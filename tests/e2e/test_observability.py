@@ -143,7 +143,7 @@ async def test_memory_retrieval_span_carries_bundle_facts_not_content(memory, co
     assert span.attributes["memory.evidence.status"] == "COMPLETE"
     assert span.attributes["memory.token_estimate"] == 42
     assert span.attributes["memory.item_count"] == 0
-    assert "input.value" not in span.attributes  # raw_memory_content is off by default
+    assert "input.value" not in span.attributes  # capture.memory_content is off by default
     assert "remembered:" not in str(dict(span.attributes))
 
 
@@ -244,9 +244,9 @@ async def test_langfuse_user_id_flows_only_when_capture_allows(memory, context, 
                     "mode": "otlp",
                     "public_key": "pk",
                     "secret_key": "sk",
-                    "capture": {"user_id": True},
                 }
             },
+            "telemetry": {"capture": {"user_id": True}},
         },
     )
 

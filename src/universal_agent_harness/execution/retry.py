@@ -53,12 +53,10 @@ class RetryPolicy:
         return error.retryable and error.category in self._categories
 
     def backoff(self, attempt: int) -> float:
-        cfg = self.config
-        delay = min(
-            cfg.initial_backoff_seconds * (cfg.backoff_multiplier ** (attempt - 1)),
-            cfg.max_backoff_seconds,
-        )
-        return delay * (0.5 + random.random() / 2) if cfg.jitter else delay
+        """Exponential with jitter, capped at 30s: the shape almost everyone wants, with one
+        knob (``backoff_seconds``) instead of four."""
+        delay = min(self.config.backoff_seconds * (2 ** (attempt - 1)), 30.0)
+        return delay * (0.5 + random.random() / 2)
 
     async def sleep(self, attempt: int) -> None:
         await asyncio.sleep(self.backoff(attempt))

@@ -23,21 +23,19 @@ class MemoryPolicy:
     private_by_default: bool = False
     record_messages: bool = False
     token_budget: int | None = None
-    require_evidence: bool = False
     writeback: bool = True
 
     @classmethod
     def from_config(cls, config: MemoryConfig) -> MemoryPolicy:
         return cls(
             retrieve_before=config.retrieve_before,
-            observe_input=config.observe_after and config.observe_input,
-            observe_output=config.observe_after and config.observe_output,
-            observe_tool_results=config.observe_after and config.observe_tool_results,
-            observe_claims=config.observe_after and config.observe_claims,
+            observe_input=config.observe_input,
+            observe_output=config.observe_output,
+            observe_tool_results=config.observe_tool_results,
+            observe_claims=config.observe_claims,
             private_by_default=config.private_by_default,
             record_messages=config.record_messages,
             token_budget=config.token_budget,
-            require_evidence=config.require_evidence,
             writeback=config.writeback,
         )
 

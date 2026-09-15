@@ -23,7 +23,7 @@ One of:
 
 Writeback is asynchronous. In a short-lived process, `await harness.drain()` (or
 `await harness.aclose()`) before exiting, or set `memory.writeback: false`. Check also that
-`memory.observe_after` is on and that the result carried something to write: text `data`,
+`memory.observe_output` is on and that the result carried something to write: text `data`,
 `claims`, or explicit `memory_observations`.
 
 ### Duplicate memory observations after a retry

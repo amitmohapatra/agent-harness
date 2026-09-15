@@ -12,15 +12,33 @@ from universal_agent_harness.config.settings import env_overrides
 def test_defaults_are_safe():
     cfg = HarnessConfig.load(env=False)
     assert cfg.memory.enabled and cfg.memory.retrieve_before
-    assert cfg.telemetry.enabled and cfg.telemetry.provider == "opentelemetry"
+    assert cfg.telemetry.enabled
     assert cfg.observability.langfuse.enabled is False
-    assert cfg.retries.enabled is False  # retries are opt-in (§40)
-    assert cfg.telemetry.capture.raw_prompts is False  # no payloads by default (§26)
+    assert cfg.retries.enabled is False              # retries are opt-in
+    assert cfg.telemetry.capture.inputs is False     # no payloads by default
+    assert cfg.telemetry.capture.outputs is False
+    assert cfg.telemetry.capture.memory_content is False
     assert cfg.telemetry.capture.user_id is False
     assert cfg.memory.failure_mode == "non_blocking"
+    assert cfg.observability.failure_mode == "non_blocking"
 
 
-def test_document_form_with_harness_and_frameworks_keys(tmp_path):
+def test_capture_and_sampling_are_defined_once():
+    """Langfuse must not carry a second copy of the capture policy or the sample rate."""
+    lf = HarnessConfig.load(env=False).observability.langfuse
+    assert not hasattr(lf, "capture")
+    assert not hasattr(lf, "sampling")
+
+
+def test_no_setting_exists_only_to_agree_with_a_provider():
+    """Policy and registry are enabled by passing a provider, not by a flag."""
+    cfg = HarnessConfig.load(env=False)
+    assert not hasattr(cfg, "policy")
+    assert not hasattr(cfg, "registry")
+    assert not hasattr(cfg, "frameworks")
+
+
+def test_document_form_with_a_harness_key(tmp_path):
     path = tmp_path / "harness.yaml"
     path.write_text(
         """
@@ -29,23 +47,21 @@ harness:
     enabled: false
   timeouts:
     default_seconds: 5
+  telemetry:
+    sampling:
+      sample_rate: 0.1
   observability:
     langfuse:
       enabled: true
       public_key: pk
       secret_key: sk
-      sampling:
-        sample_rate: 0.1
-frameworks:
-  langgraph: true
-  crewai: false
 """
     )
     cfg = HarnessConfig.load(path, env=False)
     assert cfg.memory.enabled is False
     assert cfg.timeouts.default_seconds == 5
-    assert cfg.observability.langfuse.sampling.sample_rate == 0.1
-    assert cfg.frameworks.langgraph is True
+    assert cfg.telemetry.sampling.sample_rate == 0.1
+    assert cfg.observability.langfuse.enabled is True
 
 
 def test_langfuse_without_keys_fails_at_startup():
@@ -78,13 +94,14 @@ def test_documented_environment_variables():
         "LANGFUSE_SECRET_KEY": "sk",
         "LANGFUSE_BASE_URL": "https://lf.internal",
         "UAH_DEFAULT_TIMEOUT": "12.5",
-        "UAH_LANGFUSE_SAMPLE_RATE": "0.25",
+        "UAH_SAMPLE_RATE": "0.25",
     }
     cfg = HarnessConfig.model_validate(env_overrides(env))
     assert cfg.memory.enabled is False
     assert cfg.timeouts.default_seconds == 12.5
     lf = cfg.observability.langfuse
-    assert lf.enabled and lf.base_url == "https://lf.internal" and lf.sampling.sample_rate == 0.25
+    assert lf.enabled and lf.base_url == "https://lf.internal"
+    assert cfg.telemetry.sampling.sample_rate == 0.25
 
 
 def test_invalid_environment_value_is_reported_with_the_variable_name():

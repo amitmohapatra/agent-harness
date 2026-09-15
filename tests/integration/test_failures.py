@@ -149,7 +149,7 @@ async def test_retries_need_both_configuration_and_an_idempotent_agent(memory, c
     harness = AgentHarness(
         memory=memory,
         defaults={"tenant_id": "acme"},
-        config={"retries": {"enabled": True, "max_attempts": 3, "initial_backoff_seconds": 0.001}},
+        config={"retries": {"enabled": True, "max_attempts": 3, "backoff_seconds": 0.001}},
     )
     attempts = 0
 
@@ -195,7 +195,6 @@ async def test_policy_denial_rejects_before_the_agent_runs(memory, context):
         memory=memory,
         defaults={"tenant_id": "acme"},
         policy=AllowListPolicyProvider(agents={"allowed-agent"}),
-        config={"policy": {"enabled": True}},
     )
 
     async def agent(payload):
@@ -213,7 +212,6 @@ async def test_policy_denial_status_in_result_mode(memory, context):
         memory=memory,
         defaults={"tenant_id": "acme"},
         policy=AllowListPolicyProvider(agents=set()),
-        config={"policy": {"enabled": True}},
     )
 
     async def agent(payload):
@@ -233,7 +231,6 @@ async def test_tool_policy_blocks_a_specific_tool(memory, context):
         tools=[dangerous],
         defaults={"tenant_id": "acme"},
         policy=AllowListPolicyProvider(tools=set()),
-        config={"policy": {"enabled": True}},
     )
 
     async def agent(payload, runtime):

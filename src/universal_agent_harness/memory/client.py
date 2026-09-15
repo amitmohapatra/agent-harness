@@ -21,9 +21,13 @@ from universal_agent_harness.telemetry.tracer import HarnessTracer
 class MemoryFactory:
     """Creates a :class:`MemoryRuntime` per execution from a shared client."""
 
-    def __init__(self, client: Any | None, config: MemoryConfig) -> None:
+    def __init__(
+        self, client: Any | None, config: MemoryConfig, *, timeout_seconds: float | None = 10.0
+    ) -> None:
         self.client = client
         self.config = config
+        #: One deadline for every memory call, from ``timeouts.memory_seconds``.
+        self.timeout_seconds = timeout_seconds
         self.default_policy = MemoryPolicy.from_config(config)
 
     @property
@@ -46,8 +50,8 @@ class MemoryFactory:
             context=context,
             policy=resolved,
             tracer=tracer,
-            retrieval_timeout=self.config.retrieval_timeout_seconds,
-            observation_timeout=self.config.observation_timeout_seconds,
+            retrieval_timeout=self.timeout_seconds,
+            observation_timeout=self.timeout_seconds,
             fail_closed=self.config.failure_mode == "fail_closed",
         )
 

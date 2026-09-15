@@ -26,21 +26,14 @@ from universal_agent_harness.telemetry.redaction import DefaultRedactor
 from universal_agent_harness.telemetry.sampling import SamplingDecision
 from universal_agent_harness.telemetry.span import NOOP_SPAN
 
-#: capture category -> (input flag, output flag)
+#: capture category -> (input flag, output flag). Memory content has its own flag because
+#: it is the most sensitive payload the harness ever sees.
 _CAPTURE_FLAGS = {
-    "agent": ("raw_agent_inputs", "raw_agent_outputs"),
-    "model": ("raw_model_inputs", "raw_model_outputs"),
-    "prompt": ("raw_prompts", "raw_model_outputs"),
-    "tool": ("raw_tool_inputs", "raw_tool_outputs"),
-    "memory": ("raw_memory_content", "raw_memory_content"),
-}
-#: capture category -> the flag that enables the span itself
-_ENABLED_FLAGS = {
-    "agent": "agents",
-    "model": "models",
-    "prompt": "models",
-    "tool": "tools",
-    "memory": "memory_operations",
+    "agent": ("inputs", "outputs"),
+    "model": ("inputs", "outputs"),
+    "prompt": ("inputs", "outputs"),
+    "tool": ("inputs", "outputs"),
+    "memory": ("memory_content", "memory_content"),
 }
 
 
@@ -145,10 +138,7 @@ class HarnessTracer:
             yield TracedSpan(raw, category=category, capture=self.capture, redactor=self.redactor)
 
     def _span_enabled(self, category: str) -> bool:
-        if not self.enabled:
-            return False
-        flag = _ENABLED_FLAGS.get(category)
-        return True if flag is None else bool(getattr(self.capture, flag, True))
+        return self.enabled
 
     # -- named spans ----------------------------------------------------------------
     def agent_span(

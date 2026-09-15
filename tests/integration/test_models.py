@@ -69,7 +69,7 @@ async def test_prompts_are_captured_when_explicitly_enabled(memory, context, spa
         memory=memory,
         model=FakeModel(),
         defaults={"tenant_id": "acme"},
-        config={"telemetry": {"capture": {"raw_prompts": True, "raw_model_outputs": True}}},
+        config={"telemetry": {"capture": {"inputs": True, "outputs": True}}},
     )
 
     async def agent(payload, runtime):

@@ -126,8 +126,8 @@ async def test_slow_memory_does_not_hold_the_turn_past_its_deadline(memory, cont
         memory=memory,
         defaults={"tenant_id": "acme"},
         config={
-            "memory": {"retrieval_timeout_seconds": 0.05, "writeback": False},
-            "timeouts": {"default_seconds": 2.0},
+            "memory": {"writeback": False},
+            "timeouts": {"default_seconds": 2.0, "memory_seconds": 0.05},
         },
     )
 

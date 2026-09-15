@@ -21,6 +21,8 @@ class PolicyInterceptor(BaseInterceptor):
 
     def __init__(self, provider: Any, *, fail_closed: bool = False) -> None:
         self.provider = provider
+        #: A provider *outage* allows by default (its denials always deny). A provider that
+        #: must fail closed should raise ``PolicyDeniedError`` itself.
         self.fail_closed = fail_closed
 
     async def before(self, request: AgentRequest, runtime: AgentRuntime) -> AgentRequest:

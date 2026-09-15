@@ -13,15 +13,15 @@ identifiers, counts, statuses, latencies and token/cost numbers — and nothing 
 harness:
   telemetry:
     capture:
-      raw_prompts: false
-      raw_model_inputs: false
-      raw_model_outputs: false
-      raw_tool_inputs: false
-      raw_tool_outputs: false
-      raw_memory_content: false
+      inputs: false          # prompts, model inputs, tool arguments, agent inputs
+      outputs: false         # completions, tool results, agent results
+      memory_content: false  # retrieved memory text
       user_id: false
-      thread_id: true          # thread id is an opaque id, not content
+      thread_id: true        # an opaque id, not content
 ```
+
+This is the **only** capture policy. Langfuse and any other backend obey it; there is no
+second block to keep in sync, which is how a backend quietly ends up with looser rules.
 
 Two independent gates apply, in this order:
 
@@ -102,11 +102,8 @@ For environments where losing telemetry is worse than failing a request:
 
 ```yaml
 harness:
-  telemetry:
-    failure_mode: fail_closed
   observability:
-    langfuse:
-      failure_mode: fail_closed
+    failure_mode: fail_closed     # applies to every telemetry backend
 ```
 
 This is not the default, and it means an observability outage becomes a business outage.

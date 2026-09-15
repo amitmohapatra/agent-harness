@@ -74,6 +74,9 @@ from universal_agent_harness.tools.wrappers import wrap_tool as _wrap_tool
 
 __version__ = "0.1.0"
 
+#: How many memory/evaluation writes may be in flight before the harness writes inline.
+MAX_PENDING_WRITEBACKS = 256
+
 
 class AgentHarness:
     """The cross-cutting runtime layer around agents you already have."""
@@ -108,9 +111,8 @@ class AgentHarness:
 
         # -- telemetry: OpenTelemetry first, Langfuse layered on the same spans (§21/§22)
         self.telemetry = telemetry or self._build_telemetry()
-        # Capture flags decide *whether* a payload is attached (§26); the redactor decides
-        # what an allowed payload may contain (§27). Gating twice would make
-        # ``raw_tool_inputs: true`` silently do nothing.
+        # Capture flags decide *whether* a payload is attached; the redactor decides what an
+        # allowed payload may contain. Gating twice would make ``capture.inputs`` do nothing.
         self.redactor = redactor or DefaultRedactor()
         self.tracer = HarnessTracer(
             self.telemetry,
@@ -122,17 +124,25 @@ class AgentHarness:
         self.sampler = Sampler(self.config.telemetry.sampling)
 
         # -- providers
-        self.memory_factory = MemoryFactory(memory, self.config.memory)
+        self.memory_factory = MemoryFactory(
+            memory, self.config.memory, timeout_seconds=self.config.timeouts.memory_seconds
+        )
+        self.default_memory_policy = self.memory_factory.default_policy
         self.model_client = self._build_model(model)
         self.tool_client = self._build_tools(tools)
         self.artifact_store = self._build_artifacts(artifacts)
+        # A provider is enabled by being passed: no flag that has to agree with it.
         self.policy = policy or NoOpPolicyProvider()
+        self.policy_enabled = policy is not None
         self.registry = registry or NoOpAgentRegistry()
+        self.registry_enabled = registry is not None
         self.prompts = prompts
         self.evaluation_provider = evaluation_provider or NoOpEvaluationProvider()
 
         self.events = LifecycleDispatcher(list(listeners))
-        self.writeback = WritebackQueue(self.config.memory.writeback_max_pending)
+        #: Bounded so a backlog can never grow without limit; writing inline is the
+        #: fallback when it saturates.
+        self.writeback = WritebackQueue(MAX_PENDING_WRITEBACKS)
         self.evaluation_sink = evaluation_sink or self._build_evaluation_sink()
         self.context_factory = ContextFactory(self.defaults)
         self.descriptors: dict[str, AgentDescriptor] = {}
@@ -145,7 +155,7 @@ class AgentHarness:
             model_client=self.model_client,
             tool_client=self.tool_client,
             artifact_store=self.artifact_store,
-            policy=self.policy if self.config.policy.enabled else None,
+            policy=self.policy if self.policy_enabled else None,
             events=self.events,
             timeouts=self.config.timeouts,
             tools_config=self.config.tools,
@@ -173,7 +183,11 @@ class AgentHarness:
                 LangfuseTelemetryProvider,
             )
 
-            self.langfuse = LangfuseTelemetryProvider(langfuse_config)
+            self.langfuse = LangfuseTelemetryProvider(
+                langfuse_config,
+                sample_rate=self.config.telemetry.sampling.sample_rate,
+                strict=self.strict_observability,
+            )
             providers.append(self.langfuse)
         else:
             self.langfuse = None
@@ -185,8 +199,12 @@ class AgentHarness:
         )
 
         return CompositeTelemetryProvider(
-            providers, strict=self.config.telemetry.failure_mode == "fail_closed"
+            providers, strict=self.config.observability.failure_mode == "fail_closed"
         )
+
+    @property
+    def strict_observability(self) -> bool:
+        return self.config.observability.failure_mode == "fail_closed"
 
     def _build_model(self, model: Any) -> Any:
         if model is None:
@@ -211,8 +229,7 @@ class AgentHarness:
         if not self.config.artifacts.enabled:
             return NoArtifactStore()
         if artifacts is None:
-            root = self.config.artifacts.options.get("root")
-            return FileArtifactStore(root) if root else InMemoryArtifactStore()
+            return InMemoryArtifactStore()
         if isinstance(artifacts, str):
             return FileArtifactStore(artifacts)
         return artifacts
@@ -239,15 +256,11 @@ class AgentHarness:
             TimeoutInterceptor(self.config.timeouts.default_seconds),
             ResultValidationInterceptor(),
         ]
-        if self.config.policy.enabled:
-            chain.append(
-                PolicyInterceptor(
-                    self.policy, fail_closed=self.config.policy.failure_mode == "fail_closed"
-                )
-            )
+        if self.policy_enabled:
+            chain.append(PolicyInterceptor(self.policy))
         if self.memory_factory.enabled:
             chain.append(MemoryContextInterceptor(self.events))
-            if self.config.memory.observe_after:
+            if self.default_memory_policy.writes_anything:
                 chain.append(
                     MemoryObservationInterceptor(
                         self.writeback,
@@ -260,7 +273,13 @@ class AgentHarness:
                 LangfuseInterceptor,
             )
 
-            chain.append(LangfuseInterceptor(langfuse, self.config.observability.langfuse))
+            chain.append(
+                LangfuseInterceptor(
+                    langfuse,
+                    self.config.telemetry.capture,
+                    fail_closed=self.strict_observability,
+                )
+            )
         if self.config.evaluation_events.enabled:
             chain.append(
                 EvaluationEventInterceptor(
@@ -551,7 +570,7 @@ class AgentHarness:
 
     async def register_agents(self) -> None:
         """Push known descriptors to the registry hook (a no-op by default, §47)."""
-        if not self.config.registry.enabled:
+        if not self.registry_enabled:
             return
         for descriptor in self.descriptors.values():
             await self.registry.register(descriptor)

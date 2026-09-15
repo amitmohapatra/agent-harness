@@ -163,10 +163,13 @@ def configure_sdk(config: TelemetryConfig) -> bool:
         log.warning("telemetry.configure_sdk requested but opentelemetry-sdk is not installed")
         return False
 
-    attributes = {"service.name": config.service_name}
-    if config.service_version:
-        attributes["service.version"] = config.service_version
-    provider = TracerProvider(resource=Resource.create(attributes))
+    from universal_agent_harness.harness import __version__  # noqa: PLC0415 - avoids a cycle
+
+    provider = TracerProvider(
+        resource=Resource.create(
+            {"service.name": config.service_name, "service.version": __version__}
+        )
+    )
     if config.exporter == "console":
         provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
     elif config.exporter == "otlp":

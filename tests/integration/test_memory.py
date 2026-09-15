@@ -140,11 +140,11 @@ async def test_fail_closed_turns_a_memory_outage_into_an_error(memory, context):
         await harness.wrap(agent, agent_id="inv")("q", context=context)
 
 
-async def test_retrieval_timeout_is_bounded(memory, context):
+async def test_memory_calls_are_bounded_by_the_memory_timeout(memory, context):
     harness = AgentHarness(
         memory=memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"retrieval_timeout_seconds": 0.05, "writeback": False}},
+        config={"memory": {"writeback": False}, "timeouts": {"memory_seconds": 0.05}},
     )
     memory.retrieval_delay = 1.0
 

@@ -62,7 +62,7 @@ def harness(memory: FakeMemoryClient) -> AgentHarness:
         defaults={"tenant_id": "acme", "user_id": "u1"},
         config={
             "memory": {"writeback": False},
-            "telemetry": {"capture": {"raw_agent_inputs": True, "raw_agent_outputs": True}},
+            "telemetry": {"capture": {"inputs": True, "outputs": True}},
             "evaluation_events": {"enabled": True, "synchronous": True},
         },
     )

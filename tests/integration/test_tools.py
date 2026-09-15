@@ -58,7 +58,7 @@ async def test_tool_inputs_are_captured_only_when_configured(memory, context, sp
         memory=memory,
         tools=[echo],
         defaults={"tenant_id": "acme"},
-        config={"telemetry": {"capture": {"raw_tool_inputs": True, "raw_tool_outputs": True}}},
+        config={"telemetry": {"capture": {"inputs": True, "outputs": True}}},
     )
 
     async def agent(payload, runtime):

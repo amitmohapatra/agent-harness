@@ -228,7 +228,6 @@ async def test_in_memory_registry_receives_descriptors(memory):
         memory=memory,
         defaults={"tenant_id": "acme"},
         registry=registry,
-        config={"registry": {"enabled": True}},
     )
     harness.describe("inventory-agent", skills=["inventory.analysis"])
     await harness.register_agents()

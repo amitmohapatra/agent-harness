@@ -174,7 +174,9 @@ async def main() -> None:
             "memory": {
                 "record_messages": True,     # let the harness write the chat turns
                 "retrieve_before": False,    # this example drives retrieval explicitly
-                "observe_after": False,
+                "observe_input": False,
+                "observe_output": False,
+                "observe_claims": False,
                 "writeback": False,          # await the writes so the output is ordered
             }
         },

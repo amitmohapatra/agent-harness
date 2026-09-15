@@ -166,8 +166,6 @@ def build_harness() -> AgentHarness:
                 "langfuse": {
                     "enabled": langfuse_on,      # keys come from LANGFUSE_* env vars
                     "environment": os.environ.get("APP_ENV", "local"),
-                    "sampling": {"sample_rate": 1.0, "error_sample_rate": 1.0},
-                    "capture": {"raw_prompts": False, "raw_model_outputs": False},
                 }
             },
             "evaluation_events": {"enabled": True},

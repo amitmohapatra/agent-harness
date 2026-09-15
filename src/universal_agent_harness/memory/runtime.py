@@ -80,7 +80,7 @@ class MemoryRuntime:
         if not query or not query.strip():
             return None
         budget = options.pop("token_budget", self.policy.token_budget)
-        require_evidence = options.pop("require_evidence", self.policy.require_evidence)
+        require_evidence = options.pop("require_evidence", False)
         watch = Stopwatch()
         with self.tracer.memory_span("retrieve", **{N.MEMORY_KIND: "context"}) as span:
             span.set_input(query, category="memory")

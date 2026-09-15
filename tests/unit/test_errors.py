@@ -65,8 +65,6 @@ def test_retry_requires_idempotency_and_enabled_config():
 
 
 def test_backoff_is_bounded():
-    policy = RetryPolicy(
-        RetryConfig(enabled=True, max_attempts=8, initial_backoff_seconds=1, max_backoff_seconds=3),
-        idempotent=True,
-    )
-    assert all(policy.backoff(n) <= 3.0 for n in range(1, 9))
+    policy = RetryPolicy(RetryConfig(enabled=True, max_attempts=8, backoff_seconds=1), idempotent=True)
+    assert all(policy.backoff(n) <= 30.0 for n in range(1, 9))
+    assert policy.backoff(1) <= policy.backoff(4)   # exponential, with jitter

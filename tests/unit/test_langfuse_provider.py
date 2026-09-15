@@ -114,13 +114,14 @@ def test_sdk_client_is_constructed_with_documented_public_arguments(monkeypatch)
         enabled=True, mode="sdk", public_key="pk", secret_key="sk",
         base_url="https://lf.example.com", environment="staging", release="1.2.3",
     )
-    client = _create_client(config, tracer_provider=None)
+    client = _create_client(config, tracer_provider=None, sample_rate=0.5)
 
     assert isinstance(client, FakeLangfuse)
     assert captured["public_key"] == "pk"
     assert captured["host"] == "https://lf.example.com"
     assert captured["environment"] == "staging"
     assert captured["release"] == "1.2.3"
+    assert captured["sample_rate"] == 0.5          # sampling comes from telemetry config
     assert callable(captured["should_export_span"])
 
 
@@ -134,9 +135,7 @@ def test_harness_spans_are_included_in_what_langfuse_exports(monkeypatch):
     import langfuse
 
     monkeypatch.setattr(langfuse, "Langfuse", FakeLangfuse)
-    _create_client(
-        LangfuseConfig(enabled=True, mode="sdk", public_key="pk", secret_key="sk"), None
-    )
+    _create_client(LangfuseConfig(enabled=True, mode="sdk", public_key="pk", secret_key="sk"), None)
     should_export = captured["should_export_span"]
 
     harness_span = SimpleNamespace(

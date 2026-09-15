@@ -5,25 +5,83 @@ framework, and it does not want to be one: LangGraph, CrewAI or plain Python kee
 the agent, its state and its control flow. The harness wraps an execution and supplies the
 cross-cutting concerns every production agent ends up needing.
 
+## What is a harness? (in plain English)
+
+A climbing harness does not climb for you. It attaches to the climber you already have and
+carries the rope, the safety gear and the anchor points — so that when something goes wrong,
+you are still attached to the wall.
+
+This is that, for agents.
+
+You write an agent. It works on your laptop. Then it goes to production, and a different set
+of questions starts arriving — none of them about your agent's logic:
+
+> *Who ran this, and for which customer?*
+> *What did it remember from last week's conversation, and what did it just learn?*
+> *It took 40 seconds. Where did they go?*
+> *How much did that answer cost in tokens?*
+> *It failed at 2am — which step, and can we safely retry it?*
+> *Did any customer data end up in our logging vendor?*
+> *Three agents worked on this request. What did each of them actually do?*
+
+Answering those means writing the same plumbing into every agent: passing a tenant id
+through every function, fetching memory before and saving after, opening trace spans,
+counting tokens, setting timeouts, catching and classifying errors, making retries safe,
+scrubbing secrets before they're logged. It is perhaps 300 lines per agent. It is boring,
+it is easy to get subtly wrong, and by the fifth agent every copy has drifted.
+
+The harness is that plumbing, written once. You hand it your agent; it hands you back the
+same agent with all of the above attached:
+
 ```python
-from universal_agent_harness import AgentHarness
-from universal_memory import MemoryClient
-
-harness = AgentHarness(memory=MemoryClient("http://memory-service:8080", api_key="..."))
-
-wrapped = harness.wrap(my_agent, agent_id="inventory-agent", skills=["inventory.analysis"])
-
-result = await wrapped(payload, context=context)
+wrapped = harness.wrap(my_agent, agent_id="inventory-agent")
 ```
 
-That one call adds: execution-context propagation, tenant/user/thread/turn lineage, agent
-and run identity, Memory Service retrieval before and observation after, OpenTelemetry
-spans and metrics, optional Langfuse observability, structured logging, deadlines,
-cancellation, retry hooks, idempotency, artifact registration, normalized errors, a
-standard `AgentResult`, token/cost metrics where the provider reports them, policy hooks,
-evaluation events and lifecycle hooks.
+Your agent's code does not change. It does not learn a new framework. It does not even have
+to know the harness exists.
 
-**Contents** · [Install](#install) · [Quickstart](#5-minute-quickstart) ·
+**A concrete before and after.** The same agent, with production concerns handled:
+
+```python
+# before — the agent is 3 lines; the plumbing is the rest
+async def inventory_agent(question, tenant_id, user_id, thread_id, trace):
+    span = tracer.start_span("inventory-agent")               # tracing
+    span.set_attribute("tenant.id", tenant_id)                # ...by hand, every time
+    memory_ctx = memory.bind(tenant_id=tenant_id, user_id=user_id, thread_id=thread_id)
+    bundle = await memory_ctx.context(question)               # fetch memory
+    started = time.time()
+    try:
+        async with asyncio.timeout(30):                       # deadline
+            answer = await llm.complete(prompt(question, bundle))
+    except Exception as exc:
+        span.record_exception(exc)                            # error handling
+        metrics.count("agent.errors", agent="inventory")
+        raise
+    finally:
+        span.end()
+        metrics.timing("agent.duration", time.time() - started)
+    await memory_ctx.observe(answer, idempotency_key=???)     # save memory, safely
+    return answer
+
+# after — the agent is the 3 lines; the harness is the rest
+@harness.agent(agent_id="inventory-agent")
+async def inventory_agent(question, agent):
+    response = await agent.model.invoke(prompt(question, agent.memory_context))
+    return response.text
+```
+
+**What you get for that one line:** who ran it (tenant, user, thread, turn, parent agent),
+what it remembered and learned, one trace covering every agent/model/tool/memory step, token
+and cost numbers, deadlines that actually cancel, errors sorted into categories you can act
+on, retries that don't double-charge anyone, and secrets kept out of your telemetry — by
+default, without you asking.
+
+**When you do *not* need it:** one agent, one framework, no shared memory, no multi-tenancy.
+Then this is overhead and you should skip it. It earns its place at *n* agents across *m*
+teams, where the alternative is the same 300 lines copy-pasted and subtly different in each.
+
+**Contents** · [What is a harness?](#what-is-a-harness-in-plain-english) ·
+[Install](#install) · [Quickstart](#5-minute-quickstart) · [Tutorial](#tutorial-six-steps) ·
 [Integration modes](#three-integration-modes) · [LangGraph](#langgraph) ·
 [Tools and models](#tools-and-models) · [Memory](#memory-service-integration) ·
 [Results and errors](#results-and-errors) ·
@@ -87,6 +145,125 @@ harness:
 ```python
 harness = AgentHarness(memory=memory, config="harness.yaml")   # business code unchanged
 ```
+
+## Tutorial: six steps
+
+Each step is small, and each one is optional — stop wherever it stops paying for itself.
+
+### 1. Wrap what you have
+
+```python
+from universal_agent_harness import AgentHarness
+
+harness = AgentHarness(defaults={"tenant_id": "acme"})
+
+async def inventory_agent(question: str) -> str:      # your agent, untouched
+    return "SKU-1 has 3 units left"
+
+wrapped = harness.wrap(inventory_agent, agent_id="inventory-agent")
+result = await wrapped("how much stock?")
+
+result.status   # SUCCESS
+result.data     # "SKU-1 has 3 units left"  — exactly what your function returned
+```
+
+You already have: a trace span, execution metrics, a structured log line, a normalized
+result, a deadline, and an error taxonomy if it throws.
+
+### 2. Say who is asking
+
+```python
+from universal_agent_harness import AgentExecutionContext
+
+context = AgentExecutionContext.create(
+    tenant_id="acme", agent_id="inventory-agent",
+    user_id="u-42", thread_id="chat-7", turn_id="turn-3",
+)
+result = await wrapped("how much stock?", context=context)
+```
+
+Now every span, log line, metric and memory write is attributed to that tenant, user and
+conversation — and a nested agent inherits all of it automatically. This is also what makes
+retries safe: ids derived from (thread, turn, agent) are stable across replays.
+
+### 3. Take the runtime
+
+Add a second parameter and your agent becomes "runtime-aware":
+
+```python
+@harness.agent(agent_id="inventory-agent", skills=["inventory.analysis"])
+async def inventory_agent(question, agent):
+    agent.log("thinking", question_length=len(question))
+    agent.check_cancelled()                  # cooperative cancellation
+    return AgentResult.ok({"answer": "3 units"}, confidence=0.9)
+```
+
+`agent` is the [`AgentRuntime`](src/universal_agent_harness/runtime/agent_runtime.py):
+`memory`, `memory_context`, `model`, `tools`, `artifacts`, `logger`, `tracer`,
+`cancellation`, `deadline`.
+
+### 4. Call tools through it
+
+```python
+async def inventory_db(sku: str) -> dict:
+    """Stock for a SKU."""                    # the docstring becomes the tool description
+    return {"sku": sku, "on_hand": 3}
+
+harness = AgentHarness(tools=[inventory_db], defaults={"tenant_id": "acme"})
+
+@harness.agent(agent_id="inventory-agent")
+async def inventory_agent(question, agent):
+    stock = await agent.tools.call("inventory_db", sku="SKU-1")
+    return f"{stock.output['on_hand']} units"
+```
+
+Each call now has its own span, latency, status, retry count and idempotency key — and the
+argument *names* are recorded, not their values.
+
+### 5. Give it memory
+
+```python
+harness = AgentHarness(memory=MemoryClient("http://memory-service:8080", api_key="..."),
+                       defaults={"tenant_id": "acme"})
+
+@harness.agent(agent_id="inventory-agent")
+async def inventory_agent(question, agent):
+    bundle = agent.memory_context              # already fetched, before you were called
+    await agent.memory.remember("SKU-1 moves fast in Q4",
+                                memory_type="SEMANTIC", lifetime="LONG_TERM")
+    return AgentResult.ok(
+        "3 units",
+        claims=[Claim(claim_id="c1", text="SKU-1 has 3 units")],
+        memory_observations=[MemoryObservation(content="checked SKU-1 stock")],
+    )
+```
+
+The harness fetched context before your agent ran and writes the observations after it
+returns — so the answer is not waiting on the write. See
+[Memory Service integration](#memory-service-integration) for the full surface.
+
+### 6. Decide what happens when it breaks
+
+```python
+wrapped = harness.wrap(
+    inventory_agent,
+    agent_id="inventory-agent",
+    timeout_seconds=5,        # deadline for the agent and everything it calls
+    idempotent=True,          # makes it eligible for configured retries
+    error_mode="result",      # return AgentResult(status=ERROR) instead of raising
+)
+```
+
+And turn on observability with configuration, not code:
+
+```yaml
+harness:
+  observability:
+    langfuse:
+      enabled: true      # keys from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
+```
+
+That is the whole learning curve. Everything below is reference.
 
 ## Three integration modes
 
@@ -409,11 +586,12 @@ harness:
       enabled: true
       mode: auto            # auto | sdk | otlp
       environment: staging
-      sampling:
-        sample_rate: 0.1    # 10% of executions...
-        error_sample_rate: 1.0   # ...but every failure
-      capture:
-        raw_prompts: false  # opt in per tenant/environment
+  telemetry:
+    sampling:
+      sample_rate: 0.1        # 10% of executions...
+      error_sample_rate: 1.0  # ...but every failure
+    capture:
+      inputs: false           # opt in per tenant/environment
 ```
 
 No agent code changes. Keys are validated at startup: enabling Langfuse without them fails

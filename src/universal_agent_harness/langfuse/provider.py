@@ -102,15 +102,25 @@ class LangfuseTelemetryProvider:
 
     name = "langfuse"
 
-    def __init__(self, config: LangfuseConfig, *, tracer_provider: Any = None) -> None:
+    def __init__(
+        self,
+        config: LangfuseConfig,
+        *,
+        tracer_provider: Any = None,
+        sample_rate: float = 1.0,
+        strict: bool = False,
+    ) -> None:
         self.config = config
-        self.strict = config.failure_mode == "fail_closed"
+        #: Capture policy and sampling come from ``telemetry`` — Langfuse does not carry a
+        #: second copy of them.
+        self.sample_rate = sample_rate
+        self.strict = strict
         self.client: Any = None
         self.mode = "disabled"
         if not config.enabled:
             return
         if config.mode in ("auto", "sdk"):
-            self.client = _create_client(config, tracer_provider)
+            self.client = _create_client(config, tracer_provider, sample_rate)
             if self.client is not None:
                 self.mode = "sdk"
         if self.client is None:
@@ -210,7 +220,7 @@ class LangfuseTelemetryProvider:
             log.debug("langfuse trace decoration failed")
 
 
-def _create_client(config: LangfuseConfig, tracer_provider: Any) -> Any:
+def _create_client(config: LangfuseConfig, tracer_provider: Any, sample_rate: float = 1.0) -> Any:
     """Construct the Langfuse client, or return ``None`` when the SDK is unavailable."""
     try:
         from langfuse import Langfuse, is_default_export_span  # noqa: PLC0415
@@ -219,10 +229,9 @@ def _create_client(config: LangfuseConfig, tracer_provider: Any) -> Any:
     kwargs: dict[str, Any] = {
         "public_key": config.public_key,
         "secret_key": config.secret_key,
-        "debug": config.debug,
         "environment": config.environment,
         "release": config.release,
-        "sample_rate": config.sampling.sample_rate,
+        "sample_rate": sample_rate,
         # Export the harness's own spans in addition to what Langfuse exports by default.
         "should_export_span": lambda span: (
             is_default_export_span(span)

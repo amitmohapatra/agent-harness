@@ -14,8 +14,13 @@ harness = AgentHarness(memory=memory, config=HarnessConfig.load("harness.yaml",
                                                                overrides={"memory": {"enabled": False}}))
 ```
 
-The YAML may be the full document (`harness:` + `frameworks:` keys, as in
+The YAML may be the full document (with a `harness:` key, as in
 [`harness.example.yaml`](../harness.example.yaml)) or just the harness section.
+
+The surface is **52 settings** and every one of them does something. Two rules keep it that
+way: capture policy and sampling are defined once (under `telemetry`) and obeyed by every
+backend, and a provider is enabled by *passing* it — there is no `policy.enabled` flag that
+has to agree with the policy object you supplied.
 
 ## Settings
 
@@ -31,12 +36,11 @@ Decisions worth calling out:
 | `memory.writeback` | `true` | the turn must not wait for consolidation |
 | `memory.failure_mode` | `non_blocking` | a memory outage degrades a run, it does not fail it |
 | `telemetry.configure_sdk` | `false` | applications usually configure OpenTelemetry themselves |
-| `telemetry.capture.raw_*` | `false` | nothing sensitive is exported unless asked for |
+| `telemetry.capture.inputs` / `.outputs` | `false` | nothing sensitive is exported unless asked for |
 | `telemetry.capture.user_id` | `false` | identity export is a policy decision |
 | `retries.enabled` | `false` | retries are only safe for idempotent work |
 | `evaluation_events.enabled` | `false` | evaluation is opt-in and asynchronous |
-| `policy.enabled` | `false` | the harness does not invent an authorization model |
-| `observability.langfuse.failure_mode` | `non_blocking` | observability is never a business dependency |
+| `observability.failure_mode` | `non_blocking` | observability is never a business dependency |
 
 ## Environment variables
 
@@ -44,7 +48,7 @@ Decisions worth calling out:
 | --- | --- |
 | `UAH_MEMORY_ENABLED` | `memory.enabled` |
 | `UAH_MEMORY_RETRIEVE_BEFORE` | `memory.retrieve_before` |
-| `UAH_MEMORY_OBSERVE_AFTER` | `memory.observe_after` |
+
 | `UAH_MEMORY_FAILURE_MODE` | `memory.failure_mode` |
 | `UAH_OTEL_ENABLED` | `telemetry.enabled` |
 | `UAH_OTEL_EXPORTER` | `telemetry.exporter` |
@@ -53,8 +57,9 @@ Decisions worth calling out:
 | `UAH_SERVICE_NAME` | `telemetry.service_name` |
 | `UAH_LANGFUSE_ENABLED` | `observability.langfuse.enabled` |
 | `UAH_LANGFUSE_MODE` | `observability.langfuse.mode` |
-| `UAH_LANGFUSE_SAMPLE_RATE` | `observability.langfuse.sampling.sample_rate` |
-| `UAH_LANGFUSE_FAILURE_MODE` | `observability.langfuse.failure_mode` |
+| `UAH_SAMPLE_RATE` | `telemetry.sampling.sample_rate` |
+| `UAH_CAPTURE_INPUTS` / `UAH_CAPTURE_OUTPUTS` | `telemetry.capture.inputs` / `.outputs` |
+| `UAH_OBSERVABILITY_FAILURE_MODE` | `observability.failure_mode` |
 | `LANGFUSE_HOST` / `LANGFUSE_BASE_URL` | `observability.langfuse.base_url` |
 | `LANGFUSE_PUBLIC_KEY` | `observability.langfuse.public_key` |
 | `LANGFUSE_SECRET_KEY` | `observability.langfuse.secret_key` |
@@ -95,8 +100,8 @@ AgentHarness(
     model=my_model_client,             # ModelClient, or any callable/object with ainvoke
     tools=[tool_a, tool_b],            # list, {name: callable}, or a ToolClient
     artifacts="/var/lib/agent-artifacts",   # path, store instance, or None (in-process)
-    policy=AllowListPolicyProvider(tools={"inventory_db"}),
-    registry=my_registry,              # AgentRegistryClient; default is a no-op
+    policy=AllowListPolicyProvider(tools={"inventory_db"}),   # passing it enables it
+    registry=my_registry,              # AgentRegistryClient; omitted -> no registry
     evaluation_sink=my_sink,           # EvaluationSink
     redactor=MyRedactor(),             # TelemetryRedactor
     listeners=[on_event],              # lifecycle listeners

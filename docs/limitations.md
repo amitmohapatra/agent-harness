@@ -47,8 +47,8 @@ If a framework changes its state model, nothing here has to change — which is 
 * Writeback is asynchronous by default: a process that exits immediately after an execution
   should `await harness.drain()` (or `await harness.aclose()`) or set
   `memory.writeback: false`.
-* The writeback queue is bounded. Above `writeback_max_pending` the harness writes inline
-  and logs; it does not grow an unbounded backlog.
+* The writeback queue is bounded (256 in flight). Above that the harness writes inline and
+  logs; it does not grow an unbounded backlog.
 
 ## Retries
 
