@@ -63,6 +63,17 @@ together: `agent_run_id` needs `agent_id`, `session_id` needs `thread_id`, `turn
 `session_id`. The harness derives a session (one per thread) and drops ids it cannot express
 coherently, so this should not reach you — if it does, the details name the field.
 
+### A document I ingested is not retrievable
+
+A document is readable only by principals in its audience. `add_document` creates the thread
+for you (a thread grants its audience only once it exists), so the thread case is handled —
+but a `visibility="WORKSPACE"` or `"GROUP"` document is readable only by members of that
+workspace or group, and membership lives in the authorization service, not in the harness.
+Either ingest with the default thread visibility, or provision the membership.
+
+Also remember indexing is asynchronous: poll `runtime.memory.sdk.files.document(id)` until
+`status == "READY"`, and allow a moment more for the vector index.
+
 ### `ValidationError: turn_id belongs to a different session`
 
 A `turn_id` is bound to the session that created it. Reusing a generic id like `"turn-1"`

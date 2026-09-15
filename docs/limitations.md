@@ -33,7 +33,10 @@ single tree. The same applies to any framework that starts tasks the harness did
 ## Ids the harness does not invent
 
 `thread_id`, `turn_id` and `work_id` are yours: the harness propagates them but never makes
-them up, because only the application knows what a conversation or a turn *is*. Two service
+them up, because only the application knows what a conversation or a turn *is*. Identity you
+declare once on the harness (`workspace_id`, `user_id`, `group_ids`, `agent_group_id`,
+`work_id`) *is* filled in for contexts that leave it empty — but a value you set yourself is
+never overwritten, and ids that identify a specific execution are never inherited. Two service
 rules apply to them — a `turn_id` is bound to the session that created it (so turn ids must
 be unique per session), and a session belongs to a thread. The harness derives the session
 (one per thread) so you do not have to, and drops conversation ids it cannot express

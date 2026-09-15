@@ -99,7 +99,9 @@ the request and fail later — in a background job, where you would never see it
 | Check | Why |
 | --- | --- |
 | Conversation ids hang together | `turn_id` needs a `session_id`, a session needs a thread. The harness derives one session per thread and drops ids it cannot express. |
-| Visibility prerequisites | `AGENT_GROUP` needs `agent_group_id`, `WORKSPACE` needs `workspace_id`, `USER` needs `user_id`, and so on. A write to an audience the context cannot express is refused immediately. |
+| Visibility prerequisites | `AGENT_GROUP` needs `agent_group_id`, `WORKSPACE` needs `workspace_id`, `USER` needs `user_id`, and so on. A write to an audience the context cannot express is refused immediately, with the error naming all the ways to supply it. |
+| Thread existence before ingestion | A thread-visible document is readable only by thread participants, so `add_document` creates the thread first. |
+| Memory policy option names | A misspelled key (`observe_outputs`) is refused, not silently ignored. |
 | Observation kinds | Only the service's vocabulary (MESSAGE, FILE, AGENT_RESULT, TOOL_RESULT, DECISION, FEEDBACK, EVENT, IMPORT) is accepted. |
 | Langfuse credentials | Enabling Langfuse without keys fails at startup, not silently at runtime. |
 | Unknown config keys | Rejected rather than ignored, so a typo is not a silent default. |
@@ -117,6 +119,7 @@ in; the setting is the answer.
 | "Nothing should be written back automatically" | `memory.observe_input/observe_output/observe_claims: false`. Explicit `runtime.memory.*` calls still write — the policy governs only the automatic path. |
 | "Tool outputs contain customer data" | Leave `memory.observe_tool_results: false` (the default). |
 | "This agent's notes must not leak to the user or other agents" | `memory.private_by_default: true` — everything it writes becomes RUN-visible. |
+| "Agents should share findings with each other" | Declare the group once: `defaults={"agent_group_id": "crew"}`, or `harness.wrap(..., agent_group="crew")`, or `share(..., group="crew")` for one call. Then `runtime.memory.share(...)` just works. |
 | "I want the turn recorded as a conversation, not just observations" | `memory.record_messages: true`. |
 | "The process exits right after the turn" | `memory.writeback: false`, or `await harness.drain()` before exit — writes are asynchronous by default. |
 | "A memory outage must fail the request" | `memory.failure_mode: fail_closed`. Otherwise the run degrades with a `MEMORY_DEGRADED` warning. |
@@ -157,10 +160,11 @@ Two service behaviours that no configuration changes, and that explain most surp
    turns it into memories, graph edges and index entries. Reading immediately after writing
    will not show it; the live tests poll for this reason.
 2. **Reads are audience-filtered.** A memory or document chunk is retrievable only by a
-   principal in its audience. A THREAD audience requires the thread to exist — writing a
-   message creates it — and WORKSPACE/GROUP audiences require membership in the
-   authorization service. Ingesting a document into an empty thread produces chunks that
-   nobody, including you, can retrieve.
+   principal in its audience. WORKSPACE and GROUP audiences require membership in the
+   authorization service, which the harness cannot provision for you — so a
+   workspace-visible document is readable only by workspace members. (The THREAD case is
+   handled: `add_document` creates the thread, because a thread grants its audience only
+   once it exists.)
 
 ## Per-agent overrides
 

@@ -442,7 +442,7 @@ its own timeout and a deterministic idempotency key:
 | `observe(MemoryObservation(...))` | something happened (episodic) | `recall(query)` | ranked evidence items, without bundle assembly |
 | `remember(text, memory_type=…, lifetime=…, visibility=…)` | a typed, durable memory | `history(limit=…)` | the conversation window on its own |
 | `add_document(path)` | ingest a document into the RAG corpus | `graph_query(q, hops=…, as_of=…)` | knowledge-graph entities and relationships, optionally as of a time |
-| `share(text)` | publish to the agent group | `memories(memory_types=…)` | the inventory view: what is held for this scope |
+| `share(text)` | publish to the agent group (declare the group once on the harness, per agent, or per call) | `memories(memory_types=…)` | the inventory view: what is held for this scope |
 | `forget(memory_id)` | delete a memory | `verify(answer, bundle=…)` | grounding report: is this answer supported, claim by claim |
 
 The vocabulary is the service's: `memory_type` (SEMANTIC, EPISODIC, PROCEDURAL, PREFERENCE,
