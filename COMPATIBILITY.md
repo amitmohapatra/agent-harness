@@ -58,6 +58,12 @@ Public, documented surface only:
 * `langgraph.types.StreamWriter`, `langgraph.store.base.BaseStore`,
   `langchain_core.runnables.RunnableConfig` as annotations.
 
+**Trace roots.** LangGraph executes each superstep as its own task, so a node span has no
+ambient parent: with nothing enclosing the invocation, every node starts its own trace.
+Wrapping `app.ainvoke(...)` in `harness.execution(...)` produces one trace per turn with a
+single root (asserted in `tests/e2e/test_example_workflow.py`). Both modes are supported;
+only the trace shape differs.
+
 It does **not** touch `langgraph._internal`, the checkpoint format, reducer internals or
 any private attribute. Missing keys degrade to `None`; a config the adapter does not
 recognise simply yields less identity, never an error.

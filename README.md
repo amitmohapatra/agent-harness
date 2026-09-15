@@ -158,7 +158,22 @@ await app.ainvoke(state, {"configurable": {
 }})
 ```
 
-See [`examples/langgraph_agent.py`](examples/langgraph_agent.py).
+**One trace per turn.** Each node is its own agent run, and LangGraph runs supersteps as
+separate tasks — so with nothing enclosing them, each node span starts its own trace. Wrap
+the invocation to get a single trace (and a single Langfuse session) for the turn:
+
+```python
+async with harness.execution(context, agent_id="reorder-workflow", input=question):
+    out = await app.ainvoke(state, config)
+```
+
+Without it the graph still works and every node is still instrumented; you just get one
+trace per node instead of one per turn.
+
+Small example: [`examples/langgraph_agent.py`](examples/langgraph_agent.py). A full
+multi-agent workflow — fan-out/fan-in, a nested sub-agent, tools, model calls, business
+logic, artifacts and memory writes — is in
+[`examples/reorder_workflow.py`](examples/reorder_workflow.py).
 
 ## Tools and models
 
@@ -459,7 +474,7 @@ mistake fails at startup rather than on the first execution.
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Symptoms, causes, fixes |
 | [examples/plain_python.py](examples/plain_python.py) | All three modes, tools, artifacts, claims, child runs — runs with no services |
 | [examples/langgraph_agent.py](examples/langgraph_agent.py) | An existing node and a runtime-aware node in one graph, with a checkpointer |
-| [examples/with_memory_and_langfuse.py](examples/with_memory_and_langfuse.py) | Memory Service + OpenTelemetry + Langfuse, switched on by configuration only |
+| [examples/reorder_workflow.py](examples/reorder_workflow.py) | The full picture: 6-node graph with parallel fan-out, a nested sub-agent, tools, model calls, real business logic, artifacts, claims, memory and Langfuse |
 
 ## Performance
 

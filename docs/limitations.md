@@ -23,6 +23,13 @@ quietly.
 `harness.execution(...)` instruments the *block*: its span, its memory context, its
 deadline, its observations. It cannot see inside the code you call within the block.
 
+## One trace per node, unless you enclose the run
+
+LangGraph runs each superstep in its own task, so node spans have no ambient parent. Unless
+you wrap the graph invocation (`async with harness.execution(context, ...)`), each node
+produces a separate trace — every node is still fully instrumented, but the turn is not a
+single tree. The same applies to any framework that starts tasks the harness did not create.
+
 ## What the harness does not own
 
 Graph topology, routing, reducers, checkpoint backends, framework state schemas, prompt
