@@ -63,6 +63,13 @@ together: `agent_run_id` needs `agent_id`, `session_id` needs `thread_id`, `turn
 `session_id`. The harness derives a session (one per thread) and drops ids it cannot express
 coherently, so this should not reach you — if it does, the details name the field.
 
+### `verify()` returns `None`, or the run times out during grounding
+
+Grounding runs an NLI model over every claim. On CPU that is tens of seconds per call, well
+past the default 10s memory budget, and the harness cancels it. Raise
+`timeouts.memory_seconds` (300s is realistic for CPU inference) for agents that verify, or
+run the Memory Service where its models have a GPU.
+
 ### A document I ingested is not retrievable
 
 A document is readable only by principals in its audience. `add_document` creates the thread

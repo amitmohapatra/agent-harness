@@ -434,7 +434,9 @@ async def test_observations_populate_the_knowledge_graph(client, context):
 
 
 async def test_grounding_reports_on_a_real_bundle(client, context):
-    harness = build(client)
+    # Grounding runs an NLI cross-encoder per claim. On CPU that is tens of seconds per
+    # call — an order of magnitude slower than a retrieval — so it needs its own budget.
+    harness = build(client, timeouts={"memory_seconds": 300.0, "default_seconds": 600.0})
     marker = uuid.uuid4().hex[:6]
 
     async def body(rt):
