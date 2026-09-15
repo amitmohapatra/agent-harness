@@ -93,7 +93,7 @@ HTTP layer and asserts the wire payloads. `tests/e2e/test_live_memory_service.py
 against a **live service** (`make test-live`) — the only suite that mocks nothing.
 
 Verified live against the service at commit-time, with Postgres, Qdrant, Dragonfly and
-OpenFGA behind it:
+OpenFGA behind it, and a real ONNX embedding model (`fastembed`, BAAI/bge-small-en-v1.5):
 
 | Exercised | Result |
 | --- | --- |
@@ -106,6 +106,20 @@ OpenFGA behind it:
 | `verify` | grounding report returned |
 | Replayed write | same `observation_id` — idempotency holds end to end |
 | Both examples, run as a user runs them | pass |
+
+`make test-live-full` goes further and reads the database rather than trusting a 202.
+Final state of that run — 31 live tests, 0 failed background jobs:
+
+| Persisted | Verified |
+| --- | --- |
+| Memory types | SEMANTIC, EPISODIC, PROCEDURAL, PREFERENCE, DECISION, OUTCOME, FAILURE, SHARED, AGENT — each written through the harness and read back from `memories` with its lifetime |
+| Visibility levels | PRIVATE, RUN, USER, THREAD, WORK, WORKSPACE, AGENT_GROUP, TENANT — each stored with the audience the caller asked for |
+| Knowledge base | document -> `documents` row -> `chunks` rows -> indexed vectors -> retrieved as `knowledge` in a bundle |
+| Knowledge graph | `graph_entities` and `graph_relations` created from the harness's own observations, then traversed with `graph_query` |
+| Conversation | `threads`, `sessions`, `turns` and `messages` rows, with the derived session owning the turn |
+| Tool memory | `tool_invocations` rows attributed to the agent and run that made the call |
+| Agent lineage | a nested run's writes carry both its own run id and its parent's |
+| Idempotency | a replayed write produces exactly one observation row |
 
 Caveat on that run: the service was configured with its lightweight model stand-ins
 (`embedding=hash`, `reranker=lexical`, `nli=lexical`) because the host lacked the heavy model
