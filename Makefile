@@ -48,6 +48,12 @@ test-live:  ## End-to-end against a running Memory Service (MEMORY_SERVICE_URL)
 	MEMORY_API_KEY=$${MEMORY_API_KEY:-dev-key} \
 	$(PYTEST) tests/e2e/test_live_memory_service.py -q -s
 
+.PHONY: test-live-full
+test-live-full:  ## Every feature against a running Memory Service, with database checks
+	MEMORY_SERVICE_URL=$${MEMORY_SERVICE_URL:-http://localhost:8080} \
+	MEMORY_API_KEY=$${MEMORY_API_KEY:-dev-key} \
+	$(PYTEST) tests/e2e/test_live_full_surface.py -q -s
+
 .PHONY: bench
 bench:  ## Harness overhead benchmark (writes benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s

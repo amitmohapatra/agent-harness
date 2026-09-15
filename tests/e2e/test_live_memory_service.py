@@ -74,6 +74,9 @@ def live_context():
         thread_id=f"live-thread-{run}",
         turn_id=f"turn-{run}",
         work_id=f"wo-{run}",
+        # share() publishes to the agent group; USER-visible memories need the user
+        agent_group_id=f"crew-{run}",
+        workspace_id=f"ws-{run}",
     )
 
 

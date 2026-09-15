@@ -19,6 +19,27 @@ if str(EXAMPLES) not in sys.path:
     sys.path.insert(0, str(EXAMPLES))
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _demo_mode():
+    """These tests exercise the examples as *examples*: self-contained, no services.
+
+    The examples read MEMORY_SERVICE_URL at import time, so an ambient value (set when the
+    live suite is also running) would silently point them at a real service and make this
+    module's assertions depend on its state.
+    """
+    import os
+
+    saved = {k: os.environ.pop(k, None)
+             for k in ("MEMORY_SERVICE_URL", "MEMORY_API_KEY", "LANGFUSE_PUBLIC_KEY",
+                       "LANGFUSE_SECRET_KEY")}
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
+
+
 @pytest.fixture(scope="module")
 def workflow():
     return importlib.import_module("reorder_workflow")

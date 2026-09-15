@@ -74,6 +74,94 @@ Decisions worth calling out:
 
 Booleans accept `1/true/yes/on`. An unparseable value raises at startup naming the variable.
 
+
+## What is mandatory?
+
+Almost nothing. This is the complete set of things you *must* provide:
+
+| You must set | When | If you don't |
+| --- | --- | --- |
+| `tenant_id` | always — on the context or in `defaults` | `ValueError` at the first execution |
+| `agent_id` | per wrapped agent | the function's name is used |
+| `memory=` client | only to use memory | memory calls are no-ops; everything else works |
+| `model=` client | only to use `runtime.model` | `ConfigurationError` naming the fix |
+| `tools=` | only to use `runtime.tools` | `ToolNotFoundError` naming the fix |
+| `LANGFUSE_*` keys | only with Langfuse enabled | startup fails with the missing key named |
+
+Everything else has a working default. `AgentHarness(defaults={"tenant_id": "acme"})` is a
+complete, valid configuration.
+
+## What the harness checks for you
+
+These are validated *before* anything is sent, because the service would otherwise accept
+the request and fail later — in a background job, where you would never see it:
+
+| Check | Why |
+| --- | --- |
+| Conversation ids hang together | `turn_id` needs a `session_id`, a session needs a thread. The harness derives one session per thread and drops ids it cannot express. |
+| Visibility prerequisites | `AGENT_GROUP` needs `agent_group_id`, `WORKSPACE` needs `workspace_id`, `USER` needs `user_id`, and so on. A write to an audience the context cannot express is refused immediately. |
+| Observation kinds | Only the service's vocabulary (MESSAGE, FILE, AGENT_RESULT, TOOL_RESULT, DECISION, FEEDBACK, EVENT, IMPORT) is accepted. |
+| Langfuse credentials | Enabling Langfuse without keys fails at startup, not silently at runtime. |
+| Unknown config keys | Rejected rather than ignored, so a typo is not a silent default. |
+
+## What do I set, and when?
+
+A decision table, rather than a list of knobs. Each row is a situation you will actually be
+in; the setting is the answer.
+
+### Memory
+
+| Situation | Setting |
+| --- | --- |
+| "My agent should see prior context" | `memory.retrieve_before: true` (default) and give the request a query — an `objective`, a string input, or `query`/`question` in a dict. Without one, retrieval is skipped rather than guessed. |
+| "Nothing should be written back automatically" | `memory.observe_input/observe_output/observe_claims: false`. Explicit `runtime.memory.*` calls still write — the policy governs only the automatic path. |
+| "Tool outputs contain customer data" | Leave `memory.observe_tool_results: false` (the default). |
+| "This agent's notes must not leak to the user or other agents" | `memory.private_by_default: true` — everything it writes becomes RUN-visible. |
+| "I want the turn recorded as a conversation, not just observations" | `memory.record_messages: true`. |
+| "The process exits right after the turn" | `memory.writeback: false`, or `await harness.drain()` before exit — writes are asynchronous by default. |
+| "A memory outage must fail the request" | `memory.failure_mode: fail_closed`. Otherwise the run degrades with a `MEMORY_DEGRADED` warning. |
+| "Context is too large / too small" | `memory.token_budget`. |
+| "Memory calls are hanging" | `timeouts.memory_seconds` (one deadline for every memory call). |
+
+### Telemetry and privacy
+
+| Situation | Setting |
+| --- | --- |
+| "My app already configures OpenTelemetry" | Nothing — the default (`configure_sdk: false`) uses your provider. |
+| "Nothing configures OpenTelemetry and I want traces" | `telemetry.configure_sdk: true` plus `exporter: console` or `otlp` + `endpoint`. |
+| "I'm debugging and need to see prompts" | `telemetry.capture.inputs: true` (and `outputs`) — per environment, not globally. |
+| "Retrieved memory text must never leave the process" | Leave `capture.memory_content: false` (the default). |
+| "Our policy forbids exporting user ids" | Leave `capture.user_id: false` (the default). |
+| "Too much trace volume" | `telemetry.sampling.sample_rate: 0.1`, keeping `error_sample_rate: 1.0`. |
+| "This agent is business-critical, always trace it" | `sampling.critical_agents: [billing-agent]`. |
+| "Losing telemetry is worse than failing the request" | `observability.failure_mode: fail_closed` (rare; it makes observability a business dependency). |
+| "I need Langfuse" | `observability.langfuse.enabled: true` + `LANGFUSE_*` env vars. Capture and sampling come from `telemetry` — there is nothing else to set. |
+
+### Execution
+
+| Situation | Setting |
+| --- | --- |
+| "Agents must not run longer than N seconds" | `timeouts.default_seconds`, or `timeout_seconds=` per wrapped agent. |
+| "A model provider is slow" | `timeouts.model_seconds` — bounded by the agent deadline regardless. |
+| "Transient upstream failures should be retried" | `retries.enabled: true` **and** `harness.wrap(..., idempotent=True)`. Both are required: retrying a non-idempotent agent is how you double-charge someone. |
+| "I want a result object instead of an exception" | `harness.wrap(..., error_mode="result")`. |
+| "Results can be large" | `artifacts.inline_max_bytes` — anything bigger is stored and replaced by a reference. |
+| "I need evaluation events" | `evaluation_events.enabled: true` (asynchronous by default; `synchronous: true` blocks the result). |
+| "Only some agents may run / some tools may be called" | Pass `policy=` a provider. Passing it is what enables it. |
+
+## Operational rules that are not settings
+
+Two service behaviours that no configuration changes, and that explain most surprises:
+
+1. **Writes are asynchronous.** The API commits your observation and queues the work that
+   turns it into memories, graph edges and index entries. Reading immediately after writing
+   will not show it; the live tests poll for this reason.
+2. **Reads are audience-filtered.** A memory or document chunk is retrievable only by a
+   principal in its audience. A THREAD audience requires the thread to exist — writing a
+   message creates it — and WORKSPACE/GROUP audiences require membership in the
+   authorization service. Ingesting a document into an empty thread produces chunks that
+   nobody, including you, can retrieve.
+
 ## Per-agent overrides
 
 Harness-wide configuration is the floor; individual agents can narrow it at wrap time:

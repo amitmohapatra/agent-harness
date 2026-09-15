@@ -202,6 +202,8 @@ async def main() -> None:
 
     context = AgentExecutionContext.create(
         tenant_id=TENANT, agent_id="memory-tour", user_id=USER, workspace_id=WORKSPACE,
+        # share() publishes to the agent group, so the run must belong to one
+        agent_group_id="supply-chain",
         thread_id=THREAD, turn_id=TURN, work_id="wo-2291",
     )
     result = await wrapped(None, context=context)

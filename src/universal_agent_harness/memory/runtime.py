@@ -20,6 +20,7 @@ from typing import Any
 from universal_agent_harness.contracts.artifacts import MemoryObservation
 from universal_agent_harness.contracts.context import AgentExecutionContext
 from universal_agent_harness.contracts.errors import AgentError, MemoryUnavailableError
+from universal_agent_harness.memory import visibility as vis
 from universal_agent_harness.memory.policy import MemoryPolicy
 from universal_agent_harness.telemetry import names as N
 from universal_agent_harness.telemetry.metrics import (
@@ -137,6 +138,7 @@ class MemoryRuntime:
         )
         watch = Stopwatch()
         hints = {**self.policy.visibility_hints(), **observation.hints}
+        vis.check(hints.get("visibility"), self.context)
         with self.tracer.memory_span("observe", **{N.MEMORY_KIND: observation.kind}) as span:
             span.set_input(observation.content, category="memory")
             try:
@@ -200,7 +202,12 @@ class MemoryRuntime:
             )
 
     async def share(self, content: str, /, **metadata: Any) -> Any:
-        """Publish to the agent group explicitly — the only way memory crosses agents."""
+        """Publish to the agent group explicitly — the only way memory crosses agents.
+
+        Requires ``agent_group_id`` on the context: without a group there is no audience,
+        and the service would fail the write asynchronously.
+        """
+        vis.check("AGENT_GROUP", self.context)
         return await self.observe(
             MemoryObservation(
                 content=content,
@@ -230,6 +237,7 @@ class MemoryRuntime:
         """
         hints: dict[str, Any] = {"memory_type": memory_type, "lifetime": lifetime}
         if visibility:
+            vis.check(visibility, self.context)
             hints["visibility"] = visibility
         with self.tracer.memory_span(
             "remember",
@@ -314,6 +322,7 @@ class MemoryRuntime:
         Ingestion is asynchronous in the service: the handle comes back immediately and the
         document becomes retrievable once parsing and indexing finish.
         """
+        vis.check(options.get("visibility"), self.context)
         with self.tracer.memory_span("ingest") as span:
             handle = await self._write(self._ctx.files.add(file, **options), span, "ingest")
             if handle is not None:

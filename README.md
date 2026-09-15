@@ -728,10 +728,23 @@ make test-live     # the same paths against a *running* Memory Service
 MEMORY_SERVICE_URL=http://localhost:8080 MEMORY_API_KEY=dev-key make test-live
 ```
 
-It drives the real SDK against the real service: a full turn, every memory operation
-(typed memories, RAG ingestion, knowledge graph, history, inventory, grounding, deletion),
-idempotency of a replayed write, and both examples run as a user would run them. Without
-`MEMORY_SERVICE_URL` the suite skips, so the normal run stays hermetic.
+It drives the real SDK against the real service. `make test-live-full` goes further and
+checks the **database**: every memory type and visibility level written and read back out of
+Postgres, a document ingested and retrieved as knowledge, graph entities and relations
+created from the harness's own observations, conversation/session/turn rows, tool
+invocations, agent-run lineage, a replayed write producing exactly one row, and a LangGraph
+graph running against it all. Without `MEMORY_SERVICE_URL` both suites skip, so the normal
+run stays hermetic.
+
+Two service behaviours explain most surprises, and no setting changes them:
+
+* **writes are asynchronous** — the API commits and queues; reading immediately after
+  writing proves nothing (drain, or poll);
+* **reads are audience-filtered** — a memory or chunk is retrievable only by a principal in
+  its audience. A THREAD audience needs the thread to exist (a message creates it);
+  WORKSPACE and GROUP audiences need membership. The harness refuses a write whose audience
+  the context cannot express, because the service would accept it and fail the background
+  job that creates the memory.
 
 Test suite: 280 tests (276 functional + 4 benchmarks), 91% line coverage of the core and
 the adapter. Categories: unit, contract (protocol conformance), integration, end-to-end

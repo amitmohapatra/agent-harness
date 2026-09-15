@@ -50,8 +50,11 @@ def context() -> AgentExecutionContext:
         tenant_id="acme",
         agent_id="test-agent",
         user_id="u1",
+        workspace_id="ws-1",
+        agent_group_id="crew-1",
         thread_id="chat-1",
         turn_id="turn-1",
+        work_id="work-1",
     )
 
 
