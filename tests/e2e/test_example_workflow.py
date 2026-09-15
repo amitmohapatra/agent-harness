@@ -121,3 +121,26 @@ async def test_the_explain_node_produces_claims_evidence_and_observations(workfl
     assert result.memory_observations[0].content.startswith("SKU-1 was reordered")
     assert result.confidence == 0.86
     assert result.metrics["order_qty"] == 500.0
+
+
+async def test_memory_tour_example_exercises_every_operation(spans):
+    """The memory tour is executed too, and every operation it claims to cover must appear
+    as its own span — the example is the documentation for the memory surface."""
+    import importlib
+
+    tour = importlib.import_module("memory_tour")
+    await tour.main()
+
+    emitted = {s.name for s in spans.get_finished_spans()}
+    assert {
+        "agent.memory.retrieve",
+        "agent.memory.recall",
+        "agent.memory.observe",
+        "agent.memory.remember",
+        "agent.memory.forget",
+        "agent.memory.list",
+        "agent.memory.history",
+        "agent.memory.graph",
+        "agent.memory.ingest",
+        "agent.memory.verify",
+    } <= emitted

@@ -5,6 +5,7 @@
 | [`plain_python.py`](plain_python.py) | all three integration modes, tools, artifacts, claims, child runs — no framework, no services |
 | [`langgraph_agent.py`](langgraph_agent.py) | the smallest useful graph: an existing node and a runtime-aware node, with a checkpointer |
 | [`reorder_workflow.py`](reorder_workflow.py) | the full picture — see below |
+| [`memory_tour.py`](memory_tour.py) | every memory operation the service supports, driven through the harness |
 
 All three run as-is, with no services and no API keys:
 
@@ -12,6 +13,7 @@ All three run as-is, with no services and no API keys:
 python examples/plain_python.py
 python examples/langgraph_agent.py          # needs the [langgraph] extra
 python examples/reorder_workflow.py
+python examples/memory_tour.py
 ```
 
 They print JSON log lines (structured logging is on by default) alongside their output.
@@ -61,3 +63,22 @@ LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-... LANGFUSE_HOST=https:
 The workflow is also executed as a test (`tests/e2e/test_example_workflow.py`), which
 asserts the arithmetic, the span hierarchy and the parallelism — so this example cannot
 drift away from the code.
+
+## `memory_tour.py`
+
+One agent run that exercises the whole Memory Service surface through `runtime.memory`, and
+prints the calls it made:
+
+| Push | Get |
+| --- | --- |
+| chat turns → history | `retrieve()` → one bundle: conversation + memories + RAG + graph + summaries |
+| `observe()` → episodic memory | `recall()` → ranked evidence only |
+| `remember()` → typed memory (`memory_type`, `lifetime`, `visibility`) | `history()` → the conversation window |
+| `add_document()` → the RAG corpus | `graph_query()` → knowledge-graph facts, with `as_of` |
+| `share()` → the agent group | `memories()` → the inventory view |
+| tool invocations → tool memory | `verify()` → grounding report |
+| `forget()` → deletion | |
+
+It runs against an in-process stand-in by default, so you can see the wire calls without a
+service; point `MEMORY_SERVICE_URL` at a real one and nothing else changes. A test asserts
+that every operation produces its own `agent.memory.*` span.

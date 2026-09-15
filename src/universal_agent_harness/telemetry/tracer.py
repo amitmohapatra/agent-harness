@@ -16,7 +16,7 @@ import json
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, ClassVar
 
 from universal_agent_harness.config.settings import CaptureConfig
 from universal_agent_harness.contracts.context import AgentExecutionContext
@@ -188,13 +188,27 @@ class HarnessTracer:
             attributes={N.TOOL_NAME: tool, **extra},
         )
 
+    #: Memory operation -> (span name, whether it is a retrieval).
+    MEMORY_OPERATIONS: ClassVar[dict[str, tuple[str, bool]]] = {
+        "retrieve": (N.MEMORY_RETRIEVE, True),
+        "recall": (N.MEMORY_RECALL, True),
+        "observe": (N.MEMORY_OBSERVE, False),
+        "remember": (N.MEMORY_REMEMBER, False),
+        "forget": (N.MEMORY_FORGET, False),
+        "list": (N.MEMORY_LIST, True),
+        "history": (N.MEMORY_HISTORY, True),
+        "graph": (N.MEMORY_GRAPH, True),
+        "ingest": (N.MEMORY_INGEST, False),
+        "verify": (N.MEMORY_VERIFY, True),
+    }
+
     def memory_span(self, operation: str, **extra: Any) -> Any:
-        name = N.MEMORY_RETRIEVE if operation == "retrieve" else N.MEMORY_OBSERVE
+        name, is_read = self.MEMORY_OPERATIONS.get(operation, (N.MEMORY_OBSERVE, False))
         return self.span(
             name,
-            kind=N.KIND_RETRIEVAL if operation == "retrieve" else N.KIND_INTERNAL,
+            kind=N.KIND_RETRIEVAL if is_read else N.KIND_INTERNAL,
             category="memory",
-            attributes=extra,
+            attributes={"memory.operation": operation, **extra},
         )
 
     def artifact_span(self, artifact_type: str, **extra: Any) -> Any:

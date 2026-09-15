@@ -253,6 +253,45 @@ harness = AgentHarness(memory=memory, config={"memory": {
 
 Per-agent overrides: `harness.wrap(agent, memory_policy=MemoryPolicy(observe_output=False))`.
 
+### Driving memory yourself
+
+That automatic path covers the common turn. Everything else the service can do is on
+`runtime.memory`, instrumented the same way — each call gets its own `agent.memory.*` span,
+its own timeout and a deterministic idempotency key:
+
+| Push | | Get | |
+| --- | --- | --- | --- |
+| `record_input` / `record_output` | the conversation turns | `retrieve(query)` | **the 90% call**: one bounded, ranked, evidence-gated bundle — conversation window + memories + RAG knowledge + graph facts + summaries |
+| `observe(MemoryObservation(...))` | something happened (episodic) | `recall(query)` | ranked evidence items, without bundle assembly |
+| `remember(text, memory_type=…, lifetime=…, visibility=…)` | a typed, durable memory | `history(limit=…)` | the conversation window on its own |
+| `add_document(path)` | ingest a document into the RAG corpus | `graph_query(q, hops=…, as_of=…)` | knowledge-graph entities and relationships, optionally as of a time |
+| `share(text)` | publish to the agent group | `memories(memory_types=…)` | the inventory view: what is held for this scope |
+| `forget(memory_id)` | delete a memory | `verify(answer, bundle=…)` | grounding report: is this answer supported, claim by claim |
+
+The vocabulary is the service's: `memory_type` (SEMANTIC, EPISODIC, PROCEDURAL, PREFERENCE,
+DECISION, OUTCOME, FAILURE, SHARED…), `lifetime` (EPHEMERAL, SHORT_TERM, LONG_TERM,
+ARCHIVAL), `visibility` (PRIVATE, RUN, AGENT_GROUP, THREAD, USER, WORK, WORKSPACE, TENANT).
+
+```python
+@harness.agent(agent_id="inventory-agent")
+async def agent(state, runtime):
+    await runtime.memory.remember(
+        "SKU-1 reorders from Castor Supply below 10 days of cover",
+        memory_type="SEMANTIC", lifetime="LONG_TERM", visibility="WORKSPACE",
+    )
+    bundle = await runtime.memory.retrieve(state["question"])   # everything, in one call
+    facts = await runtime.memory.graph_query("who supplies SKU-1?", hops=2)
+    report = await runtime.memory.verify(answer, bundle=bundle)  # grounded, or not
+    ...
+```
+
+Anything the harness does not wrap is one attribute away — `runtime.memory.sdk` is the bound
+SDK context (and `.chat`, `.files`, `.graph`, `.tools`). Those calls work; they are simply
+not traced by the harness, and that is stated rather than implied.
+
+A runnable walk through every one of these:
+[`examples/memory_tour.py`](examples/memory_tour.py).
+
 ## Results and errors
 
 Whatever your agent returns is coerced into an `AgentResult`; returning one yourself gives
@@ -475,6 +514,7 @@ mistake fails at startup rather than on the first execution.
 | [examples/plain_python.py](examples/plain_python.py) | All three modes, tools, artifacts, claims, child runs — runs with no services |
 | [examples/langgraph_agent.py](examples/langgraph_agent.py) | An existing node and a runtime-aware node in one graph, with a checkpointer |
 | [examples/reorder_workflow.py](examples/reorder_workflow.py) | The full picture: 6-node graph with parallel fan-out, a nested sub-agent, tools, model calls, real business logic, artifacts, claims, memory and Langfuse |
+| [examples/memory_tour.py](examples/memory_tour.py) | Every memory operation — history, episodic, typed long/short-term, RAG ingestion, knowledge graph, inventory, grounding, deletion — and what each sends over the wire |
 
 ## Performance
 

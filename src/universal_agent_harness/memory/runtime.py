@@ -116,7 +116,7 @@ class MemoryRuntime:
 
     async def recall(self, query: str, /, **options: Any) -> list[Any]:
         """Ranked evidence without bundle assembly (the service's ``recall``)."""
-        with self.tracer.memory_span("retrieve", **{N.MEMORY_KIND: "recall"}) as span:
+        with self.tracer.memory_span("recall") as span:
             span.set_input(query, category="memory")
             try:
                 return await _with_timeout(
@@ -184,6 +184,169 @@ class MemoryRuntime:
                 idempotency_key=self.context.idempotency_key("share", content),
             )
         )
+
+    async def remember(
+        self,
+        content: str,
+        /,
+        *,
+        memory_type: str = "SEMANTIC",
+        lifetime: str = "LONG_TERM",
+        visibility: str | None = None,
+        **metadata: Any,
+    ) -> Any | None:
+        """Write a *typed* memory: what kind of knowledge it is, how long it should live and
+        who may see it. ``observe`` lets the service classify; this states it explicitly.
+
+        ``memory_type``: SEMANTIC, EPISODIC, PROCEDURAL, PREFERENCE, DECISION, OUTCOME,
+        FAILURE, SHARED... ``lifetime``: EPHEMERAL, SHORT_TERM, LONG_TERM, ARCHIVAL.
+        ``visibility``: PRIVATE, RUN, AGENT_GROUP, THREAD, USER, WORK, WORKSPACE, TENANT.
+        """
+        hints: dict[str, Any] = {"memory_type": memory_type, "lifetime": lifetime}
+        if visibility:
+            hints["visibility"] = visibility
+        with self.tracer.memory_span(
+            "remember",
+            **{
+                N.MEMORY_TYPE: memory_type,
+                N.MEMORY_LIFETIME: lifetime,
+                N.MEMORY_VISIBILITY: visibility
+                or ("RUN" if self.policy.private_by_default else None),
+            },
+        ) as span:
+            span.set_input(content, category="memory")
+            ack = await self._write(
+                self._ctx.observe(
+                    content,
+                    kind="EVENT",
+                    idempotency_key=self.context.idempotency_key("remember", memory_type, content),
+                    hints={**self.policy.visibility_hints(), **hints},
+                    **metadata,
+                ),
+                span,
+                "remember",
+            )
+        return ack
+
+    async def forget(self, memory_id: str, /) -> None:
+        """Delete a memory. Idempotent in the service; traced here because it is a write."""
+        with self.tracer.memory_span("forget", **{N.MEMORY_ID: memory_id}) as span:
+            await self._write(self._ctx.forget(memory_id), span, "forget")
+
+    async def memories(self, **options: Any) -> list[Any]:
+        """The inventory view: current memories anchored to this execution's scopes.
+
+        ``recall`` is the ranked, query-driven view; this is "what do we hold about this
+        user / thread / run", for audit screens and debugging.
+        """
+        with self.tracer.memory_span("list") as span:
+            items = await self._read(self._ctx.memories(**options), span, "list", default=[])
+            span.set(**{N.MEMORY_RESULT_COUNT: len(items)})
+        return items
+
+    async def get(self, memory_id: str, /) -> Any | None:
+        with self.tracer.memory_span("list", **{N.MEMORY_ID: memory_id}) as span:
+            return await self._read(self._ctx.get_memory(memory_id), span, "get")
+
+    async def history(self, *, limit: int = 50, include_internal: bool = False) -> list[Any]:
+        """The conversation window: what was actually said in this thread."""
+        with self.tracer.memory_span("history") as span:
+            messages = await self._read(
+                self._ctx.chat.history(limit=limit, include_internal=include_internal),
+                span,
+                "history",
+                default=[],
+            )
+            span.set(**{N.MEMORY_RESULT_COUNT: len(messages)})
+        return messages
+
+    async def graph_query(
+        self,
+        query: str | None = None,
+        /,
+        *,
+        entities: list[str] | None = None,
+        hops: int = 1,
+        as_of: Any = None,
+    ) -> Any | None:
+        """Knowledge-graph traversal: resolve entities and walk a bounded neighbourhood.
+        ``as_of`` gives the temporal view — what the graph believed at that time."""
+        with self.tracer.memory_span("graph", **{N.MEMORY_HOPS: hops}) as span:
+            span.set_input(query or entities, category="memory")
+            answer = await self._read(
+                self._ctx.graph.query(query, entities=entities, hops=hops, as_of=as_of),
+                span,
+                "graph",
+            )
+            if answer is not None:
+                span.set(**{N.MEMORY_RESULT_COUNT: len(getattr(answer, "facts", []) or [])})
+        return answer
+
+    async def add_document(self, file: Any, /, **options: Any) -> Any | None:
+        """Ingest a document so its chunks become retrievable knowledge (the RAG corpus).
+
+        Ingestion is asynchronous in the service: the handle comes back immediately and the
+        document becomes retrievable once parsing and indexing finish.
+        """
+        with self.tracer.memory_span("ingest") as span:
+            handle = await self._write(self._ctx.files.add(file, **options), span, "ingest")
+            if handle is not None:
+                span.set(**{N.MEMORY_DOCUMENT_ID: getattr(handle, "document_id", None)})
+        return handle
+
+    async def verify(self, answer: str, /, **options: Any) -> Any | None:
+        """Grounding check: claim by claim, is this answer supported by the evidence?
+
+        Returns the service's grounding report. Use it before returning an answer that must
+        be defensible; it is a *read* and does not write memory.
+        """
+        with self.tracer.memory_span("verify") as span:
+            report = await self._read(self._ctx.verify(answer, **options), span, "verify")
+            if report is not None:
+                span.set(
+                    **{
+                        N.MEMORY_HALLUCINATION_RATE: getattr(
+                            report, "per_claim_hallucination_rate", None
+                        ),
+                        N.MEMORY_GROUNDED: getattr(report, "grounded", None),
+                    }
+                )
+        return report
+
+    # -- shared plumbing for the operations above --------------------------------------
+    async def _read(self, awaitable: Any, span: Any, operation: str, default: Any = None) -> Any:
+        """A read follows the degradation policy: ``fail_closed`` raises, otherwise the
+        caller gets ``default`` and the failure is recorded."""
+        watch = Stopwatch()
+        try:
+            value = await _with_timeout(awaitable, self.retrieval_timeout)
+        except Exception as exc:
+            self.last_error = AgentError.of(exc, source=f"memory.{operation}")
+            span.error(exc, **{N.STATUS: "error"})
+            self._metric(operation, "error", watch.ms)
+            if self.fail_closed:
+                raise MemoryUnavailableError(
+                    f"memory {operation} failed: {exc}", source=f"memory.{operation}"
+                ) from exc
+            return default
+        span.ok()
+        self._metric(operation, "ok", watch.ms)
+        return value
+
+    async def _write(self, awaitable: Any, span: Any, operation: str) -> Any:
+        """A write never silently disappears: the failure propagates to the caller (or to
+        the writeback handler, when it was scheduled)."""
+        watch = Stopwatch()
+        try:
+            value = await _with_timeout(awaitable, self.observation_timeout)
+        except Exception as exc:
+            self.last_error = AgentError.of(exc, source=f"memory.{operation}")
+            span.error(exc, **{N.STATUS: "error"})
+            self._metric(operation, "error", watch.ms)
+            raise
+        span.ok()
+        self._metric(operation, "ok", watch.ms)
+        return value
 
     # -- tool memory (used by the tool client when enabled) ---------------------------
     @property
@@ -253,6 +416,13 @@ class NoOpMemoryRuntime:
     def sdk(self) -> Any:
         return None
 
+    #: The SDK sub-APIs are unavailable without a client; attribute access returns ``None``
+    #: so ``if runtime.memory.graph:`` reads naturally.
+    chat = None
+    files = None
+    graph = None
+    tools = None
+
     async def retrieve(self, query: str, /, **options: Any) -> None:
         return None
 
@@ -269,6 +439,30 @@ class NoOpMemoryRuntime:
         return None
 
     async def share(self, content: str, /, **metadata: Any) -> None:
+        return None
+
+    async def remember(self, content: str, /, **kwargs: Any) -> None:
+        return None
+
+    async def forget(self, memory_id: str, /) -> None:
+        return None
+
+    async def memories(self, **options: Any) -> list[Any]:
+        return []
+
+    async def get(self, memory_id: str, /) -> None:
+        return None
+
+    async def history(self, **options: Any) -> list[Any]:
+        return []
+
+    async def graph_query(self, query: str | None = None, /, **options: Any) -> None:
+        return None
+
+    async def add_document(self, file: Any, /, **options: Any) -> None:
+        return None
+
+    async def verify(self, answer: str, /, **options: Any) -> None:
         return None
 
     async def record_tool_call(self, *args: Any, **kwargs: Any) -> None:

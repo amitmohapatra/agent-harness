@@ -32,11 +32,20 @@ class FakeEvidence:
 
 
 @dataclass
+class FakeConversation:
+    thread_id: str = "chat-1"
+    message_ids: list = field(default_factory=list)
+    rendered: str = ""
+    summary: str | None = None
+
+
+@dataclass
 class FakeBundle:
     query: str = ""
     query_type: str = "FACTUAL"
     bundle_id: str = "bundle_1"
     rendered: str = "remembered: SKU-1 stock is low"
+    conversation: FakeConversation = field(default_factory=FakeConversation)
     memories: list[Any] = field(default_factory=list)
     knowledge: list[Any] = field(default_factory=list)
     graph_facts: list[Any] = field(default_factory=list)
@@ -75,6 +84,91 @@ class FakeChat:
         self._calls.append(("chat.internal", {"content": content, **kwargs}))
         return FakeAck()
 
+    async def history(self, *, limit: int = 50, include_internal: bool = False) -> list[Any]:
+        self._calls.append(
+            ("chat.history", {"limit": limit, "include_internal": include_internal})
+        )
+        return [FakeMessage()]
+
+
+@dataclass
+class FakeMemoryRecord:
+    memory_id: str = "mem_1"
+    content: str = "SKU-1 reorder point is 50"
+    memory_type: str = "SEMANTIC"
+    lifetime: str = "LONG_TERM"
+    visibility: str = "USER"
+
+
+@dataclass
+class FakeGraphFact:
+    relation_id: str = "rel_1"
+    subject: str = "SKU-1"
+    predicate: str = "supplied_by"
+    object: str = "Castor Supply"
+    fact_text: str = "SKU-1 is supplied by Castor Supply"
+
+
+@dataclass
+class FakeGraphAnswer:
+    matched: list = field(default_factory=list)
+    entities: list = field(default_factory=list)
+    facts: list = field(default_factory=lambda: [FakeGraphFact()])
+    visited: int = 1
+
+
+@dataclass
+class FakeGrounding:
+    per_claim_hallucination_rate: float = 0.0
+    supported: int = 2
+    unsupported: int = 0
+    contradicted: int = 0
+
+    @property
+    def grounded(self) -> bool:
+        return self.per_claim_hallucination_rate == 0.0
+
+
+@dataclass
+class FakeFileHandle:
+    document_id: str = "doc_1"
+    filename: str = "policy.txt"
+    checksum: str = "abc"
+    size_bytes: int = 12
+    job_ids: list = field(default_factory=lambda: ["job_1"])
+
+
+@dataclass
+class FakeMessage:
+    message_id: str = "msg_1"
+    role: str = "USER"
+    kind: str = "VISIBLE"
+    sequence: int = 1
+    content: str = "how much stock?"
+
+
+class FakeGraph:
+    def __init__(self, calls: list[tuple[str, dict[str, Any]]], client: Any = None) -> None:
+        self._calls = calls
+        self._client = client
+
+    async def query(self, query=None, *, entities=None, hops=1, as_of=None) -> FakeGraphAnswer:
+        self._calls.append(
+            ("graph.query", {"query": query, "entities": entities, "hops": hops, "as_of": as_of})
+        )
+        if self._client is not None and self._client.fail_retrieval:
+            raise ConnectionError("memory service unavailable")
+        return FakeGraphAnswer()
+
+
+class FakeFiles:
+    def __init__(self, calls: list[tuple[str, dict[str, Any]]]) -> None:
+        self._calls = calls
+
+    async def add(self, file: Any, **kwargs: Any) -> FakeFileHandle:
+        self._calls.append(("files.add", {"file": str(file)[:40], **kwargs}))
+        return FakeFileHandle()
+
 
 class FakeTools:
     def __init__(self, calls: list[tuple[str, dict[str, Any]]]) -> None:
@@ -95,6 +189,8 @@ class FakeMemoryContext:
         self.scope = FakeScope(scope)
         self.chat = FakeChat(client.calls)
         self.tools = FakeTools(client.calls)
+        self.graph = FakeGraph(client.calls, client)
+        self.files = FakeFiles(client.calls)
 
     def derive(self, **changes: Any) -> FakeMemoryContext:
         return FakeMemoryContext(self._client, {**self.scope.model_dump(), **changes})
@@ -109,7 +205,26 @@ class FakeMemoryContext:
 
     async def recall(self, query: str, **options: Any) -> list[Any]:
         self._client.calls.append(("recall", {"query": query, **options}))
+        if self._client.fail_retrieval:
+            raise ConnectionError("memory service unavailable")
         return []
+
+    async def memories(self, **options: Any) -> list[FakeMemoryRecord]:
+        self._client.calls.append(("memories", dict(options)))
+        if self._client.fail_retrieval:
+            raise ConnectionError("memory service unavailable")
+        return [FakeMemoryRecord()]
+
+    async def get_memory(self, memory_id: str) -> FakeMemoryRecord:
+        self._client.calls.append(("get_memory", {"memory_id": memory_id}))
+        return FakeMemoryRecord(memory_id=memory_id)
+
+    async def forget(self, memory_id: str) -> None:
+        self._client.calls.append(("forget", {"memory_id": memory_id}))
+
+    async def verify(self, answer: str, **options: Any) -> FakeGrounding:
+        self._client.calls.append(("verify", {"answer": answer, **options}))
+        return FakeGrounding()
 
     async def observe(self, content: str, **kwargs: Any) -> FakeAck:
         self._client.calls.append(

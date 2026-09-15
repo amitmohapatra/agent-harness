@@ -71,6 +71,7 @@ examples:  ## Run the runnable examples
 	$(PY) examples/plain_python.py >/dev/null && echo "plain_python ok"
 	$(PY) examples/langgraph_agent.py >/dev/null && echo "langgraph_agent ok"
 	$(PY) examples/reorder_workflow.py >/dev/null && echo "reorder_workflow ok"
+	$(PY) examples/memory_tour.py >/dev/null && echo "memory_tour ok"
 
 .PHONY: clean
 clean:  ## Remove caches
