@@ -18,6 +18,7 @@ from universal_agent_harness.artifacts import (
 )
 from universal_agent_harness.config import HarnessConfig
 from universal_agent_harness.contracts import (
+    OBSERVATION_KINDS,
     AgentCancelledError,
     AgentDescriptor,
     AgentError,
@@ -66,6 +67,7 @@ from universal_agent_harness.telemetry import DefaultRedactor, HarnessTracer
 from universal_agent_harness.tools import LocalToolClient, wrap_tool
 
 __all__ = [
+    "OBSERVATION_KINDS",
     "AgentCancelledError",
     "AgentDescriptor",
     "AgentError",

@@ -30,6 +30,15 @@ you wrap the graph invocation (`async with harness.execution(context, ...)`), ea
 produces a separate trace — every node is still fully instrumented, but the turn is not a
 single tree. The same applies to any framework that starts tasks the harness did not create.
 
+## Ids the harness does not invent
+
+`thread_id`, `turn_id` and `work_id` are yours: the harness propagates them but never makes
+them up, because only the application knows what a conversation or a turn *is*. Two service
+rules apply to them — a `turn_id` is bound to the session that created it (so turn ids must
+be unique per session), and a session belongs to a thread. The harness derives the session
+(one per thread) so you do not have to, and drops conversation ids it cannot express
+coherently rather than having the service reject the whole call.
+
 ## What the harness does not own
 
 Graph topology, routing, reducers, checkpoint backends, framework state schemas, prompt

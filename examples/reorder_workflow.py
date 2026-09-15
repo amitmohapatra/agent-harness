@@ -37,6 +37,7 @@ import asyncio
 import math
 import operator
 import os
+import uuid
 from typing import Annotated, Any, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -156,7 +157,11 @@ def build_harness() -> AgentHarness:
         memory=memory,                       # None -> memory degrades to a no-op
         model=DemoModel(),                   # swap for your provider client
         tools=[inventory_db, demand_forecast, supplier_catalog],
-        defaults={"tenant_id": "acme", "user_id": "planner-7", "agent_group_id": "supply-chain"},
+        defaults={
+            "tenant_id": os.environ.get("MEMORY_TENANT", "acme"),
+            "user_id": "planner-7",
+            "agent_group_id": "supply-chain",
+        },
         config={
             "memory": {
                 "observe_claims": True,
@@ -389,9 +394,17 @@ def build_graph():
 async def main() -> None:
     app = build_graph()
 
+    # A turn id belongs to the session that created it, so each run gets its own; the
+    # thread stays stable so the conversation accumulates.
+    run = uuid.uuid4().hex[:8]
     context = AgentExecutionContext.create(
-        tenant_id="acme", agent_id="reorder-workflow", user_id="planner-7",
-        thread_id="chat-supply-42", turn_id="turn-1", work_id="wo-2291",
+        tenant_id=os.environ.get("MEMORY_TENANT", "acme"),
+        agent_id="reorder-workflow",
+        user_id="planner-7",
+        # stable thread so the conversation accumulates; override to isolate a run
+        thread_id=os.environ.get("MEMORY_THREAD_ID", "chat-supply-42"),
+        turn_id=f"turn-{run}",
+        work_id="wo-2291",
     )
 
     question = "Do we need to reorder SKU-1 before the quarter closes?"

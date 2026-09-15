@@ -86,8 +86,52 @@ so no live project or network is needed to run the suite.
 
 The harness depends on the `universal-memory` SDK contract only:
 `MemoryClient.bind(**scope)` → `MemoryContext`, then `context()`, `recall()`, `observe()`,
-`chat.*`, `tools.record()`. `tests/e2e/test_real_memory_sdk.py` runs the real SDK against a
-mocked HTTP layer and asserts the wire payloads (scope fields and idempotency headers).
+`chat.*`, `graph.*`, `files.*`, `tools.record()`.
+
+Two suites cover it. `tests/e2e/test_real_memory_sdk.py` runs the real SDK against a mocked
+HTTP layer and asserts the wire payloads. `tests/e2e/test_live_memory_service.py` runs
+against a **live service** (`make test-live`) — the only suite that mocks nothing.
+
+Verified live against the service at commit-time, with Postgres, Qdrant, Dragonfly and
+OpenFGA behind it:
+
+| Exercised | Result |
+| --- | --- |
+| Full turn: retrieve before, observe after | bundle `COMPLETE`, 12 memories, 182 tokens |
+| `recall` | 5 ranked items |
+| `history` | messages written by the harness read back |
+| `graph_query` | 29 facts extracted from the harness's observations |
+| `memories` / `forget` | inventory returned, deletion accepted |
+| `add_document` | document handle returned, indexed by the worker |
+| `verify` | grounding report returned |
+| Replayed write | same `observation_id` — idempotency holds end to end |
+| Both examples, run as a user runs them | pass |
+
+Caveat on that run: the service was configured with its lightweight model stand-ins
+(`embedding=hash`, `reranker=lexical`, `nli=lexical`) because the host lacked the heavy model
+extras. That exercises every wire contract, scope rule and persistence path, but says nothing
+about retrieval or grounding *quality* — which is the Memory Service's own concern, measured
+by its own benchmarks.
+
+### What the live run found that mocks could not
+
+Three defects, all now fixed and covered by contract tests
+(`tests/contract/test_memory_scope_rules.py`):
+
+1. **`turn_id` was sent without `session_id`.** The service rejects the whole request
+   (`session_id` is required whenever a turn is set). The LangGraph adapter derived a session;
+   the plain-Python path did not. The context now derives one session per thread, and
+   `scope_fields()` drops conversation ids it cannot express coherently.
+2. **Observation kinds the service does not accept.** The harness wrote `AGENT_INPUT` and
+   `CLAIM`; the enum is MESSAGE / FILE / AGENT_RESULT / TOOL_RESULT / DECISION / FEEDBACK /
+   EVENT / IMPORT. Every automatic input and claim write was being refused. `MemoryObservation`
+   now validates the kind before the wire.
+3. **`record_input()` / `record_output()` silently did nothing** unless the `record_messages`
+   policy was on — a config flag elsewhere quietly voiding an explicit call. The policy now
+   governs only the automatic path; an explicit call always writes.
+
+A `turn_id` is also bound to the session that created it, so turn ids must be unique per
+session; the examples derive one per run.
 
 ## CrewAI and Google ADK
 

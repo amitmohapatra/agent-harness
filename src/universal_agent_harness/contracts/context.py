@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from universal_agent_harness.contracts.ids import new_id, safe_id, stable_id
 
@@ -75,6 +75,21 @@ class AgentExecutionContext(BaseModel):
     deadline: datetime | None = None
 
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coherent_conversation_ids(cls, data: Any) -> Any:
+        """Keep the conversation ids consistent with the Memory Service's rules.
+
+        The service requires ``session_id`` whenever ``turn_id`` is set (and a thread for a
+        session). An application that only knows "this is turn 3 of chat-42" should not have
+        to invent a session id, so one is derived: one session per thread.
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("turn_id") and not data.get("session_id") and data.get("thread_id"):
+            data = {**data, "session_id": safe_id(f"{data['thread_id']}-session")}
+        return data
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -180,15 +195,29 @@ class AgentExecutionContext(BaseModel):
         )
 
     def scope_fields(self) -> dict[str, Any]:
-        """The Memory Service ``Scope`` keyword arguments for this execution."""
+        """The Memory Service ``Scope`` keyword arguments for this execution.
+
+        The service enforces three coherence rules — ``agent_run_id`` needs ``agent_id``,
+        ``session_id`` needs ``thread_id``, ``turn_id`` needs ``session_id`` — and rejects
+        the whole request otherwise. This is the boundary, so the rules are applied here as
+        well as at construction: a conversation id that cannot be expressed coherently is
+        dropped rather than sent and refused.
+        """
+        session_id = self.session_id
+        turn_id = self.turn_id
+        if self.thread_id is None:
+            session_id = None
+            turn_id = None
+        elif turn_id is not None and session_id is None:
+            session_id = safe_id(f"{self.thread_id}-session")
         out: dict[str, Any] = {
             "tenant_id": self.tenant_id,
             "workspace_id": self.workspace_id,
             "user_id": self.user_id,
             "group_ids": list(self.group_ids),
             "thread_id": self.thread_id,
-            "session_id": self.session_id,
-            "turn_id": self.turn_id,
+            "session_id": session_id,
+            "turn_id": turn_id,
             "work_id": self.work_id,
             "task_id": self.task_id,
             "agent_id": self.agent_id,

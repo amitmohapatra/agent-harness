@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ArtifactRef(BaseModel):
@@ -65,8 +65,16 @@ class RecommendedAction(BaseModel):
     confidence: float | None = None
 
 
+#: The observation kinds the Memory Service accepts (its ``ObservationKind`` enum). Sending
+#: anything else is rejected with a 422, so the harness validates before the wire rather
+#: than letting a typo become a runtime failure in the writeback path.
+OBSERVATION_KINDS: frozenset[str] = frozenset(
+    {"MESSAGE", "FILE", "AGENT_RESULT", "TOOL_RESULT", "DECISION", "FEEDBACK", "EVENT", "IMPORT"}
+)
+
+
 class MemoryObservation(BaseModel):
-    """Something the agent wants remembered. Written after the result is returned (§10)."""
+    """Something the agent wants remembered. Written after the result is returned."""
 
     model_config = ConfigDict(frozen=True, extra="allow")
 
@@ -75,6 +83,16 @@ class MemoryObservation(BaseModel):
     hints: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
+
+    @field_validator("kind")
+    @classmethod
+    def _known_kind(cls, value: str) -> str:
+        if value not in OBSERVATION_KINDS:
+            raise ValueError(
+                f"unknown observation kind {value!r}; the Memory Service accepts "
+                f"{', '.join(sorted(OBSERVATION_KINDS))}"
+            )
+        return value
 
 
 class AgentWarning(BaseModel):

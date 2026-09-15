@@ -38,11 +38,21 @@ pytestmark = [
 TENANT = os.environ.get("MEMORY_TENANT", "acme")
 
 
-@pytest.fixture(scope="module")
-def live_client():
+@pytest.fixture
+async def live_client():
+    """One client per test.
+
+    ``MemoryClient`` holds an httpx connection pool bound to the loop it was created on,
+    and pytest-asyncio gives each test its own loop — a module-scoped client therefore
+    works for the first test and fails with "Event loop is closed" for the rest.
+    """
     from universal_memory import MemoryClient
 
-    return MemoryClient(URL, api_key=API_KEY, timeout=30.0)
+    client = MemoryClient(URL, api_key=API_KEY, timeout=30.0)
+    try:
+        yield client
+    finally:
+        await client.aclose()
 
 
 @pytest.fixture
@@ -210,6 +220,9 @@ def test_the_shipped_examples_run_against_the_live_service():
         **os.environ,
         "MEMORY_SERVICE_URL": URL or "",
         "MEMORY_API_KEY": API_KEY,
+        "MEMORY_TENANT": TENANT,
+        # a thread of its own, so repeated runs never interfere with each other
+        "MEMORY_THREAD_ID": f"live-example-{uuid.uuid4().hex[:8]}",
         "PYTHONPATH": str(root),
     }
     for example in ("memory_tour.py", "reorder_workflow.py"):

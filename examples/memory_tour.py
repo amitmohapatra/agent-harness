@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,15 @@ from universal_agent_harness import (
     MemoryObservation,
 )
 
-TENANT, USER, THREAD = "acme", "planner-7", "chat-memory-tour"
+TENANT = os.environ.get("MEMORY_TENANT", "acme")
+USER = "planner-7"
+#: WORKSPACE-visible memories need a workspace to belong to.
+WORKSPACE = os.environ.get("MEMORY_WORKSPACE_ID", "supply-chain-ws")
+#: The thread is stable so history accumulates across runs; override it to keep a run
+#: isolated (the live test suite does this).
+THREAD = os.environ.get("MEMORY_THREAD_ID", "chat-memory-tour")
+#: A turn id is bound to the session that created it, so each run needs its own.
+TURN = f"turn-{uuid.uuid4().hex[:8]}"
 
 
 async def tour(agent: AgentRuntime) -> dict[str, Any]:
@@ -169,7 +178,12 @@ async def main() -> None:
 
     harness = AgentHarness(
         memory=client,
-        defaults={"tenant_id": TENANT, "user_id": USER, "agent_group_id": "supply-chain"},
+        defaults={
+            "tenant_id": TENANT,
+            "user_id": USER,
+            "workspace_id": WORKSPACE,
+            "agent_group_id": "supply-chain",
+        },
         config={
             "memory": {
                 "record_messages": True,     # let the harness write the chat turns
@@ -187,8 +201,8 @@ async def main() -> None:
     wrapped = harness.wrap(memory_tour, agent_id="memory-tour", skills=["memory.tour"])
 
     context = AgentExecutionContext.create(
-        tenant_id=TENANT, agent_id="memory-tour", user_id=USER,
-        thread_id=THREAD, turn_id="turn-1", work_id="wo-2291",
+        tenant_id=TENANT, agent_id="memory-tour", user_id=USER, workspace_id=WORKSPACE,
+        thread_id=THREAD, turn_id=TURN, work_id="wo-2291",
     )
     result = await wrapped(None, context=context)
 

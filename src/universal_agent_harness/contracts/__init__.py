@@ -1,6 +1,7 @@
 """Framework-neutral contracts. Everything the harness exchanges with an application."""
 
 from universal_agent_harness.contracts.artifacts import (
+    OBSERVATION_KINDS,
     AgentWarning,
     ArtifactRef,
     Claim,
@@ -48,6 +49,7 @@ from universal_agent_harness.contracts.ports import (
 from universal_agent_harness.contracts.tool import ToolCall, ToolOutcome, ToolSpec
 
 __all__ = [
+    "OBSERVATION_KINDS",
     "AgentCancelledError",
     "AgentDescriptor",
     "AgentError",

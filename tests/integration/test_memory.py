@@ -81,8 +81,11 @@ async def test_claims_are_observed_when_the_policy_asks(harness, memory, context
         return AgentResult.ok("x", claims=[Claim(claim_id="c1", text="stock is low")])
 
     await harness.wrap(agent, agent_id="inv")("q", context=context)
-    kinds = {o["kind"] for o in memory.observations}
-    assert "CLAIM" in kinds
+    claim_writes = [o for o in memory.observations if o["content"] == "stock is low"]
+    assert claim_writes, "the claim should have been written"
+    # the kind says where it came from (the agent's result); the hint says what it is
+    assert claim_writes[0]["kind"] == "AGENT_RESULT"
+    assert claim_writes[0]["hints"]["memory_type"] == "SEMANTIC"
 
 
 async def test_memory_policy_can_be_narrowed_per_agent(harness, memory, context):

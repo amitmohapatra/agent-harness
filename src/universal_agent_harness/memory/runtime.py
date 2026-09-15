@@ -161,17 +161,43 @@ class MemoryRuntime:
         return ack
 
     async def record_input(self, text: str, /, **metadata: Any) -> Any | None:
-        """The turn's user message, when the application asked the harness to record it."""
-        if not self.policy.record_messages or not self._ctx.scope.thread_id:
+        """Record the turn's user message.
+
+        The ``record_messages`` policy governs whether the harness does this *automatically*;
+        calling it yourself always writes. A call that silently did nothing because of a
+        config flag elsewhere is worse than no method at all.
+
+        Returns ``None`` only when there is no thread to record into — a message needs a
+        conversation.
+        """
+        if not self._ctx.scope.thread_id:
             return None
-        key = self.context.idempotency_key("msg", "user", text)
-        return await self._ctx.chat.user(text, idempotency_key=key, **metadata)
+        with self.tracer.memory_span("observe", **{N.MEMORY_KIND: "message.user"}) as span:
+            span.set_input(text, category="memory")
+            return await self._write(
+                self._ctx.chat.user(
+                    text, idempotency_key=self.context.idempotency_key("msg", "user", text),
+                    **metadata,
+                ),
+                span,
+                "record_input",
+            )
 
     async def record_output(self, text: str, /, **metadata: Any) -> Any | None:
-        if not self.policy.record_messages or not self._ctx.scope.thread_id:
+        """Record the agent's answer as the assistant turn. Always writes when called."""
+        if not self._ctx.scope.thread_id:
             return None
-        key = self.context.idempotency_key("msg", "assistant", text)
-        return await self._ctx.chat.assistant(text, idempotency_key=key, **metadata)
+        with self.tracer.memory_span("observe", **{N.MEMORY_KIND: "message.assistant"}) as span:
+            span.set_input(text, category="memory")
+            return await self._write(
+                self._ctx.chat.assistant(
+                    text,
+                    idempotency_key=self.context.idempotency_key("msg", "assistant", text),
+                    **metadata,
+                ),
+                span,
+                "record_output",
+            )
 
     async def share(self, content: str, /, **metadata: Any) -> Any:
         """Publish to the agent group explicitly — the only way memory crosses agents."""

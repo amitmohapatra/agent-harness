@@ -56,6 +56,19 @@ plus a turn or task id). For LangGraph, ensure `configurable.thread_id` is set.
 That is the default (see [privacy.md](privacy.md)). Enable the specific capture flags you
 need, per environment.
 
+### `ValidationError: Invalid execution context`
+
+The Memory Service validates the whole scope and rejects the request if the ids do not hang
+together: `agent_run_id` needs `agent_id`, `session_id` needs `thread_id`, `turn_id` needs
+`session_id`. The harness derives a session (one per thread) and drops ids it cannot express
+coherently, so this should not reach you — if it does, the details name the field.
+
+### `ValidationError: turn_id belongs to a different session`
+
+A `turn_id` is bound to the session that created it. Reusing a generic id like `"turn-1"`
+under a different thread collides with the earlier turn. Turn ids must be unique per
+session — derive them from your own turn counter, a request id, or a uuid.
+
 ### `ConfigurationError: no model client is configured`
 
 `runtime.model` was used without `AgentHarness(model=...)`. Either pass a model client, or

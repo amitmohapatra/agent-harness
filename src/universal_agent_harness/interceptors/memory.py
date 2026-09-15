@@ -78,8 +78,9 @@ class MemoryObservationInterceptor(BaseInterceptor):
         if policy.observe_input and request is not None and request.query:
             observations.append(
                 MemoryObservation(
+                    # "what the agent was asked" is an EVENT; AGENT_RESULT is its answer.
                     content=request.query,
-                    kind="AGENT_INPUT",
+                    kind="EVENT",
                     metadata={"agent_id": runtime.agent_id},
                     idempotency_key=runtime.idempotency_key("obs", "input", request.query),
                 )
@@ -100,7 +101,8 @@ class MemoryObservationInterceptor(BaseInterceptor):
                 observations.append(
                     MemoryObservation(
                         content=claim.text,
-                        kind="CLAIM",
+                        kind="AGENT_RESULT",
+                        # the *kind* says where it came from; the hint says what it is
                         hints={"memory_type": "SEMANTIC"},
                         metadata={"claim_id": claim.claim_id, "confidence": claim.confidence},
                         idempotency_key=runtime.idempotency_key("obs", "claim", claim.claim_id),
@@ -135,6 +137,8 @@ class MemoryObservationInterceptor(BaseInterceptor):
         memory = runtime.memory
         policy = memory.policy
         try:
+            # The policy governs this automatic path; explicit calls in agent code always
+            # write, which is why the check lives here and not in MemoryRuntime.
             if policy.record_messages:
                 request: AgentRequest | None = runtime.state.get("request")
                 if request is not None and request.query:
