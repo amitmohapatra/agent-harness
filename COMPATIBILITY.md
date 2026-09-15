@@ -107,6 +107,10 @@ OpenFGA behind it, and a real ONNX embedding model (`fastembed`, BAAI/bge-small-
 | Replayed write | same `observation_id` — idempotency holds end to end |
 | Both examples, run as a user runs them | pass |
 
+All of it was re-run against the **containerised** service (`docker compose up -d`, the
+image's own sentence-transformers models), not only a locally launched API: 357 tests pass,
+31 of them live.
+
 `make test-live-full` goes further and reads the database rather than trusting a 202.
 Final state of that run — 31 live tests, 0 failed background jobs:
 

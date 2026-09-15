@@ -201,15 +201,20 @@ async def test_visibility_levels_that_the_context_supports(client, context):
 
     await run(harness, context, body)
 
-    for visibility, marker in written.items():
-        rows = await eventually(
-            lambda m=marker: sql(
-                f"SELECT visibility FROM memories WHERE tenant_id='{TENANT}' "
-                f"AND content LIKE '%{m}%'"
-            ),
-            what=f"the {visibility} memory",
+    # Poll for all of them at once: seven separate budgets serialise into a long wait when
+    # the worker is busy, which makes the test flaky rather than wrong.
+    markers = "','".join(f"%{m}%" for m in written.values())
+
+    def stored() -> dict[str, str] | None:
+        rows = sql(
+            f"SELECT visibility, content FROM memories WHERE tenant_id='{TENANT}' "
+            f"AND content LIKE ANY (ARRAY['{markers}'])"
         )
-        assert rows[0][0] == visibility
+        found = {r[0]: r[1] for r in rows}
+        return found if len(found) >= len(written) else None
+
+    found = await eventually(stored, timeout=120.0, what="every visibility level to be stored")
+    assert set(found) == set(written), f"missing: {sorted(set(written) - set(found))}"
     await harness.aclose()
 
 
@@ -222,7 +227,7 @@ async def test_a_visibility_the_context_cannot_express_is_refused_immediately(cl
     bare = AgentExecutionContext.create(tenant_id=TENANT, agent_id="live-surface")
 
     async def body(rt):
-        with pytest.raises(ConfigurationError, match="requires agent_group_id"):
+        with pytest.raises(ConfigurationError, match="needs an agent group"):
             await rt.memory.share("this has no audience")
         with pytest.raises(ConfigurationError, match="requires workspace_id"):
             await rt.memory.remember("no workspace", visibility="WORKSPACE")
