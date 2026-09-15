@@ -42,6 +42,12 @@ test-langgraph:  ## LangGraph adapter tests
 test-compat:  ## Compatibility matrix (rewrites compatibility-matrix.json)
 	$(PYTEST) tests/compatibility -q
 
+.PHONY: test-live
+test-live:  ## End-to-end against a running Memory Service (MEMORY_SERVICE_URL)
+	MEMORY_SERVICE_URL=$${MEMORY_SERVICE_URL:-http://localhost:8080} \
+	MEMORY_API_KEY=$${MEMORY_API_KEY:-dev-key} \
+	$(PYTEST) tests/e2e/test_live_memory_service.py -q -s
+
 .PHONY: bench
 bench:  ## Harness overhead benchmark (writes benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s

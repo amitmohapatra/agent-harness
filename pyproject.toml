@@ -76,6 +76,7 @@ filterwarnings = ["error::DeprecationWarning:universal_agent_harness.*"]
 markers = [
   "performance: harness overhead benchmarks",
   "compatibility: framework version compatibility matrix",
+  "live: needs a running Memory Service (MEMORY_SERVICE_URL)",
 ]
 
 [tool.ruff]

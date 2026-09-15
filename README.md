@@ -714,11 +714,24 @@ uv venv --python 3.12 .venv
 source .venv/bin/activate
 uv sync --all-extras
 
-make test          # 276 tests: unit, contract, integration, e2e, compatibility, LangGraph
+make test          # the hermetic suite: unit, contract, integration, e2e, compatibility
 make check         # ruff + pyright + tests — what a release gate runs
 make bench         # overhead benchmark (writes benchmark-results.json)
-make examples      # run the three examples end to end
+make examples      # run every example end to end
+make test-live     # the same paths against a *running* Memory Service
 ```
+
+`make test-live` is the one suite that mocks nothing. Start the service first (in the
+`agent-memory-service` checkout: `make dev-up`), then:
+
+```bash
+MEMORY_SERVICE_URL=http://localhost:8080 MEMORY_API_KEY=dev-key make test-live
+```
+
+It drives the real SDK against the real service: a full turn, every memory operation
+(typed memories, RAG ingestion, knowledge graph, history, inventory, grounding, deletion),
+idempotency of a replayed write, and both examples run as a user would run them. Without
+`MEMORY_SERVICE_URL` the suite skips, so the normal run stays hermetic.
 
 Test suite: 280 tests (276 functional + 4 benchmarks), 91% line coverage of the core and
 the adapter. Categories: unit, contract (protocol conformance), integration, end-to-end
