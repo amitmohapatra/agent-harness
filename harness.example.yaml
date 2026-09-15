@@ -1,0 +1,131 @@
+# Universal Agent Harness — configuration reference.
+# Load with: AgentHarness(memory=..., config="harness.yaml")
+# Every value below is the default unless stated; environment variables override the file.
+
+harness:
+  memory:
+    enabled: true
+    retrieve_before: true          # fetch a ContextBundle before the agent runs
+    observe_after: true            # write observations after the result is returned
+    observe_input: true
+    observe_output: true
+    observe_tool_results: false    # tool outputs are NOT sent to memory by default
+    observe_claims: true
+    private_by_default: false      # true -> observations are RUN-visible only
+    record_messages: false         # also record the turn as chat messages
+    token_budget: null
+    require_evidence: false
+    failure_mode: non_blocking     # non_blocking | fail_closed
+    writeback: true                # write off the critical path
+    writeback_max_pending: 256
+    retrieval_timeout_seconds: 10.0
+    observation_timeout_seconds: 15.0
+
+  telemetry:
+    enabled: true
+    provider: opentelemetry
+    service_name: agent-harness
+    service_version: null
+    configure_sdk: false           # true only if the app does not configure OTel itself
+    exporter: none                 # none | console | otlp   (used only with configure_sdk)
+    endpoint: null
+    metrics_enabled: true
+    failure_mode: non_blocking
+    capture:
+      agents: true
+      models: true
+      tools: true
+      memory_operations: true
+      retrieval_metadata: true
+      raw_prompts: false           # payload capture is opt-in, per tenant/environment
+      raw_agent_inputs: false
+      raw_agent_outputs: false
+      raw_model_inputs: false
+      raw_model_outputs: false
+      raw_tool_inputs: false
+      raw_tool_outputs: false
+      raw_memory_content: false
+      user_id: false               # identity capture is opt-in
+      thread_id: true
+    sampling:
+      sample_rate: 1.0
+      error_sample_rate: 1.0
+      critical_agent_sample_rate: 1.0
+      critical_agents: []
+
+  observability:
+    structured_logging: true
+    log_level: INFO
+    langfuse:
+      enabled: false
+      mode: auto                   # auto | sdk | otlp
+      base_url: null               # or LANGFUSE_HOST / LANGFUSE_BASE_URL
+      public_key: null             # or LANGFUSE_PUBLIC_KEY
+      secret_key: null             # or LANGFUSE_SECRET_KEY
+      environment: null
+      release: null
+      failure_mode: non_blocking   # Langfuse must not be a business dependency
+      flush_on_exit: true
+      debug: false
+      capture:                     # same shape as telemetry.capture
+        agents: true
+        models: true
+        tools: true
+        memory_operations: true
+        raw_prompts: false
+        raw_model_inputs: false
+        raw_model_outputs: false
+      sampling:
+        sample_rate: 1.0
+        error_sample_rate: 1.0
+        critical_agent_sample_rate: 1.0
+
+  models:
+    provider: direct
+    default_model: null
+    options: {}
+
+  tools:
+    provider: local
+    record_to_memory: true         # record invocations in the Memory Service tool memory
+    use_memory_cache: false
+    options: {}
+
+  retries:
+    enabled: false                 # opt-in, and only for agents marked idempotent
+    max_attempts: 2
+    initial_backoff_seconds: 0.1
+    max_backoff_seconds: 5.0
+    backoff_multiplier: 2.0
+    jitter: true
+    retry_categories: [TIMEOUT, RATE_LIMIT, DEPENDENCY]
+
+  timeouts:
+    default_seconds: 30.0
+    memory_seconds: 10.0
+    model_seconds: 60.0
+    tool_seconds: 30.0
+
+  artifacts:
+    enabled: true
+    provider: memory               # in-process store; set options.root for a file store
+    inline_max_bytes: 64000
+    options: {}
+
+  evaluation_events:
+    enabled: false
+    synchronous: false             # evaluation stays off the critical path
+    sample_rate: 1.0
+
+  registry:
+    enabled: false
+    provider: noop
+
+  policy:
+    enabled: false
+    provider: noop
+    failure_mode: non_blocking
+
+frameworks:
+  langgraph: true
+  crewai: false

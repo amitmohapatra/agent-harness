@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --all-extras
+      - name: Lint
+        run: uv run ruff check .
+      - name: Typecheck
+        run: uv run pyright
+      - name: Tests
+        run: uv run pytest -q -m "not performance"
+      - name: Compatibility matrix
+        run: uv run pytest tests/compatibility -q
+      - name: Benchmark
+        run: uv run pytest tests/performance -m performance -q -s
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports
+          path: |
+            compatibility-matrix.json
+            benchmark-results.json
+
+  # The core must keep working with nothing optional installed.
+  core-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install core only
+        run: |
+          uv venv --python 3.12
+          uv pip install -e . pytest pytest-asyncio respx
+      - name: Core smoke test
+        run: |
+          uv run python -c "
+          import asyncio, sys
+          from universal_agent_harness import AgentHarness
+          assert 'langgraph' not in sys.modules and 'langfuse' not in sys.modules
+          h = AgentHarness(defaults={'tenant_id': 'acme'})
+          async def agent(x): return x
+          print(asyncio.run(h.wrap(agent, agent_id='a')('ok')).data)
+          "

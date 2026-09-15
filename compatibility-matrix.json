@@ -1,0 +1,29 @@
+{
+  "harness_version": "0.1.0",
+  "python": "3.12.14",
+  "packages": {
+    "langgraph": "1.2.11",
+    "langchain-core": "1.6.3",
+    "langfuse": "4.15.2",
+    "opentelemetry-api": "1.44.0",
+    "opentelemetry-sdk": "1.44.0",
+    "pydantic": "2.13.5",
+    "universal-memory": "0.1.0"
+  },
+  "langgraph_features": {
+    "wrap_existing_node": "supported",
+    "runtime_aware_node": "supported",
+    "async_nodes": "supported",
+    "sync_nodes": "supported",
+    "config_injection": "supported",
+    "stream_writer_injection": "supported",
+    "parallel_nodes": "supported",
+    "reducers_unchanged": "supported",
+    "subgraph_lineage": "supported",
+    "checkpoint_retry_idempotency": "supported",
+    "streaming": "supported",
+    "cancellation": "supported",
+    "exception_propagation": "supported",
+    "tool_events": "supported"
+  }
+}

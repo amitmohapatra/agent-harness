@@ -1,0 +1,103 @@
+[project]
+name = "universal-agent-harness"
+version = "0.1.0"
+description = "Framework-neutral runtime harness for agents: context, memory, telemetry, tools, models, policy and evaluation around agents you already have."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Agent Platform Team" }]
+keywords = ["agents", "harness", "opentelemetry", "langfuse", "memory", "langgraph"]
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: Apache Software License",
+  "Typing :: Typed",
+]
+
+# Core stays small: contracts, config, the OTel API (not the SDK) and the Memory Service SDK.
+# No framework (langgraph/crewai/adk) and no telemetry backend are ever pulled in here.
+dependencies = [
+  "pydantic>=2.13,<3",
+  "pydantic-settings>=2.15,<3",
+  "opentelemetry-api>=1.44",
+  "universal-memory>=0.1",
+  "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+# OpenTelemetry SDK + OTLP exporter (needed only if the application does not configure its own)
+otel = ["opentelemetry-sdk>=1.44", "opentelemetry-exporter-otlp-proto-http>=1.44"]
+# Langfuse observability / evaluation / prompt provider
+langfuse = ["langfuse>=3.0"]
+# LangGraph adapter (never installed for plain-Python users)
+langgraph = ["universal-agent-harness-langgraph"]
+# JSON structured logging via structlog (stdlib logging is used when absent)
+logging = ["structlog>=25.2"]
+all = ["universal-agent-harness[otel,langfuse,langgraph,logging]"]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.1",
+  "pytest-asyncio>=1.4",
+  "pytest-cov>=6",
+  "pytest-timeout>=2.3",
+  "hypothesis>=6",
+  "respx>=0.22",
+  "ruff>=0.16",
+  "pyright>=1.1.414",
+  "opentelemetry-sdk>=1.44",
+  "structlog>=25.2",
+  "langgraph>=1.2",
+  "universal-agent-harness-langgraph",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/universal_agent_harness"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.uv.workspace]
+members = ["integrations/langgraph"]
+
+[tool.uv.sources]
+universal-agent-harness-langgraph = { workspace = true }
+# Local development against the Memory Service SDK checkout.
+universal-memory = { path = "../agent-memory-service/sdk/python", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "integrations/langgraph/tests"]
+timeout = 120
+filterwarnings = ["error::DeprecationWarning:universal_agent_harness.*"]
+markers = [
+  "performance: harness overhead benchmarks",
+  "compatibility: framework version compatibility matrix",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "integrations/langgraph/src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PL", "RUF", "ASYNC", "T20"]
+ignore = ["PLR0913", "PLR2004", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "T20", "PLC0415", "E501"]
+"integrations/*/tests/**" = ["PLR2004", "T20", "PLC0415", "E501"]
+"conftest.py" = ["E402"]
+"examples/**" = ["T20"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+include = ["src", "integrations/langgraph/src"]
+exclude = ["**/__pycache__", "**/.venv"]
+typeCheckingMode = "standard"
+reportMissingImports = "warning"
