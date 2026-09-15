@@ -20,6 +20,12 @@ from universal_agent_harness.contracts.context import AgentExecutionContext
 from universal_agent_harness.contracts.ids import new_id, safe_id, stable_id
 from universal_agent_harness.runtime.propagation import current_context
 
+#: Identity an application declares once (on the harness) and should never have to repeat on
+#: an individual context. Ids that identify *this* execution are never back-filled.
+FILLABLE_FIELDS = frozenset(
+    {"workspace_id", "user_id", "group_ids", "agent_group_id", "work_id"}
+)
+
 
 class ContextFactory:
     """Builds execution contexts from defaults plus whatever the call site supplies."""
@@ -51,8 +57,17 @@ class ContextFactory:
         explicit_run_id = fields.pop("agent_run_id", None)
 
         if context is not None:
-            # An explicit context wins; it is only re-pointed at this agent when it names a
-            # different one, so a caller can hand the same context to a nested agent safely.
+            # Identity the application declared once on the harness fills gaps the caller's
+            # context left empty. Without this, `defaults={"agent_group_id": ...}` silently
+            # applied to some executions and not others, and the caller had to remember to
+            # repeat it on every context they built themselves.
+            gaps = {
+                field: value
+                for field, value in self.defaults.items()
+                if field in FILLABLE_FIELDS and value and not getattr(context, field, None)
+            }
+            if gaps:
+                context = context.with_fields(**gaps)
             if context.agent_id == safe_id(agent_id) and not fields:
                 return context
             if context.agent_id == safe_id(agent_id):

@@ -40,10 +40,25 @@ class MemoryPolicy:
         )
 
     def merged(self, override: MemoryPolicy | dict[str, Any] | None) -> MemoryPolicy:
+        """Apply an override. A :class:`MemoryPolicy` replaces this one wholesale; a dict
+        changes only the fields it names.
+
+        A misspelled key is rejected rather than silently ignored — a policy that quietly
+        does nothing is the worst kind of configuration bug.
+        """
         if override is None:
             return self
         if isinstance(override, MemoryPolicy):
             return override
+        unknown = set(override) - FIELDS
+        if unknown:
+            from universal_agent_harness.contracts.errors import ConfigurationError  # noqa: PLC0415
+
+            raise ConfigurationError(
+                f"unknown memory policy option(s): {', '.join(sorted(unknown))}. "
+                f"Valid options are {', '.join(sorted(FIELDS))}.",
+                source="memory.policy",
+            )
         return replace(self, **override)
 
     @property
@@ -58,3 +73,7 @@ class MemoryPolicy:
     def visibility_hints(self) -> dict[str, Any]:
         """Hints attached to every observation this policy produces."""
         return {"visibility": "RUN"} if self.private_by_default else {}
+
+
+#: The names ``merged`` accepts in a dict override.
+FIELDS: frozenset[str] = frozenset(MemoryPolicy.__dataclass_fields__)

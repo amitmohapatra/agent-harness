@@ -14,6 +14,7 @@ to the writeback handler rather than being silently dropped.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -29,6 +30,8 @@ from universal_agent_harness.telemetry.metrics import (
     MEMORY_OPERATIONS,
 )
 from universal_agent_harness.telemetry.tracer import HarnessTracer, Stopwatch
+
+log = logging.getLogger("universal_agent_harness.memory")
 
 
 class MemoryRuntime:
@@ -55,6 +58,7 @@ class MemoryRuntime:
         self.observation_timeout = observation_timeout
         self.fail_closed = fail_closed
         self.last_error: AgentError | None = None
+        self._thread_ready = False
 
     # -- underlying SDK handle (escape hatch for advanced callers) ------------------
     @property
@@ -201,13 +205,29 @@ class MemoryRuntime:
                 "record_output",
             )
 
-    async def share(self, content: str, /, **metadata: Any) -> Any:
-        """Publish to the agent group explicitly — the only way memory crosses agents.
+    async def share(self, content: str, /, *, group: str | None = None, **metadata: Any) -> Any:
+        """Publish to the agent group — the only way memory crosses agents.
 
-        Requires ``agent_group_id`` on the context: without a group there is no audience,
-        and the service would fail the write asynchronously.
+        A group is required because it *is* the audience: without one there is nobody to
+        share with. Declare it once (``AgentHarness(defaults={"agent_group_id": ...})`` or
+        ``harness.wrap(..., agent_group="crew")``) and it flows automatically; ``group=``
+        overrides it for a single call.
         """
-        vis.check("AGENT_GROUP", self.context)
+        if group:
+            # Rebind the SDK context too: the scope that travels with the write is built
+            # from it, so changing only the harness context would send the old group.
+            self.context = self.context.with_fields(agent_group_id=group)
+            if hasattr(self._ctx, "derive"):
+                self._ctx = self._ctx.derive(agent_group_id=group)
+        if not self.context.agent_group_id:
+            from universal_agent_harness.contracts.errors import ConfigurationError  # noqa: PLC0415
+
+            raise ConfigurationError(
+                "share() needs an agent group: the group is the audience. Set it once with "
+                'AgentHarness(defaults={"agent_group_id": "..."}), per agent with '
+                'harness.wrap(..., agent_group="..."), or per call with share(..., group="...").',
+                source="memory.share",
+            )
         return await self.observe(
             MemoryObservation(
                 content=content,
@@ -322,7 +342,13 @@ class MemoryRuntime:
         Ingestion is asynchronous in the service: the handle comes back immediately and the
         document becomes retrievable once parsing and indexing finish.
         """
-        vis.check(options.get("visibility"), self.context)
+        visibility = options.get("visibility")
+        vis.check(visibility, self.context)
+        # A document inherits the thread's audience unless told otherwise, and a thread only
+        # grants that audience once it exists. Ingesting into a thread that was never written
+        # to produces chunks nobody — including the caller — can retrieve, so create it.
+        if self.context.thread_id and visibility in (None, "THREAD"):
+            await self._ensure_thread()
         with self.tracer.memory_span("ingest") as span:
             handle = await self._write(self._ctx.files.add(file, **options), span, "ingest")
             if handle is not None:
@@ -347,6 +373,16 @@ class MemoryRuntime:
                     }
                 )
         return report
+
+    async def _ensure_thread(self) -> None:
+        """Create the thread if it does not exist yet. Idempotent in the service."""
+        if self._thread_ready:
+            return
+        try:
+            await _with_timeout(self._ctx.chat.create(), self.observation_timeout)
+        except Exception as exc:  # a pre-existing thread, or a service that does not need it
+            log.debug("thread creation skipped: %s", exc)
+        self._thread_ready = True
 
     # -- shared plumbing for the operations above --------------------------------------
     async def _read(self, awaitable: Any, span: Any, operation: str, default: Any = None) -> Any:

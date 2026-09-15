@@ -308,6 +308,7 @@ class AgentHarness:
         interceptors: Iterable[BaseInterceptor] = (),
         framework: str | None = None,
         framework_version: str | None = None,
+        agent_group: str | None = None,
         **descriptor_fields: Any,
     ) -> Callable[..., Any]:
         """Wrap an existing agent. The wrapper keeps the target's sync/async nature.
@@ -322,6 +323,7 @@ class AgentHarness:
             version=version,
             framework=framework,
             framework_version=framework_version,
+            agent_group_id=agent_group,
             **descriptor_fields,
         )
         policy = retry or RetryPolicy(self.config.retries, idempotent=idempotent)
@@ -334,6 +336,8 @@ class AgentHarness:
             objective: str | None = None,
             **fields: Any,
         ) -> Any:
+            if agent_group:
+                fields.setdefault("agent_group_id", agent_group)
             request = self.request(
                 payload,
                 descriptor=descriptor,

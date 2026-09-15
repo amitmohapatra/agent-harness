@@ -84,6 +84,10 @@ class FakeChat:
         self._calls.append(("chat.internal", {"content": content, **kwargs}))
         return FakeAck()
 
+    async def create(self, *, title: str | None = None, **metadata: Any) -> Any:
+        self._calls.append(("chat.create", {"title": title, **metadata}))
+        return FakeThread()
+
     async def history(self, *, limit: int = 50, include_internal: bool = False) -> list[Any]:
         self._calls.append(
             ("chat.history", {"limit": limit, "include_internal": include_internal})
@@ -136,6 +140,13 @@ class FakeFileHandle:
     checksum: str = "abc"
     size_bytes: int = 12
     job_ids: list = field(default_factory=lambda: ["job_1"])
+
+
+@dataclass
+class FakeThread:
+    thread_id: str = "chat-1"
+    tenant_id: str = "acme"
+    title: str | None = None
 
 
 @dataclass
