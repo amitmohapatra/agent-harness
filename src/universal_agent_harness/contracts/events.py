@@ -24,6 +24,7 @@ class LifecycleEvent(StrEnum):
     AGENT_SUCCESS = "on_agent_success"
     AGENT_ERROR = "on_agent_error"
     AGENT_CANCEL = "on_agent_cancel"
+    AGENT_PAUSE = "on_agent_pause"
     AGENT_TIMEOUT = "on_agent_timeout"
     AGENT_FINISH = "on_agent_finish"
 

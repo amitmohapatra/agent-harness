@@ -72,6 +72,23 @@ class AgentError(BaseModel):
         )
 
 
+#: Exceptions a framework raises to *suspend* a run rather than to report a failure.
+#: LangGraph's ``interrupt()`` raises ``GraphInterrupt``; ``Command(goto=...)`` from a
+#: subgraph raises ``ParentCommand``. Both derive from ``GraphBubbleUp``, and both are
+#: control flow the graph runtime catches and acts on — not errors.
+_PAUSE_SIGNALS = frozenset({"GraphBubbleUp", "GraphInterrupt", "NodeInterrupt", "ParentCommand"})
+
+
+def is_pause_signal(exc: BaseException) -> bool:
+    """Whether ``exc`` means "this run is suspended", not "this run failed".
+
+    Matched by class name across the exception's own hierarchy rather than by importing
+    langgraph, which the core must not depend on. A user-defined ``GraphInterrupt`` of their
+    own would match too — which is the behaviour they would want anyway.
+    """
+    return any(cls.__name__ in _PAUSE_SIGNALS for cls in type(exc).__mro__)
+
+
 def classify(exc: BaseException) -> ErrorCategory:
     """Best-effort category for an arbitrary exception.
 

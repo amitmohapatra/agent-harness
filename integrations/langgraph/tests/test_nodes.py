@@ -330,3 +330,46 @@ async def test_subgraph_lineage_nests_agent_runs(harness, spans):
     assert span.attributes["agent.id"] == "inner-agent"
     # the enclosing subgraph invocation is recorded as the parent run
     assert span.attributes.get("agent.parent_run.id")
+
+
+# --------------------------------------------------------------------------- pause (HITL)
+
+
+async def test_an_interrupt_suspends_the_run_instead_of_failing_it(harness, spans, memory):
+    """``interrupt()`` raises to hand control to the graph runtime. That is the mechanism,
+    not a failure, and the harness must not report it as one."""
+    from langgraph.types import interrupt
+
+    from universal_agent_harness.contracts.events import LifecycleEvent
+
+    interesting = {str(LifecycleEvent.AGENT_PAUSE), str(LifecycleEvent.AGENT_ERROR)}
+    seen: list[str] = []
+    harness.events.add(lambda event, payload: seen.append(event) if event in interesting else None)
+
+    async def approval_node(state: State) -> dict:
+        decision = interrupt({"question": "approve the reorder?"})
+        return {"answer": f"human said {decision}"}
+
+    graph = StateGraph(State)
+    graph.add_node("approve", harness.langgraph.wrap_node(approval_node, agent_id="approver"))
+    graph.add_edge(START, "approve")
+    graph.add_edge("approve", END)
+    app = graph.compile(checkpointer=InMemorySaver())
+
+    cfg = config("chat-hitl")
+    result = await app.ainvoke({"question": "reorder 50?"}, config=cfg)
+
+    # the graph is suspended, and the harness said so
+    assert "__interrupt__" in result
+    assert seen == ["on_agent_pause"], "a pause must not be reported as an error"
+
+    run = span_by_name(spans, "agent.run")
+    assert run.attributes["status"] == "PAUSED"
+    assert run.status.status_code.name == "OK", "a suspended run is not an errored span"
+
+    # ...and resuming finishes the turn normally
+    from langgraph.types import Command
+
+    resumed = await app.ainvoke(Command(resume="approved"), config=cfg)
+    assert resumed["answer"] == "human said approved"
+    assert seen == ["on_agent_pause"]

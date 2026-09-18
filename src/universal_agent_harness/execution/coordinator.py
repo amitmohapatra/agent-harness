@@ -30,6 +30,7 @@ from universal_agent_harness.contracts.errors import (
     AgentTimeoutError,
     ErrorCategory,
     HarnessError,
+    is_pause_signal,
 )
 from universal_agent_harness.contracts.events import LifecycleEvent
 from universal_agent_harness.contracts.messages import AgentRequest, AgentResult, AgentStatus
@@ -102,6 +103,9 @@ class ExecutionCoordinator:
                     await self._on_cancel(runtime, chain)
                     raise
                 except BaseException as exc:
+                    if is_pause_signal(exc):
+                        self._on_pause(exc, runtime, span)
+                        raise
                     result, error = await self._on_error(exc, runtime, chain)
                     if result is None:
                         self._finish(runtime, None, error)
@@ -201,6 +205,33 @@ class ExecutionCoordinator:
             with contextlib.suppress(AttributeError, TypeError):
                 exc.agent_error = error  # type: ignore[attr-defined]
         return recovered, error
+
+    def _on_pause(self, exc: BaseException, runtime: AgentRuntime, span: Any) -> None:
+        """A suspended run is not a failed one.
+
+        ``interrupt()`` in a LangGraph node raises to hand control back to the graph runtime,
+        which persists the checkpoint and waits for a human. The exception is the mechanism,
+        so the harness saw a run "fail" with an unclassifiable error every time a turn asked
+        a person a question: an ERROR span, an on_agent_error interceptor pass, and an
+        error-rate metric that counted the feature working as the feature breaking.
+
+        So: mark the span OK — setting OK is final in OpenTelemetry, so the automatic
+        set-status-on-exception that follows is ignored — say PAUSED, and re-raise unchanged
+        so the graph suspends exactly as it would without the harness. ``after``
+        interceptors do not run, because the turn is not over; they run on resume, when the
+        node is re-entered and reaches its end.
+        """
+        span.set(**{N.STATUS: str(AgentStatus.PAUSED)})
+        span.event("agent.paused", reason=type(exc).__name__)
+        span.ok()
+        runtime.logger.info("agent.paused", reason=type(exc).__name__)
+        self.events.emit(
+            LifecycleEvent.AGENT_PAUSE, {"context": runtime.context, "signal": exc}
+        )
+        self.events.emit(
+            LifecycleEvent.AGENT_FINISH,
+            {"context": runtime.context, "status": str(AgentStatus.PAUSED)},
+        )
 
     async def _on_cancel(self, runtime: AgentRuntime, chain: Any) -> None:
         runtime.cancellation.cancel("cancelled")

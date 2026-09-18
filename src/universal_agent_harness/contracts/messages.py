@@ -30,6 +30,9 @@ class AgentStatus(StrEnum):
     TIMEOUT = "TIMEOUT"
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
+    #: suspended waiting for something outside the run — a human, typically — and expected
+    #: to be resumed. Not a failure, and not a finished turn either.
+    PAUSED = "PAUSED"
 
     @property
     def ok(self) -> bool:
