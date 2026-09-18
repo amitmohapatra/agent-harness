@@ -347,6 +347,22 @@ async with harness.execution(context, agent_id="reorder-workflow", input=questio
 Without it the graph still works and every node is still instrumented; you just get one
 trace per node instead of one per turn.
 
+**Asking a human is not a failure.** `interrupt()` raises to hand control back to the graph
+runtime, which saves the checkpoint and waits. The harness recognises that as a pause: the
+span is `OK` with `status=PAUSED`, an `on_agent_pause` lifecycle event fires instead of
+`on_agent_error`, and the exception is re-raised unchanged so the graph suspends exactly as
+it would without the harness. `after` interceptors do not run — the turn is not over — and
+they run on resume, when the node is re-entered and reaches its end.
+
+```python
+@harness.langgraph.agent(agent_id="approver")
+async def approve(state, agent):
+    decision = interrupt({"question": "approve the reorder?"})   # pauses here
+    return {"answer": f"human said {decision}"}
+
+await app.ainvoke(Command(resume="approved"), config)            # resumes, finishes normally
+```
+
 Small example: [`examples/langgraph_agent.py`](examples/langgraph_agent.py). A full
 multi-agent workflow — fan-out/fan-in, a nested sub-agent, tools, model calls, business
 logic, artifacts and memory writes — is in
@@ -421,10 +437,16 @@ summaries or evaluation. Every write carries a deterministic idempotency key der
 (tenant, thread, turn, task, agent, run, content), so retries and checkpoint replays
 deduplicate.
 
+It also labels the run success or failure when the turn ends — on both paths, including one
+the harness re-raised. Tool memory learns procedures from runs it knows succeeded; without a
+label the service has to wait hours before counting one as a weak positive, and never learns
+anything from a failure.
+
 ```python
 harness = AgentHarness(memory=memory, config={"memory": {
     "retrieve_before": True, "observe_input": True, "observe_output": True,
     "observe_tool_results": False, "observe_claims": True, "private_by_default": False,
+    "record_outcome": True,
 }})
 ```
 
