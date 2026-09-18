@@ -361,8 +361,21 @@ class AgentHarness:
             wrapper: Callable[..., Any] = _copy_metadata(run, target)
         else:
 
+            async def run_and_settle(payload: Any, **kwargs: Any) -> Any:
+                """A synchronous call is synchronous to the end.
+
+                ``run_sync`` executes on a loop that closes when it returns, so a write
+                scheduled fire-and-forget during the call would race the loop's shutdown —
+                sometimes landing, sometimes cancelled. Draining here makes a sync agent's
+                memory writes as durable as an async agent's, at the cost of the sync caller
+                waiting for them (which is what "synchronous" means).
+                """
+                result = await run(payload, **kwargs)
+                await self.drain()
+                return result
+
             def sync_wrapper(payload: Any = None, **kwargs: Any) -> Any:
-                return run_sync(run(payload, **kwargs))
+                return run_sync(run_and_settle(payload, **kwargs))
 
             wrapper = _copy_metadata(sync_wrapper, target)
             wrapper.arun = run  # type: ignore[attr-defined]
