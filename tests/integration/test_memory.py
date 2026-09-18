@@ -1,4 +1,9 @@
-"""Memory Service integration (§10, §11, §42, §77)."""
+"""The automatic memory path, against a running Memory Service.
+
+Retrieval before the agent, observations after it, and what happens when the service is not
+there. Nothing is stubbed: the bundle comes from the service, and the outage tests point at
+a port nothing listens on.
+"""
 
 from __future__ import annotations
 
@@ -11,19 +16,28 @@ from universal_agent_harness.contracts.errors import MemoryUnavailableError
 
 
 async def test_context_is_retrieved_before_the_agent_runs(harness, memory, context):
+    seen = {}
+
     async def agent(payload, agent_runtime):
-        assert agent_runtime.memory_context is not None
-        assert agent_runtime.memory_context.rendered.startswith("remembered:")
+        bundle = agent_runtime.memory_context
+        assert bundle is not None, "the bundle must be fetched before the agent runs"
+        seen["facts"] = agent_runtime.memory.describe(bundle)
+        seen["rendered"] = bundle.rendered
         return "ok"
 
     await harness.wrap(agent, agent_id="inv")({"question": "how much stock?"}, context=context)
+
+    # a real bundle: an evidence verdict, a token accounting, and prompt-ready text
+    assert seen["facts"]["evidence_status"] in ("COMPLETE", "INCOMPLETE", "INSUFFICIENT")
+    assert isinstance(seen["facts"]["token_estimate"], int)
+    assert isinstance(seen["rendered"], str)
 
     assert len(memory.retrievals) == 1
     retrieval = memory.retrievals[0]
     assert retrieval["query"] == "how much stock?"
     assert retrieval["scope"]["tenant_id"] == "acme"
     assert retrieval["scope"]["agent_id"] == "inv"
-    assert retrieval["scope"]["thread_id"] == "chat-1"
+    assert retrieval["scope"]["thread_id"] == context.thread_id
 
 
 async def test_no_query_means_no_retrieval(harness, memory, context):
@@ -42,6 +56,8 @@ async def test_observations_are_written_after_the_result(harness, memory, contex
         )
 
     await harness.wrap(agent, agent_id="inv")("how much stock?", context=context)
+    # writeback is asynchronous in production and here: drain, as a process would on exit
+    await harness.drain()
 
     contents = [o["content"] for o in memory.observations]
     assert "SKU-1 is short by 40 units" in contents
@@ -68,6 +84,7 @@ async def test_observation_keys_are_stable_across_retries(harness, memory, conte
     wrapped = harness.wrap(agent, agent_id="inv")
     await wrapped("q", context=context)
     await wrapped("q", context=context)
+    await harness.drain()
 
     keys = [o["idempotency_key"] for o in memory.observations]
     assert len(keys) == 4  # two runs x (input, output)
@@ -81,6 +98,7 @@ async def test_claims_are_observed_when_the_policy_asks(harness, memory, context
         return AgentResult.ok("x", claims=[Claim(claim_id="c1", text="stock is low")])
 
     await harness.wrap(agent, agent_id="inv")("q", context=context)
+    await harness.drain()
     claim_writes = [o for o in memory.observations if o["content"] == "stock is low"]
     assert claim_writes, "the claim should have been written"
     # the kind says where it came from (the agent's result); the hint says what it is
@@ -116,8 +134,12 @@ async def test_private_by_default_marks_observations_run_visible(memory, context
     assert all(o["hints"].get("visibility") == "RUN" for o in memory.observations)
 
 
-async def test_retrieval_failure_degrades_by_default(harness, memory, context):
-    memory.fail_retrieval = True
+async def test_retrieval_failure_degrades_by_default(dead_memory, context):
+    """A real outage: the client points at a port nothing listens on."""
+    harness = AgentHarness(
+        memory=dead_memory, defaults={"tenant_id": "acme"},
+        config={"timeouts": {"memory_seconds": 3.0}},
+    )
 
     async def agent(payload, runtime):
         assert runtime.memory_context is None
@@ -126,30 +148,32 @@ async def test_retrieval_failure_degrades_by_default(harness, memory, context):
     result = await harness.wrap(agent, agent_id="inv")("q", context=context)
     assert result.data == "answered without memory"
     assert any(w.code == "MEMORY_DEGRADED" for w in result.warnings)
+    await harness.aclose()
 
 
-async def test_fail_closed_turns_a_memory_outage_into_an_error(memory, context):
+async def test_fail_closed_turns_a_memory_outage_into_an_error(dead_memory, context):
     harness = AgentHarness(
-        memory=memory,
+        memory=dead_memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"failure_mode": "fail_closed", "writeback": False}},
+        config={"memory": {"failure_mode": "fail_closed"},
+                "timeouts": {"memory_seconds": 3.0}},
     )
-    memory.fail_retrieval = True
 
     async def agent(payload):
         return "should not run"
 
     with pytest.raises(MemoryUnavailableError):
         await harness.wrap(agent, agent_id="inv")("q", context=context)
+    await harness.aclose()
 
 
-async def test_memory_calls_are_bounded_by_the_memory_timeout(memory, context):
+async def test_memory_calls_are_bounded_by_the_memory_timeout(faulty_memory, context):
     harness = AgentHarness(
-        memory=memory,
+        memory=faulty_memory,
         defaults={"tenant_id": "acme"},
         config={"memory": {"writeback": False}, "timeouts": {"memory_seconds": 0.05}},
     )
-    memory.retrieval_delay = 1.0
+    faulty_memory.faults.stall["/v1/context"] = 1.0  # a genuinely slow link, not a flag
 
     async def agent(payload, runtime):
         return "no context" if runtime.memory_context is None else "had context"
@@ -171,13 +195,15 @@ async def test_memory_disabled_gives_a_working_noop_runtime(context):
     assert (await harness.wrap(agent, agent_id="inv")("q", context=context)).data == "fine"
 
 
-async def test_failed_write_warns_but_keeps_the_turn_s_result(memory, context):
-    """A post-hoc write failing must not destroy a result the agent already produced (§10),
-    but it must never be silent either (§77)."""
+async def test_failed_write_warns_but_keeps_the_turn_s_result(dead_memory, context):
+    """A post-hoc write failing must not destroy a result the agent already produced, but it
+    must never be silent either. Written inline here so the warning lands on this result."""
     harness = AgentHarness(
-        memory=memory, defaults={"tenant_id": "acme"}, config={"memory": {"writeback": False}}
+        memory=dead_memory,
+        defaults={"tenant_id": "acme"},
+        config={"memory": {"writeback": False, "retrieve_before": False},
+                "timeouts": {"memory_seconds": 3.0}},
     )
-    memory.fail_observation = True
 
     async def agent(payload):
         return "answer"
@@ -185,18 +211,21 @@ async def test_failed_write_warns_but_keeps_the_turn_s_result(memory, context):
     result = await harness.wrap(agent, agent_id="inv")("q", context=context)
     assert result.data == "answer"
     assert any(w.code == "MEMORY_WRITE_FAILED" for w in result.warnings)
+    await harness.aclose()
 
 
-async def test_fail_closed_propagates_a_failed_write(memory, context):
+async def test_fail_closed_propagates_a_failed_write(dead_memory, context):
     harness = AgentHarness(
-        memory=memory,
+        memory=dead_memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"writeback": False, "failure_mode": "fail_closed"}},
+        config={"memory": {"writeback": False, "retrieve_before": False,
+                           "failure_mode": "fail_closed"},
+                "timeouts": {"memory_seconds": 3.0}},
     )
-    memory.fail_observation = True
 
     async def agent(payload):
         return "answer"
 
-    with pytest.raises(ConnectionError):
+    with pytest.raises(Exception, match="(?i)connect|unavailable|timeout"):
         await harness.wrap(agent, agent_id="inv")("q", context=context)
+    await harness.aclose()

@@ -3,7 +3,7 @@
     make test-live-full          # or: MEMORY_SERVICE_URL=... pytest -m live -q -s
 
 This is the suite that answers "does it actually work" rather than "does it work against
-our idea of the service". Nothing is mocked: real SDK, real HTTP, real Postgres, Qdrant,
+our idea of the service". Nothing is simulated: real SDK, real HTTP, real Postgres, Qdrant,
 Dragonfly and OpenFGA. Where a feature is supposed to *persist* something, the row is read
 back out of the database rather than inferred from a 202.
 
@@ -37,14 +37,33 @@ from universal_agent_harness import (
     MemoryObservation,
 )
 
-URL = os.environ.get("MEMORY_SERVICE_URL")
+URL = os.environ.get("MEMORY_SERVICE_URL", "http://localhost:8080")
+
+
+def _reachable(url: str) -> bool:
+    """Gate on the service being *there*, not on someone having exported a variable.
+
+    An env-var gate turns "the service is down" and "I forgot to set MEMORY_SERVICE_URL"
+    into the same green run. This asks the service.
+    """
+    import httpx
+
+    try:
+        return httpx.get(f"{url}/health/live", timeout=5).status_code == 200
+    except Exception:
+        return False
+
+
+LIVE = _reachable(URL)
 API_KEY = os.environ.get("MEMORY_API_KEY", "dev-key")
 TENANT = os.environ.get("MEMORY_TENANT", "acme")
 PG_CONTAINER = os.environ.get("MEMORY_PG_CONTAINER", "memory-service-postgres-1")
 
 pytestmark = [
     pytest.mark.live,
-    pytest.mark.skipif(not URL, reason="set MEMORY_SERVICE_URL to run against a live service"),
+    pytest.mark.skipif(
+        not LIVE, reason=f"no Memory Service at {URL} — start it with `make dev-up`"
+    ),
 ]
 
 

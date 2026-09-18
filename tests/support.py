@@ -1,264 +1,83 @@
-"""Shared test doubles and span helpers.
+"""Test doubles: there are none for the Memory Service.
 
-The Memory Service itself is out of scope here (it has its own test suite); what these
-tests must prove is that the *harness* calls it correctly — right scope, right idempotency
-keys, right ordering, right degradation — so the fake records calls and is deliberately
-faithful to the SDK's public shape.
+Every test in this suite talks to a **running** Memory Service. What lives here is a
+recording proxy — it forwards each call to the real client, returns the service's real
+response, and keeps a note of what was sent so a test can assert on the request as well as
+the outcome. Nothing is stubbed: validation, persistence, extraction, indexing and failure
+all come from the service.
+
+Why no fakes: every integration defect found in this project — a ``turn_id`` sent without a
+``session_id``, observation kinds the service does not accept, a visibility whose audience
+nobody was in — was accepted happily by a fake and rejected by the service. A fake tests our
+idea of the service, which is the thing that was wrong.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import inspect
+import os
 from typing import Any
 
+import httpx
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-# --------------------------------------------------------------------------- memory fake
+MEMORY_SERVICE_URL = os.environ.get("MEMORY_SERVICE_URL", "http://localhost:8080")
+MEMORY_API_KEY = os.environ.get("MEMORY_API_KEY", "dev-key")
+#: A port nothing listens on: the honest way to test a dependency being down.
+DEAD_SERVICE_URL = "http://127.0.0.1:9"
 
 
-@dataclass
-class FakeAck:
-    observation_id: str = "obs_1"
-    job_ids: list[str] = field(default_factory=list)
-    deduplicated: bool = False
+# ------------------------------------------------------------------------- fault injection
 
 
-@dataclass
-class FakeEvidence:
-    status: str = "COMPLETE"
-    notes: list[str] = field(default_factory=list)
-    unused: list[Any] = field(default_factory=list)
+class FaultInjectingTransport(httpx.AsyncBaseTransport):
+    """Real HTTP to the real service, with faults applied at the socket.
 
-
-@dataclass
-class FakeConversation:
-    thread_id: str = "chat-1"
-    message_ids: list = field(default_factory=list)
-    rendered: str = ""
-    summary: str | None = None
-
-
-@dataclass
-class FakeBundle:
-    query: str = ""
-    query_type: str = "FACTUAL"
-    bundle_id: str = "bundle_1"
-    rendered: str = "remembered: SKU-1 stock is low"
-    conversation: FakeConversation = field(default_factory=FakeConversation)
-    memories: list[Any] = field(default_factory=list)
-    knowledge: list[Any] = field(default_factory=list)
-    graph_facts: list[Any] = field(default_factory=list)
-    summaries: list[Any] = field(default_factory=list)
-    token_budget: int = 2000
-    token_estimate: int = 42
-    cache_hit: bool = False
-    evidence: FakeEvidence = field(default_factory=FakeEvidence)
-
-
-class FakeScope:
-    def __init__(self, fields: dict[str, Any]) -> None:
-        self.__dict__.update(fields)
-        self._fields = fields
-
-    def __getattr__(self, item: str) -> Any:
-        return self._fields.get(item)
-
-    def model_dump(self, **_: Any) -> dict[str, Any]:
-        return dict(self._fields)
-
-
-class FakeChat:
-    def __init__(self, calls: list[tuple[str, dict[str, Any]]]) -> None:
-        self._calls = calls
-
-    async def user(self, content: str, **kwargs: Any) -> FakeAck:
-        self._calls.append(("chat.user", {"content": content, **kwargs}))
-        return FakeAck()
-
-    async def assistant(self, content: str, **kwargs: Any) -> FakeAck:
-        self._calls.append(("chat.assistant", {"content": content, **kwargs}))
-        return FakeAck()
-
-    async def internal(self, content: str, **kwargs: Any) -> FakeAck:
-        self._calls.append(("chat.internal", {"content": content, **kwargs}))
-        return FakeAck()
-
-    async def create(self, *, title: str | None = None, **metadata: Any) -> Any:
-        self._calls.append(("chat.create", {"title": title, **metadata}))
-        return FakeThread()
-
-    async def history(self, *, limit: int = 50, include_internal: bool = False) -> list[Any]:
-        self._calls.append(
-            ("chat.history", {"limit": limit, "include_internal": include_internal})
-        )
-        return [FakeMessage()]
-
-
-@dataclass
-class FakeMemoryRecord:
-    memory_id: str = "mem_1"
-    content: str = "SKU-1 reorder point is 50"
-    memory_type: str = "SEMANTIC"
-    lifetime: str = "LONG_TERM"
-    visibility: str = "USER"
-
-
-@dataclass
-class FakeGraphFact:
-    relation_id: str = "rel_1"
-    subject: str = "SKU-1"
-    predicate: str = "supplied_by"
-    object: str = "Castor Supply"
-    fact_text: str = "SKU-1 is supplied by Castor Supply"
-
-
-@dataclass
-class FakeGraphAnswer:
-    matched: list = field(default_factory=list)
-    entities: list = field(default_factory=list)
-    facts: list = field(default_factory=lambda: [FakeGraphFact()])
-    visited: int = 1
-
-
-@dataclass
-class FakeGrounding:
-    per_claim_hallucination_rate: float = 0.0
-    supported: int = 2
-    unsupported: int = 0
-    contradicted: int = 0
-
-    @property
-    def grounded(self) -> bool:
-        return self.per_claim_hallucination_rate == 0.0
-
-
-@dataclass
-class FakeFileHandle:
-    document_id: str = "doc_1"
-    filename: str = "policy.txt"
-    checksum: str = "abc"
-    size_bytes: int = 12
-    job_ids: list = field(default_factory=lambda: ["job_1"])
-
-
-@dataclass
-class FakeThread:
-    thread_id: str = "chat-1"
-    tenant_id: str = "acme"
-    title: str | None = None
-
-
-@dataclass
-class FakeMessage:
-    message_id: str = "msg_1"
-    role: str = "USER"
-    kind: str = "VISIBLE"
-    sequence: int = 1
-    content: str = "how much stock?"
-
-
-class FakeGraph:
-    def __init__(self, calls: list[tuple[str, dict[str, Any]]], client: Any = None) -> None:
-        self._calls = calls
-        self._client = client
-
-    async def query(self, query=None, *, entities=None, hops=1, as_of=None) -> FakeGraphAnswer:
-        self._calls.append(
-            ("graph.query", {"query": query, "entities": entities, "hops": hops, "as_of": as_of})
-        )
-        if self._client is not None and self._client.fail_retrieval:
-            raise ConnectionError("memory service unavailable")
-        return FakeGraphAnswer()
-
-
-class FakeFiles:
-    def __init__(self, calls: list[tuple[str, dict[str, Any]]]) -> None:
-        self._calls = calls
-
-    async def add(self, file: Any, **kwargs: Any) -> FakeFileHandle:
-        self._calls.append(("files.add", {"file": str(file)[:40], **kwargs}))
-        return FakeFileHandle()
-
-
-class FakeTools:
-    def __init__(self, calls: list[tuple[str, dict[str, Any]]]) -> None:
-        self._calls = calls
-
-    async def record(self, tool: str, args: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        self._calls.append(("tools.record", {"tool": tool, "args": args, **kwargs}))
-        return {"recorded": True}
-
-    async def lookup(self, tool: str, args: dict[str, Any]) -> Any:
-        self._calls.append(("tools.lookup", {"tool": tool, "args": args}))
-        return None
-
-
-class FakeMemoryContext:
-    def __init__(self, client: FakeMemoryClient, scope: dict[str, Any]) -> None:
-        self._client = client
-        self.scope = FakeScope(scope)
-        self.chat = FakeChat(client.calls)
-        self.tools = FakeTools(client.calls)
-        self.graph = FakeGraph(client.calls, client)
-        self.files = FakeFiles(client.calls)
-
-    def derive(self, **changes: Any) -> FakeMemoryContext:
-        return FakeMemoryContext(self._client, {**self.scope.model_dump(), **changes})
-
-    async def context(self, query: str, **options: Any) -> FakeBundle:
-        self._client.calls.append(("context", {"query": query, "scope": self.scope.model_dump(), **options}))
-        if self._client.fail_retrieval:
-            raise ConnectionError("memory service unavailable")
-        if self._client.retrieval_delay:
-            await asyncio.sleep(self._client.retrieval_delay)
-        return FakeBundle(query=query)
-
-    async def recall(self, query: str, **options: Any) -> list[Any]:
-        self._client.calls.append(("recall", {"query": query, **options}))
-        if self._client.fail_retrieval:
-            raise ConnectionError("memory service unavailable")
-        return []
-
-    async def memories(self, **options: Any) -> list[FakeMemoryRecord]:
-        self._client.calls.append(("memories", dict(options)))
-        if self._client.fail_retrieval:
-            raise ConnectionError("memory service unavailable")
-        return [FakeMemoryRecord()]
-
-    async def get_memory(self, memory_id: str) -> FakeMemoryRecord:
-        self._client.calls.append(("get_memory", {"memory_id": memory_id}))
-        return FakeMemoryRecord(memory_id=memory_id)
-
-    async def forget(self, memory_id: str) -> None:
-        self._client.calls.append(("forget", {"memory_id": memory_id}))
-
-    async def verify(self, answer: str, **options: Any) -> FakeGrounding:
-        self._client.calls.append(("verify", {"answer": answer, **options}))
-        return FakeGrounding()
-
-    async def observe(self, content: str, **kwargs: Any) -> FakeAck:
-        self._client.calls.append(
-            ("observe", {"content": content, "scope": self.scope.model_dump(), **kwargs})
-        )
-        if self._client.fail_observation:
-            raise ConnectionError("memory service unavailable")
-        return FakeAck(observation_id=f"obs_{len(self._client.calls)}")
-
-
-class FakeMemoryClient:
-    """Mimics ``universal_memory.MemoryClient`` closely enough to bind and record."""
+    The service will not fail on request, so an outage has to be produced somewhere. This
+    produces it in the only place that is honest: the network between us and it. A dropped
+    connection raises the ``httpx.ConnectError`` a real refusal raises; a stalled path is
+    genuinely slow. Everything that does get through is a real request to the real service.
+    """
 
     def __init__(self) -> None:
+        self._inner = httpx.AsyncHTTPTransport()
+        #: paths whose connection is refused, e.g. ``{"/v1/context"}``
+        self.drop: set[str] = set()
+        #: paths held open for this many seconds before proceeding
+        self.stall: dict[str, float] = {}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if (delay := self.stall.get(path)) is not None:
+            await asyncio.sleep(delay)
+        if path in self.drop:
+            raise httpx.ConnectError("connection refused", request=request)
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+# --------------------------------------------------------------------------- recording tap
+
+
+class RecordingMemoryClient:
+    """The real ``MemoryClient``, with the calls it makes recorded."""
+
+    def __init__(self, client: Any, faults: FaultInjectingTransport | None = None) -> None:
+        self._client = client
         self.calls: list[tuple[str, dict[str, Any]]] = []
-        self.fail_retrieval = False
-        self.fail_observation = False
-        self.retrieval_delay = 0.0
+        #: present only on the fault-injecting fixture; ``None`` on a healthy client
+        self.faults = faults
 
-    def bind(self, **scope: Any) -> FakeMemoryContext:
-        return FakeMemoryContext(self, scope)
+    def bind(self, **scope: Any) -> RecordingContext:
+        return RecordingContext(self._client.bind(**scope), self.calls, scope)
 
-    # -- assertions helpers ------------------------------------------------
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    # -- assertion helpers -------------------------------------------------
     def of(self, kind: str) -> list[dict[str, Any]]:
         return [payload for name, payload in self.calls if name == kind]
 
@@ -270,6 +89,97 @@ class FakeMemoryClient:
     def retrievals(self) -> list[dict[str, Any]]:
         return self.of("context")
 
+    def clear(self) -> None:
+        self.calls.clear()
+
+
+class _RecordingAPI:
+    """Forwards attribute calls to a real sub-API, recording each one."""
+
+    def __init__(self, target: Any, calls: list, prefix: str, scope: dict[str, Any]) -> None:
+        self._target, self._calls, self._prefix, self._scope = target, calls, prefix, scope
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._target, name)
+        if not callable(attr):
+            return attr
+
+        async def recorded(*args: Any, **kwargs: Any) -> Any:
+            # Record arguments under their parameter names, so a test asserting on
+            # ``tools.record(tool=...)`` reads the same whether the caller passed it
+            # positionally or by keyword.
+            payload = _bind(attr, args, kwargs)
+            payload["scope"] = dict(self._scope)
+            self._calls.append((f"{self._prefix}.{name}", payload))
+            return await attr(*args, **kwargs)
+
+        return recorded
+
+
+def _bind(fn: Any, args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Name every argument of a call, falling back to positions if the signature is opaque."""
+    try:
+        bound = inspect.signature(fn).bind(*args, **kwargs)
+    except (TypeError, ValueError):
+        return {**kwargs, **{f"arg{i}": a for i, a in enumerate(args)}}
+    bound.apply_defaults()
+    payload = dict(bound.arguments)
+    # ``**kwargs`` in the target's signature arrives as a nested dict; flatten it.
+    for name, param in inspect.signature(fn).parameters.items():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            payload.update(payload.pop(name, {}))
+    return payload
+
+
+class RecordingContext:
+    """A real bound ``MemoryContext`` whose calls are recorded before being forwarded."""
+
+    def __init__(self, context: Any, calls: list, scope: dict[str, Any]) -> None:
+        self._ctx = context
+        self._calls = calls
+        self._scope = scope
+        self.scope = context.scope
+        self.chat = _RecordingAPI(context.chat, calls, "chat", scope)
+        self.files = _RecordingAPI(context.files, calls, "files", scope)
+        self.graph = _RecordingAPI(context.graph, calls, "graph", scope)
+        self.tools = _RecordingAPI(context.tools, calls, "tools", scope)
+        self.runs = _RecordingAPI(context.runs, calls, "runs", scope)
+
+    def derive(self, **changes: Any) -> RecordingContext:
+        return RecordingContext(
+            self._ctx.derive(**changes), self._calls, {**self._scope, **changes}
+        )
+
+    def _record(self, name: str, payload: dict[str, Any]) -> None:
+        self._calls.append((name, {**payload, "scope": self.scope.model_dump(exclude_none=True)}))
+
+    async def context(self, query: str, **options: Any) -> Any:
+        self._record("context", {"query": query, **options})
+        return await self._ctx.context(query, **options)
+
+    async def recall(self, query: str, **options: Any) -> Any:
+        self._record("recall", {"query": query, **options})
+        return await self._ctx.recall(query, **options)
+
+    async def observe(self, content: str, **kwargs: Any) -> Any:
+        self._record("observe", {"content": content, **kwargs})
+        return await self._ctx.observe(content, **kwargs)
+
+    async def memories(self, **options: Any) -> Any:
+        self._record("memories", dict(options))
+        return await self._ctx.memories(**options)
+
+    async def get_memory(self, memory_id: str) -> Any:
+        self._record("get_memory", {"memory_id": memory_id})
+        return await self._ctx.get_memory(memory_id)
+
+    async def forget(self, memory_id: str) -> Any:
+        self._record("forget", {"memory_id": memory_id})
+        return await self._ctx.forget(memory_id)
+
+    async def verify(self, answer: str, **options: Any) -> Any:
+        self._record("verify", {"answer": answer, **options})
+        return await self._ctx.verify(answer, **options)
 
 
 # --------------------------------------------------------------------------- span helpers

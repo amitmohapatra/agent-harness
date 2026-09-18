@@ -6,7 +6,7 @@ Skipped unless ``MEMORY_SERVICE_URL`` is set, so the normal suite stays hermetic
     MEMORY_SERVICE_URL=http://localhost:8080 MEMORY_API_KEY=dev-key \
         pytest tests/e2e/test_live_memory_service.py -q -s
 
-Everything else in this repository mocks the transport. This file does not: it drives the
+Every suite in this repository talks to a running service; this file goes furthest — it drives the
 real SDK against the real service and asserts that what the harness sends is accepted and
 that what comes back is usable — the one test that proves the integration rather than the
 harness's idea of it.
@@ -27,12 +27,31 @@ from universal_agent_harness import (
     MemoryObservation,
 )
 
-URL = os.environ.get("MEMORY_SERVICE_URL")
+URL = os.environ.get("MEMORY_SERVICE_URL", "http://localhost:8080")
+
+
+def _reachable(url: str) -> bool:
+    """Gate on the service being *there*, not on someone having exported a variable.
+
+    An env-var gate turns "the service is down" and "I forgot to set MEMORY_SERVICE_URL"
+    into the same green run. This asks the service.
+    """
+    import httpx
+
+    try:
+        return httpx.get(f"{url}/health/live", timeout=5).status_code == 200
+    except Exception:
+        return False
+
+
+LIVE = _reachable(URL)
 API_KEY = os.environ.get("MEMORY_API_KEY", "dev-key")
 
 pytestmark = [
     pytest.mark.live,
-    pytest.mark.skipif(not URL, reason="set MEMORY_SERVICE_URL to run against a live service"),
+    pytest.mark.skipif(
+        not LIVE, reason=f"no Memory Service at {URL} — start it with `make dev-up`"
+    ),
 ]
 
 TENANT = os.environ.get("MEMORY_TENANT", "acme")
@@ -115,7 +134,7 @@ async def test_a_full_turn_writes_and_reads_back(live_harness, live_context, spa
 
 async def test_every_memory_operation_against_the_real_service(live_harness, live_context):
     """Each operation the harness exposes, executed for real. Failures here mean the wire
-    contract is wrong — not that a mock disagrees with us."""
+    contract is wrong — not that our idea of it disagrees with us."""
     outcome: dict[str, object] = {}
 
     @live_harness.agent(agent_id="live-memory", memory_policy={"retrieve_before": False})

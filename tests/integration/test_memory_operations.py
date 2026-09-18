@@ -1,12 +1,18 @@
-"""The whole memory surface through the harness: what is pushed, what is read, what is traced.
+"""The whole memory surface through the harness, against a running Memory Service.
 
 `test_memory.py` covers the automatic path (retrieve before, observe after). This file
 covers the operations an agent drives itself — typed memories, the KG, RAG ingestion,
-conversation history, the inventory view and grounding — and asserts each one is
-instrumented rather than passed through untraced.
+conversation history, the inventory view and grounding — asserting both that the request
+carried what it should and that the service accepted and answered it.
+
+Assertions describe *shape and contract*, not specific content: what the retriever ranks
+first or which predicate the extractor chooses is the service's business, and pinning it
+here would make this a change-detector rather than a test.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 from tests.support import span_by_name, span_names
@@ -88,9 +94,24 @@ async def test_share_publishes_to_the_agent_group(harness, memory, context):
 
 
 async def test_forget_deletes_and_is_traced(harness, memory, context, spans):
-    await run(harness, context, lambda rt: rt.memory.forget("mem_42"))
-    assert memory.of("forget")[0]["memory_id"] == "mem_42"
-    assert span_by_name(spans, "agent.memory.forget").attributes["memory.id"] == "mem_42"
+    """Delete a memory this test created, rather than a made-up id the service rejects."""
+
+    async def body(rt):
+        await rt.memory.remember(
+            f"Depot {context.turn_id} stores the reserve stock for SKU-1.", visibility="USER"
+        )
+        for _ in range(30):
+            held = await rt.memory.memories(limit=50)
+            mine = [m for m in held if context.turn_id in m.content]
+            if mine:
+                await rt.memory.forget(mine[0].memory_id)
+                return mine[0].memory_id
+            await asyncio.sleep(1)
+        pytest.skip("the memory did not materialise in time to delete it")
+
+    memory_id = await run(harness, context, body)
+    assert memory.of("forget")[0]["memory_id"] == memory_id
+    assert span_by_name(spans, "agent.memory.forget").attributes["memory.id"] == memory_id
 
 
 async def test_document_ingestion_feeds_the_rag_corpus(harness, memory, context, spans, tmp_path):
@@ -100,10 +121,11 @@ async def test_document_ingestion_feeds_the_rag_corpus(harness, memory, context,
     handle = await run(harness, context, lambda rt: rt.memory.add_document(
         doc, title="Reorder policy", visibility="WORKSPACE",
     ))
-    assert handle.document_id == "doc_1"
+    assert handle.document_id.startswith("doc_"), "the service returns a document handle"
     call = memory.of("files.add")[0]
     assert call["title"] == "Reorder policy" and call["visibility"] == "WORKSPACE"
-    assert span_by_name(spans, "agent.memory.ingest").attributes["memory.document.id"] == "doc_1"
+    span = span_by_name(spans, "agent.memory.ingest")
+    assert span.attributes["memory.document.id"] == handle.document_id
 
 
 # --------------------------------------------------------------------------- reads
@@ -114,7 +136,8 @@ async def test_context_bundle_is_the_one_call_that_returns_everything(harness, c
     # conversation window, memories, RAG knowledge, graph facts and summaries in one object
     for group in ("conversation", "memories", "knowledge", "graph_facts", "summaries"):
         assert hasattr(bundle, group)
-    assert bundle.evidence.status == "COMPLETE"
+    # the verdict is the service's to make; what matters is that it made one
+    assert bundle.evidence.status in ("COMPLETE", "INCOMPLETE", "INSUFFICIENT")
     assert span_by_name(spans, "agent.memory.retrieve").attributes["memory.evidence.status"]
 
 
@@ -128,12 +151,14 @@ async def test_graph_query_traverses_the_knowledge_graph(harness, memory, contex
     answer = await run(harness, context, lambda rt: rt.memory.graph_query(
         "who supplies SKU-1?", hops=2,
     ))
-    assert answer.facts[0].predicate == "supplied_by"
+    assert answer is not None
+    for fact in getattr(answer, "facts", []):
+        assert fact.subject and fact.predicate, "a fact needs a subject and a predicate"
     call = memory.of("graph.query")[0]
     assert call["hops"] == 2 and call["query"] == "who supplies SKU-1?"
     span = span_by_name(spans, "agent.memory.graph")
     assert span.attributes["memory.graph.hops"] == 2
-    assert span.attributes["memory.result_count"] == 1
+    assert "memory.result_count" in span.attributes
 
 
 async def test_graph_query_accepts_entities_and_a_temporal_view(harness, memory, context):
@@ -148,59 +173,89 @@ async def test_graph_query_accepts_entities_and_a_temporal_view(harness, memory,
 
 
 async def test_history_reads_the_conversation(harness, memory, context, spans):
-    messages = await run(harness, context, lambda rt: rt.memory.history(limit=10))
-    assert messages[0].content == "how much stock?"
+    async def body(rt):
+        await rt.memory.record_input("how much stock?")
+        await rt.memory.record_output("Three units.")
+        return await rt.memory.history(limit=10)
+
+    messages = await run(harness, context, body)
+    assert [m.content for m in messages] == ["how much stock?", "Three units."]
     assert memory.of("chat.history")[0]["limit"] == 10
-    assert span_by_name(spans, "agent.memory.history").attributes["memory.result_count"] == 1
+    assert span_by_name(spans, "agent.memory.history").attributes["memory.result_count"] == 2
 
 
 async def test_inventory_view_lists_what_is_held(harness, memory, context, spans):
+    """The inventory is scoped to this execution, and a fresh context holds nothing yet —
+    so what is asserted is the request and the shape of the answer."""
     items = await run(harness, context, lambda rt: rt.memory.memories(
         memory_types=["SEMANTIC"], limit=20,
     ))
-    assert items[0].memory_type == "SEMANTIC"
-    assert memory.of("memories")[0]["limit"] == 20
-    assert span_by_name(spans, "agent.memory.list").attributes["memory.result_count"] == 1
+    assert isinstance(items, list)
+    assert all(m.memory_type for m in items)
+    call = memory.of("memories")[0]
+    assert call["limit"] == 20 and call["memory_types"] == ["SEMANTIC"]
+    span = span_by_name(spans, "agent.memory.list")
+    assert span.attributes["memory.result_count"] == len(items)
 
 
 async def test_get_one_memory_by_id(harness, memory, context):
-    item = await run(harness, context, lambda rt: rt.memory.get("mem_7"))
-    assert item.memory_id == "mem_7"
+    async def body(rt):
+        await rt.memory.remember(
+            f"Depot {context.turn_id} is the overflow site for SKU-1.", visibility="USER"
+        )
+        for _ in range(30):
+            held = await rt.memory.memories(limit=50)
+            mine = [m for m in held if context.turn_id in m.content]
+            if mine:
+                return await rt.memory.get(mine[0].memory_id), mine[0].memory_id
+            await asyncio.sleep(1)
+        pytest.skip("the memory did not materialise in time to fetch it")
+
+    fetched, memory_id = await run(harness, context, body)
+    assert fetched.memory_id == memory_id
+    assert fetched.content
 
 
 async def test_verify_grounds_an_answer_against_the_evidence(harness, memory, context, spans):
+    """A verdict is the point, not a particular verdict: an unverifiable claim *should* come
+    back unsupported."""
     report = await run(harness, context, lambda rt: rt.memory.verify(
         "SKU-1 has 3 units left", query="stock for SKU-1",
     ))
-    assert report.grounded is True
+    assert report is not None
+    assert report.claims, "the report should carry a per-claim verdict"
+    assert report.claims[0].verdict in ("supported", "unsupported", "contradicted", "borderline")
     span = span_by_name(spans, "agent.memory.verify")
-    assert span.attributes["memory.grounding.hallucination_rate"] == 0.0
-    assert span.attributes["memory.grounding.grounded"] is True
+    assert 0.0 <= span.attributes["memory.grounding.hallucination_rate"] <= 1.0
+    assert span.attributes["memory.grounding.grounded"] is report.grounded
 
 
 # --------------------------------------------------------------------------- degradation
 
 
-async def test_reads_degrade_and_writes_propagate(memory, context):
+async def test_reads_degrade_and_writes_propagate(dead_memory, context):
+    """Against a service that is genuinely down: reads degrade, writes propagate."""
     from universal_agent_harness import AgentHarness
 
     harness = AgentHarness(
-        memory=memory, defaults={"tenant_id": "acme"}, config={"memory": {"writeback": False}}
+        memory=dead_memory,
+        defaults={"tenant_id": "acme"},
+        config={"memory": {"writeback": False, "retrieve_before": False},
+                "timeouts": {"memory_seconds": 3.0}},
     )
-    memory.fail_retrieval = True
-    memory.fail_observation = True
 
     async def agent(payload, runtime):
         # a failing read degrades to an empty result...
         assert await runtime.memory.graph_query("who supplies SKU-1?") is None
         assert await runtime.memory.memories() == []
         # ...a failing write is never silently dropped
-        with pytest.raises(ConnectionError):
+        with pytest.raises(Exception, match="(?i)connect|unavailable|timeout"):
             await runtime.memory.remember("this will not land")
         return "handled"
 
     result = await harness.wrap(agent, agent_id="inv")(None, context=context)
     assert result.data == "handled"
+    await harness.aclose()
 
 
 async def test_every_operation_is_a_noop_without_a_memory_client(context):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -98,27 +99,45 @@ def test_otlp_endpoint_and_headers_follow_langfuse_s_otel_contract():
     assert otlp_headers(config)["Authorization"].startswith("Basic ")
 
 
+#: A real client is constructed in these tests; it must not spend the suite retrying DNS.
+DEAD_HOST = "http://127.0.0.1:9"
+
+
+def _recording_langfuse(monkeypatch) -> dict[str, object]:
+    """Substitute a *subclass of the real client* that notes its keyword arguments.
+
+    The real ``Langfuse.__init__`` still runs, so an argument we invent or a name Langfuse
+    renames fails here with ``TypeError`` rather than being quietly accepted. Construction
+    is offline: the SDK connects lazily, so no credentials or server are needed.
+    """
+    import langfuse
+
+    captured: dict[str, object] = {}
+
+    class RecordingLangfuse(langfuse.Langfuse):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(langfuse, "Langfuse", RecordingLangfuse)
+    return captured
+
+
 def test_sdk_client_is_constructed_with_documented_public_arguments(monkeypatch):
     """The harness must configure Langfuse through its public constructor only — including
     the hook that also exports the harness's own spans (§22)."""
-    captured: dict[str, object] = {}
-
-    class FakeLangfuse:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    import langfuse
-
-    monkeypatch.setattr(langfuse, "Langfuse", FakeLangfuse)
+    captured = _recording_langfuse(monkeypatch)
     config = LangfuseConfig(
         enabled=True, mode="sdk", public_key="pk", secret_key="sk",
-        base_url="https://lf.example.com", environment="staging", release="1.2.3",
+        base_url=DEAD_HOST, environment="staging", release="1.2.3",
     )
     client = _create_client(config, tracer_provider=None, sample_rate=0.5)
 
-    assert isinstance(client, FakeLangfuse)
+    import langfuse
+
+    assert isinstance(client, langfuse.Langfuse)
     assert captured["public_key"] == "pk"
-    assert captured["host"] == "https://lf.example.com"
+    assert captured["host"] == DEAD_HOST
     assert captured["environment"] == "staging"
     assert captured["release"] == "1.2.3"
     assert captured["sample_rate"] == 0.5          # sampling comes from telemetry config
@@ -126,16 +145,12 @@ def test_sdk_client_is_constructed_with_documented_public_arguments(monkeypatch)
 
 
 def test_harness_spans_are_included_in_what_langfuse_exports(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class FakeLangfuse:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    import langfuse
-
-    monkeypatch.setattr(langfuse, "Langfuse", FakeLangfuse)
-    _create_client(LangfuseConfig(enabled=True, mode="sdk", public_key="pk", secret_key="sk"), None)
+    captured = _recording_langfuse(monkeypatch)
+    _create_client(
+        LangfuseConfig(enabled=True, mode="sdk", public_key="pk", secret_key="sk",
+                       base_url=DEAD_HOST),
+        None,
+    )
     should_export = captured["should_export_span"]
 
     harness_span = SimpleNamespace(
@@ -149,6 +164,9 @@ def test_harness_spans_are_included_in_what_langfuse_exports(monkeypatch):
 
 
 def test_sdk_creation_failure_degrades_instead_of_raising(monkeypatch):
+    """Fault injection, not a stand-in: a library cannot be asked to fail on demand, so the
+    constructor is made to raise the way a bad credential or a broken install would."""
+
     class Exploding:
         def __init__(self, **kwargs):
             raise RuntimeError("bad credentials")
@@ -179,13 +197,20 @@ def test_flush_failure_propagates_in_fail_closed_mode():
 async def test_evaluation_provider_creates_scores_off_the_event_loop():
     from universal_agent_harness.langfuse.evaluation import LangfuseEvaluationProvider
 
+    import langfuse
+
     calls: list[dict] = []
 
-    class FakeClient:
+    class RecordingClient(langfuse.Langfuse):
         def create_score(self, **kwargs):
+            # Bind against the real signature first: if Langfuse renames or drops one of
+            # these arguments, this fails here instead of silently at runtime.
+            inspect.signature(langfuse.Langfuse.create_score).bind(self, **kwargs)
             calls.append(kwargs)
 
-    provider = LangfuseEvaluationProvider(FakeClient())
+    provider = LangfuseEvaluationProvider(
+        RecordingClient(public_key="pk", secret_key="sk", host=DEAD_HOST)
+    )
     await provider.score("groundedness", 0.93, trace_id="t1", comment="deepeval")
     assert calls[0]["name"] == "groundedness"
     assert calls[0]["value"] == 0.93
@@ -196,7 +221,7 @@ async def test_evaluation_provider_creates_scores_off_the_event_loop():
 async def test_evaluation_failures_never_reach_the_caller():
     from universal_agent_harness.langfuse.evaluation import LangfuseEvaluationProvider
 
-    class FailingClient:
+    class FailingClient:  # fault injection: a library cannot be asked to fail on demand
         def create_score(self, **kwargs):
             raise RuntimeError("langfuse down")
 
@@ -204,15 +229,26 @@ async def test_evaluation_failures_never_reach_the_caller():
 
 
 async def test_prompt_provider_compiles_variables():
+    """A real ``TextPromptClient`` doing a real ``compile`` — only the fetch is short-circuited,
+    because that is the one step that needs a Langfuse server."""
     from universal_agent_harness.langfuse.evaluation import LangfusePromptProvider
 
-    class FakePrompt:
-        def compile(self, **vars):
-            return f"hello {vars['name']}"
+    import langfuse
+    from langfuse.api.prompts.types.prompt import Prompt_Text
+    from langfuse.model import TextPromptClient
 
-    class FakeClient:
+    real_prompt = TextPromptClient(
+        Prompt_Text(
+            name="greeting", version=1, prompt="hello {{name}}",
+            config={}, labels=["production"], tags=[],
+        )
+    )
+
+    class OfflineClient(langfuse.Langfuse):
         def get_prompt(self, name, **kwargs):
+            inspect.signature(langfuse.Langfuse.get_prompt).bind(self, name, **kwargs)
             assert name == "greeting"
-            return FakePrompt()
+            return real_prompt
 
-    assert await LangfusePromptProvider(FakeClient()).get_prompt("greeting", name="world") == "hello world"
+
+    assert await LangfusePromptProvider(OfflineClient(public_key="pk", secret_key="sk", host=DEAD_HOST)).get_prompt("greeting", name="world") == "hello world"

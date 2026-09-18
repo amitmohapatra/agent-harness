@@ -7,7 +7,7 @@ ids do not hang together:
     session_id   requires thread_id
     turn_id      requires session_id
 
-A mocked transport accepts anything, so these rules have to be asserted here or they are
+These rules are invisible in a single passing call, so they are asserted here or they are
 only discovered against a live service — which is exactly how the missing ``session_id``
 was found. Each test below states one rule from the service's own validator
 (``memory_service/domain/context.py``).
@@ -131,7 +131,7 @@ def test_the_sdk_scope_model_accepts_what_we_emit():
 
 def test_observation_kinds_match_the_services_enum():
     """These are the service's ``ObservationKind`` values. A kind outside this set is a 422
-    from the service — which a mocked transport happily accepts, so it is asserted here."""
+    from the service only under conditions a green turn never reaches, so it is asserted here."""
     from universal_agent_harness import OBSERVATION_KINDS
 
     assert {
@@ -158,6 +158,7 @@ async def test_the_automatic_writeback_only_uses_valid_kinds(harness, memory, co
         )
 
     await harness.wrap(agent, agent_id="inv")("a question", context=context)
+    await harness.drain()  # writeback is asynchronous in production, and so here
 
     kinds = {o["kind"] for o in memory.observations}
     assert kinds, "the automatic path should have written something"

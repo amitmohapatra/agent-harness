@@ -11,7 +11,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from universal_agent_harness import AgentExecutionContext
-from universal_agent_harness.telemetry.redaction import DefaultRedactor
+from universal_agent_harness.telemetry.redaction import REDACTED, DefaultRedactor
 
 ids = st.text(min_size=1, max_size=40).filter(lambda s: s.strip())
 SETTINGS = settings(max_examples=150, deadline=None)
@@ -56,13 +56,18 @@ def test_children_always_preserve_lineage(agent, group):
 
 
 @given(
-    secret=st.text(min_size=8, max_size=40).filter(lambda s: s.strip() and "@" not in s),
+    # A secret that is itself a fragment of the replacement token — "[redacte" — would be
+    # "found" in a correctly redacted output, so exclude those rather than weaken the check.
+    secret=st.text(min_size=8, max_size=40).filter(
+        lambda s: s.strip() and "@" not in s and s not in REDACTED
+    ),
     key=st.sampled_from(["api_key", "authorization", "password", "secret", "x-api-key",
                          "access_token", "cookie"]),
 )
 @SETTINGS
 def test_named_secrets_are_never_emitted(secret, key):
     out = DefaultRedactor().redact_attributes({key: secret})
+    assert out[key] == REDACTED
     assert secret not in str(out)
 
 

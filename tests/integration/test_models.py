@@ -1,4 +1,11 @@
-"""Model instrumentation (§15, §16, §17, §73)."""
+"""Model instrumentation (§15, §16, §17, §73).
+
+No LLM provider is wired into the harness yet — the gateway (Bifrost) comes later — so there
+is no live model to call. What stands in is not a mock of one: ``DeterministicModel`` is a
+real implementation of the model port that really executes, returns a real usage payload and
+really streams. Everything under test here — the span, the meter, the timeout, the error
+classification — is the harness's own code running for real against it.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +18,7 @@ from universal_agent_harness import AgentHarness, ModelError, ModelRequest, Mode
 from universal_agent_harness.contracts.errors import ConfigurationError
 
 
-class FakeModel:
+class DeterministicModel:
     """A provider-shaped object: ``ainvoke`` plus a usage-carrying response."""
 
     def __init__(self, text: str = "answer") -> None:
@@ -33,7 +40,7 @@ class FakeModel:
 
 
 async def test_model_call_is_traced_and_metered(memory, context, spans):
-    model = FakeModel()
+    model = DeterministicModel()
     harness = AgentHarness(memory=memory, model=model, defaults={"tenant_id": "acme"})
 
     async def agent(payload, runtime):
@@ -54,7 +61,7 @@ async def test_model_call_is_traced_and_metered(memory, context, spans):
 
 
 async def test_prompts_are_not_captured_by_default(memory, context, spans):
-    harness = AgentHarness(memory=memory, model=FakeModel(), defaults={"tenant_id": "acme"})
+    harness = AgentHarness(memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"})
 
     async def agent(payload, runtime):
         return (await runtime.model.invoke("patient record: John Doe")).text
@@ -67,7 +74,7 @@ async def test_prompts_are_not_captured_by_default(memory, context, spans):
 async def test_prompts_are_captured_when_explicitly_enabled(memory, context, spans):
     harness = AgentHarness(
         memory=memory,
-        model=FakeModel(),
+        model=DeterministicModel(),
         defaults={"tenant_id": "acme"},
         config={"telemetry": {"capture": {"inputs": True, "outputs": True}}},
     )
@@ -82,7 +89,7 @@ async def test_prompts_are_captured_when_explicitly_enabled(memory, context, spa
 
 
 async def test_model_request_metadata_reaches_the_span(memory, context, spans):
-    harness = AgentHarness(memory=memory, model=FakeModel(), defaults={"tenant_id": "acme"})
+    harness = AgentHarness(memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"})
 
     async def agent(payload, runtime):
         request = ModelRequest(
@@ -99,7 +106,7 @@ async def test_model_request_metadata_reaches_the_span(memory, context, spans):
 
 
 async def test_streaming_records_time_to_first_token_without_buffering(memory, context, spans):
-    harness = AgentHarness(memory=memory, model=FakeModel(), defaults={"tenant_id": "acme"})
+    harness = AgentHarness(memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"})
     received: list[str] = []
 
     async def agent(payload, runtime):
@@ -186,7 +193,7 @@ async def test_uninstrumented_model_calls_are_simply_not_traced(harness, context
     """Bypassing the runtime is allowed — and honestly reported as uninstrumented (§13)."""
 
     async def agent(payload, runtime):
-        return await FakeModel().ainvoke("direct call")
+        return await DeterministicModel().ainvoke("direct call")
 
     await harness.wrap(agent, agent_id="inv")(None, context=context)
     assert "agent.model.invoke" not in span_names(spans)

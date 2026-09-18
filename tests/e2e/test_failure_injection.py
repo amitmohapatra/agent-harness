@@ -47,11 +47,13 @@ async def test_a_completely_broken_telemetry_backend_does_not_fail_the_agent(mem
     assert (await harness.wrap(agent, agent_id="inv")("q", context=context)).data == "business value"
 
 
-async def test_memory_read_and_write_both_failing(memory, context):
-    memory.fail_retrieval = True
-    memory.fail_observation = True
+async def test_memory_read_and_write_both_failing(faulty_memory, context):
+    """Both directions cut at the socket: the read and the write really fail to connect."""
+    faulty_memory.faults.drop.update({"/v1/context", "/v1/observations"})
     harness = AgentHarness(
-        memory=memory, defaults={"tenant_id": "acme"}, config={"memory": {"writeback": False}}
+        memory=faulty_memory,
+        defaults={"tenant_id": "acme"},
+        config={"memory": {"writeback": False}, "timeouts": {"memory_seconds": 10}},
     )
 
     async def agent(payload, runtime):
@@ -120,10 +122,10 @@ async def test_artifact_store_failure_surfaces_as_an_error(memory, context):
     assert (await harness.wrap(agent, agent_id="inv")("q", context=context)).data == "handled"
 
 
-async def test_slow_memory_does_not_hold_the_turn_past_its_deadline(memory, context):
-    memory.retrieval_delay = 10.0
+async def test_slow_memory_does_not_hold_the_turn_past_its_deadline(faulty_memory, context):
+    faulty_memory.faults.stall["/v1/context"] = 10.0
     harness = AgentHarness(
-        memory=memory,
+        memory=faulty_memory,
         defaults={"tenant_id": "acme"},
         config={
             "memory": {"writeback": False},
