@@ -58,6 +58,10 @@ test-live-full:  ## Every feature against a running Memory Service, with databas
 bench:  ## Harness overhead benchmark (writes benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s
 
+.PHONY: bench-throughput
+bench-throughput:  ## Turns/second against a running Memory Service (throughput-results.json)
+	$(PYTEST) tests/performance/test_throughput.py -m performance -q -s
+
 .PHONY: lint
 lint:  ## Ruff
 	.venv/bin/ruff check .
