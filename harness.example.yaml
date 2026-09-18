@@ -15,6 +15,7 @@ harness:
     observe_input: true            # write the turn's question back
     observe_output: true           # write the agent's answer back
     observe_claims: true           # write the agent's claims back
+    record_outcome: true           # label the run success/failure for tool memory
     observe_tool_results: false    # tool outputs are NOT sent to memory by default
     private_by_default: false      # true -> everything written is RUN-visible only
     record_messages: false         # also record the turn as chat messages

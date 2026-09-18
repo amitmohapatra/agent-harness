@@ -20,6 +20,9 @@ class MemoryPolicy:
     observe_output: bool = True
     observe_tool_results: bool = False
     observe_claims: bool = True
+    #: label the run success/failure when the turn ends, so tool memory learns from it
+    #: without waiting hours for a weak positive
+    record_outcome: bool = True
     private_by_default: bool = False
     record_messages: bool = False
     token_budget: int | None = None
@@ -33,6 +36,7 @@ class MemoryPolicy:
             observe_output=config.observe_output,
             observe_tool_results=config.observe_tool_results,
             observe_claims=config.observe_claims,
+            record_outcome=config.record_outcome,
             private_by_default=config.private_by_default,
             record_messages=config.record_messages,
             token_budget=config.token_budget,
@@ -68,6 +72,7 @@ class MemoryPolicy:
             or self.observe_output
             or self.observe_claims
             or self.record_messages
+            or self.record_outcome
         )
 
     def visibility_hints(self) -> dict[str, Any]:

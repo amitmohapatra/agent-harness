@@ -40,6 +40,7 @@ class MemoryConfig(_Section):
     observe_input: bool = True
     observe_output: bool = True
     observe_claims: bool = True
+    record_outcome: bool = True
     #: Tool outputs frequently contain customer data, so they are not written by default.
     observe_tool_results: bool = False
     #: Mark everything this harness writes as visible only to the agent run.

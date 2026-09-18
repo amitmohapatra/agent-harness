@@ -374,6 +374,29 @@ class MemoryRuntime:
                 )
         return report
 
+    async def record_outcome(self, *, success: bool, note: str | None = None) -> Any | None:
+        """Tell the service whether this run worked.
+
+        Tool memory learns procedures from *successful* trajectories, and without a label it
+        has to guess: a run with no failing call counts as a weak positive, but only once it
+        is older than the service's window — hours later — and a run that failed for any
+        reason other than a failing tool call is never counted as a negative at all. The
+        harness knows the answer the moment the turn ends, so it says so.
+
+        Recorded once per run, keyed by ``agent_run_id``; the service upserts, so a retry of
+        the same turn overwrites rather than duplicates.
+        """
+        run_id = self.context.agent_run_id
+        if not run_id:
+            return None
+        with self.tracer.memory_span("record_outcome") as span:
+            span.set(**{N.STATUS: "ok" if success else "error"})
+            return await self._write(
+                self._ctx.runs.outcome(run_id, success=success, note=note),
+                span,
+                "record_outcome",
+            )
+
     async def _ensure_thread(self) -> None:
         """Create the thread if it does not exist yet. Idempotent in the service."""
         if self._thread_ready:
@@ -534,6 +557,9 @@ class NoOpMemoryRuntime:
         return None
 
     async def verify(self, answer: str, /, **options: Any) -> None:
+        return None
+
+    async def record_outcome(self, **kwargs: Any) -> None:
         return None
 
     async def record_tool_call(self, *args: Any, **kwargs: Any) -> None:

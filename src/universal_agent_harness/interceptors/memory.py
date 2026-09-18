@@ -69,9 +69,15 @@ class MemoryObservationInterceptor(BaseInterceptor):
 
     async def after(self, result: AgentResult, runtime: AgentRuntime) -> AgentResult:
         memory = runtime.memory
-        if not memory.enabled or not result.status.ok:
+        if not memory.enabled:
             return result
         policy = memory.policy
+        if not result.status.ok:
+            # Nothing is written back from a failed turn — but the failure itself is worth
+            # saying out loud, because tool memory only ever infers negatives from a failing
+            # tool call and would otherwise treat this run as neutral.
+            await self._label(runtime, success=False, note=_failure_note(result))
+            return result
         observations = list(result.memory_observations)
         request: AgentRequest | None = runtime.state.get("request")
 
@@ -109,6 +115,7 @@ class MemoryObservationInterceptor(BaseInterceptor):
                     )
                 )
         if not observations:
+            await self._label(runtime, success=True, note=str(result.status))
             return result
 
         if policy.writeback:
@@ -131,6 +138,25 @@ class MemoryObservationInterceptor(BaseInterceptor):
             )
         return result
 
+    async def on_error(self, error: AgentError, runtime: AgentRuntime) -> None:
+        """``after`` does not run when the harness re-raises, so the label is recorded here.
+
+        Both paths are idempotent: the service upserts the outcome on (tenant, run), so a
+        turn that reaches both records one row, not two.
+        """
+        await self._label(runtime, success=False, note=str(error.category))
+        return None
+
+    async def _label(self, runtime: AgentRuntime, *, success: bool, note: str) -> None:
+        """Record the run outcome, never letting it disturb the turn it describes."""
+        memory = runtime.memory
+        if not memory.enabled or not memory.policy.record_outcome:
+            return
+        try:
+            await memory.record_outcome(success=success, note=note)
+        except Exception as exc:  # a label is not worth failing or re-failing a turn over
+            runtime.logger.warning("memory.outcome.failed", error_message=str(exc))
+
     async def _write(
         self, runtime: AgentRuntime, observations: list[MemoryObservation], result: AgentResult
     ) -> None:
@@ -139,6 +165,8 @@ class MemoryObservationInterceptor(BaseInterceptor):
         try:
             # The policy governs this automatic path; explicit calls in agent code always
             # write, which is why the check lives here and not in MemoryRuntime.
+            if policy.record_outcome:
+                await memory.record_outcome(success=result.status.ok, note=str(result.status))
             if policy.record_messages:
                 request: AgentRequest | None = runtime.state.get("request")
                 if request is not None and request.query:
@@ -154,6 +182,11 @@ class MemoryObservationInterceptor(BaseInterceptor):
                 "memory.writeback.failed", error_code=error.code, error_message=error.message
             )
             raise
+
+
+def _failure_note(result: AgentResult) -> str:
+    error = result.error
+    return f"{result.status}: {error.category}" if error else str(result.status)
 
 
 def _summarize(result: AgentResult) -> str | None:

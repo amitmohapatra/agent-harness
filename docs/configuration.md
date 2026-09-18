@@ -17,7 +17,7 @@ harness = AgentHarness(memory=memory, config=HarnessConfig.load("harness.yaml",
 The YAML may be the full document (with a `harness:` key, as in
 [`harness.example.yaml`](../harness.example.yaml)) or just the harness section.
 
-The surface is **52 settings** and every one of them does something. Two rules keep it that
+The surface is **53 settings** and every one of them does something. Two rules keep it that
 way: capture policy and sampling are defined once (under `telemetry`) and obeyed by every
 backend, and a provider is enabled by *passing* it — there is no `policy.enabled` flag that
 has to agree with the policy object you supplied.
@@ -33,6 +33,7 @@ Decisions worth calling out:
 | Setting | Default | Why that default |
 | --- | --- | --- |
 | `memory.observe_tool_results` | `false` | tool outputs frequently contain customer data |
+| `memory.record_outcome` | `true` | tool memory learns procedures from runs it knows succeeded; without a label it waits hours to guess one, and never learns from a failure |
 | `memory.writeback` | `true` | the turn must not wait for consolidation |
 | `memory.failure_mode` | `non_blocking` | a memory outage degrades a run, it does not fail it |
 | `telemetry.configure_sdk` | `false` | applications usually configure OpenTelemetry themselves |
@@ -121,6 +122,7 @@ in; the setting is the answer.
 | "This agent's notes must not leak to the user or other agents" | `memory.private_by_default: true` — everything it writes becomes RUN-visible. |
 | "Agents should share findings with each other" | Declare the group once: `defaults={"agent_group_id": "crew"}`, or `harness.wrap(..., agent_group="crew")`, or `share(..., group="crew")` for one call. Then `runtime.memory.share(...)` just works. |
 | "I want the turn recorded as a conversation, not just observations" | `memory.record_messages: true`. |
+| "Don't tell the service whether my runs worked" | `memory.record_outcome: false`. The harness labels each finished run success or failure so tool memory can learn from it; turning it off means the service falls back to inferring a weak positive hours later. |
 | "The process exits right after the turn" | `memory.writeback: false`, or `await harness.drain()` before exit — writes are asynchronous by default. |
 | "A memory outage must fail the request" | `memory.failure_mode: fail_closed`. Otherwise the run degrades with a `MEMORY_DEGRADED` warning. |
 | "Context is too large / too small" | `memory.token_budget`. |
