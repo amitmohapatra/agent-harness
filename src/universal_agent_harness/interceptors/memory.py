@@ -73,9 +73,11 @@ class MemoryObservationInterceptor(BaseInterceptor):
             return result
         policy = memory.policy
         if not result.status.ok:
-            # Nothing is written back from a failed turn — but the failure itself is worth
-            # saying out loud, because tool memory only ever infers negatives from a failing
-            # tool call and would otherwise treat this run as neutral.
+            # Nothing is observed from a failed turn — but the failure itself is worth saying
+            # out loud, because tool memory only ever infers negatives from a failing tool
+            # call and would otherwise treat this run as neutral. Inline on purpose: the turn
+            # has already failed, and a label that races the caller's shutdown is worse than
+            # one that costs a failing turn a few milliseconds.
             await self._label(runtime, success=False, note=_failure_note(result))
             return result
         observations = list(result.memory_observations)
@@ -114,10 +116,13 @@ class MemoryObservationInterceptor(BaseInterceptor):
                         idempotency_key=runtime.idempotency_key("obs", "claim", claim.claim_id),
                     )
                 )
-        if not observations:
-            await self._label(runtime, success=True, note=str(result.status))
+        if not observations and not policy.record_outcome:
             return result
 
+        # A turn with nothing to observe still has an outcome to report — and that report
+        # goes through the same writeback path as everything else. Doing it inline put an
+        # HTTP round trip back on the critical path for exactly the agents that write
+        # nothing, which is the opposite of what writeback is for.
         if policy.writeback:
             scheduled = self.writeback.submit(
                 self._write(runtime, observations, result),

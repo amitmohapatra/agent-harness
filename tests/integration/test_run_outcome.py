@@ -89,3 +89,35 @@ async def test_the_label_survives_a_turn_that_wrote_no_observations(memory, cont
     await harness.wrap(agent, agent_id="inv")("q", context=context)
     await harness.drain()
     assert len(memory.of("runs.outcome")) == 1
+
+
+async def test_the_label_does_not_block_a_turn_that_wrote_nothing(memory, context):
+    """The label rides the writeback queue like everything else.
+
+    Recording it inline was a real regression: an agent that observes nothing — a LangGraph
+    node returning a state update, say — paid an HTTP round trip before its result came back,
+    which is precisely the cost writeback exists to avoid.
+    """
+    import asyncio
+
+    harness = AgentHarness(
+        memory=memory,
+        defaults={"tenant_id": "acme"},
+        # retrieval off so the measurement is about the write, not the read before it;
+        # writeback stays on, as in production
+        config={"memory": {"retrieve_before": False, "observe_input": False,
+                           "observe_output": False, "observe_claims": False}},
+    )
+
+    async def agent(payload):
+        return AgentResult.ok(None)
+
+    started = asyncio.get_running_loop().time()
+    await harness.wrap(agent, agent_id="inv")("q", context=context)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert memory.of("runs.outcome") == [], "the label must not have been written yet"
+    assert elapsed < 0.05, f"the turn waited {elapsed * 1000:.0f} ms for a memory write"
+
+    await harness.drain()
+    assert len(memory.of("runs.outcome")) == 1, "...and it lands once the queue drains"
