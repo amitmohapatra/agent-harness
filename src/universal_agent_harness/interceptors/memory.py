@@ -7,7 +7,8 @@ waits for consolidation, KG updates, summaries or eval processing.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from universal_agent_harness.contracts.artifacts import MemoryObservation
 from universal_agent_harness.contracts.errors import AgentError, ErrorCategory
@@ -165,28 +166,64 @@ class MemoryObservationInterceptor(BaseInterceptor):
     async def _write(
         self, runtime: AgentRuntime, observations: list[MemoryObservation], result: AgentResult
     ) -> None:
+        """Write everything this turn produced. Each write stands on its own.
+
+        These used to be one sequence of awaits inside a single ``try``, so the first failure
+        discarded every write after it: a turn with ``record_messages`` on lost its question,
+        its answer *and* every claim because ``/v1/messages`` rejected the scope. They are
+        independent facts about the turn; one being unwritable is not a reason to lose the
+        rest. Failures are collected and reported together, so the caller still learns that
+        something was lost and what.
+        """
         memory = runtime.memory
         policy = memory.policy
-        try:
-            # The policy governs this automatic path; explicit calls in agent code always
-            # write, which is why the check lives here and not in MemoryRuntime.
-            if policy.record_outcome:
-                await memory.record_outcome(success=result.status.ok, note=str(result.status))
-            if policy.record_messages:
-                request: AgentRequest | None = runtime.state.get("request")
-                if request is not None and request.query:
-                    await memory.record_input(request.query)
-                summary = _summarize(result)
-                if summary:
-                    await memory.record_output(summary)
-            for observation in observations:
-                await memory.observe(observation)
-        except Exception as exc:
-            error = AgentError.of(exc, category=ErrorCategory.MEMORY, source="memory.observe")
-            runtime.logger.warning(
-                "memory.writeback.failed", error_code=error.code, error_message=error.message
+        request: AgentRequest | None = runtime.state.get("request")
+        summary = _summarize(result)
+
+        # (name, thunk) so nothing is turned into a coroutine until it is about to be awaited
+        writes: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
+        if policy.record_outcome:
+            writes.append(
+                ("outcome", lambda: memory.record_outcome(
+                    success=result.status.ok, note=str(result.status)
+                ))
             )
-            raise
+        if policy.record_messages:
+            if request is not None and request.query:
+                writes.append(("message.user", lambda q=request.query: memory.record_input(q)))
+            if summary:
+                writes.append(("message.assistant", lambda t=summary: memory.record_output(t)))
+        writes.extend(
+            (f"observe[{o.kind}]", lambda o=o: memory.observe(o)) for o in observations
+        )
+
+        failures: list[tuple[str, Exception]] = []
+        for name, thunk in writes:
+            try:
+                await thunk()
+            except Exception as exc:  # noqa: PERF203 - one failure must not stop the others
+                failures.append((name, exc))
+
+        if failures:
+            first = failures[0][1]
+            error = AgentError.of(first, category=ErrorCategory.MEMORY, source="memory.observe")
+            runtime.logger.warning(
+                "memory.writeback.failed",
+                error_code=error.code,
+                error_message=error.message,
+                failed=[name for name, _ in failures],
+                written=len(writes) - len(failures),
+            )
+            raise MemoryWriteError(failures) from first
+
+
+class MemoryWriteError(Exception):
+    """One or more writes for a turn failed. Names which, so the warning is actionable."""
+
+    def __init__(self, failures: list[tuple[str, Exception]]) -> None:
+        self.failures = failures
+        detail = "; ".join(f"{name}: {exc}" for name, exc in failures)
+        super().__init__(f"{len(failures)} memory write(s) failed - {detail}")
 
 
 def _failure_note(result: AgentResult) -> str:

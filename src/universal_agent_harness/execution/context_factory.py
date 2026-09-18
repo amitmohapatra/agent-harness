@@ -68,10 +68,9 @@ class ContextFactory:
             }
             if gaps:
                 context = context.with_fields(**gaps)
-            if context.agent_id == safe_id(agent_id) and not fields:
-                return context
             if context.agent_id == safe_id(agent_id):
-                return context.with_fields(**fields)
+                context = self._own_turn(context, agent_id)
+                return context.with_fields(**fields) if fields else context
             return context.for_agent(
                 agent_id,
                 agent_run_id=explicit_run_id or self._run_id(agent_id, context, fields),
@@ -108,6 +107,31 @@ class ContextFactory:
         )
 
     # -- run ids ---------------------------------------------------------------------
+    def _own_turn(self, context: AgentExecutionContext, agent_id: str) -> AgentExecutionContext:
+        """Give this invocation a turn of its own when the caller did not name one.
+
+        A context carrying no ``turn_id`` describes a *conversation*, not a turn — and reusing
+        one for two messages produced the same ``agent_run_id`` for both, so the second
+        message's outcome overwrote the first's and both tool trajectories merged into a
+        single run. A caller who *does* set ``turn_id`` is saying "this is the same turn"
+        — a replayed LangGraph superstep, say — and is honoured unchanged.
+        """
+        if context.turn_id or not context.thread_id:
+            return context
+        turn = new_id("turn_")
+        run = (
+            stable_id(context.thread_id, turn, safe_id(agent_id), prefix="run_")
+            if self.deterministic_run_ids
+            else new_id("run_")
+        )
+        return context.with_fields(
+            turn_id=turn,
+            # the service requires a session whenever a turn is set; ``with_fields`` copies
+            # rather than re-validating, so derive it here exactly as the validator would
+            session_id=context.session_id or safe_id(f"{context.thread_id}-session"),
+            agent_run_id=run,
+        )
+
     def _run_id(
         self, agent_id: str, base: AgentExecutionContext, fields: Mapping[str, Any]
     ) -> str | None:

@@ -206,7 +206,7 @@ class InstrumentedToolClient:
                 status=status,
                 error_class=type(error).__name__ if error else None,
                 latency_ms=ms,
-                task=call.task or runtime.context.task_id or "",
+                task=_task_of(call, runtime),
                 step=call.step,
             )
         except Exception:
@@ -223,3 +223,22 @@ def outcome_with_artifact(outcome: ToolOutcome, artifact: ArtifactRef) -> ToolOu
         update={"artifacts": [*outcome.artifacts, artifact], "output": None,
                 "output_summary": outcome.output_summary or f"artifact:{artifact.artifact_id}"}
     )
+
+
+def _task_of(call: Any, runtime: Any) -> str:
+    """What this tool call was *for*, as the service keys procedures on.
+
+    The service normalises this into a typed-placeholder pattern ("how much stock of
+    {entity}?") so two phrasings of the same question mine the same trajectory. It was being
+    sent ``context.task_id`` — an opaque identifier — so the pattern either matched only
+    other runs of that same id, or, far more often, was empty: no task_id, no pattern, no
+    procedure, ever. The turn's question is what it wanted.
+    """
+    explicit = getattr(call, "task", None)
+    if explicit:
+        return str(explicit)
+    request = runtime.state.get("request") if hasattr(runtime, "state") else None
+    query = getattr(request, "query", None)
+    if query:
+        return str(query)
+    return runtime.context.task_id or ""
