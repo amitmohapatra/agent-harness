@@ -114,15 +114,38 @@ async def test_overhead_when_sampled_out(context):
 
 
 async def test_context_creation_is_constant_time():
-    """Context creation is O(1) and allocation-light (§64)."""
+    """Context creation is O(1) and allocation-light (§64).
+
+    Measured against a baseline and asserted on the *difference*, the way
+    :func:`_overhead` already does it. Two reasons, both learned from this test:
+
+    * The old body was ``lambda: asyncio.sleep(0) or AgentExecutionContext.create(...)``.
+      ``asyncio.sleep(0)`` returns a truthy coroutine, so ``or`` short-circuited and the
+      context was **never created** — the test measured an event-loop round trip and
+      nothing else, while reporting a number called "context_creation".
+    * That number was then compared against an absolute 1ms budget, which measures the
+      machine rather than the code. It failed at p95 = 1.06ms on a laptop that was busy
+      building images, and passed on the same commit minutes later.
+
+    The subtraction cancels whatever the loop and the machine are doing. Context creation
+    measured ~0.03ms at p50 and ~0.09ms at p95 on an unloaded machine, so the budget below
+    has room for the noise and still catches a regression worth knowing about.
+    """
     from universal_agent_harness import AgentExecutionContext
 
-    samples = await measure(
-        lambda: asyncio.sleep(0) or AgentExecutionContext.create(tenant_id="acme"), iterations=2000
-    )
-    stats = percentiles(samples)
-    _report("context_creation", {k: round(v, 4) for k, v in stats.items()})
-    assert stats["p95"] < 1.0, stats
+    async def loop_only() -> None:
+        await asyncio.sleep(0)
+
+    async def loop_and_context() -> None:
+        await asyncio.sleep(0)
+        AgentExecutionContext.create(tenant_id="acme")
+
+    baseline = percentiles(await measure(loop_only, iterations=2000))
+    measured = percentiles(await measure(loop_and_context, iterations=2000))
+    cost = {key: measured[key] - baseline[key] for key in ("p50", "p95", "p99")}
+    _report("context_creation", {k: round(v, 4) for k, v in cost.items()})
+
+    assert cost["p95"] < 0.5, {"cost": cost, "baseline": baseline, "measured": measured}
 
 
 _RESULTS: dict[str, dict[str, float]] = {}
