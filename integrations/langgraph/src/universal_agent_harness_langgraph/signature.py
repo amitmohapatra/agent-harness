@@ -25,10 +25,7 @@ def declared_injectables(fn: Callable[..., Any]) -> tuple[str, ...]:
     except (TypeError, ValueError):  # pragma: no cover - builtins
         return ()
     valid = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-    return tuple(
-        name for name in INJECTABLES
-        if name in params and params[name].kind in valid
-    )
+    return tuple(name for name in INJECTABLES if name in params and params[name].kind in valid)
 
 
 def positional_arity(fn: Callable[..., Any]) -> int:

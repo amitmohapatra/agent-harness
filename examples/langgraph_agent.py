@@ -1,7 +1,7 @@
 """LangGraph: an existing node and a runtime-aware node in the same graph.
 
-    pip install "universal-agent-harness[langgraph]"
-    python examples/langgraph_agent.py
+pip install "universal-agent-harness[langgraph]"
+python examples/langgraph_agent.py
 """
 
 from __future__ import annotations
@@ -66,7 +66,9 @@ async def main() -> None:
         {"question": "how much stock of SKU-1?", "trace": []},
         {
             "configurable": {
-                "thread_id": "chat-42",
+                # its own thread id: running this example must not claim one the
+                # test suite also uses against a shared dev service
+                "thread_id": "example-langgraph-agent",
                 # identity the graph carries for the harness (optional)
                 "harness": {"tenant_id": "acme", "user_id": "u1", "work_id": "wo-9"},
             }

@@ -10,10 +10,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from universal_agent_harness.contracts.artifacts import MemoryObservation
-from universal_agent_harness.contracts.errors import AgentError, ErrorCategory
-from universal_agent_harness.contracts.events import LifecycleEvent
-from universal_agent_harness.contracts.messages import AgentRequest, AgentResult
+from universal_agent_contracts.artifacts import MemoryObservation
+from universal_agent_contracts.errors import AgentError, ErrorCategory
+from universal_agent_contracts.events import LifecycleEvent
+from universal_agent_contracts.messages import AgentRequest, AgentResponse
+
 from universal_agent_harness.interceptors.base import BaseInterceptor, Order
 from universal_agent_harness.memory.writeback import WritebackQueue
 
@@ -68,7 +69,7 @@ class MemoryObservationInterceptor(BaseInterceptor):
         #: returned with an explicit warning. Either way the failure is never silent (§77).
         self.fail_closed = fail_closed
 
-    async def after(self, result: AgentResult, runtime: AgentRuntime) -> AgentResult:
+    async def after(self, result: AgentResponse, runtime: AgentRuntime) -> AgentResponse:
         memory = runtime.memory
         if not memory.enabled:
             return result
@@ -151,7 +152,6 @@ class MemoryObservationInterceptor(BaseInterceptor):
         turn that reaches both records one row, not two.
         """
         await self._label(runtime, success=False, note=str(error.category))
-        return None
 
     async def _label(self, runtime: AgentRuntime, *, success: bool, note: str) -> None:
         """Record the run outcome, never letting it disturb the turn it describes."""
@@ -164,7 +164,7 @@ class MemoryObservationInterceptor(BaseInterceptor):
             runtime.logger.warning("memory.outcome.failed", error_message=str(exc))
 
     async def _write(
-        self, runtime: AgentRuntime, observations: list[MemoryObservation], result: AgentResult
+        self, runtime: AgentRuntime, observations: list[MemoryObservation], result: AgentResponse
     ) -> None:
         """Write everything this turn produced. Each write stands on its own.
 
@@ -184,24 +184,26 @@ class MemoryObservationInterceptor(BaseInterceptor):
         writes: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
         if policy.record_outcome:
             writes.append(
-                ("outcome", lambda: memory.record_outcome(
-                    success=result.status.ok, note=str(result.status)
-                ))
+                (
+                    "outcome",
+                    lambda: memory.record_outcome(
+                        success=result.status.ok, note=str(result.status)
+                    ),
+                )
             )
         if policy.record_messages:
             if request is not None and request.query:
                 writes.append(("message.user", lambda q=request.query: memory.record_input(q)))
             if summary:
                 writes.append(("message.assistant", lambda t=summary: memory.record_output(t)))
-        writes.extend(
-            (f"observe[{o.kind}]", lambda o=o: memory.observe(o)) for o in observations
-        )
+        writes.extend((f"observe[{o.kind}]", lambda o=o: memory.observe(o)) for o in observations)
 
         failures: list[tuple[str, Exception]] = []
         for name, thunk in writes:
             try:
                 await thunk()
-            except Exception as exc:  # noqa: PERF203 - one failure must not stop the others
+            except Exception as exc:
+                # deliberately inside the loop: one failure must not stop the others
                 failures.append((name, exc))
 
         if failures:
@@ -226,12 +228,12 @@ class MemoryWriteError(Exception):
         super().__init__(f"{len(failures)} memory write(s) failed - {detail}")
 
 
-def _failure_note(result: AgentResult) -> str:
+def _failure_note(result: AgentResponse) -> str:
     error = result.error
     return f"{result.status}: {error.category}" if error else str(result.status)
 
 
-def _summarize(result: AgentResult) -> str | None:
+def _summarize(result: AgentResponse) -> str | None:
     """What the harness writes back as the agent's output.
 
     Text data is written verbatim; structured data is *not* dumped wholesale into memory —

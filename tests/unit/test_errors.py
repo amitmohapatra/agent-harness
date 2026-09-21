@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
-from universal_agent_harness import AgentError, ErrorCategory
-from universal_agent_harness.config.settings import RetryConfig
-from universal_agent_harness.contracts.errors import (
+from universal_agent_contracts.errors import (
     AgentTimeoutError,
     PolicyDeniedError,
     classify,
 )
+
+from universal_agent_harness import AgentError, ErrorCategory
+from universal_agent_harness.config.settings import RetryConfig
 from universal_agent_harness.execution.retry import NEVER_RETRY, RetryPolicy
 
 
@@ -65,6 +65,8 @@ def test_retry_requires_idempotency_and_enabled_config():
 
 
 def test_backoff_is_bounded():
-    policy = RetryPolicy(RetryConfig(enabled=True, max_attempts=8, backoff_seconds=1), idempotent=True)
+    policy = RetryPolicy(
+        RetryConfig(enabled=True, max_attempts=8, backoff_seconds=1), idempotent=True
+    )
     assert all(policy.backoff(n) <= 30.0 for n in range(1, 9))
-    assert policy.backoff(1) <= policy.backoff(4)   # exponential, with jitter
+    assert policy.backoff(1) <= policy.backoff(4)  # exponential, with jitter

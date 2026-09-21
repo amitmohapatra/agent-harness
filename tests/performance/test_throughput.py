@@ -55,6 +55,15 @@ async def _turn(wrapped, index: int) -> float:
     return (time.perf_counter() - started) * 1000
 
 
+#: 60 real turns against a real service, so the suite-wide 120 s default does not apply.
+#:
+#: Measured at 113 s on an idle machine — 94% of that default, which is not a margin, it is a
+#: coin toss. Run after the rest of the suite the service is warm but contended and the same
+#: work took longer than the budget: pytest cancelled the test mid-flight, every in-flight
+#: agent logged AGENT_CANCELLED, and teardown closed the client under the stragglers
+#: ("Cannot send a request, as the client has been closed"). None of that was a regression in
+#: what is being measured; it was a benchmark sharing a unit test's clock.
+@pytest.mark.timeout(600)
 @pytest.mark.live
 async def test_turn_throughput_across_concurrencies(live_memory) -> None:
     harness = AgentHarness(
@@ -75,8 +84,10 @@ async def test_turn_throughput_across_concurrencies(live_memory) -> None:
     for concurrency in CONCURRENCIES:
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def one(index: int) -> float:
-            async with semaphore:
+        async def one(index: int, sem: asyncio.Semaphore = semaphore) -> float:
+            # bound at definition: the loop rebinds `semaphore` each iteration, so a closure
+            # over it would gate every level on whichever one was created last
+            async with sem:
                 return await _turn(wrapped, index)
 
         started = time.perf_counter()

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from universal_agent_harness import AgentResult, BaseInterceptor, Order
-from universal_agent_harness.contracts.errors import AgentError
+from universal_agent_contracts.errors import AgentError
+
+from universal_agent_harness import AgentResponse, BaseInterceptor, Order
 from universal_agent_harness.interceptors.base import InterceptorChain
 
 
@@ -32,10 +33,14 @@ async def test_before_ascends_and_after_descends():
     )
     assert chain.names == ["a", "b", "c"]
     await chain.before(None, None)
-    await chain.after(AgentResult.ok(), None)
+    await chain.after(AgentResponse.ok(), None)
     assert log == [
-        "before:a", "before:b", "before:c",
-        "after:c", "after:b", "after:a",
+        "before:a",
+        "before:b",
+        "before:c",
+        "after:c",
+        "after:b",
+        "after:a",
     ]
 
 
@@ -50,7 +55,7 @@ async def test_error_path_lets_one_interceptor_recover():
         name, order = "recover", Order.USER
 
         async def on_error(self, error, runtime):
-            return AgentResult.ok("fallback")
+            return AgentResponse.ok("fallback")
 
     log: list[str] = []
     chain = InterceptorChain([Recovering(), Recorder("t", 10, log)])

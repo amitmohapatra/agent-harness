@@ -46,7 +46,7 @@ from langgraph.graph import END, START, StateGraph
 from universal_agent_harness import (
     AgentExecutionContext,
     AgentHarness,
-    AgentResult,
+    AgentResponse,
     AgentRuntime,
     Claim,
     EvidenceRef,
@@ -56,8 +56,8 @@ from universal_agent_harness import (
 
 # --------------------------------------------------------------------------- policy knobs
 
-SERVICE_LEVEL_Z = 1.65      # 95% service level
-LEAD_TIME_RISK_DAYS = 21    # above this, a supplier counts as slow
+SERVICE_LEVEL_Z = 1.65  # 95% service level
+LEAD_TIME_RISK_DAYS = 21  # above this, a supplier counts as slow
 ORDER_BUDGET_USD = 10_000.0  # per-order spending cap
 
 
@@ -100,10 +100,20 @@ async def supplier_catalog(sku: str) -> dict[str, Any]:
     return {
         "sku": sku,
         "suppliers": [
-            {"name": "Meridian Parts", "lead_time_days": 24, "moq": 250, "pack_size": 50,
-             "unit_price": 12.10},
-            {"name": "Castor Supply", "lead_time_days": 9, "moq": 500, "pack_size": 100,
-             "unit_price": 13.40},
+            {
+                "name": "Meridian Parts",
+                "lead_time_days": 24,
+                "moq": 250,
+                "pack_size": 50,
+                "unit_price": 12.10,
+            },
+            {
+                "name": "Castor Supply",
+                "lead_time_days": 9,
+                "moq": 500,
+                "pack_size": 100,
+                "unit_price": 13.40,
+            },
         ],
     }
 
@@ -154,8 +164,8 @@ def build_harness() -> AgentHarness:
     )
 
     return AgentHarness(
-        memory=memory,                       # None -> memory degrades to a no-op
-        model=DemoModel(),                   # swap for your provider client
+        memory=memory,  # None -> memory degrades to a no-op
+        model=DemoModel(),  # swap for your provider client
         tools=[inventory_db, demand_forecast, supplier_catalog],
         defaults={
             "tenant_id": os.environ.get("MEMORY_TENANT", "acme"),
@@ -165,11 +175,11 @@ def build_harness() -> AgentHarness:
         config={
             "memory": {
                 "observe_claims": True,
-                "observe_tool_results": False,   # tool payloads stay out of memory
+                "observe_tool_results": False,  # tool payloads stay out of memory
             },
             "observability": {
                 "langfuse": {
-                    "enabled": langfuse_on,      # keys come from LANGFUSE_* env vars
+                    "enabled": langfuse_on,  # keys come from LANGFUSE_* env vars
                     "environment": os.environ.get("APP_ENV", "local"),
                 }
             },
@@ -208,7 +218,7 @@ async def triage(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
 async def inventory(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
     """Stock position, plus a nested sub-agent that judges supplier concentration risk."""
     stock = (await agent.tools.call("inventory_db", sku=state["sku"])).output
-    pending = await open_purchase_orders(sku=state["sku"])   # wrapped tool, direct call
+    pending = await open_purchase_orders(sku=state["sku"])  # wrapped tool, direct call
     stock["on_order"] = stock["on_order"] + sum(po["qty"] for po in pending)
 
     await agent.model.invoke(f"Summarise the stock position: {stock['on_hand']} on hand")
@@ -220,7 +230,7 @@ async def inventory(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
 
 
 @harness.agent(agent_id="supplier-risk-agent", skills=["supply.risk"])
-async def supplier_risk(state: dict[str, Any], agent: AgentRuntime) -> AgentResult:
+async def supplier_risk(state: dict[str, Any], agent: AgentRuntime) -> AgentResponse:
     """A plain (non-node) agent, called from inside a node."""
     catalog = (await agent.tools.call("supplier_catalog", sku=state["sku"])).output
     risks: list[str] = []
@@ -228,7 +238,7 @@ async def supplier_risk(state: dict[str, Any], agent: AgentRuntime) -> AgentResu
         risks.append("single-source exposure")
     if all(s["lead_time_days"] > LEAD_TIME_RISK_DAYS for s in catalog["suppliers"]):
         risks.append(f"every supplier exceeds the {LEAD_TIME_RISK_DAYS}-day lead-time limit")
-    return AgentResult.ok({"risks": risks})
+    return AgentResponse.ok({"risks": risks})
 
 
 @harness.langgraph.agent(agent_id="demand-agent", skills=["demand.forecast"])
@@ -243,8 +253,7 @@ async def supplier(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
     """Pick the supplier that can actually cover the gap in time."""
     catalog = (await agent.tools.call("supplier_catalog", sku=state["sku"])).output
     chosen = min(catalog["suppliers"], key=lambda s: (s["lead_time_days"], s["unit_price"]))
-    return {"supplier": {"catalog": catalog["suppliers"], "chosen": chosen},
-            "trace": ["supplier"]}
+    return {"supplier": {"catalog": catalog["suppliers"], "chosen": chosen}, "trace": ["supplier"]}
 
 
 @harness.langgraph.agent(agent_id="decision-agent", skills=["inventory.reorder"])
@@ -266,7 +275,7 @@ async def decide(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
     cost = order_qty * chosen["unit_price"]
 
     capped = False
-    if cost > ORDER_BUDGET_USD:          # budget policy: never exceed; order whole packs
+    if cost > ORDER_BUDGET_USD:  # budget policy: never exceed; order whole packs
         affordable = int(ORDER_BUDGET_USD // chosen["unit_price"])
         order_qty = (affordable // chosen["pack_size"]) * chosen["pack_size"]
         cost, capped = order_qty * chosen["unit_price"], True
@@ -283,8 +292,7 @@ async def decide(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
     covers_lead_time = days_of_cover >= lead_time
     if not covers_lead_time:
         blockers.append(
-            f"stock runs out in {days_of_cover:.1f} days, before the "
-            f"{lead_time}-day lead time"
+            f"stock runs out in {days_of_cover:.1f} days, before the {lead_time}-day lead time"
         )
 
     decision = {
@@ -306,7 +314,9 @@ async def decide(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
     # A purchase-order draft is a document, not a state field: it becomes an artifact and
     # the state keeps only the reference.
     po = await agent.artifacts.put(
-        _render_po(decision), type="purchase_order", mime_type="text/plain",
+        _render_po(decision),
+        type="purchase_order",
+        mime_type="text/plain",
         metadata={"sku": decision["sku"], "supplier": decision["supplier"]},
     )
 
@@ -318,7 +328,7 @@ async def decide(state: OrderState, agent: AgentRuntime) -> dict[str, Any]:
     }
 
 
-def _explain_state(result: AgentResult) -> dict[str, Any]:
+def _explain_state(result: AgentResponse) -> dict[str, Any]:
     """Map the rich result onto the graph's state. The application owns its state shape;
     the harness keeps the claims, evidence and observations on the result."""
     return {"answer": result.data["answer"], "trace": ["explain"]}
@@ -330,7 +340,7 @@ def _explain_state(result: AgentResult) -> dict[str, Any]:
     query="question",
     state_mapper=_explain_state,
 )
-async def explain(state: OrderState, agent: AgentRuntime) -> AgentResult:
+async def explain(state: OrderState, agent: AgentRuntime) -> AgentResponse:
     """Write the answer, and hand the durable facts to memory as claims and observations."""
     decision = state["decision"]
     reply = await agent.model.invoke(
@@ -346,21 +356,31 @@ async def explain(state: OrderState, agent: AgentRuntime) -> AgentResult:
         EvidenceRef(source_type="tool", source_id="inventory_db", citation="[1]"),
         EvidenceRef(source_type="tool", source_id="demand_forecast", citation="[2]"),
     ]
-    return AgentResult.ok(
+    return AgentResponse.ok(
         {"answer": answer},
         claims=[
-            Claim(claim_id="c-position", confidence=1.0, evidence_ids=["inventory_db"],
-                  text=f"{decision['sku']} has {decision['position']} units of cover "
-                       f"({decision['days_of_cover']} days)"),
-            Claim(claim_id="c-reorder", confidence=0.9, evidence_ids=["demand_forecast"],
-                  text=f"{decision['sku']} reorder point is {decision['reorder_point']} units"),
+            Claim(
+                claim_id="c-position",
+                confidence=1.0,
+                evidence_ids=["inventory_db"],
+                text=f"{decision['sku']} has {decision['position']} units of cover "
+                f"({decision['days_of_cover']} days)",
+            ),
+            Claim(
+                claim_id="c-reorder",
+                confidence=0.9,
+                evidence_ids=["demand_forecast"],
+                text=f"{decision['sku']} reorder point is {decision['reorder_point']} units",
+            ),
         ],
         evidence=evidence,
         recommended_actions=_actions(decision),
         memory_observations=[
             MemoryObservation(
-                content=(f"{decision['sku']} was reordered from {decision['supplier']}: "
-                         f"{decision['order_qty']} units at ${decision['cost_usd']:,.2f}"),
+                content=(
+                    f"{decision['sku']} was reordered from {decision['supplier']}: "
+                    f"{decision['order_qty']} units at ${decision['cost_usd']:,.2f}"
+                ),
                 kind="AGENT_RESULT",
             )
         ],
@@ -385,7 +405,7 @@ def build_graph():
     # fan out: the three investigations run concurrently
     for node in ("inventory", "demand", "supplier"):
         graph.add_edge("triage", node)
-        graph.add_edge(node, "decide")       # fan in: decide waits for all three
+        graph.add_edge(node, "decide")  # fan in: decide waits for all three
     graph.add_edge("decide", "explain")
     graph.add_edge("explain", END)
     return graph.compile(checkpointer=InMemorySaver())
@@ -434,22 +454,25 @@ async def main() -> None:
     print(f"question     : {out['question']}")
     print(f"nodes        : {' -> '.join(out['trace'])}")
     print(f"risks        : {out['risks'] or ['none']}")
-    print(f"position     : {decision['position']} units "
-          f"({decision['days_of_cover']} days of cover)")
-    print(f"reorder point: {decision['reorder_point']} "
-          f"(safety stock {decision['safety_stock']})")
-    print(f"decision     : {decision['order_qty']} units from {decision['supplier']} "
-          f"at ${decision['cost_usd']:,.2f}"
-          f"{' (budget capped)' if decision['budget_capped'] else ''}")
+    print(
+        f"position     : {decision['position']} units ({decision['days_of_cover']} days of cover)"
+    )
+    print(f"reorder point: {decision['reorder_point']} (safety stock {decision['safety_stock']})")
+    print(
+        f"decision     : {decision['order_qty']} units from {decision['supplier']} "
+        f"at ${decision['cost_usd']:,.2f}"
+        f"{' (budget capped)' if decision['budget_capped'] else ''}"
+    )
     print(f"purchase order artifact: {decision['purchase_order_ref']}")
-    print(f"placeable    : {decision['placeable']}"
-          f"{'' if decision['placeable'] else ' -> escalate'}")
+    print(
+        f"placeable    : {decision['placeable']}{'' if decision['placeable'] else ' -> escalate'}"
+    )
     print(f"answer       : {out['answer']}")
     print(f"wall clock   : {elapsed:.0f} ms (the three investigations ran in parallel)")
     print(f"memory       : {'attached' if os.environ.get('MEMORY_SERVICE_URL') else 'no-op'}")
     print(f"langfuse     : {'enabled' if harness.langfuse else 'disabled'}")
 
-    await harness.aclose()   # drain memory writeback, flush telemetry
+    await harness.aclose()  # drain memory writeback, flush telemetry
 
 
 def _actions(decision: dict[str, Any]) -> list[RecommendedAction]:

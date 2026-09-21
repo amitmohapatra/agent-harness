@@ -10,8 +10,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from universal_agent_harness.contracts.errors import AgentError
-from universal_agent_harness.contracts.messages import AgentRequest, AgentResult
+from universal_agent_contracts.errors import AgentError
+from universal_agent_contracts.messages import AgentRequest, AgentResponse
+
 from universal_agent_harness.interceptors.base import BaseInterceptor, Order
 from universal_agent_harness.telemetry import names as N
 from universal_agent_harness.telemetry.metrics import AGENT_EXECUTIONS, AGENT_LATENCY
@@ -31,7 +32,7 @@ class TelemetryInterceptor(BaseInterceptor):
         runtime.state["started_at"] = time.perf_counter()
         return request
 
-    async def after(self, result: AgentResult, runtime: AgentRuntime) -> AgentResult:
+    async def after(self, result: AgentResponse, runtime: AgentRuntime) -> AgentResponse:
         span = runtime.state["span"]
         elapsed = _elapsed_ms(runtime)
         span.set(

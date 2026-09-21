@@ -9,7 +9,7 @@ What the adapter does, and only this:
 * derive identity from the ``RunnableConfig`` (thread, subgraph lineage, step) — public keys;
 * build a wrapper whose signature declares the injectables the node asked for;
 * run the node through the harness pipeline;
-* map the :class:`AgentResult` back to a **state update the graph already understands**.
+* map the :class:`AgentResponse` back to a **state update the graph already understands**.
 
 What it deliberately does not do: own the graph topology, the routing, the reducers, the
 checkpoint backend or the state schema. A wrapped node returns exactly what the original
@@ -22,9 +22,10 @@ import inspect
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.messages import AgentResult
-from universal_agent_harness.contracts.tool import ToolSpec
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.messages import AgentResponse
+from universal_agent_contracts.tool import ToolSpec
+
 from universal_agent_harness_langgraph.lineage import Lineage, context_fields, lineage_from_config
 from universal_agent_harness_langgraph.signature import (
     build_node,
@@ -36,8 +37,8 @@ __all__ = ["LangGraphHarness", "langgraph_version"]
 
 #: Query extractors: a state key, or a callable taking the state.
 Query = str | Callable[[Any], str | None]
-#: Result mappers: ``AgentResult -> state update``.
-StateMapper = Callable[[AgentResult], Any]
+#: Result mappers: ``AgentResponse -> state update``.
+StateMapper = Callable[[AgentResponse], Any]
 
 
 def langgraph_version() -> str | None:
@@ -166,9 +167,9 @@ class LangGraphHarness:
                 **{k: v for k, v in self.harness.defaults.items() if k != "tenant_id"},
                 **{k: v for k, v in fields.items() if k not in ("tenant_id", "agent_run_id")},
             },
-        ) .with_fields(parent_agent_run_id=lineage.parent_run_id())
+        ).with_fields(parent_agent_run_id=lineage.parent_run_id())
 
-    def map_result(self, result: AgentResult, mapper: StateMapper | None = None) -> Any:
+    def map_result(self, result: AgentResponse, mapper: StateMapper | None = None) -> Any:
         return (mapper or _default_mapper)(result)
 
     def lineage(self, config: Mapping[str, Any] | None) -> Lineage:
@@ -221,7 +222,7 @@ def _as_agent(node: Callable[..., Any], *, runtime_aware: bool) -> Callable[...,
     return agent
 
 
-def _default_mapper(result: AgentResult) -> Any:
+def _default_mapper(result: AgentResponse) -> Any:
     """Return exactly what the node returned (§52). The harness's own metadata stays on the
     result object, which callers can opt into with an explicit ``state_mapper``."""
     return result.data

@@ -22,17 +22,18 @@ from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.descriptors import AgentDescriptor, SkillDescriptor
+from universal_agent_contracts.errors import AgentError
+from universal_agent_contracts.events import LifecycleEvent
+from universal_agent_contracts.messages import AgentRequest, AgentResponse
+
 from universal_agent_harness.artifacts.stores import (
     FileArtifactStore,
     InMemoryArtifactStore,
     NoArtifactStore,
 )
 from universal_agent_harness.config.settings import HarnessConfig
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.descriptors import AgentDescriptor, SkillDescriptor
-from universal_agent_harness.contracts.errors import AgentError
-from universal_agent_harness.contracts.events import LifecycleEvent
-from universal_agent_harness.contracts.messages import AgentRequest, AgentResult
 from universal_agent_harness.evaluation.events import (
     CompositeEvaluationSink,
     LifecycleDispatcher,
@@ -60,6 +61,7 @@ from universal_agent_harness.memory.writeback import WritebackQueue
 from universal_agent_harness.models.providers import DirectModelClient, UnconfiguredModelClient
 from universal_agent_harness.policy.providers import NoOpPolicyProvider
 from universal_agent_harness.registry.client import NoOpAgentRegistry
+from universal_agent_harness.runs import NoRunStore, RunRecorder
 from universal_agent_harness.runtime.agent_runtime import AgentRuntime
 from universal_agent_harness.runtime.logging import configure_logging
 from universal_agent_harness.runtime.propagation import bind, current_context
@@ -93,6 +95,7 @@ class AgentHarness:
         telemetry: Any = None,
         policy: Any = None,
         registry: Any = None,
+        runs: Any = None,
         evaluation_sink: Any = None,
         evaluation_provider: Any = None,
         prompts: Any = None,
@@ -134,12 +137,19 @@ class AgentHarness:
         # A provider is enabled by being passed: no flag that has to agree with it.
         self.policy = policy or NoOpPolicyProvider()
         self.policy_enabled = policy is not None
-        self.registry = registry or NoOpAgentRegistry()
-        self.registry_enabled = registry is not None
+        self.registry = registry or self._build_registry()
+        self.registry_enabled = self.registry.name != "noop"
+        self.runs = runs or self._build_runs()
         self.prompts = prompts
         self.evaluation_provider = evaluation_provider or NoOpEvaluationProvider()
 
         self.events = LifecycleDispatcher(list(listeners))
+        if self.runs.name != "noop":
+            # A listener, not an interceptor: recording a run is an observation of the turn,
+            # not a step in it. An interceptor that failed would change the outcome, which
+            # is the coupling the store's best-effort default exists to avoid.
+            self._recorder = RunRecorder(self.runs)
+            self.events.add(self._recorder)
         #: Bounded so a backlog can never grow without limit; writing inline is the
         #: fallback when it saturates.
         self.writeback = WritebackQueue(MAX_PENDING_WRITEBACKS)
@@ -147,9 +157,7 @@ class AgentHarness:
         self.context_factory = ContextFactory(self.defaults)
         self.descriptors: dict[str, AgentDescriptor] = {}
 
-        self.chain = InterceptorChain(
-            [*self._core_interceptors(), *interceptors]
-        )
+        self.chain = InterceptorChain([*self._core_interceptors(), *interceptors])
         self.runtime_builder = RuntimeBuilder(
             memory_factory=self.memory_factory,
             model_client=self.model_client,
@@ -254,7 +262,7 @@ class AgentHarness:
             IdentityInterceptor(self.version),
             TelemetryInterceptor(),
             TimeoutInterceptor(self.config.timeouts.default_seconds),
-            ResultValidationInterceptor(),
+            ResultValidationInterceptor(output_schema=self._output_schema),
         ]
         if self.policy_enabled:
             chain.append(PolicyInterceptor(self.policy))
@@ -299,7 +307,7 @@ class AgentHarness:
         agent_id: str | None = None,
         skills: list[str | SkillDescriptor] | None = None,
         version: str = "0.1.0",
-        state_mapper: Callable[[AgentResult], Any] | None = None,
+        state_mapper: Callable[[AgentResponse], Any] | None = None,
         memory_policy: MemoryPolicy | dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
         idempotent: bool = False,
@@ -313,7 +321,7 @@ class AgentHarness:
     ) -> Callable[..., Any]:
         """Wrap an existing agent. The wrapper keeps the target's sync/async nature.
 
-        ``state_mapper`` maps the :class:`AgentResult` onto whatever the caller's framework
+        ``state_mapper`` maps the :class:`AgentResponse` onto whatever the caller's framework
         expects (a graph state update, a dict, the raw data) — the application keeps owning
         its own state shape (§8).
         """
@@ -452,7 +460,7 @@ class AgentHarness:
                     raise
                 # The block reports what it produced through ``runtime.state["result"]``;
                 # with nothing set, the execution is recorded as a bare success.
-                result = AgentResult.coerce(runtime.state.get("result"))
+                result = AgentResponse.coerce(runtime.state.get("result"))
                 result = await self.chain.after(result, runtime)
                 if result.succeeded:
                     self.events.emit(
@@ -473,7 +481,7 @@ class AgentHarness:
         agent_id: str | None = None,
         context: AgentExecutionContext | None = None,
         **options: Any,
-    ) -> AgentResult:
+    ) -> AgentResponse:
         """One-shot execution without keeping a wrapper around."""
         wrapper_options = {k: v for k, v in options.items() if k in _WRAP_OPTIONS}
         call_fields = {k: v for k, v in options.items() if k not in _WRAP_OPTIONS}
@@ -486,6 +494,77 @@ class AgentHarness:
         return run_sync(self.run(target, payload, **options))
 
     # ------------------------------------------------------------------ helpers
+    async def _output_schema(self, agent_id: str) -> dict[str, Any] | None:
+        """The output schema the registry holds for ``agent_id``, if any.
+
+        A bound method rather than a lambda so the interceptor keeps working when the
+        registry is swapped after construction, and so an unbound deployment answers
+        ``None`` without the interceptor needing to know a registry exists.
+        """
+        resolver = getattr(self.registry, "output_schema", None)
+        if resolver is None:
+            return None
+        return await resolver(agent_id)
+
+    def _build_runs(self) -> Any:
+        """The durable-runs client when the deployment records to one, else a no-op.
+
+        Partial configuration is treated as unconfigured, for the same reason as the
+        registry: a URL with no key fails on the first turn, at startup, reading as an
+        outage rather than as the missing setting it is.
+        """
+        settings = self.config.runs
+        if not settings.configured:
+            return NoRunStore()
+        from universal_agent_harness.runs import RunStoreClient  # noqa: PLC0415 - optional
+
+        return RunStoreClient(
+            str(settings.url), api_key=str(settings.api_key), required=settings.required
+        )
+
+    def _build_registry(self) -> Any:
+        """The AI Registry client when the deployment is bound to one, else a no-op.
+
+        Built from configuration rather than asked for in code: a deployment that has
+        already told the harness its registry URL, product and key should not have to
+        construct a client as well. Partial configuration is treated as *not configured* —
+        a URL without a key would otherwise fail on the first call, at startup, in a way
+        that reads as an outage rather than a missing setting.
+        """
+        settings = self.config.registry
+        if not settings.configured:
+            return NoOpAgentRegistry()
+        from universal_agent_harness.registry.ai_registry import (  # noqa: PLC0415 - optional
+            AIRegistryClient,
+        )
+
+        return AIRegistryClient(
+            str(settings.url),
+            product_key=str(settings.product_key),
+            api_key=str(settings.api_key),
+        )
+
+    def qualify(self, agent_id: str) -> str:
+        """``agent_id`` as the rest of the world must see it.
+
+        Agents are declared bare — ``@harness.agent(agent_id="refund-agent")`` — because the
+        product a deployment serves is configuration, not source. When ``product_key`` is
+        set, the id that leaves this process becomes ``{product_key}:{agent_id}``, which is
+        what keeps two teams' identically-named agents from sharing a memory scope inside
+        one tenant.
+
+        ``:`` rather than ``/``: ``safe_id`` keeps ``:`` and rewrites ``/`` to a hyphen, so
+        ``billing/refund-agent`` would arrive downstream as ``billing-refund-agent`` —
+        indistinguishable from product ``billing-refund``'s agent ``agent``.
+
+        An id that already carries a prefix is left alone, so a process serving several
+        products can name them explicitly.
+        """
+        product = self.config.registry.product_key
+        if not product or ":" in agent_id:
+            return agent_id
+        return f"{product}:{agent_id}"
+
     def describe(
         self,
         agent_id: str,
@@ -496,7 +575,7 @@ class AgentHarness:
     ) -> AgentDescriptor:
         """Build (and remember) an agent descriptor, for the registry hook and telemetry."""
         descriptor = AgentDescriptor.build(
-            agent_id,
+            self.qualify(agent_id),
             skills=skills,
             version=version,
             harness_version=self.version,
@@ -593,7 +672,15 @@ class AgentHarness:
             await self.registry.register(descriptor)
 
     async def drain(self, timeout: float | None = 30.0) -> int:  # noqa: ASYNC109
-        """Await outstanding memory/evaluation writebacks. Use at shutdown and in tests."""
+        """Await outstanding memory/evaluation writebacks and run records.
+
+        Run records are drained too, and before the count is returned: a process that exits
+        without this may have opened a run it never closed, leaving a turn that finished
+        looking like one still in flight.
+        """
+        recorder = getattr(self, "_recorder", None)
+        if recorder is not None:
+            await recorder.drain()
         return await self.writeback.drain(timeout)
 
     def flush(self, timeout_seconds: float = 5.0) -> None:

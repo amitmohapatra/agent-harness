@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from tests.support import span_by_name, span_names
 
-from universal_agent_harness import AgentHarness, AgentResult
+from universal_agent_harness import AgentHarness, AgentResponse
 from universal_agent_harness.langfuse import attributes as LA
 
 
@@ -40,17 +40,17 @@ async def run_multi_agent(harness, context):
     async def inventory(state, agent):
         await agent.model.invoke("check stock")
         await agent.tools.call("inventory_db", sku=state["sku"])
-        return AgentResult.ok({"stock": 2})
+        return AgentResponse.ok({"stock": 2})
 
     @harness.agent(agent_id="promotion-agent")
     async def promotion(state, agent):
         await agent.model.invoke("check promotions")
-        return AgentResult.ok({"promo": None})
+        return AgentResponse.ok({"promo": None})
 
     @harness.agent(agent_id="synthesis-agent")
     async def synthesis(state, agent):
         await agent.model.invoke("summarise")
-        return AgentResult.ok("final answer")
+        return AgentResponse.ok("final answer")
 
     @harness.agent(agent_id="planner-agent")
     async def planner(state, agent):
@@ -75,13 +75,14 @@ async def test_span_hierarchy_matches_the_documented_shape(memory, context, span
     # one trace for the whole multi-agent turn
     assert len({s.get_span_context().trace_id for s in finished}) == 1
 
-    by_agent = {
-        s.attributes["agent.id"]: s for s in finished if s.name == "agent.run"
-    }
+    by_agent = {s.attributes["agent.id"]: s for s in finished if s.name == "agent.run"}
     planner = by_agent["planner-agent"]
     for child_agent in ("inventory-agent", "promotion-agent", "synthesis-agent"):
         assert by_agent[child_agent].parent.span_id == planner.get_span_context().span_id
-        assert by_agent[child_agent].attributes["agent.parent_run.id"] == planner.attributes["agent.run.id"]
+        assert (
+            by_agent[child_agent].attributes["agent.parent_run.id"]
+            == planner.attributes["agent.run.id"]
+        )
 
     inventory_children = [
         s.name
@@ -214,7 +215,9 @@ async def test_langfuse_maps_the_documented_trace_and_observation_fields(memory,
 
     assert span_by_name(spans, "agent.model.invoke").attributes[LA.OBSERVATION_TYPE] == "generation"
     assert span_by_name(spans, "agent.tool.call").attributes[LA.OBSERVATION_TYPE] == "tool"
-    assert span_by_name(spans, "agent.memory.retrieve").attributes[LA.OBSERVATION_TYPE] == "retriever"
+    assert (
+        span_by_name(spans, "agent.memory.retrieve").attributes[LA.OBSERVATION_TYPE] == "retriever"
+    )
 
 
 async def test_langfuse_generation_carries_model_and_usage_details(memory, context, spans):

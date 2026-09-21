@@ -16,6 +16,10 @@ classifiers = [
 # Core stays small: contracts, config, the OTel API (not the SDK) and the Memory Service SDK.
 # No framework (langgraph/crewai/adk) and no telemetry backend are ever pulled in here.
 dependencies = [
+  "universal-agent-contracts>=0.1",
+  # The gateway client, shared with the memory service so its retry and rate-limit
+  # handling has one implementation rather than two that drift.
+  "bifrost-sdk>=0.1",
   "pydantic>=2.13,<3",
   "pydantic-settings>=2.15,<3",
   "opentelemetry-api>=1.44",
@@ -26,13 +30,15 @@ dependencies = [
 [project.optional-dependencies]
 # OpenTelemetry SDK + OTLP exporter (needed only if the application does not configure its own)
 otel = ["opentelemetry-sdk>=1.44", "opentelemetry-exporter-otlp-proto-http>=1.44"]
+# AI Registry binding: validating a result against the output_schema an agent declared
+registry = ["jsonschema>=4"]
 # Langfuse observability / evaluation / prompt provider
 langfuse = ["langfuse>=3.0"]
 # LangGraph adapter (never installed for plain-Python users)
 langgraph = ["universal-agent-harness-langgraph"]
 # JSON structured logging via structlog (stdlib logging is used when absent)
 logging = ["structlog>=25.2"]
-all = ["universal-agent-harness[otel,langfuse,langgraph,logging]"]
+all = ["universal-agent-harness[otel,langfuse,langgraph,logging,registry]"]
 
 [dependency-groups]
 dev = [
@@ -67,6 +73,9 @@ members = ["integrations/langgraph"]
 universal-agent-harness-langgraph = { workspace = true }
 # Local development against the Memory Service SDK checkout.
 universal-memory = { path = "../agent-memory-service/sdk/python", editable = true }
+# The contract and the gateway client are separate distributions; local while unpublished.
+universal-agent-contracts = { path = "../agent-contracts", editable = true }
+bifrost-sdk = { path = "../bifrost-sdk", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -91,7 +100,9 @@ ignore = ["PLR0913", "PLR2004", "B008"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004", "T20", "PLC0415", "E501"]
 "integrations/*/tests/**" = ["PLR2004", "T20", "PLC0415", "E501"]
-"conftest.py" = ["E402"]
+# E402: sys.path is set up before the imports. PLC0415: fixtures import optional
+# dependencies *after* deciding to skip, so a missing service is a skip not an ImportError.
+"conftest.py" = ["E402", "PLC0415"]
 "examples/**" = ["T20"]
 
 [tool.pyright]

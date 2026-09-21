@@ -14,8 +14,8 @@ def test_defaults_are_safe():
     assert cfg.memory.enabled and cfg.memory.retrieve_before
     assert cfg.telemetry.enabled
     assert cfg.observability.langfuse.enabled is False
-    assert cfg.retries.enabled is False              # retries are opt-in
-    assert cfg.telemetry.capture.inputs is False     # no payloads by default
+    assert cfg.retries.enabled is False  # retries are opt-in
+    assert cfg.telemetry.capture.inputs is False  # no payloads by default
     assert cfg.telemetry.capture.outputs is False
     assert cfg.telemetry.capture.memory_content is False
     assert cfg.telemetry.capture.user_id is False
@@ -31,11 +31,16 @@ def test_capture_and_sampling_are_defined_once():
 
 
 def test_no_setting_exists_only_to_agree_with_a_provider():
-    """Policy and registry are enabled by passing a provider, not by a flag."""
+    """A provider is enabled by supplying what it needs, never by a flag repeating it."""
     cfg = HarnessConfig.load(env=False)
     assert not hasattr(cfg, "policy")
-    assert not hasattr(cfg, "registry")
     assert not hasattr(cfg, "frameworks")
+    # ``registry`` carries the address and credential a client is built from, the same shape
+    # as ``observability.langfuse``. What it must never carry is an ``enabled`` flag: that
+    # would let configuration claim a registry the deployment has no way to reach, and the
+    # first symptom would be a startup failure that reads as an outage.
+    assert not hasattr(cfg.registry, "enabled")
+    assert cfg.registry.configured is False
 
 
 def test_document_form_with_a_harness_key(tmp_path):
@@ -74,7 +79,9 @@ def test_langfuse_requires_telemetry():
         HarnessConfig.load(
             {
                 "telemetry": {"enabled": False},
-                "observability": {"langfuse": {"enabled": True, "public_key": "p", "secret_key": "s"}},
+                "observability": {
+                    "langfuse": {"enabled": True, "public_key": "p", "secret_key": "s"}
+                },
             },
             env=False,
         )
@@ -111,6 +118,8 @@ def test_invalid_environment_value_is_reported_with_the_variable_name():
 
 def test_overrides_beat_file_and_env():
     cfg = HarnessConfig.load(
-        {"timeouts": {"default_seconds": 1}}, env=False, overrides={"timeouts": {"default_seconds": 9}}
+        {"timeouts": {"default_seconds": 1}},
+        env=False,
+        overrides={"timeouts": {"default_seconds": 9}},
     )
     assert cfg.timeouts.default_seconds == 9

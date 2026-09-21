@@ -5,8 +5,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from universal_agent_harness.contracts.events import AgentEvalEvent
-from universal_agent_harness.contracts.messages import AgentRequest, AgentResult
+from universal_agent_contracts.events import AgentEvalEvent
+from universal_agent_contracts.messages import AgentRequest, AgentResponse
+
 from universal_agent_harness.interceptors.base import BaseInterceptor, Order
 from universal_agent_harness.memory.writeback import WritebackQueue
 from universal_agent_harness.telemetry.sampling import roll
@@ -34,11 +35,11 @@ class EvaluationEventInterceptor(BaseInterceptor):
         self.sample_rate = sample_rate
         self.queue = queue or WritebackQueue()
 
-    async def after(self, result: AgentResult, runtime: AgentRuntime) -> AgentResult:
+    async def after(self, result: AgentResponse, runtime: AgentRuntime) -> AgentResponse:
         await self._emit(runtime, result)
         return result
 
-    async def _emit(self, runtime: AgentRuntime, result: AgentResult) -> None:
+    async def _emit(self, runtime: AgentRuntime, result: AgentResponse) -> None:
         if not self._sampled(runtime):
             return
         request: AgentRequest | None = runtime.state.get("request")

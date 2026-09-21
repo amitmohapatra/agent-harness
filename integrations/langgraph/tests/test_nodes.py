@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 from tests.support import span_by_name, span_names
 
-from universal_agent_harness import AgentResult, AgentRuntime
+from universal_agent_harness import AgentResponse, AgentRuntime
 
 
 class State(TypedDict, total=False):
@@ -94,9 +94,7 @@ async def test_identity_overrides_travel_in_the_config(harness, memory):
         return {"answer": "ok"}
 
     graph = StateGraph(State)
-    graph.add_node(
-        "answer", harness.langgraph.wrap_node(node, agent_id="inv", query="question")
-    )
+    graph.add_node("answer", harness.langgraph.wrap_node(node, agent_id="inv", query="question"))
     graph.add_edge(START, "answer")
     await graph.compile().ainvoke(
         {"question": "q"},
@@ -131,8 +129,8 @@ async def test_state_mapper_controls_the_state_update(harness):
     @harness.langgraph.agent(
         agent_id="inv", state_mapper=lambda result: {"answer": result.data["text"]}
     )
-    async def node(state: State, agent: AgentRuntime) -> AgentResult:
-        return AgentResult.ok({"text": "mapped answer"})
+    async def node(state: State, agent: AgentRuntime) -> AgentResponse:
+        return AgentResponse.ok({"text": "mapped answer"})
 
     graph = StateGraph(State)
     graph.add_node("inv", node)
@@ -229,7 +227,9 @@ async def test_streaming_still_streams(harness):
     graph.add_edge(START, "answer")
     app = graph.compile()
 
-    updates = [chunk async for chunk in app.astream({"question": "q"}, config(), stream_mode="updates")]
+    updates = [
+        chunk async for chunk in app.astream({"question": "q"}, config(), stream_mode="updates")
+    ]
     assert updates == [{"answer": {"answer": "streamed"}}]
 
 
@@ -339,8 +339,7 @@ async def test_an_interrupt_suspends_the_run_instead_of_failing_it(harness, span
     """``interrupt()`` raises to hand control to the graph runtime. That is the mechanism,
     not a failure, and the harness must not report it as one."""
     from langgraph.types import interrupt
-
-    from universal_agent_harness.contracts.events import LifecycleEvent
+    from universal_agent_contracts.events import LifecycleEvent
 
     interesting = {str(LifecycleEvent.AGENT_PAUSE), str(LifecycleEvent.AGENT_ERROR)}
     seen: list[str] = []

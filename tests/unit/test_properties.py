@@ -22,7 +22,10 @@ SETTINGS = settings(max_examples=150, deadline=None)
 def test_idempotency_keys_are_deterministic(tenant, thread, turn, agent, part):
     def key() -> str:
         ctx = AgentExecutionContext.create(
-            tenant_id=tenant, agent_id=agent, thread_id=thread, turn_id=turn,
+            tenant_id=tenant,
+            agent_id=agent,
+            thread_id=thread,
+            turn_id=turn,
             agent_run_id="run_fixed",
         )
         return ctx.idempotency_key("obs", part)
@@ -61,8 +64,9 @@ def test_children_always_preserve_lineage(agent, group):
     secret=st.text(min_size=8, max_size=40).filter(
         lambda s: s.strip() and "@" not in s and s not in REDACTED
     ),
-    key=st.sampled_from(["api_key", "authorization", "password", "secret", "x-api-key",
-                         "access_token", "cookie"]),
+    key=st.sampled_from(
+        ["api_key", "authorization", "password", "secret", "x-api-key", "access_token", "cookie"]
+    ),
 )
 @SETTINGS
 def test_named_secrets_are_never_emitted(secret, key):

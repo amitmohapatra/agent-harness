@@ -1,6 +1,6 @@
 """Plain Python, no framework: wrap what you have, then adopt more when you want to.
 
-    python examples/plain_python.py
+python examples/plain_python.py
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import asyncio
 from universal_agent_harness import (
     AgentExecutionContext,
     AgentHarness,
-    AgentResult,
+    AgentResponse,
     Claim,
     MemoryObservation,
 )
@@ -36,7 +36,11 @@ async def main() -> None:
     )
 
     context = AgentExecutionContext.create(
-        tenant_id="acme", agent_id="inventory-agent", user_id="u1", thread_id="chat-42",
+        tenant_id="acme",
+        agent_id="inventory-agent",
+        user_id="u1",
+        # its own thread id: examples must not claim one the test suite also uses
+        thread_id="example-plain-python",
         turn_id="turn-1",
     )
 
@@ -47,17 +51,15 @@ async def main() -> None:
 
     # -- level 2: runtime-aware agent ---------------------------------------------------
     @harness.agent(agent_id="reorder-agent", skills=["inventory.reorder"])
-    async def reorder_agent(state, agent) -> AgentResult:
+    async def reorder_agent(state, agent) -> AgentResponse:
         stock = (await agent.tools.call("inventory_db", sku=state["sku"])).output
         needed = max(0, stock["reorder_point"] - stock["on_hand"])
         report = await agent.artifacts.put(
             f"reorder report for {state['sku']}: {needed} units", type="report"
         )
-        return AgentResult.ok(
+        return AgentResponse.ok(
             {"reorder": needed},
-            claims=[
-                Claim(claim_id="c1", text=f"{state['sku']} is {needed} units below reorder")
-            ],
+            claims=[Claim(claim_id="c1", text=f"{state['sku']} is {needed} units below reorder")],
             artifacts=[report],
             memory_observations=[MemoryObservation(content=f"{state['sku']} needs {needed} units")],
             confidence=0.9,
@@ -70,7 +72,7 @@ async def main() -> None:
     # -- level 3: instrument a block ----------------------------------------------------
     async with harness.execution(context, agent_id="report-agent", input="summarise") as runtime:
         runtime.logger.info("doing work the harness cannot see inside")
-        runtime.state["result"] = AgentResult.ok("summary written")
+        runtime.state["result"] = AgentResponse.ok("summary written")
 
     # -- child runs inherit identity ----------------------------------------------------
     child = context.for_agent("promotion-agent")

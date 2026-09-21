@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from universal_agent_harness.contracts.context import AgentExecutionContext
+    from universal_agent_contracts.context import AgentExecutionContext
 
 #: visibility -> the context field that must be present for it.
 REQUIRED_FIELD: dict[str, str] = {
@@ -54,7 +54,7 @@ def check(visibility: str | None, context: AgentExecutionContext) -> None:
     """Raise if ``visibility`` cannot be satisfied by this execution context."""
     if visibility is None:
         return
-    from universal_agent_harness.contracts.errors import ConfigurationError  # noqa: PLC0415
+    from universal_agent_contracts.errors import ConfigurationError  # noqa: PLC0415
 
     if visibility not in VISIBILITIES:
         raise ConfigurationError(

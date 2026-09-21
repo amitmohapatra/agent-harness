@@ -32,7 +32,7 @@ import pytest
 from universal_agent_harness import (
     AgentExecutionContext,
     AgentHarness,
-    AgentResult,
+    AgentResponse,
     Claim,
     MemoryObservation,
 )
@@ -73,9 +73,26 @@ pytestmark = [
 def sql(query: str) -> list[list[str]]:
     """Read the service's database directly. A 202 is not evidence that a row exists."""
     proc = subprocess.run(
-        ["docker", "exec", PG_CONTAINER, "psql", "-U", "memory", "-d", "memory", "-t", "-A",
-         "-F", "\x1f", "-c", query],
-        capture_output=True, text=True, check=False, timeout=30,
+        [
+            "docker",
+            "exec",
+            PG_CONTAINER,
+            "psql",
+            "-U",
+            "memory",
+            "-d",
+            "memory",
+            "-t",
+            "-A",
+            "-F",
+            "\x1f",
+            "-c",
+            query,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
     )
     if proc.returncode != 0:
         pytest.skip(f"database not reachable for verification: {proc.stderr.strip()[:120]}")
@@ -107,8 +124,52 @@ async def eventually(
     raise AssertionError(f"timed out waiting for {what or 'condition'} (last value: {last!r})")
 
 
+#: How long a cold worker may take before the suite gives up on it.
+#:
+#: ``/health/live`` answers as soon as the API is up, which says nothing about the worker —
+#: and the worker loads three models before it processes anything. Measured on this machine:
+#: five minutes from container start to ``wiring.done``, with one model taking 1m41s alone.
+#: Every per-test budget here is 45s, so a suite started against a cold worker fails tests
+#: that are perfectly correct, and fails *different* ones each run depending on timing.
+WORKER_WARMUP_SECONDS = 420.0
+
+
+@pytest.fixture(scope="session")
+async def worker_ready() -> bool:
+    """Wait until the worker actually processes a job, once per session.
+
+    Deliberately not a bigger per-test timeout: raising those would hide a real regression in
+    processing latency behind the cold-start allowance. This pays the warmup once, up front,
+    and leaves every test's own budget tight enough to still catch a slowdown.
+    """
+    from universal_memory import MemoryClient
+
+    probe = MemoryClient(URL, api_key=API_KEY, timeout=60.0)
+    marker = uuid.uuid4().hex[:8]
+    try:
+        scoped = probe.bind(tenant_id=TENANT, user_id=f"warmup-{marker}")
+        await scoped.remember(
+            f"Warehouse WARMUP-{marker} ships SKU-{marker} every Tuesday at 09:00."
+        )
+        deadline = asyncio.get_running_loop().time() + WORKER_WARMUP_SECONDS
+        while asyncio.get_running_loop().time() < deadline:
+            rows = sql(
+                f"SELECT 1 FROM memories WHERE tenant_id = '{TENANT}' "
+                f"AND content LIKE '%{marker}%' LIMIT 1"
+            )
+            if rows:
+                return True
+            await asyncio.sleep(2.0)
+        raise AssertionError(
+            f"the worker did not process a memory within {WORKER_WARMUP_SECONDS:.0f}s — it is "
+            "either not running or still loading models"
+        )
+    finally:
+        await probe.aclose()
+
+
 @pytest.fixture
-async def client():
+async def client(worker_ready: bool):
     from universal_memory import MemoryClient
 
     c = MemoryClient(URL, api_key=API_KEY, timeout=60.0)
@@ -139,8 +200,13 @@ def context(run_id) -> AgentExecutionContext:
 
 def build(client, **config) -> AgentHarness:
     merged = {
-        "memory": {"writeback": False, "retrieve_before": False,
-                   "observe_input": False, "observe_output": False, "observe_claims": False},
+        "memory": {
+            "writeback": False,
+            "retrieve_before": False,
+            "observe_input": False,
+            "observe_output": False,
+            "observe_claims": False,
+        },
         "timeouts": {"memory_seconds": 60.0, "default_seconds": 120.0},
         **config,
     }
@@ -153,7 +219,7 @@ async def run(harness, context, body, **wrap):
 
     async def agent(_payload, runtime):
         captured["value"] = await body(runtime)
-        return AgentResult.ok("ok")
+        return AgentResponse.ok("ok")
 
     await harness.wrap(agent, agent_id=context.agent_id, **wrap)(None, context=context)
     return captured["value"]
@@ -183,9 +249,16 @@ async def test_each_memory_type_is_written_and_stored(client, context, memory_ty
     marker = uuid.uuid4().hex[:6]
     fact = f"Warehouse EU-{marker} ships SKU-{marker} every Tuesday at 09:00."
 
-    await run(harness, context, lambda rt: rt.memory.remember(
-        fact, memory_type=memory_type, lifetime=lifetime, visibility="USER",
-    ))
+    await run(
+        harness,
+        context,
+        lambda rt: rt.memory.remember(
+            fact,
+            memory_type=memory_type,
+            lifetime=lifetime,
+            visibility="USER",
+        ),
+    )
 
     rows = await eventually(
         lambda: sql(
@@ -209,8 +282,15 @@ async def test_visibility_levels_that_the_context_supports(client, context):
     written = {}
 
     async def body(rt):
-        for visibility in ("PRIVATE", "USER", "THREAD", "WORK", "WORKSPACE", "AGENT_GROUP",
-                           "TENANT"):
+        for visibility in (
+            "PRIVATE",
+            "USER",
+            "THREAD",
+            "WORK",
+            "WORKSPACE",
+            "AGENT_GROUP",
+            "TENANT",
+        ):
             marker = uuid.uuid4().hex[:6]
             await rt.memory.remember(
                 f"Supplier {marker} delivers pallets of SKU-{marker} within nine days.",
@@ -232,7 +312,11 @@ async def test_visibility_levels_that_the_context_supports(client, context):
         found = {r[0]: r[1] for r in rows}
         return found if len(found) >= len(written) else None
 
-    found = await eventually(stored, timeout=120.0, what="every visibility level to be stored")
+    # Seven memories, each needing extraction and indexing, behind a queue this suite shares
+    # with every other test. Measured at roughly four seconds per memory on a warm worker, so
+    # 120s was marginal and failed only when the rest of the suite had run first — passing in
+    # isolation and failing in the full run, which is the worst way for a test to be wrong.
+    found = await eventually(stored, timeout=300.0, what="every visibility level to be stored")
     assert set(found) == set(written), f"missing: {sorted(set(written) - set(found))}"
     await harness.aclose()
 
@@ -240,7 +324,7 @@ async def test_visibility_levels_that_the_context_supports(client, context):
 async def test_a_visibility_the_context_cannot_express_is_refused_immediately(client):
     """The service accepts such a write and fails the job that would create the memory, so
     the harness refuses it up front instead."""
-    from universal_agent_harness.contracts.errors import ConfigurationError
+    from universal_agent_contracts.errors import ConfigurationError
 
     harness = build(client)
     bare = AgentExecutionContext.create(tenant_id=TENANT, agent_id="live-surface")
@@ -293,11 +377,13 @@ async def test_forget_removes_the_memory(client, context):
 
     memory_id = await run(harness, context, body)
     gone = await eventually(
-        lambda: not sql(
-            f"SELECT memory_id FROM memories WHERE memory_id='{memory_id}' "
-            f"AND deleted_at IS NULL"
-        )
-        or sql(f"SELECT deleted_at FROM memories WHERE memory_id='{memory_id}'")[0][0],
+        lambda: (
+            not sql(
+                f"SELECT memory_id FROM memories WHERE memory_id='{memory_id}' "
+                f"AND deleted_at IS NULL"
+            )
+            or sql(f"SELECT deleted_at FROM memories WHERE memory_id='{memory_id}'")[0][0]
+        ),
         what="the deletion to land",
     )
     assert gone
@@ -361,9 +447,10 @@ async def test_a_document_becomes_retrievable_knowledge(client, context, tmp_pat
     )
 
     async def body(rt):
-        await rt.memory.record_input("What is our reorder policy?")   # creates the thread
-        handle = await rt.memory.add_document(doc, title=f"Reorder policy {marker}",
-                                              visibility="THREAD")
+        await rt.memory.record_input("What is our reorder policy?")  # creates the thread
+        handle = await rt.memory.add_document(
+            doc, title=f"Reorder policy {marker}", visibility="THREAD"
+        )
         assert handle.document_id
         # poll the document until the service reports it indexed
         for _ in range(40):
@@ -413,7 +500,8 @@ async def test_observations_populate_the_knowledge_graph(client, context):
         )
         await rt.memory.remember(
             f"{supplier} is the preferred supplier for SKU-{marker}.",
-            memory_type="SEMANTIC", visibility="USER",
+            memory_type="SEMANTIC",
+            visibility="USER",
         )
 
         async def has_facts():
@@ -461,7 +549,8 @@ async def test_grounding_reports_on_a_real_bundle(client, context):
     async def body(rt):
         await rt.memory.remember(
             f"SKU-{marker} has ninety five units on hand at warehouse EU-1.",
-            memory_type="SEMANTIC", visibility="USER",
+            memory_type="SEMANTIC",
+            visibility="USER",
         )
         bundle = await eventually(
             lambda: _nonempty_bundle(rt, f"how much stock of SKU-{marker}?"),
@@ -498,11 +587,19 @@ async def test_tool_calls_are_recorded_in_tool_memory(client, context):
         return {"sku": sku, "on_hand": 95}
 
     harness = AgentHarness(
-        memory=client, tools=[inventory_db], defaults={"tenant_id": TENANT},
-        config={"memory": {"writeback": False, "retrieve_before": False,
-                           "observe_input": False, "observe_output": False,
-                           "observe_claims": False},
-                "timeouts": {"memory_seconds": 60.0}},
+        memory=client,
+        tools=[inventory_db],
+        defaults={"tenant_id": TENANT},
+        config={
+            "memory": {
+                "writeback": False,
+                "retrieve_before": False,
+                "observe_input": False,
+                "observe_output": False,
+                "observe_claims": False,
+            },
+            "timeouts": {"memory_seconds": 60.0},
+        },
     )
 
     await run(harness, context, lambda rt: rt.tools.call("inventory_db", sku=f"SKU-{marker}"))
@@ -536,7 +633,7 @@ async def test_a_replayed_write_creates_one_row_not_two(client, context):
         return await rt.memory.remember(fact, visibility="USER")
 
     first = await run(harness, context, body)
-    second = await run(harness, context, body)      # same context -> same key
+    second = await run(harness, context, body)  # same context -> same key
     assert first.observation_id == second.observation_id
 
     rows = sql(
@@ -558,15 +655,20 @@ async def test_a_full_agent_turn_uses_every_runtime_client(client, context, span
     class Model:
         async def ainvoke(self, prompt, **kwargs):
             calls["prompt"] = prompt
-            return {"text": "reorder 500 units", "model": "live-demo",
-                    "usage": {"prompt_tokens": 12, "completion_tokens": 5, "cost_usd": 0.0001}}
+            return {
+                "text": "reorder 500 units",
+                "model": "live-demo",
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "cost_usd": 0.0001},
+            }
 
     async def inventory_db(sku: str) -> dict:
         """Stock levels."""
         return {"sku": sku, "on_hand": 95}
 
     harness = AgentHarness(
-        memory=client, model=Model(), tools=[inventory_db],
+        memory=client,
+        model=Model(),
+        tools=[inventory_db],
         defaults={"tenant_id": TENANT},
         config={
             "memory": {"writeback": False, "record_messages": True},
@@ -578,12 +680,12 @@ async def test_a_full_agent_turn_uses_every_runtime_client(client, context, span
     harness.on(lambda event, payload: events.append(event))
 
     @harness.agent(agent_id="live-surface", skills=["inventory.analysis"])
-    async def agent(state, runtime) -> AgentResult:
+    async def agent(state, runtime) -> AgentResponse:
         assert runtime.memory_context is not None, "memory should have been fetched first"
         stock = (await runtime.tools.call("inventory_db", sku="SKU-1")).output
         answer = (await runtime.model.invoke(f"stock is {stock['on_hand']}")).text
         ref = await runtime.artifacts.put(f"report: {answer}", type="report")
-        return AgentResult.ok(
+        return AgentResponse.ok(
             answer,
             claims=[Claim(claim_id="c1", text=f"SKU-1 has {stock['on_hand']} units")],
             artifacts=[ref],
@@ -598,8 +700,7 @@ async def test_a_full_agent_turn_uses_every_runtime_client(client, context, span
     assert {"on_agent_start", "on_model_end", "on_tool_end", "on_agent_success"} <= set(events)
 
     names = [s.name for s in spans.get_finished_spans()]
-    for expected in ("agent.run", "agent.model.invoke", "agent.tool.call",
-                     "agent.memory.retrieve"):
+    for expected in ("agent.run", "agent.model.invoke", "agent.tool.call", "agent.memory.retrieve"):
         assert expected in names, f"{expected} missing from {sorted(set(names))}"
 
     await harness.drain()
@@ -615,23 +716,30 @@ async def test_a_full_agent_turn_uses_every_runtime_client(client, context, span
 
 
 async def test_nested_agents_record_their_lineage_in_the_service(client, context):
-    harness = build(client, memory={"writeback": False, "retrieve_before": False,
-                                    "observe_input": False, "observe_output": False,
-                                    "observe_claims": False})
+    harness = build(
+        client,
+        memory={
+            "writeback": False,
+            "retrieve_before": False,
+            "observe_input": False,
+            "observe_output": False,
+            "observe_claims": False,
+        },
+    )
     child_context: dict[str, AgentExecutionContext] = {}
 
     @harness.agent(agent_id="child-agent")
-    async def child(state, runtime) -> AgentResult:
+    async def child(state, runtime) -> AgentResponse:
         child_context["ctx"] = runtime.context
         await runtime.memory.remember(
             f"The child agent inspected depot {state['marker']}.", visibility="USER"
         )
-        return AgentResult.ok("child done")
+        return AgentResponse.ok("child done")
 
     @harness.agent(agent_id="parent-agent")
-    async def parent(state, runtime) -> AgentResult:
+    async def parent(state, runtime) -> AgentResponse:
         await child(state)
-        return AgentResult.ok("parent done")
+        return AgentResponse.ok("parent done")
 
     marker = uuid.uuid4().hex[:6]
     await parent({"marker": marker}, context=context)
@@ -662,17 +770,17 @@ async def test_nested_agents_record_their_lineage_in_the_service(client, context
 async def test_automatic_writeback_records_the_turn(client, context):
     """The default path: question in, answer and claims out, all written by the harness."""
     harness = AgentHarness(
-        memory=client, defaults={"tenant_id": TENANT},
+        memory=client,
+        defaults={"tenant_id": TENANT},
         config={"memory": {"writeback": False}, "timeouts": {"memory_seconds": 60.0}},
     )
     marker = uuid.uuid4().hex[:6]
 
     @harness.agent(agent_id="live-surface")
-    async def agent(state, runtime) -> AgentResult:
-        return AgentResult.ok(
+    async def agent(state, runtime) -> AgentResponse:
+        return AgentResponse.ok(
             f"Warehouse EU-{marker} holds {marker} pallets of SKU-{marker}.",
-            claims=[Claim(claim_id="c1",
-                          text=f"SKU-{marker} is stored at warehouse EU-{marker}.")],
+            claims=[Claim(claim_id="c1", text=f"SKU-{marker} is stored at warehouse EU-{marker}.")],
         )
 
     await agent({"question": f"where is SKU-{marker} stored?"}, context=context)
@@ -735,15 +843,21 @@ async def test_a_langgraph_graph_runs_against_the_live_service(client, run_id, s
     app = graph.compile()
 
     context = AgentExecutionContext.create(
-        tenant_id=TENANT, agent_id="graph", user_id=f"lg-user-{run_id}",
-        thread_id=f"lg-{run_id}", turn_id=f"lg-turn-{run_id}",
+        tenant_id=TENANT,
+        agent_id="graph",
+        user_id=f"lg-user-{run_id}",
+        thread_id=f"lg-{run_id}",
+        turn_id=f"lg-turn-{run_id}",
     )
     async with harness.execution(context, agent_id="graph", input="stock check"):
         out = await app.ainvoke(
             {"question": f"how much stock of SKU-{run_id}?", "findings": []},
-            {"configurable": {"thread_id": f"lg-{run_id}",
-                              "harness": {"tenant_id": TENANT,
-                                          "user_id": f"lg-user-{run_id}"}}},
+            {
+                "configurable": {
+                    "thread_id": f"lg-{run_id}",
+                    "harness": {"tenant_id": TENANT, "user_id": f"lg-user-{run_id}"},
+                }
+            },
         )
 
     assert out["answer"] == "checked: stock checked, supplier checked"
@@ -783,7 +897,8 @@ async def test_policy_denial_blocks_before_any_write(client, context):
     from universal_agent_harness import AllowListPolicyProvider, PolicyDeniedError
 
     harness = AgentHarness(
-        memory=client, policy=AllowListPolicyProvider(agents={"allowed"}),
+        memory=client,
+        policy=AllowListPolicyProvider(agents={"allowed"}),
         defaults={"tenant_id": TENANT},
         config={"memory": {"writeback": False}, "timeouts": {"memory_seconds": 60.0}},
     )
@@ -810,14 +925,15 @@ async def test_memory_failure_degrades_the_run_but_keeps_the_answer(context):
 
     dead = MemoryClient("http://127.0.0.1:9", api_key="x", timeout=2.0, max_retries=0)
     harness = AgentHarness(
-        memory=dead, defaults={"tenant_id": TENANT},
+        memory=dead,
+        defaults={"tenant_id": TENANT},
         config={"memory": {"writeback": False}, "timeouts": {"memory_seconds": 3.0}},
     )
 
     @harness.agent(agent_id="live-surface")
-    async def agent(state, runtime) -> AgentResult:
+    async def agent(state, runtime) -> AgentResponse:
         assert runtime.memory_context is None
-        return AgentResult.ok("answered without memory")
+        return AgentResponse.ok("answered without memory")
 
     result = await agent({"question": "anything"}, context=context)
     assert result.data == "answered without memory"

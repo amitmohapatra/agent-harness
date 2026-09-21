@@ -13,9 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from universal_agent_harness.contracts.artifacts import ArtifactRef
-from universal_agent_harness.contracts.errors import ConfigurationError
-from universal_agent_harness.contracts.ids import stable_id
+from universal_agent_contracts.artifacts import ArtifactRef
+from universal_agent_contracts.errors import ConfigurationError
+from universal_agent_contracts.ids import stable_id
 
 
 class InMemoryArtifactStore:

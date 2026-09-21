@@ -7,7 +7,7 @@ from tests.support import span_names
 
 from universal_agent_harness import (
     AgentHarness,
-    AgentResult,
+    AgentResponse,
     Claim,
     CollectingEvaluationSink,
     EvidenceRef,
@@ -20,7 +20,7 @@ async def test_artifacts_created_during_a_run_are_registered_on_the_result(harne
     async def agent(payload, runtime):
         ref = await runtime.artifacts.put("a long report", type="report", mime_type="text/plain")
         assert ref.checksum.startswith("sha256:")
-        return AgentResult.ok({"report": ref.artifact_id})
+        return AgentResponse.ok({"report": ref.artifact_id})
 
     result = await harness.wrap(agent, agent_id="reporter")(None, context=context)
     assert len(result.artifacts) == 1
@@ -43,9 +43,7 @@ async def test_artifact_ids_are_stable_for_identical_content(harness, context):
 
 
 async def test_artifact_roundtrip_through_the_file_store(memory, context, tmp_path):
-    harness = AgentHarness(
-        memory=memory, artifacts=str(tmp_path), defaults={"tenant_id": "acme"}
-    )
+    harness = AgentHarness(memory=memory, artifacts=str(tmp_path), defaults={"tenant_id": "acme"})
 
     async def agent(payload, runtime):
         ref = await runtime.artifacts.put(b"binary payload", type="blob")
@@ -84,9 +82,11 @@ async def test_artifact_creation_is_traced(harness, context, spans):
 
 async def test_claims_evidence_and_recommendations_survive_the_pipeline(harness, context):
     async def agent(payload):
-        return AgentResult.ok(
+        return AgentResponse.ok(
             "stock is low",
-            claims=[Claim(claim_id="c1", text="SKU-1 has 3 units", evidence_ids=["e1"], confidence=0.9)],
+            claims=[
+                Claim(claim_id="c1", text="SKU-1 has 3 units", evidence_ids=["e1"], confidence=0.9)
+            ],
             evidence=[EvidenceRef(source_type="document", source_id="e1", page=2)],
             recommended_actions=[
                 RecommendedAction(
@@ -112,11 +112,14 @@ async def test_evaluation_events_carry_references_not_payloads(memory, context):
         memory=memory,
         defaults={"tenant_id": "acme"},
         evaluation_sink=sink,
-        config={"evaluation_events": {"enabled": True, "synchronous": True}, "memory": {"writeback": False}},
+        config={
+            "evaluation_events": {"enabled": True, "synchronous": True},
+            "memory": {"writeback": False},
+        },
     )
 
     async def agent(payload, runtime):
-        return AgentResult.ok(
+        return AgentResponse.ok(
             "secret business answer",
             evidence=[EvidenceRef(source_type="memory", source_id="m1")],
         )
@@ -170,7 +173,10 @@ async def test_model_and_tool_lifecycle_events(memory, context):
 
     seen: list[str] = []
     harness = AgentHarness(
-        memory=memory, model=model, tools=[echo], defaults={"tenant_id": "acme"},
+        memory=memory,
+        model=model,
+        tools=[echo],
+        defaults={"tenant_id": "acme"},
         listeners=[lambda event, payload: seen.append(event)],
     )
 

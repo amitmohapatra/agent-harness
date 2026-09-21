@@ -77,16 +77,21 @@ async def tour(agent: AgentRuntime) -> dict[str, Any]:
     #    visibility:  PRIVATE | RUN | AGENT_GROUP | THREAD | USER | WORK | WORKSPACE | TENANT
     await memory.remember(
         "SKU-1 is reordered from Castor Supply when cover falls below 10 days.",
-        memory_type="SEMANTIC", lifetime="LONG_TERM", visibility="WORKSPACE",
+        memory_type="SEMANTIC",
+        lifetime="LONG_TERM",
+        visibility="WORKSPACE",
         source="reorder-policy",
     )
     await memory.remember(
         "The planner prefers weekly digests over per-event alerts.",
-        memory_type="PREFERENCE", lifetime="LONG_TERM", visibility="USER",
+        memory_type="PREFERENCE",
+        lifetime="LONG_TERM",
+        visibility="USER",
     )
     await memory.remember(
         "Checking SKU-1 twice in one session usually means a customer escalation.",
-        memory_type="EPISODIC", lifetime="SHORT_TERM",
+        memory_type="EPISODIC",
+        lifetime="SHORT_TERM",
     )
 
     # 4. A document: parsed, chunked and indexed, becoming retrievable knowledge (RAG).
@@ -136,9 +141,11 @@ async def tour(agent: AgentRuntime) -> dict[str, Any]:
 
     # 10. Knowledge graph: entities and their relationships, optionally as of a point in time.
     answer = await memory.graph_query("who supplies SKU-1?", hops=2)
-    out["graph_facts"] = [
-        f"{f.subject} -{f.predicate}-> {f.object}" for f in getattr(answer, "facts", [])
-    ] if answer else []
+    out["graph_facts"] = (
+        [f"{f.subject} -{f.predicate}-> {f.object}" for f in getattr(answer, "facts", [])]
+        if answer
+        else []
+    )
     await memory.graph_query(entities=["SKU-1"], hops=1, as_of=datetime.now(UTC))
 
     # 11. The inventory view: what do we actually hold for this user/thread/run?
@@ -146,10 +153,14 @@ async def tour(agent: AgentRuntime) -> dict[str, Any]:
     out["held"] = [getattr(m, "memory_id", "?") for m in held][:5]
 
     # 12. Grounding: is the answer we are about to give supported by the evidence?
-    report = await memory.verify(
-        "SKU-1 has 95 units on hand and is reordered from Castor Supply.",
-        bundle=bundle,
-    ) if bundle is not None else None
+    report = (
+        await memory.verify(
+            "SKU-1 has 95 units on hand and is reordered from Castor Supply.",
+            bundle=bundle,
+        )
+        if bundle is not None
+        else None
+    )
     if report is not None:
         out["grounding"] = {
             "grounded": getattr(report, "grounded", None),
@@ -174,7 +185,7 @@ async def main() -> None:
 
         client: Any = MemoryClient(url, api_key=os.environ.get("MEMORY_API_KEY"))
     else:
-        client = DemoMemoryClient()   # prints the calls it would have made
+        client = DemoMemoryClient()  # prints the calls it would have made
 
     harness = AgentHarness(
         memory=client,
@@ -186,25 +197,31 @@ async def main() -> None:
         },
         config={
             "memory": {
-                "record_messages": True,     # let the harness write the chat turns
-                "retrieve_before": False,    # this example drives retrieval explicitly
+                "record_messages": True,  # let the harness write the chat turns
+                "retrieve_before": False,  # this example drives retrieval explicitly
                 "observe_input": False,
                 "observe_output": False,
                 "observe_claims": False,
-                "writeback": False,          # await the writes so the output is ordered
+                "writeback": False,  # await the writes so the output is ordered
             }
         },
     )
+
     async def memory_tour(_payload: Any, runtime: AgentRuntime) -> dict[str, Any]:
         return await tour(runtime)
 
     wrapped = harness.wrap(memory_tour, agent_id="memory-tour", skills=["memory.tour"])
 
     context = AgentExecutionContext.create(
-        tenant_id=TENANT, agent_id="memory-tour", user_id=USER, workspace_id=WORKSPACE,
+        tenant_id=TENANT,
+        agent_id="memory-tour",
+        user_id=USER,
+        workspace_id=WORKSPACE,
         # share() publishes to the agent group, so the run must belong to one
         agent_group_id="supply-chain",
-        thread_id=THREAD, turn_id=TURN, work_id="wo-2291",
+        thread_id=THREAD,
+        turn_id=TURN,
+        work_id="wo-2291",
     )
     result = await wrapped(None, context=context)
 
@@ -367,7 +384,7 @@ class _Bundle:
         self.query, self.query_type, self.bundle_id = query, "FACTUAL", "bundle_demo"
         self.conversation, self.evidence = _Conversation(), _Evidence()
         self.memories = (_Item("m1"), _Item("m2"))
-        self.knowledge = (_Item("k1"),)          # RAG chunks from the ingested document
+        self.knowledge = (_Item("k1"),)  # RAG chunks from the ingested document
         self.graph_facts = (_Item("g1"),)
         self.summaries = ()
         self.token_budget, self.token_estimate, self.cache_hit = 1500, 240, False

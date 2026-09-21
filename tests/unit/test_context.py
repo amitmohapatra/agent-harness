@@ -37,8 +37,17 @@ def test_child_inherits_trusted_identity_and_records_lineage():
     )
     child = parent.for_agent("inventory")
 
-    for field in ("tenant_id", "user_id", "workspace_id", "thread_id", "turn_id", "trace_id",
-                  "request_id", "correlation_id", "group_ids"):
+    for field in (
+        "tenant_id",
+        "user_id",
+        "workspace_id",
+        "thread_id",
+        "turn_id",
+        "trace_id",
+        "request_id",
+        "correlation_id",
+        "group_ids",
+    ):
         assert getattr(child, field) == getattr(parent, field), field
     assert child.agent_id == "inventory"
     assert child.parent_agent_run_id == parent.agent_run_id

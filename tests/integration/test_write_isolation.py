@@ -9,9 +9,7 @@ failure happened on the writeback path after the result was returned.
 
 from __future__ import annotations
 
-import pytest
-
-from universal_agent_harness import AgentHarness, AgentResult, Claim
+from universal_agent_harness import AgentHarness, AgentResponse, Claim
 
 
 async def test_a_failing_message_write_does_not_lose_the_observations(faulty_memory, context):
@@ -25,12 +23,14 @@ async def test_a_failing_message_write_does_not_lose_the_observations(faulty_mem
     harness = AgentHarness(
         memory=memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"writeback": False, "record_messages": True},
-                "timeouts": {"memory_seconds": 10}},
+        config={
+            "memory": {"writeback": False, "record_messages": True},
+            "timeouts": {"memory_seconds": 10},
+        },
     )
 
     async def agent(payload):
-        return AgentResult.ok(
+        return AgentResponse.ok(
             "reorder 50 units",
             claims=[Claim(claim_id="c1", text="SKU-1 cover is below ten days")],
         )
@@ -53,8 +53,10 @@ async def test_a_failing_message_write_does_not_lose_the_observations(faulty_mem
 async def test_the_error_names_what_was_lost(memory, context):
     from universal_agent_harness.interceptors.memory import MemoryWriteError
 
-    failures = [("message.user", RuntimeError("scope rejected")),
-                ("observe[EVENT]", RuntimeError("down"))]
+    failures = [
+        ("message.user", RuntimeError("scope rejected")),
+        ("observe[EVENT]", RuntimeError("down")),
+    ]
     error = MemoryWriteError(failures)
     assert "2 memory write(s) failed" in str(error)
     assert "message.user" in str(error) and "observe[EVENT]" in str(error)

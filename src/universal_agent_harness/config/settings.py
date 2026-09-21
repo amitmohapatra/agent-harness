@@ -149,8 +149,6 @@ class ModelsConfig(_Section):
 class ToolsConfig(_Section):
     #: Record invocations in the Memory Service's tool memory.
     record_to_memory: bool = True
-    #: Look up the Memory Service tool cache before executing a cacheable tool.
-    use_memory_cache: bool = False
 
 
 class ArtifactsConfig(_Section):
@@ -164,6 +162,59 @@ class EvaluationConfig(_Section):
     #: Evaluation is asynchronous by default; synchronous scoring blocks the result.
     synchronous: bool = False
     sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class RegistryConfig(_Section):
+    """The AI Registry this deployment is bound to.
+
+    All of it is deployment configuration, never source. ``product_key`` is the registry's
+    own product key: the registry enforces ``UNIQUE(product_id, type, name)``, so an agent
+    name is unique *within* a product and two teams may each own a "refund-agent". Nothing
+    downstream knows products exist — the Memory Service keys a private memory as
+    ``principal:{tenant}/agent:{agent_id}``, scoped by tenant alone — so the id that leaves
+    this process has to carry the product.
+
+    Deliberately absent: anything about Redis or pub/sub. The manifest carries its own
+    ``channel`` block, so a deployment that already told the registry where its bus is does
+    not tell every consumer again — the same reason the MCP SDK's quick start has no Redis
+    configuration in it.
+    """
+
+    url: str | None = None
+    product_key: str | None = None
+    #: Data-plane credential ("Manage -> SDK API keys" in the registry UI).
+    api_key: str | None = None
+
+    #: Deliberately no ``audience`` setting. An audience answers "who may call this?", which
+    #: is a property of a request and not of a deployment: the same process serves an
+    #: internal colleague and an external customer on consecutive turns. Pinning one here
+    #: would either hide agents the deployment is accountable for, or hand an external
+    #: caller an internal view. It is a per-call argument to discovery instead.
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.url and self.product_key and self.api_key)
+
+
+class RunsConfig(_Section):
+    """The durable-runs service this deployment records to.
+
+    Optional by design. Without it the harness behaves exactly as it did before: LangGraph's
+    own checkpointer still resumes an interrupted graph. What a runs service adds is the view
+    from *outside* the framework — "what is waiting for a human right now" — and a record
+    that survives the framework being swapped.
+    """
+
+    url: str | None = None
+    api_key: str | None = None
+    #: Fail the turn when a run cannot be recorded. Off by default: bookkeeping being
+    #: unreachable is a worse reason to fail a customer's request than almost any other.
+    #: On for workflows where an unrecorded run is the more serious failure.
+    required: bool = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.url and self.api_key)
 
 
 class HarnessConfig(BaseModel):
@@ -180,6 +231,8 @@ class HarnessConfig(BaseModel):
     timeouts: TimeoutConfig = TimeoutConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     evaluation_events: EvaluationConfig = EvaluationConfig()
+    registry: RegistryConfig = RegistryConfig()
+    runs: RunsConfig = RunsConfig()
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
@@ -246,6 +299,12 @@ def _bool(raw: str) -> bool:
 
 #: Documented environment variables -> config path.
 _ENV_MAP: dict[str, tuple[tuple[str, ...], Any]] = {
+    "UAH_RUNS_URL": (("runs", "url"), str),
+    "UAH_RUNS_API_KEY": (("runs", "api_key"), str),
+    "UAH_RUNS_REQUIRED": (("runs", "required"), _bool),
+    "UAH_REGISTRY_URL": (("registry", "url"), str),
+    "UAH_REGISTRY_PRODUCT_KEY": (("registry", "product_key"), str),
+    "UAH_REGISTRY_API_KEY": (("registry", "api_key"), str),
     "UAH_MEMORY_ENABLED": (("memory", "enabled"), _bool),
     "UAH_MEMORY_RETRIEVE_BEFORE": (("memory", "retrieve_before"), _bool),
     "UAH_MEMORY_FAILURE_MODE": (("memory", "failure_mode"), str),

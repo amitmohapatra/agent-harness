@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
-from universal_agent_harness.contracts.context import AgentExecutionContext
+from universal_agent_contracts.context import AgentExecutionContext
 
 if TYPE_CHECKING:  # pragma: no cover
     from universal_agent_harness.runtime.agent_runtime import AgentRuntime
@@ -47,9 +47,7 @@ def require_runtime() -> AgentRuntime:
 
 
 @contextmanager
-def bind(
-    context: AgentExecutionContext | None = None, runtime: Any = None
-) -> Iterator[None]:
+def bind(context: AgentExecutionContext | None = None, runtime: Any = None) -> Iterator[None]:
     """Bind context/runtime for the duration of the block, restoring previous values after."""
     tokens: list[tuple[ContextVar[Any], Token[Any]]] = []
     if context is not None:

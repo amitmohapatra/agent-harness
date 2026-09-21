@@ -15,6 +15,7 @@ BASE_LOGGER = "universal_agent_harness"
 
 try:  # pragma: no cover - exercised by whichever branch the environment provides
     import structlog
+
     _HAS_STRUCTLOG = True
 except ImportError:  # pragma: no cover - stdlib logging is the documented fallback
     structlog = None  # type: ignore[assignment]

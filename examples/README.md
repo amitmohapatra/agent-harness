@@ -4,6 +4,7 @@
 | --- | --- |
 | [`plain_python.py`](plain_python.py) | all three integration modes, tools, artifacts, claims, child runs — no framework, no services |
 | [`langgraph_agent.py`](langgraph_agent.py) | the smallest useful graph: an existing node and a runtime-aware node, with a checkpointer |
+| [`langgraph_chatbot.py`](langgraph_chatbot.py) | a five-node chatbot on a Bifrost gateway, with every configuration section set — see below |
 | [`reorder_workflow.py`](reorder_workflow.py) | the full picture — see below |
 | [`memory_tour.py`](memory_tour.py) | every memory operation the service supports, driven through the harness |
 
@@ -17,6 +18,44 @@ python examples/memory_tour.py
 ```
 
 They print JSON log lines (structured logging is on by default) alongside their output.
+
+## `langgraph_chatbot.py`
+
+A support chatbot whose models are reached through a **Bifrost** gateway, as five nodes and
+one conditional edge:
+
+```
+recall ──▶ plan ──▶ act ──▶ answer ──▶ verify ──▶ END
+             │                 ▲
+             └─────────────────┘   no lookup needed: skip `act`
+```
+
+| Node | What it does | Harness surface it shows |
+| --- | --- | --- |
+| `recall` | reads the context the harness already fetched | `query=` on the node drives retrieval; `runtime.memory_context` |
+| `plan` | one structured model call → route | `model.structured()`, JSON-schema output, a narrowed `MemoryPolicy` |
+| `act` | runs the tool the plan named | `runtime.tools.call()`, tool memory, per-tool timeout |
+| `answer` | the customer-facing reply | `model.invoke()`, an `AgentResponse` carrying a `Claim` |
+| `verify` | grounding gate — every number must come from a lookup | cheap, no model call; sets the failure signal |
+
+Unlike the other examples it needs a gateway:
+
+```bash
+export BIFROST_BASE_URL=http://localhost:8090/v1
+export BIFROST_API_KEY=vk-...
+export MEMORY_SERVICE_URL=http://localhost:8080   # optional
+python examples/langgraph_chatbot.py
+```
+
+`build_harness()` sets **every** configuration section explicitly — memory, telemetry and
+its capture/sampling policy, observability, models, tools, retries, timeouts, artifacts and
+evaluation events — plus every injectable provider (model, memory, tools, artifacts, policy,
+redactor, evaluation sink). Most deployments set three or four of these; they are all spelled
+out here so the surface is visible in one place.
+
+The graph is executed in `tests/integration/test_langgraph_chatbot.py` against a real
+gateway process and a real Memory Service, including the ungrounded-answer path — so this
+example cannot drift away from the code either.
 
 ## `reorder_workflow.py`
 

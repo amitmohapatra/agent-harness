@@ -10,8 +10,10 @@ from universal_agent_harness import AgentHarness, HarnessConfig
 
 harness = AgentHarness(memory=memory, config="harness.yaml")
 harness = AgentHarness(memory=memory, config={"timeouts": {"default_seconds": 10}})
-harness = AgentHarness(memory=memory, config=HarnessConfig.load("harness.yaml",
-                                                               overrides={"memory": {"enabled": False}}))
+harness = AgentHarness(
+    memory=memory,
+    config=HarnessConfig.load("harness.yaml", overrides={"memory": {"enabled": False}}),
+)
 ```
 
 The YAML may be the full document (with a `harness:` key, as in
@@ -179,8 +181,8 @@ harness.wrap(
     skills=["inventory.analysis"],
     memory_policy=MemoryPolicy(retrieve_before=False, observe_output=False),
     timeout_seconds=5,
-    idempotent=True,               # makes the agent eligible for configured retries
-    error_mode="result",           # return AgentResult(status=ERROR) instead of raising
+    idempotent=True,  # makes the agent eligible for configured retries
+    error_mode="result",  # return AgentResponse(status=ERROR) instead of raising
     state_mapper=lambda r: {"inventory_result": r.data},
     interceptors=[MyInterceptor()],
 )
@@ -190,16 +192,16 @@ harness.wrap(
 
 ```python
 AgentHarness(
-    memory=MemoryClient(...),          # universal-memory SDK client (or a MemoryContext)
-    model=my_model_client,             # ModelClient, or any callable/object with ainvoke
-    tools=[tool_a, tool_b],            # list, {name: callable}, or a ToolClient
-    artifacts="/var/lib/agent-artifacts",   # path, store instance, or None (in-process)
-    policy=AllowListPolicyProvider(tools={"inventory_db"}),   # passing it enables it
-    registry=my_registry,              # AgentRegistryClient; omitted -> no registry
-    evaluation_sink=my_sink,           # EvaluationSink
-    redactor=MyRedactor(),             # TelemetryRedactor
-    listeners=[on_event],              # lifecycle listeners
-    defaults={"tenant_id": "acme"},    # used when no context is supplied
-    error_mode="raise",                # "raise" (default) | "result"
+    memory=MemoryClient(...),  # universal-memory SDK client (or a MemoryContext)
+    model=my_model_client,  # ModelClient, or any callable/object with ainvoke
+    tools=[tool_a, tool_b],  # list, {name: callable}, or a ToolClient
+    artifacts="/var/lib/agent-artifacts",  # path, store instance, or None (in-process)
+    policy=AllowListPolicyProvider(tools={"inventory_db"}),  # passing it enables it
+    registry=my_registry,  # AgentRegistryClient; omitted -> no registry
+    evaluation_sink=my_sink,  # EvaluationSink
+    redactor=MyRedactor(),  # TelemetryRedactor
+    listeners=[on_event],  # lifecycle listeners
+    defaults={"tenant_id": "acme"},  # used when no context is supplied
+    error_mode="raise",  # "raise" (default) | "result"
 )
 ```

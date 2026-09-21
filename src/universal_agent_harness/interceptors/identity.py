@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from universal_agent_harness.contracts.messages import AgentRequest
+from universal_agent_contracts.messages import AgentRequest
+
 from universal_agent_harness.interceptors.base import BaseInterceptor, Order
 from universal_agent_harness.telemetry import names as N
 

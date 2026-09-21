@@ -14,8 +14,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
-from universal_agent_harness.contracts.errors import AgentError
-from universal_agent_harness.contracts.messages import AgentRequest, AgentResult
+from universal_agent_contracts.errors import AgentError
+from universal_agent_contracts.messages import AgentRequest, AgentResponse
 
 if TYPE_CHECKING:  # pragma: no cover
     from universal_agent_harness.runtime.agent_runtime import AgentRuntime
@@ -58,10 +58,10 @@ class BaseInterceptor:
     async def before(self, request: AgentRequest, runtime: AgentRuntime) -> AgentRequest:
         return request
 
-    async def after(self, result: AgentResult, runtime: AgentRuntime) -> AgentResult:
+    async def after(self, result: AgentResponse, runtime: AgentRuntime) -> AgentResponse:
         return result
 
-    async def on_error(self, error: AgentError, runtime: AgentRuntime) -> AgentResult | None:
+    async def on_error(self, error: AgentError, runtime: AgentRuntime) -> AgentResponse | None:
         return None
 
 
@@ -94,14 +94,14 @@ class InterceptorChain:
             request = await interceptor.before(request, runtime)
         return request
 
-    async def after(self, result: AgentResult, runtime: AgentRuntime) -> AgentResult:
+    async def after(self, result: AgentResponse, runtime: AgentRuntime) -> AgentResponse:
         for interceptor in self._after:
             result = await interceptor.after(result, runtime)
         return result
 
-    async def on_error(self, error: AgentError, runtime: AgentRuntime) -> AgentResult | None:
+    async def on_error(self, error: AgentError, runtime: AgentRuntime) -> AgentResponse | None:
         """First interceptor that produces a result wins; the rest still see the error."""
-        recovered: AgentResult | None = None
+        recovered: AgentResponse | None = None
         for interceptor in self._after:
             produced = await interceptor.on_error(error, runtime)
             if produced is not None and recovered is None:

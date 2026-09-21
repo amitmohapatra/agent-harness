@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tests.support import (  # noqa: E402
+from tests.support import (
     DEAD_SERVICE_URL,
     MEMORY_API_KEY,
     MEMORY_SERVICE_URL,
@@ -39,7 +39,7 @@ from tests.support import (  # noqa: E402
     RecordingMemoryClient,
 )
 
-from universal_agent_harness import AgentExecutionContext, AgentHarness  # noqa: E402
+from universal_agent_harness import AgentExecutionContext, AgentHarness
 
 TENANT = "acme"
 
@@ -173,6 +173,11 @@ async def harness(memory: Any) -> Any:
 @pytest.fixture(autouse=True)
 def _reset_langfuse_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ambient Langfuse credentials must not silently change what the tests exercise."""
-    for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
-                 "LANGFUSE_BASE_URL", "UAH_LANGFUSE_ENABLED"):
+    for name in (
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_HOST",
+        "LANGFUSE_BASE_URL",
+        "UAH_LANGFUSE_ENABLED",
+    ):
         monkeypatch.delenv(name, raising=False)

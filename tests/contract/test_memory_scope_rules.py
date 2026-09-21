@@ -65,8 +65,11 @@ def test_turn_id_gets_a_session_derived_from_the_thread():
 
 def test_an_explicit_session_is_never_overwritten():
     context = AgentExecutionContext.create(
-        tenant_id="acme", agent_id="inv", thread_id="chat-42",
-        session_id="sess-9", turn_id="turn-3",
+        tenant_id="acme",
+        agent_id="inv",
+        thread_id="chat-42",
+        session_id="sess-9",
+        turn_id="turn-3",
     )
     assert emitted(context)["session_id"] == "sess-9"
 
@@ -118,8 +121,12 @@ def test_the_sdk_scope_model_accepts_what_we_emit():
     from universal_memory.models import Scope
 
     context = AgentExecutionContext.create(
-        tenant_id="acme", agent_id="inv", thread_id="chat-42", turn_id="turn-3",
-        user_id="u1", work_id="wo-1",
+        tenant_id="acme",
+        agent_id="inv",
+        thread_id="chat-42",
+        turn_id="turn-3",
+        user_id="u1",
+        work_id="wo-1",
     )
     scope = Scope(**context.scope_fields())
     assert scope.session_id == "chat-42-session"
@@ -135,8 +142,14 @@ def test_observation_kinds_match_the_services_enum():
     from universal_agent_harness import OBSERVATION_KINDS
 
     assert {
-        "MESSAGE", "FILE", "AGENT_RESULT", "TOOL_RESULT",
-        "DECISION", "FEEDBACK", "EVENT", "IMPORT",
+        "MESSAGE",
+        "FILE",
+        "AGENT_RESULT",
+        "TOOL_RESULT",
+        "DECISION",
+        "FEEDBACK",
+        "EVENT",
+        "IMPORT",
     } == OBSERVATION_KINDS
 
 
@@ -150,12 +163,10 @@ def test_an_unknown_observation_kind_fails_before_the_wire():
 async def test_the_automatic_writeback_only_uses_valid_kinds(harness, memory, context):
     """The harness's own observations must be in the vocabulary — this is the regression
     test for input/claim observations being written with invented kinds."""
-    from universal_agent_harness import OBSERVATION_KINDS, AgentResult, Claim
+    from universal_agent_harness import OBSERVATION_KINDS, AgentResponse, Claim
 
     async def agent(payload):
-        return AgentResult.ok(
-            "an answer", claims=[Claim(claim_id="c1", text="a claim")]
-        )
+        return AgentResponse.ok("an answer", claims=[Claim(claim_id="c1", text="a claim")])
 
     await harness.wrap(agent, agent_id="inv")("a question", context=context)
     await harness.drain()  # writeback is asynchronous in production, and so here

@@ -22,9 +22,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.descriptors import AgentDescriptor
-from universal_agent_harness.contracts.errors import (
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.descriptors import AgentDescriptor
+from universal_agent_contracts.errors import (
     AgentCancelledError,
     AgentError,
     AgentTimeoutError,
@@ -32,8 +32,9 @@ from universal_agent_harness.contracts.errors import (
     HarnessError,
     is_pause_signal,
 )
-from universal_agent_harness.contracts.events import LifecycleEvent
-from universal_agent_harness.contracts.messages import AgentRequest, AgentResult, AgentStatus
+from universal_agent_contracts.events import LifecycleEvent
+from universal_agent_contracts.messages import AgentRequest, AgentResponse, AgentStatus
+
 from universal_agent_harness.execution.retry import RetryPolicy, with_retry
 from universal_agent_harness.runtime.agent_runtime import AgentRuntime
 from universal_agent_harness.runtime.cancellation import CancellationToken
@@ -74,7 +75,7 @@ class ExecutionCoordinator:
         error_mode: str | None = None,
         extra_interceptors: Any = (),
         memory_policy: Any = None,
-    ) -> AgentResult:
+    ) -> AgentResponse:
         """Execute ``agent`` (or ``call``) for ``request``. Returns a normalized result."""
         context = request.context
         decision = self.sampler.decide(agent_id=context.agent_id, run_id=context.agent_run_id)
@@ -111,7 +112,7 @@ class ExecutionCoordinator:
                         self._finish(runtime, None, error)
                         if mode == "raise":
                             raise
-                        result = AgentResult.failed(error, status=_status_for(error))
+                        result = AgentResponse.failed(error, status=_status_for(error))
                         result = await self._safe_after(result, runtime, chain)
                     self._finish(runtime, result, error)
                     return result
@@ -128,7 +129,7 @@ class ExecutionCoordinator:
         policy: RetryPolicy,
         *,
         call: Callable[[AgentRuntime], Awaitable[Any]] | None,
-    ) -> AgentResult:
+    ) -> AgentResponse:
         overhead = _Overhead()
         prepared = await chain.before(request, runtime)
         runtime.state["request"] = prepared
@@ -149,7 +150,7 @@ class ExecutionCoordinator:
             ),
         )
         overhead.mark_agent()
-        result = AgentResult.coerce(raw)
+        result = AgentResponse.coerce(raw)
         result = await chain.after(result, runtime)
         overhead.record(runtime)
         return result
@@ -186,7 +187,7 @@ class ExecutionCoordinator:
     # ------------------------------------------------------------------ failure paths
     async def _on_error(
         self, exc: BaseException, runtime: AgentRuntime, chain: Any
-    ) -> tuple[AgentResult | None, AgentError]:
+    ) -> tuple[AgentResponse | None, AgentError]:
         error = AgentError.of(exc, trace_id=runtime.context.trace_id, source=runtime.agent_id)
         try:
             recovered = await chain.on_error(error, runtime)
@@ -225,9 +226,7 @@ class ExecutionCoordinator:
         span.event("agent.paused", reason=type(exc).__name__)
         span.ok()
         runtime.logger.info("agent.paused", reason=type(exc).__name__)
-        self.events.emit(
-            LifecycleEvent.AGENT_PAUSE, {"context": runtime.context, "signal": exc}
-        )
+        self.events.emit(LifecycleEvent.AGENT_PAUSE, {"context": runtime.context, "signal": exc})
         self.events.emit(
             LifecycleEvent.AGENT_FINISH,
             {"context": runtime.context, "status": str(AgentStatus.PAUSED)},
@@ -252,8 +251,8 @@ class ExecutionCoordinator:
         )
 
     async def _safe_after(
-        self, result: AgentResult, runtime: AgentRuntime, chain: Any
-    ) -> AgentResult:
+        self, result: AgentResponse, runtime: AgentRuntime, chain: Any
+    ) -> AgentResponse:
         try:
             return await chain.after(result, runtime)
         except Exception:
@@ -261,7 +260,7 @@ class ExecutionCoordinator:
             return result
 
     def _finish(
-        self, runtime: AgentRuntime, result: AgentResult | None, error: AgentError | None
+        self, runtime: AgentRuntime, result: AgentResponse | None, error: AgentError | None
     ) -> None:
         if result is not None:
             status = str(result.status)
@@ -355,7 +354,6 @@ class RuntimeBuilder:
             policy=self.policy,
             events=self.events,
             record_to_memory=self.tools_config.record_to_memory,
-            use_memory_cache=self.tools_config.use_memory_cache,
         )
         artifacts = ArtifactRuntime(
             self.artifact_store, inline_max_bytes=self.artifacts_config.inline_max_bytes

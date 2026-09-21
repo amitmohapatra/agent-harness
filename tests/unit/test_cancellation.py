@@ -54,6 +54,8 @@ async def test_a_listener_that_raises_does_not_break_cancellation():
 def test_deadline_helpers():
     now = datetime.now(UTC)
     assert tightest(None, None) is None
-    assert tightest(now + timedelta(seconds=5), now + timedelta(seconds=1)) == now + timedelta(seconds=1)
+    assert tightest(now + timedelta(seconds=5), now + timedelta(seconds=1)) == now + timedelta(
+        seconds=1
+    )
     assert remaining_seconds(None) is None
     assert remaining_seconds(now - timedelta(seconds=5)) == 0.0

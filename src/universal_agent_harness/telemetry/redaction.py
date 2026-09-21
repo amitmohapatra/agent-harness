@@ -67,15 +67,17 @@ _VALUE_PATTERNS = (
     re.compile(r"^eyJ[A-Za-z0-9._\-]{20,}$"),  # JWT
     # A long base64-ish blob, but only when it has the character mix of a real key: plain
     # prose of the same length (and a run of one character) must not be flagged.
-    re.compile(r"^(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*\d)"
-               r"[A-Za-z0-9+/]{40,}={0,2}$"),
+    re.compile(
+        r"^(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*\d)"
+        r"[A-Za-z0-9+/]{40,}={0,2}$"
+    ),
 )
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 
 class DefaultRedactor:
-    """The default :class:`~universal_agent_harness.contracts.ports.TelemetryRedactor`."""
+    """The default :class:`~universal_agent_contracts.ports.TelemetryRedactor`."""
 
     def __init__(
         self,

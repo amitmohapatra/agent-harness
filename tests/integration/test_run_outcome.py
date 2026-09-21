@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from universal_agent_harness import AgentHarness, AgentResult, MemoryPolicy
+from universal_agent_harness import AgentHarness, AgentResponse, MemoryPolicy
 
 
 async def test_a_successful_turn_is_labelled_a_success(harness, memory, context):
@@ -68,9 +68,9 @@ async def test_the_label_can_be_turned_off(memory, context):
     async def agent(payload):
         return "answered"
 
-    await harness.wrap(
-        agent, agent_id="inv", memory_policy=MemoryPolicy(record_outcome=False)
-    )("q", context=context)
+    await harness.wrap(agent, agent_id="inv", memory_policy=MemoryPolicy(record_outcome=False))(
+        "q", context=context
+    )
     await harness.drain()
     assert memory.of("runs.outcome") == []
 
@@ -79,12 +79,18 @@ async def test_the_label_survives_a_turn_that_wrote_no_observations(memory, cont
     harness = AgentHarness(
         memory=memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"writeback": False, "observe_input": False,
-                           "observe_output": False, "observe_claims": False}},
+        config={
+            "memory": {
+                "writeback": False,
+                "observe_input": False,
+                "observe_output": False,
+                "observe_claims": False,
+            }
+        },
     )
 
     async def agent(payload):
-        return AgentResult.ok(None)
+        return AgentResponse.ok(None)
 
     await harness.wrap(agent, agent_id="inv")("q", context=context)
     await harness.drain()
@@ -105,12 +111,18 @@ async def test_the_label_does_not_block_a_turn_that_wrote_nothing(memory, contex
         defaults={"tenant_id": "acme"},
         # retrieval off so the measurement is about the write, not the read before it;
         # writeback stays on, as in production
-        config={"memory": {"retrieve_before": False, "observe_input": False,
-                           "observe_output": False, "observe_claims": False}},
+        config={
+            "memory": {
+                "retrieve_before": False,
+                "observe_input": False,
+                "observe_output": False,
+                "observe_claims": False,
+            }
+        },
     )
 
     async def agent(payload):
-        return AgentResult.ok(None)
+        return AgentResponse.ok(None)
 
     started = asyncio.get_running_loop().time()
     await harness.wrap(agent, agent_id="inv")("q", context=context)

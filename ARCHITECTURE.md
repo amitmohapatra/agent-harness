@@ -72,7 +72,7 @@ harness.wrap(agent)(payload, context=ctx)
   │   ├─ interceptor.before   ascending order
   │   │     identity → policy → memory context → telemetry → langfuse → timeout → user
   │   ├─ the developer's agent             inside asyncio.timeout + a cancellation scope
-  │   ├─ AgentResult.coerce                whatever it returned becomes an AgentResult
+  │   ├─ AgentResponse.coerce                whatever it returned becomes an AgentResponse
   │   └─ interceptor.after    descending order
   │         result validation → memory observation → evaluation → … → telemetry → identity
   └─ lifecycle events + normalized result (or the original exception re-raised)
@@ -161,4 +161,4 @@ Facade (`AgentHarness`), Observer (lifecycle listeners, evaluation sinks), Compo
 * an agent registry → implement `AgentRegistryClient` (default: no-op);
 * prompt management → implement `PromptProvider`;
 * Bifrost / MCP / A2A → `ModelClient`, `ToolClient`, `PromptProvider` and the serializable
-  `AgentRequest`/`AgentResult` exist so these plug in without rewriting agents.
+  `AgentRequest`/`AgentResponse` exist so these plug in without rewriting agents.

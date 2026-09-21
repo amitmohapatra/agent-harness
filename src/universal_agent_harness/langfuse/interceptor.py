@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from universal_agent_contracts.messages import AgentRequest, AgentResponse
+
 from universal_agent_harness.config.settings import CaptureConfig
-from universal_agent_harness.contracts.messages import AgentRequest, AgentResult
 from universal_agent_harness.interceptors.base import BaseInterceptor, Order
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -63,5 +64,5 @@ class LangfuseInterceptor(BaseInterceptor):
             runtime.logger.warning("langfuse.decorate_failed", error=str(exc))
         return request
 
-    async def after(self, result: AgentResult, runtime: AgentRuntime) -> AgentResult:
+    async def after(self, result: AgentResponse, runtime: AgentRuntime) -> AgentResponse:
         return result

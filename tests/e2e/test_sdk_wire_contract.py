@@ -15,10 +15,10 @@ import json
 
 import httpx
 import pytest
+from tests.support import DEAD_SERVICE_URL, MEMORY_API_KEY, MEMORY_SERVICE_URL, span_by_name
 from universal_memory import MemoryClient
 
-from universal_agent_harness import AgentHarness, AgentResult, MemoryObservation
-from tests.support import DEAD_SERVICE_URL, MEMORY_API_KEY, MEMORY_SERVICE_URL, span_by_name
+from universal_agent_harness import AgentHarness, AgentResponse, MemoryObservation
 
 
 class WireTap(httpx.AsyncBaseTransport):
@@ -56,15 +56,15 @@ async def tapped_client(wire):
         MEMORY_SERVICE_URL,
         api_key=MEMORY_API_KEY,
         timeout=120.0,
-        http_client=httpx.AsyncClient(
-            transport=wire, timeout=120.0, base_url=MEMORY_SERVICE_URL
-        ),
+        http_client=httpx.AsyncClient(transport=wire, timeout=120.0, base_url=MEMORY_SERVICE_URL),
     )
     yield client
     await client.aclose()
 
 
-async def test_full_turn_puts_the_documented_requests_on_the_wire(tapped_client, wire, context, spans):
+async def test_full_turn_puts_the_documented_requests_on_the_wire(
+    tapped_client, wire, context, spans
+):
     harness = AgentHarness(
         memory=tapped_client,
         defaults={"tenant_id": "acme"},
@@ -76,7 +76,7 @@ async def test_full_turn_puts_the_documented_requests_on_the_wire(tapped_client,
         bundle = agent.memory_context
         assert bundle is not None, "the service answered /v1/context"
         assert bundle.evidence.status in ("COMPLETE", "INCOMPLETE", "INSUFFICIENT")
-        return AgentResult.ok(
+        return AgentResponse.ok(
             "reorder 50 units",
             memory_observations=[MemoryObservation(content="SKU-1 was reordered")],
         )
@@ -124,8 +124,10 @@ async def test_a_real_connection_failure_is_classified_as_a_memory_error(context
     harness = AgentHarness(
         memory=client,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"writeback": False, "failure_mode": "fail_closed"},
-                "timeouts": {"memory_seconds": 5}},
+        config={
+            "memory": {"writeback": False, "failure_mode": "fail_closed"},
+            "timeouts": {"memory_seconds": 5},
+        },
     )
 
     @harness.agent(agent_id="inv", error_mode="result")

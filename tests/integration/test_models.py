@@ -13,9 +13,9 @@ import asyncio
 
 import pytest
 from tests.support import span_by_name, span_names
+from universal_agent_contracts.errors import ConfigurationError
 
 from universal_agent_harness import AgentHarness, ModelError, ModelRequest, ModelUsage
-from universal_agent_harness.contracts.errors import ConfigurationError
 
 
 class DeterministicModel:
@@ -61,7 +61,9 @@ async def test_model_call_is_traced_and_metered(memory, context, spans):
 
 
 async def test_prompts_are_not_captured_by_default(memory, context, spans):
-    harness = AgentHarness(memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"})
+    harness = AgentHarness(
+        memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"}
+    )
 
     async def agent(payload, runtime):
         return (await runtime.model.invoke("patient record: John Doe")).text
@@ -89,11 +91,16 @@ async def test_prompts_are_captured_when_explicitly_enabled(memory, context, spa
 
 
 async def test_model_request_metadata_reaches_the_span(memory, context, spans):
-    harness = AgentHarness(memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"})
+    harness = AgentHarness(
+        memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"}
+    )
 
     async def agent(payload, runtime):
         request = ModelRequest(
-            prompt="q", model="gpt-x", provider="acme-ai", prompt_id="inventory/v3",
+            prompt="q",
+            model="gpt-x",
+            provider="acme-ai",
+            prompt_id="inventory/v3",
             prompt_version="3",
         )
         return (await runtime.model.invoke(request)).text
@@ -106,7 +113,9 @@ async def test_model_request_metadata_reaches_the_span(memory, context, spans):
 
 
 async def test_streaming_records_time_to_first_token_without_buffering(memory, context, spans):
-    harness = AgentHarness(memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"})
+    harness = AgentHarness(
+        memory=memory, model=DeterministicModel(), defaults={"tenant_id": "acme"}
+    )
     received: list[str] = []
 
     async def agent(payload, runtime):

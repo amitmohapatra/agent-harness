@@ -29,9 +29,15 @@ def _demo_mode():
     """
     import os
 
-    saved = {k: os.environ.pop(k, None)
-             for k in ("MEMORY_SERVICE_URL", "MEMORY_API_KEY", "LANGFUSE_PUBLIC_KEY",
-                       "LANGFUSE_SECRET_KEY")}
+    saved = {
+        k: os.environ.pop(k, None)
+        for k in (
+            "MEMORY_SERVICE_URL",
+            "MEMORY_API_KEY",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+        )
+    }
     try:
         yield
     finally:
@@ -74,7 +80,9 @@ async def test_every_node_is_an_agent_run_and_the_middle_three_are_parallel(work
 
     app = workflow.build_graph()
     context = AgentExecutionContext.create(
-        tenant_id="acme", agent_id="reorder-workflow", thread_id="chat-parallel",
+        tenant_id="acme",
+        agent_id="reorder-workflow",
+        thread_id="chat-parallel",
         turn_id="turn-1",
     )
 
@@ -91,8 +99,14 @@ async def test_every_node_is_an_agent_run_and_the_middle_three_are_parallel(work
     runs = [s for s in finished if s.name == "agent.run"]
     agent_ids = {s.attributes["agent.id"] for s in runs}
     assert agent_ids == {
-        "reorder-workflow", "triage-agent", "inventory-agent", "supplier-risk-agent",
-        "demand-agent", "supplier-agent", "decision-agent", "explain-agent",
+        "reorder-workflow",
+        "triage-agent",
+        "inventory-agent",
+        "supplier-risk-agent",
+        "demand-agent",
+        "supplier-agent",
+        "decision-agent",
+        "explain-agent",
     }
 
     # the nested agent records the node that started it as its parent run
@@ -116,7 +130,7 @@ async def test_every_node_is_an_agent_run_and_the_middle_three_are_parallel(work
 
 async def test_the_explain_node_produces_claims_evidence_and_observations(workflow, spans):
     """The node's state update stays a plain dict; the claims, evidence, recommended actions
-    and memory observations ride on the AgentResult the state mapper was given."""
+    and memory observations ride on the AgentResponse the state mapper was given."""
     results = {}
 
     def capture(event: str, payload: dict) -> None:
@@ -131,13 +145,13 @@ async def test_the_explain_node_produces_claims_evidence_and_observations(workfl
         {"configurable": {"thread_id": "chat-claims", "harness": {"tenant_id": "acme"}}},
     )
 
-    assert out["answer"].startswith("Order 500 units of SKU-1")   # the state update is a dict
+    assert out["answer"].startswith("Order 500 units of SKU-1")  # the state update is a dict
     result = results["result"]
     assert {c.claim_id for c in result.claims} == {"c-position", "c-reorder"}
     assert {e.source_id for e in result.evidence} == {"inventory_db", "demand_forecast"}
     assert [a.action_type for a in result.recommended_actions] == [
         "raise_purchase_order",
-        "expedite_shipment",          # stock runs out before the lead time elapses
+        "expedite_shipment",  # stock runs out before the lead time elapses
     ]
     assert result.memory_observations[0].content.startswith("SKU-1 was reordered")
     assert result.confidence == 0.86

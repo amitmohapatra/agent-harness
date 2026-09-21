@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from universal_agent_contracts.errors import ConfigurationError, ModelError
 
 from universal_agent_harness import ModelRequest
 from universal_agent_harness.config.settings import TelemetryConfig
-from universal_agent_harness.contracts.errors import ConfigurationError, ModelError
 from universal_agent_harness.models.providers import DirectModelClient, UnconfiguredModelClient
 from universal_agent_harness.policy.providers import (
     AllowListPolicyProvider,

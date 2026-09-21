@@ -56,7 +56,7 @@ class MemoryPolicy:
             return override
         unknown = set(override) - FIELDS
         if unknown:
-            from universal_agent_harness.contracts.errors import ConfigurationError  # noqa: PLC0415
+            from universal_agent_contracts.errors import ConfigurationError  # noqa: PLC0415
 
             raise ConfigurationError(
                 f"unknown memory policy option(s): {', '.join(sorted(unknown))}. "

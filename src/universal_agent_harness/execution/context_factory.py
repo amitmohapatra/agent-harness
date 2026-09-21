@@ -16,15 +16,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.ids import new_id, safe_id, stable_id
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.ids import new_id, safe_id, stable_id
+
 from universal_agent_harness.runtime.propagation import current_context
 
 #: Identity an application declares once (on the harness) and should never have to repeat on
 #: an individual context. Ids that identify *this* execution are never back-filled.
-FILLABLE_FIELDS = frozenset(
-    {"workspace_id", "user_id", "group_ids", "agent_group_id", "work_id"}
-)
+FILLABLE_FIELDS = frozenset({"workspace_id", "user_id", "group_ids", "agent_group_id", "work_id"})
 
 
 class ContextFactory:

@@ -118,14 +118,17 @@ memory = MemoryClient("http://memory-service:8080", api_key="...")
 harness = AgentHarness(memory=memory, defaults={"tenant_id": "acme"})
 
 
-async def inventory_agent(question: str) -> str:      # the agent you already have
+async def inventory_agent(question: str) -> str:  # the agent you already have
     return f"answering: {question}"
 
 
 wrapped = harness.wrap(inventory_agent, agent_id="inventory-agent")
 
 context = AgentExecutionContext.create(
-    tenant_id="acme", agent_id="inventory-agent", user_id="u1", thread_id="chat-42",
+    tenant_id="acme",
+    agent_id="inventory-agent",
+    user_id="u1",
+    thread_id="chat-42",
 )
 
 result = asyncio.run(wrapped("how much stock of SKU-1?", context=context))
@@ -143,7 +146,7 @@ harness:
 ```
 
 ```python
-harness = AgentHarness(memory=memory, config="harness.yaml")   # business code unchanged
+harness = AgentHarness(memory=memory, config="harness.yaml")  # business code unchanged
 ```
 
 ## Tutorial: six steps
@@ -157,14 +160,16 @@ from universal_agent_harness import AgentHarness
 
 harness = AgentHarness(defaults={"tenant_id": "acme"})
 
-async def inventory_agent(question: str) -> str:      # your agent, untouched
+
+async def inventory_agent(question: str) -> str:  # your agent, untouched
     return "SKU-1 has 3 units left"
+
 
 wrapped = harness.wrap(inventory_agent, agent_id="inventory-agent")
 result = await wrapped("how much stock?")
 
-result.status   # SUCCESS
-result.data     # "SKU-1 has 3 units left"  — exactly what your function returned
+result.status  # SUCCESS
+result.data  # "SKU-1 has 3 units left"  — exactly what your function returned
 ```
 
 You already have: a trace span, execution metrics, a structured log line, a normalized
@@ -176,8 +181,11 @@ result, a deadline, and an error taxonomy if it throws.
 from universal_agent_harness import AgentExecutionContext
 
 context = AgentExecutionContext.create(
-    tenant_id="acme", agent_id="inventory-agent",
-    user_id="u-42", thread_id="chat-7", turn_id="turn-3",
+    tenant_id="acme",
+    agent_id="inventory-agent",
+    user_id="u-42",
+    thread_id="chat-7",
+    turn_id="turn-3",
 )
 result = await wrapped("how much stock?", context=context)
 ```
@@ -194,8 +202,8 @@ Add a second parameter and your agent becomes "runtime-aware":
 @harness.agent(agent_id="inventory-agent", skills=["inventory.analysis"])
 async def inventory_agent(question, agent):
     agent.log("thinking", question_length=len(question))
-    agent.check_cancelled()                  # cooperative cancellation
-    return AgentResult.ok({"answer": "3 units"}, confidence=0.9)
+    agent.check_cancelled()  # cooperative cancellation
+    return AgentResponse.ok({"answer": "3 units"}, confidence=0.9)
 ```
 
 `agent` is the [`AgentRuntime`](src/universal_agent_harness/runtime/agent_runtime.py):
@@ -206,10 +214,12 @@ async def inventory_agent(question, agent):
 
 ```python
 async def inventory_db(sku: str) -> dict:
-    """Stock for a SKU."""                    # the docstring becomes the tool description
+    """Stock for a SKU."""  # the docstring becomes the tool description
     return {"sku": sku, "on_hand": 3}
 
+
 harness = AgentHarness(tools=[inventory_db], defaults={"tenant_id": "acme"})
+
 
 @harness.agent(agent_id="inventory-agent")
 async def inventory_agent(question, agent):
@@ -223,15 +233,18 @@ argument *names* are recorded, not their values.
 ### 5. Give it memory
 
 ```python
-harness = AgentHarness(memory=MemoryClient("http://memory-service:8080", api_key="..."),
-                       defaults={"tenant_id": "acme"})
+harness = AgentHarness(
+    memory=MemoryClient("http://memory-service:8080", api_key="..."), defaults={"tenant_id": "acme"}
+)
+
 
 @harness.agent(agent_id="inventory-agent")
 async def inventory_agent(question, agent):
-    bundle = agent.memory_context              # already fetched, before you were called
-    await agent.memory.remember("SKU-1 moves fast in Q4",
-                                memory_type="SEMANTIC", lifetime="LONG_TERM")
-    return AgentResult.ok(
+    bundle = agent.memory_context  # already fetched, before you were called
+    await agent.memory.remember(
+        "SKU-1 moves fast in Q4", memory_type="SEMANTIC", lifetime="LONG_TERM"
+    )
+    return AgentResponse.ok(
         "3 units",
         claims=[Claim(claim_id="c1", text="SKU-1 has 3 units")],
         memory_observations=[MemoryObservation(content="checked SKU-1 stock")],
@@ -248,9 +261,9 @@ returns — so the answer is not waiting on the write. See
 wrapped = harness.wrap(
     inventory_agent,
     agent_id="inventory-agent",
-    timeout_seconds=5,        # deadline for the agent and everything it calls
-    idempotent=True,          # makes it eligible for configured retries
-    error_mode="result",      # return AgentResult(status=ERROR) instead of raising
+    timeout_seconds=5,  # deadline for the agent and everything it calls
+    idempotent=True,  # makes it eligible for configured retries
+    error_mode="result",  # return AgentResponse(status=ERROR) instead of raising
 )
 ```
 
@@ -287,7 +300,7 @@ exception types still propagate (with a normalized `AgentError` attached as
 async def inventory_agent(state, agent):
     response = await agent.model.invoke("check stock for " + state["sku"])
     stock = await agent.tools.call("inventory_db", sku=state["sku"])
-    return AgentResult.ok({"answer": response.text, "stock": stock.output})
+    return AgentResponse.ok({"answer": response.text, "stock": stock.output})
 ```
 
 `agent` is an [`AgentRuntime`](src/universal_agent_harness/runtime/agent_runtime.py):
@@ -301,7 +314,7 @@ around it are not (see [Limitations](docs/limitations.md)).
 async with harness.execution(context, agent_id="report-agent", input=question) as runtime:
     bundle = runtime.memory_context
     answer = await existing_pipeline(question, bundle)
-    runtime.state["result"] = AgentResult.ok(answer)
+    runtime.state["result"] = AgentResponse.ok(answer)
 ```
 
 ## LangGraph
@@ -309,9 +322,14 @@ async with harness.execution(context, agent_id="report-agent", input=question) a
 An existing node, unchanged:
 
 ```python
-graph.add_node("inventory", harness.langgraph.wrap_node(
-    existing_node, agent_id="inventory-agent", query="question",
-))
+graph.add_node(
+    "inventory",
+    harness.langgraph.wrap_node(
+        existing_node,
+        agent_id="inventory-agent",
+        query="question",
+    ),
+)
 ```
 
 A runtime-aware node:
@@ -320,7 +338,7 @@ A runtime-aware node:
 @harness.langgraph.agent(agent_id="inventory-agent", query="question")
 async def inventory_node(state, agent):
     response = await agent.model.invoke(state["question"])
-    return {"answer": response.text}          # a normal LangGraph state update
+    return {"answer": response.text}  # a normal LangGraph state update
 ```
 
 The adapter derives identity from the `RunnableConfig` (`thread_id`, `checkpoint_ns`,
@@ -329,10 +347,15 @@ writes deduplicate. It does not touch your graph topology, routing, reducers, ch
 or state schema. Application identity can travel in the config:
 
 ```python
-await app.ainvoke(state, {"configurable": {
-    "thread_id": "chat-42",
-    "harness": {"tenant_id": "acme", "user_id": "u1", "work_id": "wo-9"},
-}})
+await app.ainvoke(
+    state,
+    {
+        "configurable": {
+            "thread_id": "chat-42",
+            "harness": {"tenant_id": "acme", "user_id": "u1", "work_id": "wo-9"},
+        }
+    },
+)
 ```
 
 **One trace per turn.** Each node is its own agent run, and LangGraph runs supersteps as
@@ -357,10 +380,11 @@ they run on resume, when the node is re-entered and reaches its end.
 ```python
 @harness.langgraph.agent(agent_id="approver")
 async def approve(state, agent):
-    decision = interrupt({"question": "approve the reorder?"})   # pauses here
+    decision = interrupt({"question": "approve the reorder?"})  # pauses here
     return {"answer": f"human said {decision}"}
 
-await app.ainvoke(Command(resume="approved"), config)            # resumes, finishes normally
+
+await app.ainvoke(Command(resume="approved"), config)  # resumes, finishes normally
 ```
 
 Small example: [`examples/langgraph_agent.py`](examples/langgraph_agent.py). A full
@@ -375,19 +399,21 @@ callable and keep calling it the way you already do:
 
 ```python
 async def inventory_db(sku: str) -> dict:
-    """Stock levels for a SKU."""            # the docstring becomes the tool description
+    """Stock levels for a SKU."""  # the docstring becomes the tool description
     ...
 
+
 harness = AgentHarness(memory=memory, tools=[inventory_db])
+
 
 @harness.agent(agent_id="inventory-agent")
 async def agent(state, runtime):
     outcome = await runtime.tools.call("inventory_db", sku=state["sku"])
-    return outcome.output                     # .status, .latency_ms, .cached, .artifacts
+    return outcome.output  # .status, .latency_ms, .cached, .artifacts
 
-@harness.wrap_tool                            # or: instrument a tool you call directly
-async def pricing_api(sku: str) -> float:
-    ...                                       # returns the tool's own value, instrumented
+
+@harness.wrap_tool  # or: instrument a tool you call directly
+async def pricing_api(sku: str) -> float: ...  # returns the tool's own value, instrumented
 ```
 
 **Models.** Anything with `ainvoke`/`invoke` (or a plain callable) can be adapted; the
@@ -404,11 +430,12 @@ harness = AgentHarness(
     model=DirectModelClient(client, provider="acme-ai", model="gpt-x"),
 )
 
+
 @harness.agent(agent_id="answer-agent")
 async def answer(state, runtime):
     response = await runtime.model.invoke(state["question"])
     response.text, response.usage.input_tokens, response.usage.cost_usd
-    async for chunk in runtime.model.stream(state["question"]):   # streaming is instrumented
+    async for chunk in runtime.model.stream(state["question"]):  # streaming is instrumented
         ...
     return response.text
 ```
@@ -443,11 +470,20 @@ label the service has to wait hours before counting one as a weak positive, and 
 anything from a failure.
 
 ```python
-harness = AgentHarness(memory=memory, config={"memory": {
-    "retrieve_before": True, "observe_input": True, "observe_output": True,
-    "observe_tool_results": False, "observe_claims": True, "private_by_default": False,
-    "record_outcome": True,
-}})
+harness = AgentHarness(
+    memory=memory,
+    config={
+        "memory": {
+            "retrieve_before": True,
+            "observe_input": True,
+            "observe_output": True,
+            "observe_tool_results": False,
+            "observe_claims": True,
+            "private_by_default": False,
+            "record_outcome": True,
+        }
+    },
+)
 ```
 
 Per-agent overrides: `harness.wrap(agent, memory_policy=MemoryPolicy(observe_output=False))`.
@@ -476,9 +512,11 @@ ARCHIVAL), `visibility` (PRIVATE, RUN, AGENT_GROUP, THREAD, USER, WORK, WORKSPAC
 async def agent(state, runtime):
     await runtime.memory.remember(
         "SKU-1 reorders from Castor Supply below 10 days of cover",
-        memory_type="SEMANTIC", lifetime="LONG_TERM", visibility="WORKSPACE",
+        memory_type="SEMANTIC",
+        lifetime="LONG_TERM",
+        visibility="WORKSPACE",
     )
-    bundle = await runtime.memory.retrieve(state["question"])   # everything, in one call
+    bundle = await runtime.memory.retrieve(state["question"])  # everything, in one call
     facts = await runtime.memory.graph_query("who supplies SKU-1?", hops=2)
     report = await runtime.memory.verify(answer, bundle=bundle)  # grounded, or not
     ...
@@ -493,26 +531,26 @@ A runnable walk through every one of these:
 
 ## Results and errors
 
-Whatever your agent returns is coerced into an `AgentResult`; returning one yourself gives
+Whatever your agent returns is coerced into an `AgentResponse`; returning one yourself gives
 you the richer fields.
 
 ```python
 result = await wrapped(payload, context=context)
 
-result.status              # SUCCESS | PARTIAL | ERROR | TIMEOUT | CANCELLED | REJECTED
-result.data                # your agent's own return value
-result.claims              # Claim(claim_id, text, evidence_ids, confidence)
-result.evidence            # EvidenceRef(source_type, source_id, document_id, page, citation)
-result.artifacts           # ArtifactRef(artifact_id, type, uri, checksum, size_bytes)
-result.recommended_actions # RecommendedAction(action_type, description, reason_summary)
-result.memory_observations # what should be remembered (written after the turn)
-result.warnings            # e.g. MEMORY_DEGRADED, MEMORY_WRITE_FAILED, RESULT_OFFLOADED
-result.metrics             # model_calls, tool_calls, total_tokens, cost_usd
+result.status  # SUCCESS | PARTIAL | ERROR | TIMEOUT | CANCELLED | REJECTED
+result.data  # your agent's own return value
+result.claims  # Claim(claim_id, text, evidence_ids, confidence)
+result.evidence  # EvidenceRef(source_type, source_id, document_id, page, citation)
+result.artifacts  # ArtifactRef(artifact_id, type, uri, checksum, size_bytes)
+result.recommended_actions  # RecommendedAction(action_type, description, reason_summary)
+result.memory_observations  # what should be remembered (written after the turn)
+result.warnings  # e.g. MEMORY_DEGRADED, MEMORY_WRITE_FAILED, RESULT_OFFLOADED
+result.metrics  # model_calls, tool_calls, total_tokens, cost_usd
 result.confidence
-result.error               # AgentError | None
+result.error  # AgentError | None
 ```
 
-`AgentRequest` and `AgentResult` are plain Pydantic models with no framework types in them,
+`AgentRequest` and `AgentResponse` are plain Pydantic models with no framework types in them,
 so they serialize cleanly for queues, storage or a future A2A transport.
 
 **Errors keep their own type.** By default the harness re-raises your exception unchanged
@@ -521,9 +559,9 @@ and attaches the normalized classification to it:
 ```python
 try:
     await wrapped(payload, context=context)
-except StaleFeedError as exc:            # your exception, not ours
-    exc.agent_error.category   # VALIDATION | AUTHORIZATION | MODEL | TOOL | MEMORY |
-                               # TIMEOUT | CANCELLED | RATE_LIMIT | DEPENDENCY | POLICY | UNKNOWN
+except StaleFeedError as exc:  # your exception, not ours
+    exc.agent_error.category  # VALIDATION | AUTHORIZATION | MODEL | TOOL | MEMORY |
+    # TIMEOUT | CANCELLED | RATE_LIMIT | DEPENDENCY | POLICY | UNKNOWN
     exc.agent_error.retryable  # False for UNKNOWN — the harness never guesses
     exc.agent_error.trace_id
 ```
@@ -554,7 +592,7 @@ wrapped = harness.wrap(agent, agent_id="inv", timeout_seconds=5, idempotent=True
   @harness.agent(agent_id="long-agent")
   async def long_agent(state, agent):
       for item in state["items"]:
-          agent.check_cancelled()        # raises CancelledError promptly
+          agent.check_cancelled()  # raises CancelledError promptly
           await process(item)
   ```
 * **Retries are opt-in twice over**: `retries.enabled` in configuration *and*
@@ -628,14 +666,15 @@ tracing system.
 In a short-lived process, flush before exit:
 
 ```python
-await harness.aclose()     # drains memory writeback and flushes telemetry
+await harness.aclose()  # drains memory writeback and flushes telemetry
 ```
 
 Scores (from DeepEval, an LLM judge, or a human) go back onto the trace:
 
 ```python
-await harness.evaluation_provider.score("groundedness", 0.93,
-                                        trace_id=context.trace_id, comment="deepeval")
+await harness.evaluation_provider.score(
+    "groundedness", 0.93, trace_id=context.trace_id, comment="deepeval"
+)
 ```
 
 ## Extending the harness
@@ -643,9 +682,10 @@ await harness.evaluation_provider.score("groundedness", 0.93,
 ```python
 from universal_agent_harness import BaseInterceptor, Order
 
+
 class AuditInterceptor(BaseInterceptor):
     name = "audit"
-    order = Order.USER                      # runs after the core before-chain
+    order = Order.USER  # runs after the core before-chain
 
     async def before(self, request, runtime):
         runtime.logger.info("audit.start", agent_id=runtime.agent_id)
@@ -654,9 +694,10 @@ class AuditInterceptor(BaseInterceptor):
     async def after(self, result, runtime):
         return result.add_warning("AUDITED", "reviewed by the audit interceptor")
 
+
 harness = AgentHarness(
     memory=memory,
-    interceptors=[AuditInterceptor()],                       # or harness.add_interceptor(...)
+    interceptors=[AuditInterceptor()],  # or harness.add_interceptor(...)
     listeners=[lambda event, payload: metrics.count(event)],  # or harness.on(...)
     policy=CallablePolicyProvider(tool=lambda ctx, call: call.tool != "rm"),
     evaluation_sink=my_sink,
@@ -687,7 +728,8 @@ await harness.register_agents()
 | OpenTelemetry | supported, tested |
 | Langfuse (3.x/4.x API) | supported, tested against 4.15.2 |
 | CrewAI, Google ADK | **not implemented.** Their callables work as plain Python, but framework-level lineage, events and state mapping do not |
-| Agent registry service, Bifrost, MCP, A2A | **not implemented.** The ports and serializable contracts exist so they can arrive without rewriting agents |
+| Bifrost LLM gateway | supported, tested against a real gateway process: retries, circuit breaker, streaming, structured output, tool calls |
+| Agent registry service, MCP, A2A | **not implemented.** The ports and serializable contracts exist so they can arrive without rewriting agents |
 
 What the harness deliberately cannot do — and says so rather than implying otherwise — is
 in [docs/limitations.md](docs/limitations.md). The short version: it cannot instrument an

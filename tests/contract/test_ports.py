@@ -7,14 +7,7 @@ drifts from its protocol, this fails before an adapter does at runtime.
 from __future__ import annotations
 
 import pytest
-
-from universal_agent_harness.artifacts.stores import (
-    FileArtifactStore,
-    InMemoryArtifactStore,
-    NoArtifactStore,
-)
-from universal_agent_harness.config.settings import LangfuseConfig
-from universal_agent_harness.contracts.ports import (
+from universal_agent_contracts.ports import (
     AgentPolicyProvider,
     AgentRegistryClient,
     ArtifactClient,
@@ -26,6 +19,13 @@ from universal_agent_harness.contracts.ports import (
     TelemetryRedactor,
     ToolClient,
 )
+
+from universal_agent_harness.artifacts.stores import (
+    FileArtifactStore,
+    InMemoryArtifactStore,
+    NoArtifactStore,
+)
+from universal_agent_harness.config.settings import LangfuseConfig
 from universal_agent_harness.evaluation.events import (
     CollectingEvaluationSink,
     CompositeEvaluationSink,

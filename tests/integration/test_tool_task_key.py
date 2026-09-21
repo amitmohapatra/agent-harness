@@ -39,7 +39,7 @@ async def test_the_query_is_what_keys_the_procedure(memory, context):
 
 
 async def test_an_explicit_task_on_the_call_wins(memory, context):
-    from universal_agent_harness.contracts.tool import ToolCall
+    from universal_agent_contracts.tool import ToolCall
 
     harness = _harness(memory)
 

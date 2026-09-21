@@ -22,7 +22,7 @@ import pytest
 from universal_agent_harness import (
     AgentExecutionContext,
     AgentHarness,
-    AgentResult,
+    AgentResponse,
     Claim,
     MemoryObservation,
 )
@@ -115,7 +115,7 @@ async def test_a_full_turn_writes_and_reads_back(live_harness, live_context, spa
         bundle = runtime.memory_context
         facts = runtime.memory.describe(bundle)
         assert facts["evidence_status"] in ("COMPLETE", "INCOMPLETE", "INSUFFICIENT")
-        return AgentResult.ok(
+        return AgentResponse.ok(
             "SKU-1 has 3 units left",
             claims=[Claim(claim_id="c1", text="SKU-1 has 3 units left")],
             memory_observations=[
@@ -148,11 +148,15 @@ async def test_every_memory_operation_against_the_real_service(live_harness, liv
         )
         await m.remember(
             "SKU-1 is reordered from Castor Supply below 10 days of cover.",
-            memory_type="SEMANTIC", lifetime="LONG_TERM", visibility="USER",
+            memory_type="SEMANTIC",
+            lifetime="LONG_TERM",
+            visibility="USER",
         )
         await m.remember(
             "The planner prefers weekly digests.",
-            memory_type="PREFERENCE", lifetime="LONG_TERM", visibility="USER",
+            memory_type="PREFERENCE",
+            lifetime="LONG_TERM",
+            visibility="USER",
         )
         await m.share("SKU-1 reorder raised with Castor Supply.")
         await m.record_output("You have 95 units, about 4 days of cover.")
@@ -173,7 +177,7 @@ async def test_every_memory_operation_against_the_real_service(live_harness, liv
         if held:
             await m.forget(held[0].memory_id)
             outcome["forgot"] = held[0].memory_id
-        return AgentResult.ok(outcome)
+        return AgentResponse.ok(outcome)
 
     result = await agent({}, context=live_context)
     assert result.succeeded, result.error
@@ -197,7 +201,7 @@ async def test_document_ingestion_and_retrieval(live_harness, live_context, tmp_
     @live_harness.agent(agent_id="live-ingest", memory_policy={"retrieve_before": False})
     async def agent(state, runtime):
         handle = await runtime.memory.add_document(doc, title="Reorder policy v3")
-        return AgentResult.ok({"document_id": getattr(handle, "document_id", None)})
+        return AgentResponse.ok({"document_id": getattr(handle, "document_id", None)})
 
     result = await agent({}, context=live_context)
     assert result.succeeded
@@ -215,10 +219,10 @@ async def test_idempotency_is_enforced_by_the_service(live_harness, live_context
             MemoryObservation(content="a replayed observation", kind="EVENT")
         )
         acks.append(ack)
-        return AgentResult.ok("ok")
+        return AgentResponse.ok("ok")
 
     await agent({}, context=live_context)
-    await agent({}, context=live_context)      # same context -> same idempotency key
+    await agent({}, context=live_context)  # same context -> same idempotency key
 
     first, second = acks
     assert getattr(first, "observation_id", None) == getattr(second, "observation_id", None), (
@@ -250,9 +254,15 @@ def test_the_shipped_examples_run_against_the_live_service():
     for example in ("memory_tour.py", "reorder_workflow.py"):
         proc = subprocess.run(
             [sys.executable, str(root / "examples" / example)],
-            capture_output=True, text=True, env=env, timeout=180, check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=180,
+            check=False,
         )
-        assert proc.returncode == 0, f"{example} failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        assert proc.returncode == 0, (
+            f"{example} failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+        )
         assert "Traceback" not in proc.stderr, proc.stderr[-2000:]
         summary = [line for line in proc.stdout.splitlines() if not line.startswith("{")]
         print(f"\n[live] {example}:\n" + "\n".join(summary[-14:]))

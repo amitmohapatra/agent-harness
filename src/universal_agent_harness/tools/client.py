@@ -12,10 +12,11 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from universal_agent_harness.contracts.artifacts import ArtifactRef
-from universal_agent_harness.contracts.errors import PolicyDeniedError, ToolError
-from universal_agent_harness.contracts.events import LifecycleEvent
-from universal_agent_harness.contracts.tool import ToolCall, ToolOutcome, ToolSpec
+from universal_agent_contracts.artifacts import ArtifactRef
+from universal_agent_contracts.errors import PolicyDeniedError, ToolError
+from universal_agent_contracts.events import LifecycleEvent
+from universal_agent_contracts.tool import ToolCall, ToolOutcome, ToolSpec
+
 from universal_agent_harness.telemetry import names as N
 from universal_agent_harness.telemetry.metrics import TOOL_CALLS, TOOL_LATENCY
 from universal_agent_harness.telemetry.tracer import Stopwatch
@@ -36,7 +37,6 @@ class InstrumentedToolClient:
         policy: Any = None,
         events: Any = None,
         record_to_memory: bool = True,
-        use_memory_cache: bool = False,
     ) -> None:
         self._client = client
         self._runtime: AgentRuntime | None = runtime_ref
@@ -44,7 +44,6 @@ class InstrumentedToolClient:
         self._policy = policy
         self._events = events
         self.record_to_memory = record_to_memory
-        self.use_memory_cache = use_memory_cache
         self._step = 0
 
     def attach(self, runtime: AgentRuntime) -> None:
@@ -100,9 +99,7 @@ class InstrumentedToolClient:
                 if isinstance(exc, ToolError):
                     raise
                 raise ToolError(str(exc), source=f"tool.{call.tool}") from exc
-            outcome = outcome.model_copy(
-                update={"latency_ms": watch.ms, "tool": call.tool}
-            )
+            outcome = outcome.model_copy(update={"latency_ms": watch.ms, "tool": call.tool})
             span.set(
                 **{
                     N.STATUS: outcome.status,
@@ -220,8 +217,11 @@ class InstrumentedToolClient:
 def outcome_with_artifact(outcome: ToolOutcome, artifact: ArtifactRef) -> ToolOutcome:
     """Replace a large tool output with a reference to a stored artifact (§43)."""
     return outcome.model_copy(
-        update={"artifacts": [*outcome.artifacts, artifact], "output": None,
-                "output_summary": outcome.output_summary or f"artifact:{artifact.artifact_id}"}
+        update={
+            "artifacts": [*outcome.artifacts, artifact],
+            "output": None,
+            "output_summary": outcome.output_summary or f"artifact:{artifact.artifact_id}",
+        }
     )
 
 

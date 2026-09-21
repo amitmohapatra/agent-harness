@@ -13,8 +13,8 @@ import inspect
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from universal_agent_harness.contracts.errors import ConfigurationError, ModelError
-from universal_agent_harness.contracts.model import ModelRequest, ModelResponse
+from universal_agent_contracts.errors import ConfigurationError, ModelError
+from universal_agent_contracts.model import ModelRequest, ModelResponse
 
 #: Method names, in preference order, that a "model-like" object may expose.
 ASYNC_METHODS = ("ainvoke", "acomplete", "agenerate", "acreate", "invoke", "complete", "generate")

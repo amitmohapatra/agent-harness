@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from universal_agent_harness.contracts.artifacts import ArtifactRef
+from universal_agent_contracts.artifacts import ArtifactRef
+
 from universal_agent_harness.telemetry import names as N
 
 if TYPE_CHECKING:  # pragma: no cover

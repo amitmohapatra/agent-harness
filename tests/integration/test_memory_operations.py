@@ -47,40 +47,54 @@ async def run(harness, context, body):
 
 
 async def test_remember_writes_a_typed_long_term_memory(harness, memory, context, spans):
-    await run(harness, context, lambda rt: rt.memory.remember(
-        "the EU-1 warehouse ships on Tuesdays",
-        memory_type="SEMANTIC", lifetime="LONG_TERM", visibility="WORKSPACE",
-        source="ops-handbook",
-    ))
+    await run(
+        harness,
+        context,
+        lambda rt: rt.memory.remember(
+            "the EU-1 warehouse ships on Tuesdays",
+            memory_type="SEMANTIC",
+            lifetime="LONG_TERM",
+            visibility="WORKSPACE",
+            source="ops-handbook",
+        ),
+    )
 
     call = memory.observations[-1]
     assert call["content"] == "the EU-1 warehouse ships on Tuesdays"
-    assert call["hints"] == {"memory_type": "SEMANTIC", "lifetime": "LONG_TERM",
-                             "visibility": "WORKSPACE"}
-    assert call["source"] == "ops-handbook"           # arbitrary metadata rides along
-    assert call["idempotency_key"]                     # stable across replays
+    assert call["hints"] == {
+        "memory_type": "SEMANTIC",
+        "lifetime": "LONG_TERM",
+        "visibility": "WORKSPACE",
+    }
+    assert call["source"] == "ops-handbook"  # arbitrary metadata rides along
+    assert call["idempotency_key"]  # stable across replays
 
     span = span_by_name(spans, "agent.memory.remember")
     assert span.attributes["memory.type"] == "SEMANTIC"
     assert span.attributes["memory.lifetime"] == "LONG_TERM"
     assert span.attributes["memory.visibility"] == "WORKSPACE"
-    assert "the EU-1 warehouse" not in str(dict(span.attributes))   # content is not exported
+    assert "the EU-1 warehouse" not in str(dict(span.attributes))  # content is not exported
 
 
 async def test_short_term_and_episodic_memories_are_just_different_hints(harness, memory, context):
-    await run(harness, context, lambda rt: rt.memory.remember(
-        "user asked about SKU-1 twice today", memory_type="EPISODIC", lifetime="SHORT_TERM",
-    ))
-    assert memory.observations[-1]["hints"] == {
-        "memory_type": "EPISODIC", "lifetime": "SHORT_TERM"
-    }
+    await run(
+        harness,
+        context,
+        lambda rt: rt.memory.remember(
+            "user asked about SKU-1 twice today",
+            memory_type="EPISODIC",
+            lifetime="SHORT_TERM",
+        ),
+    )
+    assert memory.observations[-1]["hints"] == {"memory_type": "EPISODIC", "lifetime": "SHORT_TERM"}
 
 
 async def test_private_by_default_policy_applies_to_remember(memory, context):
     from universal_agent_harness import AgentHarness
 
     harness = AgentHarness(
-        memory=memory, defaults={"tenant_id": "acme"},
+        memory=memory,
+        defaults={"tenant_id": "acme"},
         config={"memory": {"private_by_default": True, "writeback": False}},
     )
     await run(harness, context, lambda rt: rt.memory.remember("a working note"))
@@ -118,9 +132,15 @@ async def test_document_ingestion_feeds_the_rag_corpus(harness, memory, context,
     doc = tmp_path / "policy.txt"
     doc.write_text("Reorder policy: never exceed a 30-day cover.")
 
-    handle = await run(harness, context, lambda rt: rt.memory.add_document(
-        doc, title="Reorder policy", visibility="WORKSPACE",
-    ))
+    handle = await run(
+        harness,
+        context,
+        lambda rt: rt.memory.add_document(
+            doc,
+            title="Reorder policy",
+            visibility="WORKSPACE",
+        ),
+    )
     assert handle.document_id.startswith("doc_"), "the service returns a document handle"
     call = memory.of("files.add")[0]
     assert call["title"] == "Reorder policy" and call["visibility"] == "WORKSPACE"
@@ -141,16 +161,23 @@ async def test_context_bundle_is_the_one_call_that_returns_everything(harness, c
     assert span_by_name(spans, "agent.memory.retrieve").attributes["memory.evidence.status"]
 
 
-async def test_recall_returns_ranked_evidence_without_bundle_assembly(harness, memory, context, spans):
+async def test_recall_returns_ranked_evidence_without_bundle_assembly(
+    harness, memory, context, spans
+):
     await run(harness, context, lambda rt: rt.memory.recall("stock levels", limit=5))
     assert memory.of("recall")[0]["limit"] == 5
     assert "agent.memory.recall" in span_names(spans)
 
 
 async def test_graph_query_traverses_the_knowledge_graph(harness, memory, context, spans):
-    answer = await run(harness, context, lambda rt: rt.memory.graph_query(
-        "who supplies SKU-1?", hops=2,
-    ))
+    answer = await run(
+        harness,
+        context,
+        lambda rt: rt.memory.graph_query(
+            "who supplies SKU-1?",
+            hops=2,
+        ),
+    )
     assert answer is not None
     for fact in getattr(answer, "facts", []):
         assert fact.subject and fact.predicate, "a fact needs a subject and a predicate"
@@ -165,9 +192,15 @@ async def test_graph_query_accepts_entities_and_a_temporal_view(harness, memory,
     from datetime import UTC, datetime
 
     as_of = datetime(2026, 1, 1, tzinfo=UTC)
-    await run(harness, context, lambda rt: rt.memory.graph_query(
-        entities=["SKU-1"], hops=1, as_of=as_of,
-    ))
+    await run(
+        harness,
+        context,
+        lambda rt: rt.memory.graph_query(
+            entities=["SKU-1"],
+            hops=1,
+            as_of=as_of,
+        ),
+    )
     call = memory.of("graph.query")[0]
     assert call["entities"] == ["SKU-1"] and call["as_of"] == as_of
 
@@ -187,9 +220,14 @@ async def test_history_reads_the_conversation(harness, memory, context, spans):
 async def test_inventory_view_lists_what_is_held(harness, memory, context, spans):
     """The inventory is scoped to this execution, and a fresh context holds nothing yet —
     so what is asserted is the request and the shape of the answer."""
-    items = await run(harness, context, lambda rt: rt.memory.memories(
-        memory_types=["SEMANTIC"], limit=20,
-    ))
+    items = await run(
+        harness,
+        context,
+        lambda rt: rt.memory.memories(
+            memory_types=["SEMANTIC"],
+            limit=20,
+        ),
+    )
     assert isinstance(items, list)
     assert all(m.memory_type for m in items)
     call = memory.of("memories")[0]
@@ -219,9 +257,14 @@ async def test_get_one_memory_by_id(harness, memory, context):
 async def test_verify_grounds_an_answer_against_the_evidence(harness, memory, context, spans):
     """A verdict is the point, not a particular verdict: an unverifiable claim *should* come
     back unsupported."""
-    report = await run(harness, context, lambda rt: rt.memory.verify(
-        "SKU-1 has 3 units left", query="stock for SKU-1",
-    ))
+    report = await run(
+        harness,
+        context,
+        lambda rt: rt.memory.verify(
+            "SKU-1 has 3 units left",
+            query="stock for SKU-1",
+        ),
+    )
     assert report is not None
     assert report.claims, "the report should carry a per-claim verdict"
     assert report.claims[0].verdict in ("supported", "unsupported", "contradicted", "borderline")
@@ -240,8 +283,10 @@ async def test_reads_degrade_and_writes_propagate(dead_memory, context):
     harness = AgentHarness(
         memory=dead_memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"writeback": False, "retrieve_before": False},
-                "timeouts": {"memory_seconds": 3.0}},
+        config={
+            "memory": {"writeback": False, "retrieve_before": False},
+            "timeouts": {"memory_seconds": 3.0},
+        },
     )
 
     async def agent(payload, runtime):
@@ -249,7 +294,7 @@ async def test_reads_degrade_and_writes_propagate(dead_memory, context):
         assert await runtime.memory.graph_query("who supplies SKU-1?") is None
         assert await runtime.memory.memories() == []
         # ...a failing write is never silently dropped
-        with pytest.raises(Exception, match="(?i)connect|unavailable|timeout"):
+        with pytest.raises(Exception, match=r"(?i)connect|unavailable|timeout"):
             await runtime.memory.remember("this will not land")
         return "handled"
 

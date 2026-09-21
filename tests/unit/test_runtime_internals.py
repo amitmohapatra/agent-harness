@@ -64,7 +64,9 @@ def test_only_bounded_labels_survive():
 
 def test_label_values_are_coerced_and_empties_dropped():
     assert labels(agent_id="a", retry=3, cached=True, model=None, provider="") == {
-        "agent_id": "a", "retry": 3, "cached": True
+        "agent_id": "a",
+        "retry": 3,
+        "cached": True,
     }
 
 
@@ -84,7 +86,9 @@ async def test_in_memory_store_is_content_addressed_and_bounded():
 
 
 async def test_artifact_checksum_and_size():
-    ref = await InMemoryArtifactStore().put(b"12345", type="blob", mime_type="application/octet-stream")
+    ref = await InMemoryArtifactStore().put(
+        b"12345", type="blob", mime_type="application/octet-stream"
+    )
     assert ref.size_bytes == 5
     assert ref.checksum.startswith("sha256:")
     assert ref.mime_type == "application/octet-stream"

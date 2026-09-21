@@ -100,10 +100,7 @@ def test_opentelemetry_sdk_is_not_required_by_the_core():
     """Only the OTel API is a runtime dependency; without an SDK the API's no-op is used."""
     import subprocess
 
-    code = (
-        "import importlib.util as u; "
-        "print(u.find_spec('opentelemetry.sdk') is not None)"
-    )
+    code = "import importlib.util as u; print(u.find_spec('opentelemetry.sdk') is not None)"
     subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     from universal_agent_harness.telemetry.otel import OpenTelemetryTelemetryProvider
 

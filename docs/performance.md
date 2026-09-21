@@ -50,7 +50,7 @@ removes the span work but keeps metrics — which is why the "sampled out" row m
 * Lower `sampling.sample_rate` in high-volume services; errors and critical agents can stay
   at 1.0.
 * Leave `memory.writeback: true` so the turn never waits for memory writes.
-* Do not put large payloads in `AgentResult.data`; use artifacts (the harness offloads
+* Do not put large payloads in `AgentResponse.data`; use artifacts (the harness offloads
   anything over `artifacts.inline_max_bytes` and warns).
 * In production use a `BatchSpanProcessor` rather than the synchronous one used in these
   measurements.

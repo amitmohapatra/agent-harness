@@ -1,4 +1,4 @@
-"""``AgentRequest``/``AgentResult``: coercion, serializability, A2A readiness (§7, §90)."""
+"""``AgentRequest``/``AgentResponse``: coercion, serializability, A2A readiness (§7, §90)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 from universal_agent_harness import (
     AgentExecutionContext,
     AgentRequest,
-    AgentResult,
+    AgentResponse,
     AgentStatus,
     ArtifactRef,
     Claim,
@@ -15,14 +15,14 @@ from universal_agent_harness import (
 
 
 def test_coerce_passes_results_through_and_wraps_everything_else():
-    original = AgentResult.ok("x")
-    assert AgentResult.coerce(original) is original
-    assert AgentResult.coerce({"a": 1}).data == {"a": 1}
-    assert AgentResult.coerce(None).status is AgentStatus.SUCCESS
+    original = AgentResponse.ok("x")
+    assert AgentResponse.coerce(original) is original
+    assert AgentResponse.coerce({"a": 1}).data == {"a": 1}
+    assert AgentResponse.coerce(None).status is AgentStatus.SUCCESS
 
 
 def test_result_is_json_serializable_for_a2a_and_queues():
-    result = AgentResult.ok(
+    result = AgentResponse.ok(
         {"total": 3},
         claims=[Claim(claim_id="c1", text="stock is low", evidence_ids=["e1"])],
         artifacts=[ArtifactRef(artifact_id="a1", type="report")],
@@ -30,7 +30,7 @@ def test_result_is_json_serializable_for_a2a_and_queues():
     payload = json.loads(result.model_dump_json())
     assert payload["status"] == "SUCCESS"
     assert payload["claims"][0]["claim_id"] == "c1"
-    assert AgentResult.model_validate(payload).data == {"total": 3}
+    assert AgentResponse.model_validate(payload).data == {"total": 3}
 
 
 def test_request_round_trips_with_its_context():
@@ -56,6 +56,6 @@ def test_status_ok_semantics():
 
 
 def test_add_warning_returns_a_new_result():
-    base = AgentResult.ok("x")
+    base = AgentResponse.ok("x")
     warned = base.add_warning("W", "careful")
     assert not base.warnings and warned.warnings[0].code == "W"

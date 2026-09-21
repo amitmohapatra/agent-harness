@@ -7,10 +7,10 @@ import inspect
 from collections.abc import Iterable
 from typing import Any
 
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.messages import AgentRequest
-from universal_agent_harness.contracts.model import ModelRequest
-from universal_agent_harness.contracts.tool import ToolCall
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.messages import AgentRequest
+from universal_agent_contracts.model import ModelRequest
+from universal_agent_contracts.tool import ToolCall
 
 
 class NoOpPolicyProvider:
@@ -24,9 +24,7 @@ class NoOpPolicyProvider:
     async def authorize_tool(self, context: AgentExecutionContext, call: ToolCall) -> bool:
         return True
 
-    async def authorize_model(
-        self, context: AgentExecutionContext, request: ModelRequest
-    ) -> bool:
+    async def authorize_model(self, context: AgentExecutionContext, request: ModelRequest) -> bool:
         return True
 
 

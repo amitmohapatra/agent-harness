@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from universal_agent_harness.contracts.descriptors import AgentDescriptor
+from universal_agent_contracts.descriptors import AgentDescriptor
+
 from universal_agent_harness.runtime.logging import get_logger
 
 log = get_logger("universal_agent_harness.registry")

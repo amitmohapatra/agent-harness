@@ -14,8 +14,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.descriptors import AgentDescriptor
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.descriptors import AgentDescriptor
+
 from universal_agent_harness.runtime.cancellation import CancellationToken, remaining_seconds
 from universal_agent_harness.runtime.logging import HarnessLogger, get_logger
 from universal_agent_harness.telemetry.tracer import HarnessTracer

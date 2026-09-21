@@ -13,8 +13,9 @@ import random
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
+from universal_agent_contracts.errors import AgentError, ErrorCategory
+
 from universal_agent_harness.config.settings import RetryConfig
-from universal_agent_harness.contracts.errors import AgentError, ErrorCategory
 
 T = TypeVar("T")
 

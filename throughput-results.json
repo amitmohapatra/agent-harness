@@ -1,23 +1,23 @@
 {
   "1": {
     "turns": 20,
-    "wall_seconds": 34.266,
-    "turns_per_second": 0.584,
-    "latency_p50_ms": 1364.6,
-    "latency_p95_ms": 2955.2
+    "wall_seconds": 23.248,
+    "turns_per_second": 0.86,
+    "latency_p50_ms": 848.5,
+    "latency_p95_ms": 2019.7
   },
   "5": {
     "turns": 20,
-    "wall_seconds": 22.274,
-    "turns_per_second": 0.898,
-    "latency_p50_ms": 5298.5,
-    "latency_p95_ms": 6719.3
+    "wall_seconds": 15.393,
+    "turns_per_second": 1.299,
+    "latency_p50_ms": 3332.0,
+    "latency_p95_ms": 4271.5
   },
   "20": {
     "turns": 20,
-    "wall_seconds": 51.994,
-    "turns_per_second": 0.385,
-    "latency_p50_ms": 45980.3,
-    "latency_p95_ms": 51595.7
+    "wall_seconds": 21.296,
+    "turns_per_second": 0.939,
+    "latency_p50_ms": 19591.2,
+    "latency_p95_ms": 20132.9
   }
 }

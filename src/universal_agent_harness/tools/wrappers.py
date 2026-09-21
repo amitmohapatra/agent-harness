@@ -15,7 +15,8 @@ import inspect
 from collections.abc import Callable
 from typing import Any, overload
 
-from universal_agent_harness.contracts.tool import ToolCall, ToolOutcome, ToolSpec
+from universal_agent_contracts.tool import ToolCall, ToolOutcome, ToolSpec
+
 from universal_agent_harness.runtime.propagation import current_runtime
 from universal_agent_harness.tools.local import LocalToolClient
 

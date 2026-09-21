@@ -9,7 +9,7 @@ import pytest
 from universal_agent_harness import (
     AgentExecutionContext,
     AgentHarness,
-    AgentResult,
+    AgentResponse,
     AgentRuntime,
     current_context,
 )
@@ -21,7 +21,7 @@ async def test_wrap_async_callable(harness, context):
 
     wrapped = harness.wrap(agent, agent_id="echo")
     result = await wrapped("hello", context=context)
-    assert isinstance(result, AgentResult)
+    assert isinstance(result, AgentResponse)
     assert result.data == {"seen": "hello"}
     assert result.status == "SUCCESS"
 
@@ -64,7 +64,7 @@ async def test_decorator_injects_the_runtime(harness, context):
     async def inventory_agent(state, agent: AgentRuntime):
         seen["runtime"] = agent
         seen["agent_id"] = agent.agent_id
-        return AgentResult.ok({"stock": state["sku"]})
+        return AgentResponse.ok({"stock": state["sku"]})
 
     result = await inventory_agent({"sku": "SKU-1"}, context=context)
     assert result.data == {"stock": "SKU-1"}
@@ -87,7 +87,7 @@ async def test_execution_context_manager(harness, context):
     async with harness.execution(context, agent_id="block-agent", input="question?") as runtime:
         assert runtime.agent_id == "block-agent"
         assert current_context() is runtime.context
-        runtime.state["result"] = AgentResult.ok("done")
+        runtime.state["result"] = AgentResponse.ok("done")
     assert current_context() is None
 
 
@@ -195,7 +195,7 @@ async def test_execution_block_emits_lifecycle_events_like_a_wrapped_agent(harne
     harness.on(lambda event, payload: seen.append(event))
 
     async with harness.execution(context, agent_id="block-agent", input="q") as runtime:
-        runtime.state["result"] = AgentResult.ok("done")
+        runtime.state["result"] = AgentResponse.ok("done")
 
     assert seen[0] == "on_agent_start"
     assert "on_agent_success" in seen

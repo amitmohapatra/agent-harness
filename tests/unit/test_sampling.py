@@ -23,8 +23,12 @@ def test_rate_is_approximately_honoured():
 
 def test_errors_and_critical_agents_bypass_the_low_rate():
     sampler = Sampler(
-        SamplingConfig(sample_rate=0.0, error_sample_rate=1.0, critical_agent_sample_rate=1.0,
-                       critical_agents=("billing-agent",))
+        SamplingConfig(
+            sample_rate=0.0,
+            error_sample_rate=1.0,
+            critical_agent_sample_rate=1.0,
+            critical_agents=("billing-agent",),
+        )
     )
     assert sampler.decide(agent_id="x", run_id="r").sampled is False
     assert sampler.decide(agent_id="x", run_id="r", is_error=True).sampled is True

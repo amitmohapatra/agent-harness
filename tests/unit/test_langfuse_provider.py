@@ -7,6 +7,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from opentelemetry import trace as otel_trace
 
 from universal_agent_harness.config.settings import LangfuseConfig
 from universal_agent_harness.langfuse import attributes as LA
@@ -67,7 +68,9 @@ def test_enricher_maps_harness_attributes_to_langfuse_ones():
     assert span.attributes[LA.OBSERVATION_OUTPUT] == "answer"
     assert span.attributes[LA.OBSERVATION_MODEL] == "gpt-x"
     assert json.loads(span.attributes[LA.OBSERVATION_USAGE_DETAILS]) == {
-        "input": 10, "output": 4, "total": 14
+        "input": 10,
+        "output": 4,
+        "total": 14,
     }
     assert json.loads(span.attributes[LA.OBSERVATION_COST_DETAILS]) == {"total": 0.002}
 
@@ -93,8 +96,13 @@ def test_otlp_mode_needs_no_sdk():
 
 
 def test_otlp_endpoint_and_headers_follow_langfuse_s_otel_contract():
-    config = LangfuseConfig(enabled=True, mode="otlp", public_key="pk", secret_key="sk",
-                            base_url="https://lf.example.com/")
+    config = LangfuseConfig(
+        enabled=True,
+        mode="otlp",
+        public_key="pk",
+        secret_key="sk",
+        base_url="https://lf.example.com/",
+    )
     assert otlp_endpoint(config) == "https://lf.example.com/api/public/otel/v1/traces"
     assert otlp_headers(config)["Authorization"].startswith("Basic ")
 
@@ -103,16 +111,30 @@ def test_otlp_endpoint_and_headers_follow_langfuse_s_otel_contract():
 DEAD_HOST = "http://127.0.0.1:9"
 
 
-def _recording_langfuse(monkeypatch) -> dict[str, object]:
-    """Substitute a *subclass of the real client* that notes its keyword arguments.
+@pytest.fixture
+def recording_langfuse(monkeypatch):
+    """A *subclass of the real client* that notes its keyword arguments, built in isolation.
 
     The real ``Langfuse.__init__`` still runs, so an argument we invent or a name Langfuse
     renames fails here with ``TypeError`` rather than being quietly accepted. Construction
     is offline: the SDK connects lazily, so no credentials or server are needed.
+
+    Isolation matters as much as fidelity. A real client with no ``tracer_provider`` attaches
+    a ``LangfuseSpanProcessor`` to the *global* OTel provider, and that processor's ``on_end``
+    stamps ``langfuse.internal.is_app_root`` on spans — on harness spans especially, since
+    ``_create_client`` opts them in by name via ``should_export_span``. OTel has no API for
+    removing a processor, and the client is a process-wide singleton keyed by public key, so
+    one unguarded construction here silently decorated every span in every later test: the
+    e2e suite's "langfuse disabled emits no langfuse attributes" failed, but only when the
+    unit tier ran first. Hence a throwaway provider to absorb the processor, and a reset of
+    Langfuse's singleton registry so the next construction is not answered from this one.
     """
     import langfuse
+    from langfuse._client.resource_manager import LangfuseResourceManager
+    from opentelemetry.sdk.trace import TracerProvider
 
     captured: dict[str, object] = {}
+    provider = TracerProvider()
 
     class RecordingLangfuse(langfuse.Langfuse):
         def __init__(self, **kwargs):
@@ -120,18 +142,30 @@ def _recording_langfuse(monkeypatch) -> dict[str, object]:
             super().__init__(**kwargs)
 
     monkeypatch.setattr(langfuse, "Langfuse", RecordingLangfuse)
-    return captured
+    LangfuseResourceManager.reset()
+    try:
+        yield SimpleNamespace(kwargs=captured, tracer_provider=provider)
+    finally:
+        LangfuseResourceManager.reset()
+        provider.shutdown()
 
 
-def test_sdk_client_is_constructed_with_documented_public_arguments(monkeypatch):
+def test_sdk_client_is_constructed_with_documented_public_arguments(recording_langfuse):
     """The harness must configure Langfuse through its public constructor only — including
     the hook that also exports the harness's own spans (§22)."""
-    captured = _recording_langfuse(monkeypatch)
+    captured = recording_langfuse.kwargs
     config = LangfuseConfig(
-        enabled=True, mode="sdk", public_key="pk", secret_key="sk",
-        base_url=DEAD_HOST, environment="staging", release="1.2.3",
+        enabled=True,
+        mode="sdk",
+        public_key="pk",
+        secret_key="sk",
+        base_url=DEAD_HOST,
+        environment="staging",
+        release="1.2.3",
     )
-    client = _create_client(config, tracer_provider=None, sample_rate=0.5)
+    client = _create_client(
+        config, tracer_provider=recording_langfuse.tracer_provider, sample_rate=0.5
+    )
 
     import langfuse
 
@@ -140,18 +174,18 @@ def test_sdk_client_is_constructed_with_documented_public_arguments(monkeypatch)
     assert captured["host"] == DEAD_HOST
     assert captured["environment"] == "staging"
     assert captured["release"] == "1.2.3"
-    assert captured["sample_rate"] == 0.5          # sampling comes from telemetry config
+    assert captured["sample_rate"] == 0.5  # sampling comes from telemetry config
     assert callable(captured["should_export_span"])
 
 
-def test_harness_spans_are_included_in_what_langfuse_exports(monkeypatch):
-    captured = _recording_langfuse(monkeypatch)
+def test_harness_spans_are_included_in_what_langfuse_exports(recording_langfuse):
     _create_client(
-        LangfuseConfig(enabled=True, mode="sdk", public_key="pk", secret_key="sk",
-                       base_url=DEAD_HOST),
-        None,
+        LangfuseConfig(
+            enabled=True, mode="sdk", public_key="pk", secret_key="sk", base_url=DEAD_HOST
+        ),
+        recording_langfuse.tracer_provider,
     )
-    should_export = captured["should_export_span"]
+    should_export = recording_langfuse.kwargs["should_export_span"]
 
     harness_span = SimpleNamespace(
         instrumentation_scope=SimpleNamespace(name="universal_agent_harness"), attributes={}
@@ -161,6 +195,37 @@ def test_harness_spans_are_included_in_what_langfuse_exports(monkeypatch):
     )
     assert should_export(harness_span) is True
     assert should_export(unrelated_span) is False
+
+
+def _global_span_processors() -> tuple:
+    """The processors hanging off the globally registered provider.
+
+    OTel exposes no public reader for this, and none for *removing* a processor either —
+    which is the whole reason this guard exists rather than a teardown that detaches.
+    """
+    provider = otel_trace.get_tracer_provider()
+    active = getattr(provider, "_active_span_processor", None)
+    return tuple(getattr(active, "_span_processors", ()))
+
+
+def test_building_a_client_here_leaves_the_global_tracer_provider_alone(recording_langfuse):
+    """A Langfuse client built with no ``tracer_provider`` attaches a span processor to the
+    global one, permanently: ``on_end`` then stamps ``langfuse.internal.is_app_root`` on every
+    harness span in the process, because ``_create_client`` opts harness spans in by name.
+
+    That made the e2e assertion "langfuse disabled emits no langfuse attributes" fail — but
+    only when this file ran first, which is why it looked like flakiness. Constructing a real
+    client is still worth doing here (it catches a renamed constructor argument), so the test
+    hands Langfuse a provider of its own instead.
+    """
+    before = _global_span_processors()
+    _create_client(
+        LangfuseConfig(
+            enabled=True, mode="sdk", public_key="pk", secret_key="sk", base_url=DEAD_HOST
+        ),
+        recording_langfuse.tracer_provider,
+    )
+    assert _global_span_processors() == before
 
 
 def test_sdk_creation_failure_degrades_instead_of_raising(monkeypatch):
@@ -195,9 +260,9 @@ def test_flush_failure_propagates_in_fail_closed_mode():
 
 
 async def test_evaluation_provider_creates_scores_off_the_event_loop():
-    from universal_agent_harness.langfuse.evaluation import LangfuseEvaluationProvider
-
     import langfuse
+
+    from universal_agent_harness.langfuse.evaluation import LangfuseEvaluationProvider
 
     calls: list[dict] = []
 
@@ -231,16 +296,20 @@ async def test_evaluation_failures_never_reach_the_caller():
 async def test_prompt_provider_compiles_variables():
     """A real ``TextPromptClient`` doing a real ``compile`` — only the fetch is short-circuited,
     because that is the one step that needs a Langfuse server."""
-    from universal_agent_harness.langfuse.evaluation import LangfusePromptProvider
-
     import langfuse
     from langfuse.api.prompts.types.prompt import Prompt_Text
     from langfuse.model import TextPromptClient
 
+    from universal_agent_harness.langfuse.evaluation import LangfusePromptProvider
+
     real_prompt = TextPromptClient(
         Prompt_Text(
-            name="greeting", version=1, prompt="hello {{name}}",
-            config={}, labels=["production"], tags=[],
+            name="greeting",
+            version=1,
+            prompt="hello {{name}}",
+            config={},
+            labels=["production"],
+            tags=[],
         )
     )
 
@@ -250,5 +319,9 @@ async def test_prompt_provider_compiles_variables():
             assert name == "greeting"
             return real_prompt
 
-
-    assert await LangfusePromptProvider(OfflineClient(public_key="pk", secret_key="sk", host=DEAD_HOST)).get_prompt("greeting", name="world") == "hello world"
+    assert (
+        await LangfusePromptProvider(
+            OfflineClient(public_key="pk", secret_key="sk", host=DEAD_HOST)
+        ).get_prompt("greeting", name="world")
+        == "hello world"
+    )

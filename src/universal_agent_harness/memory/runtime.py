@@ -18,9 +18,10 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from universal_agent_harness.contracts.artifacts import MemoryObservation
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.errors import AgentError, MemoryUnavailableError
+from universal_agent_contracts.artifacts import MemoryObservation
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.errors import AgentError, MemoryUnavailableError
+
 from universal_agent_harness.memory import visibility as vis
 from universal_agent_harness.memory.policy import MemoryPolicy
 from universal_agent_harness.telemetry import names as N
@@ -182,7 +183,8 @@ class MemoryRuntime:
             span.set_input(text, category="memory")
             return await self._write(
                 self._ctx.chat.user(
-                    text, idempotency_key=self.context.idempotency_key("msg", "user", text),
+                    text,
+                    idempotency_key=self.context.idempotency_key("msg", "user", text),
                     **metadata,
                 ),
                 span,
@@ -220,7 +222,7 @@ class MemoryRuntime:
             if hasattr(self._ctx, "derive"):
                 self._ctx = self._ctx.derive(agent_group_id=group)
         if not self.context.agent_group_id:
-            from universal_agent_harness.contracts.errors import ConfigurationError  # noqa: PLC0415
+            from universal_agent_contracts.errors import ConfigurationError  # noqa: PLC0415
 
             raise ConfigurationError(
                 "share() needs an agent group: the group is the audience. Set it once with "

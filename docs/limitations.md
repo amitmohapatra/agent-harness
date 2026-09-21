@@ -91,6 +91,6 @@ applies, and both are per-tenant/environment decisions with real consequences â€
 ## Not implemented (contracts exist, services do not)
 
 Agent registry service, Bifrost model/tool gateway, MCP tool client, A2A transport, CrewAI
-and Google ADK adapters. `AgentRequest`/`AgentResult` are serializable and the relevant
+and Google ADK adapters. `AgentRequest`/`AgentResponse` are serializable and the relevant
 ports exist so these can arrive without rewriting agents â€” but nothing here talks to them
 today.

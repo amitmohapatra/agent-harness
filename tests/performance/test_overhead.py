@@ -65,7 +65,8 @@ async def _overhead(harness: AgentHarness, context) -> dict[str, float]:
     baseline = percentiles(await measure(lambda: bare_agent("payload")))
     harnessed = percentiles(await measure(lambda: wrapped("payload", context=context)))
     return {
-        key: round(harnessed[key] - baseline[key], 4) for key in ("p50", "p90", "p95", "p99", "mean")
+        key: round(harnessed[key] - baseline[key], 4)
+        for key in ("p50", "p90", "p95", "p99", "mean")
     } | {"baseline_p50_ms": round(baseline["p50"], 4), "wrapped_p50_ms": round(harnessed["p50"], 4)}
 
 

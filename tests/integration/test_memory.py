@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from universal_agent_contracts.errors import MemoryUnavailableError
 
-from universal_agent_harness import AgentHarness, AgentResult, MemoryObservation, MemoryPolicy
-from universal_agent_harness.contracts.errors import MemoryUnavailableError
+from universal_agent_harness import AgentHarness, AgentResponse, MemoryObservation, MemoryPolicy
 
 
 async def test_context_is_retrieved_before_the_agent_runs(harness, memory, context):
@@ -50,7 +50,7 @@ async def test_no_query_means_no_retrieval(harness, memory, context):
 
 async def test_observations_are_written_after_the_result(harness, memory, context):
     async def agent(payload):
-        return AgentResult.ok(
+        return AgentResponse.ok(
             "stock is low",
             memory_observations=[MemoryObservation(content="SKU-1 is short by 40 units")],
         )
@@ -95,7 +95,7 @@ async def test_claims_are_observed_when_the_policy_asks(harness, memory, context
     from universal_agent_harness import Claim
 
     async def agent(payload):
-        return AgentResult.ok("x", claims=[Claim(claim_id="c1", text="stock is low")])
+        return AgentResponse.ok("x", claims=[Claim(claim_id="c1", text="stock is low")])
 
     await harness.wrap(agent, agent_id="inv")("q", context=context)
     await harness.drain()
@@ -113,7 +113,9 @@ async def test_memory_policy_can_be_narrowed_per_agent(harness, memory, context)
     await harness.wrap(
         agent,
         agent_id="private-agent",
-        memory_policy=MemoryPolicy(retrieve_before=False, observe_input=False, observe_output=False),
+        memory_policy=MemoryPolicy(
+            retrieve_before=False, observe_input=False, observe_output=False
+        ),
     )("q", context=context)
 
     assert memory.retrievals == []
@@ -137,7 +139,8 @@ async def test_private_by_default_marks_observations_run_visible(memory, context
 async def test_retrieval_failure_degrades_by_default(dead_memory, context):
     """A real outage: the client points at a port nothing listens on."""
     harness = AgentHarness(
-        memory=dead_memory, defaults={"tenant_id": "acme"},
+        memory=dead_memory,
+        defaults={"tenant_id": "acme"},
         config={"timeouts": {"memory_seconds": 3.0}},
     )
 
@@ -155,8 +158,7 @@ async def test_fail_closed_turns_a_memory_outage_into_an_error(dead_memory, cont
     harness = AgentHarness(
         memory=dead_memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"failure_mode": "fail_closed"},
-                "timeouts": {"memory_seconds": 3.0}},
+        config={"memory": {"failure_mode": "fail_closed"}, "timeouts": {"memory_seconds": 3.0}},
     )
 
     async def agent(payload):
@@ -201,8 +203,10 @@ async def test_failed_write_warns_but_keeps_the_turn_s_result(dead_memory, conte
     harness = AgentHarness(
         memory=dead_memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"writeback": False, "retrieve_before": False},
-                "timeouts": {"memory_seconds": 3.0}},
+        config={
+            "memory": {"writeback": False, "retrieve_before": False},
+            "timeouts": {"memory_seconds": 3.0},
+        },
     )
 
     async def agent(payload):
@@ -218,14 +222,15 @@ async def test_fail_closed_propagates_a_failed_write(dead_memory, context):
     harness = AgentHarness(
         memory=dead_memory,
         defaults={"tenant_id": "acme"},
-        config={"memory": {"writeback": False, "retrieve_before": False,
-                           "failure_mode": "fail_closed"},
-                "timeouts": {"memory_seconds": 3.0}},
+        config={
+            "memory": {"writeback": False, "retrieve_before": False, "failure_mode": "fail_closed"},
+            "timeouts": {"memory_seconds": 3.0},
+        },
     )
 
     async def agent(payload):
         return "answer"
 
-    with pytest.raises(Exception, match="(?i)connect|unavailable|timeout"):
+    with pytest.raises(Exception, match=r"(?i)connect|unavailable|timeout"):
         await harness.wrap(agent, agent_id="inv")("q", context=context)
     await harness.aclose()

@@ -18,8 +18,9 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, ClassVar
 
+from universal_agent_contracts.context import AgentExecutionContext
+
 from universal_agent_harness.config.settings import CaptureConfig
-from universal_agent_harness.contracts.context import AgentExecutionContext
 from universal_agent_harness.telemetry import names as N
 from universal_agent_harness.telemetry.metrics import MetricsRecorder
 from universal_agent_harness.telemetry.redaction import DefaultRedactor

@@ -41,9 +41,7 @@ class _BridgeLoop:
             if self._loop is not None and not self._loop.is_closed():
                 return self._loop
             loop = asyncio.new_event_loop()
-            thread = threading.Thread(
-                target=loop.run_forever, name="uah-sync-bridge", daemon=True
-            )
+            thread = threading.Thread(target=loop.run_forever, name="uah-sync-bridge", daemon=True)
             thread.start()
             self._loop, self._thread = loop, thread
             return loop

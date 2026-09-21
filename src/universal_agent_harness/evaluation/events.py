@@ -12,7 +12,8 @@ import inspect
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from universal_agent_harness.contracts.events import AgentEvalEvent
+from universal_agent_contracts.events import AgentEvalEvent
+
 from universal_agent_harness.runtime.logging import get_logger
 
 log = get_logger("universal_agent_harness.evaluation")

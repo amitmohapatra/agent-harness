@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from universal_agent_contracts.context import AgentExecutionContext
+from universal_agent_contracts.errors import ConfigurationError
+
 from universal_agent_harness.config.settings import MemoryConfig
-from universal_agent_harness.contracts.context import AgentExecutionContext
-from universal_agent_harness.contracts.errors import ConfigurationError
 from universal_agent_harness.memory.policy import MemoryPolicy
 from universal_agent_harness.memory.runtime import MemoryRuntime, NoOpMemoryRuntime
 from universal_agent_harness.telemetry.tracer import HarnessTracer

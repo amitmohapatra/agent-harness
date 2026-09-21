@@ -12,8 +12,8 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from universal_agent_harness.contracts.errors import ToolNotFoundError
-from universal_agent_harness.contracts.tool import ToolCall, ToolOutcome, ToolSpec
+from universal_agent_contracts.errors import ToolNotFoundError
+from universal_agent_contracts.tool import ToolCall, ToolOutcome, ToolSpec
 
 
 class LocalToolClient:

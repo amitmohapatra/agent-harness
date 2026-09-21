@@ -15,9 +15,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from universal_agent_harness.contracts.errors import HarnessError, ModelError, PolicyDeniedError
-from universal_agent_harness.contracts.events import LifecycleEvent
-from universal_agent_harness.contracts.model import ModelRequest, ModelResponse
+from universal_agent_contracts.errors import HarnessError, ModelError, PolicyDeniedError
+from universal_agent_contracts.events import LifecycleEvent
+from universal_agent_contracts.model import ModelRequest, ModelResponse
+
 from universal_agent_harness.telemetry import names as N
 from universal_agent_harness.telemetry.metrics import (
     MODEL_CALLS,

@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from universal_agent_harness.contracts.ids import safe_id, stable_id
+from universal_agent_contracts.ids import safe_id, stable_id
 
 #: Fields an application may set under ``configurable.harness``.
 IDENTITY_FIELDS = (
@@ -88,7 +88,10 @@ class Lineage:
         if not parents:
             return None
         return stable_id(
-            self.thread_id, self.checkpoint_ns, parents[-1].task_id, parents[-1].node,
+            self.thread_id,
+            self.checkpoint_ns,
+            parents[-1].task_id,
+            parents[-1].node,
             prefix="run_lg_",
         )
 
@@ -106,9 +109,7 @@ def lineage_from_config(config: Mapping[str, Any] | None) -> Lineage:
     segments = tuple(Segment.parse(s) for s in ns.split("|") if s)
     node = meta.get("langgraph_node") or (segments[-1].node if segments else None)
     step = meta.get("langgraph_step")
-    overrides = {
-        k: v for k, v in dict(conf.get("harness") or {}).items() if k in IDENTITY_FIELDS
-    }
+    overrides = {k: v for k, v in dict(conf.get("harness") or {}).items() if k in IDENTITY_FIELDS}
     return Lineage(
         thread_id=conf.get("thread_id"),
         segments=segments,

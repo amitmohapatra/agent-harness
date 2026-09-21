@@ -8,6 +8,7 @@ to the application.
 from __future__ import annotations
 
 import pytest
+from universal_agent_contracts.errors import ConfigurationError
 
 from universal_agent_harness import (
     AgentExecutionContext,
@@ -15,7 +16,6 @@ from universal_agent_harness import (
     MemoryPolicy,
     current_context,
 )
-from universal_agent_harness.contracts.errors import ConfigurationError
 
 # --------------------------------------------------------------------------- identity
 
@@ -157,9 +157,7 @@ async def test_ingesting_into_a_thread_creates_the_thread_first(memory, context,
     )
 
 
-async def test_a_document_for_a_wider_audience_does_not_touch_the_thread(
-    memory, context, tmp_path
-):
+async def test_a_document_for_a_wider_audience_does_not_touch_the_thread(memory, context, tmp_path):
     harness = AgentHarness(
         memory=memory, defaults={"tenant_id": "acme"}, config={"memory": {"writeback": False}}
     )
@@ -185,7 +183,7 @@ def test_a_misspelled_memory_policy_option_is_refused():
 def test_a_correct_policy_option_changes_only_that_field():
     narrowed = MemoryPolicy().merged({"observe_output": False})
     assert narrowed.observe_output is False
-    assert narrowed.observe_input is True   # everything else is untouched
+    assert narrowed.observe_input is True  # everything else is untouched
 
 
 async def test_nothing_but_a_tenant_is_required_to_run_an_agent():
@@ -196,4 +194,4 @@ async def test_nothing_but_a_tenant_is_required_to_run_an_agent():
 
     result = await harness.wrap(agent, agent_id="inv")("how much stock?")
     assert result.succeeded
-    assert current_context() is None      # and nothing leaks out of the execution
+    assert current_context() is None  # and nothing leaks out of the execution

@@ -155,7 +155,7 @@ session; the examples derive one per run.
 
 Not implemented. The contracts are deliberately framework-neutral so an adapter can be
 added without core changes (`FrameworkAdapter`, `AgentExecutionContext`, `AgentRequest`,
-`AgentResult`). Until such an adapter exists and is tested, CrewAI and ADK are **not
+`AgentResponse`). Until such an adapter exists and is tested, CrewAI and ADK are **not
 supported** — wrapping their callables as plain Python works, but framework-level lineage,
 events and state mapping do not.
 

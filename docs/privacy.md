@@ -55,6 +55,7 @@ class MyRedactor:
     def redact_input(self, value): ...
     def redact_output(self, value): ...
 
+
 AgentHarness(memory=memory, redactor=MyRedactor())
 ```
 

@@ -29,8 +29,9 @@ async def _ids(harness, ctx, text):
 
 
 async def test_two_messages_in_one_chat_are_two_turns(memory):
-    harness = AgentHarness(memory=memory, defaults={"tenant_id": "acme"},
-                           config={"memory": {"writeback": False}})
+    harness = AgentHarness(
+        memory=memory, defaults={"tenant_id": "acme"}, config={"memory": {"writeback": False}}
+    )
     chat = AgentExecutionContext.create(
         tenant_id="acme", user_id="u1", agent_id="support", thread_id="chat-A"
     )
@@ -46,11 +47,15 @@ async def test_two_messages_in_one_chat_are_two_turns(memory):
 
 async def test_a_named_turn_is_honoured(memory):
     """Replay: the caller says these are the same turn, so they are."""
-    harness = AgentHarness(memory=memory, defaults={"tenant_id": "acme"},
-                           config={"memory": {"writeback": False}})
+    harness = AgentHarness(
+        memory=memory, defaults={"tenant_id": "acme"}, config={"memory": {"writeback": False}}
+    )
     ctx = AgentExecutionContext.create(
-        tenant_id="acme", user_id="u1", agent_id="support",
-        thread_id="chat-B", turn_id="turn-fixed",
+        tenant_id="acme",
+        user_id="u1",
+        agent_id="support",
+        thread_id="chat-B",
+        turn_id="turn-fixed",
     )
     first = await _ids(harness, ctx, "q")
     second = await _ids(harness, ctx, "q")
@@ -60,11 +65,22 @@ async def test_a_named_turn_is_honoured(memory):
 
 
 async def test_separate_chats_are_separate_sessions(memory):
-    harness = AgentHarness(memory=memory, defaults={"tenant_id": "acme"},
-                           config={"memory": {"writeback": False}})
-    a = await _ids(harness, AgentExecutionContext.create(
-        tenant_id="acme", user_id="u1", agent_id="support", thread_id="chat-C"), "q")
-    b = await _ids(harness, AgentExecutionContext.create(
-        tenant_id="acme", user_id="u1", agent_id="support", thread_id="chat-D"), "q")
+    harness = AgentHarness(
+        memory=memory, defaults={"tenant_id": "acme"}, config={"memory": {"writeback": False}}
+    )
+    a = await _ids(
+        harness,
+        AgentExecutionContext.create(
+            tenant_id="acme", user_id="u1", agent_id="support", thread_id="chat-C"
+        ),
+        "q",
+    )
+    b = await _ids(
+        harness,
+        AgentExecutionContext.create(
+            tenant_id="acme", user_id="u1", agent_id="support", thread_id="chat-D"
+        ),
+        "q",
+    )
     assert a["session"] != b["session"] and a["run"] != b["run"]
     await harness.aclose()

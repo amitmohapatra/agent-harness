@@ -56,7 +56,9 @@ async def test_errors_are_recorded_on_the_span(harness, context, spans):
 
 async def test_timeout_produces_a_timeout_error(memory, context):
     harness = AgentHarness(
-        memory=memory, defaults={"tenant_id": "acme"}, config={"timeouts": {"default_seconds": 0.05}}
+        memory=memory,
+        defaults={"tenant_id": "acme"},
+        config={"timeouts": {"default_seconds": 0.05}},
     )
 
     async def agent(payload):
@@ -69,7 +71,9 @@ async def test_timeout_produces_a_timeout_error(memory, context):
 
 async def test_timeout_result_mode_reports_timeout_status(memory, context):
     harness = AgentHarness(
-        memory=memory, defaults={"tenant_id": "acme"}, config={"timeouts": {"default_seconds": 0.05}}
+        memory=memory,
+        defaults={"tenant_id": "acme"},
+        config={"timeouts": {"default_seconds": 0.05}},
     )
 
     async def agent(payload):
@@ -93,7 +97,9 @@ async def test_per_call_timeout_overrides_the_default(harness, context):
 async def test_timeout_cancels_the_agent_task(memory, context):
     cancelled = asyncio.Event()
     harness = AgentHarness(
-        memory=memory, defaults={"tenant_id": "acme"}, config={"timeouts": {"default_seconds": 0.05}}
+        memory=memory,
+        defaults={"tenant_id": "acme"},
+        config={"timeouts": {"default_seconds": 0.05}},
     )
 
     async def agent(payload):

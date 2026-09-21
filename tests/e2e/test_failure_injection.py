@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from universal_agent_harness import AgentHarness, AgentResult, CollectingEvaluationSink
+from universal_agent_harness import AgentHarness, AgentResponse, CollectingEvaluationSink
 
 
 class BrokenTelemetry:
@@ -44,7 +44,9 @@ async def test_a_completely_broken_telemetry_backend_does_not_fail_the_agent(mem
     async def agent(payload):
         return "business value"
 
-    assert (await harness.wrap(agent, agent_id="inv")("q", context=context)).data == "business value"
+    assert (
+        await harness.wrap(agent, agent_id="inv")("q", context=context)
+    ).data == "business value"
 
 
 async def test_memory_read_and_write_both_failing(faulty_memory, context):
@@ -156,7 +158,7 @@ async def test_everything_disabled_still_runs(context):
 
     async def agent(payload, runtime):
         assert runtime.memory.enabled is False
-        return AgentResult.ok("bare metal")
+        return AgentResponse.ok("bare metal")
 
     assert (await harness.wrap(agent, agent_id="inv")("q", context=context)).data == "bare metal"
 
