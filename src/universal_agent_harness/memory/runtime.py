@@ -461,16 +461,29 @@ class MemoryRuntime:
         task: str = "",
         step: int | None = None,
     ) -> Any | None:
-        return await self._ctx.tools.record(
-            tool,
-            dict(args),
-            output=output,
-            status=status,
-            error_class=error_class,
-            latency_ms=latency_ms,
-            task=task,
-            step=step,
-        )
+        """Record one tool call for tool memory.
+
+        Through ``_write`` like every other write. It used to call the SDK directly, which
+        meant this one operation had no span, no latency metric and no deadline — and a
+        failure vanished instead of reaching the writeback handler. A tool-memory write that
+        silently does nothing is the kind of gap that shows up much later as "why did the
+        agent never learn that procedure".
+        """
+        with self.tracer.memory_span("record_tool_call", **{N.TOOL_NAME: tool}) as span:
+            return await self._write(
+                self._ctx.tools.record(
+                    tool,
+                    dict(args),
+                    output=output,
+                    status=status,
+                    error_class=error_class,
+                    latency_ms=latency_ms,
+                    task=task,
+                    step=step,
+                ),
+                span,
+                "record_tool_call",
+            )
 
     # -- introspection ----------------------------------------------------------------
     def describe(self, bundle: Any, /) -> dict[str, Any]:
