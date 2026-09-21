@@ -59,6 +59,7 @@ class RunStoreClient:
         tenant_id: str | None = None,
         required: bool = False,
         timeout: float = 5.0,
+        webhook_url: str | None = None,
         client: Any = None,
     ) -> None:
         import httpx  # noqa: PLC0415 - optional at import time, required to construct
@@ -67,6 +68,12 @@ class RunStoreClient:
             raise ValueError("RunStoreClient needs base_url and api_key")
         self.tenant_id = tenant_id
         self.required = required
+        #: Where agent-runs should POST when a run pauses or finishes. Without it a UI has
+        #: to poll ``GET /v1/runs?status=PAUSED`` to notice that the 3am job is waiting on
+        #: an approval — which is the wrong shape for a product where most runs do nothing
+        #: interesting for minutes at a time. Set per deployment, because only the
+        #: deployment knows where its own UI backend lives.
+        self.webhook_url = webhook_url
         self._httpx = httpx
         self._auth = {"X-Api-Key": api_key}
         self._client = client or httpx.AsyncClient(
@@ -92,6 +99,10 @@ class RunStoreClient:
                 # The run id *is* the natural idempotency key: it is derived, not random, so
                 # a retried turn produces the same one and reopens nothing.
                 "idempotency_key": context.agent_run_id,
+                # Captured at start, because that is when the caller who wants to know is
+                # still here. Omitted entirely when unset: agent-runs forbids unknown
+                # fields, and sending an explicit null is not the same as not asking.
+                **({"webhook_url": self.webhook_url} if self.webhook_url else {}),
             },
         )
 
@@ -144,6 +155,36 @@ class RunStoreClient:
 __all__ = ["NoRunStore", "RunRecorder", "RunStoreClient"]
 
 
+def _asked(signal: Any) -> dict[str, Any] | None:
+    """What the person is being asked, if the pause signal says.
+
+    Only the exception's class name used to reach the run store, so a paused run told a UI
+    that something called "GraphInterrupt" had happened and nothing about the question —
+    which is the one thing a human inbox exists to show.
+
+    :class:`AgentPaused` carries it directly. LangGraph puts its ``interrupt(value)`` in the
+    exception's args, as ``Interrupt`` objects with a ``.value``; those are read
+    structurally rather than by importing langgraph, which this package must not depend on.
+    Anything unrecognised returns None and the reason alone is recorded, exactly as before.
+    """
+    if signal is None:
+        return None
+    if callable(getattr(signal, "awaiting", None)):
+        try:
+            asked = signal.awaiting()
+        except Exception:  # a broken signal must not turn a pause into a crash
+            return None
+        return asked if isinstance(asked, dict) else None
+    values = [
+        getattr(arg, "value", arg)
+        for arg in getattr(signal, "args", ())
+        if arg is not None and not isinstance(arg, str | bytes)
+    ]
+    if not values:
+        return None
+    return {"question": values[0]} if len(values) == 1 else {"question": values}
+
+
 class RunRecorder:
     """Turns lifecycle events into run records, in order, without blocking the turn.
 
@@ -180,7 +221,7 @@ class RunRecorder:
         elif event == LifecycleEvent.AGENT_PAUSE:
             signal = payload.get("signal")
             reason = type(signal).__name__ if signal is not None else "paused"
-            self._enqueue("paused", context, {"reason": reason})
+            self._enqueue("paused", context, {"reason": reason, "awaiting": _asked(signal)})
         elif event == LifecycleEvent.AGENT_FINISH:
             status = str(payload.get("status") or "ERROR")
             if status not in self.FINAL:

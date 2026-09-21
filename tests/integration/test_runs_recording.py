@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import pytest
+from universal_agent_contracts import AgentPaused
 from universal_agent_contracts.messages import AgentResponse, AgentStatus
 
 from universal_agent_harness import AgentHarness
@@ -180,3 +181,93 @@ async def test_an_unconfigured_deployment_records_nothing() -> None:
         return AgentResponse.ok("x")
 
     assert (await agent({})).data == "x"
+
+
+# ------------------------------------------------------- pausing, and telling someone
+
+
+async def test_a_plain_agent_can_pause_and_the_question_is_recorded() -> None:
+    """The framework-agnostic human-in-the-loop path, with no LangGraph anywhere.
+
+    Two things had to be true for this and neither was: an ordinary coroutine needed a way
+    to say "a person has to answer this" (pause detection matched four LangGraph class
+    names and nothing else), and the question had to survive the trip (only the exception's
+    class name reached the store, so the inbox said "GraphInterrupt" and nothing about what
+    was actually being asked).
+    """
+    calls, handler = recording()
+    harness = build(store(handler))
+
+    @harness.agent(agent_id="refund-bot")
+    async def agent(state, runtime):
+        raise AgentPaused(
+            "Approve a EUR 240 refund for order 91?",
+            expects={"type": "boolean"},
+            payload={"order_id": 91},
+        )
+
+    with pytest.raises(AgentPaused):
+        await agent({})
+    await harness.drain()
+
+    transitions = [c for c in calls if c["path"].endswith("/transition")]
+    assert transitions, "a paused run must be recorded"
+    awaiting = transitions[-1]["body"]["awaiting"]
+    assert transitions[-1]["body"]["status"] == "PAUSED"
+    assert awaiting["question"] == "Approve a EUR 240 refund for order 91?"
+    assert awaiting["expects"] == {"type": "boolean"}
+    assert awaiting["payload"] == {"order_id": 91}
+    # The class name stays too: a UI may want to know what *kind* of pause it was.
+    assert awaiting["reason"] == "AgentPaused"
+
+
+async def test_a_paused_run_is_not_reported_as_finished() -> None:
+    """PAUSED is not terminal. Reporting it as finished is what made "waiting for a human"
+    look like a completed turn."""
+    calls, handler = recording()
+    harness = build(store(handler))
+
+    @harness.agent(agent_id="a")
+    async def agent(state, runtime):
+        raise AgentPaused("Approve?")
+
+    with pytest.raises(AgentPaused):
+        await agent({})
+    await harness.drain()
+
+    statuses = [c["body"].get("status") for c in calls if c["path"].endswith("/transition")]
+    assert "PAUSED" in statuses
+    assert not {"SUCCESS", "ERROR"} & set(statuses), statuses
+
+
+async def test_a_webhook_url_is_registered_when_the_deployment_sets_one() -> None:
+    """Without it a UI has to poll to notice that the 3am job is waiting on an approval."""
+    calls, handler = recording()
+    harness = build(store(handler, webhook_url="https://ui.example/hooks/runs"))
+
+    @harness.agent(agent_id="a")
+    async def agent(state, runtime):
+        return AgentResponse.ok({})
+
+    await agent({})
+    await harness.drain()
+
+    opened = next(c for c in calls if c["path"] == "/v1/runs")
+    assert opened["body"]["webhook_url"] == "https://ui.example/hooks/runs"
+
+
+async def test_no_webhook_url_is_sent_when_none_is_configured() -> None:
+    """agent-runs forbids unknown fields, and an explicit null is not the same as not
+    asking to be told."""
+    calls, handler = recording()
+    harness = build(store(handler))
+
+    @harness.agent(agent_id="a")
+    async def agent(state, runtime):
+        return AgentResponse.ok({})
+
+    await agent({})
+    await harness.drain()
+
+    opened = next(c for c in calls if c["path"] == "/v1/runs")
+    assert "webhook_url" not in opened["body"]
