@@ -29,6 +29,32 @@ EXPLICIT_ONLY = {
 }
 
 
+#: How long a write may take to become listable. Writes are asynchronous — the API commits
+#: an observation and queues the work that turns it into a memory — so a read straight after
+#: a write proves nothing and polling is the honest way to wait.
+#:
+#: A timeout here is a **failure**, not a skip. Both of these tests used to skip themselves
+#: when the memory never arrived, which meant they never ran at all: the service had an
+#: unscheduled outbox sweep, so a write whose fast-path dispatch was missed sat undispatched
+#: forever, and the suite reported that as a clean run. Measured after the sweep was
+#: scheduled, the write lands in about a second.
+MATERIALISE_SECONDS = 30
+
+
+async def _until_listed(rt, marker: str):
+    """The memories this run wrote, once the service has them. Fails if they never arrive."""
+    for _ in range(MATERIALISE_SECONDS):
+        held = await rt.memory.memories(limit=50)
+        mine = [m for m in held if marker in m.content]
+        if mine:
+            return mine
+        await asyncio.sleep(1)
+    raise AssertionError(
+        f"no memory containing {marker!r} was listable after {MATERIALISE_SECONDS}s: the "
+        f"write was accepted and never became a memory"
+    )
+
+
 async def run(harness, context, body):
     """Run ``body(runtime)`` as an agent so it has a real runtime."""
     captured = {}
@@ -114,14 +140,9 @@ async def test_forget_deletes_and_is_traced(harness, memory, context, spans):
         await rt.memory.remember(
             f"Depot {context.turn_id} stores the reserve stock for SKU-1.", visibility="USER"
         )
-        for _ in range(30):
-            held = await rt.memory.memories(limit=50)
-            mine = [m for m in held if context.turn_id in m.content]
-            if mine:
-                await rt.memory.forget(mine[0].memory_id)
-                return mine[0].memory_id
-            await asyncio.sleep(1)
-        pytest.skip("the memory did not materialise in time to delete it")
+        mine = await _until_listed(rt, context.turn_id)
+        await rt.memory.forget(mine[0].memory_id)
+        return mine[0].memory_id
 
     memory_id = await run(harness, context, body)
     assert memory.of("forget")[0]["memory_id"] == memory_id
@@ -241,13 +262,8 @@ async def test_get_one_memory_by_id(harness, memory, context):
         await rt.memory.remember(
             f"Depot {context.turn_id} is the overflow site for SKU-1.", visibility="USER"
         )
-        for _ in range(30):
-            held = await rt.memory.memories(limit=50)
-            mine = [m for m in held if context.turn_id in m.content]
-            if mine:
-                return await rt.memory.get(mine[0].memory_id), mine[0].memory_id
-            await asyncio.sleep(1)
-        pytest.skip("the memory did not materialise in time to fetch it")
+        mine = await _until_listed(rt, context.turn_id)
+        return await rt.memory.get(mine[0].memory_id), mine[0].memory_id
 
     fetched, memory_id = await run(harness, context, body)
     assert fetched.memory_id == memory_id
