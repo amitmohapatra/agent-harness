@@ -16,9 +16,12 @@ Bounded by construction, because a chat node that hangs holds a graph open:
   fail immediately for ``circuit_open_seconds`` instead of each paying the full timeout. A
   gateway outage costs one timeout, not one per request.
 
-The first two of those are the ``bifrost-sdk`` client's, shared with the Memory Service; the
-breaker and everything below it are the harness's. They were one lump of code here until the
-same three bugs had to be fixed twice in two repositories on the same day.
+All three are the ``bifrost-sdk`` client's, shared with the Memory Service. They were one
+lump of code here until the same three bugs had to be fixed twice in two repositories on the
+same day; the breaker was the last piece to move, once it turned out to be the same thirty
+lines in both — with 15s here against 30s there for the same gateway. What stays is the
+harness's own: the ModelRequest/ModelResponse contract, tool projection, and translating the
+client's failures into the harness's error vocabulary.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ import time
 from collections.abc import AsyncIterator, Iterable, Sequence
 from typing import Any
 
-from bifrost_sdk import Bifrost, BifrostError, RateLimited, Unreachable
+from bifrost_sdk import Bifrost, BifrostError, CircuitOpen, RateLimited, Unreachable
 from universal_agent_contracts.errors import ConfigurationError, ModelError
 from universal_agent_contracts.model import ModelRequest, ModelResponse, ModelUsage
 from universal_agent_contracts.tool import ToolSpec
@@ -77,15 +80,12 @@ class BifrostModelClient:
             raise ConfigurationError("BifrostModelClient: base_url is required")
         self.default_model = model
         self.provider = "bifrost"
-        self.circuit_failure_threshold = circuit_failure_threshold
-        self.circuit_open_seconds = circuit_open_seconds
         self.default_params = dict(default_params or {})
-        #: Transport, retries and rate-limit handling come from the shared gateway client.
-        #: What stays here is what is the *harness's*: the ModelRequest/ModelResponse
-        #: contract, tool projection, and the circuit breaker. Keeping a second copy of the
-        #: transport is what let the two drift — both read ``Retry-After`` from the header
-        #: alone, so a provider that puts the delay in the body was retried on a backoff
-        #: measured in milliseconds against a window measured in a minute.
+        #: Transport, retries, rate-limit handling and the breaker all come from the shared
+        #: gateway client. Keeping a second copy of any of it is what let the two drift —
+        #: both read ``Retry-After`` from the header alone, so a provider that puts the
+        #: delay in the body was retried on a backoff measured in milliseconds against a
+        #: window measured in a minute.
         try:
             self._gateway = Bifrost(
                 base_url,
@@ -93,12 +93,12 @@ class BifrostModelClient:
                 timeout=timeout,
                 max_retries=max_retries,
                 backoff_seconds=backoff_seconds,
+                circuit_failure_threshold=circuit_failure_threshold,
+                circuit_open_seconds=circuit_open_seconds,
                 client=http_client,
             )
         except ImportError as exc:  # pragma: no cover - documented degradation
             raise ConfigurationError("BifrostModelClient needs httpx: pip install httpx") from exc
-        self._consecutive_failures = 0
-        self._circuit_open_until = 0.0
 
     # ------------------------------------------------------------------ port
     async def invoke(self, request: ModelRequest | str, /, **kwargs: Any) -> ModelResponse:
@@ -216,12 +216,6 @@ class BifrostModelClient:
         )
 
     async def _chat(self, body: dict[str, Any], *, deadline: float | None) -> dict[str, Any]:
-        now = time.monotonic()
-        if now < self._circuit_open_until:
-            raise ModelError(
-                "bifrost circuit open",
-                details={"retry_after_seconds": round(self._circuit_open_until - now, 1)},
-            )
         params = {k: v for k, v in body.items() if k not in ("model", "messages", "tools")}
         try:
             data = await self._gateway.complete(
@@ -232,22 +226,18 @@ class BifrostModelClient:
                 timeout=deadline,
                 **params,
             )
+        except CircuitOpen as exc:
+            # Nothing was sent. The shared client's breaker is open after consecutive
+            # failures, so a gateway outage costs one timeout rather than one per call.
+            raise ModelError("bifrost circuit open", details=dict(exc.details)) from exc
         except BifrostError as exc:
-            # A 429 is the gateway working and asking for less, not the gateway being broken.
-            # Counting it toward the breaker turns backpressure into an outage: measured on a
-            # real run, 17 rate limits opened the circuit and the next 62 calls failed
-            # instantly without a request ever being sent.
-            self._failed(trips_circuit=not isinstance(exc, RateLimited))
+            # Whether this opens the circuit is the shared client's decision, and it applies
+            # the rule both copies of this code learned the same way: a 429 is the gateway
+            # working and asking for less, not the gateway being broken. Counting it turns
+            # backpressure into an outage — measured on a real run, 17 rate limits opened
+            # the circuit and the next 62 calls failed without a request being sent.
             raise _as_model_error(exc) from exc
-        self._consecutive_failures = 0
         return data
-
-    def _failed(self, *, trips_circuit: bool = True) -> None:
-        if not trips_circuit:
-            return
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self.circuit_failure_threshold:
-            self._circuit_open_until = time.monotonic() + self.circuit_open_seconds
 
 
 # ---------------------------------------------------------------------- helpers
@@ -259,6 +249,19 @@ def _as_model_error(exc: BifrostError) -> ModelError:
     """
     if isinstance(exc, Unreachable):
         return ModelError(f"bifrost unreachable ({exc})", source="bifrost", retryable=True)
+    if isinstance(exc, RateLimited):
+        # Carry how long to wait. The client parses it — some providers put the delay in the
+        # response body rather than a Retry-After header — but `details` holds only what the
+        # gateway literally said, so forwarding that alone dropped it and nothing above here
+        # could tell "come back in 30 seconds" from "this is broken". Same key the circuit
+        # breaker uses, so one caller-side branch handles both.
+        wait = {"retry_after_seconds": round(exc.retry_after, 1)} if exc.retry_after else {}
+        return ModelError(
+            "bifrost rate limited the request",
+            source="bifrost",
+            retryable=True,
+            details={**exc.details, **wait},
+        )
     status = exc.details.get("status")
     if status is None:
         return ModelError("bifrost returned a non-JSON body", source="bifrost")

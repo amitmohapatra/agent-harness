@@ -51,7 +51,19 @@ def wire():
 
 
 @pytest.fixture
-async def tapped_client(wire):
+async def tapped_client(wire, service_available: bool):
+    """The tap points at the real service, so it needs one — and says so if there is none.
+
+    Without the guard this fixture built a client against a dead port and the test waited
+    out the harness's own 120 s memory timeout before pytest-timeout killed it: four minutes
+    to discover nothing was listening, reported as a failure rather than a skip, while every
+    other live test in this suite skipped in five seconds on `service_available`.
+    """
+    if not service_available:
+        pytest.skip(
+            f"no Memory Service at {MEMORY_SERVICE_URL} — start it with `make dev-up` in the "
+            "agent-memory-service checkout, or set MEMORY_SERVICE_URL"
+        )
     client = MemoryClient(
         MEMORY_SERVICE_URL,
         api_key=MEMORY_API_KEY,
