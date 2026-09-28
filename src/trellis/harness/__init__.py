@@ -84,7 +84,7 @@ from trellis.harness.runtime import (
     trace_headers,
 )
 from trellis.harness.telemetry import DefaultRedactor, HarnessTracer
-from trellis.harness.tools import LocalToolClient, wrap_tool
+from trellis.harness.tools import LocalToolClient, ToolCallBridge, wrap_tool
 from trellis.harness.tools.composite import CompositeToolClient
 from trellis.harness.tools.mcp import MCPToolClient
 from trellis.harness.tools.memory_tools import MemoryToolClient
@@ -156,6 +156,7 @@ __all__ = [
     "RunOutcome",
     "SkillDescriptor",
     "ToolCall",
+    "ToolCallBridge",
     "ToolError",
     "ToolOutcome",
     "ToolSpec",
@@ -181,20 +182,26 @@ __all__ = [
 #: What that should *not* cost is a second import line. PEP 562 lets the name live here and
 #: the dependency stay optional: ``from trellis.harness import LangGraphHarness``
 #: works when the extra is installed, and says how to install it when it is not.
-_ADAPTERS = {"LangGraphHarness": "trellis.harness_langgraph"}
+_ADAPTERS = {
+    "LangGraphHarness": ("trellis.harness_langgraph", "langgraph"),
+    "DeepAgentsHarness": ("trellis.harness_deepagents", "deepagents"),
+    "OpenAIAgentsHarness": ("trellis.harness_openai_agents", "openai-agents"),
+    "ClaudeAgentSDKHarness": ("trellis.harness_claude_agent_sdk", "claude-agent-sdk"),
+}
 
 
 def __getattr__(name: str) -> Any:
-    module = _ADAPTERS.get(name)
-    if module is None:
+    found = _ADAPTERS.get(name)
+    if found is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module, extra = found
     try:
         import importlib  # noqa: PLC0415 - only on the adapter path
 
         return getattr(importlib.import_module(module), name)
     except ImportError as exc:  # pragma: no cover - documented degradation
         raise ImportError(
-            f"{name} needs the adapter: pip install 'trellis-harness[langgraph]'"
+            f"{name} needs the adapter: pip install 'trellis-harness[{extra}]'"
         ) from exc
 
 

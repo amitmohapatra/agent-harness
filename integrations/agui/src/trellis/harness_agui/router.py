@@ -28,6 +28,9 @@ from trellis.contracts.runs import (
     InterruptResolution,
     RunEventType,
 )
+
+from trellis.harness.events import CollectingEventSink
+from trellis.harness.runtime.logging import get_logger
 from trellis.harness_agui.events import (
     AGUIEvent,
     AGUIEventType,
@@ -37,9 +40,6 @@ from trellis.harness_agui.events import (
 )
 from trellis.harness_agui.sse import MEDIA_TYPE, encode
 from trellis.harness_agui.translate import translate
-
-from trellis.harness.events import CollectingEventSink
-from trellis.harness.runtime.logging import get_logger
 
 log = get_logger(__name__)
 

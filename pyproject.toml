@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{ name = "Agent Platform Team" }]
-keywords = ["agents", "harness", "opentelemetry", "langfuse", "memory", "langgraph"]
+keywords = ["agents", "harness", "opentelemetry", "langfuse", "memory", "langgraph", "deepagents"]
 classifiers = [
   "Programming Language :: Python :: 3.12",
   "License :: OSI Approved :: Apache Software License",
@@ -38,9 +38,15 @@ langfuse = ["langfuse>=3.0"]
 langgraph = ["trellis-harness-langgraph"]
 # AG-UI surface (FastAPI + SSE); the core imports nothing of it
 agui = ["trellis-harness-agui"]
+# Framework adapters, one distribution each (design §8). The core imports none of them.
+deepagents = ["trellis-harness-deepagents"]
+openai-agents = ["trellis-harness-openai-agents"]
+claude-agent-sdk = ["trellis-harness-claude-agent-sdk"]
 # JSON structured logging via structlog (stdlib logging is used when absent)
 logging = ["structlog>=25.2"]
-all = ["trellis-harness[otel,langfuse,langgraph,logging,registry,agui]"]
+all = [
+  "trellis-harness[otel,langfuse,langgraph,logging,registry,agui,deepagents,openai-agents,claude-agent-sdk]",
+]
 
 [dependency-groups]
 dev = [
@@ -58,6 +64,14 @@ dev = [
   "trellis-harness-langgraph",
   "trellis-harness-agui",
   "fastapi>=0.115",
+  # The three frameworks the Phase 5 adapters bind, pinned to the ranges their tests
+  # verify. Declared here as well as in each adapter so a dev sync always has them.
+  "deepagents>=0.7.19,<0.8",
+  "openai-agents>=0.22.3,<0.23",
+  "claude-agent-sdk>=0.2.160,<0.3",
+  "trellis-harness-deepagents",
+  "trellis-harness-openai-agents",
+  "trellis-harness-claude-agent-sdk",
 ]
 
 [build-system]
@@ -72,11 +86,20 @@ packages = ["src/trellis"]
 default-groups = ["dev"]
 
 [tool.uv.workspace]
-members = ["integrations/langgraph", "integrations/agui"]
+members = [
+  "integrations/langgraph",
+  "integrations/agui",
+  "integrations/deepagents",
+  "integrations/openai_agents",
+  "integrations/claude_agent_sdk",
+]
 
 [tool.uv.sources]
 trellis-harness-langgraph = { workspace = true }
 trellis-harness-agui = { workspace = true }
+trellis-harness-deepagents = { workspace = true }
+trellis-harness-openai-agents = { workspace = true }
+trellis-harness-claude-agent-sdk = { workspace = true }
 # Local development against the Memory Service SDK checkout.
 trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
 # The contract and the gateway client are separate distributions; local while unpublished.
@@ -85,7 +108,13 @@ bifrost-sdk = { path = "../bifrost-sdk", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests", "integrations/langgraph/tests"]
+testpaths = [
+  "tests",
+  "integrations/langgraph/tests",
+  "integrations/deepagents/tests",
+  "integrations/openai_agents/tests",
+  "integrations/claude_agent_sdk/tests",
+]
 timeout = 120
 filterwarnings = ["error::DeprecationWarning:trellis.harness.*"]
 markers = [
@@ -98,7 +127,15 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "integrations/langgraph/src", "tests"]
+src = [
+  "src",
+  "integrations/langgraph/src",
+  "integrations/agui/src",
+  "integrations/deepagents/src",
+  "integrations/openai_agents/src",
+  "integrations/claude_agent_sdk/src",
+  "tests",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PL", "RUF", "ASYNC", "T20"]
@@ -116,7 +153,14 @@ ignore = ["PLR0913", "PLR2004", "B008"]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
-include = ["src", "integrations/langgraph/src", "integrations/agui/src"]
+include = [
+  "src",
+  "integrations/langgraph/src",
+  "integrations/agui/src",
+  "integrations/deepagents/src",
+  "integrations/openai_agents/src",
+  "integrations/claude_agent_sdk/src",
+]
 exclude = ["**/__pycache__", "**/.venv"]
 typeCheckingMode = "standard"
 reportMissingImports = "warning"

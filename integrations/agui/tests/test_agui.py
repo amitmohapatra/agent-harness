@@ -21,9 +21,6 @@ from trellis.contracts import (
     RunOutcome,
     ToolCall,
 )
-from trellis.harness_agui import AGUIEventType, RunAgentInput, agui_router, encode, translate
-from trellis.harness_agui.router import Surface
-from trellis.harness_agui.sse import decode
 
 from trellis.harness import (
     AgentHarness,
@@ -32,6 +29,9 @@ from trellis.harness import (
     LocalToolClient,
 )
 from trellis.harness.interrupts import ANSWER
+from trellis.harness_agui import AGUIEventType, RunAgentInput, agui_router, encode, translate
+from trellis.harness_agui.router import Surface
+from trellis.harness_agui.sse import decode
 
 CTX = AgentExecutionContext.create(
     tenant_id="acme", user_id="u1", agent_id="ref", thread_id="thr_1"

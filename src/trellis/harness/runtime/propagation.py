@@ -36,12 +36,21 @@ def current_runtime() -> AgentRuntime | None:
     return _runtime.get()
 
 
-def require_runtime() -> AgentRuntime:
-    runtime = _runtime.get()
+def require_runtime(explicit: Any = None, *, hint: str | None = None) -> AgentRuntime:
+    """The runtime to use: the one passed in, else the running execution's.
+
+    ``explicit`` and ``hint`` exist for the framework adapters (design §8). A compiled Deep
+    Agents graph or an OpenAI Agents ``Agent`` is built once and run many times, so its
+    harness pieces resolve the *current* execution per call rather than binding one at
+    construction; a test or a nested run passes the runtime instead. Raising rather than
+    degrading is the point: a framework whose harness pieces silently did nothing would look
+    instrumented and record nothing, which is the failure this layer exists to prevent.
+    """
+    runtime = explicit if explicit is not None else _runtime.get()
     if runtime is None:
         raise RuntimeError(
             "no AgentRuntime is bound here; call this inside a harness-wrapped agent "
-            "or pass the runtime explicitly"
+            "or pass the runtime explicitly" + (f" ({hint})" if hint else "")
         )
     return runtime
 

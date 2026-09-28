@@ -7,15 +7,25 @@
 | [`langgraph_chatbot.py`](langgraph_chatbot.py) | a five-node chatbot on a Bifrost gateway, with every configuration section set — see below |
 | [`reorder_workflow.py`](reorder_workflow.py) | the full picture — see below |
 | [`memory_tour.py`](memory_tour.py) | every memory operation the service supports, driven through the harness |
+| [`deepagents_agent.py`](deepagents_agent.py) | Deep Agents: the six bindings, a tool held for a person, and the resumed run |
+| [`openai_agents_agent.py`](openai_agents_agent.py) | the OpenAI Agents SDK: the six bindings, and its own `needs_approval` as one harness `Interrupt` |
+| [`claude_agent_sdk_agent.py`](claude_agent_sdk_agent.py) | the Claude Agent SDK: every hook driven with the payloads the CLI sends, no CLI needed |
 
 All three run as-is, with no services and no API keys:
 
 ```bash
 python examples/plain_python.py
-python examples/langgraph_agent.py          # needs the [langgraph] extra
+python examples/langgraph_agent.py            # needs the [langgraph] extra
 python examples/reorder_workflow.py
 python examples/memory_tour.py
+python examples/deepagents_agent.py           # needs the [deepagents] extra
+python examples/openai_agents_agent.py        # needs the [openai-agents] extra
+python examples/claude_agent_sdk_agent.py     # needs the [claude-agent-sdk] extra
 ```
+
+The three framework examples use a scripted model behind the harness's own model port, so they
+show the bindings without a key and without pretending to show a real model's judgement. Point
+`model=` at a `BifrostModelClient` and the same code talks to the gateway.
 
 They print JSON log lines (structured logging is on by default) alongside their output.
 

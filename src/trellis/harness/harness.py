@@ -24,7 +24,7 @@ from typing import Any
 
 from trellis.contracts.context import AgentExecutionContext
 from trellis.contracts.descriptors import AgentDescriptor, SkillDescriptor
-from trellis.contracts.errors import AgentError
+from trellis.contracts.errors import AgentError, is_pause_signal
 from trellis.contracts.events import LifecycleEvent
 from trellis.contracts.messages import AgentRequest, AgentResponse
 from trellis.contracts.runs import (
@@ -210,7 +210,7 @@ class AgentHarness:
             tracer=self.tracer,
             error_mode=error_mode,
         )
-        self._langgraph: Any = None
+        self._adapters: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ construction
     def _build_telemetry(self) -> Any:
@@ -486,6 +486,16 @@ class AgentHarness:
                 try:
                     yield runtime
                 except BaseException as exc:
+                    if is_pause_signal(exc):
+                        # A block that asked a person a question is suspended, not broken:
+                        # same span status, same announced Interrupt, same INTERRUPT event as
+                        # a wrapped agent's pause. Without this, a Level-3 block that paused
+                        # was recorded as an ERROR and the interrupt was never announced, so
+                        # no surface could show it and ``resume`` had nothing to find — the
+                        # one mechanism the design promises, missing from one of the three
+                        # integration levels (§7).
+                        await self.coordinator.on_pause(exc, runtime, span)
+                        raise
                     error = AgentError.of(exc, trace_id=request.context.trace_id)
                     await self.chain.on_error(error, runtime)
                     status = str(status_for(error))
@@ -772,18 +782,48 @@ class AgentHarness:
     def current_context(self) -> AgentExecutionContext | None:
         return current_context()
 
+    # ------------------------------------------------------------------ framework adapters
+    def _adapter(self, name: str) -> Any:
+        """The framework adapter ``name``, constructed once and remembered.
+
+        One lookup for every framework rather than one property body each: the adapters are
+        four identical two-line bodies otherwise, and a fifth framework should cost a row in
+        :data:`ADAPTERS`, not another copy of the same import-and-explain dance (§2).
+        """
+        cached = self._adapters.get(name)
+        if cached is not None:
+            return cached
+        module, attribute, extra, label = ADAPTERS[name]
+        try:
+            import importlib  # noqa: PLC0415 - only on the adapter path
+
+            adapter_class = getattr(importlib.import_module(module), attribute)
+        except ImportError as exc:  # pragma: no cover - documented degradation
+            raise ImportError(
+                f'{label} support needs the adapter: pip install "trellis-harness[{extra}]"'
+            ) from exc
+        self._adapters[name] = adapter_class(self)
+        return self._adapters[name]
+
     @property
     def langgraph(self) -> Any:
         """The LangGraph adapter. Importing it requires the ``langgraph`` extra (§2)."""
-        if self._langgraph is None:
-            try:
-                from trellis.harness_langgraph import LangGraphHarness  # noqa: PLC0415
-            except ImportError as exc:  # pragma: no cover - documented degradation
-                raise ImportError(
-                    'LangGraph support needs the adapter: pip install "trellis-harness[langgraph]"'
-                ) from exc
-            self._langgraph = LangGraphHarness(self)
-        return self._langgraph
+        return self._adapter("langgraph")
+
+    @property
+    def deepagents(self) -> Any:
+        """The Deep Agents adapter. Requires the ``deepagents`` extra (design §8)."""
+        return self._adapter("deepagents")
+
+    @property
+    def openai_agents(self) -> Any:
+        """The OpenAI Agents SDK adapter. Requires the ``openai-agents`` extra (design §8)."""
+        return self._adapter("openai_agents")
+
+    @property
+    def claude_agent_sdk(self) -> Any:
+        """The Claude Agent SDK adapter. Requires the ``claude-agent-sdk`` extra (design §8)."""
+        return self._adapter("claude_agent_sdk")
 
     async def register_agents(self) -> None:
         """Push known descriptors to the registry hook (a no-op by default, §47)."""
@@ -864,6 +904,25 @@ _DECISIONS: dict[InterruptReason, frozenset[InterruptDecision]] = {
     InterruptReason.QUESTION: frozenset({InterruptDecision.ANSWER, InterruptDecision.CANCEL}),
 }
 _ANY_DECISION = frozenset(InterruptDecision)
+
+#: The framework adapters: attribute -> (module, class, extra, human name). A framework is
+#: supported by adding a row here and a distribution; the core imports none of them.
+ADAPTERS: dict[str, tuple[str, str, str, str]] = {
+    "langgraph": ("trellis.harness_langgraph", "LangGraphHarness", "langgraph", "LangGraph"),
+    "deepagents": ("trellis.harness_deepagents", "DeepAgentsHarness", "deepagents", "Deep Agents"),
+    "openai_agents": (
+        "trellis.harness_openai_agents",
+        "OpenAIAgentsHarness",
+        "openai-agents",
+        "OpenAI Agents SDK",
+    ),
+    "claude_agent_sdk": (
+        "trellis.harness_claude_agent_sdk",
+        "ClaudeAgentSDKHarness",
+        "claude-agent-sdk",
+        "Claude Agent SDK",
+    ),
+}
 
 #: Keyword arguments of :meth:`AgentHarness.wrap` (so ``run`` can split them from call fields).
 _WRAP_OPTIONS = frozenset(

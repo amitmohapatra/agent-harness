@@ -116,7 +116,7 @@ class ExecutionCoordinator:
                     raise
                 except BaseException as exc:
                     if is_pause_signal(exc):
-                        await self._on_pause(exc, runtime, span)
+                        await self.on_pause(exc, runtime, span)
                         raise
                     result, error = await self._on_error(exc, runtime, chain)
                     if result is None and mode == "raise":
@@ -228,7 +228,7 @@ class ExecutionCoordinator:
                 exc.agent_error = error  # type: ignore[attr-defined]
         return recovered, error
 
-    async def _on_pause(self, exc: BaseException, runtime: AgentRuntime, span: Any) -> None:
+    async def on_pause(self, exc: BaseException, runtime: AgentRuntime, span: Any) -> None:
         """A suspended run is not a failed one.
 
         ``interrupt()`` in a LangGraph node raises to hand control back to the graph runtime,

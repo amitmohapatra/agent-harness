@@ -9,16 +9,29 @@ with the versions that were actually exercised; the table below is that file, tr
 | Component | Version tested |
 | --- | --- |
 | Python | 3.12.14 |
-| trellis-harness | 0.1.0 |
+| trellis-harness | 0.3.0 |
 | langgraph | 1.2.11 |
-| langchain-core | 1.6.3 |
+| langchain / langchain-core | 1.4.2 / 1.6.5 |
+| deepagents | 0.7.19 |
+| openai-agents | 0.22.3 |
+| claude-agent-sdk | 0.2.160 |
 | langfuse | 4.15.2 |
 | opentelemetry-api / -sdk | 1.44.0 |
 | pydantic | 2.13.5 |
-| trellis-memory (Memory Service SDK) | 0.1.0 |
+| trellis-memory (Memory Service SDK) | 0.2.1 |
+| trellis-harness-langgraph | 0.2.0 |
+| trellis-harness-agui | 0.1.0 |
+| trellis-harness-deepagents | 0.1.0 |
+| trellis-harness-openai-agents | 0.1.0 |
+| trellis-harness-claude-agent-sdk | 0.1.0 |
 
-Declared support ranges (from `pyproject.toml`): Python `>=3.12`, `pydantic>=2.13,<3`,
-`opentelemetry-api>=1.44`, and for the extras `langgraph>=1.2`, `langfuse>=3.0`.
+Declared support ranges (from `pyproject.toml` and each adapter's own): Python `>=3.12`,
+`pydantic>=2.13,<3`, `opentelemetry-api>=1.44`, and for the extras `langgraph>=1.2`,
+`langfuse>=3.0`, `deepagents>=0.7.19,<0.8`, `openai-agents>=0.22.3,<0.23`,
+`claude-agent-sdk>=0.2.160,<0.3`. The three framework adapters pin an upper bound because
+all three libraries are pre-1.0 and have moved their hook APIs inside a minor release —
+design §8's hook names were taken from documentation and three of them were already wrong
+when checked against the installed packages (see each adapter's README).
 Versions outside the "tested" row are expected to work but are not verified here; the
 honest statement is "untested", not "supported".
 
@@ -67,6 +80,55 @@ only the trace shape differs.
 It does **not** touch `langgraph._internal`, the checkpoint format, reducer internals or
 any private attribute. Missing keys degrade to `None`; a config the adapter does not
 recognise simply yields less identity, never an error.
+
+## Framework adapter matrices (design §8)
+
+Each adapter binds the same six moments. A moment a framework cannot express is recorded as
+unsupported or partial, with the reason, rather than claimed — the per-adapter READMEs carry
+the full reasoning, and `compatibility-matrix.json` carries these rows verbatim.
+
+### Deep Agents 0.7.19 — `integrations/deepagents`
+
+| Moment | State | Where |
+| --- | --- | --- |
+| run start / context | supported | `abefore_agent`, and the bundle into `ModelRequest.system_message` in `awrap_model_call` |
+| memory files (`/memories/*`) | supported | `MemoryServiceBackend` implements their `BackendProtocol` |
+| model call | supported | `BifrostChatModel` (a `BaseChatModel`) over `runtime.model` |
+| tool call | supported | `awrap_tool_call` through `ToolCallBridge` |
+| pause and resume | supported | `ApprovalRequired` out of the graph; `interrupt_on=` also maps |
+| approver edit | supported | the approved arguments replace the model's in the tool call |
+| run end | supported | `aafter_agent` |
+| compaction | supported, by inspection | LangChain has **no post-summary hook**: the summary is read out of the assembled request (`additional_kwargs["lc_source"] == "summarization"`) |
+| note filenames | partial | the service names a note, so a write returns the path it was given |
+
+### OpenAI Agents SDK 0.22.3 — `integrations/openai_agents`
+
+| Moment | State | Where |
+| --- | --- | --- |
+| run start / context | supported | `Agent(instructions=<callable>)` plus `on_agent_start` |
+| conversation | supported | `MemoryServiceSession` (`get_items`/`add_items`/`clear_session`) |
+| model call | supported | `BifrostModel(Model)` + `BifrostModelProvider(ModelProvider)` |
+| tool call | supported | `ToolInputGuardrail` decides, `ToolOutputGuardrail` records |
+| pause and resume | supported, two paths | a policy `require_approval`, and the SDK's own `needs_approval` interruptions |
+| run end | supported | `on_agent_end` |
+| compaction | supported | `MemoryServiceSession.compact()` — the SDK has no summarisation hook |
+| SDK streaming | **unsupported** | the SDK streams Responses-API *server* events; a chat-completions gateway does not produce them |
+| `Session.pop_item` | **unsupported** | the Memory Service thread has no per-message delete |
+| approver edit | **unsupported** | the SDK approves or rejects a call; it does not rewrite one |
+
+### Claude Agent SDK 0.2.160 — `integrations/claude_agent_sdk`
+
+| Moment | State | Where |
+| --- | --- | --- |
+| run start / context | supported | `UserPromptSubmit` returns `additionalContext` |
+| model call | supported, by environment | `ANTHROPIC_BASE_URL` → the gateway's `/anthropic` (verified against a running Bifrost: it answers with Anthropic's own error envelope there) |
+| model client instrumentation | **unsupported** | the SDK spawns the `claude` CLI, so there is no client to wrap |
+| per-call token usage | partial | the CLI reports usage and cost once per run, on `ResultMessage` |
+| tool call | supported | `PreToolUse` `permissionDecision`, `PostToolUse` for tool memory |
+| pause and resume | supported | `can_use_tool` → `PermissionResultDeny(interrupt=True)` → `ApprovalRequired` |
+| approver edit | supported | `PreToolUse` returns `updatedInput` |
+| run end | supported | `Stop` / `SubagentStop` |
+| compaction | supported, the adapter's own summary | `PreCompact` carries the trigger but **no summary**, so the adapter writes its own |
 
 ## Langfuse
 
@@ -153,7 +215,8 @@ session; the examples derive one per run.
 
 ## CrewAI and Google ADK
 
-Not implemented. The contracts are deliberately framework-neutral so an adapter can be
+Not implemented (Deep Agents, the OpenAI Agents SDK and the Claude Agent SDK **are** — see
+their matrices above). The contracts are deliberately framework-neutral so an adapter can be
 added without core changes (`FrameworkAdapter`, `AgentExecutionContext`, `AgentRequest`,
 `AgentResponse`). Until such an adapter exists and is tested, CrewAI and ADK are **not
 supported** — wrapping their callables as plain Python works, but framework-level lineage,
@@ -164,6 +227,10 @@ events and state mapping do not.
 | Missing | Behaviour |
 | --- | --- |
 | `trellis-harness-langgraph` | `harness.langgraph` raises `ImportError` naming the extra |
+| `trellis-harness-deepagents` | `harness.deepagents` raises `ImportError` naming the extra |
+| `trellis-harness-openai-agents` | `harness.openai_agents` raises `ImportError` naming the extra |
+| `trellis-harness-claude-agent-sdk` | `harness.claude_agent_sdk` raises `ImportError` naming the extra |
+| a gateway URL, for the Claude Agent SDK | `ConfigurationError`: the CLI is never allowed to reach a provider directly |
 | `langfuse` | Langfuse falls back to `otlp` attribute mode |
 | `opentelemetry-sdk` | the OTel API's no-op is used; spans are created and dropped |
 | `structlog` | stdlib logging with the same fields under `extra` |

@@ -95,15 +95,41 @@ teams, where the alternative is the same 300 lines copy-pasted and subtly differ
 ## Install
 
 ```bash
-pip install trellis-harness                        # core: plain Python
-pip install "trellis-harness[langgraph]"           # + LangGraph adapter
-pip install "trellis-harness[langfuse]"            # + Langfuse observability
-pip install "trellis-harness[otel]"                # + OTel SDK & OTLP exporter
-pip install "trellis-harness[langgraph,langfuse]"  # combined
+pip install trellis-harness                          # core: plain Python
+pip install "trellis-harness[langgraph]"             # + LangGraph adapter
+pip install "trellis-harness[deepagents]"            # + Deep Agents adapter
+pip install "trellis-harness[openai-agents]"         # + OpenAI Agents SDK adapter
+pip install "trellis-harness[claude-agent-sdk]"      # + Claude Agent SDK adapter
+pip install "trellis-harness[agui]"                  # + AG-UI surface
+pip install "trellis-harness[langfuse]"              # + Langfuse observability
+pip install "trellis-harness[otel]"                  # + OTel SDK & OTLP exporter
+pip install "trellis-harness[all]"                   # everything
 ```
 
-Plain-Python users never receive LangGraph transitively: the adapter is a separate
-distribution (`trellis-harness-langgraph`) and the core imports no framework.
+Plain-Python users never receive a framework transitively: every adapter is a separate
+distribution (`trellis-harness-langgraph`, `-deepagents`, `-openai-agents`,
+`-claude-agent-sdk`) and the core imports none of them —
+`tests/compatibility/test_matrix.py` proves it in a subprocess, and
+`tests/unit/test_architecture.py` proves no trellis package imports a provider SDK at all.
+
+## Frameworks
+
+One core, four adapters, the same six moments (design §8): run start / context, the model
+call, the tool call, the pause, the run end, compaction. A paused Deep Agents run, a paused
+OpenAI Agents run and a paused Claude Agent SDK run are the same `Interrupt`, on the same
+event stream, answered by the same `harness.resume` — so the AG-UI surface works over all of
+them without knowing which framework ran.
+
+| Framework | Attribute | Distribution | What it cannot express |
+| --- | --- | --- | --- |
+| LangGraph | `harness.langgraph` | `trellis-harness-langgraph` | — |
+| Deep Agents | `harness.deepagents` | `trellis-harness-deepagents` | no post-summary compaction hook; the Memory Service names a note, not the model |
+| OpenAI Agents SDK | `harness.openai_agents` | `trellis-harness-openai-agents` | SDK streaming; `Session.pop_item`; an approver cannot edit a call |
+| Claude Agent SDK | `harness.claude_agent_sdk` | `trellis-harness-claude-agent-sdk` | no model client at all (it drives the `claude` CLI), so no per-call span; `PreCompact` carries no summary |
+
+Every one of those is documented in the adapter's own README and recorded in
+[COMPATIBILITY.md](COMPATIBILITY.md) and `compatibility-matrix.json`, with the reason. None of
+them is faked.
 
 Requires Python 3.12+.
 
@@ -724,6 +750,9 @@ await harness.register_agents()
 | --- | --- |
 | Plain Python | supported, tested |
 | LangGraph (1.2.x) | supported, tested — see [COMPATIBILITY.md](COMPATIBILITY.md) |
+| Deep Agents (0.7.x) | supported, tested — [`integrations/deepagents`](integrations/deepagents/README.md) |
+| OpenAI Agents SDK (0.22.x) | supported, tested (non-streaming) — [`integrations/openai_agents`](integrations/openai_agents/README.md) |
+| Claude Agent SDK (0.2.x) | supported, tested — [`integrations/claude_agent_sdk`](integrations/claude_agent_sdk/README.md) |
 | Memory Service integration | supported, tested against the real SDK |
 | OpenTelemetry | supported, tested |
 | Langfuse (3.x/4.x API) | supported, tested against 4.15.2 |
@@ -842,5 +871,6 @@ budget and compacts older turns into a remembered summary. The AG-UI surface is 
 
 ```python
 from trellis.harness_agui import agui_router
+
 app.include_router(agui_router(harness, agent=refund_agent, agent_id="refund-agent"))
 ```
