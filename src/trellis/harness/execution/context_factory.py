@@ -13,13 +13,14 @@ same run id, and therefore the same idempotency keys (§42/§55).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from trellis.contracts.context import AgentExecutionContext
 from trellis.contracts.ids import new_id, safe_id, stable_id
 
 from trellis.harness.runtime.propagation import current_context
+from trellis.harness.telemetry.otel import W3C_TRACE_ID
 
 #: Identity an application declares once (on the harness) and should never have to repeat on
 #: an individual context. Ids that identify *this* execution are never back-filled.
@@ -34,8 +35,12 @@ class ContextFactory:
         defaults: Mapping[str, Any] | None = None,
         *,
         deterministic_run_ids: bool = True,
+        trace_id_source: Callable[[], str | None] | None = None,
     ) -> None:
+        """``trace_id_source`` answers the active trace id (the telemetry provider's), so a
+        context built inside a caller's trace belongs to that trace."""
         self.defaults = dict(defaults or {})
+        self.trace_id_source = trace_id_source
         self.deterministic_run_ids = deterministic_run_ids
 
     def with_defaults(self, **defaults: Any) -> ContextFactory:
@@ -89,6 +94,11 @@ class ContextFactory:
             return child.with_fields(**fields) if fields else child
 
         merged: dict[str, Any] = {**self.defaults, **fields}
+        if "trace_id" not in merged and self.trace_id_source is not None:
+            # inside a caller's trace (a web request, say) the run belongs to that trace
+            active = self.trace_id_source()
+            if active and W3C_TRACE_ID.fullmatch(active):
+                merged["trace_id"] = active
         tenant_id = merged.pop("tenant_id", None)
         if not tenant_id:
             raise ValueError(
@@ -119,7 +129,9 @@ class ContextFactory:
             return context
         turn = new_id("turn_")
         run = (
-            stable_id(context.thread_id, turn, safe_id(agent_id), prefix="run_")
+            # the tenant is part of the derivation: two tenants naming the same thread and
+            # turn must never share a run id, which is what event fan-out and resumes key on
+            stable_id(context.tenant_id, context.thread_id, turn, safe_id(agent_id), prefix="run_")
             if self.deterministic_run_ids
             else new_id("run_")
         )
@@ -139,7 +151,9 @@ class ContextFactory:
         anchor = fields.get("task_id") or base.task_id or base.turn_id
         if not (base.thread_id and anchor):
             return None
-        return stable_id(base.thread_id, anchor, base.agent_run_id, agent_id, prefix="run_")
+        return stable_id(
+            base.tenant_id, base.thread_id, anchor, base.agent_run_id, agent_id, prefix="run_"
+        )
 
     def _derive(self, agent_id: str, fields: Mapping[str, Any]) -> str:
         if not self.deterministic_run_ids:
@@ -147,5 +161,5 @@ class ContextFactory:
         thread = fields.get("thread_id")
         anchor = fields.get("task_id") or fields.get("turn_id")
         if thread and anchor:
-            return stable_id(thread, anchor, agent_id, prefix="run_")
+            return stable_id(fields.get("tenant_id"), thread, anchor, agent_id, prefix="run_")
         return new_id("run_")

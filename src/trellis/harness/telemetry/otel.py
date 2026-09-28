@@ -9,10 +9,13 @@ overrides a provider the application already registered.
 from __future__ import annotations
 
 import logging
+import re
+import secrets
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Final
 
+from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
 from opentelemetry import trace as otel_trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
@@ -20,6 +23,9 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from trellis.harness.config.settings import TelemetryConfig
 
 log = logging.getLogger("trellis.harness.telemetry")
+
+#: A W3C trace id: 32 lower-case hex characters.
+W3C_TRACE_ID: Final = re.compile(r"[0-9a-f]{32}")
 
 TRACER_NAME = "trellis.harness"
 
@@ -138,6 +144,31 @@ class OpenTelemetryTelemetryProvider:
         ctx = otel_trace.get_current_span().get_span_context()
         if ctx and ctx.trace_id:
             return format(ctx.trace_id, "032x")
+        return None
+
+    @contextmanager
+    def bind_trace(self, trace_id: str | None) -> Iterator[None]:
+        """Start the spans opened inside in the trace ``trace_id`` names, when no span is
+        active: the harness's spans, the SDKs' ``traceparent`` and the execution context
+        then agree on one trace id (design §4), and every service a request touches is
+        joined on it. Inside an active span nothing changes: the caller's trace wins."""
+        current = otel_trace.get_current_span().get_span_context()
+        if not trace_id or not W3C_TRACE_ID.fullmatch(trace_id) or current.is_valid:
+            yield
+            return
+        parent = otel_trace.NonRecordingSpan(
+            otel_trace.SpanContext(
+                trace_id=int(trace_id, 16),
+                span_id=secrets.randbits(64) or 1,
+                is_remote=True,
+                trace_flags=otel_trace.TraceFlags(otel_trace.TraceFlags.SAMPLED),
+            )
+        )
+        token = otel_context.attach(otel_trace.set_span_in_context(parent))
+        try:
+            yield
+        finally:
+            otel_context.detach(token)
         return None
 
 

@@ -27,6 +27,14 @@ from trellis.contracts.descriptors import AgentDescriptor, SkillDescriptor
 from trellis.contracts.errors import AgentError
 from trellis.contracts.events import LifecycleEvent
 from trellis.contracts.messages import AgentRequest, AgentResponse
+from trellis.contracts.runs import (
+    Interrupt,
+    InterruptDecision,
+    InterruptReason,
+    InterruptResolution,
+    RunEventType,
+    RunOutcome,
+)
 
 from trellis.harness.artifacts.stores import (
     FileArtifactStore,
@@ -41,7 +49,12 @@ from trellis.harness.evaluation.events import (
     NoOpEvaluationProvider,
 )
 from trellis.harness.execution.context_factory import ContextFactory
-from trellis.harness.execution.coordinator import ExecutionCoordinator, RuntimeBuilder
+from trellis.harness.execution.coordinator import (
+    ExecutionCoordinator,
+    RuntimeBuilder,
+    status_for,
+    wire_value,
+)
 from trellis.harness.execution.retry import RetryPolicy
 from trellis.harness.execution.sync import run_sync
 from trellis.harness.interceptors.base import BaseInterceptor, InterceptorChain
@@ -55,6 +68,7 @@ from trellis.harness.interceptors.policy import PolicyInterceptor
 from trellis.harness.interceptors.result import ResultValidationInterceptor
 from trellis.harness.interceptors.telemetry import TelemetryInterceptor
 from trellis.harness.interceptors.timeout import TimeoutInterceptor
+from trellis.harness.interrupts import ResolutionRegistry
 from trellis.harness.memory.client import MemoryFactory
 from trellis.harness.memory.policy import MemoryPolicy
 from trellis.harness.memory.writeback import WritebackQueue
@@ -63,7 +77,7 @@ from trellis.harness.policy.providers import NoOpPolicyProvider
 from trellis.harness.registry.client import NoOpAgentRegistry
 from trellis.harness.runs import NoRunStore, RunRecorder
 from trellis.harness.runtime.agent_runtime import AgentRuntime
-from trellis.harness.runtime.logging import configure_logging
+from trellis.harness.runtime.logging import configure_logging, get_logger
 from trellis.harness.runtime.propagation import bind, current_context
 from trellis.harness.telemetry.metrics import MetricsRecorder
 from trellis.harness.telemetry.noop import NoOpTelemetryProvider
@@ -74,10 +88,13 @@ from trellis.harness.telemetry.tracer import HarnessTracer
 from trellis.harness.tools.local import LocalToolClient, NoToolsClient
 from trellis.harness.tools.wrappers import wrap_tool as _wrap_tool
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 #: How many memory/evaluation writes may be in flight before the harness writes inline.
 MAX_PENDING_WRITEBACKS = 256
+
+
+log = get_logger(__name__)
 
 
 class AgentHarness:
@@ -102,6 +119,7 @@ class AgentHarness:
         redactor: Any = None,
         interceptors: Iterable[BaseInterceptor] = (),
         listeners: Iterable[Any] = (),
+        event_sinks: Iterable[Any] = (),
         error_mode: str = "raise",
     ) -> None:
         self.config = config if isinstance(config, HarnessConfig) else HarnessConfig.load(config)
@@ -144,6 +162,10 @@ class AgentHarness:
         self.evaluation_provider = evaluation_provider or NoOpEvaluationProvider()
 
         self.events = LifecycleDispatcher(list(listeners))
+        #: Where every run's ``RunEvent``s go (design §4): a UI bridge, a webhook, a trace.
+        self.event_sinks: list[Any] = list(event_sinks)
+        #: Answers recorded by :meth:`resume`, waiting for their runs.
+        self.resolutions = ResolutionRegistry()
         if self.runs.name != "noop":
             # A listener, not an interceptor: recording a run is an observation of the turn,
             # not a step in it. An interceptor that failed would change the outcome, which
@@ -153,8 +175,15 @@ class AgentHarness:
         #: Bounded so a backlog can never grow without limit; writing inline is the
         #: fallback when it saturates.
         self.writeback = WritebackQueue(MAX_PENDING_WRITEBACKS)
+        for sink in self.event_sinks:
+            attach = getattr(sink, "attach_queue", None)
+            if callable(attach):
+                attach(self.writeback)
         self.evaluation_sink = evaluation_sink or self._build_evaluation_sink()
-        self.context_factory = ContextFactory(self.defaults)
+        self.context_factory = ContextFactory(
+            self.defaults,
+            trace_id_source=getattr(self.tracer.provider, "current_trace_id", None),
+        )
         self.descriptors: dict[str, AgentDescriptor] = {}
 
         self.chain = InterceptorChain([*self._core_interceptors(), *interceptors])
@@ -168,6 +197,10 @@ class AgentHarness:
             timeouts=self.config.timeouts,
             tools_config=self.config.tools,
             artifacts_config=self.config.artifacts,
+            sinks=self.event_sinks,
+            resolutions=self.resolutions,
+            memory_config=self.config.memory,
+            redactor=self.redactor,
         )
         self.coordinator = ExecutionCoordinator(
             chain=self.chain,
@@ -443,6 +476,11 @@ class AgentHarness:
                     LifecycleEvent.AGENT_START,
                     {"context": request.context, "descriptor": descriptor, "request": request},
                 )
+                await runtime.events.emit(
+                    RunEventType.RUN_STARTED,
+                    agent_id=request.context.agent_id,
+                    objective=request.objective,
+                )
                 prepared = await self.chain.before(request, runtime)
                 runtime.state["request"] = prepared
                 try:
@@ -450,12 +488,18 @@ class AgentHarness:
                 except BaseException as exc:
                     error = AgentError.of(exc, trace_id=request.context.trace_id)
                     await self.chain.on_error(error, runtime)
+                    status = str(status_for(error))
                     self.events.emit(
                         LifecycleEvent.AGENT_ERROR, {"context": request.context, "error": error}
                     )
                     self.events.emit(
                         LifecycleEvent.AGENT_FINISH,
-                        {"context": request.context, "status": "ERROR", "error": error},
+                        {"context": request.context, "status": status, "error": error},
+                    )
+                    await runtime.events.emit(
+                        RunEventType.RUN_FINISHED,
+                        outcome=RunOutcome.from_status(status),
+                        error=error,
                     )
                     raise
                 # The block reports what it produced through ``runtime.state["result"]``;
@@ -471,6 +515,84 @@ class AgentHarness:
                     LifecycleEvent.AGENT_FINISH,
                     {"context": request.context, "status": str(result.status), "result": result},
                 )
+                await runtime.events.emit(
+                    RunEventType.RUN_FINISHED,
+                    outcome=RunOutcome.from_status(str(result.status)),
+                    error=result.error if not result.succeeded else None,
+                    **({"result": wire_value(result.data)} if result.data is not None else {}),
+                )
+
+    # ------------------------------------------------------------------ interrupts
+    async def resume(
+        self,
+        interrupt: Interrupt,
+        resolution: InterruptResolution,
+        *,
+        context: AgentExecutionContext,
+        agent: Callable[..., Any] | None = None,
+        payload: Any = None,
+        **fields: Any,
+    ) -> AgentResponse | None:
+        """Answer a paused run (design §7).
+
+        The answer is recorded on the run store, becomes feedback when it judged a tool call,
+        and waits in :attr:`resolutions` for the run. With ``agent`` (a wrapped agent) the
+        run continues here: the same context, so the same run id, so the resumed run finds
+        its answer; without one the caller resumes it (a LangGraph graph resumes itself with
+        ``Command(resume=...)`` and its wrapped nodes find the answer the same way).
+        """
+        if not resolution.resolves(interrupt):
+            raise ValueError("the resolution answers a different interrupt")
+        if context.agent_run_id != interrupt.run_id or context.tenant_id != interrupt.tenant_id:
+            raise ValueError("the context is not the paused run's")
+        if context.thread_id and not context.turn_id:
+            # a thread context with no turn is a conversation: re-running it would open a
+            # new turn, so a new run, and the answer would wait for a run that never comes
+            raise ValueError("the context must name the paused run's turn (turn_id)")
+        if resolution.decision not in _DECISIONS.get(interrupt.reason, _ANY_DECISION):
+            raise ValueError(
+                f"a {interrupt.reason.value} interrupt is not answered with "
+                f"{resolution.decision.value}"
+            )
+        feedback = resolution.to_feedback(interrupt, context)  # refuses a foreign tenant/run
+        self.resolutions.record(interrupt, resolution)
+        try:
+            # the pause is recorded off the turn; the answer must land after it
+            recorder = getattr(self, "_recorder", None)
+            if recorder is not None:
+                await recorder.drain()
+            await self.runs.resumed(resolution)
+        except Exception:
+            log.warning("runs.resume_record_failed", run_id=interrupt.run_id)
+        if feedback is not None:
+            await self.feedback(
+                context,
+                feedback.target_kind.value,
+                feedback.target_id,
+                feedback.verdict.value,
+                correction=feedback.correction,
+                reviewer=feedback.reviewer,
+                source=feedback.source.value,
+                feedback_id=feedback.feedback_id,
+                metadata=dict(feedback.metadata),
+            )
+        if agent is None:
+            return None
+        runner = getattr(agent, "arun", agent)
+        return await runner(payload, context=context, **fields)
+
+    async def feedback(
+        self,
+        context: AgentExecutionContext,
+        target_kind: str,
+        target_id: str,
+        verdict: str,
+        /,
+        **fields: Any,
+    ) -> Any | None:
+        """Record a judgement for ``context`` through the Memory Service (design §7)."""
+        memory = self.memory_factory.create(context, tracer=self.tracer)
+        return await memory.feedback(target_kind, target_id, verdict, **fields)
 
     # ------------------------------------------------------------------ direct run
     async def run(
@@ -689,6 +811,10 @@ class AgentHarness:
     async def aclose(self) -> None:
         await self.drain()
         self.flush()
+        for sink in self.event_sinks:
+            close = getattr(sink, "aclose", None)
+            if callable(close):
+                await close()  # type: ignore[misc]
         langfuse = getattr(self, "langfuse", None)
         if langfuse is not None:
             langfuse.shutdown()
@@ -723,6 +849,21 @@ def _copy_metadata(wrapper: Callable[..., Any], target: Any) -> Callable[..., An
         wrapper.__name__ = getattr(target, "__name__", type(target).__name__)
         return wrapper
 
+
+#: Which decisions answer which kind of pause (design §7): an approval is approved, edited,
+#: rejected or the run is cancelled; a question is answered or the run is cancelled.
+_DECISIONS: dict[InterruptReason, frozenset[InterruptDecision]] = {
+    InterruptReason.APPROVAL: frozenset(
+        {
+            InterruptDecision.APPROVE,
+            InterruptDecision.EDIT,
+            InterruptDecision.REJECT,
+            InterruptDecision.CANCEL,
+        }
+    ),
+    InterruptReason.QUESTION: frozenset({InterruptDecision.ANSWER, InterruptDecision.CANCEL}),
+}
+_ANY_DECISION = frozenset(InterruptDecision)
 
 #: Keyword arguments of :meth:`AgentHarness.wrap` (so ``run`` can split them from call fields).
 _WRAP_OPTIONS = frozenset(

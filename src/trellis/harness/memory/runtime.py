@@ -376,6 +376,41 @@ class MemoryRuntime:
                 )
         return report
 
+    async def feedback(
+        self,
+        target_kind: str,
+        target_id: str,
+        verdict: str,
+        /,
+        *,
+        correction: Any = None,
+        score: float | None = None,
+        comment: str | None = None,
+        reviewer: str | None = None,
+        source: str = "human",
+        feedback_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any | None:
+        """Record a judgement (design §7): the Memory Service stores it apart from memory and
+        learns from a verdict on a memory. Follows the memory failure mode like every write."""
+        with self.tracer.memory_span("feedback", target_kind=target_kind) as span:
+            return await self._write(
+                self.sdk.feedback.submit(
+                    target_kind,
+                    target_id,
+                    verdict,
+                    correction=correction,
+                    score=score,
+                    comment=comment,
+                    reviewer=reviewer,
+                    source=source,
+                    metadata=metadata or None,
+                    feedback_id=feedback_id,
+                ),
+                span,
+                "feedback",
+            )
+
     async def record_outcome(self, *, success: bool, note: str | None = None) -> Any | None:
         """Tell the service whether this run worked.
 
@@ -542,6 +577,11 @@ class NoOpMemoryRuntime:
         return None
 
     async def record_input(self, text: str, /, **metadata: Any) -> None:
+        return None
+
+    async def feedback(
+        self, target_kind: str, target_id: str, verdict: str, /, **fields: Any
+    ) -> None:
         return None
 
     async def record_output(self, text: str, /, **metadata: Any) -> None:

@@ -93,3 +93,26 @@ def test_langfuse_evaluation_provider_satisfies_the_port():
     from trellis.harness.langfuse.evaluation import LangfuseEvaluationProvider
 
     assert isinstance(LangfuseEvaluationProvider(client=object()), EvaluationProvider)
+
+
+def test_the_phase_3_adapters_satisfy_their_ports():
+    """The run store client is the contracts ``RunStore``; every sink is an ``EventSink``."""
+    from trellis.contracts.ports import EventSink, RunStore
+
+    from trellis.harness.events import (
+        CollectingEventSink,
+        CompositeEventSink,
+        FilteringEventSink,
+        WebhookEventSink,
+    )
+    from trellis.harness.runs import NoRunStore, RunStoreClient
+
+    assert isinstance(NoRunStore(), RunStore)
+    assert isinstance(RunStoreClient("http://runs.test", api_key="k"), RunStore)
+    for sink in (
+        CollectingEventSink(),
+        CompositeEventSink([]),
+        FilteringEventSink(CollectingEventSink(), ["RUN_FINISHED"]),
+        WebhookEventSink("https://hooks.example/run", secret="s" * 32, verify_targets=False),
+    ):
+        assert isinstance(sink, EventSink), type(sink).__name__

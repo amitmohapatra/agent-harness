@@ -35,6 +35,7 @@ Decisions worth calling out:
 | Setting | Default | Why that default |
 | --- | --- | --- |
 | `memory.observe_tool_results` | `false` | tool outputs frequently contain customer data |
+| `memory.as_tools` | `false` | offer `memory.recall` and `memory.remember` to the model, so an agent can ask for more mid-loop; opt-in because a tool result can talk a model into remembering something that outlives the run |
 | `memory.record_outcome` | `true` | tool memory learns procedures from runs it knows succeeded; without a label it waits hours to guess one, and never learns from a failure |
 | `memory.writeback` | `true` | the turn must not wait for consolidation |
 | `memory.failure_mode` | `non_blocking` | a memory outage degrades a run, it does not fail it |

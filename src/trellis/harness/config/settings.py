@@ -43,6 +43,10 @@ class MemoryConfig(_Section):
     record_outcome: bool = True
     #: Tool outputs frequently contain customer data, so they are not written by default.
     observe_tool_results: bool = False
+    #: Offer ``memory.recall`` and ``memory.remember`` to the model as tools (design §5), so
+    #: an agent can ask for more mid-loop. Opt-in: a tool result can talk the model into
+    #: remembering something, and a durable memory outlives the run that wrote it.
+    as_tools: bool = False
     #: Mark everything this harness writes as visible only to the agent run.
     private_by_default: bool = False
     #: Also record the turn as chat messages (user/assistant), not only observations.

@@ -12,11 +12,12 @@ The tracer is cheap when disabled: no provider calls, no dict building, a shared
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from trellis.contracts.context import AgentExecutionContext
 
@@ -87,6 +88,13 @@ _NOOP_TRACED = TracedSpan(
 )
 
 
+@runtime_checkable
+class TraceBinding(Protocol):
+    """A telemetry provider that can open the next span inside a given W3C trace."""
+
+    def bind_trace(self, trace_id: str | None) -> contextlib.AbstractContextManager[None]: ...
+
+
 class HarnessTracer:
     """Creates the harness's spans. One per harness instance; safe to share across tasks."""
 
@@ -142,19 +150,32 @@ class HarnessTracer:
         return self.enabled
 
     # -- named spans ----------------------------------------------------------------
+    @contextmanager
     def agent_span(
         self, context: AgentExecutionContext, *, skills: list[str] | None = None, **extra: Any
-    ) -> Any:
-        return self.span(
-            N.AGENT_RUN,
-            kind=N.KIND_AGENT,
-            category="agent",
-            attributes={
-                **context_attributes(context, self.capture),
-                N.AGENT_SKILL: skills,
-                **extra,
-            },
+    ) -> Iterator[TracedSpan]:
+        """The run's root span, in the trace the context names (a provider that can bind a
+        trace joins it when no span is active), so the SDKs' ``traceparent`` and the memory
+        service's records carry the same trace id as the context."""
+        binding = (
+            self.provider.bind_trace(context.trace_id)
+            if isinstance(self.provider, TraceBinding)
+            else contextlib.nullcontext()
         )
+        with (
+            binding,
+            self.span(
+                N.AGENT_RUN,
+                kind=N.KIND_AGENT,
+                category="agent",
+                attributes={
+                    **context_attributes(context, self.capture),
+                    N.AGENT_SKILL: skills,
+                    **extra,
+                },
+            ) as traced,
+        ):
+            yield traced
 
     def model_span(self, request: Any, **extra: Any) -> Any:
         return self.span(

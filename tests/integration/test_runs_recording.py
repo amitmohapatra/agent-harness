@@ -218,7 +218,8 @@ async def test_a_plain_agent_can_pause_and_the_question_is_recorded() -> None:
     assert awaiting["expects"] == {"type": "boolean"}
     assert awaiting["payload"] == {"order_id": 91}
     # The class name stays too: a UI may want to know what *kind* of pause it was.
-    assert awaiting["reason"] == "AgentPaused"
+    # the interrupt as the contracts spell it: a question, with its own id
+    assert awaiting["reason"] == "QUESTION" and awaiting["interrupt_id"].startswith("int_")
 
 
 async def test_a_paused_run_is_not_reported_as_finished() -> None:
@@ -271,3 +272,155 @@ async def test_no_webhook_url_is_sent_when_none_is_configured() -> None:
 
     opened = next(c for c in calls if c["path"] == "/v1/runs")
     assert "webhook_url" not in opened["body"]
+
+
+# ------------------------------------------------------- answering, reading, the port shape
+
+
+async def test_an_answer_reaches_the_store_after_the_pause_and_moves_the_run_on() -> None:
+    """``resumed`` posts to the resume route with the answer on it, after the PAUSED
+    transition it answers (the pause is recorded off the turn; the answer waits for it)."""
+    from trellis.contracts import InterruptDecision, InterruptResolution
+
+    calls, handler = recording()
+    harness = build(store(handler))
+    ctx = harness.context_factory.build(agent_id="deploy", overrides={"turn_id": "t1"})
+
+    @harness.agent(agent_id="deploy")
+    async def agent(state, runtime):
+        raise AgentPaused("Which region?", expects={"type": "string"})
+
+    with pytest.raises(AgentPaused):
+        await agent({}, context=ctx)
+    interrupt = harness.resolutions.announced("acme")[-1]
+    answer = InterruptResolution(
+        interrupt_id=interrupt.interrupt_id,
+        run_id=interrupt.run_id,
+        decision=InterruptDecision.ANSWER,
+        answer="eu",
+    )
+    await harness.resume(interrupt, answer, context=ctx)
+    paths = [c["path"] for c in calls]
+    paused = next(
+        i for i, c in enumerate(calls) if c["body"] and c["body"].get("status") == "PAUSED"
+    )
+    resumed = paths.index(f"/v1/runs/{interrupt.run_id}/resume")
+    assert paused < resumed
+    assert calls[resumed]["tenant"] == "acme"
+    assert calls[resumed]["body"]["answer"]["decision"] == "ANSWER"
+    assert calls[resumed]["body"]["answer"]["answer"] == "eu"
+
+
+async def test_a_failed_turn_carries_its_error_and_a_refused_one_is_rejected_when_raising() -> None:
+    from trellis.contracts import PolicyDeniedError
+
+    from trellis.harness import CallablePolicyProvider
+
+    calls, handler = recording()
+    harness = AgentHarness(
+        runs=store(handler), defaults={"tenant_id": "acme"}, config=CONFIG, error_mode="return"
+    )
+
+    @harness.agent(agent_id="triage")
+    async def agent(state, runtime):
+        raise RuntimeError("boom")
+
+    await agent({})
+    await harness.drain()
+    last = calls[-1]["body"]
+    assert last["status"] == "ERROR" and "boom" in last["error"]["message"]
+
+    calls.clear()
+    raising = AgentHarness(
+        runs=store(handler),
+        defaults={"tenant_id": "acme"},
+        config=CONFIG,
+        error_mode="raise",
+        tools=[lambda: "x"],
+        policy=CallablePolicyProvider(tool=lambda c, call: "no tools today"),
+    )
+
+    @raising.agent(agent_id="triage")
+    async def denied(state, runtime):
+        return await runtime.tools.call("<lambda>")
+
+    with pytest.raises(PolicyDeniedError):
+        await denied({})
+    await raising.drain()
+    assert calls[-1]["body"]["status"] == "REJECTED"  # not the error category, not RUNNING
+
+
+async def test_get_and_list_paused_read_the_inbox() -> None:
+    good = {
+        "run_id": "r1",
+        "tenant_id": "acme",
+        "agent_id": "deploy",
+        "status": "PAUSED",
+        "awaiting": {
+            "interrupt_id": "int_1",
+            "tenant_id": "acme",
+            "run_id": "r1",
+            "reason": "QUESTION",
+            "question": "Which region?",
+            "created_at": "2026-09-28T10:00:00Z",
+        },
+    }
+    legacy = {  # written by 0.2.0: no interrupt id, the pause's class name as the reason
+        "run_id": "r0",
+        "tenant_id": "acme",
+        "agent_id": "deploy",
+        "status": "PAUSED",
+        "awaiting": {
+            "reason": "AgentPaused",
+            "question": "Approve?",
+            "expects": {"type": "boolean"},
+        },
+    }
+    unreadable = {"run_id": "r2", "tenant_id": "acme", "agent_id": "deploy"}  # no status
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            {
+                "path": request.url.path,
+                "params": dict(request.url.params),
+                "tenant": request.headers.get("x-tenant-id"),
+            }
+        )
+        if request.url.path == "/v1/runs/r1":
+            return httpx.Response(200, json=good)
+        if request.url.path == "/v1/runs/r404":
+            return httpx.Response(404, text="no run")
+        if request.url.path == "/v1/runs/r500":
+            return httpx.Response(500, text="down")
+        return httpx.Response(200, json={"runs": [legacy, unreadable, good]})
+
+    client = store(handler)
+    record = await client.get("r1")
+    assert record is not None and record.awaiting is not None
+    assert record.awaiting.question == "Which region?" and record.awaiting.interrupt_id == "int_1"
+    assert await client.get("r404") is None
+    inbox = await client.list_paused("acme", limit=5)
+    assert [r.run_id for r in inbox] == ["r0", "r1"]  # the unreadable row is dropped
+    assert inbox[0].awaiting is not None and inbox[0].awaiting.question == "Approve?"
+    assert inbox[0].awaiting.expects == {"type": "boolean"}
+    listing = seen[-1]
+    assert listing["params"] == {"status": "PAUSED", "limit": "5"} and listing["tenant"] == "acme"
+    strict = store(handler, required=True)
+    with pytest.raises(RuntimeError, match="agent-runs is required"):
+        await strict.get("r500")
+    bound = store(handler, tenant_id="acme")
+    with pytest.raises(RuntimeError, match="bound to tenant"):
+        await bound.list_paused("globex")
+
+
+async def test_the_tenant_a_run_was_opened_under_names_its_later_records() -> None:
+    """The port's ``finished`` and ``resumed`` carry no tenant; the client remembers it."""
+    from trellis.contracts import RunStart, RunStatus
+
+    calls, handler = recording()
+    client = store(handler)  # not bound to a tenant
+    await client.started(RunStart(run_id="r9", tenant_id="globex", agent_id="a"))
+    await client.finished("r9", RunStatus.SUCCESS, output={"ok": True})
+    assert [c["tenant"] for c in calls] == ["globex", "globex"]
+    assert calls[-1]["body"] == {"status": "SUCCESS", "output": {"ok": True}}

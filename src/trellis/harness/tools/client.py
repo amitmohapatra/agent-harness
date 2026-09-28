@@ -10,14 +10,18 @@ retries a tool it has not been told is idempotent.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 from trellis.contracts import ToolStatus
 from trellis.contracts.artifacts import ArtifactRef
-from trellis.contracts.errors import PolicyDeniedError, ToolError
+from trellis.contracts.errors import AgentCancelledError, PolicyDeniedError, ToolError
 from trellis.contracts.events import LifecycleEvent
+from trellis.contracts.runs import InterruptDecision, RunEventType
 from trellis.contracts.tool import ToolCall, ToolOutcome, ToolSpec
 
+from trellis.harness.interrupts.signals import ApprovalRequired
+from trellis.harness.policy.outcome import PolicyOutcome, normalize
 from trellis.harness.telemetry import names as N
 from trellis.harness.telemetry.metrics import TOOL_CALLS, TOOL_LATENCY
 from trellis.harness.telemetry.tracer import Stopwatch
@@ -72,10 +76,25 @@ class InstrumentedToolClient:
                 or runtime.idempotency_key("tool", call.tool, self._step),
             }
         )
-        await self._authorize(call)
+        call, rejected = await self._authorize(call)
+        if rejected is not None:
+            # a refused call is still a call: it opens and closes on the stream like one
+            # that ran, and tool memory learns that it was refused
+            await self._opened(runtime, call)
+            self._finish(call, rejected, 0.0, str(rejected.status))
+            await self._record_memory(call, rejected, 0.0, str(rejected.status))
+            await self._closed(
+                runtime,
+                call,
+                status=str(rejected.status),
+                error_class=rejected.error_class,
+                output=rejected.output,
+            )
+            return rejected
         spec = self._spec(call.tool)
         watch = Stopwatch()
         self._emit(LifecycleEvent.TOOL_START, {"tool": call.tool, "step": call.step})
+        await self._opened(runtime, call)
         with runtime.tracer.tool_span(
             call.tool,
             **{
@@ -97,6 +116,13 @@ class InstrumentedToolClient:
                 span.error(exc, **{N.STATUS: "error"})
                 self._finish(call, None, watch.ms, "error", error=exc)
                 await self._record_memory(call, None, watch.ms, "error", error=exc)
+                await self._closed(
+                    runtime,
+                    call,
+                    status="error",
+                    error_class=type(exc).__name__,
+                    output=str(exc),
+                )
                 if isinstance(exc, ToolError):
                     raise
                 raise ToolError(str(exc), source=f"tool.{call.tool}") from exc
@@ -113,7 +139,47 @@ class InstrumentedToolClient:
             span.ok()
         self._finish(call, outcome, watch.ms, outcome.status)
         await self._record_memory(call, outcome, watch.ms, outcome.status)
+        await self._closed(
+            runtime,
+            call,
+            status=str(outcome.status),
+            output=outcome.output,
+            invocation_id=outcome.invocation_id,
+        )
         return outcome
+
+    # -- the run's event stream ----------------------------------------------------------
+    @staticmethod
+    async def _opened(runtime: AgentRuntime, call: ToolCall) -> None:
+        await runtime.events.emit(
+            RunEventType.TOOL_CALL_START, tool_call_id=_call_id(call), tool=call.tool
+        )
+        await runtime.events.emit(
+            RunEventType.TOOL_CALL_ARGS, tool_call_id=_call_id(call), args=call.args
+        )
+
+    @staticmethod
+    async def _closed(
+        runtime: AgentRuntime,
+        call: ToolCall,
+        *,
+        status: str,
+        output: Any = None,
+        error_class: str | None = None,
+        invocation_id: str | None = None,
+    ) -> None:
+        await runtime.events.emit(
+            RunEventType.TOOL_CALL_END, tool_call_id=_call_id(call), tool=call.tool
+        )
+        await runtime.events.emit(
+            RunEventType.TOOL_CALL_RESULT,
+            tool_call_id=_call_id(call),
+            tool=call.tool,
+            status=status,
+            output=_brief(output),
+            error_class=error_class,
+            invocation_id=invocation_id,
+        )
 
     # -- plumbing --------------------------------------------------------------------
     async def _execute(self, call: ToolCall) -> ToolOutcome:
@@ -130,15 +196,49 @@ class InstrumentedToolClient:
         spec = getter(tool)
         return spec if isinstance(spec, ToolSpec) else None
 
-    async def _authorize(self, call: ToolCall) -> None:
+    async def _authorize(self, call: ToolCall) -> tuple[ToolCall, ToolOutcome | None]:
+        """The call to run (its arguments possibly edited by an approver), or a rejected
+        outcome. A policy that requires approval pauses the run with the call, unless the
+        person already answered: a resumed run finds the resolution in ``runtime.state``,
+        and it counts only for the arguments the approver saw. Edited arguments go through
+        the policy again: an approver may narrow a call, never widen it past a denial."""
         if self._policy is None or self._runtime is None:
-            return
-        decision = await self._policy.authorize_tool(self._runtime.context, call)
-        if decision is not True:
+            return call, None
+        outcome, reason = normalize(await self._policy.authorize_tool(self._runtime.context, call))
+        if outcome is PolicyOutcome.ALLOW:
+            return call, None
+        if outcome is PolicyOutcome.DENY:
             raise PolicyDeniedError(
-                decision if isinstance(decision, str) else f"tool {call.tool!r} denied by policy",
-                source="policy.tool",
+                reason or f"tool {call.tool!r} denied by policy", source="policy.tool"
             )
+        resolved = self._runtime.state.get("resolutions", {}).get(call.idempotency_key)
+        if resolved is None or not _same_call(resolved.interrupt.tool_call, call):
+            raise ApprovalRequired(call, reason=reason)
+        decision = resolved.decision
+        if decision is InterruptDecision.APPROVE:
+            return call, None
+        if decision is InterruptDecision.EDIT:
+            edited = call.model_copy(update={"args": dict(resolved.payload or {})})
+            verdict, why = normalize(
+                await self._policy.authorize_tool(self._runtime.context, edited)
+            )
+            if verdict is PolicyOutcome.DENY:
+                raise PolicyDeniedError(
+                    why or f"the edited arguments for {call.tool!r} are denied by policy",
+                    source="policy.tool",
+                )
+            return edited, None
+        if decision is InterruptDecision.CANCEL:
+            # the person abandoned the run, not just the call: it ends CANCELLED
+            self._runtime.cancellation.cancel("cancelled by the approver")
+            raise AgentCancelledError("cancelled by the approver", source="policy.tool")
+        return call, ToolOutcome(
+            tool=call.tool,
+            status=ToolStatus.REJECTED,
+            output=f"the call to {call.tool} was rejected by the approver",
+            error_class="ApprovalRejected",
+            metadata={"interrupt_id": resolved.interrupt.interrupt_id},
+        )
 
     async def _bounded(self, awaitable: Any) -> Any:
         remaining = self._runtime.remaining_seconds if self._runtime else None
@@ -213,6 +313,39 @@ class InstrumentedToolClient:
     def _emit(self, event: LifecycleEvent, payload: dict[str, Any]) -> None:
         if self._events is not None and self._runtime is not None:
             self._events.emit(event, {"context": self._runtime.context, **payload})
+
+
+def _same_call(held: ToolCall | None, call: ToolCall) -> bool:
+    """Whether ``call`` is the call a person approved: the same tool with the same arguments
+    (a resumed agent re-plans from scratch, and its second attempt may ask for more)."""
+    return held is not None and held.tool == call.tool and held.args == call.args
+
+
+def _call_id(call: ToolCall) -> str:
+    """The id a surface correlates the tool events by: the call's idempotency key, which is
+    stable across a pause and its resume, so an approval resolves the same call."""
+    return call.idempotency_key or f"call:{call.tool}:{call.step}"
+
+
+#: How much of a tool result rides on the stream; the rest is reachable by reference.
+RESULT_PREVIEW_CHARS = 2000
+
+
+def _brief(output: Any) -> Any:
+    """The result as the stream carries it: scalars as they are, a structured value as
+    JSON carries it when it fits, otherwise the head of its JSON text."""
+    if output is None or isinstance(output, bool | int | float):
+        return output
+    if isinstance(output, str):
+        text = output
+    else:
+        try:
+            text = json.dumps(output, default=str)
+        except (TypeError, ValueError):
+            text = json.dumps(str(output))
+        if len(text) <= RESULT_PREVIEW_CHARS:
+            return json.loads(text)
+    return text if len(text) <= RESULT_PREVIEW_CHARS else text[:RESULT_PREVIEW_CHARS] + "…"
 
 
 def outcome_with_artifact(outcome: ToolOutcome, artifact: ArtifactRef) -> ToolOutcome:

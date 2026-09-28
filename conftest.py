@@ -37,6 +37,7 @@ from tests.support import (
     MEMORY_SERVICE_URL,
     FaultInjectingTransport,
     RecordingMemoryClient,
+    onboard,
 )
 
 from trellis.harness import AgentExecutionContext, AgentHarness
@@ -84,6 +85,7 @@ async def memory(service_available: bool, run_id: str) -> Any:
     from trellis.memory import MemoryClient
 
     client = MemoryClient(MEMORY_SERVICE_URL, api_key=MEMORY_API_KEY, timeout=120.0)
+    await onboard(client, TENANT, workspace_id=f"ws-{run_id}", users=[f"user-{run_id}"])
     recording = RecordingMemoryClient(client)
     try:
         yield recording
@@ -92,7 +94,7 @@ async def memory(service_available: bool, run_id: str) -> Any:
 
 
 @pytest.fixture
-async def faulty_memory(service_available: bool) -> Any:
+async def faulty_memory(service_available: bool, run_id: str) -> Any:
     """The real client and the real service, with a fault injector in the socket path.
 
     Tests reach it through ``memory.faults``: ``faults.drop.add("/v1/context")`` refuses that
@@ -102,8 +104,14 @@ async def faulty_memory(service_available: bool) -> Any:
     if not service_available:
         pytest.skip(f"no Memory Service at {MEMORY_SERVICE_URL}")
     import httpx as _httpx
+    from tests.support import onboard as _onboard
     from trellis.memory import MemoryClient
 
+    plain = MemoryClient(MEMORY_SERVICE_URL, api_key=MEMORY_API_KEY, timeout=60.0)
+    try:
+        await _onboard(plain, TENANT, workspace_id=f"ws-{run_id}", users=[f"user-{run_id}"])
+    finally:
+        await plain.aclose()
     faults = FaultInjectingTransport()
     client = MemoryClient(
         MEMORY_SERVICE_URL,

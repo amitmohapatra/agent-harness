@@ -31,6 +31,10 @@ from trellis.contracts import (
     ErrorCategory,
     EvidenceRef,
     HarnessError,
+    Interrupt,
+    InterruptDecision,
+    InterruptReason,
+    InterruptResolution,
     LifecycleEvent,
     MemoryObservation,
     ModelError,
@@ -39,6 +43,9 @@ from trellis.contracts import (
     ModelUsage,
     PolicyDeniedError,
     RecommendedAction,
+    RunEvent,
+    RunEventType,
+    RunOutcome,
     SkillDescriptor,
     ToolCall,
     ToolError,
@@ -53,13 +60,22 @@ from trellis.harness.artifacts import (
 )
 from trellis.harness.config import HarnessConfig
 from trellis.harness.evaluation import CollectingEvaluationSink
+from trellis.harness.events import (
+    CollectingEventSink,
+    CompositeEventSink,
+    FilteringEventSink,
+    RunEventStream,
+    WebhookEventSink,
+)
 from trellis.harness.execution import RetryPolicy, run_sync
 from trellis.harness.harness import AgentHarness, __version__
 from trellis.harness.interceptors import BaseInterceptor, Order
+from trellis.harness.interrupts import ApprovalRequired, ResolutionRegistry
 from trellis.harness.memory import MemoryPolicy
 from trellis.harness.models import BifrostModelClient, DirectModelClient, tool_schemas
 from trellis.harness.policy import AllowListPolicyProvider, CallablePolicyProvider
-from trellis.harness.reasoning import ReActStep, ReActTrace, react
+from trellis.harness.policy.outcome import PolicyOutcome
+from trellis.harness.reasoning import ContextAssembler, ReActStep, ReActTrace, react
 from trellis.harness.runtime import (
     AgentRuntime,
     CancellationToken,
@@ -69,6 +85,9 @@ from trellis.harness.runtime import (
 )
 from trellis.harness.telemetry import DefaultRedactor, HarnessTracer
 from trellis.harness.tools import LocalToolClient, wrap_tool
+from trellis.harness.tools.composite import CompositeToolClient
+from trellis.harness.tools.mcp import MCPToolClient
+from trellis.harness.tools.memory_tools import MemoryToolClient
 
 __all__ = [
     "OBSERVATION_KINDS",
@@ -85,6 +104,7 @@ __all__ = [
     "AgentTimeoutError",
     "AgentWarning",
     "AllowListPolicyProvider",
+    "ApprovalRequired",
     "ArtifactRef",
     "ArtifactRuntime",
     "BaseInterceptor",
@@ -93,35 +113,53 @@ __all__ = [
     "CancellationToken",
     "Claim",
     "CollectingEvaluationSink",
+    "CollectingEventSink",
+    "CompositeEventSink",
+    "CompositeToolClient",
     "ConfigurationError",
+    "ContextAssembler",
     "DefaultRedactor",
     "DirectModelClient",
     "ErrorCategory",
     "EvidenceRef",
     "FileArtifactStore",
+    "FilteringEventSink",
     "HarnessConfig",
     "HarnessError",
     "HarnessTracer",
     "InMemoryArtifactStore",
+    "Interrupt",
+    "InterruptDecision",
+    "InterruptReason",
+    "InterruptResolution",
     "LifecycleEvent",
     "LocalToolClient",
+    "MCPToolClient",
     "MemoryObservation",
     "MemoryPolicy",
+    "MemoryToolClient",
     "ModelError",
     "ModelRequest",
     "ModelResponse",
     "ModelUsage",
     "Order",
     "PolicyDeniedError",
+    "PolicyOutcome",
     "ReActStep",
     "ReActTrace",
     "RecommendedAction",
+    "ResolutionRegistry",
     "RetryPolicy",
+    "RunEvent",
+    "RunEventStream",
+    "RunEventType",
+    "RunOutcome",
     "SkillDescriptor",
     "ToolCall",
     "ToolError",
     "ToolOutcome",
     "ToolSpec",
+    "WebhookEventSink",
     "__version__",
     "current_context",
     "current_runtime",

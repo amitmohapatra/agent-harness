@@ -84,8 +84,11 @@ def live_harness(live_client):
 
 
 @pytest.fixture
-def live_context():
+async def live_context(live_client):
+    from tests.support import onboard
+
     run = uuid.uuid4().hex[:8]
+    await onboard(live_client, TENANT, workspace_id=f"ws-{run}", users=["live-user"])
     return AgentExecutionContext.create(
         tenant_id=TENANT,
         agent_id="live-agent",
@@ -231,12 +234,49 @@ async def test_idempotency_is_enforced_by_the_service(live_harness, live_context
     print(f"\n[live] replayed write deduplicated: {getattr(second, 'deduplicated', '?')}")
 
 
+async def test_feedback_reaches_the_service(live_harness, live_context):
+    """A judgement recorded through the harness is stored by the service (ADR 0023) and
+    readable back through the SDK: the verdict, the reviewer and the run it belongs to."""
+    from trellis.memory import Feedback
+
+    record = await live_harness.feedback(
+        live_context,
+        "run",
+        live_context.agent_run_id,
+        "confirm",
+        score=0.9,
+        comment="the answer was right",
+        reviewer="live-user",
+    )
+    assert isinstance(record, Feedback) and record.verdict == "confirm"
+    assert record.agent_run_id == live_context.agent_run_id and record.reviewer == "live-user"
+    memory = live_harness.memory_factory.create(live_context, tracer=live_harness.tracer)
+    listed = await memory.sdk.feedback.list_for("run", live_context.agent_run_id)
+    assert [f.feedback_id for f in listed] == [record.feedback_id]
+
+
 def test_the_shipped_examples_run_against_the_live_service():
     """The examples, run as the user would run them, with the real service behind them.
 
     A subprocess rather than an import: the examples build their harness at import time
     from the environment, which is exactly the path a reader will take.
     """
+    import asyncio
+
+    from tests.support import onboard
+    from trellis.memory import MemoryClient
+
+    workspace = f"live-example-ws-{uuid.uuid4().hex[:8]}"
+
+    async def _prepare() -> None:
+        client = MemoryClient(URL, api_key=API_KEY, timeout=30.0)
+        try:
+            await onboard(client, TENANT, workspace_id=workspace, users=["planner-7"])
+        finally:
+            await client.aclose()
+
+    asyncio.run(_prepare())
+
     import subprocess
     import sys
     from pathlib import Path
@@ -247,6 +287,7 @@ def test_the_shipped_examples_run_against_the_live_service():
         "MEMORY_SERVICE_URL": URL or "",
         "MEMORY_API_KEY": API_KEY,
         "MEMORY_TENANT": TENANT,
+        "MEMORY_WORKSPACE_ID": workspace,
         # a thread of its own, so repeated runs never interfere with each other
         "MEMORY_THREAD_ID": f"live-example-{uuid.uuid4().hex[:8]}",
         "PYTHONPATH": str(root),

@@ -17,6 +17,8 @@ harness:
     observe_claims: true           # write the agent's claims back
     record_outcome: true           # label the run success/failure for tool memory
     observe_tool_results: false    # tool outputs are NOT sent to memory by default
+    # Offer memory.recall and memory.remember to the model as tools (design §5); opt-in.
+    as_tools: false
     private_by_default: false      # true -> everything written is RUN-visible only
     record_messages: false         # also record the turn as chat messages
     token_budget: null             # null -> the service's default bundle budget

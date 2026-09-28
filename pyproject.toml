@@ -1,6 +1,6 @@
 [project]
 name = "trellis-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "Framework-neutral runtime harness for agents: context, memory, telemetry, tools, models, policy and evaluation around agents you already have."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -36,9 +36,11 @@ registry = ["jsonschema>=4"]
 langfuse = ["langfuse>=3.0"]
 # LangGraph adapter (never installed for plain-Python users)
 langgraph = ["trellis-harness-langgraph"]
+# AG-UI surface (FastAPI + SSE); the core imports nothing of it
+agui = ["trellis-harness-agui"]
 # JSON structured logging via structlog (stdlib logging is used when absent)
 logging = ["structlog>=25.2"]
-all = ["trellis-harness[otel,langfuse,langgraph,logging,registry]"]
+all = ["trellis-harness[otel,langfuse,langgraph,logging,registry,agui]"]
 
 [dependency-groups]
 dev = [
@@ -54,6 +56,8 @@ dev = [
   "structlog>=25.2",
   "langgraph>=1.2",
   "trellis-harness-langgraph",
+  "trellis-harness-agui",
+  "fastapi>=0.115",
 ]
 
 [build-system]
@@ -68,10 +72,11 @@ packages = ["src/trellis"]
 default-groups = ["dev"]
 
 [tool.uv.workspace]
-members = ["integrations/langgraph"]
+members = ["integrations/langgraph", "integrations/agui"]
 
 [tool.uv.sources]
 trellis-harness-langgraph = { workspace = true }
+trellis-harness-agui = { workspace = true }
 # Local development against the Memory Service SDK checkout.
 trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
 # The contract and the gateway client are separate distributions; local while unpublished.
@@ -111,7 +116,7 @@ ignore = ["PLR0913", "PLR2004", "B008"]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
-include = ["src", "integrations/langgraph/src"]
+include = ["src", "integrations/langgraph/src", "integrations/agui/src"]
 exclude = ["**/__pycache__", "**/.venv"]
 typeCheckingMode = "standard"
 reportMissingImports = "warning"

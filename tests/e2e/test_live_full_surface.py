@@ -58,6 +58,8 @@ LIVE = _reachable(URL)
 API_KEY = os.environ.get("MEMORY_API_KEY", "dev-key")
 TENANT = os.environ.get("MEMORY_TENANT", "acme")
 PG_CONTAINER = os.environ.get("MEMORY_PG_CONTAINER", "memory-service-postgres-1")
+#: The service's database inside that container (a native service may use another one).
+PG_DATABASE = os.environ.get("MEMORY_PG_DATABASE", "memory")
 
 pytestmark = [
     pytest.mark.live,
@@ -81,7 +83,7 @@ def sql(query: str) -> list[list[str]]:
             "-U",
             "memory",
             "-d",
-            "memory",
+            PG_DATABASE,
             "-t",
             "-A",
             "-F",
@@ -169,10 +171,12 @@ async def worker_ready() -> bool:
 
 
 @pytest.fixture
-async def client(worker_ready: bool):
+async def client(worker_ready: bool, run_id: str):
+    from tests.support import onboard
     from trellis.memory import MemoryClient
 
     c = MemoryClient(URL, api_key=API_KEY, timeout=60.0)
+    await onboard(c, TENANT, workspace_id=f"ws-{run_id}", users=[f"user-{run_id}"])
     try:
         yield c
     finally:
@@ -286,7 +290,6 @@ async def test_visibility_levels_that_the_context_supports(client, context):
             "PRIVATE",
             "USER",
             "THREAD",
-            "WORK",
             "WORKSPACE",
             "AGENT_GROUP",
             "TENANT",

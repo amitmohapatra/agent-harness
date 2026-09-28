@@ -14,6 +14,7 @@ from trellis.contracts.artifacts import MemoryObservation
 from trellis.contracts.errors import AgentError, ErrorCategory
 from trellis.contracts.events import LifecycleEvent
 from trellis.contracts.messages import AgentRequest, AgentResponse
+from trellis.contracts.runs import RunEventType
 
 from trellis.harness.interceptors.base import BaseInterceptor, Order
 from trellis.harness.memory.writeback import WritebackQueue
@@ -52,6 +53,9 @@ class MemoryContextInterceptor(BaseInterceptor):
                 {"context": runtime.context, "bundle": facts, "has_context": bundle is not None},
             )
         runtime.state["memory_facts"] = facts
+        await runtime.events.emit(
+            RunEventType.CONTEXT_LOADED, has_context=bundle is not None, facts=facts
+        )
         return request
 
 

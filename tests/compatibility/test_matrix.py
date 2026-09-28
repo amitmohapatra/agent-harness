@@ -125,9 +125,26 @@ def test_write_compatibility_matrix(request):
                 "opentelemetry-sdk",
                 "pydantic",
                 "trellis-memory",
+                "trellis-harness-agui",
+                "fastapi",
             )
         },
         "langgraph_features": passed_features,
     }
     MATRIX_PATH.write_text(json.dumps(matrix, indent=2) + "\n")
     assert matrix["packages"]["langgraph"] is not None
+
+
+def test_the_agui_surface_reports_its_version_and_stays_out_of_the_core():
+    """The AG-UI package is a distribution of its own (design §10): importable when
+    installed, never pulled in by the core."""
+    import subprocess
+    from importlib import util
+
+    from trellis.harness_agui import __version__ as agui_version
+
+    assert agui_version == installed("trellis-harness-agui")
+    assert util.find_spec("fastapi") is not None  # installed: the check below means something
+    code = "import sys; import trellis.harness; print('fastapi' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "False"

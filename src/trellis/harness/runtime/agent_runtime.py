@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from trellis.contracts.context import AgentExecutionContext
 from trellis.contracts.descriptors import AgentDescriptor
 
+from trellis.harness.events.stream import RunEventStream
 from trellis.harness.runtime.cancellation import CancellationToken, remaining_seconds
 from trellis.harness.runtime.logging import HarnessLogger, get_logger
 from trellis.harness.telemetry.tracer import HarnessTracer
@@ -47,6 +48,8 @@ class AgentRuntime:
     tracer: HarnessTracer
     logger: HarnessLogger
     cancellation: CancellationToken
+    #: The run's event stream (design §4): what a UI, a webhook or a trace sink watches.
+    events: RunEventStream
 
     deadline: datetime | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)

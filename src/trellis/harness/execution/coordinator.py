@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import json
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -34,8 +35,11 @@ from trellis.contracts.errors import (
 )
 from trellis.contracts.events import LifecycleEvent
 from trellis.contracts.messages import AgentRequest, AgentResponse, AgentStatus
+from trellis.contracts.runs import InterruptDecision, RunEventType, RunOutcome
 
+from trellis.harness.events.stream import WEBHOOK_URL_FIELD, RunEventStream
 from trellis.harness.execution.retry import RetryPolicy, with_retry
+from trellis.harness.interrupts.signals import interrupt_from_signal
 from trellis.harness.runtime.agent_runtime import AgentRuntime
 from trellis.harness.runtime.cancellation import CancellationToken
 from trellis.harness.runtime.logging import get_logger
@@ -91,10 +95,17 @@ class ExecutionCoordinator:
             runtime.state["span"] = span
             runtime.state["request"] = request
             runtime.state["sampling"] = decision
+            runtime.state[WEBHOOK_URL_FIELD] = request.metadata.get(WEBHOOK_URL_FIELD)
             with bind(context, runtime):
                 self.events.emit(
                     LifecycleEvent.AGENT_START,
                     {"context": context, "descriptor": descriptor, "request": request},
+                )
+                await runtime.events.emit(
+                    RunEventType.RUN_STARTED,
+                    agent_id=context.agent_id,
+                    objective=request.objective,
+                    **_notify(runtime),
                 )
                 try:
                     result = await self._run_pipeline(
@@ -105,18 +116,18 @@ class ExecutionCoordinator:
                     raise
                 except BaseException as exc:
                     if is_pause_signal(exc):
-                        self._on_pause(exc, runtime, span)
+                        await self._on_pause(exc, runtime, span)
                         raise
                     result, error = await self._on_error(exc, runtime, chain)
+                    if result is None and mode == "raise":
+                        await self._finish(runtime, None, error)
+                        raise
                     if result is None:
-                        self._finish(runtime, None, error)
-                        if mode == "raise":
-                            raise
-                        result = AgentResponse.failed(error, status=_status_for(error))
+                        result = AgentResponse.failed(error, status=status_for(error))
                         result = await self._safe_after(result, runtime, chain)
-                    self._finish(runtime, result, error)
+                    await self._finish(runtime, result, error)
                     return result
-                self._finish(runtime, result, None)
+                await self._finish(runtime, result, None)
                 return result
 
     # ------------------------------------------------------------------ pipeline
@@ -139,7 +150,17 @@ class ExecutionCoordinator:
             if number > 1:
                 runtime.state["span"].set(**{N.RETRY: number})
                 runtime.logger.warning("agent.retry", attempt=number)
-            return await self._invoke(agent, prepared, runtime, call=call)
+                runtime.events.next_attempt()
+            await runtime.events.emit(RunEventType.STEP_STARTED, step=AGENT_STEP)
+            try:
+                if runtime.cancellation.cancelled:
+                    # a person cancelled the paused run: it ends here, CANCELLED, unrun
+                    raise AgentCancelledError(
+                        runtime.cancellation.reason or "cancelled", source="harness.resume"
+                    )
+                return await self._invoke(agent, prepared, runtime, call=call)
+            finally:
+                await runtime.events.emit(RunEventType.STEP_FINISHED, step=AGENT_STEP)
 
         raw = await with_retry(
             attempt,
@@ -207,7 +228,7 @@ class ExecutionCoordinator:
                 exc.agent_error = error  # type: ignore[attr-defined]
         return recovered, error
 
-    def _on_pause(self, exc: BaseException, runtime: AgentRuntime, span: Any) -> None:
+    async def _on_pause(self, exc: BaseException, runtime: AgentRuntime, span: Any) -> None:
         """A suspended run is not a failed one.
 
         ``interrupt()`` in a LangGraph node raises to hand control back to the graph runtime,
@@ -226,10 +247,27 @@ class ExecutionCoordinator:
         span.event("agent.paused", reason=type(exc).__name__)
         span.ok()
         runtime.logger.info("agent.paused", reason=type(exc).__name__)
-        self.events.emit(LifecycleEvent.AGENT_PAUSE, {"context": runtime.context, "signal": exc})
+        # Whatever the framework raised, the run store and every surface see one shape.
+        interrupt = interrupt_from_signal(exc, runtime.context)
+        runtime.state["interrupt"] = interrupt
+        registry = self.runtime_builder.resolutions
+        if registry is not None:
+            # the harness keeps the unredacted interrupt; a surface answers it by id
+            registry.announce(interrupt, runtime.context)
+        self.events.emit(
+            LifecycleEvent.AGENT_PAUSE,
+            {"context": runtime.context, "signal": exc, "interrupt": interrupt},
+        )
         self.events.emit(
             LifecycleEvent.AGENT_FINISH,
             {"context": runtime.context, "status": str(AgentStatus.PAUSED)},
+        )
+        await runtime.events.emit(RunEventType.INTERRUPT, interrupt=interrupt, **_notify(runtime))
+        await runtime.events.emit(
+            RunEventType.RUN_FINISHED,
+            outcome=RunOutcome.INTERRUPT,
+            interrupt=interrupt,
+            **_notify(runtime),
         )
 
     async def _on_cancel(self, runtime: AgentRuntime, chain: Any) -> None:
@@ -249,6 +287,9 @@ class ExecutionCoordinator:
             LifecycleEvent.AGENT_FINISH,
             {"context": runtime.context, "status": "CANCELLED"},
         )
+        await runtime.events.emit(
+            RunEventType.RUN_FINISHED, outcome=RunOutcome.CANCELLED, error=error, **_notify(runtime)
+        )
 
     async def _safe_after(
         self, result: AgentResponse, runtime: AgentRuntime, chain: Any
@@ -259,13 +300,15 @@ class ExecutionCoordinator:
             runtime.logger.exception("interceptor after() failed on the error path")
             return result
 
-    def _finish(
+    async def _finish(
         self, runtime: AgentRuntime, result: AgentResponse | None, error: AgentError | None
     ) -> None:
+        """One ``AGENT_FINISH`` and one ``RUN_FINISHED`` per run, with the same status in
+        both error modes: a refused run is REJECTED whether it returned or raised."""
         if result is not None:
             status = str(result.status)
         else:
-            status = str(error.category) if error else "ERROR"
+            status = str(status_for(error)) if error else str(AgentStatus.ERROR)
         if result is not None and result.succeeded:
             self.events.emit(
                 LifecycleEvent.AGENT_SUCCESS, {"context": runtime.context, "result": result}
@@ -274,6 +317,43 @@ class ExecutionCoordinator:
             LifecycleEvent.AGENT_FINISH,
             {"context": runtime.context, "status": status, "result": result, "error": error},
         )
+        outcome = RunOutcome.from_status(status)
+        payload = _notify(runtime)
+        if result is not None and result.data is not None and outcome in _PRODUCED:
+            payload["result"] = wire_value(result.data)
+        await runtime.events.emit(
+            RunEventType.RUN_FINISHED,
+            outcome=outcome,
+            error=error if outcome not in _PRODUCED else None,
+            **payload,
+        )
+
+
+#: The step name a retryable agent invocation is reported under.
+AGENT_STEP = "agent"
+#: Outcomes that carry the agent's result rather than an error.
+_PRODUCED = frozenset({RunOutcome.SUCCESS, RunOutcome.PARTIAL})
+#: How much of a result rides on ``RUN_FINISHED``; a larger one is previewed.
+RESULT_WIRE_CHARS = 65536
+
+
+def _notify(runtime: AgentRuntime) -> dict[str, Any]:
+    """The run's own webhook, if the request named one, travels on the events a notifier
+    delivers (RUN_STARTED, INTERRUPT, RUN_FINISHED)."""
+    url = runtime.state.get(WEBHOOK_URL_FIELD)
+    return {WEBHOOK_URL_FIELD: url} if url else {}
+
+
+def wire_value(value: Any) -> Any:
+    """``value`` as JSON carries it (a surface serialises the event; a result with a
+    datetime or a model in it must not break the stream), previewed past the cap."""
+    try:
+        text = json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        text = json.dumps(str(value))
+    if len(text) <= RESULT_WIRE_CHARS:
+        return json.loads(text)
+    return {"truncated": True, "chars": len(text), "preview": text[:RESULT_WIRE_CHARS]}
 
 
 class _Overhead:
@@ -315,6 +395,10 @@ class RuntimeBuilder:
         timeouts: Any,
         tools_config: Any,
         artifacts_config: Any,
+        sinks: Any = (),
+        resolutions: Any = None,
+        memory_config: Any = None,
+        redactor: Any = None,
     ) -> None:
         self.memory_factory = memory_factory
         self.model_client = model_client
@@ -325,6 +409,11 @@ class RuntimeBuilder:
         self.timeouts = timeouts
         self.tools_config = tools_config
         self.artifacts_config = artifacts_config
+        # the harness's own list, shared: a sink added after construction reaches every run
+        self.sinks = sinks if isinstance(sinks, list) else list(sinks)
+        self.resolutions = resolutions
+        self.memory_as_tools = bool(getattr(memory_config, "as_tools", False))
+        self.redactor = redactor
 
     def build(
         self,
@@ -340,6 +429,8 @@ class RuntimeBuilder:
         from trellis.harness.artifacts.client import ArtifactRuntime  # noqa: PLC0415
         from trellis.harness.models.client import InstrumentedModelClient  # noqa: PLC0415
         from trellis.harness.tools.client import InstrumentedToolClient  # noqa: PLC0415
+        from trellis.harness.tools.composite import CompositeToolClient  # noqa: PLC0415
+        from trellis.harness.tools.memory_tools import MemoryToolClient  # noqa: PLC0415
 
         memory = self.memory_factory.create(context, tracer=tracer, policy=memory_policy)
         model = InstrumentedModelClient(
@@ -348,8 +439,14 @@ class RuntimeBuilder:
             policy=self.policy,
             events=self.events,
         )
+        memory_tools = MemoryToolClient() if self.memory_as_tools and memory.enabled else None
+        tool_client = (
+            CompositeToolClient([self.tool_client, memory_tools])
+            if memory_tools is not None
+            else self.tool_client
+        )
         tools = InstrumentedToolClient(
-            self.tool_client,
+            tool_client,
             timeout=self.timeouts.tool_seconds,
             policy=self.policy,
             events=self.events,
@@ -368,12 +465,21 @@ class RuntimeBuilder:
             tracer=tracer,
             logger=get_logger(**context.log_fields()),
             cancellation=CancellationToken(),
+            events=RunEventStream(context, self.sinks, redactor=self.redactor),
             deadline=context.deadline,
             metadata=dict(metadata or {}),
         )
+        if self.resolutions is not None:
+            # a resumed run finds the answers a person gave while it was paused
+            answers = self.resolutions.for_run(context.tenant_id, context.agent_run_id)
+            runtime.state["resolutions"] = answers
+            if any(a.decision is InterruptDecision.CANCEL for a in answers.values()):
+                runtime.cancellation.cancel("cancelled by the person who was asked")
         model.attach(runtime)
         tools.attach(runtime)
         artifacts.attach(runtime)
+        if memory_tools is not None:
+            memory_tools.attach(runtime)
         return runtime
 
 
@@ -442,7 +548,8 @@ def _seconds_until(deadline: datetime | None) -> float | None:
     return max(0.0, (deadline - datetime.now(UTC)).total_seconds())
 
 
-def _status_for(error: AgentError) -> AgentStatus:
+def status_for(error: AgentError) -> AgentStatus:
+    """The status a run that failed with ``error`` ends in."""
     if error.category is ErrorCategory.TIMEOUT:
         return AgentStatus.TIMEOUT
     if error.category is ErrorCategory.CANCELLED:

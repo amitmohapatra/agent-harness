@@ -100,6 +100,11 @@ class BifrostModelClient:
         except ImportError as exc:  # pragma: no cover - documented degradation
             raise ConfigurationError("BifrostModelClient needs httpx: pip install httpx") from exc
 
+    @property
+    def gateway(self) -> Any:
+        """The shared gateway client: ``MCPToolClient(model)`` reuses it for tools."""
+        return self._gateway
+
     # ------------------------------------------------------------------ port
     async def invoke(self, request: ModelRequest | str, /, **kwargs: Any) -> ModelResponse:
         req = _as_request(request, self.default_model)

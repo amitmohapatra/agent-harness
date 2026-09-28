@@ -18,7 +18,9 @@ from typing import TYPE_CHECKING, Any
 from trellis.contracts.errors import HarnessError, ModelError, PolicyDeniedError
 from trellis.contracts.events import LifecycleEvent
 from trellis.contracts.model import ModelRequest, ModelResponse
+from trellis.contracts.runs import RunEventType
 
+from trellis.harness.reasoning.assembler import INTERNAL
 from trellis.harness.telemetry import names as N
 from trellis.harness.telemetry.metrics import (
     MODEL_CALLS,
@@ -31,6 +33,10 @@ from trellis.harness.telemetry.tracer import Stopwatch
 
 if TYPE_CHECKING:  # pragma: no cover
     from trellis.harness.runtime.agent_runtime import AgentRuntime
+
+
+#: The role every model answer is reported under.
+ASSISTANT = "assistant"
 
 
 class InstrumentedModelClient:
@@ -105,6 +111,8 @@ class InstrumentedModelClient:
             LifecycleEvent.MODEL_END,
             {"status": "ok", "model": normalized.model, "latency_ms": watch.ms},
         )
+        if not req.metadata.get(INTERNAL):
+            await self._announce(runtime, normalized.text)
         return normalized
 
     async def _invoke_inner(self, method: str, request: Any, kwargs: dict[str, Any]) -> Any:
@@ -127,6 +135,7 @@ class InstrumentedModelClient:
         watch = Stopwatch()
         chunks = 0
         first_token_ms: float | None = None
+        message_id = self._message_id(runtime)
         self._emit(LifecycleEvent.MODEL_START, {"model": req.model, "streaming": True})
         with runtime.tracer.model_span(req, **{N.MODEL_STREAMING: True}) as span:
             span.set_input(req.messages or req.prompt, category="prompt")
@@ -135,7 +144,17 @@ class InstrumentedModelClient:
                     if first_token_ms is None:
                         first_token_ms = watch.ms
                         span.event("first_token", **{N.MODEL_TTFT_MS: first_token_ms})
+                        await runtime.events.emit(
+                            RunEventType.TEXT_MESSAGE_START, message_id=message_id, role=ASSISTANT
+                        )
                     chunks += 1
+                    if isinstance(chunk, str) and chunk:
+                        await runtime.events.emit(
+                            RunEventType.TEXT_MESSAGE_CONTENT,
+                            message_id=message_id,
+                            role=ASSISTANT,
+                            delta=chunk,
+                        )
                     yield chunk
             except asyncio.CancelledError:
                 span.error("cancelled", **{N.STATUS: "cancelled", "chunks": chunks})
@@ -156,6 +175,10 @@ class InstrumentedModelClient:
         self._metrics(req, None, watch.ms, status="ok", streaming=True)
         self._record(req, None, watch.ms, status="ok", streaming=True, chunks=chunks)
         self._emit(LifecycleEvent.MODEL_END, {"status": "ok", "streaming": True, "chunks": chunks})
+        if chunks:
+            await runtime.events.emit(
+                RunEventType.TEXT_MESSAGE_END, message_id=message_id, role=ASSISTANT
+            )
 
     # -- plumbing -----------------------------------------------------------------------
     async def _authorize(self, request: ModelRequest) -> None:
@@ -235,6 +258,27 @@ class InstrumentedModelClient:
     def _emit(self, event: LifecycleEvent, payload: dict[str, Any]) -> None:
         if self._events is not None and self._runtime is not None:
             self._events.emit(event, {"context": self._runtime.context, **payload})
+
+    # -- the run's event stream ----------------------------------------------------------
+    @staticmethod
+    def _message_id(runtime: Any) -> str:
+        """One id per model answer of the run, stable across the three text events."""
+        return f"msg_{runtime.run_id}_{len(runtime.model_calls) + 1}"
+
+    async def _announce(self, runtime: Any, text: str | None) -> None:
+        """A non-streaming answer is one message: start, its whole text, end (design §10)."""
+        if runtime is None or not text:
+            return
+        message_id = f"msg_{runtime.run_id}_{len(runtime.model_calls)}"
+        await runtime.events.emit(
+            RunEventType.TEXT_MESSAGE_START, message_id=message_id, role=ASSISTANT
+        )
+        await runtime.events.emit(
+            RunEventType.TEXT_MESSAGE_CONTENT, message_id=message_id, role=ASSISTANT, delta=text
+        )
+        await runtime.events.emit(
+            RunEventType.TEXT_MESSAGE_END, message_id=message_id, role=ASSISTANT
+        )
 
 
 def _response_attributes(response: ModelResponse) -> dict[str, Any]:

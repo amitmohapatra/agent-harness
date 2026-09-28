@@ -267,7 +267,7 @@ imports none of them.
 ## 10. Talking to people: AG-UI, webhooks, schedules
 
 - **AG-UI surface**: one route (`POST /agui/run`, SSE) that runs the harness and translates
-  `RunEvent`s to the 16 AG-UI events: `RunStarted`, `StepStarted/Finished`,
+  `RunEvent`s to the 17 AG-UI events: `RunStarted`, `StepStarted/Finished`,
   `TextMessageStart/Content/End`, `ToolCallStart/Args/End/Result`, `StateSnapshot/Delta`,
   `MessagesSnapshot`, `RunFinished{outcome}` / `RunError`, `Raw`, `Custom`. Frontend tools in
   `RunAgentInput.tools` become `ToolSpec`s the model may call (confirmations, UI actions);

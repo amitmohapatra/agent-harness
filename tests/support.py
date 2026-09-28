@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -60,6 +61,32 @@ class FaultInjectingTransport(httpx.AsyncBaseTransport):
 
 
 # --------------------------------------------------------------------------- recording tap
+
+
+async def onboard(
+    client: Any,
+    tenant_id: str,
+    *,
+    workspace_id: str | None = None,
+    users: Sequence[str] = (),
+) -> None:
+    """Create the tenant and the workspace the tests write into and enrol ``users`` in it,
+    tolerating that they exist: since the tenancy milestone a WORKSPACE-visible write needs
+    a workspace row and a member (the team-write gate), and the dev key may onboard all of
+    that in ``trusted_dev`` mode."""
+    import contextlib
+
+    from trellis.memory.errors import ConflictError
+
+    with contextlib.suppress(ConflictError):
+        await client.admin.create_tenant(tenant_id, tenant_id=tenant_id)
+    if not workspace_id:
+        return
+    workspaces = client.administer(tenant_id).workspaces
+    with contextlib.suppress(ConflictError):
+        await workspaces.create(workspace_id, workspace_id=workspace_id)
+    for user_id in users:
+        await workspaces.set_member(workspace_id, f"user:{user_id}")
 
 
 class RecordingMemoryClient:
@@ -144,6 +171,7 @@ class RecordingContext:
         self.graph = _RecordingAPI(context.graph, calls, "graph", scope)
         self.tools = _RecordingAPI(context.tools, calls, "tools", scope)
         self.runs = _RecordingAPI(context.runs, calls, "runs", scope)
+        self.feedback = _RecordingAPI(context.feedback, calls, "feedback", scope)
 
     def derive(self, **changes: Any) -> RecordingContext:
         return RecordingContext(

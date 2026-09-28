@@ -74,7 +74,7 @@ async def tour(agent: AgentRuntime) -> dict[str, Any]:
     # 3. A typed memory: you say what kind of knowledge this is and how long it should live.
     #    memory_type: SEMANTIC | EPISODIC | PROCEDURAL | PREFERENCE | DECISION | OUTCOME ...
     #    lifetime:    EPHEMERAL | SHORT_TERM | LONG_TERM | ARCHIVAL
-    #    visibility:  PRIVATE | RUN | AGENT_GROUP | THREAD | USER | WORK | WORKSPACE | TENANT
+    #    visibility:  PRIVATE | RUN | AGENT_GROUP | THREAD | USER | WORKSPACE | TENANT
     await memory.remember(
         "SKU-1 is reordered from Castor Supply when cover falls below 10 days.",
         memory_type="SEMANTIC",

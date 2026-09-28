@@ -6,6 +6,7 @@ policy and deadlines, so a loop written against them is instrumented wherever it
 inside a LangGraph node, a Celery task or a bare ``asyncio.run``.
 """
 
+from trellis.harness.reasoning.assembler import ContextAssembler
 from trellis.harness.reasoning.react import ReActStep, ReActTrace, react
 
-__all__ = ["ReActStep", "ReActTrace", "react"]
+__all__ = ["ContextAssembler", "ReActStep", "ReActTrace", "react"]

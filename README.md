@@ -824,3 +824,23 @@ python3.12 -m venv .venv && source .venv/bin/activate && pip install -e ".[all]"
 ## License
 
 Apache-2.0.
+
+
+## Events, interrupts and surfaces (0.3.0)
+
+Every run emits an ordered `RunEvent` stream to the sinks you pass
+(`AgentHarness(event_sinks=[CollectingEventSink(), WebhookEventSink(url, secret=...)])`);
+see [docs/events.md](docs/events.md). A run pauses the same way whatever asked, a person's
+answer continues the same run, and approvals become feedback; see
+[docs/interrupts.md](docs/interrupts.md). Tools: `MCPToolClient(gateway_or_model_client)`
+lists and runs the gateway's MCP tools under the names Bifrost gives them,
+`CompositeToolClient` puts several clients behind one port, and memory can be offered to the
+model as `memory.recall` / `memory.remember` (`memory.as_tools: true`, opt-in). `react()`
+runs every tool call of a step and takes a `ContextAssembler` that keeps the prompt under
+budget and compacts older turns into a remembered summary. The AG-UI surface is the
+`trellis-harness-agui` distribution (`pip install "trellis-harness[agui]"`):
+
+```python
+from trellis.harness_agui import agui_router
+app.include_router(agui_router(harness, agent=refund_agent, agent_id="refund-agent"))
+```
