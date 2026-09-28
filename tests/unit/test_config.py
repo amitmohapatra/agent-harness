@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from trellis.harness import HarnessConfig
-from trellis.harness.config.settings import env_overrides
+from trellis.harness.config.settings import RunsEngine, env_overrides
 
 
 def test_defaults_are_safe():
@@ -102,6 +104,13 @@ def test_documented_environment_variables():
         "LANGFUSE_BASE_URL": "https://lf.internal",
         "UAH_DEFAULT_TIMEOUT": "12.5",
         "UAH_SAMPLE_RATE": "0.25",
+        "UAH_JUDGE_ENABLED": "true",
+        "UAH_JUDGE_SAMPLE_RATE": "0.4",
+        "UAH_JUDGE_MAX_USD_PER_HOUR": "0.25",
+        "UAH_JUDGE_RUBRIC_PROMPT_ID": "prompt_judge_v2",
+        "UAH_RUNS_ENGINE": "temporal",
+        "UAH_TEMPORAL_TARGET": "temporal.internal:7233",
+        "UAH_TEMPORAL_TASK_QUEUE": "runs",
     }
     cfg = HarnessConfig.model_validate(env_overrides(env))
     assert cfg.memory.enabled is False
@@ -109,6 +118,42 @@ def test_documented_environment_variables():
     lf = cfg.observability.langfuse
     assert lf.enabled and lf.base_url == "https://lf.internal"
     assert cfg.telemetry.sampling.sample_rate == 0.25
+    assert cfg.judge.enabled and cfg.judge.sample_rate == 0.4
+    assert cfg.judge.max_usd_per_hour == 0.25
+    assert cfg.judge.rubric_prompt_id == "prompt_judge_v2"
+    assert cfg.runs.engine is RunsEngine.TEMPORAL and cfg.runs.configured
+    assert cfg.runs.temporal.target == "temporal.internal:7233"
+
+
+def test_the_shipped_example_configuration_is_loadable():
+    """``harness.example.yaml`` is documented as the list of every setting. A setting that has
+    been renamed or removed makes the whole file unloadable, and an example nobody can load is
+    worse than no example — so it is validated rather than believed."""
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    cfg = HarnessConfig.load(yaml.safe_load((root / "harness.example.yaml").read_text()))
+    assert cfg.judge.enabled is False, "the example must not switch spending on"
+    assert cfg.runs.engine is RunsEngine.AGENT_RUNS
+    assert cfg.runs.temporal.task_queue == "trellis-runs"
+
+
+def test_per_agent_judge_limits_fall_back_to_the_defaults():
+    cfg = HarnessConfig.load(
+        {
+            "judge": {
+                "enabled": True,
+                "sample_rate": 0.1,
+                "max_per_hour": 60,
+                "agents": {"noisy": {"sample_rate": 1.0}, "off": {"enabled": False}},
+            }
+        },
+        env=False,
+    )
+    assert cfg.judge.limits_for("noisy").sample_rate == 1.0
+    assert cfg.judge.limits_for("noisy").max_per_hour == 60, "unset means the default"
+    assert cfg.judge.limits_for("off").enabled is False
+    assert cfg.judge.limits_for("unknown").sample_rate == 0.1
 
 
 def test_invalid_environment_value_is_reported_with_the_variable_name():

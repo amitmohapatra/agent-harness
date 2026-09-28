@@ -21,6 +21,7 @@ MODEL_STREAM: Final = "agent.model.stream"
 TOOL_CALL: Final = "agent.tool.call"
 ARTIFACT_CREATE: Final = "agent.artifact.create"
 POLICY_CHECK: Final = "agent.policy.check"
+JUDGE: Final = "agent.judge"
 
 # -- span kinds (mapped onto backend-specific observation types) ---------------------
 KIND_AGENT: Final = "agent"
@@ -101,6 +102,14 @@ MEMORY_HOPS: Final = "memory.graph.hops"
 MEMORY_DOCUMENT_ID: Final = "memory.document.id"
 MEMORY_GROUNDED: Final = "memory.grounding.grounded"
 MEMORY_HALLUCINATION_RATE: Final = "memory.grounding.hallucination_rate"
+
+# The online judge's verdict, on its own span so a plain OTLP backend sees what Langfuse
+# gets as a score.
+JUDGE_SCORE: Final = "judge.score"
+JUDGE_METHOD: Final = "judge.method"
+JUDGE_LABEL: Final = "judge.label"
+JUDGE_MODEL: Final = "judge.model"
+JUDGE_COST: Final = "judge.cost_usd"
 
 ARTIFACT_ID: Final = "artifact.id"
 ARTIFACT_TYPE: Final = "artifact.type"

@@ -31,10 +31,13 @@ import time
 from collections.abc import AsyncIterator, Iterable, Sequence
 from typing import Any
 
-from bifrost_sdk import Bifrost, BifrostError, CircuitOpen, RateLimited, Unreachable
+from bifrost_sdk import Bifrost, BifrostError, CircuitOpen, Options, RateLimited, Unreachable
 from trellis.contracts.errors import ConfigurationError, ModelError
 from trellis.contracts.model import ModelRequest, ModelResponse, ModelUsage
 from trellis.contracts.tool import ToolSpec
+
+#: Bifrost's own header for a stored prompt's version (``bifrost_sdk._headers``).
+PROMPT_VERSION_HEADER = "x-bf-prompt-version"
 
 
 def tool_schemas(tools: Iterable[ToolSpec]) -> list[dict[str, Any]]:
@@ -184,6 +187,9 @@ class BifrostModelClient:
         body: dict[str, Any] = {"model": model, "messages": _messages(req), **params}
         if req.tools:
             body["tools"] = req.tools
+        options = _gateway_options(req)
+        if options is not None:
+            body["_options"] = options
         return body
 
     def _response(self, data: dict[str, Any], req: ModelRequest, started: float) -> ModelResponse:
@@ -271,6 +277,26 @@ def _as_model_error(exc: BifrostError) -> ModelError:
     if status is None:
         return ModelError("bifrost returned a non-JSON body", source="bifrost")
     return ModelError(f"bifrost returned {status}", source="bifrost", details=dict(exc.details))
+
+
+def _gateway_options(req: ModelRequest) -> Options | None:
+    """The gateway's per-request control plane for this request, when it asks for any.
+
+    Today that is the stored prompt: Bifrost is where prompts are authored and versioned
+    (design §3), and the gateway injects one by id at inference time — so a request naming
+    ``prompt_id`` must send the header, not paste the text. The contract spells a version as a
+    string because not every provider numbers them; Bifrost numbers them, so a numeric version
+    becomes the typed field and anything else travels as the documented header rather than
+    being silently dropped.
+    """
+    if not req.prompt_id:
+        return None
+    version = req.prompt_version
+    if version is None:
+        return Options(prompt_id=req.prompt_id)
+    if str(version).isdigit():
+        return Options(prompt_id=req.prompt_id, prompt_version=int(version))
+    return Options(prompt_id=req.prompt_id, extra={PROMPT_VERSION_HEADER: str(version)})
 
 
 def _as_request(request: ModelRequest | str, default_model: str | None) -> ModelRequest:

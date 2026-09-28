@@ -133,6 +133,9 @@ BANNED_IN_CORE = (
     "google.adk",
     "langfuse",
     "fastapi",
+    # Durability is a distribution too: choosing Temporal must not be something every
+    # plain-Python install pays for.
+    "temporalio",
 )
 
 #: What the matrix records the installed version of.
@@ -156,6 +159,8 @@ RECORDED = (
     "trellis-harness-a2a",
     "a2a-sdk",
     "fastapi",
+    "trellis-harness-temporal",
+    "temporalio",
 )
 
 
@@ -294,3 +299,36 @@ def test_the_a2a_package_speaks_the_protocol_version_it_was_verified_against():
 
     assert installed("a2a-sdk") == "1.1.5"
     assert PROTOCOL_VERSION_CURRENT == "1.0"
+
+
+def test_the_temporal_adapters_report_their_versions_and_stay_out_of_the_core():
+    """Durability is a distribution too: a deployment with no Temporal never imports it, and
+    one with Temporal records which ``temporalio`` was actually verified."""
+    from importlib import util
+
+    from trellis.harness_temporal import __version__ as temporal_version
+    from trellis.harness_temporal import temporalio_version
+
+    assert temporal_version == installed("trellis-harness-temporal")
+    assert temporalio_version() == installed("temporalio")
+    assert util.find_spec("temporalio") is not None  # installed: the core check means something
+
+
+def test_the_temporal_names_are_reachable_from_the_core_namespace():
+    """``from trellis.harness import TemporalRunStore`` works with the extra, and says how to
+    install it without (PEP 562: the name costs no import)."""
+    import trellis.harness as core
+
+    assert core.TemporalRunStore.__name__ == "TemporalRunStore"
+    assert core.TemporalScheduler.__name__ == "TemporalScheduler"
+    assert core.AgentRunWorkflow.__name__ == "AgentRunWorkflow"
+    with pytest.raises(AttributeError):
+        _ = core.NotAnAdapter
+
+
+def test_a_missing_temporal_extra_names_the_install_command(monkeypatch):
+    import trellis.harness as core
+
+    monkeypatch.setitem(sys.modules, "trellis.harness_temporal", None)
+    with pytest.raises(ImportError, match=r"trellis-harness\[temporal\]"):
+        _ = core.TemporalRunStore

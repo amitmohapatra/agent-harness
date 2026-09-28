@@ -325,21 +325,23 @@ runs with the ruler named, and no number claimed that a gate artifact does not c
 
 ```python
 harness = AgentHarness(
-    memory=MemoryClient(url, api_key=team_key),           # tenant + workspace come from the key
-    model=BifrostModelClient(gateway, virtual_key=vk),     # models, prompts, skills, MCP, budget
+    memory=MemoryClient(url, api_key=team_key),  # tenant + workspace come from the key
+    model=BifrostModelClient(gateway, virtual_key=vk),  # models, prompts, skills, MCP, budget
     tools=[MCPToolClient(gateway, vk), A2AAgentClient(registry)],
     runs=AgentRunsClient(...) or TemporalRuns(...),
-    policy=OpaPolicy(...),                                 # or CallablePolicyProvider
+    policy=OpaPolicy(...),  # or CallablePolicyProvider
     registry=AIRegistryClient(...),
     surfaces=[AGUISurface(), A2AServer(), Webhooks()],
     evaluation=[LangfuseJudge(sample=0.1)],
 )
 
-@harness.agent(agent_id="refund-agent", skills=["billing.refund"])
-async def refund_agent(state, agent): ...                  # plain Python, ReAct, or a framework
 
-app.include_router(harness.agui.router)                    # UI talks AG-UI
-harness.a2a.serve(port=9000)                               # other agents talk A2A
+@harness.agent(agent_id="refund-agent", skills=["billing.refund"])
+async def refund_agent(state, agent): ...  # plain Python, ReAct, or a framework
+
+
+app.include_router(harness.agui.router)  # UI talks AG-UI
+harness.a2a.serve(port=9000)  # other agents talk A2A
 ```
 
 A team that only wants memory adds one line; a team that wants everything adds the

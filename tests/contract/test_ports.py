@@ -95,6 +95,28 @@ def test_langfuse_evaluation_provider_satisfies_the_port():
     assert isinstance(LangfuseEvaluationProvider(client=object()), EvaluationProvider)
 
 
+def test_the_online_judge_satisfies_the_judge_port():
+    """Nothing else in the harness implements ``Judge``; if this drifts, the interceptor finds
+    out at the end of a real turn."""
+    from trellis.contracts.ports import Judge
+
+    from trellis.harness.evaluation.judge import GroundedJudge
+
+    assert isinstance(GroundedJudge(), Judge)
+
+
+def test_the_temporal_adapters_satisfy_the_run_and_schedule_ports():
+    """A deployment chooses its durability engine by configuration, which is only true while
+    both adapters answer the same two protocols the agent-runs client does."""
+    from trellis.contracts.ports import RunStore, Scheduler
+
+    temporal = pytest.importorskip(
+        "trellis.harness_temporal", reason="needs trellis-harness[temporal]"
+    )
+    assert isinstance(temporal.TemporalRunStore("localhost:7233"), RunStore)
+    assert isinstance(temporal.TemporalScheduler("localhost:7233"), Scheduler)
+
+
 def test_the_phase_3_adapters_satisfy_their_ports():
     """The run store client is the contracts ``RunStore``; every sink is an ``EventSink``."""
     from trellis.contracts.ports import EventSink, RunStore

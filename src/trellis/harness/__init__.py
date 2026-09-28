@@ -59,7 +59,18 @@ from trellis.harness.artifacts import (
     InMemoryArtifactStore,
 )
 from trellis.harness.config import HarnessConfig
-from trellis.harness.evaluation import CollectingEvaluationSink
+from trellis.harness.evaluation import (
+    CollectingEvaluationSink,
+    Dataset,
+    DatasetBuilder,
+    DatasetItem,
+    ExperimentResult,
+    ExperimentRunner,
+    GateThresholds,
+    GroundedJudge,
+    RegressionGate,
+    RubricPrompt,
+)
 from trellis.harness.events import (
     CollectingEventSink,
     CompositeEventSink,
@@ -118,12 +129,19 @@ __all__ = [
     "CompositeToolClient",
     "ConfigurationError",
     "ContextAssembler",
+    "Dataset",
+    "DatasetBuilder",
+    "DatasetItem",
     "DefaultRedactor",
     "DirectModelClient",
     "ErrorCategory",
     "EvidenceRef",
+    "ExperimentResult",
+    "ExperimentRunner",
     "FileArtifactStore",
     "FilteringEventSink",
+    "GateThresholds",
+    "GroundedJudge",
     "HarnessConfig",
     "HarnessError",
     "HarnessTracer",
@@ -148,8 +166,10 @@ __all__ = [
     "ReActStep",
     "ReActTrace",
     "RecommendedAction",
+    "RegressionGate",
     "ResolutionRegistry",
     "RetryPolicy",
+    "RubricPrompt",
     "RunEvent",
     "RunEventStream",
     "RunEventType",
@@ -182,11 +202,16 @@ __all__ = [
 #: What that should *not* cost is a second import line. PEP 562 lets the name live here and
 #: the dependency stay optional: ``from trellis.harness import LangGraphHarness``
 #: works when the extra is installed, and says how to install it when it is not.
+#: name -> (module, the extra that installs it)
 _ADAPTERS = {
     "LangGraphHarness": ("trellis.harness_langgraph", "langgraph"),
     "DeepAgentsHarness": ("trellis.harness_deepagents", "deepagents"),
     "OpenAIAgentsHarness": ("trellis.harness_openai_agents", "openai-agents"),
     "ClaudeAgentSDKHarness": ("trellis.harness_claude_agent_sdk", "claude-agent-sdk"),
+    # Durability is the same idea: a name that costs no import until it is used.
+    "AgentRunWorkflow": ("trellis.harness_temporal", "temporal"),
+    "TemporalRunStore": ("trellis.harness_temporal", "temporal"),
+    "TemporalScheduler": ("trellis.harness_temporal", "temporal"),
 }
 
 

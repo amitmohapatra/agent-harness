@@ -5,6 +5,7 @@ from trellis.harness.interceptors.base import (
 )
 from trellis.harness.interceptors.evaluation import EvaluationEventInterceptor
 from trellis.harness.interceptors.identity import IdentityInterceptor
+from trellis.harness.interceptors.judge import JudgeInterceptor
 from trellis.harness.interceptors.memory import (
     MemoryContextInterceptor,
     MemoryObservationInterceptor,
@@ -19,6 +20,7 @@ __all__ = [
     "EvaluationEventInterceptor",
     "IdentityInterceptor",
     "InterceptorChain",
+    "JudgeInterceptor",
     "MemoryContextInterceptor",
     "MemoryObservationInterceptor",
     "Order",

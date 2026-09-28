@@ -44,10 +44,12 @@ openai-agents = ["trellis-harness-openai-agents"]
 claude-agent-sdk = ["trellis-harness-claude-agent-sdk"]
 # A2A surface and client (a2a-sdk): serve agents to agents, call registry agents as tools
 a2a = ["trellis-harness-a2a"]
+# Temporal durability: a workflow per run, Temporal Schedules, behind the same ports
+temporal = ["trellis-harness-temporal"]
 # JSON structured logging via structlog (stdlib logging is used when absent)
 logging = ["structlog>=25.2"]
 all = [
-  "trellis-harness[otel,langfuse,langgraph,logging,registry,agui,a2a,deepagents,openai-agents,claude-agent-sdk]",
+  "trellis-harness[otel,langfuse,langgraph,logging,registry,agui,a2a,deepagents,openai-agents,claude-agent-sdk,temporal]",
 ]
 
 [dependency-groups]
@@ -75,6 +77,7 @@ dev = [
   "trellis-harness-deepagents",
   "trellis-harness-openai-agents",
   "trellis-harness-claude-agent-sdk",
+  "trellis-harness-temporal",
 ]
 
 [build-system]
@@ -96,6 +99,7 @@ members = [
   "integrations/deepagents",
   "integrations/openai_agents",
   "integrations/claude_agent_sdk",
+  "integrations/temporal",
 ]
 
 [tool.uv.sources]
@@ -105,6 +109,7 @@ trellis-harness-deepagents = { workspace = true }
 trellis-harness-openai-agents = { workspace = true }
 trellis-harness-claude-agent-sdk = { workspace = true }
 trellis-harness-a2a = { workspace = true }
+trellis-harness-temporal = { workspace = true }
 # Local development against the Memory Service SDK checkout.
 trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
 # The contract and the gateway client are separate distributions; local while unpublished.
@@ -120,6 +125,7 @@ testpaths = [
   "integrations/deepagents/tests",
   "integrations/openai_agents/tests",
   "integrations/claude_agent_sdk/tests",
+  "integrations/temporal/tests",
 ]
 timeout = 120
 filterwarnings = ["error::DeprecationWarning:trellis.harness.*"]
@@ -128,6 +134,7 @@ markers = [
   "compatibility: framework version compatibility matrix",
   "live: needs a running Memory Service (MEMORY_SERVICE_URL)",
   "live_llm: needs a Memory Service *and* a model gateway (BIFROST_URL)",
+  "temporal: needs temporalio's time-skipping test server (downloaded on first use)",
 ]
 
 [tool.ruff]
@@ -141,6 +148,7 @@ src = [
   "integrations/deepagents/src",
   "integrations/openai_agents/src",
   "integrations/claude_agent_sdk/src",
+  "integrations/temporal/src",
   "tests",
 ]
 
@@ -168,6 +176,7 @@ include = [
   "integrations/deepagents/src",
   "integrations/openai_agents/src",
   "integrations/claude_agent_sdk/src",
+  "integrations/temporal/src",
 ]
 exclude = ["**/__pycache__", "**/.venv"]
 typeCheckingMode = "standard"

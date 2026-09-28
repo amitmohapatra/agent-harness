@@ -15,6 +15,7 @@ members = [
     "trellis-harness-deepagents",
     "trellis-harness-langgraph",
     "trellis-harness-openai-agents",
+    "trellis-harness-temporal",
 ]
 
 [[package]]
@@ -1248,6 +1249,18 @@ wheels = [
 ]
 
 [[package]]
+name = "nexus-rpc"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/35/d5/cd1ffb202b76ebc1b33c1332a3416e55a39929006982adc2b1eb069aaa9b/nexus_rpc-1.4.0.tar.gz", hash = "sha256:3b8b373d4865671789cc43623e3dc0bcbf192562e40e13727e17f1c149050fba", size = 82367, upload-time = "2026-02-25T22:01:34.053Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/52/6327a5f4fda01207205038a106a99848a41c83e933cd23ea2cab3d2ebc6c/nexus_rpc-1.4.0-py3-none-any.whl", hash = "sha256:14c953d3519113f8ccec533a9efdb6b10c28afef75d11cdd6d422640c40b3a49", size = 29645, upload-time = "2026-02-25T22:01:33.122Z" },
+]
+
+[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1258,7 +1271,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "3.19.2"
+version = "3.20.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1268,9 +1281,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/91/2d5722388a50cc86e162779df5fbfe0afa652a6e2d5c9ee616e081a82098/openai-3.19.2.tar.gz", hash = "sha256:de185f9834ad064d965ec42bd0766731cf66bceea16a7670294a835d207019e6", size = 1716953, upload-time = "2026-09-24T00:06:07.315Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/9a/008ff67f5f39ff680b7c9adf38373779247c365c611b9c60302e2dc65eea/openai-3.20.0.tar.gz", hash = "sha256:5e5dc0a3c0a9362e69cd35a65d04580a73a66eb39d5abeb78881b6190ca5d98c", size = 1746517, upload-time = "2026-09-28T16:05:03.22Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/20/4fe123e60525375878c67d1d8d051c9c5dec81cc56a579ba9304ca743303/openai-3.19.2-py3-none-any.whl", hash = "sha256:66247fcd07266e72536e90656dc27f3b0bb1e9d8696d4013fc55402c0b96a5c2", size = 2071459, upload-time = "2026-09-24T00:06:05.416Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/92/218ff62ff1ae4eb737bdd011a20ca2f0f48a313893cc45190819468ba4e1/openai-3.20.0-py3-none-any.whl", hash = "sha256:fb1b109e3423ed51c6ade96bbb0fffddae39c8e64bb9b6e501659bcbaa5ad30c", size = 2082957, upload-time = "2026-09-28T16:05:00.823Z" },
 ]
 
 [[package]]
@@ -2049,6 +2062,27 @@ wheels = [
 ]
 
 [[package]]
+name = "temporalio"
+version = "1.33.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nexus-rpc" },
+    { name = "protobuf" },
+    { name = "types-protobuf" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bd/64/b92769790411fa33ce2d037131f5bc856b90837ab1af3d093036f5144c15/temporalio-1.33.0.tar.gz", hash = "sha256:a1e506bcad08c995df7ec083bfd953f3c85bd1e2f6accbbb7562ef39386b3afb", size = 3065348, upload-time = "2026-09-15T00:53:07.558Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/21/eca23a5b343e1036b2449c18405df32d6e452bebaa3ce1e896551741f738/temporalio-1.33.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:152b808c622c83052e17e64e228c1fa0410c515a908ed8981d17cba527183cf9", size = 13900095, upload-time = "2026-09-15T00:52:51.43Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/89/91e8ed945b6e35f948e4cb01335bd8db0aa973f94d5ed86ead3c0f1fa6c2/temporalio-1.33.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:a46970c35acf77dfe142ee2aa3504462a3ff7aa12abdada57e7e8e2488930cbc", size = 13572589, upload-time = "2026-09-15T00:52:53.98Z" },
+    { url = "https://files.pythonhosted.org/packages/54/96/b23ed2a722f2758035dc5af03d93b426740a7f65ca573a6f9718a093594c/temporalio-1.33.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c685f6f4629b72645c0f9a9811cb2275d8a7cd0b2893b3349bd0a53985ff6f46", size = 13974142, upload-time = "2026-09-15T00:52:56.152Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/12/63e13f93b5772f5bd2128990bfeec050f7de9e80ce4d8504d99f7f794b10/temporalio-1.33.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:efba3fec8735c4592c57a1a7aa4c2e4acf5a0765f53bd7366b94540755dbab0f", size = 14322659, upload-time = "2026-09-15T00:52:58.513Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/34/886675724adbdf4b8b01e37fabda07138eb4668ee50388fbd2ac308ec26f/temporalio-1.33.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:79840232ed78943951d5f0069193b997d24e1da85890784a7d4351a48eb1f166", size = 14032190, upload-time = "2026-09-15T00:53:00.726Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/00/11d89ec3017fd7fe9c6cfcc8b2f52e8327ff82ff8412b361e5f2efda1e32/temporalio-1.33.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:8f52f2f175aed174de21fc5782e5cba1e9e2e37cfd5687d5a8bd084b4deba483", size = 14423865, upload-time = "2026-09-15T00:53:02.932Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/b9/ee3ceb93733512cd9faea4d0d1d604965870aa2e35bf0cfa83e6dba47199/temporalio-1.33.0-cp310-abi3-win_amd64.whl", hash = "sha256:33b5ff39c6737d21c6f16d3fef0c458d64aa9e78ce187e293bda6998d29ea7b8", size = 15254531, upload-time = "2026-09-15T00:53:05.319Z" },
+]
+
+[[package]]
 name = "tenacity"
 version = "9.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2107,6 +2141,7 @@ all = [
     { name = "trellis-harness-deepagents" },
     { name = "trellis-harness-langgraph" },
     { name = "trellis-harness-openai-agents" },
+    { name = "trellis-harness-temporal" },
 ]
 claude-agent-sdk = [
     { name = "trellis-harness-claude-agent-sdk" },
@@ -2133,6 +2168,9 @@ otel = [
 registry = [
     { name = "jsonschema" },
 ]
+temporal = [
+    { name = "trellis-harness-temporal" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -2157,6 +2195,7 @@ dev = [
     { name = "trellis-harness-deepagents" },
     { name = "trellis-harness-langgraph" },
     { name = "trellis-harness-openai-agents" },
+    { name = "trellis-harness-temporal" },
 ]
 
 [package.metadata]
@@ -2172,16 +2211,17 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "structlog", marker = "extra == 'logging'", specifier = ">=25.2" },
     { name = "trellis-contracts", editable = "../agent-contracts" },
-    { name = "trellis-harness", extras = ["otel", "langfuse", "langgraph", "logging", "registry", "agui", "a2a", "deepagents", "openai-agents", "claude-agent-sdk"], marker = "extra == 'all'" },
+    { name = "trellis-harness", extras = ["otel", "langfuse", "langgraph", "logging", "registry", "agui", "a2a", "deepagents", "openai-agents", "claude-agent-sdk", "temporal"], marker = "extra == 'all'" },
     { name = "trellis-harness-a2a", marker = "extra == 'a2a'", editable = "integrations/a2a" },
     { name = "trellis-harness-agui", marker = "extra == 'agui'", editable = "integrations/agui" },
     { name = "trellis-harness-claude-agent-sdk", marker = "extra == 'claude-agent-sdk'", editable = "integrations/claude_agent_sdk" },
     { name = "trellis-harness-deepagents", marker = "extra == 'deepagents'", editable = "integrations/deepagents" },
     { name = "trellis-harness-langgraph", marker = "extra == 'langgraph'", editable = "integrations/langgraph" },
     { name = "trellis-harness-openai-agents", marker = "extra == 'openai-agents'", editable = "integrations/openai_agents" },
+    { name = "trellis-harness-temporal", marker = "extra == 'temporal'", editable = "integrations/temporal" },
     { name = "trellis-memory", editable = "../agent-memory-service/sdk/python" },
 ]
-provides-extras = ["otel", "registry", "langfuse", "langgraph", "agui", "deepagents", "openai-agents", "claude-agent-sdk", "a2a", "logging", "all"]
+provides-extras = ["otel", "registry", "langfuse", "langgraph", "agui", "deepagents", "openai-agents", "claude-agent-sdk", "a2a", "temporal", "logging", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2206,6 +2246,7 @@ dev = [
     { name = "trellis-harness-deepagents", editable = "integrations/deepagents" },
     { name = "trellis-harness-langgraph", editable = "integrations/langgraph" },
     { name = "trellis-harness-openai-agents", editable = "integrations/openai_agents" },
+    { name = "trellis-harness-temporal", editable = "integrations/temporal" },
 ]
 
 [[package]]
@@ -2397,6 +2438,41 @@ requires-dist = [
 provides-extras = ["openai-agents", "dev"]
 
 [[package]]
+name = "trellis-harness-temporal"
+version = "0.1.0"
+source = { editable = "integrations/temporal" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "temporalio" },
+    { name = "trellis-contracts" },
+    { name = "trellis-harness" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "temporalio", specifier = ">=1.33" },
+    { name = "trellis-contracts", editable = "../agent-contracts" },
+    { name = "trellis-harness", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyright", specifier = ">=1.1.414" },
+    { name = "pytest", specifier = ">=9.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4" },
+    { name = "ruff", specifier = ">=0.16" },
+]
+
+[[package]]
 name = "trellis-memory"
 version = "0.2.1"
 source = { editable = "../agent-memory-service/sdk/python" }
@@ -2425,6 +2501,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
+]
+
+[[package]]
+name = "types-protobuf"
+version = "7.35.1.20260906"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/6c/e3e5b3e10bc328126a39637c138f9ebfd734bf14342b9f3540039b4ab995/types_protobuf-7.35.1.20260906.tar.gz", hash = "sha256:efd1a3862d4c967dad5512ef8d56b1530ac84f182c41735b94004756518c4998", size = 69895, upload-time = "2026-09-06T06:35:28.308Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/4e/f63e826c68f77ef875506d72f225918800346545ee99847bc28f3394f18d/types_protobuf-7.35.1.20260906-py3-none-any.whl", hash = "sha256:5155e48569e0dabff303fdf578db96cd31ea9a4a63b18018a4ceac6b0ae17462", size = 86419, upload-time = "2026-09-06T06:35:27.247Z" },
 ]
 
 [[package]]

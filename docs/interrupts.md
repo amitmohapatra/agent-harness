@@ -41,6 +41,7 @@ the approver saw: a resumed agent that asks for a different call asks a person a
 ```python
 from trellis.harness.interrupts import ANSWER
 
+
 @harness.agent(agent_id="deploy")
 async def deploy(payload, runtime):
     answer = runtime.state.get("resolutions", {}).get(ANSWER)
@@ -48,8 +49,13 @@ async def deploy(payload, runtime):
         raise AgentPaused("Which region?", expects={"type": "string"})
     return f"deploying to {answer.answer}"
 
-resolution = InterruptResolution(interrupt_id=interrupt.interrupt_id, run_id=interrupt.run_id,
-                                 decision=InterruptDecision.ANSWER, answer="eu")
+
+resolution = InterruptResolution(
+    interrupt_id=interrupt.interrupt_id,
+    run_id=interrupt.run_id,
+    decision=InterruptDecision.ANSWER,
+    answer="eu",
+)
 await harness.resume(interrupt, resolution, context=ctx, agent=deploy)
 ```
 

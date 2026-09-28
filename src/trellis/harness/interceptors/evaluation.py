@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING, Any
 
-from trellis.contracts.events import AgentEvalEvent
-from trellis.contracts.messages import AgentRequest, AgentResponse
+from trellis.contracts.messages import AgentResponse
 
+from trellis.harness.evaluation.events import build_eval_event
 from trellis.harness.interceptors.base import BaseInterceptor, Order
 from trellis.harness.memory.writeback import WritebackQueue
 from trellis.harness.telemetry.sampling import roll
@@ -42,26 +41,7 @@ class EvaluationEventInterceptor(BaseInterceptor):
     async def _emit(self, runtime: AgentRuntime, result: AgentResponse) -> None:
         if not self._sampled(runtime):
             return
-        request: AgentRequest | None = runtime.state.get("request")
-        started = runtime.state.get("started_at")
-        event = AgentEvalEvent(
-            agent_id=runtime.agent_id,
-            agent_run_id=runtime.run_id,
-            tenant_id=runtime.context.tenant_id,
-            trace_id=runtime.context.trace_id,
-            skills=list(
-                runtime.descriptor.skill_ids or (request.skills_requested if request else [])
-            ),
-            request_ref=runtime.context.request_id,
-            result_ref=runtime.idempotency_key("result"),
-            evidence_refs=list(result.evidence),
-            model_metadata=list(runtime.model_calls),
-            tool_calls=list(runtime.tool_calls),
-            status=result.status,
-            latency_ms=round((time.perf_counter() - started) * 1000.0, 3) if started else 0.0,
-            metrics=dict(result.metrics),
-            metadata={"bundle": runtime.state.get("memory_facts") or {}},
-        )
+        event = build_eval_event(runtime, result)
         if self.synchronous:
             await self.sink.emit(event)
             return

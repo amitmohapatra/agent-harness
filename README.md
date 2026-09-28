@@ -782,6 +782,8 @@ mistake fails at startup rather than on the first execution.
 | [COMPATIBILITY.md](COMPATIBILITY.md) | Versions actually tested, per-feature matrix, degradation rules |
 | [docs/configuration.md](docs/configuration.md) | Every setting, every environment variable |
 | [docs/a2a.md](docs/a2a.md) | Serving an agent over A2A, calling registry agents as tools, Agent Cards, registry sync |
+| [docs/evaluation.md](docs/evaluation.md) | The online judge, offline datasets and experiments, the CI regression gate |
+| [docs/observability.md](docs/observability.md) | One trace per request, what memory was served, and the Langfuse/Datadog split with collector configuration |
 | [docs/privacy.md](docs/privacy.md) | Capture policy, redaction, sampling, what never leaves |
 | [docs/limitations.md](docs/limitations.md) | What the harness cannot do, stated plainly |
 | [docs/performance.md](docs/performance.md) | Measured overhead and how to reproduce it |
@@ -907,3 +909,52 @@ Identity on an A2A call is the platform's, never the caller's: the tenant, user 
 on a trusted header an authenticating edge sets, a foreign one is refused before a run starts, and
 only the run's own caller can answer its pause. Details, including the full event mapping and the
 registry sync: [docs/a2a.md](docs/a2a.md).
+
+
+## Evaluation and durability (0.3.0)
+
+**Is this agent any good?** An online judge scores sampled turns, asynchronously, and
+**grounded first**: the Memory Service's `/v1/verify` (deterministic citation validation and NLI
+against the bundle the run was actually given) decides everything a classifier can decide, and
+only what it cannot settle reaches a model — through Bifrost, on a cheap model, with the rubric
+stored and versioned in the gateway by prompt id. A verdict becomes a Langfuse score, an
+`agent.judge` span and a `Feedback` record with `source="judge"`. Off by default; per-agent rate,
+per-hour count and per-hour dollar ceilings.
+
+```python
+from trellis.harness import AgentHarness, BifrostModelClient, GroundedJudge
+
+judge = GroundedJudge(model=BifrostModelClient(gateway, api_key=budgeted_key), config=cfg.judge)
+harness = AgentHarness(memory=memory, judge=judge)  # the turn never waits for the verdict
+```
+
+**Is it getting better?** `DatasetBuilder` turns run records plus human corrections into a
+dataset (judge feedback excluded, so the judge cannot become its own ground truth),
+`ExperimentRunner` replays it against a candidate and scores it with the *same* `Judge`, and one
+command gates CI on both halves:
+
+```bash
+python -m trellis.harness.evaluation.gate \
+  --baseline benchmark-results.json --current build/benchmark-results.json \
+  --judge build/experiment.json --max-latency-regression 20 --max-score-drop 0.05
+```
+
+See [docs/evaluation.md](docs/evaluation.md). **Where do I look when one request went wrong?**
+One Langfuse trace per request holds the spans, the cost, the judge's score, the human's score
+and the feedback thread; `GET /v1/reads` says what memory was served; Langfuse is per agent and
+Datadog (OTLP) is per service, joined on `traceparent` + `x-request-id` — with the collector
+configuration in [docs/observability.md](docs/observability.md).
+
+**Durability.** A deployment that runs Temporal puts its runs there by configuration —
+a workflow per run, signals for pause and resume, Temporal Schedules for standing intents, both
+behind the same `RunStore` and `Scheduler` ports as `agent-runs`
+(`pip install "trellis-harness[temporal]"`):
+
+```yaml
+runs:
+  engine: temporal       # or agent_runs, the default
+  temporal: { target: localhost:7233, task_queue: trellis-runs }
+```
+
+See [integrations/temporal/README.md](integrations/temporal/README.md).
+

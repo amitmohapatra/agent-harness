@@ -9,14 +9,47 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trellis.contracts.events import AgentEvalEvent
+from trellis.contracts.messages import AgentRequest, AgentResponse
 
 from trellis.harness.runtime.logging import get_logger
 
+if TYPE_CHECKING:  # pragma: no cover
+    from trellis.harness.runtime.agent_runtime import AgentRuntime
+
 log = get_logger("trellis.harness.evaluation")
+
+
+def build_eval_event(runtime: AgentRuntime, result: AgentResponse) -> AgentEvalEvent:
+    """One description of a finished run, built from references only (§49).
+
+    Shared by the evaluation sink and the judge on purpose: two builders would let the score
+    on a trace describe a slightly different run from the event a dataset was assembled from.
+    Nothing here is a payload — an evaluator resolves the references out of band, so turning
+    evaluation on never widens what the harness holds or sends.
+    """
+    request: AgentRequest | None = runtime.state.get("request")
+    started = runtime.state.get("started_at")
+    return AgentEvalEvent(
+        agent_id=runtime.agent_id,
+        agent_run_id=runtime.run_id,
+        tenant_id=runtime.context.tenant_id,
+        trace_id=runtime.context.trace_id,
+        skills=list(runtime.descriptor.skill_ids or (request.skills_requested if request else [])),
+        request_ref=runtime.context.request_id,
+        result_ref=runtime.idempotency_key("result"),
+        evidence_refs=list(result.evidence),
+        model_metadata=list(runtime.model_calls),
+        tool_calls=list(runtime.tool_calls),
+        status=result.status,
+        latency_ms=round((time.perf_counter() - started) * 1000.0, 3) if started else 0.0,
+        metrics=dict(result.metrics),
+        metadata={"bundle": runtime.state.get("memory_facts") or {}},
+    )
 
 
 class LifecycleDispatcher:

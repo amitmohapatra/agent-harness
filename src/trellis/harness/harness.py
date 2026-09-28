@@ -24,7 +24,7 @@ from typing import Any
 
 from trellis.contracts.context import AgentExecutionContext
 from trellis.contracts.descriptors import AgentDescriptor, SkillDescriptor
-from trellis.contracts.errors import AgentError, is_pause_signal
+from trellis.contracts.errors import AgentError, ConfigurationError, is_pause_signal
 from trellis.contracts.events import LifecycleEvent
 from trellis.contracts.messages import AgentRequest, AgentResponse
 from trellis.contracts.runs import (
@@ -41,7 +41,7 @@ from trellis.harness.artifacts.stores import (
     InMemoryArtifactStore,
     NoArtifactStore,
 )
-from trellis.harness.config.settings import HarnessConfig
+from trellis.harness.config.settings import HarnessConfig, RunsEngine
 from trellis.harness.evaluation.events import (
     CompositeEvaluationSink,
     LifecycleDispatcher,
@@ -60,6 +60,7 @@ from trellis.harness.execution.sync import run_sync
 from trellis.harness.interceptors.base import BaseInterceptor, InterceptorChain
 from trellis.harness.interceptors.evaluation import EvaluationEventInterceptor
 from trellis.harness.interceptors.identity import IdentityInterceptor
+from trellis.harness.interceptors.judge import JudgeInterceptor
 from trellis.harness.interceptors.memory import (
     MemoryContextInterceptor,
     MemoryObservationInterceptor,
@@ -115,6 +116,7 @@ class AgentHarness:
         runs: Any = None,
         evaluation_sink: Any = None,
         evaluation_provider: Any = None,
+        judge: Any = None,
         prompts: Any = None,
         redactor: Any = None,
         interceptors: Iterable[BaseInterceptor] = (),
@@ -160,6 +162,9 @@ class AgentHarness:
         self.runs = runs or self._build_runs()
         self.prompts = prompts
         self.evaluation_provider = evaluation_provider or NoOpEvaluationProvider()
+        #: The online judge (design §11). Passed in, or built from ``config.judge`` when the
+        #: deployment turned it on; ``None`` means nothing is judged and nothing is spent.
+        self.judge = judge or self._build_judge()
 
         self.events = LifecycleDispatcher(list(listeners))
         #: Where every run's ``RunEvent``s go (design §4): a UI bridge, a webhook, a trace.
@@ -275,6 +280,22 @@ class AgentHarness:
             return FileArtifactStore(artifacts)
         return artifacts
 
+    def _build_judge(self) -> Any:
+        """The configured judge, or ``None``.
+
+        Built here rather than asked for in code for the same reason as the registry: a
+        deployment that has already said which model judges, how often and up to what spend
+        should not also have to construct the object. It stays off unless ``judge.enabled``,
+        because switching a judge on spends money.
+        """
+        settings = self.config.judge
+        if not settings.enabled:
+            return None
+        from trellis.harness.evaluation.judge import GroundedJudge  # noqa: PLC0415 - optional
+
+        model = None if settings.grounded_only else self.model_client
+        return GroundedJudge(model=model, config=settings)
+
     def _build_evaluation_sink(self) -> Any:
         sinks: list[Any] = [LoggingEvaluationSink()]
         langfuse = getattr(self, "langfuse", None)
@@ -328,6 +349,17 @@ class AgentHarness:
                     synchronous=self.config.evaluation_events.synchronous,
                     sample_rate=self.config.evaluation_events.sample_rate,
                     queue=self.writeback,
+                )
+            )
+        if self.judge is not None:
+            chain.append(
+                JudgeInterceptor(
+                    self.judge,
+                    queue=self.writeback,
+                    evaluation=self.evaluation_provider,
+                    feedback=self.feedback,
+                    tracer=self.tracer,
+                    threshold=self.config.judge.threshold,
                 )
             )
         return chain
@@ -648,10 +680,36 @@ class AgentHarness:
         settings = self.config.runs
         if not settings.configured:
             return NoRunStore()
+        if settings.engine is RunsEngine.TEMPORAL:
+            return self._build_temporal_runs()
         from trellis.harness.runs import RunStoreClient  # noqa: PLC0415 - optional
 
         return RunStoreClient(
             str(settings.url), api_key=str(settings.api_key), required=settings.required
+        )
+
+    def _build_temporal_runs(self) -> Any:
+        """Temporal behind the same port, selected by ``runs.engine``.
+
+        The client connects lazily: ``Client.connect`` is a coroutine and a harness is built
+        synchronously, so the adapter holds the target and opens the connection on the first
+        run rather than making every application construct one before it can build a harness.
+        """
+        temporal = self.config.runs.temporal
+        try:
+            from trellis.harness_temporal import TemporalRunStore  # noqa: PLC0415 - optional
+        except ImportError as exc:  # pragma: no cover - documented degradation
+            raise ConfigurationError(
+                "runs.engine is 'temporal' but the adapter is not installed: "
+                "pip install 'trellis-harness[temporal]'"
+            ) from exc
+        return TemporalRunStore(
+            str(temporal.target),
+            task_queue=temporal.task_queue,
+            namespace=temporal.namespace,
+            required=self.config.runs.required,
+            api_key=temporal.api_key,
+            tls=temporal.tls,
         )
 
     def _build_registry(self) -> Any:

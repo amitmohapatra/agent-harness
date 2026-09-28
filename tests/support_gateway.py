@@ -36,6 +36,10 @@ class FakeGateway:
     def __init__(self, script: list[Turn] | Callable[[dict[str, Any]], Turn]) -> None:
         self.script = script
         self.requests: list[dict[str, Any]] = []
+        #: The headers of each POST, lower-cased. Bifrost's per-request control plane *is*
+        #: headers (a stored prompt, a virtual key, MCP scoping), so a test that only sees the
+        #: body cannot tell whether any of it was actually selected.
+        self.headers: list[dict[str, str]] = []
         self._calls = 0
         outer = self
 
@@ -52,6 +56,7 @@ class FakeGateway:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
                 outer.requests.append(body)
+                outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                 turn = outer._next(body)
                 status, payload = turn if isinstance(turn, tuple) else (200, turn)
                 if body.get("stream"):

@@ -19,7 +19,7 @@ harness = AgentHarness(
 The YAML may be the full document (with a `harness:` key, as in
 [`harness.example.yaml`](../harness.example.yaml)) or just the harness section.
 
-The surface is **53 settings** and every one of them does something. Two rules keep it that
+The surface is **75 settings** and every one of them does something. Two rules keep it that
 way: capture policy and sampling are defined once (under `telemetry`) and obeyed by every
 backend, and a provider is enabled by *passing* it — there is no `policy.enabled` flag that
 has to agree with the policy object you supplied.
@@ -44,6 +44,9 @@ Decisions worth calling out:
 | `telemetry.capture.user_id` | `false` | identity export is a policy decision |
 | `retries.enabled` | `false` | retries are only safe for idempotent work |
 | `evaluation_events.enabled` | `false` | evaluation is opt-in and asynchronous |
+| `judge.enabled` | `false` | the online judge spends money; nothing starts spending because the package was upgraded |
+| `judge.grounded_only` | `false` | `true` keeps the deterministic half (`/v1/verify`) and never calls a model, which is grounding checks at zero marginal cost |
+| `runs.engine` | `agent_runs` | an enum, so a typo is a startup error rather than a silently unrecorded run; `temporal` needs `trellis-harness[temporal]` |
 | `observability.failure_mode` | `non_blocking` | observability is never a business dependency |
 | `registry.control_plane_token` | `null` | without it the one control-plane write (publishing an agent's A2A card location) is skipped with a warning, and creating entities stays a reviewed, human action |
 | `registry.entity_path` | `/v1/entities/{entity_id}` | the entity API belongs to the registry product, so where a single entity is addressed is configuration rather than a guess |
@@ -77,6 +80,16 @@ Decisions worth calling out:
 | `UAH_RETRIES_ENABLED` | `retries.enabled` |
 | `UAH_RETRIES_MAX_ATTEMPTS` | `retries.max_attempts` |
 | `UAH_EVAL_EVENTS_ENABLED` | `evaluation_events.enabled` |
+| `UAH_JUDGE_ENABLED` | `judge.enabled` |
+| `UAH_JUDGE_SAMPLE_RATE` | `judge.sample_rate` |
+| `UAH_JUDGE_MODEL` | `judge.model` |
+| `UAH_JUDGE_MAX_USD_PER_HOUR` | `judge.max_usd_per_hour` |
+| `UAH_JUDGE_RUBRIC_PROMPT_ID` | `judge.rubric_prompt_id` |
+| `UAH_RUNS_ENGINE` | `runs.engine` |
+| `UAH_TEMPORAL_TARGET` | `runs.temporal.target` |
+| `UAH_TEMPORAL_NAMESPACE` | `runs.temporal.namespace` |
+| `UAH_TEMPORAL_TASK_QUEUE` | `runs.temporal.task_queue` |
+| `UAH_TEMPORAL_API_KEY` | `runs.temporal.api_key` |
 | `UAH_LOG_LEVEL` | `observability.log_level` |
 | `UAH_REGISTRY_URL` / `UAH_REGISTRY_PRODUCT_KEY` / `UAH_REGISTRY_API_KEY` | `registry.url` / `.product_key` / `.api_key` |
 | `UAH_REGISTRY_CONTROL_PLANE_TOKEN` | `registry.control_plane_token` |

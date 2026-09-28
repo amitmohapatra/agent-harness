@@ -16,6 +16,7 @@ from trellis.contracts.events import LifecycleEvent
 from trellis.contracts.messages import AgentRequest, AgentResponse
 from trellis.contracts.runs import RunEventType
 
+from trellis.harness.evaluation.answers import answer_text
 from trellis.harness.interceptors.base import BaseInterceptor, Order
 from trellis.harness.memory.writeback import WritebackQueue
 
@@ -100,7 +101,7 @@ class MemoryObservationInterceptor(BaseInterceptor):
                 )
             )
         if policy.observe_output:
-            summary = _summarize(result)
+            summary = answer_text(result)
             if summary:
                 observations.append(
                     MemoryObservation(
@@ -182,7 +183,7 @@ class MemoryObservationInterceptor(BaseInterceptor):
         memory = runtime.memory
         policy = memory.policy
         request: AgentRequest | None = runtime.state.get("request")
-        summary = _summarize(result)
+        summary = answer_text(result)
 
         # (name, thunk) so nothing is turned into a coroutine until it is about to be awaited
         writes: list[tuple[str, Callable[[], Awaitable[Any]]]] = []
@@ -235,16 +236,3 @@ class MemoryWriteError(Exception):
 def _failure_note(result: AgentResponse) -> str:
     error = result.error
     return f"{result.status}: {error.category}" if error else str(result.status)
-
-
-def _summarize(result: AgentResponse) -> str | None:
-    """What the harness writes back as the agent's output.
-
-    Text data is written verbatim; structured data is *not* dumped wholesale into memory —
-    an agent that wants structured memory should return explicit ``memory_observations``.
-    """
-    if isinstance(result.data, str) and result.data.strip():
-        return result.data.strip()
-    if result.claims:
-        return "\n".join(c.text for c in result.claims)
-    return None

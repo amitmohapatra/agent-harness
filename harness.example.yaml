@@ -93,7 +93,27 @@ harness:
     heartbeat_seconds: 60.0        # RegistrySync: how often each declared agent is re-checked
     poll_seconds: 30.0             # and how often the manifest is re-read (a 304 costs nothing)
 
+  judge:                           # the online judge (design §11)
+    enabled: false                 # it spends money: opt in, never by upgrade
+    sample_rate: 0.1               # rolled on the run id, so a retry is judged the same way
+    max_per_hour: 60               # a traffic spike must not become a judging spike
+    max_usd_per_hour: 1.0          # a brake; the hard cap belongs on the gateway's virtual key
+    model: openrouter/openai/gpt-4.1-nano
+    rubric_prompt_id: null         # the rubric lives in Bifrost; unset uses the built-in one
+    rubric_prompt_version: null
+    grounded_only: false           # true: /v1/verify only, never a model, zero marginal cost
+    threshold: 0.5                 # at or above: the judge's feedback confirms; below: rejects
+    # per-agent ceilings - "sampled per agent" is this
+    agents: {}                     # refund-agent: { sample_rate: 0.25, max_usd_per_hour: 0.5 }
+
   runs:                            # the durable-runs service (agent-runs), all optional
+    engine: agent_runs             # or temporal (needs trellis-harness[temporal])
     url: null
     api_key: null
     required: false                # true: a run that cannot be recorded fails the turn
+    temporal:                      # read only when engine is temporal
+      target: null                 # host:port of the Temporal frontend
+      namespace: default
+      task_queue: trellis-runs     # the queue the deployment's run-workflow worker polls
+      api_key: null                # Temporal Cloud
+      tls: false

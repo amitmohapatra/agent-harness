@@ -17,6 +17,7 @@ on the first agent execution.
 from __future__ import annotations
 
 import os
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -168,6 +169,65 @@ class EvaluationConfig(_Section):
     sample_rate: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
+class JudgeLimits(_Section):
+    """What one agent's online judge may do. Every field is a ceiling, never a target."""
+
+    enabled: bool | None = None
+    sample_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_per_hour: int | None = Field(default=None, ge=0)
+    max_usd_per_hour: float | None = Field(default=None, ge=0.0)
+
+
+class JudgeConfig(_Section):
+    """The online judge (design §11): sampled, asynchronous, grounded first.
+
+    Off by default, because turning it on spends money. ``grounded_only`` keeps the
+    deterministic half — the Memory Service's ``/v1/verify`` — and never calls a model, which
+    is the setting for a deployment that wants grounding checks at zero marginal cost.
+    """
+
+    enabled: bool = False
+    #: Fraction of runs judged, rolled deterministically on the run id so a retry of the same
+    #: run is judged the same way (and only once).
+    sample_rate: float = Field(default=0.1, ge=0.0, le=1.0)
+    max_per_hour: int = Field(default=60, ge=0)
+    max_usd_per_hour: float = Field(default=1.0, ge=0.0)
+    #: Judged through the gateway like everything else; a cheap model on a budgeted key.
+    model: str = "openrouter/openai/gpt-4.1-nano"
+    #: The rubric lives in Bifrost's prompt repository (design §3: prompts have one home);
+    #: without an id the built-in rubric is used and the verdict says so.
+    rubric_prompt_id: str | None = None
+    rubric_prompt_version: str | None = None
+    #: Never call a model: the grounded stage is the whole judge.
+    grounded_only: bool = False
+    #: Score at or above which the judge's feedback record confirms rather than rejects.
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    #: Per-agent ceilings, keyed by agent id. "Sampled per agent" is this.
+    agents: dict[str, JudgeLimits] = Field(default_factory=dict)
+
+    def limits_for(self, agent_id: str) -> JudgeLimits:
+        """This agent's ceilings, falling back to the defaults for anything unset."""
+        override = self.agents.get(agent_id)
+        return JudgeLimits(
+            enabled=self.enabled
+            if override is None or override.enabled is None
+            else override.enabled,
+            sample_rate=_first_set(
+                None if override is None else override.sample_rate, self.sample_rate
+            ),
+            max_per_hour=_first_set(
+                None if override is None else override.max_per_hour, self.max_per_hour
+            ),
+            max_usd_per_hour=_first_set(
+                None if override is None else override.max_usd_per_hour, self.max_usd_per_hour
+            ),
+        )
+
+
+def _first_set(override: Any, default: Any) -> Any:
+    return default if override is None else override
+
+
 class RegistryConfig(_Section):
     """The AI Registry this deployment is bound to.
 
@@ -211,6 +271,32 @@ class RegistryConfig(_Section):
         return bool(self.url and self.product_key and self.api_key)
 
 
+class RunsEngine(StrEnum):
+    """Where a run's state lives. A closed vocabulary, so a typo is a startup error."""
+
+    #: the agent-runs service over HTTP (the default)
+    AGENT_RUNS = "agent_runs"
+    #: Temporal: one workflow per run, through ``trellis-harness[temporal]``
+    TEMPORAL = "temporal"
+
+
+class TemporalConfig(_Section):
+    """Where the Temporal adapters connect, when ``runs.engine`` selects them."""
+
+    #: host:port of the frontend (``localhost:7233`` for a local dev server)
+    target: str | None = None
+    namespace: str = "default"
+    #: The queue the deployment's run-workflow worker polls.
+    task_queue: str = "trellis-runs"
+    #: Temporal Cloud API key; TLS is implied by the cloud endpoint and set explicitly here.
+    api_key: str | None = None
+    tls: bool = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.target and self.task_queue)
+
+
 class RunsConfig(_Section):
     """The durable-runs service this deployment records to.
 
@@ -220,15 +306,21 @@ class RunsConfig(_Section):
     that survives the framework being swapped.
     """
 
+    #: Which engine keeps the runs. Both satisfy the same ``RunStore`` port, so this is the
+    #: whole difference between recording to agent-runs and recording to Temporal.
+    engine: RunsEngine = RunsEngine.AGENT_RUNS
     url: str | None = None
     api_key: str | None = None
     #: Fail the turn when a run cannot be recorded. Off by default: bookkeeping being
     #: unreachable is a worse reason to fail a customer's request than almost any other.
     #: On for workflows where an unrecorded run is the more serious failure.
     required: bool = False
+    temporal: TemporalConfig = TemporalConfig()
 
     @property
     def configured(self) -> bool:
+        if self.engine is RunsEngine.TEMPORAL:
+            return self.temporal.configured
         return bool(self.url and self.api_key)
 
 
@@ -246,6 +338,7 @@ class HarnessConfig(BaseModel):
     timeouts: TimeoutConfig = TimeoutConfig()
     artifacts: ArtifactsConfig = ArtifactsConfig()
     evaluation_events: EvaluationConfig = EvaluationConfig()
+    judge: JudgeConfig = JudgeConfig()
     registry: RegistryConfig = RegistryConfig()
     runs: RunsConfig = RunsConfig()
 
@@ -346,6 +439,16 @@ _ENV_MAP: dict[str, tuple[tuple[str, ...], Any]] = {
     "UAH_RETRIES_ENABLED": (("retries", "enabled"), _bool),
     "UAH_RETRIES_MAX_ATTEMPTS": (("retries", "max_attempts"), int),
     "UAH_EVAL_EVENTS_ENABLED": (("evaluation_events", "enabled"), _bool),
+    "UAH_JUDGE_ENABLED": (("judge", "enabled"), _bool),
+    "UAH_JUDGE_SAMPLE_RATE": (("judge", "sample_rate"), float),
+    "UAH_JUDGE_MODEL": (("judge", "model"), str),
+    "UAH_JUDGE_MAX_USD_PER_HOUR": (("judge", "max_usd_per_hour"), float),
+    "UAH_JUDGE_RUBRIC_PROMPT_ID": (("judge", "rubric_prompt_id"), str),
+    "UAH_RUNS_ENGINE": (("runs", "engine"), str),
+    "UAH_TEMPORAL_TARGET": (("runs", "temporal", "target"), str),
+    "UAH_TEMPORAL_NAMESPACE": (("runs", "temporal", "namespace"), str),
+    "UAH_TEMPORAL_TASK_QUEUE": (("runs", "temporal", "task_queue"), str),
+    "UAH_TEMPORAL_API_KEY": (("runs", "temporal", "api_key"), str),
     "UAH_LOG_LEVEL": (("observability", "log_level"), str),
 }
 

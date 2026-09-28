@@ -20,7 +20,9 @@
     "trellis-harness-claude-agent-sdk": "0.1.0",
     "trellis-harness-a2a": "0.1.0",
     "a2a-sdk": "1.1.5",
-    "fastapi": "0.141.1"
+    "fastapi": "0.141.1",
+    "trellis-harness-temporal": "0.1.0",
+    "temporalio": "1.33.0"
   },
   "langgraph_features": {
     "wrap_existing_node": "supported",
