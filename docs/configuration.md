@@ -45,6 +45,9 @@ Decisions worth calling out:
 | `retries.enabled` | `false` | retries are only safe for idempotent work |
 | `evaluation_events.enabled` | `false` | evaluation is opt-in and asynchronous |
 | `observability.failure_mode` | `non_blocking` | observability is never a business dependency |
+| `registry.control_plane_token` | `null` | without it the one control-plane write (publishing an agent's A2A card location) is skipped with a warning, and creating entities stays a reviewed, human action |
+| `registry.entity_path` | `/v1/entities/{entity_id}` | the entity API belongs to the registry product, so where a single entity is addressed is configuration rather than a guess |
+| `registry.heartbeat_seconds` / `registry.poll_seconds` | `60` / `30` | `RegistrySync` re-reads a manifest that has not changed for the price of a 304 |
 
 ## Environment variables
 
@@ -75,6 +78,9 @@ Decisions worth calling out:
 | `UAH_RETRIES_MAX_ATTEMPTS` | `retries.max_attempts` |
 | `UAH_EVAL_EVENTS_ENABLED` | `evaluation_events.enabled` |
 | `UAH_LOG_LEVEL` | `observability.log_level` |
+| `UAH_REGISTRY_URL` / `UAH_REGISTRY_PRODUCT_KEY` / `UAH_REGISTRY_API_KEY` | `registry.url` / `.product_key` / `.api_key` |
+| `UAH_REGISTRY_CONTROL_PLANE_TOKEN` | `registry.control_plane_token` |
+| `UAH_RUNS_URL` / `UAH_RUNS_API_KEY` / `UAH_RUNS_REQUIRED` | `runs.url` / `.api_key` / `.required` |
 
 Booleans accept `1/true/yes/on`. An unparseable value raises at startup naming the variable.
 

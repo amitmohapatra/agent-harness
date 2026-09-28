@@ -100,7 +100,8 @@ pip install "trellis-harness[langgraph]"             # + LangGraph adapter
 pip install "trellis-harness[deepagents]"            # + Deep Agents adapter
 pip install "trellis-harness[openai-agents]"         # + OpenAI Agents SDK adapter
 pip install "trellis-harness[claude-agent-sdk]"      # + Claude Agent SDK adapter
-pip install "trellis-harness[agui]"                  # + AG-UI surface
+pip install "trellis-harness[agui]"                  # + AG-UI surface (FastAPI + SSE)
+pip install "trellis-harness[a2a]"                   # + A2A surface and client (a2a-sdk)
 pip install "trellis-harness[langfuse]"              # + Langfuse observability
 pip install "trellis-harness[otel]"                  # + OTel SDK & OTLP exporter
 pip install "trellis-harness[all]"                   # everything
@@ -758,7 +759,9 @@ await harness.register_agents()
 | Langfuse (3.x/4.x API) | supported, tested against 4.15.2 |
 | CrewAI, Google ADK | **not implemented.** Their callables work as plain Python, but framework-level lineage, events and state mapping do not |
 | Bifrost LLM gateway | supported, tested against a real gateway process: retries, circuit breaker, streaming, structured output, tool calls |
-| Agent registry service, MCP, A2A | **not implemented.** The ports and serializable contracts exist so they can arrive without rewriting agents |
+| MCP tools (Bifrost `/mcp`) | supported, tested — `MCPToolClient` lists and runs the gateway's tools under the names it gives them |
+| A2A (protocol v1.0, `a2a-sdk` 1.1.5) | supported, tested — serve any agent (`trellis-harness[a2a]`), call registry agents as tools; JSON-RPC verified, gRPC and card signing not installed. See [docs/a2a.md](docs/a2a.md) |
+| AI Registry | supported, tested against a scripted registry: manifest discovery, agent directory, Agent Card write-back, heartbeat and delta sync, Bifrost MCP clients configured from tool entities. No registry *service* is shipped here |
 
 What the harness deliberately cannot do — and says so rather than implying otherwise — is
 in [docs/limitations.md](docs/limitations.md). The short version: it cannot instrument an
@@ -778,6 +781,7 @@ mistake fails at startup rather than on the first execution.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Layering, ports and adapters, interceptor pipeline, execution flow |
 | [COMPATIBILITY.md](COMPATIBILITY.md) | Versions actually tested, per-feature matrix, degradation rules |
 | [docs/configuration.md](docs/configuration.md) | Every setting, every environment variable |
+| [docs/a2a.md](docs/a2a.md) | Serving an agent over A2A, calling registry agents as tools, Agent Cards, registry sync |
 | [docs/privacy.md](docs/privacy.md) | Capture policy, redaction, sampling, what never leaves |
 | [docs/limitations.md](docs/limitations.md) | What the harness cannot do, stated plainly |
 | [docs/performance.md](docs/performance.md) | Measured overhead and how to reproduce it |
@@ -874,3 +878,32 @@ from trellis.harness_agui import agui_router
 
 app.include_router(agui_router(harness, agent=refund_agent, agent_id="refund-agent"))
 ```
+
+Agents talk to agents over A2A, through the `trellis-harness-a2a` distribution
+(`pip install "trellis-harness[a2a]"`, protocol v1.0 on `a2a-sdk` 1.1.5). Serving publishes an Agent
+Card generated from the Registry entity and the `AgentDescriptor`, streams the run's events as task
+updates, turns a pause into `input-required` (the next message on the same task resumes the same
+run), and signs push notifications with the harness's webhook rules. Calling makes every agent the
+Registry lists a tool the planner can choose, next to local and MCP tools:
+
+```python
+from trellis.harness.registry import RegistryAgentDirectory, RegistrySync
+from trellis.harness_a2a import A2AAgentClient, A2AServer, TrustedHeaderIdentity
+
+server = await A2AServer.from_registry(
+    harness,
+    agent=refund_agent,
+    url="https://agents.example.com/a2a",
+    registry=harness.registry,
+    identity=TrustedHeaderIdentity(allowed_tenants={"acme"}),
+)
+app.mount("/", server.app())  # card + JSON-RPC, at the published URL
+
+agents = A2AAgentClient(RegistryAgentDirectory(harness.registry), credentials=team_keys)
+sync = RegistrySync(harness.registry, descriptors=[...], gateway=bifrost)  # heartbeat, deltas, MCP
+```
+
+Identity on an A2A call is the platform's, never the caller's: the tenant, user and workspace travel
+on a trusted header an authenticating edge sets, a foreign one is refused before a run starts, and
+only the run's own caller can answer its pause. Details, including the full event mapping and the
+registry sync: [docs/a2a.md](docs/a2a.md).

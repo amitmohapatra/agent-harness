@@ -42,10 +42,12 @@ agui = ["trellis-harness-agui"]
 deepagents = ["trellis-harness-deepagents"]
 openai-agents = ["trellis-harness-openai-agents"]
 claude-agent-sdk = ["trellis-harness-claude-agent-sdk"]
+# A2A surface and client (a2a-sdk): serve agents to agents, call registry agents as tools
+a2a = ["trellis-harness-a2a"]
 # JSON structured logging via structlog (stdlib logging is used when absent)
 logging = ["structlog>=25.2"]
 all = [
-  "trellis-harness[otel,langfuse,langgraph,logging,registry,agui,deepagents,openai-agents,claude-agent-sdk]",
+  "trellis-harness[otel,langfuse,langgraph,logging,registry,agui,a2a,deepagents,openai-agents,claude-agent-sdk]",
 ]
 
 [dependency-groups]
@@ -63,6 +65,7 @@ dev = [
   "langgraph>=1.2",
   "trellis-harness-langgraph",
   "trellis-harness-agui",
+  "trellis-harness-a2a",
   "fastapi>=0.115",
   # The three frameworks the Phase 5 adapters bind, pinned to the ranges their tests
   # verify. Declared here as well as in each adapter so a dev sync always has them.
@@ -89,6 +92,7 @@ default-groups = ["dev"]
 members = [
   "integrations/langgraph",
   "integrations/agui",
+  "integrations/a2a",
   "integrations/deepagents",
   "integrations/openai_agents",
   "integrations/claude_agent_sdk",
@@ -100,6 +104,7 @@ trellis-harness-agui = { workspace = true }
 trellis-harness-deepagents = { workspace = true }
 trellis-harness-openai-agents = { workspace = true }
 trellis-harness-claude-agent-sdk = { workspace = true }
+trellis-harness-a2a = { workspace = true }
 # Local development against the Memory Service SDK checkout.
 trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
 # The contract and the gateway client are separate distributions; local while unpublished.
@@ -111,6 +116,7 @@ asyncio_mode = "auto"
 testpaths = [
   "tests",
   "integrations/langgraph/tests",
+  "integrations/a2a/tests",
   "integrations/deepagents/tests",
   "integrations/openai_agents/tests",
   "integrations/claude_agent_sdk/tests",
@@ -131,6 +137,7 @@ src = [
   "src",
   "integrations/langgraph/src",
   "integrations/agui/src",
+  "integrations/a2a/src",
   "integrations/deepagents/src",
   "integrations/openai_agents/src",
   "integrations/claude_agent_sdk/src",
@@ -157,6 +164,7 @@ include = [
   "src",
   "integrations/langgraph/src",
   "integrations/agui/src",
+  "integrations/a2a/src",
   "integrations/deepagents/src",
   "integrations/openai_agents/src",
   "integrations/claude_agent_sdk/src",

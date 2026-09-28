@@ -153,6 +153,8 @@ RECORDED = (
     "trellis-harness-deepagents",
     "trellis-harness-openai-agents",
     "trellis-harness-claude-agent-sdk",
+    "trellis-harness-a2a",
+    "a2a-sdk",
     "fastapi",
 )
 
@@ -265,3 +267,30 @@ def test_write_compatibility_matrix(request):
     MATRIX_PATH.write_text(json.dumps(matrix, indent=2) + "\n")
     for framework in ("langgraph", "deepagents", "openai-agents", "claude-agent-sdk"):
         assert matrix["packages"][framework] is not None, f"{framework} is not installed"
+
+
+def test_the_a2a_surface_reports_its_version_and_stays_out_of_the_core():
+    """The A2A package is a distribution of its own (design §9): importable when installed, and
+    never pulled into the core — including by the core's own registry directory, which speaks the
+    contracts' Agent Card and imports no ``a2a-sdk``."""
+    import subprocess
+    from importlib import util
+
+    from trellis.harness_a2a import __version__ as a2a_version
+
+    assert a2a_version == installed("trellis-harness-a2a")
+    assert util.find_spec("a2a") is not None  # installed: the check below means something
+    code = (
+        "import sys; import trellis.harness; import trellis.harness.registry; "
+        "print(sorted(m for m in sys.modules if m == 'a2a' or m.startswith('a2a.')))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]", f"importing the core pulled in: {out.stdout.strip()}"
+
+
+def test_the_a2a_package_speaks_the_protocol_version_it_was_verified_against():
+    """A2A 1.x of the SDK is protocol v1.0 with protobuf types; the card mapping depends on it."""
+    from a2a.utils.constants import PROTOCOL_VERSION_CURRENT
+
+    assert installed("a2a-sdk") == "1.1.5"
+    assert PROTOCOL_VERSION_CURRENT == "1.0"

@@ -24,6 +24,8 @@ TOOL_LATENCY = "agent.tool.duration_ms"
 MEMORY_OPERATIONS = "agent.memory.operations.count"
 MEMORY_LATENCY = "agent.memory.duration_ms"
 MEMORY_CONTEXT_TOKENS = "agent.memory.context_tokens"
+REGISTRY_SYNC = "agent.registry.sync.count"
+REGISTRY_DRIFT = "agent.registry.drift.count"
 
 #: The only labels the harness ever attaches to a metric.
 ALLOWED_LABELS = frozenset(

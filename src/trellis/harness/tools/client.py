@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from trellis.contracts import ToolStatus
 from trellis.contracts.artifacts import ArtifactRef
-from trellis.contracts.errors import ToolError
+from trellis.contracts.errors import AgentPaused, ToolError
 from trellis.contracts.tool import ToolCall, ToolOutcome, ToolSpec
 
 from trellis.harness.telemetry import names as N
@@ -106,6 +106,14 @@ class InstrumentedToolClient:
             except asyncio.CancelledError:
                 span.error("cancelled", **{N.STATUS: "cancelled"})
                 bridge.finished(call, None, watch.ms, "cancelled")
+                raise
+            except AgentPaused:
+                # A tool that needs a person pauses the run; so does a remote agent whose task
+                # says ``input-required`` (the A2A tool client). That is not a failed call: the
+                # span is fine, and tool memory must not learn a rejection that never happened.
+                # The call stays open on the stream and closes when the resumed run completes it,
+                # exactly as a call held for approval does.
+                span.ok()
                 raise
             except Exception as exc:
                 span.error(exc, **{N.STATUS: "error"})

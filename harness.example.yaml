@@ -62,7 +62,6 @@ harness:
 
   tools:
     record_to_memory: true         # record invocations in the Memory Service tool memory
-    use_memory_cache: false
 
   retries:
     enabled: false                 # opt-in, and only for agents marked idempotent=True
@@ -84,3 +83,17 @@ harness:
     enabled: false
     synchronous: false             # evaluation stays off the critical path
     sample_rate: 1.0
+
+  registry:                        # the AI Registry this deployment is bound to (all optional)
+    url: null                      # partial configuration counts as unconfigured
+    product_key: null              # agent ids that leave the process become "{product_key}:{name}"
+    api_key: null                  # data-plane key: reads the manifest
+    control_plane_token: null      # only needed to publish an agent's A2A card location
+    entity_path: "/v1/entities/{entity_id}"   # where one entity is addressed on the control plane
+    heartbeat_seconds: 60.0        # RegistrySync: how often each declared agent is re-checked
+    poll_seconds: 30.0             # and how often the manifest is re-read (a 304 costs nothing)
+
+  runs:                            # the durable-runs service (agent-runs), all optional
+    url: null
+    api_key: null
+    required: false                # true: a run that cannot be recorded fails the turn

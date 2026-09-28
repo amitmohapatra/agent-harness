@@ -674,6 +674,8 @@ class AgentHarness:
             str(settings.url),
             product_key=str(settings.product_key),
             api_key=str(settings.api_key),
+            control_plane_token=settings.control_plane_token,
+            entity_path=settings.entity_path,
         )
 
     def qualify(self, agent_id: str) -> str:

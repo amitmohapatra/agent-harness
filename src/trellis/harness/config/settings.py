@@ -188,6 +188,17 @@ class RegistryConfig(_Section):
     product_key: str | None = None
     #: Data-plane credential ("Manage -> SDK API keys" in the registry UI).
     api_key: str | None = None
+    #: Control-plane credential. Only one write needs it: publishing an agent's A2A card
+    #: location onto an entity that already exists (design §9). Without it that write is
+    #: skipped with a warning — creating entities stays a reviewed, human action.
+    control_plane_token: str | None = None
+    #: Where a single entity is addressed on the control plane. Configuration because the
+    #: entity API belongs to the registry product; ``{entity_id}`` is the manifest's own id.
+    entity_path: str = "/v1/entities/{entity_id}"
+    #: How often ``RegistrySync`` re-reads the manifest and re-checks its agents. Cheap: an
+    #: unchanged manifest is a 304.
+    heartbeat_seconds: float = Field(default=60.0, gt=0)
+    poll_seconds: float = Field(default=30.0, gt=0)
 
     #: Deliberately no ``audience`` setting. An audience answers "who may call this?", which
     #: is a property of a request and not of a deployment: the same process serves an
@@ -309,6 +320,7 @@ _ENV_MAP: dict[str, tuple[tuple[str, ...], Any]] = {
     "UAH_REGISTRY_URL": (("registry", "url"), str),
     "UAH_REGISTRY_PRODUCT_KEY": (("registry", "product_key"), str),
     "UAH_REGISTRY_API_KEY": (("registry", "api_key"), str),
+    "UAH_REGISTRY_CONTROL_PLANE_TOKEN": (("registry", "control_plane_token"), str),
     "UAH_MEMORY_ENABLED": (("memory", "enabled"), _bool),
     "UAH_MEMORY_RETRIEVE_BEFORE": (("memory", "retrieve_before"), _bool),
     "UAH_MEMORY_FAILURE_MODE": (("memory", "failure_mode"), str),

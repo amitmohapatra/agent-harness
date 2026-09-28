@@ -20,16 +20,26 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from trellis.contracts.descriptors import AgentDescriptor
 
+from trellis.harness.events.targets import TargetRefused, validate_url
 from trellis.harness.runtime.logging import get_logger
 
 log = get_logger("trellis.harness.registry.ai")
 
 _NOT_MODIFIED = 304
 _ERROR = 400
+
+#: Where an entity is written. Configuration, not a guess: the entity API belongs to the
+#: registry product. ``{entity_id}`` is the manifest's own id for the entity.
+DEFAULT_ENTITY_PATH: Final = "/v1/entities/{entity_id}"
+#: The entity spec field holding an agent's A2A Agent Card location. The harness both writes
+#: and reads it, so the name is the platform's; the two aliases are for an entity a person
+#: filled in by hand before this existed.
+CARD_URL_FIELD: Final = "a2a_card_url"
+CARD_URL_ALIASES: Final = (CARD_URL_FIELD, "card_url", "agent_card_url")
 
 
 @dataclass(slots=True)
@@ -75,17 +85,27 @@ class AIRegistryClient:
         api_key: str,
         timeout: float = 10.0,
         client: Any = None,
+        control_plane_token: str | None = None,
+        entity_path: str = DEFAULT_ENTITY_PATH,
     ) -> None:
+        """``control_plane_token`` and ``entity_path`` enable the one control-plane write the
+        harness performs: publishing an agent's A2A card location (:meth:`publish_card_url`).
+        The path is configuration because the entity API belongs to the registry product, not
+        to this client — without a token the write is skipped loudly rather than guessed."""
         import httpx  # noqa: PLC0415 - optional at import time, required to construct
 
         if not base_url or not product_key or not api_key:
             raise ValueError("AIRegistryClient needs base_url, product_key and api_key")
+        if "{entity_id}" not in entity_path:
+            raise ValueError("entity_path must contain {entity_id}")
         self.product_key = product_key
         self._httpx = httpx
         #: Sent per request, not baked into the client. A caller supplying its own
         #: ``httpx.AsyncClient`` (for pooling, for a proxy, for tests) would otherwise get a
         #: silently unauthenticated client and a 401 that looks like a bad key.
         self._auth = {"X-API-Key": api_key}
+        self._control_plane_token = control_plane_token
+        self.entity_path = entity_path
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(timeout, connect=min(5.0, timeout)),
@@ -198,6 +218,40 @@ class AIRegistryClient:
             if e.get("type") == "agent"
         ]
 
+    async def entity(
+        self, agent_id: str, *, type: str = "agent", refresh: bool = False
+    ) -> dict[str, Any] | None:
+        """The manifest entity behind ``agent_id`` (qualified or bare), or ``None``.
+
+        Served from the cached manifest by default: an Agent Card is built per served agent and
+        a card write happens once per deployment, so neither needs a network hop to learn
+        something the registry pushes on change.
+        """
+        wanted = self.qualified(agent_id)
+        for entity in (await self.manifest(refresh=refresh)).get("entities", []):
+            if entity.get("type") != type:
+                continue
+            if self.qualified(str(entity.get("name"))) == wanted:
+                return dict(entity)
+        return None
+
+    async def card_url(self, agent_id: str, *, refresh: bool = False) -> str | None:
+        """Where this agent's A2A Agent Card is published, as the registry holds it.
+
+        Read from any audience's view: the card's *location* is one fact about the agent, not a
+        per-audience overlay, and an entity that only enables an internal view still has one.
+        """
+        entity = await self.entity(agent_id, refresh=refresh)
+        if entity is None:
+            return None
+        for view in (entity.get("views") or {}).values():
+            spec = (view or {}).get("spec") or {}
+            for field_name in CARD_URL_ALIASES:
+                value = spec.get(field_name)
+                if value:
+                    return str(value)
+        return None
+
     async def output_schema(self, agent_id: str, *, refresh: bool = False) -> dict[str, Any] | None:
         """What this agent has declared it returns, or ``None`` if it declared nothing.
 
@@ -276,6 +330,68 @@ class AIRegistryClient:
             )
         return result
 
+    # ------------------------------------------------------------------ control plane
+    async def publish_card_url(
+        self, agent_id: str, card_url: str, *, allow_local: bool = False
+    ) -> bool:
+        """Write this agent's A2A card location onto its registry entity (design §9).
+
+        The one control-plane write the harness performs, and it publishes a *location*, not an
+        agent: the entity still has to exist, so a deployment cannot expose something nobody
+        approved. ``True`` when the registry accepted it.
+
+        Loud and never fatal in every other case — no control-plane token, no such entity, a
+        rejected request: discovery keeps working off whatever the entity already holds, and the
+        warning says which team to talk to. The URL passes the same checks as a webhook target
+        first, because a published card URL is a fetch target for every other agent.
+        """
+        try:
+            target = validate_url(card_url, allow_local=allow_local)
+        except TargetRefused as exc:
+            log.warning("registry.card_url_refused", agent_id=agent_id, error=str(exc))
+            return False
+        if not self._control_plane_token:
+            log.warning(
+                "registry.card_url_not_published",
+                agent_id=agent_id,
+                card_url=target,
+                detail="no control-plane token configured; publish the card URL out of band",
+            )
+            return False
+        entity = await self.entity(agent_id)
+        if entity is None or not entity.get("id"):
+            log.warning(
+                "registry.card_url_not_published",
+                agent_id=agent_id,
+                detail="no registry entity of type agent with this name",
+            )
+            return False
+        path = self.entity_path.format(entity_id=entity["id"])
+        try:
+            response = await self._client.patch(
+                path,
+                json={"spec": {CARD_URL_FIELD: target}},
+                headers={
+                    **self._auth,
+                    "Authorization": f"Bearer {self._control_plane_token}",
+                },
+            )
+        except self._httpx.HTTPError as exc:
+            log.warning("registry.card_url_write_failed", agent_id=agent_id, error=str(exc))
+            return False
+        if response.status_code >= _ERROR:
+            log.warning(
+                "registry.card_url_write_failed",
+                agent_id=agent_id,
+                status=response.status_code,
+                path=path,
+            )
+            return False
+        # the cached manifest now disagrees with the registry about this one field
+        self._etag = None
+        log.info("registry.card_url_published", agent_id=agent_id, card_url=target)
+        return True
+
     # ------------------------------------------------------------------ the harness port
     async def register(self, descriptor: AgentDescriptor) -> None:
         """Announce this agent. Deliberately a no-op against the data plane.
@@ -287,11 +403,32 @@ class AIRegistryClient:
         log.debug("registry.register.skipped", agent_id=descriptor.agent_id, reason="control-plane")
 
     async def heartbeat(self, descriptor: AgentDescriptor, *, status: str = "healthy") -> None:
-        log.debug("registry.heartbeat.skipped", agent_id=descriptor.agent_id, status=status)
+        """Liveness is reported by re-reading the manifest, not by announcing anything.
+
+        The registry's data plane has no endpoint a process may write to, and inventing one would
+        fail in production for every deployment. What a heartbeat *is* here: a check, against the
+        manifest this process already holds, that the entity behind this agent still exists and is
+        still bound to a local handler. :class:`RegistrySync` polls the manifest itself each cycle,
+        so the check is free — and a heartbeat never fetches anything, because a liveness ping that
+        makes a network call is a second thing that can fail.
+        """
+        if self._manifest is None:
+            log.debug("registry.heartbeat.no_manifest", agent_id=descriptor.agent_id, status=status)
+            return
+        entity = await self.entity(descriptor.agent_id, refresh=False)
+        if entity is None:
+            log.warning(
+                "registry.heartbeat.unregistered",
+                agent_id=descriptor.agent_id,
+                status=status,
+                detail="implemented here but not listed in the registry; it is not exposed",
+            )
+            return
+        log.debug("registry.heartbeat", agent_id=descriptor.agent_id, status=status)
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
 
-__all__ = ["AIRegistryClient", "Reconciliation"]
+__all__ = ["CARD_URL_FIELD", "DEFAULT_ENTITY_PATH", "AIRegistryClient", "Reconciliation"]

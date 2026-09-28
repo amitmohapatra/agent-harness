@@ -24,6 +24,8 @@ with the versions that were actually exercised; the table below is that file, tr
 | trellis-harness-deepagents | 0.1.0 |
 | trellis-harness-openai-agents | 0.1.0 |
 | trellis-harness-claude-agent-sdk | 0.1.0 |
+| trellis-harness-a2a | 0.1.0 |
+| a2a-sdk (A2A protocol v1.0) | 1.1.5 |
 
 Declared support ranges (from `pyproject.toml` and each adapter's own): Python `>=3.12`,
 `pydantic>=2.13,<3`, `opentelemetry-api>=1.44`, and for the extras `langgraph>=1.2`,
