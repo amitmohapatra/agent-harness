@@ -74,8 +74,8 @@ Service keeps a read audit:
 
 ```bash
 curl -s "$MEMORY_SERVICE_URL/v1/reads?limit=50" \
-  -H "Authorization: Bearer $MEMORY_API_KEY" \
-  -H "X-Tenant-Id: acme"
+  -H "X-API-Key: $MEMORY_API_KEY" \
+  -H "X-Trellis-Tenant: acme"
 ```
 
 ```python

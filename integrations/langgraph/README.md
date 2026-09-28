@@ -30,6 +30,34 @@ async def answer_node(state, agent):
     return {"answer": response.text}
 ```
 
+A complete graph that runs as written is [`examples/langgraph_agent.py`](../../examples/langgraph_agent.py)
+(`python examples/langgraph_agent.py`); the full picture — parallel nodes, a nested sub-agent,
+tools, artifacts, memory — is [`examples/reorder_workflow.py`](../../examples/reorder_workflow.py).
+
+## What one superstep does
+
+```mermaid
+sequenceDiagram
+  participant G as LangGraph
+  participant W as the wrapper wrap_node built
+  participant H as AgentHarness
+  participant N as your node
+  G->>W: node(state, config, writer, …) — exactly the injectables the node declared
+  W->>W: identity from RunnableConfig: thread_id · checkpoint_ns · langgraph_step · task id
+  W->>H: a run id derived from that position — stable across replays of this superstep
+  H->>H: memory retrieve (query=…), spans, deadline, policy
+  H->>N: node(state, …), or node(state, agent) for a runtime-aware one
+  N-->>H: a state update, or an AgentResponse
+  H->>H: observations, claims, events — once per superstep, not once per replay
+  H-->>W: AgentResponse
+  W-->>G: the state update the node itself returned (or the one `state_mapper` makes)
+```
+
+A subgraph nests: each `checkpoint_ns` segment becomes a parent agent run, so a nested graph
+appears as a child run of the node that started it rather than as an unrelated trace. Wrapping
+`app.ainvoke(...)` in `harness.execution(...)` is what gives the whole turn a single root —
+without it, LangGraph runs each superstep in its own task and every node starts its own trace.
+
 ## What it does
 
 * derives identity from the `RunnableConfig` — `thread_id` → memory thread,

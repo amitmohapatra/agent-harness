@@ -26,6 +26,9 @@ with the versions that were actually exercised; the table below is that file, tr
 | trellis-harness-claude-agent-sdk | 0.1.0 |
 | trellis-harness-a2a | 0.1.0 |
 | a2a-sdk (A2A protocol v1.0) | 1.1.5 |
+| trellis-harness-temporal | 0.1.0 |
+| temporalio | 1.33.0 |
+| fastapi (the AG-UI and A2A surfaces) | 0.141.1 |
 
 Declared support ranges (from `pyproject.toml` and each adapter's own): Python `>=3.12`,
 `pydantic>=2.13,<3`, `opentelemetry-api>=1.44`, and for the extras `langgraph>=1.2`,
@@ -150,14 +153,21 @@ so no live project or network is needed to run the suite.
 
 The harness depends on the `trellis-memory` SDK contract only:
 `MemoryClient.bind(**scope)` → `MemoryContext`, then `context()`, `recall()`, `observe()`,
-`chat.*`, `graph.*`, `files.*`, `tools.record()`.
+`chat.*`, `graph.*`, `documents.*` (`files.*` is its deprecated spelling, ADR 0022),
+`tools.record()`.
 
-Two suites cover it. `tests/e2e/test_real_memory_sdk.py` runs the real SDK against a mocked
+Two suites cover it. `tests/e2e/test_sdk_wire_contract.py` runs the real SDK against a mocked
 HTTP layer and asserts the wire payloads. `tests/e2e/test_live_memory_service.py` runs
 against a **live service** (`make test-live`) — the only suite that mocks nothing.
 
-Verified live against the service at commit-time, with Postgres, Qdrant, Dragonfly and
-OpenFGA behind it, and a real ONNX embedding model (`fastembed`, BAAI/bge-small-en-v1.5):
+Verified live against the service as it stood at that commit, with Postgres, Qdrant, Dragonfly
+and OpenFGA behind it, and a real ONNX embedding model (`fastembed`, `BAAI/bge-small-en-v1.5`).
+That encoder is **no longer what the Memory Service ships**: the frozen set is now
+`ibm-granite/granite-embedding-small-english-r2`, and that origin is excluded by the
+provenance rule the service now enforces (`domain/provenance.py`; see
+[docs/models.md](docs/models.md)). The rows below are a record of the wire contract, scope
+rules and persistence paths, none of which depend on which encoder was loaded — they are not
+evidence about retrieval quality, and the encoder is named only so the run is reproducible.
 
 | Exercised | Result |
 | --- | --- |
@@ -239,6 +249,21 @@ events and state mapping do not.
 | a memory client | `NoOpMemoryRuntime`: retrieval returns `None`, writes are skipped |
 | a model client | `runtime.model.invoke` raises `ConfigurationError` with guidance |
 | a tool runtime | `runtime.tools.call` raises `ToolNotFoundError` with guidance |
+| `trellis-harness-temporal`, with `runs.engine: temporal` | `ConfigurationError` naming the extra |
+| a runs service | `NoRunStore`: nothing is recorded and nothing fails (`required=True` inverts it) |
+| `jsonschema`, when the registry declared an `output_schema` | `ConfigurationError` naming the `registry` extra — a declared schema is never silently skipped |
+
+## Surfaces and durability
+
+Neither surface has a feature matrix of its own in `compatibility-matrix.json` — what they
+claim is checked by their own suites, and each README says which protocol version it was
+verified against.
+
+| Distribution | Verified against | Not covered |
+| --- | --- | --- |
+| `trellis-harness-agui` | fastapi 0.141.1, the AG-UI event vocabulary plus `CONTEXT_LOADED` and `INTERRUPT` | no client library is shipped; the surface is an SSE router |
+| `trellis-harness-a2a` | a2a-sdk 1.1.5, protocol v1.0, JSON-RPC | gRPC and card signing (their dependencies are not installed) |
+| `trellis-harness-temporal` | temporalio 1.33.0, against its time-skipping test server (`-m temporal`) | search-attribute-backed `list_paused`, which needs a prepared namespace |
 
 ## Regenerating this matrix
 

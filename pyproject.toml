@@ -163,6 +163,8 @@ ignore = ["PLR0913", "PLR2004", "B008"]
 # dependencies *after* deciding to skip, so a missing service is a skip not an ImportError.
 "conftest.py" = ["E402", "PLC0415"]
 "examples/**" = ["T20"]
+# A command-line helper whose whole job is to print a table.
+"tools/**" = ["T20"]
 
 [tool.pyright]
 pythonVersion = "3.12"

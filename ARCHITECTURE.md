@@ -32,31 +32,85 @@ and `langfuse` are absent from `sys.modules`.
 
 ## Hexagonal layering
 
-Every outbound dependency is a `Protocol` in
-[`contracts/ports.py`](src/trellis/harness/contracts/ports.py): `MemoryPort`,
-`ModelClient`, `ToolClient`, `ArtifactClient`, `TelemetryProvider`, `TelemetryRedactor`,
+Every outbound dependency is a `Protocol`, and they live in the **contracts distribution**, not
+here: `trellis/contracts/ports.py` in `trellis-contracts`. `MemoryPort`, `ModelClient`,
+`ToolClient`, `ArtifactClient`, `TelemetryProvider`, `TelemetryRedactor`,
 `EvaluationProvider`, `EvaluationSink`, `PromptProvider`, `AgentPolicyProvider`,
-`AgentRegistryClient`, `AgentInterceptor`, `LifecycleListener`, `FrameworkAdapter`.
+`AgentRegistryClient`, `EventSink`, `RunStore`, `Scheduler`, `FeedbackStore`, `Judge`,
+`AgentDirectory`, `AgentInterceptor`, `LifecycleListener`, `FrameworkAdapter`.
 
 The core depends only on those protocols; concrete adapters are injected. Conformance is
 asserted in `tests/contract/test_ports.py` — every shipped implementation is checked
 against the protocol it claims.
 
 ```
-contracts/     immutable, serializable domain types (context, request, result, errors, ports)
 config/        validated settings (YAML + env + code)
 runtime/       AgentRuntime, cancellation, structured logging, contextvar propagation
 execution/     ContextFactory, ExecutionCoordinator, RuntimeBuilder, retry, sync bridge
-interceptors/  the ordered pipeline
-memory/        Memory Service adapter, policy, writeback queue
-models/        ModelClient implementations + instrumentation
-tools/         ToolClient implementations + instrumentation + wrap_tool
+interceptors/  the ordered pipeline (identity, policy, memory, telemetry, judge, timeout, result)
+memory/        Memory Service adapter, policy, visibility checks, writeback queue
+models/        ModelClient implementations (Bifrost, direct) + instrumentation
+tools/         ToolClient implementations (local, MCP, memory, composite) + wrap_tool + bridge
+reasoning/     the bounded ReAct loop and the ContextAssembler (prompt budget, compaction)
 artifacts/     artifact stores + per-run client
+events/        the RunEvent stream, its sinks, webhook delivery, target validation
+interrupts/    one pause mechanism for every framework; the resolution registry
+runs/          the RunStore client over agent-runs, and the ordered run recorder
+evaluation/    the grounded judge, datasets, experiments, the regression gate
 telemetry/     OTel provider, composite, tracer facade, redaction, sampling, metrics
 langfuse/      optional Langfuse provider, interceptor, evaluation, prompts
-evaluation/    lifecycle dispatch, evaluation sinks
-policy/        policy providers
-registry/      registry hook (no-op by default)
+policy/        policy providers and the PolicyOutcome vocabulary
+registry/      the AI Registry client, the agent directory, heartbeat and delta sync
+```
+
+The framework adapters and the two surfaces are **not** in that list: each is its own
+distribution under `integrations/` (`langgraph`, `deepagents`, `openai_agents`,
+`claude_agent_sdk`, `agui`, `a2a`, `temporal`), and the core imports none of them.
+
+```mermaid
+classDiagram
+  direction LR
+  class AgentHarness
+  class MemoryPort { <<Protocol>> }
+  class ModelClient { <<Protocol>> }
+  class ToolClient { <<Protocol>> }
+  class ArtifactClient { <<Protocol>> }
+  class EventSink { <<Protocol>> }
+  class RunStore { <<Protocol>> }
+  class Scheduler { <<Protocol>> }
+  class FeedbackStore { <<Protocol>> }
+  class Judge { <<Protocol>> }
+  class AgentDirectory { <<Protocol>> }
+  class AgentPolicyProvider { <<Protocol>> }
+  class TelemetryProvider { <<Protocol>> }
+  class AgentRegistryClient { <<Protocol>> }
+  class FrameworkAdapter { <<Protocol>> }
+  AgentHarness ..> MemoryPort
+  AgentHarness ..> ModelClient
+  AgentHarness ..> ToolClient
+  AgentHarness ..> ArtifactClient
+  AgentHarness ..> EventSink
+  AgentHarness ..> RunStore
+  AgentHarness ..> Judge
+  AgentHarness ..> AgentPolicyProvider
+  AgentHarness ..> TelemetryProvider
+  AgentHarness ..> AgentRegistryClient
+  DatasetBuilder ..> RunStore
+  DatasetBuilder ..> FeedbackStore
+  A2AAgentClient ..> AgentDirectory
+  MemoryPort <|.. MemoryRuntime
+  ModelClient <|.. BifrostModelClient
+  ToolClient <|.. MCPToolClient
+  EventSink <|.. WebhookEventSink
+  RunStore <|.. RunStoreClient
+  RunStore <|.. TemporalRunStore
+  Scheduler <|.. TemporalScheduler
+  Judge <|.. GroundedJudge
+  AgentDirectory <|.. RegistryAgentDirectory
+  FrameworkAdapter <|.. LangGraphHarness
+  FrameworkAdapter <|.. DeepAgentsHarness
+  FrameworkAdapter <|.. OpenAIAgentsHarness
+  FrameworkAdapter <|.. ClaudeAgentSDKHarness
 ```
 
 ## Execution flow

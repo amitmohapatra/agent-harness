@@ -19,10 +19,30 @@ harness = AgentHarness(
 The YAML may be the full document (with a `harness:` key, as in
 [`harness.example.yaml`](../harness.example.yaml)) or just the harness section.
 
-The surface is **75 settings** and every one of them does something. Two rules keep it that
+The surface is **79 settings** and every one of them does something. Two rules keep it that
 way: capture policy and sampling are defined once (under `telemetry`) and obeyed by every
 backend, and a provider is enabled by *passing* it — there is no `policy.enabled` flag that
 has to agree with the policy object you supplied.
+
+That number is the leaf count of `HarnessConfig`, so it can be checked rather than trusted:
+
+```python
+from pydantic import BaseModel
+
+from trellis.harness import HarnessConfig
+
+
+def leaves(model: type[BaseModel]) -> int:
+    return sum(
+        leaves(f.annotation)
+        if isinstance(f.annotation, type) and issubclass(f.annotation, BaseModel)
+        else 1
+        for f in model.model_fields.values()
+    )
+
+
+print(leaves(HarnessConfig))  # 79
+```
 
 ## Settings
 
@@ -58,7 +78,6 @@ Decisions worth calling out:
 | --- | --- |
 | `UAH_MEMORY_ENABLED` | `memory.enabled` |
 | `UAH_MEMORY_RETRIEVE_BEFORE` | `memory.retrieve_before` |
-
 | `UAH_MEMORY_FAILURE_MODE` | `memory.failure_mode` |
 | `UAH_OTEL_ENABLED` | `telemetry.enabled` |
 | `UAH_OTEL_EXPORTER` | `telemetry.exporter` |

@@ -1,17 +1,29 @@
 # Examples
 
-| File | Shows |
-| --- | --- |
-| [`plain_python.py`](plain_python.py) | all three integration modes, tools, artifacts, claims, child runs — no framework, no services |
-| [`langgraph_agent.py`](langgraph_agent.py) | the smallest useful graph: an existing node and a runtime-aware node, with a checkpointer |
-| [`langgraph_chatbot.py`](langgraph_chatbot.py) | a five-node chatbot on a Bifrost gateway, with every configuration section set — see below |
-| [`reorder_workflow.py`](reorder_workflow.py) | the full picture — see below |
-| [`memory_tour.py`](memory_tour.py) | every memory operation the service supports, driven through the harness |
-| [`deepagents_agent.py`](deepagents_agent.py) | Deep Agents: the six bindings, a tool held for a person, and the resumed run |
-| [`openai_agents_agent.py`](openai_agents_agent.py) | the OpenAI Agents SDK: the six bindings, and its own `needs_approval` as one harness `Interrupt` |
-| [`claude_agent_sdk_agent.py`](claude_agent_sdk_agent.py) | the Claude Agent SDK: every hook driven with the payloads the CLI sends, no CLI needed |
+Every file says in its docstring what it demonstrates, and every one of them runs. The last
+column is the honest part: what it needs before it shows you anything real.
 
-All three run as-is, with no services and no API keys:
+| File | Shows | Needs |
+| --- | --- | --- |
+| [`memory_quickstart.py`](memory_quickstart.py) | the README quick start end to end: onboarding, one wrapped agent, the context bundle, `remember`/`recall`, draining the queued writes | a **Memory Service** (otherwise it says so and exits 0) |
+| [`memory_tour.py`](memory_tour.py) | every memory operation the service supports, driven through `runtime.memory`, and the wire call each one makes | nothing (an in-process stand-in), or a **Memory Service** |
+| [`plain_python.py`](plain_python.py) | all three integration modes, tools, artifacts, claims, child runs | nothing |
+| [`langgraph_agent.py`](langgraph_agent.py) | the smallest useful graph: an existing node and a runtime-aware node, with a checkpointer | the `[langgraph]` extra |
+| [`reorder_workflow.py`](reorder_workflow.py) | the full picture — see below | the `[langgraph]` extra; optionally a **Memory Service** and Langfuse |
+| [`langgraph_chatbot.py`](langgraph_chatbot.py) | a five-node chatbot on a Bifrost gateway, with every configuration section set — see below | a **Bifrost gateway**; optionally a Memory Service |
+| [`deepagents_agent.py`](deepagents_agent.py) | Deep Agents: the six bindings, a tool held for a person, and the resumed run | the `[deepagents]` extra |
+| [`openai_agents_agent.py`](openai_agents_agent.py) | the OpenAI Agents SDK: the six bindings, and its own `needs_approval` as one harness `Interrupt` | the `[openai-agents]` extra |
+| [`claude_agent_sdk_agent.py`](claude_agent_sdk_agent.py) | the Claude Agent SDK: every hook driven with the payloads the CLI sends, no CLI needed | the `[claude-agent-sdk]` extra |
+
+```bash
+make examples        # every example that needs no service
+make examples-live   # the two that talk to a Memory Service
+```
+
+`make examples-live` probes `/health/live` first and fails loudly when nothing answers, rather
+than printing "ok" for an example that skipped.
+
+Or one at a time, with no services and no API keys:
 
 ```bash
 python examples/plain_python.py
@@ -22,6 +34,26 @@ python examples/deepagents_agent.py           # needs the [deepagents] extra
 python examples/openai_agents_agent.py        # needs the [openai-agents] extra
 python examples/claude_agent_sdk_agent.py     # needs the [claude-agent-sdk] extra
 ```
+
+## Against a live Memory Service
+
+```bash
+MEMORY_SERVICE_URL=http://localhost:8080 MEMORY_API_KEY=dev-key \
+  python examples/memory_quickstart.py       # also memory_tour.py and reorder_workflow.py
+```
+
+Those are the defaults, so with the dev service up `python examples/memory_quickstart.py` is
+enough. Three things about a live service that these examples have to handle, and that are the
+usual reason a first script of your own does not work:
+
+* **onboard first.** A WORKSPACE-visible write needs a tenant, a workspace *row* and a member.
+  `memory_quickstart.py::onboard` and `memory_tour.py::onboard` do exactly what
+  `tests/support.py::onboard` does; without it the service answers `Workspace not found`.
+* **a workspace id cannot be reclaimed.** An id that already labels threads or documents cannot
+  later become a workspace (`in use as an anchor`), so a new team never inherits an old team's
+  anchors. `memory_tour.py` prints that and falls back to a fresh id rather than failing.
+* **writes are asynchronous.** `await harness.drain()` (or `aclose()`) before the process exits,
+  or the queued observations never leave — and a 202 means "durably queued", not "retrievable".
 
 The three framework examples use a scripted model behind the harness's own model port, so they
 show the bindings without a key and without pretending to show a real model's judgement. Point

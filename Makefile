@@ -88,6 +88,24 @@ examples:  ## Run the runnable examples
 	$(PY) examples/langgraph_agent.py >/dev/null && echo "langgraph_agent ok"
 	$(PY) examples/reorder_workflow.py >/dev/null && echo "reorder_workflow ok"
 	$(PY) examples/memory_tour.py >/dev/null && echo "memory_tour ok"
+	$(PY) examples/deepagents_agent.py >/dev/null && echo "deepagents_agent ok"
+	$(PY) examples/openai_agents_agent.py >/dev/null && echo "openai_agents_agent ok"
+	$(PY) examples/claude_agent_sdk_agent.py >/dev/null && echo "claude_agent_sdk_agent ok"
+
+.PHONY: examples-live
+examples-live:  ## Run the examples that need a Memory Service (MEMORY_SERVICE_URL)
+	@URL=$${MEMORY_SERVICE_URL:-http://localhost:8080}; \
+	KEY=$${MEMORY_API_KEY:-dev-key}; \
+	curl -sf -m 5 "$$URL/health/live" >/dev/null || \
+	  { echo "no Memory Service at $$URL — nothing to run (start one, or set MEMORY_SERVICE_URL)"; exit 1; }; \
+	MEMORY_SERVICE_URL=$$URL MEMORY_API_KEY=$$KEY $(PY) examples/memory_quickstart.py >/dev/null \
+	  && echo "memory_quickstart ok"; \
+	MEMORY_SERVICE_URL=$$URL MEMORY_API_KEY=$$KEY $(PY) examples/memory_tour.py >/dev/null \
+	  && echo "memory_tour (live) ok"
+
+.PHONY: docs-compat
+docs-compat:  ## Print the README compatibility table from compatibility-matrix.json
+	$(PY) tools/compat_table.py
 
 .PHONY: clean
 clean:  ## Remove caches

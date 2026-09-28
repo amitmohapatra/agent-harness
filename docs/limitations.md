@@ -88,9 +88,19 @@ Raw prompts, model inputs/outputs, tool inputs/outputs, memory content and user 
 applies, and both are per-tenant/environment decisions with real consequences — see
 [privacy.md](privacy.md).
 
-## Not implemented (contracts exist, services do not)
+## Not implemented (the port exists; this side of it does not)
 
-Agent registry service, Bifrost model/tool gateway, MCP tool client, A2A transport, CrewAI
-and Google ADK adapters. `AgentRequest`/`AgentResponse` are serializable and the relevant
-ports exist so these can arrive without rewriting agents — but nothing here talks to them
-today.
+The list is shorter than it was — the gateway client, the MCP tool client, the A2A transport
+and three framework adapters have since landed — so what remains is stated exactly:
+
+| Not here | What that means in practice |
+| --- | --- |
+| CrewAI and Google ADK adapters | their callables work as plain Python; framework-level lineage, events and state mapping do not |
+| an HTTP client for `agent-schedules` | the `Scheduler` port has one implementation in this repository, `TemporalScheduler`. A deployment running `agent-schedules` drives it from its own control plane; each firing arrives as an ordinary run |
+| an agent registry **service** | the harness is a client of the AI Registry; no registry is shipped here ([registry.md](registry.md)) |
+| A2A gRPC and card signing | the JSON-RPC transport is verified; `grpcio` and signing dependencies are not installed ([a2a.md](a2a.md)) |
+| SDK-native streaming for the OpenAI Agents adapter, `Session.pop_item`, an approver *editing* a call there | each is recorded, with its reason, in [`COMPATIBILITY.md`](../COMPATIBILITY.md) and the adapter's README |
+| per-model-call spans under the Claude Agent SDK | it spawns the `claude` CLI, so there is no client to wrap; usage arrives once, on `ResultMessage` |
+
+`AgentRequest`/`AgentResponse` are serializable and the ports exist, so each of these can
+arrive without rewriting an agent. None of them is faked in the meantime.

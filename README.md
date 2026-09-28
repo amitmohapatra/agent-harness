@@ -81,14 +81,18 @@ Then this is overhead and you should skip it. It earns its place at *n* agents a
 teams, where the alternative is the same 300 lines copy-pasted and subtly different in each.
 
 **Contents** · [What is a harness?](#what-is-a-harness-in-plain-english) ·
-[Install](#install) · [Quickstart](#5-minute-quickstart) · [Tutorial](#tutorial-six-steps) ·
-[Integration modes](#three-integration-modes) · [LangGraph](#langgraph) ·
-[Tools and models](#tools-and-models) · [Memory](#memory-service-integration) ·
-[Results and errors](#results-and-errors) ·
+[Install](#install) · [First agent](#your-first-agent) · [Quickstart](#5-minute-quickstart) ·
+[Tutorial](#tutorial-six-steps) · [Integration modes](#three-integration-modes) ·
+[LangGraph](#langgraph) · [Tools and models](#tools-and-models) ·
+[Memory](#memory-service-integration) · [Results and errors](#results-and-errors) ·
 [Timeouts, cancellation, retries](#timeouts-cancellation-retries-idempotency) ·
 [Observability](#observability) · [Langfuse setup](#langfuse-setup) ·
 [Extending](#extending-the-harness) · [Configuration](#configuration) ·
-[Status](#status) · [Docs](#documentation) · [Performance](#performance)
+[Status](#status) · [Docs](#documentation) · [Performance](#performance) ·
+[Events and surfaces](#events-interrupts-and-surfaces-030) ·
+[Evaluation and durability](#evaluation-and-durability-030)
+
+Every page, and the question it answers: [**docs/README.md**](docs/README.md).
 
 ---
 
@@ -96,20 +100,28 @@ teams, where the alternative is the same 300 lines copy-pasted and subtly differ
 
 ```bash
 pip install trellis-harness                          # core: plain Python
-pip install "trellis-harness[langgraph]"             # + LangGraph adapter
-pip install "trellis-harness[deepagents]"            # + Deep Agents adapter
-pip install "trellis-harness[openai-agents]"         # + OpenAI Agents SDK adapter
-pip install "trellis-harness[claude-agent-sdk]"      # + Claude Agent SDK adapter
-pip install "trellis-harness[agui]"                  # + AG-UI surface (FastAPI + SSE)
-pip install "trellis-harness[a2a]"                   # + A2A surface and client (a2a-sdk)
-pip install "trellis-harness[langfuse]"              # + Langfuse observability
-pip install "trellis-harness[otel]"                  # + OTel SDK & OTLP exporter
-pip install "trellis-harness[all]"                   # everything
 ```
 
+Every extra, what it adds, and the distribution it pulls in:
+
+| Extra | Adds | Distribution / dependency | Page |
+| --- | --- | --- | --- |
+| *(none)* | the core: contracts, config, the OTel **API**, the Memory Service SDK, the gateway client | — | [docs/harness.md](docs/harness.md) |
+| `[langgraph]` | the LangGraph adapter | `trellis-harness-langgraph` | [integrations/langgraph](integrations/langgraph/README.md) |
+| `[deepagents]` | the Deep Agents adapter | `trellis-harness-deepagents` | [integrations/deepagents](integrations/deepagents/README.md) |
+| `[openai-agents]` | the OpenAI Agents SDK adapter | `trellis-harness-openai-agents` | [integrations/openai_agents](integrations/openai_agents/README.md) |
+| `[claude-agent-sdk]` | the Claude Agent SDK adapter | `trellis-harness-claude-agent-sdk` | [integrations/claude_agent_sdk](integrations/claude_agent_sdk/README.md) |
+| `[agui]` | the AG-UI surface (FastAPI + SSE) | `trellis-harness-agui` | [integrations/agui](integrations/agui/README.md) |
+| `[a2a]` | the A2A server and client | `trellis-harness-a2a` (`a2a-sdk`) | [docs/a2a.md](docs/a2a.md) |
+| `[temporal]` | runs and schedules on Temporal, behind the same ports | `trellis-harness-temporal` (`temporalio`) | [integrations/temporal](integrations/temporal/README.md) |
+| `[langfuse]` | Langfuse as an exporter on the harness's own spans | `langfuse>=3` | [docs/observability.md](docs/observability.md) |
+| `[otel]` | the OTel **SDK** + OTLP exporter, when your app configures neither | `opentelemetry-sdk`, `-exporter-otlp-proto-http` | [docs/observability.md](docs/observability.md) |
+| `[registry]` | validating a result against the `output_schema` an agent declared | `jsonschema` | [docs/registry.md](docs/registry.md) |
+| `[logging]` | JSON structured logging | `structlog` | [docs/configuration.md](docs/configuration.md) |
+| `[all]` | every row above | — | [docs/README.md](docs/README.md) |
+
 Plain-Python users never receive a framework transitively: every adapter is a separate
-distribution (`trellis-harness-langgraph`, `-deepagents`, `-openai-agents`,
-`-claude-agent-sdk`) and the core imports none of them —
+distribution and the core imports none of them —
 `tests/compatibility/test_matrix.py` proves it in a subprocess, and
 `tests/unit/test_architecture.py` proves no trellis package imports a provider SDK at all.
 
@@ -134,14 +146,80 @@ them is faked.
 
 Requires Python 3.12+.
 
-## 5-minute quickstart
+### Versions actually exercised
+
+Not a claim, a transcription: `pytest tests/compatibility` writes
+[`compatibility-matrix.json`](compatibility-matrix.json) from the packages that run imported, and
+this table is `make docs-compat` ([`tools/compat_table.py`](tools/compat_table.py)) pasted.
+
+<!-- generated: make docs-compat -->
+| Component | Version exercised |
+| --- | --- |
+| Python | 3.12.14 |
+| trellis-harness | 0.3.0 |
+| LangGraph | 1.2.11 |
+| LangChain | 1.4.2 |
+| LangChain core | 1.6.5 |
+| Deep Agents | 0.7.19 |
+| OpenAI Agents SDK | 0.22.3 |
+| Claude Agent SDK | 0.2.160 |
+| a2a-sdk (A2A protocol v1.0) | 1.1.5 |
+| temporalio | 1.33.0 |
+| FastAPI (AG-UI, A2A surfaces) | 0.141.1 |
+| Langfuse | 4.15.2 |
+| OpenTelemetry API | 1.44.0 |
+| OpenTelemetry SDK | 1.44.0 |
+| pydantic | 2.13.5 |
+| trellis-memory (Memory Service SDK) | 0.2.1 |
+| trellis-harness-langgraph | 0.2.0 |
+| trellis-harness-agui | 0.1.0 |
+| trellis-harness-a2a | 0.1.0 |
+| trellis-harness-deepagents | 0.1.0 |
+| trellis-harness-openai-agents | 0.1.0 |
+| trellis-harness-claude-agent-sdk | 0.1.0 |
+| trellis-harness-temporal | 0.1.0 |
+<!-- /generated -->
+
+A version outside that table is expected to work and is **not** verified here; the honest word
+is "untested", not "supported". Per-capability rows, including what each framework cannot
+express, are in [COMPATIBILITY.md](COMPATIBILITY.md).
+
+## Your first agent
+
+Ten lines, no services, and it runs as written — `pip install trellis-harness` is the only
+prerequisite. You already have an identity, a span, a run record, a deadline and an event
+stream; everything after this is adding providers.
 
 ```python
 import asyncio
+
+from trellis.harness import AgentHarness
+
+harness = AgentHarness(defaults={"tenant_id": "acme"})
+
+
+@harness.agent(agent_id="inventory-agent")
+async def inventory(question: str, agent) -> str:
+    agent.log("asked", question=question)
+    return f"answering: {question}"
+
+
+print(asyncio.run(inventory("how much stock of SKU-1?")).data)
+```
+
+## 5-minute quickstart
+
+The same agent with memory attached, against a Memory Service on `localhost:8080`
+(`examples/memory_quickstart.py` is this, runnable, including the tenant onboarding a
+workspace-visible write needs):
+
+```python
+import asyncio
+
 from trellis.harness import AgentExecutionContext, AgentHarness
 from trellis.memory import MemoryClient
 
-memory = MemoryClient("http://memory-service:8080", api_key="...")
+memory = MemoryClient("http://localhost:8080", api_key="dev-key")
 harness = AgentHarness(memory=memory, defaults={"tenant_id": "acme"})
 
 
@@ -653,6 +731,27 @@ tenant/environment. See [Privacy and redaction](docs/privacy.md).
 Langfuse being unavailable never fails a business execution in the default
 `failure_mode: non_blocking`.
 
+### Two backends, one request: the split
+
+Agents and services are asked different questions, so they are answered in different places —
+and the two are joined, never merged.
+
+| | Langfuse | Datadog (OTLP) |
+| --- | --- | --- |
+| Scope | **per agent**: one trace per request, with its spans, cost, judge score, human score and feedback thread | **per service**: the Memory Service, `agent-runs`, `agent-schedules` — latency, saturation, errors, dependencies |
+| Answers | "why did this answer come out like that?" | "is the platform healthy, and what is it costing?" |
+| Fed by | the harness's own spans, with Langfuse's documented OTel attributes | the OTel collector, from the same spans plus each service's metrics |
+| Never | a Langfuse project for a non-agent service | a second span tree for agents |
+
+They are joined on two ids that travel on every hop: **`traceparent`** (W3C trace context, so a
+Datadog service span and a Langfuse agent trace share a trace id) and **`X-Request-ID`** (so a
+log line and a trace name the same request). `GET /v1/reads` on the Memory Service is the
+separate record of *what memory was served* — by principal, kind and record ids, kept beyond a
+trace's retention.
+
+The collector configuration, the per-service environment variables and what a trace looks like
+when you open it are in [docs/observability.md](docs/observability.md).
+
 ## Langfuse setup
 
 ```bash
@@ -735,8 +834,9 @@ harness = AgentHarness(
 
 Lifecycle events: `on_agent_start`, `on_context_loaded`, `on_model_start`/`on_model_end`,
 `on_tool_start`/`on_tool_end`, `on_agent_success`, `on_agent_error`, `on_agent_cancel`,
-`on_agent_timeout`, `on_agent_finish`. A listener that raises is logged and swallowed — an
-observer can never fail a business execution.
+`on_agent_pause`, `on_agent_timeout`, `on_agent_finish` (the `LifecycleEvent` enum, in full). A
+listener that raises is logged and swallowed — an observer can never fail a business execution.
+Interceptors, which *can* change a run, are [docs/interceptors.md](docs/interceptors.md).
 
 Agents describe themselves for a future registry (no-op by default):
 
@@ -776,11 +876,25 @@ mistake fails at startup rather than on the first execution.
 
 ## Documentation
 
+[**docs/README.md**](docs/README.md) is the map: every page, and the question it answers. The
+short version:
+
 | Document | What is in it |
 | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Layering, ports and adapters, interceptor pipeline, execution flow |
 | [COMPATIBILITY.md](COMPATIBILITY.md) | Versions actually tested, per-feature matrix, degradation rules |
+| [docs/harness.md](docs/harness.md) | `AgentHarness`: what you pass it, the three ways to attach, the runtime, the lifecycle events |
 | [docs/configuration.md](docs/configuration.md) | Every setting, every environment variable |
+| [docs/memory.md](docs/memory.md) | The memory runtime, visibility, the policy, and a live example |
+| [docs/tools.md](docs/tools.md) | Local, MCP, memory and agent tools behind one policy surface |
+| [docs/models.md](docs/models.md) | Calling a model through the gateway; which models the platform uses, with origins and licences |
+| [docs/reasoning.md](docs/reasoning.md) | The bounded ReAct loop, the prompt budget, compaction |
+| [docs/events.md](docs/events.md) | The `RunEvent` stream and the sinks in the box |
+| [docs/interrupts.md](docs/interrupts.md) | Pausing for a person, and what the answer does |
+| [docs/runs.md](docs/runs.md) | Durable run records, the paused inbox, `agent-runs` and Temporal |
+| [docs/registry.md](docs/registry.md) | Discovery, heartbeat, delta sync, MCP clients from registry tools |
+| [docs/artifacts.md](docs/artifacts.md) | Artifacts, claims and evidence |
+| [docs/interceptors.md](docs/interceptors.md) | Extending the pipeline; listeners; policy providers; redaction |
 | [docs/a2a.md](docs/a2a.md) | Serving an agent over A2A, calling registry agents as tools, Agent Cards, registry sync |
 | [docs/evaluation.md](docs/evaluation.md) | The online judge, offline datasets and experiments, the CI regression gate |
 | [docs/observability.md](docs/observability.md) | One trace per request, what memory was served, and the Langfuse/Datadog split with collector configuration |
@@ -788,10 +902,7 @@ mistake fails at startup rather than on the first execution.
 | [docs/limitations.md](docs/limitations.md) | What the harness cannot do, stated plainly |
 | [docs/performance.md](docs/performance.md) | Measured overhead and how to reproduce it |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Symptoms, causes, fixes |
-| [examples/plain_python.py](examples/plain_python.py) | All three modes, tools, artifacts, claims, child runs — runs with no services |
-| [examples/langgraph_agent.py](examples/langgraph_agent.py) | An existing node and a runtime-aware node in one graph, with a checkpointer |
-| [examples/reorder_workflow.py](examples/reorder_workflow.py) | The full picture: 6-node graph with parallel fan-out, a nested sub-agent, tools, model calls, real business logic, artifacts, claims, memory and Langfuse |
-| [examples/memory_tour.py](examples/memory_tour.py) | Every memory operation — history, episodic, typed long/short-term, RAG ingestion, knowledge graph, inventory, grounding, deletion — and what each sends over the wire |
+| [examples/README.md](examples/README.md) | Every example, what it demonstrates, and what it needs to run |
 
 ## Performance
 
@@ -845,21 +956,25 @@ Two service behaviours explain most surprises, and no setting changes them:
   the context cannot express, because the service would accept it and fail the background
   job that creates the memory.
 
-Test suite: 280 tests (276 functional + 4 benchmarks), 91% line coverage of the core and
-the adapter. Categories: unit, contract (protocol conformance), integration, end-to-end
-(including the real Memory Service SDK over a mocked HTTP layer), failure injection,
-observability, compatibility and performance.
+Test suite, as measured by
+`pytest tests integrations/*/tests -q -p no:randomly --timeout=300`: **870 tests — 867 passed,
+3 skipped** (the skips are the live-model paths, which skip when the Memory Service or the
+gateway is not reachable). Categories: unit, contract (protocol conformance), integration,
+end-to-end (including the real Memory Service SDK over a mocked HTTP layer), failure
+injection, observability, compatibility and performance. Coverage is not quoted here because
+this README does not carry a number nobody can reproduce: `make coverage` prints it.
+
+Two tests are **load-sensitive** and will fail on a busy machine, which is worth knowing before
+you read a red run as a regression: `test_parallel_nodes_run_concurrently_and_merge` asserts a
+wall-clock budget (`elapsed < 0.09` for two 50 ms nodes in parallel) and measured
+0.095–0.114 s while the host was running other work, then passed once it was quiet. The
+threshold is right; the machine was busy.
 
 Fallback without uv:
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate && pip install -e ".[all]"
 ```
-
-## License
-
-Apache-2.0.
-
 
 ## Events, interrupts and surfaces (0.3.0)
 
@@ -958,3 +1073,6 @@ runs:
 
 See [integrations/temporal/README.md](integrations/temporal/README.md).
 
+## License
+
+Apache-2.0.

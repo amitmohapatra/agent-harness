@@ -157,7 +157,7 @@ def build_harness() -> AgentHarness:
     if url := os.environ.get("MEMORY_SERVICE_URL"):
         from trellis.memory import MemoryClient  # noqa: PLC0415 - optional in this example
 
-        memory = MemoryClient(url, api_key=os.environ.get("MEMORY_API_KEY"))
+        memory = MemoryClient(url, api_key=os.environ.get("MEMORY_API_KEY", "dev-key"))
 
     langfuse_on = bool(
         os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")
@@ -411,7 +411,32 @@ def build_graph():
     return graph.compile(checkpointer=InMemorySaver())
 
 
+async def onboard() -> None:
+    """Create the tenant this run writes under, tolerating that it exists.
+
+    The same first step as ``tests/support.py::onboard``. This workflow writes nothing
+    WORKSPACE-visible, so a tenant is all it needs; with no ``MEMORY_SERVICE_URL`` there is
+    nothing to onboard and memory is a no-op anyway.
+    """
+    url = os.environ.get("MEMORY_SERVICE_URL")
+    if not url:
+        return
+    import contextlib  # noqa: PLC0415 - the live path only
+
+    from trellis.memory import MemoryClient  # noqa: PLC0415 - the live path only
+    from trellis.memory.errors import ConflictError  # noqa: PLC0415 - the live path only
+
+    tenant = os.environ.get("MEMORY_TENANT", "acme")
+    client = MemoryClient(url, api_key=os.environ.get("MEMORY_API_KEY", "dev-key"))
+    try:
+        with contextlib.suppress(ConflictError):
+            await client.admin.create_tenant(tenant, tenant_id=tenant)
+    finally:
+        await client.aclose()
+
+
 async def main() -> None:
+    await onboard()
     app = build_graph()
 
     # A turn id belongs to the session that created it, so each run gets its own; the

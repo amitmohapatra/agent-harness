@@ -27,6 +27,7 @@ The rest of this file exists so you know what is underneath it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import uuid
 from datetime import UTC, datetime
@@ -49,6 +50,41 @@ WORKSPACE = os.environ.get("MEMORY_WORKSPACE_ID", "supply-chain-ws")
 THREAD = os.environ.get("MEMORY_THREAD_ID", "chat-memory-tour")
 #: A turn id is bound to the session that created it, so each run needs its own.
 TURN = f"turn-{uuid.uuid4().hex[:8]}"
+
+
+async def onboard(client: Any) -> str:
+    """Create the tenant, the workspace and the membership; return the workspace to use.
+
+    The same three steps as ``tests/support.py::onboard``. Without them, a live service refuses
+    a WORKSPACE-visible write with ``Workspace not found`` — and the tour makes one (``share``
+    and the workspace-visible ``remember``), so against a real deployment this is not optional.
+    The in-process demo client has no tenancy and skips it.
+
+    One live-service rule shows up here and nowhere else: a workspace id that already labels
+    threads or documents cannot *later* become a workspace ("in use as an anchor"), so that a
+    new team never inherits an old team's anchors. On a service that was written to before the
+    tenancy milestone, ``MEMORY_WORKSPACE_ID`` is therefore already burned — the tour says so
+    and uses a fresh id rather than failing.
+    """
+    if not hasattr(client, "administer"):
+        return WORKSPACE
+    from trellis.memory.errors import ConflictError, NotFoundError  # noqa: PLC0415 - live only
+
+    with contextlib.suppress(ConflictError):
+        await client.admin.create_tenant(TENANT, tenant_id=TENANT)
+    workspaces = client.administer(TENANT).workspaces
+    workspace = WORKSPACE
+    try:
+        await workspaces.create(workspace, workspace_id=workspace)
+    except ConflictError as exc:
+        try:
+            await workspaces.get(workspace)  # it is a workspace already: use it
+        except NotFoundError:
+            workspace = f"ws-tour-{uuid.uuid4().hex[:8]}"
+            print(f"! {WORKSPACE} cannot be a workspace ({exc}); using {workspace}")
+            await workspaces.create(workspace, workspace_id=workspace)
+    await workspaces.set_member(workspace, f"user:{USER}")
+    return workspace
 
 
 async def tour(agent: AgentRuntime) -> dict[str, Any]:
@@ -183,16 +219,17 @@ async def main() -> None:
     if url:
         from trellis.memory import MemoryClient  # noqa: PLC0415 - optional in this example
 
-        client: Any = MemoryClient(url, api_key=os.environ.get("MEMORY_API_KEY"))
+        client: Any = MemoryClient(url, api_key=os.environ.get("MEMORY_API_KEY", "dev-key"))
     else:
         client = DemoMemoryClient()  # prints the calls it would have made
+    workspace = await onboard(client)
 
     harness = AgentHarness(
         memory=client,
         defaults={
             "tenant_id": TENANT,
             "user_id": USER,
-            "workspace_id": WORKSPACE,
+            "workspace_id": workspace,
             "agent_group_id": "supply-chain",
         },
         config={
@@ -216,7 +253,7 @@ async def main() -> None:
         tenant_id=TENANT,
         agent_id="memory-tour",
         user_id=USER,
-        workspace_id=WORKSPACE,
+        workspace_id=workspace,
         # share() publishes to the agent group, so the run must belong to one
         agent_group_id="supply-chain",
         thread_id=THREAD,

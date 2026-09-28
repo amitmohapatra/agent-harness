@@ -9,6 +9,12 @@ Verified against **a2a-sdk 1.1.5**, which speaks A2A protocol **v1.0** — proto
 endpoint in `supportedInterfaces`, `security` renamed to `securityRequirements`, and no
 `a2a.server.apps` module.
 
+One version detail, because it is visible on the wire: a served card's `protocolVersion` is the
+installed SDK's `PROTOCOL_VERSION_CURRENT` (`"1.0"` here), while
+`trellis.contracts.a2a.A2A_PROTOCOL_VERSION` — the default a card constructed in the contracts
+package carries when nobody sets one — is still `"0.3.0"`. Everything this surface serves says
+`1.0`; the constant is stale, and the contracts README records it.
+
 ```mermaid
 flowchart LR
   subgraph Catalogue["AI Registry"]
