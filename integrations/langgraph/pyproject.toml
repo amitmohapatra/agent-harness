@@ -1,11 +1,11 @@
 [project]
-name = "universal-agent-harness-langgraph"
-version = "0.1.0"
-description = "LangGraph adapter for the Universal Agent Harness. Never a core harness dependency."
+name = "trellis-harness-langgraph"
+version = "0.2.0"
+description = "LangGraph adapter for the trellis-harness. Never a core harness dependency."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-dependencies = ["universal-agent-harness"]
+dependencies = ["trellis-harness>=0.2"]
 
 [project.optional-dependencies]
 langgraph = ["langgraph>=1.2"]
@@ -16,7 +16,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/universal_agent_harness_langgraph"]
+packages = ["src/trellis"]
 
 [tool.uv.sources]
-universal-agent-harness = { workspace = true }
+trellis-harness = { workspace = true }

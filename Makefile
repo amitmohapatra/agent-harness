@@ -1,4 +1,4 @@
-# Universal Agent Harness — development tasks.
+# trellis-harness — development tasks.
 UV ?= uv
 PY ?= .venv/bin/python
 PYTEST ?= $(PY) -m pytest
@@ -80,7 +80,7 @@ check: lint typecheck test  ## Everything a release gate runs
 
 .PHONY: coverage
 coverage:  ## Test coverage for the core package
-	$(PYTEST) -q -m "not performance" --cov=universal_agent_harness --cov-report=term-missing
+	$(PYTEST) -q -m "not performance" --cov=trellis.harness --cov-report=term-missing
 
 .PHONY: examples
 examples:  ## Run the runnable examples

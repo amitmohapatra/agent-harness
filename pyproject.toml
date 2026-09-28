@@ -1,6 +1,6 @@
 [project]
-name = "universal-agent-harness"
-version = "0.1.0"
+name = "trellis-harness"
+version = "0.2.0"
 description = "Framework-neutral runtime harness for agents: context, memory, telemetry, tools, models, policy and evaluation around agents you already have."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -16,14 +16,14 @@ classifiers = [
 # Core stays small: contracts, config, the OTel API (not the SDK) and the Memory Service SDK.
 # No framework (langgraph/crewai/adk) and no telemetry backend are ever pulled in here.
 dependencies = [
-  "universal-agent-contracts>=0.1",
+  "trellis-contracts>=0.2",
   # The gateway client, shared with the memory service so its retry and rate-limit
   # handling has one implementation rather than two that drift.
   "bifrost-sdk>=0.1",
   "pydantic>=2.13,<3",
   "pydantic-settings>=2.15,<3",
   "opentelemetry-api>=1.44",
-  "universal-memory>=0.1",
+  "trellis-memory>=0.2",
   "pyyaml>=6",
 ]
 
@@ -35,10 +35,10 @@ registry = ["jsonschema>=4"]
 # Langfuse observability / evaluation / prompt provider
 langfuse = ["langfuse>=3.0"]
 # LangGraph adapter (never installed for plain-Python users)
-langgraph = ["universal-agent-harness-langgraph"]
+langgraph = ["trellis-harness-langgraph"]
 # JSON structured logging via structlog (stdlib logging is used when absent)
 logging = ["structlog>=25.2"]
-all = ["universal-agent-harness[otel,langfuse,langgraph,logging,registry]"]
+all = ["trellis-harness[otel,langfuse,langgraph,logging,registry]"]
 
 [dependency-groups]
 dev = [
@@ -53,7 +53,7 @@ dev = [
   "opentelemetry-sdk>=1.44",
   "structlog>=25.2",
   "langgraph>=1.2",
-  "universal-agent-harness-langgraph",
+  "trellis-harness-langgraph",
 ]
 
 [build-system]
@@ -61,7 +61,8 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/universal_agent_harness"]
+# ``trellis`` is a namespace package shared by every trellis-* distribution: no __init__.py.
+packages = ["src/trellis"]
 
 [tool.uv]
 default-groups = ["dev"]
@@ -70,18 +71,18 @@ default-groups = ["dev"]
 members = ["integrations/langgraph"]
 
 [tool.uv.sources]
-universal-agent-harness-langgraph = { workspace = true }
+trellis-harness-langgraph = { workspace = true }
 # Local development against the Memory Service SDK checkout.
-universal-memory = { path = "../agent-memory-service/sdk/python", editable = true }
+trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
 # The contract and the gateway client are separate distributions; local while unpublished.
-universal-agent-contracts = { path = "../agent-contracts", editable = true }
+trellis-contracts = { path = "../agent-contracts", editable = true }
 bifrost-sdk = { path = "../bifrost-sdk", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "integrations/langgraph/tests"]
 timeout = 120
-filterwarnings = ["error::DeprecationWarning:universal_agent_harness.*"]
+filterwarnings = ["error::DeprecationWarning:trellis.harness.*"]
 markers = [
   "performance: harness overhead benchmarks",
   "compatibility: framework version compatibility matrix",

@@ -1,4 +1,4 @@
-# Universal Agent Harness — the whole configuration surface (52 settings).
+# trellis-harness — the whole configuration surface (52 settings).
 # Load with: AgentHarness(memory=..., config="harness.yaml")
 # Every value shown is the default. Environment variables override the file.
 #

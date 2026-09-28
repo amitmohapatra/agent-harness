@@ -11,10 +11,10 @@ other was told.
 from __future__ import annotations
 
 import pytest
-from universal_agent_contracts.ids import safe_id
+from trellis.contracts.ids import safe_id
 
-from universal_agent_harness import AgentHarness
-from universal_agent_harness.config.settings import env_overrides
+from trellis.harness import AgentHarness
+from trellis.harness.config.settings import env_overrides
 
 TENANT = {"tenant_id": "acme"}
 
@@ -132,7 +132,7 @@ def test_partial_configuration_is_not_configuration() -> None:
 
 def test_an_explicit_registry_still_wins() -> None:
     """Passing one in code is how a test, or an unusual deployment, overrides config."""
-    from universal_agent_harness.registry.client import InMemoryAgentRegistry
+    from trellis.harness.registry.client import InMemoryAgentRegistry
 
     h = AgentHarness(
         defaults=TENANT,

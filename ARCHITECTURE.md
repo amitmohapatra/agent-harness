@@ -13,9 +13,9 @@ LangGraph / CrewAI / plain Python / a future framework
       |
 Framework adapter                      (the only place a framework may be imported)
       |
-Universal Agent Harness core           (contracts + pipeline; imports no framework)
+trellis-harness core           (contracts + pipeline; imports no framework)
       |
-      +--> Memory Service (universal-memory SDK)
+      +--> Memory Service (trellis-memory SDK)
       +--> Model client
       +--> Tool runtime
       +--> Artifact runtime
@@ -33,7 +33,7 @@ and `langfuse` are absent from `sys.modules`.
 ## Hexagonal layering
 
 Every outbound dependency is a `Protocol` in
-[`contracts/ports.py`](src/universal_agent_harness/contracts/ports.py): `MemoryPort`,
+[`contracts/ports.py`](src/trellis/harness/contracts/ports.py): `MemoryPort`,
 `ModelClient`, `ToolClient`, `ArtifactClient`, `TelemetryProvider`, `TelemetryRedactor`,
 `EvaluationProvider`, `EvaluationSink`, `PromptProvider`, `AgentPolicyProvider`,
 `AgentRegistryClient`, `AgentInterceptor`, `LifecycleListener`, `FrameworkAdapter`.

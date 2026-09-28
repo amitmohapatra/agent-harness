@@ -1,6 +1,6 @@
 """LangGraph: an existing node and a runtime-aware node in the same graph.
 
-pip install "universal-agent-harness[langgraph]"
+pip install "trellis-harness[langgraph]"
 python examples/langgraph_agent.py
 """
 
@@ -13,7 +13,7 @@ from typing import Annotated, TypedDict
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from universal_agent_harness import AgentHarness
+from trellis.harness import AgentHarness
 
 
 class State(TypedDict, total=False):

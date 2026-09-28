@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:  # examples/ is not a package
 from examples.langgraph_chatbot import build_graph, build_harness  # noqa: E402
 from tests.support_gateway import FakeGateway, completion  # noqa: E402
 
-from universal_agent_harness import BifrostModelClient, CollectingEvaluationSink  # noqa: E402
+from trellis.harness import BifrostModelClient, CollectingEvaluationSink  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("service_available")
 

@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import pytest
 from opentelemetry import trace as otel_trace
 
-from universal_agent_harness.config.settings import LangfuseConfig
-from universal_agent_harness.langfuse import attributes as LA
-from universal_agent_harness.langfuse.provider import (
+from trellis.harness.config.settings import LangfuseConfig
+from trellis.harness.langfuse import attributes as LA
+from trellis.harness.langfuse.provider import (
     LangfuseSpanEnricher,
     LangfuseTelemetryProvider,
     _create_client,
@@ -188,7 +188,7 @@ def test_harness_spans_are_included_in_what_langfuse_exports(recording_langfuse)
     should_export = recording_langfuse.kwargs["should_export_span"]
 
     harness_span = SimpleNamespace(
-        instrumentation_scope=SimpleNamespace(name="universal_agent_harness"), attributes={}
+        instrumentation_scope=SimpleNamespace(name="trellis.harness"), attributes={}
     )
     unrelated_span = SimpleNamespace(
         instrumentation_scope=SimpleNamespace(name="some.other.library"), attributes={}
@@ -262,7 +262,7 @@ def test_flush_failure_propagates_in_fail_closed_mode():
 async def test_evaluation_provider_creates_scores_off_the_event_loop():
     import langfuse
 
-    from universal_agent_harness.langfuse.evaluation import LangfuseEvaluationProvider
+    from trellis.harness.langfuse.evaluation import LangfuseEvaluationProvider
 
     calls: list[dict] = []
 
@@ -284,7 +284,7 @@ async def test_evaluation_provider_creates_scores_off_the_event_loop():
 
 
 async def test_evaluation_failures_never_reach_the_caller():
-    from universal_agent_harness.langfuse.evaluation import LangfuseEvaluationProvider
+    from trellis.harness.langfuse.evaluation import LangfuseEvaluationProvider
 
     class FailingClient:  # fault injection: a library cannot be asked to fail on demand
         def create_score(self, **kwargs):
@@ -300,7 +300,7 @@ async def test_prompt_provider_compiles_variables():
     from langfuse.api.prompts.types.prompt import Prompt_Text
     from langfuse.model import TextPromptClient
 
-    from universal_agent_harness.langfuse.evaluation import LangfusePromptProvider
+    from trellis.harness.langfuse.evaluation import LangfusePromptProvider
 
     real_prompt = TextPromptClient(
         Prompt_Text(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentExecutionContext,
     AgentRequest,
     AgentResponse,

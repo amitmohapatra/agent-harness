@@ -1,5 +1,5 @@
 {
-  "harness_version": "0.1.0",
+  "harness_version": "0.2.0",
   "python": "3.12.14",
   "packages": {
     "langgraph": "1.2.11",
@@ -8,7 +8,7 @@
     "opentelemetry-api": "1.44.0",
     "opentelemetry-sdk": "1.44.0",
     "pydantic": "2.13.5",
-    "universal-memory": "0.1.0"
+    "trellis-memory": "0.2.0"
   },
   "langgraph_features": {
     "wrap_existing_node": "supported",

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from universal_agent_harness import AgentHarness, AgentResponse, MemoryPolicy
+from trellis.harness import AgentHarness, AgentResponse, MemoryPolicy
 
 
 async def test_a_successful_turn_is_labelled_a_success(harness, memory, context):

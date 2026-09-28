@@ -23,7 +23,7 @@ import uuid
 
 import pytest
 
-from universal_agent_harness import AgentExecutionContext, AgentHarness
+from trellis.harness import AgentExecutionContext, AgentHarness
 
 MEMORY_URL = os.environ.get("MEMORY_SERVICE_URL", "http://localhost:8080")
 BIFROST_URL = os.environ.get("BIFROST_URL", "http://localhost:8091/v1")
@@ -62,9 +62,9 @@ async def stack():
     facts compete with this run's, and the model answered with a *previous* run's codename —
     a green-looking bug in the test, not the service.
     """
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
-    from universal_agent_harness.models.bifrost import BifrostModelClient
+    from trellis.harness.models.bifrost import BifrostModelClient
 
     run = uuid.uuid4().hex[:8]
     model = BifrostModelClient(base_url=BIFROST_URL, model=MODEL, timeout=120.0)

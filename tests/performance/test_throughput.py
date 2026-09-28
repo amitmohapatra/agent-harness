@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from universal_agent_harness import AgentExecutionContext, AgentHarness
+from trellis.harness import AgentExecutionContext, AgentHarness
 
 pytestmark = pytest.mark.performance
 
@@ -34,7 +34,7 @@ async def live_memory(service_available: bool):
     if not service_available:
         pytest.skip("no Memory Service; throughput is meaningless without one")
     from tests.support import MEMORY_API_KEY, MEMORY_SERVICE_URL
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     client = MemoryClient(MEMORY_SERVICE_URL, api_key=MEMORY_API_KEY, timeout=300.0)
     try:

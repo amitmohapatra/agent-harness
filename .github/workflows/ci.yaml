@@ -49,7 +49,7 @@ jobs:
         run: |
           uv run python -c "
           import asyncio, sys
-          from universal_agent_harness import AgentHarness
+          from trellis.harness import AgentHarness
           assert 'langgraph' not in sys.modules and 'langfuse' not in sys.modules
           h = AgentHarness(defaults={'tenant_id': 'acme'})
           async def agent(x): return x

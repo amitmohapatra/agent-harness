@@ -5,15 +5,15 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from universal_agent_contracts.errors import (
+from trellis.contracts.errors import (
     AgentTimeoutError,
     PolicyDeniedError,
     classify,
 )
 
-from universal_agent_harness import AgentError, ErrorCategory
-from universal_agent_harness.config.settings import RetryConfig
-from universal_agent_harness.execution.retry import NEVER_RETRY, RetryPolicy
+from trellis.harness import AgentError, ErrorCategory
+from trellis.harness.config.settings import RetryConfig
+from trellis.harness.execution.retry import NEVER_RETRY, RetryPolicy
 
 
 @pytest.mark.parametrize(
@@ -31,7 +31,7 @@ def test_classification(exc, category):
 
 
 def test_sdk_errors_are_classified_by_module_and_name():
-    from universal_memory.errors import RateLimitedError
+    from trellis.memory.errors import RateLimitedError
 
     assert classify(RateLimitedError("slow down")) is ErrorCategory.RATE_LIMIT
 

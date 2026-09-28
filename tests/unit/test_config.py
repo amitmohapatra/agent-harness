@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from universal_agent_harness import HarnessConfig
-from universal_agent_harness.config.settings import env_overrides
+from trellis.harness import HarnessConfig
+from trellis.harness.config.settings import env_overrides
 
 
 def test_defaults_are_safe():

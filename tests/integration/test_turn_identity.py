@@ -9,7 +9,7 @@ which is how a replayed LangGraph superstep keeps its identity.
 
 from __future__ import annotations
 
-from universal_agent_harness import AgentExecutionContext, AgentHarness
+from trellis.harness import AgentExecutionContext, AgentHarness
 
 
 async def _ids(harness, ctx, text):

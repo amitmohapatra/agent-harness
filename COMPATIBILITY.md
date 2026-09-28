@@ -9,13 +9,13 @@ with the versions that were actually exercised; the table below is that file, tr
 | Component | Version tested |
 | --- | --- |
 | Python | 3.12.14 |
-| universal-agent-harness | 0.1.0 |
+| trellis-harness | 0.1.0 |
 | langgraph | 1.2.11 |
 | langchain-core | 1.6.3 |
 | langfuse | 4.15.2 |
 | opentelemetry-api / -sdk | 1.44.0 |
 | pydantic | 2.13.5 |
-| universal-memory (Memory Service SDK) | 0.1.0 |
+| trellis-memory (Memory Service SDK) | 0.1.0 |
 
 Declared support ranges (from `pyproject.toml`): Python `>=3.12`, `pydantic>=2.13,<3`,
 `opentelemetry-api>=1.44`, and for the extras `langgraph>=1.2`, `langfuse>=3.0`.
@@ -84,7 +84,7 @@ so no live project or network is needed to run the suite.
 
 ## Memory Service
 
-The harness depends on the `universal-memory` SDK contract only:
+The harness depends on the `trellis-memory` SDK contract only:
 `MemoryClient.bind(**scope)` → `MemoryContext`, then `context()`, `recall()`, `observe()`,
 `chat.*`, `graph.*`, `files.*`, `tools.record()`.
 
@@ -163,7 +163,7 @@ events and state mapping do not.
 
 | Missing | Behaviour |
 | --- | --- |
-| `universal-agent-harness-langgraph` | `harness.langgraph` raises `ImportError` naming the extra |
+| `trellis-harness-langgraph` | `harness.langgraph` raises `ImportError` naming the extra |
 | `langfuse` | Langfuse falls back to `otlp` attribute mode |
 | `opentelemetry-sdk` | the OTel API's no-op is used; spans are created and dropped |
 | `structlog` | stdlib logging with the same fields under `extra` |

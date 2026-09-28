@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from universal_agent_harness import AgentHarness, __version__
+from trellis.harness import AgentHarness, __version__
 
 MATRIX_PATH = Path(__file__).resolve().parents[2] / "compatibility-matrix.json"
 
@@ -53,7 +53,7 @@ def test_core_never_imports_a_framework():
     import subprocess
 
     code = (
-        "import sys; import universal_agent_harness as u; "
+        "import sys; import trellis.harness as u; "
         "banned = {'langgraph', 'crewai', 'google.adk', 'langchain', 'langfuse'} & set(sys.modules); "
         "print(','.join(sorted(banned)))"
     )
@@ -64,29 +64,29 @@ def test_core_never_imports_a_framework():
 
 
 def test_langgraph_adapter_reports_the_installed_version():
-    from universal_agent_harness_langgraph import langgraph_version
+    from trellis.harness_langgraph import langgraph_version
 
     assert langgraph_version() == installed("langgraph")
 
 
 def test_adapter_availability_is_detected_not_assumed():
-    from universal_agent_harness_langgraph import LangGraphHarness
+    from trellis.harness_langgraph import LangGraphHarness
 
     assert LangGraphHarness.available() is (installed("langgraph") is not None)
 
 
 def test_harness_langgraph_property_requires_the_adapter(monkeypatch):
     harness = AgentHarness(defaults={"tenant_id": "acme"})
-    monkeypatch.setitem(sys.modules, "universal_agent_harness_langgraph", None)
+    monkeypatch.setitem(sys.modules, "trellis.harness_langgraph", None)
     harness._langgraph = None
-    with pytest.raises(ImportError, match="universal-agent-harness\\[langgraph\\]"):
+    with pytest.raises(ImportError, match="trellis-harness\\[langgraph\\]"):
         _ = harness.langgraph
 
 
 def test_langfuse_absence_degrades_to_otlp_mode(monkeypatch):
     """With the SDK missing, Langfuse still works through OTLP attributes (§22)."""
-    from universal_agent_harness.config.settings import LangfuseConfig
-    from universal_agent_harness.langfuse.provider import LangfuseTelemetryProvider
+    from trellis.harness.config.settings import LangfuseConfig
+    from trellis.harness.langfuse.provider import LangfuseTelemetryProvider
 
     monkeypatch.setitem(sys.modules, "langfuse", None)
     provider = LangfuseTelemetryProvider(
@@ -102,7 +102,7 @@ def test_opentelemetry_sdk_is_not_required_by_the_core():
 
     code = "import importlib.util as u; print(u.find_spec('opentelemetry.sdk') is not None)"
     subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
-    from universal_agent_harness.telemetry.otel import OpenTelemetryTelemetryProvider
+    from trellis.harness.telemetry.otel import OpenTelemetryTelemetryProvider
 
     provider = OpenTelemetryTelemetryProvider()
     with provider.start_span("probe") as span:  # must work whatever is installed
@@ -124,7 +124,7 @@ def test_write_compatibility_matrix(request):
                 "opentelemetry-api",
                 "opentelemetry-sdk",
                 "pydantic",
-                "universal-memory",
+                "trellis-memory",
             )
         },
         "langgraph_features": passed_features,

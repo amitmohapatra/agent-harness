@@ -10,8 +10,8 @@ from __future__ import annotations
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from universal_agent_harness import AgentExecutionContext
-from universal_agent_harness.telemetry.redaction import REDACTED, DefaultRedactor
+from trellis.harness import AgentExecutionContext
+from trellis.harness.telemetry.redaction import REDACTED, DefaultRedactor
 
 ids = st.text(min_size=1, max_size=40).filter(lambda s: s.strip())
 SETTINGS = settings(max_examples=150, deadline=None)

@@ -1,14 +1,14 @@
-# universal-agent-harness-langgraph
+# trellis-harness-langgraph
 
-The LangGraph adapter for the [Universal Agent Harness](../../README.md). The harness core
+The LangGraph adapter for the [trellis-harness](../../README.md). The harness core
 never imports LangGraph; installing this package is what makes `harness.langgraph` work.
 
 ```bash
-pip install "universal-agent-harness[langgraph]"
+pip install "trellis-harness[langgraph]"
 ```
 
 ```python
-from universal_agent_harness import AgentHarness
+from trellis.harness import AgentHarness
 
 harness = AgentHarness(memory=memory_client, defaults={"tenant_id": "acme"})
 

@@ -8,9 +8,9 @@ to the application.
 from __future__ import annotations
 
 import pytest
-from universal_agent_contracts.errors import ConfigurationError
+from trellis.contracts.errors import ConfigurationError
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentExecutionContext,
     AgentHarness,
     MemoryPolicy,
@@ -72,7 +72,7 @@ async def test_the_callers_own_values_are_never_overwritten(memory):
 
 async def test_execution_identity_is_never_back_filled(memory):
     """Ids that identify *this* run must not be inherited from defaults."""
-    from universal_agent_harness.execution.context_factory import FILLABLE_FIELDS
+    from trellis.harness.execution.context_factory import FILLABLE_FIELDS
 
     for field in ("agent_run_id", "request_id", "trace_id", "turn_id", "thread_id", "task_id"):
         assert field not in FILLABLE_FIELDS
@@ -152,7 +152,7 @@ async def test_ingesting_into_a_thread_creates_the_thread_first(memory, context,
     await harness.wrap(agent, agent_id="inv")(None, context=context)
 
     names = [name for name, _ in memory.calls]
-    assert names.index("chat.create") < names.index("files.add"), (
+    assert names.index("chat.create") < names.index("documents.add"), (
         "the thread must be created before the document is ingested"
     )
 

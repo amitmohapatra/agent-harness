@@ -6,11 +6,11 @@ import asyncio
 
 import pytest
 
-from universal_agent_harness.artifacts.stores import InMemoryArtifactStore
-from universal_agent_harness.execution.context_factory import ContextFactory
-from universal_agent_harness.execution.sync import in_event_loop, run_sync
-from universal_agent_harness.memory.writeback import WritebackQueue
-from universal_agent_harness.telemetry.metrics import ALLOWED_LABELS, labels
+from trellis.harness.artifacts.stores import InMemoryArtifactStore
+from trellis.harness.execution.context_factory import ContextFactory
+from trellis.harness.execution.sync import in_event_loop, run_sync
+from trellis.harness.memory.writeback import WritebackQueue
+from trellis.harness.telemetry.metrics import ALLOWED_LABELS, labels
 
 # --------------------------------------------------------------------------- writeback
 

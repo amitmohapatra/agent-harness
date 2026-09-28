@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from universal_agent_harness import AgentHarness
+from trellis.harness import AgentHarness
 
 pytestmark = pytest.mark.performance
 
@@ -131,7 +131,7 @@ async def test_context_creation_is_constant_time():
     measured ~0.03ms at p50 and ~0.09ms at p95 on an unloaded machine, so the budget below
     has room for the noise and still catches a regression worth knowing about.
     """
-    from universal_agent_harness import AgentExecutionContext
+    from trellis.harness import AgentExecutionContext
 
     async def loop_only() -> None:
         await asyncio.sleep(0)

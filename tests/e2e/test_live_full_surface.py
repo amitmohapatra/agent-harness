@@ -29,7 +29,7 @@ from typing import Annotated, TypedDict
 
 import pytest
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentExecutionContext,
     AgentHarness,
     AgentResponse,
@@ -142,7 +142,7 @@ async def worker_ready() -> bool:
     processing latency behind the cold-start allowance. This pays the warmup once, up front,
     and leaves every test's own budget tight enough to still catch a slowdown.
     """
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     probe = MemoryClient(URL, api_key=API_KEY, timeout=60.0)
     marker = uuid.uuid4().hex[:8]
@@ -170,7 +170,7 @@ async def worker_ready() -> bool:
 
 @pytest.fixture
 async def client(worker_ready: bool):
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     c = MemoryClient(URL, api_key=API_KEY, timeout=60.0)
     try:
@@ -324,7 +324,7 @@ async def test_visibility_levels_that_the_context_supports(client, context):
 async def test_a_visibility_the_context_cannot_express_is_refused_immediately(client):
     """The service accepts such a write and fails the job that would create the memory, so
     the harness refuses it up front instead."""
-    from universal_agent_contracts.errors import ConfigurationError
+    from trellis.contracts.errors import ConfigurationError
 
     harness = build(client)
     bare = AgentExecutionContext.create(tenant_id=TENANT, agent_id="live-surface")
@@ -454,7 +454,7 @@ async def test_a_document_becomes_retrievable_knowledge(client, context, tmp_pat
         assert handle.document_id
         # poll the document until the service reports it indexed
         for _ in range(40):
-            doc_info = await rt.memory.sdk.files.document(handle.document_id)
+            doc_info = await rt.memory.sdk.documents.document(handle.document_id)
             if doc_info.status in ("READY", "FAILED"):
                 break
             await asyncio.sleep(1.5)
@@ -883,7 +883,7 @@ async def test_a_langgraph_graph_runs_against_the_live_service(client, run_id, s
 
 async def test_timeout_cancels_a_live_call(client, context):
     harness = build(client, timeouts={"default_seconds": 0.25, "memory_seconds": 60.0})
-    from universal_agent_harness import AgentTimeoutError
+    from trellis.harness import AgentTimeoutError
 
     async def slow(_payload, runtime):
         await asyncio.sleep(5)
@@ -894,7 +894,7 @@ async def test_timeout_cancels_a_live_call(client, context):
 
 
 async def test_policy_denial_blocks_before_any_write(client, context):
-    from universal_agent_harness import AllowListPolicyProvider, PolicyDeniedError
+    from trellis.harness import AllowListPolicyProvider, PolicyDeniedError
 
     harness = AgentHarness(
         memory=client,
@@ -921,7 +921,7 @@ async def test_policy_denial_blocks_before_any_write(client, context):
 
 async def test_memory_failure_degrades_the_run_but_keeps_the_answer(context):
     """Point the harness at a dead service: the agent still answers, with a warning."""
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     dead = MemoryClient("http://127.0.0.1:9", api_key="x", timeout=2.0, max_retries=0)
     harness = AgentHarness(

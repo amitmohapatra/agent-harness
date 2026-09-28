@@ -116,7 +116,7 @@ async def test_short_term_and_episodic_memories_are_just_different_hints(harness
 
 
 async def test_private_by_default_policy_applies_to_remember(memory, context):
-    from universal_agent_harness import AgentHarness
+    from trellis.harness import AgentHarness
 
     harness = AgentHarness(
         memory=memory,
@@ -163,7 +163,7 @@ async def test_document_ingestion_feeds_the_rag_corpus(harness, memory, context,
         ),
     )
     assert handle.document_id.startswith("doc_"), "the service returns a document handle"
-    call = memory.of("files.add")[0]
+    call = memory.of("documents.add")[0]
     assert call["title"] == "Reorder policy" and call["visibility"] == "WORKSPACE"
     span = span_by_name(spans, "agent.memory.ingest")
     assert span.attributes["memory.document.id"] == handle.document_id
@@ -294,7 +294,7 @@ async def test_verify_grounds_an_answer_against_the_evidence(harness, memory, co
 
 async def test_reads_degrade_and_writes_propagate(dead_memory, context):
     """Against a service that is genuinely down: reads degrade, writes propagate."""
-    from universal_agent_harness import AgentHarness
+    from trellis.harness import AgentHarness
 
     harness = AgentHarness(
         memory=dead_memory,
@@ -320,7 +320,7 @@ async def test_reads_degrade_and_writes_propagate(dead_memory, context):
 
 
 async def test_every_operation_is_a_noop_without_a_memory_client(context):
-    from universal_agent_harness import AgentHarness
+    from trellis.harness import AgentHarness
 
     harness = AgentHarness(defaults={"tenant_id": "acme"})
 

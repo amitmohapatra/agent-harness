@@ -7,14 +7,14 @@ import asyncio
 import pytest
 from tests.support import span_by_name
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentHarness,
     AgentStatus,
     AgentTimeoutError,
     ErrorCategory,
     PolicyDeniedError,
 )
-from universal_agent_harness.policy.providers import AllowListPolicyProvider
+from trellis.harness.policy.providers import AllowListPolicyProvider
 
 
 class DomainError(Exception):
@@ -248,7 +248,7 @@ async def test_tool_policy_blocks_a_specific_tool(memory, context):
 
 
 async def test_interceptor_failures_do_not_hide_the_original_error(harness, context):
-    from universal_agent_harness import BaseInterceptor
+    from trellis.harness import BaseInterceptor
 
     class Broken(BaseInterceptor):
         name, order = "broken", 95

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from universal_agent_contracts.errors import AgentError
+from trellis.contracts.errors import AgentError
 
-from universal_agent_harness import AgentResponse, BaseInterceptor, Order
-from universal_agent_harness.interceptors.base import InterceptorChain
+from trellis.harness import AgentResponse, BaseInterceptor, Order
+from trellis.harness.interceptors.base import InterceptorChain
 
 
 class Recorder(BaseInterceptor):

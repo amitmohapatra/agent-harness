@@ -7,8 +7,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from universal_agent_harness import CancellationToken
-from universal_agent_harness.runtime.cancellation import remaining_seconds, tightest
+from trellis.harness import CancellationToken
+from trellis.harness.runtime.cancellation import remaining_seconds, tightest
 
 
 async def test_cancel_sets_reason_and_wakes_waiters():

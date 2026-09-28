@@ -7,7 +7,7 @@ drifts from its protocol, this fails before an adapter does at runtime.
 from __future__ import annotations
 
 import pytest
-from universal_agent_contracts.ports import (
+from trellis.contracts.ports import (
     AgentPolicyProvider,
     AgentRegistryClient,
     ArtifactClient,
@@ -20,32 +20,32 @@ from universal_agent_contracts.ports import (
     ToolClient,
 )
 
-from universal_agent_harness.artifacts.stores import (
+from trellis.harness.artifacts.stores import (
     FileArtifactStore,
     InMemoryArtifactStore,
     NoArtifactStore,
 )
-from universal_agent_harness.config.settings import LangfuseConfig
-from universal_agent_harness.evaluation.events import (
+from trellis.harness.config.settings import LangfuseConfig
+from trellis.harness.evaluation.events import (
     CollectingEvaluationSink,
     CompositeEvaluationSink,
     LoggingEvaluationSink,
     NoOpEvaluationProvider,
 )
-from universal_agent_harness.langfuse.provider import LangfuseTelemetryProvider
-from universal_agent_harness.memory.runtime import NoOpMemoryRuntime
-from universal_agent_harness.models.providers import DirectModelClient, UnconfiguredModelClient
-from universal_agent_harness.policy.providers import (
+from trellis.harness.langfuse.provider import LangfuseTelemetryProvider
+from trellis.harness.memory.runtime import NoOpMemoryRuntime
+from trellis.harness.models.providers import DirectModelClient, UnconfiguredModelClient
+from trellis.harness.policy.providers import (
     AllowListPolicyProvider,
     CallablePolicyProvider,
     NoOpPolicyProvider,
 )
-from universal_agent_harness.registry.client import InMemoryAgentRegistry, NoOpAgentRegistry
-from universal_agent_harness.telemetry.composite import CompositeTelemetryProvider
-from universal_agent_harness.telemetry.noop import NoOpTelemetryProvider
-from universal_agent_harness.telemetry.otel import OpenTelemetryTelemetryProvider
-from universal_agent_harness.telemetry.redaction import DefaultRedactor, NoOpRedactor
-from universal_agent_harness.tools.local import CallableToolClient, LocalToolClient, NoToolsClient
+from trellis.harness.registry.client import InMemoryAgentRegistry, NoOpAgentRegistry
+from trellis.harness.telemetry.composite import CompositeTelemetryProvider
+from trellis.harness.telemetry.noop import NoOpTelemetryProvider
+from trellis.harness.telemetry.otel import OpenTelemetryTelemetryProvider
+from trellis.harness.telemetry.redaction import DefaultRedactor, NoOpRedactor
+from trellis.harness.tools.local import CallableToolClient, LocalToolClient, NoToolsClient
 
 
 @pytest.mark.parametrize(
@@ -90,6 +90,6 @@ def test_memory_runtime_satisfies_the_port(harness, context):
 
 
 def test_langfuse_evaluation_provider_satisfies_the_port():
-    from universal_agent_harness.langfuse.evaluation import LangfuseEvaluationProvider
+    from trellis.harness.langfuse.evaluation import LangfuseEvaluationProvider
 
     assert isinstance(LangfuseEvaluationProvider(client=object()), EvaluationProvider)

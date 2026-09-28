@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from universal_agent_contracts.errors import MemoryUnavailableError
+from trellis.contracts.errors import MemoryUnavailableError
 
-from universal_agent_harness import AgentHarness, AgentResponse, MemoryObservation, MemoryPolicy
+from trellis.harness import AgentHarness, AgentResponse, MemoryObservation, MemoryPolicy
 
 
 async def test_context_is_retrieved_before_the_agent_runs(harness, memory, context):
@@ -92,7 +92,7 @@ async def test_observation_keys_are_stable_across_retries(harness, memory, conte
 
 
 async def test_claims_are_observed_when_the_policy_asks(harness, memory, context):
-    from universal_agent_harness import Claim
+    from trellis.harness import Claim
 
     async def agent(payload):
         return AgentResponse.ok("x", claims=[Claim(claim_id="c1", text="stock is low")])

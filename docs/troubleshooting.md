@@ -78,7 +78,7 @@ but a `visibility="WORKSPACE"` or `"GROUP"` document is readable only by members
 workspace or group, and membership lives in the authorization service, not in the harness.
 Either ingest with the default thread visibility, or provision the membership.
 
-Also remember indexing is asynchronous: poll `runtime.memory.sdk.files.document(id)` until
+Also remember indexing is asynchronous: poll `runtime.memory.sdk.documents.document(id)` until
 `status == "READY"`, and allow a moment more for the vector index.
 
 ### `ValidationError: turn_id belongs to a different session`
@@ -99,7 +99,7 @@ tool with `@harness.wrap_tool` and call it directly.
 
 ### `ImportError: LangGraph support needs the adapter`
 
-`pip install "universal-agent-harness[langgraph]"`.
+`pip install "trellis-harness[langgraph]"`.
 
 ### My agent's exception type changed
 

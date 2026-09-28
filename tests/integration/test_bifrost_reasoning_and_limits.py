@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 from tests.support_gateway import FakeGateway, completion
-from universal_agent_contracts.errors import ModelError
+from trellis.contracts.errors import ModelError
 
-from universal_agent_harness import BifrostModelClient
+from trellis.harness import BifrostModelClient
 
 # ``Retry-After`` parsing moved to the shared gateway client when this module stopped
 # carrying its own copy; its spellings — seconds, HTTP date, absent, unparseable, and the

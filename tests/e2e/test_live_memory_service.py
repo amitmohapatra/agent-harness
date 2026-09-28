@@ -19,7 +19,7 @@ import uuid
 
 import pytest
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentExecutionContext,
     AgentHarness,
     AgentResponse,
@@ -65,7 +65,7 @@ async def live_client():
     and pytest-asyncio gives each test its own loop — a module-scoped client therefore
     works for the first test and fails with "Event loop is closed" for the rest.
     """
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     client = MemoryClient(URL, api_key=API_KEY, timeout=30.0)
     try:

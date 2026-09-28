@@ -14,10 +14,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from universal_agent_contracts.errors import ResultValidationError
-from universal_agent_contracts.messages import AgentResponse, AgentStatus
+from trellis.contracts.errors import ResultValidationError
+from trellis.contracts.messages import AgentResponse, AgentStatus
 
-from universal_agent_harness import AgentHarness
+from trellis.harness import AgentHarness
 
 SCHEMA: dict[str, Any] = {
     "type": "object",

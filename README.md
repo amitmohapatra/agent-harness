@@ -1,4 +1,4 @@
-# Universal Agent Harness
+# trellis-harness
 
 A framework-neutral runtime layer around agents you **already have**. It is not an agent
 framework, and it does not want to be one: LangGraph, CrewAI or plain Python keep owning
@@ -95,15 +95,15 @@ teams, where the alternative is the same 300 lines copy-pasted and subtly differ
 ## Install
 
 ```bash
-pip install universal-agent-harness                        # core: plain Python
-pip install "universal-agent-harness[langgraph]"           # + LangGraph adapter
-pip install "universal-agent-harness[langfuse]"            # + Langfuse observability
-pip install "universal-agent-harness[otel]"                # + OTel SDK & OTLP exporter
-pip install "universal-agent-harness[langgraph,langfuse]"  # combined
+pip install trellis-harness                        # core: plain Python
+pip install "trellis-harness[langgraph]"           # + LangGraph adapter
+pip install "trellis-harness[langfuse]"            # + Langfuse observability
+pip install "trellis-harness[otel]"                # + OTel SDK & OTLP exporter
+pip install "trellis-harness[langgraph,langfuse]"  # combined
 ```
 
 Plain-Python users never receive LangGraph transitively: the adapter is a separate
-distribution (`universal-agent-harness-langgraph`) and the core imports no framework.
+distribution (`trellis-harness-langgraph`) and the core imports no framework.
 
 Requires Python 3.12+.
 
@@ -111,8 +111,8 @@ Requires Python 3.12+.
 
 ```python
 import asyncio
-from universal_agent_harness import AgentExecutionContext, AgentHarness
-from universal_memory import MemoryClient
+from trellis.harness import AgentExecutionContext, AgentHarness
+from trellis.memory import MemoryClient
 
 memory = MemoryClient("http://memory-service:8080", api_key="...")
 harness = AgentHarness(memory=memory, defaults={"tenant_id": "acme"})
@@ -156,7 +156,7 @@ Each step is small, and each one is optional — stop wherever it stops paying f
 ### 1. Wrap what you have
 
 ```python
-from universal_agent_harness import AgentHarness
+from trellis.harness import AgentHarness
 
 harness = AgentHarness(defaults={"tenant_id": "acme"})
 
@@ -178,7 +178,7 @@ result, a deadline, and an error taxonomy if it throws.
 ### 2. Say who is asking
 
 ```python
-from universal_agent_harness import AgentExecutionContext
+from trellis.harness import AgentExecutionContext
 
 context = AgentExecutionContext.create(
     tenant_id="acme",
@@ -206,7 +206,7 @@ async def inventory_agent(question, agent):
     return AgentResponse.ok({"answer": "3 units"}, confidence=0.9)
 ```
 
-`agent` is the [`AgentRuntime`](src/universal_agent_harness/runtime/agent_runtime.py):
+`agent` is the [`AgentRuntime`](src/trellis/harness/runtime/agent_runtime.py):
 `memory`, `memory_context`, `model`, `tools`, `artifacts`, `logger`, `tracer`,
 `cancellation`, `deadline`.
 
@@ -303,7 +303,7 @@ async def inventory_agent(state, agent):
     return AgentResponse.ok({"answer": response.text, "stock": stock.output})
 ```
 
-`agent` is an [`AgentRuntime`](src/universal_agent_harness/runtime/agent_runtime.py):
+`agent` is an [`AgentRuntime`](src/trellis/harness/runtime/agent_runtime.py):
 `memory`, `memory_context`, `model`, `tools`, `artifacts`, `tracer`, `logger`,
 `cancellation`, `deadline`, `metadata`. Calls made through it are instrumented; calls made
 around it are not (see [Limitations](docs/limitations.md)).
@@ -420,7 +420,7 @@ async def pricing_api(sku: str) -> float: ...  # returns the tool's own value, i
 harness never imports a provider SDK:
 
 ```python
-from universal_agent_harness import DirectModelClient
+from trellis.harness import DirectModelClient
 
 harness = AgentHarness(memory=memory, model=my_provider_client)
 
@@ -629,7 +629,7 @@ Langfuse being unavailable never fails a business execution in the default
 ## Langfuse setup
 
 ```bash
-pip install "universal-agent-harness[langfuse]"
+pip install "trellis-harness[langfuse]"
 
 export LANGFUSE_PUBLIC_KEY=pk-lf-...
 export LANGFUSE_SECRET_KEY=sk-lf-...
@@ -680,7 +680,7 @@ await harness.evaluation_provider.score(
 ## Extending the harness
 
 ```python
-from universal_agent_harness import BaseInterceptor, Order
+from trellis.harness import BaseInterceptor, Order
 
 
 class AuditInterceptor(BaseInterceptor):

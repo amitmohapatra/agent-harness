@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentExecutionContext,
     AgentHarness,
     AgentRuntime,
@@ -181,7 +181,7 @@ async def tour(agent: AgentRuntime) -> dict[str, Any]:
 async def main() -> None:
     url = os.environ.get("MEMORY_SERVICE_URL")
     if url:
-        from universal_memory import MemoryClient  # noqa: PLC0415 - optional in this example
+        from trellis.memory import MemoryClient  # noqa: PLC0415 - optional in this example
 
         client: Any = MemoryClient(url, api_key=os.environ.get("MEMORY_API_KEY"))
     else:
@@ -254,7 +254,7 @@ class DemoMemoryClient:
 class DemoContext:
     def __init__(self, client: DemoMemoryClient, scope: dict[str, Any]) -> None:
         self._client, self.scope = client, _Scope(scope)
-        self.chat, self.graph, self.files = _Chat(client), _Graph(client), _Files(client)
+        self.chat, self.graph, self.documents = _Chat(client), _Graph(client), _Documents(client)
 
     def derive(self, **changes: Any) -> DemoContext:
         return DemoContext(self._client, {**self.scope.fields, **changes})
@@ -326,12 +326,12 @@ class _Graph:
         return _GraphAnswer()
 
 
-class _Files:
+class _Documents:
     def __init__(self, client: DemoMemoryClient) -> None:
         self._client = client
 
     async def add(self, file: Any, **kwargs: Any) -> Any:
-        self._client.calls.append(("files.add", {"file": Path(str(file)).name, **kwargs}))
+        self._client.calls.append(("documents.add", {"file": Path(str(file)).name, **kwargs}))
         return _Document()
 
 

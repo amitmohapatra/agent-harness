@@ -11,11 +11,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from universal_agent_contracts.model import ModelResponse
-from universal_agent_contracts.tool import ToolSpec
+from trellis.contracts.model import ModelResponse
+from trellis.contracts.tool import ToolSpec
 
-from universal_agent_harness import AgentHarness
-from universal_agent_harness.reasoning import react
+from trellis.harness import AgentHarness
+from trellis.harness.reasoning import react
 
 
 class ScriptedModel:

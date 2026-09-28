@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from universal_agent_harness import AgentExecutionContext
+from trellis.harness import AgentExecutionContext
 
 
 def emitted(context: AgentExecutionContext) -> dict:
@@ -118,7 +118,7 @@ def test_every_emitted_scope_satisfies_all_three_rules(fields):
 
 def test_the_sdk_scope_model_accepts_what_we_emit():
     """The SDK's own Scope model is the nearest thing to the service's validator."""
-    from universal_memory.models import Scope
+    from trellis.memory.models import Scope
 
     context = AgentExecutionContext.create(
         tenant_id="acme",
@@ -139,7 +139,7 @@ def test_the_sdk_scope_model_accepts_what_we_emit():
 def test_observation_kinds_match_the_services_enum():
     """These are the service's ``ObservationKind`` values. A kind outside this set is a 422
     from the service only under conditions a green turn never reaches, so it is asserted here."""
-    from universal_agent_harness import OBSERVATION_KINDS
+    from trellis.harness import OBSERVATION_KINDS
 
     assert {
         "MESSAGE",
@@ -154,7 +154,7 @@ def test_observation_kinds_match_the_services_enum():
 
 
 def test_an_unknown_observation_kind_fails_before_the_wire():
-    from universal_agent_harness import MemoryObservation
+    from trellis.harness import MemoryObservation
 
     with pytest.raises(ValueError, match="unknown observation kind"):
         MemoryObservation(content="x", kind="CLAIM")
@@ -163,7 +163,7 @@ def test_an_unknown_observation_kind_fails_before_the_wire():
 async def test_the_automatic_writeback_only_uses_valid_kinds(harness, memory, context):
     """The harness's own observations must be in the vocabulary — this is the regression
     test for input/claim observations being written with invented kinds."""
-    from universal_agent_harness import OBSERVATION_KINDS, AgentResponse, Claim
+    from trellis.harness import OBSERVATION_KINDS, AgentResponse, Claim
 
     async def agent(payload):
         return AgentResponse.ok("an answer", claims=[Claim(claim_id="c1", text="a claim")])

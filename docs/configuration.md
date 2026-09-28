@@ -6,7 +6,7 @@ startup, not on the first agent execution — and unknown keys are rejected rath
 silently ignored.
 
 ```python
-from universal_agent_harness import AgentHarness, HarnessConfig
+from trellis.harness import AgentHarness, HarnessConfig
 
 harness = AgentHarness(memory=memory, config="harness.yaml")
 harness = AgentHarness(memory=memory, config={"timeouts": {"default_seconds": 10}})
@@ -28,7 +28,7 @@ has to agree with the policy object you supplied.
 
 Every setting, its default and a one-line meaning is in
 [`harness.example.yaml`](../harness.example.yaml); the authoritative definitions are in
-[`config/settings.py`](../src/universal_agent_harness/config/settings.py).
+[`config/settings.py`](../src/trellis/harness/config/settings.py).
 
 Decisions worth calling out:
 
@@ -192,7 +192,7 @@ harness.wrap(
 
 ```python
 AgentHarness(
-    memory=MemoryClient(...),  # universal-memory SDK client (or a MemoryContext)
+    memory=MemoryClient(...),  # trellis-memory SDK client (or a MemoryContext)
     model=my_model_client,  # ModelClient, or any callable/object with ainvoke
     tools=[tool_a, tool_b],  # list, {name: callable}, or a ToolClient
     artifacts="/var/lib/agent-artifacts",  # path, store instance, or None (in-process)

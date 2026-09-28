@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from universal_agent_harness.config.settings import SamplingConfig
-from universal_agent_harness.telemetry.sampling import Sampler, roll
+from trellis.harness.config.settings import SamplingConfig
+from trellis.harness.telemetry.sampling import Sampler, roll
 
 
 def test_full_and_zero_rates():

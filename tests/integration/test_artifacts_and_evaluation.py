@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from tests.support import span_names
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentHarness,
     AgentResponse,
     Claim,
@@ -227,7 +227,7 @@ async def test_registry_hook_is_a_noop_by_default(harness):
 
 
 async def test_in_memory_registry_receives_descriptors(memory):
-    from universal_agent_harness.registry.client import InMemoryAgentRegistry
+    from trellis.harness.registry.client import InMemoryAgentRegistry
 
     registry = InMemoryAgentRegistry()
     harness = AgentHarness(

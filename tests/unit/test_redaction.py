@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from universal_agent_harness.telemetry.redaction import DefaultRedactor, NoOpRedactor, reference
+from trellis.harness.telemetry.redaction import DefaultRedactor, NoOpRedactor, reference
 
 
 def test_sensitive_keys_are_redacted():

@@ -9,7 +9,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from universal_agent_harness.registry.ai_registry import AIRegistryClient
+from trellis.harness.registry.ai_registry import AIRegistryClient
 
 MANIFEST = {
     "contract": "v1",
@@ -162,7 +162,7 @@ async def test_tools_and_agents_are_separate_listings() -> None:
 async def test_registration_is_refused_to_the_data_plane() -> None:
     """A process that could register itself would let a deployment add an agent nobody
     approved — the property the registry exists to prevent."""
-    from universal_agent_contracts.descriptors import AgentDescriptor
+    from trellis.contracts.descriptors import AgentDescriptor
 
     calls, handler = serving()
     r = registry(handler)
@@ -269,7 +269,7 @@ async def test_two_products_may_each_own_an_agent_of_the_same_name() -> None:
 async def test_the_separator_survives_id_sanitisation() -> None:
     """``safe_id`` rewrites ``/`` to ``-``, which would make billing/refund-agent
     indistinguishable from product "billing-refund"'s agent "agent". ``:`` survives."""
-    from universal_agent_contracts.ids import safe_id
+    from trellis.contracts.ids import safe_id
 
     _, handler = serving()
     r = registry(handler)

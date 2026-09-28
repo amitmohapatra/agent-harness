@@ -140,7 +140,7 @@ class RecordingContext:
         self._scope = scope
         self.scope = context.scope
         self.chat = _RecordingAPI(context.chat, calls, "chat", scope)
-        self.files = _RecordingAPI(context.files, calls, "files", scope)
+        self.documents = _RecordingAPI(context.documents, calls, "documents", scope)
         self.graph = _RecordingAPI(context.graph, calls, "graph", scope)
         self.tools = _RecordingAPI(context.tools, calls, "tools", scope)
         self.runs = _RecordingAPI(context.runs, calls, "runs", scope)

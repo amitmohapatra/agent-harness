@@ -10,7 +10,7 @@ question shape produce a procedure with support=3 that is retrieved for an unsee
 
 from __future__ import annotations
 
-from universal_agent_harness import AgentExecutionContext, AgentHarness
+from trellis.harness import AgentExecutionContext, AgentHarness
 
 
 async def stock_db(sku: str) -> dict:
@@ -39,7 +39,7 @@ async def test_the_query_is_what_keys_the_procedure(memory, context):
 
 
 async def test_an_explicit_task_on_the_call_wins(memory, context):
-    from universal_agent_contracts.tool import ToolCall
+    from trellis.contracts.tool import ToolCall
 
     harness = _harness(memory)
 

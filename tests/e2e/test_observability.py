@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from tests.support import span_by_name, span_names
 
-from universal_agent_harness import AgentHarness, AgentResponse
-from universal_agent_harness.langfuse import attributes as LA
+from trellis.harness import AgentHarness, AgentResponse
+from trellis.harness.langfuse import attributes as LA
 
 
 class Model:

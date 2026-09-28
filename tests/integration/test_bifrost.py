@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import pytest
 from tests.support_gateway import FakeGateway, completion
-from universal_agent_contracts.errors import ModelError
-from universal_agent_contracts.tool import ToolSpec
+from trellis.contracts.errors import ModelError
+from trellis.contracts.tool import ToolSpec
 
-from universal_agent_harness import AgentHarness, BifrostModelClient, ModelRequest, tool_schemas
+from trellis.harness import AgentHarness, BifrostModelClient, ModelRequest, tool_schemas
 
 
 async def test_a_plain_completion_is_normalized() -> None:

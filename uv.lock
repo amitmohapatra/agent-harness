@@ -4,8 +4,8 @@ requires-python = ">=3.12"
 
 [manifest]
 members = [
-    "universal-agent-harness",
-    "universal-agent-harness-langgraph",
+    "trellis-harness",
+    "trellis-harness-langgraph",
 ]
 
 [[package]]
@@ -1347,6 +1347,164 @@ wheels = [
 ]
 
 [[package]]
+name = "trellis-contracts"
+version = "0.2.0"
+source = { editable = "../agent-contracts" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+]
+provides-extras = ["dev"]
+
+[[package]]
+name = "trellis-harness"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "bifrost-sdk" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "trellis-contracts" },
+    { name = "trellis-memory" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "jsonschema" },
+    { name = "langfuse" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+    { name = "structlog" },
+    { name = "trellis-harness-langgraph" },
+]
+langfuse = [
+    { name = "langfuse" },
+]
+langgraph = [
+    { name = "trellis-harness-langgraph" },
+]
+logging = [
+    { name = "structlog" },
+]
+otel = [
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
+registry = [
+    { name = "jsonschema" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "hypothesis" },
+    { name = "langgraph" },
+    { name = "opentelemetry-sdk" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-timeout" },
+    { name = "respx" },
+    { name = "ruff" },
+    { name = "structlog" },
+    { name = "trellis-harness-langgraph" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bifrost-sdk", editable = "../bifrost-sdk" },
+    { name = "jsonschema", marker = "extra == 'registry'", specifier = ">=4" },
+    { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=3.0" },
+    { name = "opentelemetry-api", specifier = ">=1.44" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.44" },
+    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.44" },
+    { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "pydantic-settings", specifier = ">=2.15,<3" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "structlog", marker = "extra == 'logging'", specifier = ">=25.2" },
+    { name = "trellis-contracts", editable = "../agent-contracts" },
+    { name = "trellis-harness", extras = ["otel", "langfuse", "langgraph", "logging", "registry"], marker = "extra == 'all'" },
+    { name = "trellis-harness-langgraph", marker = "extra == 'langgraph'", editable = "integrations/langgraph" },
+    { name = "trellis-memory", editable = "../agent-memory-service/sdk/python" },
+]
+provides-extras = ["otel", "registry", "langfuse", "langgraph", "logging", "all"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "hypothesis", specifier = ">=6" },
+    { name = "langgraph", specifier = ">=1.2" },
+    { name = "opentelemetry-sdk", specifier = ">=1.44" },
+    { name = "pyright", specifier = ">=1.1.414" },
+    { name = "pytest", specifier = ">=9.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4" },
+    { name = "pytest-cov", specifier = ">=6" },
+    { name = "pytest-timeout", specifier = ">=2.3" },
+    { name = "respx", specifier = ">=0.22" },
+    { name = "ruff", specifier = ">=0.16" },
+    { name = "structlog", specifier = ">=25.2" },
+    { name = "trellis-harness-langgraph", editable = "integrations/langgraph" },
+]
+
+[[package]]
+name = "trellis-harness-langgraph"
+version = "0.2.0"
+source = { editable = "integrations/langgraph" }
+dependencies = [
+    { name = "trellis-harness" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "langgraph" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
+langgraph = [
+    { name = "langgraph" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "langgraph", marker = "extra == 'dev'", specifier = ">=1.2" },
+    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.2" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4" },
+    { name = "trellis-harness", editable = "." },
+]
+provides-extras = ["langgraph", "dev"]
+
+[[package]]
+name = "trellis-memory"
+version = "0.2.0"
+source = { editable = "../agent-memory-service/sdk/python" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "opentelemetry-api", marker = "extra == 'dev'", specifier = ">=1.30" },
+    { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.30" },
+    { name = "opentelemetry-sdk", marker = "extra == 'dev'", specifier = ">=1.30" },
+    { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4" },
+    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
+]
+provides-extras = ["otel", "dev"]
+
+[[package]]
 name = "truststore"
 version = "0.10.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1375,161 +1533,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/a3/26/b09b8010994eccc3c
 wheels = [
     { url = "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl", hash = "sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147", size = 14750, upload-time = "2026-08-12T12:37:24.648Z" },
 ]
-
-[[package]]
-name = "universal-agent-contracts"
-version = "0.1.0"
-source = { editable = "../agent-contracts" }
-dependencies = [
-    { name = "pydantic" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2.13,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-]
-provides-extras = ["dev"]
-
-[[package]]
-name = "universal-agent-harness"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "bifrost-sdk" },
-    { name = "opentelemetry-api" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyyaml" },
-    { name = "universal-agent-contracts" },
-    { name = "universal-memory" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "jsonschema" },
-    { name = "langfuse" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-    { name = "structlog" },
-    { name = "universal-agent-harness-langgraph" },
-]
-langfuse = [
-    { name = "langfuse" },
-]
-langgraph = [
-    { name = "universal-agent-harness-langgraph" },
-]
-logging = [
-    { name = "structlog" },
-]
-otel = [
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-]
-registry = [
-    { name = "jsonschema" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "hypothesis" },
-    { name = "langgraph" },
-    { name = "opentelemetry-sdk" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pytest-timeout" },
-    { name = "respx" },
-    { name = "ruff" },
-    { name = "structlog" },
-    { name = "universal-agent-harness-langgraph" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bifrost-sdk", editable = "../bifrost-sdk" },
-    { name = "jsonschema", marker = "extra == 'registry'", specifier = ">=4" },
-    { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=3.0" },
-    { name = "opentelemetry-api", specifier = ">=1.44" },
-    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.44" },
-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.44" },
-    { name = "pydantic", specifier = ">=2.13,<3" },
-    { name = "pydantic-settings", specifier = ">=2.15,<3" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "structlog", marker = "extra == 'logging'", specifier = ">=25.2" },
-    { name = "universal-agent-contracts", editable = "../agent-contracts" },
-    { name = "universal-agent-harness", extras = ["otel", "langfuse", "langgraph", "logging", "registry"], marker = "extra == 'all'" },
-    { name = "universal-agent-harness-langgraph", marker = "extra == 'langgraph'", editable = "integrations/langgraph" },
-    { name = "universal-memory", editable = "../agent-memory-service/sdk/python" },
-]
-provides-extras = ["otel", "registry", "langfuse", "langgraph", "logging", "all"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "hypothesis", specifier = ">=6" },
-    { name = "langgraph", specifier = ">=1.2" },
-    { name = "opentelemetry-sdk", specifier = ">=1.44" },
-    { name = "pyright", specifier = ">=1.1.414" },
-    { name = "pytest", specifier = ">=9.1" },
-    { name = "pytest-asyncio", specifier = ">=1.4" },
-    { name = "pytest-cov", specifier = ">=6" },
-    { name = "pytest-timeout", specifier = ">=2.3" },
-    { name = "respx", specifier = ">=0.22" },
-    { name = "ruff", specifier = ">=0.16" },
-    { name = "structlog", specifier = ">=25.2" },
-    { name = "universal-agent-harness-langgraph", editable = "integrations/langgraph" },
-]
-
-[[package]]
-name = "universal-agent-harness-langgraph"
-version = "0.1.0"
-source = { editable = "integrations/langgraph" }
-dependencies = [
-    { name = "universal-agent-harness" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "langgraph" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-langgraph = [
-    { name = "langgraph" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "langgraph", marker = "extra == 'dev'", specifier = ">=1.2" },
-    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.2" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4" },
-    { name = "universal-agent-harness", editable = "." },
-]
-provides-extras = ["langgraph", "dev"]
-
-[[package]]
-name = "universal-memory"
-version = "0.1.0"
-source = { editable = "../agent-memory-service/sdk/python" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28" },
-    { name = "pydantic", specifier = ">=2.13,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "urllib3"

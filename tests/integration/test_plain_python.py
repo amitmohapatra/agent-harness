@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentExecutionContext,
     AgentHarness,
     AgentResponse,

@@ -12,13 +12,14 @@ Nothing is simulated. The failure tests point the same SDK at a port nothing lis
 from __future__ import annotations
 
 import json
+import re
 
 import httpx
 import pytest
 from tests.support import DEAD_SERVICE_URL, MEMORY_API_KEY, MEMORY_SERVICE_URL, span_by_name
-from universal_memory import MemoryClient
+from trellis.memory import MemoryClient
 
-from universal_agent_harness import AgentHarness, AgentResponse, MemoryObservation
+from trellis.harness import AgentHarness, AgentResponse, MemoryObservation
 
 
 class WireTap(httpx.AsyncBaseTransport):
@@ -109,7 +110,14 @@ async def test_full_turn_puts_the_documented_requests_on_the_wire(
     # lineage is recorded and the trace identity is inherited.
     assert scope["parent_agent_run_id"] == context.agent_run_id
     assert scope["agent_run_id"] != context.agent_run_id
-    assert scope["trace_id"] == context.trace_id
+    # the 0.2 SDK carries the trace as traceparent (a W3C id) or, for an opaque id, as the
+    # correlation id; the body scope no longer names it (trellis-memory ADR 0022)
+    assert "trace_id" not in scope
+    request = wire.to("/v1/context")[0][0]
+    if re.fullmatch(r"[0-9a-f]{32}", context.trace_id or ""):
+        assert request.headers["traceparent"].startswith(f"00-{context.trace_id}-")
+    else:
+        assert request.headers["x-correlation-id"] == context.trace_id
     assert all(e[2].status_code == 200 for e in wire.to("/v1/context"))
 
     # -- /v1/observations: input, output, explicit observation; each separately replayable
@@ -172,8 +180,8 @@ async def test_a_real_outage_still_produces_a_result(context):
 
 
 async def test_agent_scope_is_a_real_sdk_scope(context):
-    """The harness's context must map onto ``universal_memory.Scope`` without loss."""
-    from universal_memory.models import Scope
+    """The harness's context must map onto ``trellis.memory.Scope`` without loss."""
+    from trellis.memory.models import Scope
 
     scope = Scope(**context.for_agent("child-agent").scope_fields())
     assert scope.tenant_id == "acme"

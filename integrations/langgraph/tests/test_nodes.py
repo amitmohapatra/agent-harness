@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 from tests.support import span_by_name, span_names
 
-from universal_agent_harness import AgentResponse, AgentRuntime
+from trellis.harness import AgentResponse, AgentRuntime
 
 
 class State(TypedDict, total=False):
@@ -298,7 +298,7 @@ async def test_run_id_is_stable_across_replays_of_the_same_superstep(harness):
     assert run_ids[0] != run_ids[1]  # different threads -> different runs
 
     # ...but the same position replayed gives the same run id
-    from universal_agent_harness_langgraph.lineage import lineage_from_config
+    from trellis.harness_langgraph.lineage import lineage_from_config
 
     lineage = lineage_from_config(
         {"configurable": {"thread_id": "t", "checkpoint_ns": "answer:task-1"}}
@@ -339,7 +339,7 @@ async def test_an_interrupt_suspends_the_run_instead_of_failing_it(harness, span
     """``interrupt()`` raises to hand control to the graph runtime. That is the mechanism,
     not a failure, and the harness must not report it as one."""
     from langgraph.types import interrupt
-    from universal_agent_contracts.events import LifecycleEvent
+    from trellis.contracts.events import LifecycleEvent
 
     interesting = {str(LifecycleEvent.AGENT_PAUSE), str(LifecycleEvent.AGENT_ERROR)}
     seen: list[str] = []

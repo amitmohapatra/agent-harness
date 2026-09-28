@@ -76,7 +76,7 @@ async def test_workflow_produces_the_expected_business_decision(workflow, spans)
 
 
 async def test_every_node_is_an_agent_run_and_the_middle_three_are_parallel(workflow, spans):
-    from universal_agent_harness import AgentExecutionContext
+    from trellis.harness import AgentExecutionContext
 
     app = workflow.build_graph()
     context = AgentExecutionContext.create(

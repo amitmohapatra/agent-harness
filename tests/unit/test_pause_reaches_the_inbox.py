@@ -8,8 +8,9 @@ question — the one thing it exists to show.
 
 from __future__ import annotations
 
-from universal_agent_contracts import AgentPaused
-from universal_agent_harness.runs.client import _asked
+from trellis.contracts import AgentPaused
+
+from trellis.harness.runs.client import _asked
 
 
 def test_our_own_pause_carries_its_question() -> None:

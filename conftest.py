@@ -39,7 +39,7 @@ from tests.support import (
     RecordingMemoryClient,
 )
 
-from universal_agent_harness import AgentExecutionContext, AgentHarness
+from trellis.harness import AgentExecutionContext, AgentHarness
 
 TENANT = "acme"
 
@@ -81,7 +81,7 @@ async def memory(service_available: bool, run_id: str) -> Any:
             f"no Memory Service at {MEMORY_SERVICE_URL} — start it with `make dev-up` in the "
             "agent-memory-service checkout, or set MEMORY_SERVICE_URL"
         )
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     client = MemoryClient(MEMORY_SERVICE_URL, api_key=MEMORY_API_KEY, timeout=120.0)
     recording = RecordingMemoryClient(client)
@@ -102,7 +102,7 @@ async def faulty_memory(service_available: bool) -> Any:
     if not service_available:
         pytest.skip(f"no Memory Service at {MEMORY_SERVICE_URL}")
     import httpx as _httpx
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     faults = FaultInjectingTransport()
     client = MemoryClient(
@@ -123,7 +123,7 @@ async def faulty_memory(service_available: bool) -> Any:
 @pytest.fixture
 async def dead_memory() -> Any:
     """A client pointed at a port nothing listens on — a real outage, not a simulated one."""
-    from universal_memory import MemoryClient
+    from trellis.memory import MemoryClient
 
     client = MemoryClient(DEAD_SERVICE_URL, api_key="unused", timeout=2.0, max_retries=0)
     try:

@@ -9,7 +9,7 @@ failure happened on the writeback path after the result was returned.
 
 from __future__ import annotations
 
-from universal_agent_harness import AgentHarness, AgentResponse, Claim
+from trellis.harness import AgentHarness, AgentResponse, Claim
 
 
 async def test_a_failing_message_write_does_not_lose_the_observations(faulty_memory, context):
@@ -51,7 +51,7 @@ async def test_a_failing_message_write_does_not_lose_the_observations(faulty_mem
 
 
 async def test_the_error_names_what_was_lost(memory, context):
-    from universal_agent_harness.interceptors.memory import MemoryWriteError
+    from trellis.harness.interceptors.memory import MemoryWriteError
 
     failures = [
         ("message.user", RuntimeError("scope rejected")),

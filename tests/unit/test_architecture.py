@@ -12,7 +12,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[2] / "src" / "universal_agent_harness"
+SRC = Path(__file__).resolve().parents[2] / "src" / "trellis.harness"
 
 #: Talking to a model provider directly is the one thing this package must never do. The
 #: gateway client (``bifrost``) is not on this list and must not be: it speaks to *our*

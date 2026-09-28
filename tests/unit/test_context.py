@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from universal_agent_harness import AgentExecutionContext
+from trellis.harness import AgentExecutionContext
 
 
 def test_create_fills_ids():

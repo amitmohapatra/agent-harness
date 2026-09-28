@@ -6,10 +6,10 @@ import asyncio
 
 import pytest
 from tests.support import span_by_name, span_names
-from universal_agent_contracts.errors import ToolNotFoundError
+from trellis.contracts.errors import ToolNotFoundError
 
-from universal_agent_harness import AgentHarness, ToolError, ToolSpec
-from universal_agent_harness.tools.local import LocalToolClient
+from trellis.harness import AgentHarness, ToolError, ToolSpec
+from trellis.harness.tools.local import LocalToolClient
 
 
 async def test_runtime_tool_client_is_instrumented(memory, context, spans):

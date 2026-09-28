@@ -13,11 +13,11 @@ from typing import Any
 
 import httpx
 import pytest
-from universal_agent_contracts import AgentPaused
-from universal_agent_contracts.messages import AgentResponse, AgentStatus
+from trellis.contracts import AgentPaused
+from trellis.contracts.messages import AgentResponse, AgentStatus
 
-from universal_agent_harness import AgentHarness
-from universal_agent_harness.runs import RunStoreClient
+from trellis.harness import AgentHarness
+from trellis.harness.runs import RunStoreClient
 
 CONFIG = {"memory": {"enabled": False}}
 

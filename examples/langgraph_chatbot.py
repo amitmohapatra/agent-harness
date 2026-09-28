@@ -30,7 +30,7 @@ from typing import Annotated, Any, TypedDict
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentHarness,
     AgentResponse,
     AllowListPolicyProvider,
@@ -394,7 +394,7 @@ async def main() -> None:
 
     memory = None
     if memory_url := os.environ.get("MEMORY_SERVICE_URL"):
-        from universal_memory import MemoryClient  # noqa: PLC0415 - optional extra
+        from trellis.memory import MemoryClient  # noqa: PLC0415 - optional extra
 
         memory = MemoryClient(memory_url, api_key=os.environ.get("MEMORY_API_KEY", "dev-key"))
 

@@ -13,9 +13,9 @@ import asyncio
 
 import pytest
 from tests.support import span_by_name, span_names
-from universal_agent_contracts.errors import ConfigurationError
+from trellis.contracts.errors import ConfigurationError
 
-from universal_agent_harness import AgentHarness, ModelError, ModelRequest, ModelUsage
+from trellis.harness import AgentHarness, ModelError, ModelRequest, ModelUsage
 
 
 class DeterministicModel:
@@ -186,7 +186,7 @@ async def test_model_deadline_is_bounded_by_the_agent_deadline(memory, context):
         await runtime.model.invoke("q")
         return "should not get here"
 
-    from universal_agent_harness import AgentTimeoutError
+    from trellis.harness import AgentTimeoutError
 
     with pytest.raises((AgentTimeoutError, ModelError)):
         await harness.wrap(agent, agent_id="inv")(None, context=context)

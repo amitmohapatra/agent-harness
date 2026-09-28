@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
-from universal_agent_harness import (
+from trellis.harness import (
     AgentExecutionContext,
     AgentHarness,
     AgentResponse,

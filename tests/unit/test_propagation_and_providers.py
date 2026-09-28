@@ -5,16 +5,16 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from universal_agent_contracts.errors import ConfigurationError, ModelError
+from trellis.contracts.errors import ConfigurationError, ModelError
 
-from universal_agent_harness import ModelRequest
-from universal_agent_harness.config.settings import TelemetryConfig
-from universal_agent_harness.models.providers import DirectModelClient, UnconfiguredModelClient
-from universal_agent_harness.policy.providers import (
+from trellis.harness import ModelRequest
+from trellis.harness.config.settings import TelemetryConfig
+from trellis.harness.models.providers import DirectModelClient, UnconfiguredModelClient
+from trellis.harness.policy.providers import (
     AllowListPolicyProvider,
     CallablePolicyProvider,
 )
-from universal_agent_harness.runtime.propagation import (
+from trellis.harness.runtime.propagation import (
     baggage_fields,
     bind,
     current_context,
@@ -23,9 +23,9 @@ from universal_agent_harness.runtime.propagation import (
     require_runtime,
     trace_headers,
 )
-from universal_agent_harness.telemetry.composite import CompositeTelemetryProvider
-from universal_agent_harness.telemetry.noop import NoOpTelemetryProvider
-from universal_agent_harness.telemetry.otel import OpenTelemetryTelemetryProvider, configure_sdk
+from trellis.harness.telemetry.composite import CompositeTelemetryProvider
+from trellis.harness.telemetry.noop import NoOpTelemetryProvider
+from trellis.harness.telemetry.otel import OpenTelemetryTelemetryProvider, configure_sdk
 
 # --------------------------------------------------------------------------- propagation
 
@@ -200,7 +200,7 @@ async def test_unconfigured_client_explains_the_fix():
 
 
 async def test_allow_list_checks_each_dimension(context):
-    from universal_agent_harness import AgentRequest, ToolCall
+    from trellis.harness import AgentRequest, ToolCall
 
     policy = AllowListPolicyProvider(
         agents={"inv"}, tools={"search"}, models={"m1"}, tenants={"acme"}
@@ -216,7 +216,7 @@ async def test_allow_list_checks_each_dimension(context):
 
 
 async def test_allow_list_without_restrictions_allows(context):
-    from universal_agent_harness import AgentRequest, ToolCall
+    from trellis.harness import AgentRequest, ToolCall
 
     policy = AllowListPolicyProvider()
     assert await policy.authorize_execution(AgentRequest.create(context)) is True
@@ -224,7 +224,7 @@ async def test_allow_list_without_restrictions_allows(context):
 
 
 async def test_callable_policy_adapts_sync_and_async_functions(context):
-    from universal_agent_harness import AgentRequest, ToolCall
+    from trellis.harness import AgentRequest, ToolCall
 
     async def deny_tool(ctx, call):
         return f"{call.tool} is not allowed here"

@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-from universal_agent_harness import AgentHarness, AgentResponse, CollectingEvaluationSink
+from trellis.harness import AgentHarness, AgentResponse, CollectingEvaluationSink
 
 
 class BrokenTelemetry:
@@ -32,7 +32,7 @@ class BrokenTelemetry:
 
 
 async def test_a_completely_broken_telemetry_backend_does_not_fail_the_agent(memory, context):
-    from universal_agent_harness.telemetry.composite import CompositeTelemetryProvider
+    from trellis.harness.telemetry.composite import CompositeTelemetryProvider
 
     harness = AgentHarness(
         memory=memory,
@@ -164,7 +164,7 @@ async def test_everything_disabled_still_runs(context):
 
 
 async def test_evaluation_events_survive_a_partially_broken_sink_set(memory, context):
-    from universal_agent_harness.evaluation.events import CompositeEvaluationSink
+    from trellis.harness.evaluation.events import CompositeEvaluationSink
 
     class BrokenSink:
         async def emit(self, event):
