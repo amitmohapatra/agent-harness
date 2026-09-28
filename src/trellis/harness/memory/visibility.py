@@ -3,14 +3,17 @@
 Each visibility level is backed by an audience key built from the execution context, so a
 level whose id is missing cannot be expressed:
 
-    PRIVATE / TENANT / GLOBAL  always available
+    PRIVATE / TENANT           always available
     USER                       requires user_id
-    GROUP                      requires group_ids
     AGENT_GROUP                requires agent_group_id
     RUN                        requires agent_run_id
     THREAD                     requires thread_id
-    WORK                       requires work_id
     WORKSPACE                  requires workspace_id
+
+The seven levels are the service's ``Visibility`` enum, and only those: ``WORK``, ``GROUP``
+and ``GLOBAL`` were accepted here for levels the service never had, so the one check that
+exists to turn silent data loss into an error waved through the writes it was meant to catch
+(the service answers 422 for them).
 
 This matters more than it looks. The API *accepts* an observation whose visibility it cannot
 satisfy and fails later, in the background job that would have created the memory — so the
@@ -28,16 +31,14 @@ if TYPE_CHECKING:  # pragma: no cover
 #: visibility -> the context field that must be present for it.
 REQUIRED_FIELD: dict[str, str] = {
     "USER": "user_id",
-    "GROUP": "group_ids",
     "AGENT_GROUP": "agent_group_id",
     "RUN": "agent_run_id",
     "THREAD": "thread_id",
-    "WORK": "work_id",
     "WORKSPACE": "workspace_id",
 }
 
 #: Levels that need nothing from the context.
-UNCONDITIONAL = frozenset({"PRIVATE", "TENANT", "GLOBAL"})
+UNCONDITIONAL = frozenset({"PRIVATE", "TENANT"})
 
 VISIBILITIES = frozenset(REQUIRED_FIELD) | UNCONDITIONAL
 
