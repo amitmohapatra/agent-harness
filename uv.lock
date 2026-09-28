@@ -1348,7 +1348,7 @@ wheels = [
 
 [[package]]
 name = "trellis-contracts"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "../agent-contracts" }
 dependencies = [
     { name = "pydantic" },
@@ -1494,13 +1494,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
-    { name = "opentelemetry-api", marker = "extra == 'dev'", specifier = ">=1.30" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.30" },
     { name = "opentelemetry-sdk", marker = "extra == 'dev'", specifier = ">=1.30" },
     { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.4" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
+    { name = "trellis-memory", extras = ["otel"], marker = "extra == 'dev'", editable = "../agent-memory-service/sdk/python" },
 ]
 provides-extras = ["otel", "dev"]
 

@@ -12,6 +12,7 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from trellis.contracts import ToolStatus
 from trellis.contracts.errors import ToolNotFoundError
 from trellis.contracts.tool import ToolCall, ToolOutcome, ToolSpec
 
@@ -65,7 +66,7 @@ class LocalToolClient:
         result = fn(**call.args)
         if inspect.isawaitable(result):
             result = await result
-        return ToolOutcome(tool=call.tool, status="ok", output=result)
+        return ToolOutcome(tool=call.tool, status=ToolStatus.OK, output=result)
 
 
 class CallableToolClient:
@@ -90,7 +91,7 @@ class CallableToolClient:
             result = await result
         if isinstance(result, ToolOutcome):
             return result
-        return ToolOutcome(tool=call.tool, status="ok", output=result)
+        return ToolOutcome(tool=call.tool, status=ToolStatus.OK, output=result)
 
 
 class NoToolsClient:

@@ -57,7 +57,7 @@ class EvaluationEventInterceptor(BaseInterceptor):
             evidence_refs=list(result.evidence),
             model_metadata=list(runtime.model_calls),
             tool_calls=list(runtime.tool_calls),
-            status=str(result.status),
+            status=result.status,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3) if started else 0.0,
             metrics=dict(result.metrics),
             metadata={"bundle": runtime.state.get("memory_facts") or {}},

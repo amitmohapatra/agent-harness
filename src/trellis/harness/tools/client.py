@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from trellis.contracts import ToolStatus
 from trellis.contracts.artifacts import ArtifactRef
 from trellis.contracts.errors import PolicyDeniedError, ToolError
 from trellis.contracts.events import LifecycleEvent
@@ -119,7 +120,7 @@ class InstrumentedToolClient:
         result = await self._client.call(call)
         if isinstance(result, ToolOutcome):
             return result
-        return ToolOutcome(tool=call.tool, status="ok", output=result)
+        return ToolOutcome(tool=call.tool, status=ToolStatus.OK, output=result)
 
     def _spec(self, tool: str) -> ToolSpec | None:
         """Tool clients may expose specs; those that do not simply report less."""
