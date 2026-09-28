@@ -114,9 +114,11 @@ async def test_every_node_is_an_agent_run_and_the_middle_three_are_parallel(work
     inventory = next(s for s in runs if s.attributes["agent.id"] == "inventory-agent")
     assert nested.attributes["agent.parent_run.id"] == inventory.attributes["agent.run.id"]
 
-    # one trace for the whole turn, with the enclosing execution as its only root
+    # one trace for the whole turn, with the enclosing execution as its only root: the
+    # harness starts a root span inside the trace the context names, so its parent is the
+    # remote span context that carries that trace id, not a span of this process
     assert len({s.get_span_context().trace_id for s in finished}) == 1
-    roots = [s for s in finished if s.parent is None]
+    roots = [s for s in finished if s.parent is None or s.parent.is_remote]
     assert len(roots) == 1 and roots[0].attributes["agent.id"] == "reorder-workflow"
 
     # tools and models were instrumented, not bypassed
