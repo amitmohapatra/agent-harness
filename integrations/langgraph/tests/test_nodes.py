@@ -158,13 +158,17 @@ async def test_reducers_are_untouched_by_the_wrapper(harness):
     assert out["seen"] == ["first", "second"]  # the add reducer still accumulates
 
 
+#: One node's sleep. Serial execution takes two of these, parallel takes one.
+HALF = 0.5
+
+
 async def test_parallel_nodes_run_concurrently_and_merge(harness, spans):
     async def slow_a(state: State) -> dict:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(HALF)
         return {"seen": ["a"]}
 
     async def slow_b(state: State) -> dict:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(HALF)
         return {"seen": ["b"]}
 
     graph = StateGraph(State)
@@ -180,7 +184,12 @@ async def test_parallel_nodes_run_concurrently_and_merge(harness, spans):
     elapsed = asyncio.get_running_loop().time() - started
 
     assert sorted(out["seen"]) == ["a", "b"]
-    assert elapsed < 0.09  # genuinely parallel, not serialized by the harness
+    # Genuinely parallel, not serialized by the harness: serial would take 2 * HALF, so the
+    # bound sits between one and two sleeps. The sleep is long enough that per-node overhead
+    # is a small fraction of it -- with 50 ms sleeps the whole margin was 40 ms of overhead,
+    # which a loaded host spends on scheduling alone and the test then failed while the nodes
+    # were running perfectly in parallel.
+    assert elapsed < 1.6 * HALF
     assert span_names(spans).count("agent.run") == 2
 
 
