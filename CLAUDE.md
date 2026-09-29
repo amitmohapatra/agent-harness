@@ -45,3 +45,19 @@ Key routing rules:
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
 - Author a backlog-ready spec/issue → invoke /spec
+
+## Agent skills
+
+Matt Pocock's engineering skills are enabled via the `mattpocock-skills` plugin (`.claude/settings.json`); invoke them namespaced, e.g. `/mattpocock-skills:tdd`, so they don't collide with gstack's `/review` and `/retro`.
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
