@@ -39,7 +39,7 @@ def user_of(request: Request) -> str:
 async def chat() -> AsyncIterator[tuple[httpx.AsyncClient, Harness]]:
     async with live_harness() as h:
         app = FastAPI()
-        agent = h.wrap(concierge, id=f"live-concierge-{uuid.uuid4().hex[:6]}", memory="read_write")
+        agent = h.wrap(concierge, id=f"live-concierge-{uuid.uuid4().hex[:6]}")
         agent.serve_chat(app, identity=user_of)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -83,9 +83,8 @@ async def test_agui_streams_pauses_resumes_and_replays(
     record = await h.runs.get(run_id)
     assert record is not None and record.status is RunStatus.SUCCESS and record.checkpoint is None
     await h.writes.drain()
-    history = await memory_scope(
-        h, user="live-ada", agent_id=record.agent_id, thread=thread
-    ).history()
+    scope = await memory_scope(h, user="live-ada", agent_id=record.agent_id, thread=thread)
+    history = await scope.history()
     assert [m.content for m in history][-1] == "Booked for friday."
 
 

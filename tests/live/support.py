@@ -27,12 +27,12 @@ async def eventually(
         await asyncio.sleep(every)
 
 
-def memory_scope(
+async def memory_scope(
     h: Harness, *, user: str, agent_id: str, thread: str | None = None
 ) -> MemoryContext:
     """The memory service in a user's (and thread's) scope, read as the agent reads it."""
     assert h.memory is not None
-    scope = {"tenant_id": h.settings.tenant, "user_id": user, "agent_id": agent_id}
+    scope = {"tenant_id": await h.tenant(), "user_id": user, "agent_id": agent_id}
     if thread is not None:
         scope["thread_id"] = thread
     return h.memory.client.bind(**scope)

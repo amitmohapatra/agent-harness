@@ -38,7 +38,8 @@ class Stock(BaseModel):
 
 
 def harness() -> Harness:
-    return Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key=KEY, eval_sample=0.0))
+    """The gateway alone: no memory, runs in process."""
+    return Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key=KEY))
 
 
 async def test_react_calls_a_tool_and_answers_in_the_schema() -> None:
@@ -77,8 +78,8 @@ async def test_openai_agents_with_a_model_pointed_at_bifrost() -> None:
     assert "42" in str(result.answer)
 
 
-async def test_the_gateway_lists_its_mcp_tools() -> None:
+async def test_the_gateway_lists_the_mcp_tools_the_key_allows() -> None:
     async with harness() as h:
         assert h.gateway is not None
-        tools = await h.gateway.tools(["*"], None)
+        tools = await h.gateway.tools()
     assert all("-" in t.name for t in tools)

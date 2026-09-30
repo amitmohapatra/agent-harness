@@ -46,5 +46,5 @@ async def briefing(input: str, agent: Runtime) -> str:
     return f"briefing for {agent.user}: {input}"
 
 
-h.wrap(billing, id=f"live-billing-{SUFFIX}", tools=[charge], memory="read_write")
-h.wrap(briefing, id=f"live-briefing-{SUFFIX}", memory="read_write")
+h.wrap(billing, id=f"live-billing-{SUFFIX}", tools=[charge])
+h.wrap(briefing, id=f"live-briefing-{SUFFIX}")

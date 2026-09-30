@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 import pytest
 
-from tests.live.conftest import RUNS_URL, live_harness, needs_memory, needs_runs, settings
+from tests.live.conftest import RUNS_URL, live_harness, needs_memory, needs_runs
 from tests.live.support import eventually, memory_scope
 from trellis import Harness
 from trellis.contracts import (
@@ -32,7 +32,7 @@ from trellis.contracts import (
 )
 from trellis.harness.clients.runs import LeaseLost
 
-pytestmark = [pytest.mark.live, needs_runs]
+pytestmark = [pytest.mark.live, needs_runs, needs_memory]  # the key is the memory service's
 
 ROOT = Path(__file__).resolve().parents[2]
 #: The ticker sweeps every 5 s; a lapsed 5 s lease is re-queued within ~10 s.
@@ -44,10 +44,10 @@ async def in_a_worker(input: object, agent: object) -> None:
     raise AssertionError("this agent runs in a worker process")
 
 
-def start(agent_id: str, **fields: object) -> RunStart:
+def start(agent_id: str, tenant: str, **fields: object) -> RunStart:
     return RunStart(
         run_id=new_id("run_"),
-        tenant_id=settings().tenant,
+        tenant_id=tenant,
         agent_id=agent_id,
         user_id="live-user",
         input="x",
@@ -58,7 +58,7 @@ def start(agent_id: str, **fields: object) -> RunStart:
 async def test_the_runs_client_speaks_agent_runs(harness: Harness) -> None:
     runs = harness.runs
     agent_id = f"live-wire-{uuid.uuid4().hex[:8]}"
-    queued = await runs.queued(start(agent_id))
+    queued = await runs.queued(start(agent_id, await harness.tenant()))
     assert queued.status is RunStatus.QUEUED
     claimed = await runs.claim("w1", [agent_id], 30)
     assert claimed is not None and claimed.run_id == queued.run_id
@@ -75,8 +75,8 @@ async def test_the_runs_client_speaks_agent_runs(harness: Harness) -> None:
     checkpoint = {"answers": {}, "calls": {"k": ["charged"]}}
     paused = await runs.paused(asked, checkpoint=checkpoint, worker_id="w1")
     assert paused.status is RunStatus.PAUSED and paused.checkpoint == checkpoint
-    inbox = await runs.list_paused(claimed.tenant_id, assignee="role:live-ops")
-    assert claimed.run_id in [r.run_id for r in inbox]
+    [waiting] = [r for r in await harness.inbox("role:live-ops") if r.run_id == claimed.run_id]
+    assert waiting.awaiting is not None and waiting.awaiting.question == "Which size?"
 
     answer = InterruptResolution(
         interrupt_id=asked.interrupt_id,
@@ -101,7 +101,7 @@ async def test_a_lapsed_lease_puts_the_run_back_and_fences_the_old_worker(
 ) -> None:
     runs = harness.runs
     agent_id = f"live-lease-{uuid.uuid4().hex[:8]}"
-    queued = await runs.queued(start(agent_id))
+    queued = await runs.queued(start(agent_id, await harness.tenant()))
     assert await runs.claim("w1", [agent_id], 5) is not None
 
     async def requeued() -> bool:
@@ -122,7 +122,8 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
     runs = harness.runs
     agent_id = f"live-escalate-{uuid.uuid4().hex[:8]}"
     soon = datetime.now(UTC) + timedelta(seconds=1)
-    escalated = await runs.started(start(agent_id))
+    tenant = await harness.tenant()
+    escalated = await runs.started(start(agent_id, tenant))
     await runs.paused(
         Interrupt(
             interrupt_id=f"{escalated.run_id}.1.1",
@@ -134,7 +135,7 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
             escalate_to="role:live-lead",
         )
     )
-    timed_out = await runs.started(start(agent_id))
+    timed_out = await runs.started(start(agent_id, tenant))
     await runs.paused(
         Interrupt(
             interrupt_id=f"{timed_out.run_id}.1.1",
@@ -147,7 +148,7 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
     )
 
     async def swept() -> bool:
-        lead = await runs.list_paused(escalated.tenant_id, assignee="role:live-lead")
+        lead = await harness.inbox("role:live-lead")
         other = await runs.get(timed_out.run_id)
         return escalated.run_id in [r.run_id for r in lead] and (
             other is not None and other.status is RunStatus.TIMEOUT
@@ -175,7 +176,6 @@ def worker_process(suffix: str, ledger: Path) -> Iterator[subprocess.Popen[bytes
             process.wait()
 
 
-@needs_memory
 async def test_ask_and_resume_continue_in_other_worker_processes(tmp_path: Path) -> None:
     suffix = uuid.uuid4().hex[:8]
     ledger = tmp_path / "ledger.txt"
@@ -189,7 +189,7 @@ async def test_ask_and_resume_continue_in_other_worker_processes(tmp_path: Path)
             first = await handle.result(timeout=60)
         assert first.status is RunStatus.PAUSED and first.interrupt is not None
         assert first.interrupt.question == "Which size?"
-        inbox = await h.runs.list_paused(h.settings.tenant, assignee="role:ops")
+        inbox = await h.inbox("role:ops")
         assert handle.run_id in [r.run_id for r in inbox]
         queued = await agent.resume(
             first.interrupt.interrupt_id, "answer", answer="L", reviewer="live-lee"
@@ -211,7 +211,7 @@ async def test_ask_and_resume_continue_in_other_worker_processes(tmp_path: Path)
         # the charge ran once, in the first process, although three processes ran the run
         assert len(ledger.read_text().splitlines()) == 1
         # and it was recorded once, for the user, by the worker's own memory writes
-        scope = memory_scope(h, user="live-ada", agent_id=agent.id)
+        scope = await memory_scope(h, user="live-ada", agent_id=agent.id)
 
         async def charged_once() -> bool:
             entries = await scope.advanced.tools.catalog(names=[f"charge_{suffix}"])
@@ -220,7 +220,6 @@ async def test_ask_and_resume_continue_in_other_worker_processes(tmp_path: Path)
         assert await eventually(charged_once)
 
 
-@needs_memory
 async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> None:
     suffix = uuid.uuid4().hex[:8]
     async with live_harness() as h:
@@ -229,9 +228,10 @@ async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> N
         minute = (datetime.now(UTC) + timedelta(minutes=2)).minute
         cron = f"{minute} * * * *"
         first = await agent.schedule(cron, "inbox", on_behalf_of="live-ada", tz="Europe/Berlin")
-        # a redeploy schedules it again: agent-runs refuses the name, the harness updates it
+        # a redeploy schedules it again: agent-runs answers the one that exists, unchanged
         schedule = await agent.schedule(cron, "inbox", on_behalf_of="live-ada")
-        assert schedule.schedule_id == first.schedule_id and schedule.timezone == "UTC"
+        assert schedule.schedule_id == first.schedule_id
+        assert schedule.timezone == "Europe/Berlin"
         try:
             with worker_process(suffix, tmp_path / "ledger.txt"):
 
@@ -240,9 +240,10 @@ async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> N
                     return any(r["status"] == "SUCCESS" for r in runs)
 
                 assert await eventually(fired, within=240, every=5)
-            [run] = [r for r in await _runs_of(h, agent.id) if r["status"] == "SUCCESS"]
-            assert run["output"] == "briefing for live-ada: inbox"
-            assert run["metadata"]["schedule_id"] == schedule.schedule_id
+            [summary] = [r for r in await _runs_of(h, agent.id) if r["status"] == "SUCCESS"]
+            run = await h.runs.get(summary["run_id"])
+            assert run is not None and run.output == "briefing for live-ada: inbox"
+            assert run.metadata["schedule_id"] == schedule.schedule_id
         finally:
             async with _client(h) as client:
                 await client.delete(f"/v1/schedules/{schedule.schedule_id}")
@@ -250,7 +251,7 @@ async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> N
 
 def _client(h: Harness) -> httpx.AsyncClient:
     assert RUNS_URL is not None
-    headers = {"X-Api-Key": h.settings.runs_api_key or "", "X-Trellis-Tenant": h.settings.tenant}
+    headers = {"X-Api-Key": h.settings.api_key or ""}
     return httpx.AsyncClient(base_url=RUNS_URL, headers=headers)
 
 

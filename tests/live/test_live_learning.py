@@ -46,10 +46,8 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
         return "enough"
 
     async with live_harness() as h:
-        agent = h.wrap(
-            restock, id=f"live-restock-{suffix}", memory="read_write", tools=[lookup, reorder]
-        )
-        scope = memory_scope(h, user=user, agent_id=agent.id)
+        agent = h.wrap(restock, id=f"live-restock-{suffix}", tools=[lookup, reorder])
+        scope = await memory_scope(h, user=user, agent_id=agent.id)
         run_ids: list[str] = []
         for n in range(APPROVALS):
             paused = await agent.run(TASK, user=user, thread=f"live-restock-{suffix}-{n}")
@@ -64,11 +62,9 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
         assert h.writes.failed == 0
 
         async def learned_procedure() -> bool:
-            bundle = await scope.context(TASK)
-            return any(
-                reorder_name in str(p.steps) and lookup_name in str(p.steps)
-                for p in bundle.procedures
-            )
+            """The procedure the successful runs taught it, in the next run's own context."""
+            pushed = await scope.context(TASK, tools=[lookup_name, reorder_name])
+            return reorder_name in pushed.rendered and lookup_name in pushed.rendered
 
         assert await eventually(learned_procedure, within=120, every=3)
 
@@ -106,28 +102,27 @@ async def test_a_profile_block_an_agent_edits_is_in_the_next_context() -> None:
         return agent.context
 
     async with live_harness() as h:
-        agent = h.wrap(assistant, id=f"live-assistant-{suffix}", memory="read_write")
+        agent = h.wrap(assistant, id=f"live-assistant-{suffix}")
         assert (await agent.run("remember", user=user)).status is RunStatus.SUCCESS
         later = await agent.run("when do I like deliveries?", user=user)
         assert preference in str(later.answer)
-        blocks = await memory_scope(h, user=user, agent_id=agent.id).profile()
+        blocks = await (await memory_scope(h, user=user, agent_id=agent.id)).profile()
         assert any(preference in b.text for b in blocks)
 
 
-@pytest.mark.skipif(
-    not os.environ.get("TRELLIS_MEMORY_MODEL_KEY"), reason="needs TRELLIS_MEMORY_MODEL_KEY"
-)
-async def test_the_model_key_is_registered_for_the_agent() -> None:
+@pytest.mark.skipif(not os.environ.get("BIFROST_VIRTUAL_KEY"), reason="needs BIFROST_VIRTUAL_KEY")
+async def test_the_virtual_key_is_registered_as_the_agents_model_key() -> None:
     suffix = uuid.uuid4().hex[:8]
 
     async def echo(input: str, agent: Runtime) -> str:
         return input
 
     async with live_harness() as h:
-        agent = h.wrap(echo, id=f"live-keyed-{suffix}", memory="read")
+        agent = h.wrap(echo, id=f"live-keyed-{suffix}")
         await agent.run("hello", user=f"live-user-{suffix}")
         await h.writes.drain()
         assert h.writes.failed == 0
         assert h.memory is not None  # the key is the agent's, read in the agent's scope
-        status = await h.memory.scoped(h.settings.tenant, agent.id).ctx.advanced.model_keys.status()
+        scope = h.memory.scoped(await h.tenant(), agent.id)
+        status = await scope.ctx.advanced.model_keys.status()
     assert status.registered and not status.revoked
