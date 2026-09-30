@@ -124,4 +124,4 @@ async def test_the_context_is_a_system_message_and_memory_tools_are_added(
     agent = memory_harness.wrap(Agent(name="m", model=model), id="m", memory="read_write")
     assert (await agent.run("how to reach me?", user="u1")).answer == "email"
     assert model.inputs[0][0] == {"role": "system", "content": memory_service.context_text}
-    assert memory_service.named("call_agent_tool")[0][1]["name"] == "memory_search"
+    assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"

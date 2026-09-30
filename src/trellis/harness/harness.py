@@ -95,7 +95,7 @@ class Harness:
         if memory:
             if self.memory is None:
                 raise ConfigurationError("memory tools need MEMORY_URL")
-            scope = RunMemory(self.memory, self.memory.client.bind(tenant_id=self.settings.tenant))
+            scope = self.memory.tenant(self.settings.tenant)
             tools.extend(await self.memory_tools(scope, read_only=False))
         return convert(FORMATS[framework], tools)  # type: ignore[arg-type]
 
@@ -204,7 +204,7 @@ class _Services:
     def catalog(self) -> RunMemory:
         memory = self.harness.memory
         assert memory is not None
-        return RunMemory(memory, memory.client.bind(tenant_id=self.tenant))
+        return memory.tenant(self.tenant)
 
     async def side_effects(self, names: list[str]) -> dict[str, str]:
         if self.harness.memory is None or not names:

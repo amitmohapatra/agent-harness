@@ -194,7 +194,7 @@ async def test_memory_tools_are_built_in_with_h_tools(
     graph = create_agent(model, tools=tools)
     result = await memory_harness.wrap(graph, id="m", memory="read_write").run("x", user="u1")
     assert result.answer == "found"
-    assert memory_service.named("call_agent_tool")[0][1]["name"] == "memory_search"
+    assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
 
 
 async def test_a_compiled_graph_refuses_tools_at_wrap(harness: Harness) -> None:

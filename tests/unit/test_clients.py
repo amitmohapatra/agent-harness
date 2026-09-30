@@ -115,48 +115,63 @@ def identity() -> Identity:
     return Identity(tenant="t", user="u", agent_id="a", run_id="run_1", thread="th")
 
 
+def memory(service: FakeMemoryService) -> Memory:
+    return Memory("http://mem", None, client=service.client())
+
+
 async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
     service = FakeMemoryService()
-    run = Memory("http://mem", None, client=service).bind(identity())
-    pushed = await run.context("q", tools=["erp-get_stock"])
-    assert pushed.text == service.context_text
-    [(scope, payload)] = service.named("context")
-    assert scope == {
+    run = memory(service).bind(identity())
+    bundle = await run.context("q", tools=["erp-get_stock"])
+    assert bundle.rendered == service.context_text
+    [call] = service.named("context")
+    assert call.scope == {
         "tenant_id": "t",
         "user_id": "u",
         "agent_id": "a",
         "agent_run_id": "run_1",
         "thread_id": "th",
+        "custom_metadata": {},
     }
-    assert payload["tools"] == {"available": ["erp-get_stock"], "k": 8}
+    assert call.body["tools"] == {"available": ["erp-get_stock"], "k": 8}
+    assert call.body["token_budget"] == 2000
 
 
 async def test_agent_tools_are_listed_once_and_a_reader_gets_only_the_read_ones() -> None:
     service = FakeMemoryService()
-    memory = Memory("http://mem", None, client=service)
-    everything = await memory.bind(identity()).agent_tools(read_only=False)
-    reads = await memory.bind(identity()).agent_tools(read_only=True)
+    mem = memory(service)
+    everything = await mem.bind(identity()).agent_tools(read_only=False)
+    reads = await mem.bind(identity()).agent_tools(read_only=True)
     assert [t.name for t in everything] == [t["name"] for t in AGENT_TOOLS]
     assert {t.name for t in reads} <= READ_ONLY_TOOLS
     assert len(service.named("agent_tools")) == 1
+    # the SDK returns the tool's result itself
+    assert await mem.bind(identity()).call_agent_tool("memory_search", {"query": "x"}) == [
+        "memory_search ok"
+    ]
 
 
 async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() -> None:
-    service = FakeMemoryService(catalog={"erp-get_stock": "read", "odd": "sideways"})
-    run = Memory("http://mem", None, client=service).bind(identity())
+    service = FakeMemoryService(catalog={"erp-get_stock": "read"})
+    run = memory(service).bind(identity())
     await run.record_messages([("user", "hi"), ("assistant", "hello")], "run_1")
-    assert [p["idempotency_key"] for _, p in service.named("message")] == [
-        "run_1:msg:0",
-        "run_1:msg:1",
+    assert [(c.body["role"], c.idempotency_key) for c in service.named("message")] == [
+        ("USER", "run_1:msg:0"),
+        ("ASSISTANT", "run_1:msg:1"),
     ]
     await run.record_tool(
         ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)
     )
-    assert service.named("record_tool")[0][1]["status"] == "ok"
-    assert await run.side_effects(["erp-get_stock", "odd", "missing"]) == {"erp-get_stock": "read"}
+    assert service.named("record_tool")[0].body["status"] == "ok"
+    assert await run.side_effects(["erp-get_stock", "missing"]) == {"erp-get_stock": "read"}
     await run.publish_catalog(
-        [ToolSpec(name="refund", side_effects="irreversible", source="local")]
+        [
+            ToolSpec(name="refund", side_effects="irreversible", source="local"),
+            ToolSpec(name="remote", source="a2a"),  # side effects unknown: left to the catalog
+        ]
     )
-    assert service.named("put_catalog")[0][1][0]["side_effects"] == "irreversible"
+    refund, remote = service.named("put_catalog")[0].body["tools"]
+    assert refund["side_effects"] == "irreversible" and "side_effects" not in remote
     await run.register_model_key("sk", "a")
-    assert service.named("model_key")[0][1] == {"key": "sk", "idempotency_key": "model-key:a"}
+    [key] = service.named("model_key")
+    assert key.body["virtual_key"] == "sk" and key.idempotency_key == "model-key:a"

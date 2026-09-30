@@ -29,7 +29,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline
 from trellis.harness.adapters import detect
-from trellis.harness.clients.memory import Pushed, RunMemory
+from trellis.harness.clients.memory import RunMemory
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
@@ -38,6 +38,7 @@ from trellis.harness.telemetry import metrics
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.policy import Policy, Rule
 from trellis.harness.tools.sources import as_source
+from trellis.memory.models import ContextBundle
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
@@ -274,20 +275,20 @@ class Agent:
             )
         return tools
 
-    async def push(self, runtime: Runtime, tool_names: list[str]) -> Pushed | None:
+    async def push(self, runtime: Runtime, tool_names: list[str]) -> ContextBundle | None:
         """The memory context for this run, in the runtime; a failure is a warning."""
         if runtime.run_memory is None or not runtime.task:
             return None
         try:
-            pushed = await runtime.run_memory.context(
+            bundle = await runtime.run_memory.context(
                 runtime.task, tools=tool_names if self.tool_hints else None
             )
         except Exception as exc:
             runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
             return None
-        runtime.context = pushed.text or None
-        runtime.events.emit(RunEventType.CONTEXT_LOADED, data={"chars": len(pushed.text)})
-        return pushed
+        runtime.context = bundle.rendered or None
+        runtime.events.emit(RunEventType.CONTEXT_LOADED, data={"chars": len(bundle.rendered)})
+        return bundle
 
     def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
@@ -317,7 +318,9 @@ class Agent:
                 events=runtime.events,
             )
 
-    def judged(self, runtime: Runtime, question: str, answer: Any, pushed: Pushed | None) -> None:
+    def judged(
+        self, runtime: Runtime, question: str, answer: Any, bundle: ContextBundle | None
+    ) -> None:
         """The sampled online judge, in the background: grounded against the context the run
         was given, its verdict a feedback record on the answer and a metric."""
         judge = self.harness.judge
@@ -337,8 +340,8 @@ class Agent:
                 question=question,
                 answer=answer,
                 verifier=memory,
-                bundle=pushed.bundle if pushed is not None else None,
-                evidence=pushed.text if pushed is not None else "",
+                bundle=bundle,
+                evidence=bundle.rendered if bundle is not None else "",
             )
             if verdict is None:
                 return

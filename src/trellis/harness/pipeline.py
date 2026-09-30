@@ -38,6 +38,7 @@ from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
 from trellis.harness.runtime import RunCancelled, Runtime, _current, interrupt_id
 from trellis.harness.telemetry import metrics, span
+from trellis.memory.models import ContextBundle
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -83,7 +84,7 @@ async def attempt(
     )
     events.emit(RunEventType.RUN_STARTED, data={"agent_id": identity.agent_id})
     extracted: Extracted | None = None
-    pushed: Any = None
+    pushed: ContextBundle | None = None
     error: Exception | None = None
     cancelled = False
     token = _current.set(runtime)
@@ -245,7 +246,7 @@ async def _failed(agent: Agent, runtime: Runtime, exc: BaseException) -> Result:
 
 
 async def _succeeded(
-    agent: Agent, runtime: Runtime, query: str, extracted: Extracted, pushed: Any
+    agent: Agent, runtime: Runtime, query: str, extracted: Extracted, pushed: ContextBundle | None
 ) -> Result:
     answer = extracted.answer
     await agent.harness.runs.finished(

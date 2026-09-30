@@ -29,5 +29,5 @@ def memory_service() -> FakeMemoryService:
 @pytest.fixture
 async def memory_harness(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
     async with Harness(config=Settings(memory_url="http://memory.test", eval_sample=0.0)) as h:
-        h.memory = Memory("http://memory.test", None, client=memory_service)
+        h.memory = Memory("http://memory.test", None, client=memory_service.client())
         yield h

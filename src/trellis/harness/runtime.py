@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.tools.base import Tool
+    from trellis.memory import MemoryContext
+    from trellis.memory.models import ToolHints
 
 log = logging.getLogger("trellis.run")
 
@@ -116,7 +118,7 @@ class Runtime:
 
     # ------------------------------------------------------------------ services
     @property
-    def memory(self) -> Any:
+    def memory(self) -> MemoryContext:
         """The memory service in this run's scope (the SDK's verbs)."""
         if self.run_memory is None:
             raise ConfigurationError(
@@ -263,7 +265,7 @@ class Tools:
             raise ToolError(f"no tool {name!r} in this run", source="tools")
         return (await call(found, args)).output
 
-    async def hints(self, task: str) -> Any:
+    async def hints(self, task: str) -> ToolHints:
         """What the memory service suggests for ``task`` among this run's tools."""
         if self.runtime.run_memory is None:
             raise ConfigurationError("tool hints need memory='read' or 'read_write'")

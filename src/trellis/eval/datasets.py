@@ -15,13 +15,8 @@ from typing import Any, Final, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trellis.contracts import (
-    Feedback,
-    FeedbackSource,
-    FeedbackTargetKind,
-    FeedbackVerdict,
-    RunRecord,
-)
+from trellis.contracts import FeedbackSource, FeedbackTargetKind, FeedbackVerdict, RunRecord
+from trellis.memory.models import Feedback
 
 #: Whose judgement may become ground truth.
 GROUND_TRUTH_SOURCES: Final = frozenset({FeedbackSource.HUMAN, FeedbackSource.INTERRUPT})
@@ -72,7 +67,8 @@ class RunReader(Protocol):
 
 
 class FeedbackReader(Protocol):
-    """Where feedback is read back from (the memory service)."""
+    """Where feedback is read back from: the memory service (``ctx.feedback``), whose stored
+    records name their verdict and source as plain strings."""
 
     async def list_for(
         self, target_kind: FeedbackTargetKind, target_id: str
@@ -104,7 +100,7 @@ class DatasetBuilder:
         overlapping page twice adds nothing twice. Returns how many examples are new."""
         before = len(self._items)
         for judgement in feedback:
-            if judgement.source not in self.include_sources:
+            if FeedbackSource(judgement.source) not in self.include_sources:
                 continue
             if (
                 self.min_score is not None
@@ -141,23 +137,23 @@ class DatasetBuilder:
 
 
 def _item(record: RunRecord, feedback: Feedback, evidence: list[str]) -> DatasetItem | None:
+    verdict = FeedbackVerdict(feedback.verdict)
     base = {
         "run_id": record.run_id,
         "agent_id": record.agent_id,
         "feedback_id": feedback.feedback_id,
-        "verdict": feedback.verdict.value,
-        "source": feedback.source.value,
+        "verdict": verdict.value,
+        "source": feedback.source,
         "reviewer": feedback.reviewer,
     }
-    evidence = evidence or [e.citation for e in feedback.evidence_refs if e.citation]
-    if feedback.verdict in (FeedbackVerdict.CORRECT, FeedbackVerdict.EDIT):
+    if verdict in (FeedbackVerdict.CORRECT, FeedbackVerdict.EDIT):
         return DatasetItem(
             input=record.input,
             expected_output=feedback.correction,
             evidence=evidence,
             metadata=base,
         )
-    if feedback.verdict in (FeedbackVerdict.CONFIRM, FeedbackVerdict.APPROVE):
+    if verdict in (FeedbackVerdict.CONFIRM, FeedbackVerdict.APPROVE):
         if record.output is None:
             return None
         return DatasetItem(

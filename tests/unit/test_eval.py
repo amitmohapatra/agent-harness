@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import itertools
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from tests.support.memory import Report
 from tests.support.models import ScriptedChat
 from trellis.contracts import (
     AgentEvalEvent,
     AgentResponse,
-    Feedback,
     FeedbackSource,
     FeedbackTargetKind,
     FeedbackVerdict,
@@ -33,6 +33,8 @@ from trellis.eval import (
 from trellis.eval.budget import sampled
 from trellis.eval.gate import main as gate_main
 from trellis.harness.result import Result
+from trellis.memory.models import Feedback
+from trellis.memory.models import GroundingReport as Report
 
 
 def event(run_id: str = "run_1", **metadata: object) -> AgentEvalEvent:
@@ -158,16 +160,24 @@ def record(output: object = "12") -> RunRecord:
     )
 
 
+_feedback_ids = itertools.count()
+
+
 def feedback(
     verdict: FeedbackVerdict, source: FeedbackSource = FeedbackSource.HUMAN, **fields: object
 ) -> Feedback:
-    return Feedback(
-        tenant_id="t",
-        target_kind=FeedbackTargetKind.RUN,
-        target_id="run_1",
-        verdict=verdict,
-        source=source,
-        **fields,  # type: ignore[arg-type]
+    """A record as the memory service returns it: verdict and source are plain strings."""
+    return Feedback.model_validate(
+        {
+            "feedback_id": f"fb_{next(_feedback_ids)}",
+            "tenant_id": "t",
+            "target_kind": "run",
+            "target_id": "run_1",
+            "verdict": verdict.value,
+            "source": source.value,
+            "created_at": datetime.now(UTC),
+            **fields,
+        }
     )
 
 
