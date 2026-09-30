@@ -172,6 +172,8 @@ async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() ->
     )
     refund, remote = service.named("put_catalog")[0].body["tools"]
     assert refund["side_effects"] == "irreversible" and "side_effects" not in remote
-    await run.register_model_key("sk", "a")
+    await memory(service).scoped("t", "a").register_model_key("sk")
     [key] = service.named("model_key")
-    assert key.body["virtual_key"] == "sk" and key.idempotency_key == "model-key:a"
+    assert key.body["virtual_key"] == "sk"
+    assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:a:")
+    assert key.scope == {"tenant_id": "t", "agent_id": "a", "custom_metadata": {}}

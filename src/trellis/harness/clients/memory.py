@@ -8,6 +8,7 @@ tool specs and the records the pipeline queues.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from typing import Final
 
@@ -45,9 +46,15 @@ class Memory:
     def bind(self, identity: Identity) -> RunMemory:
         return RunMemory(self, self.client.bind(**identity.scope()))
 
-    def tenant(self, tenant: str) -> RunMemory:
-        """Tenant-wide calls made outside a run (the tool catalog, tools built before a run)."""
-        return RunMemory(self, self.client.bind(tenant_id=tenant))
+    def scoped(self, tenant: str, agent_id: str | None = None) -> RunMemory:
+        """Calls made outside a run: tenant-wide (the tool catalog, tools built before a run)
+        or for one agent (its model key)."""
+        scope = (
+            {"tenant_id": tenant}
+            if agent_id is None
+            else {"tenant_id": tenant, "agent_id": agent_id}
+        )
+        return RunMemory(self, self.client.bind(**scope))
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -132,9 +139,13 @@ class RunMemory:
         effects are unknown goes in without them: the catalog learns them elsewhere."""
         await self.ctx.advanced.tools.put_catalog([_catalog_entry(s) for s in specs])
 
-    async def register_model_key(self, key: str, agent_id: str) -> None:
-        """The agent-level LLM key the service uses for this agent's memory (idempotent)."""
-        await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent_id}")
+    async def register_model_key(self, key: str) -> None:
+        """The agent-level LLM key the service uses for this agent's memory, in an agent
+        scope (the same request from every process and run, so the idempotent PUT repeats
+        rather than conflicts; a rotated key is a new request)."""
+        agent = self.ctx.scope.agent_id
+        digest = hashlib.blake2b(key.encode(), digest_size=8).hexdigest()
+        await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent}:{digest}")
 
 
 def _catalog_entry(spec: ToolSpec) -> dict[str, object]:

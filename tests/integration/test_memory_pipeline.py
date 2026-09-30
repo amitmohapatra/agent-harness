@@ -211,8 +211,9 @@ async def test_the_model_key_is_registered_once_per_agent(
         await agent.run("b", user="u")
         await h.writes.drain()
     [key] = memory_service.named("model_key")
-    assert key.body["virtual_key"] == "sk-mem" and key.idempotency_key == "model-key:keyed"
-    assert key.scope["agent_id"] == "keyed"
+    assert key.body["virtual_key"] == "sk-mem"
+    assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:keyed:")
+    assert key.scope["agent_id"] == "keyed" and "user_id" not in key.scope
 
 
 async def test_the_sampled_judge_scores_against_the_context_and_files_feedback(
