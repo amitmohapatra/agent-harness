@@ -39,18 +39,6 @@ async def test_a_failed_write_is_counted_and_reported_to_the_run() -> None:
     await writes.aclose()
 
 
-async def test_a_delayed_write_is_run_now_by_drain() -> None:
-    writes, done = Writes(), []
-
-    async def later() -> None:
-        done.append(1)
-
-    writes.submit("later", later, delay=60)
-    await writes.drain()
-    assert done == [1]
-    await writes.aclose()
-
-
 def test_the_loop_shutting_down_drains_the_queue() -> None:
     done: list[int] = []
     writes = Writes()

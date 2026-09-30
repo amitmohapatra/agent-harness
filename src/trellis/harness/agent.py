@@ -358,7 +358,7 @@ class Agent:
 
         self.harness.writes.submit("judge", work, events=runtime.events)
 
-    def imported_code_mode_calls(self, runtime: Runtime, *, delay: float) -> None:
+    def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway
         if memory is None or gateway is None or self.memory_mode != "read_write":
             return
@@ -380,9 +380,7 @@ class Agent:
                 )
                 await memory.record_tool(call, outcome)
 
-        self.harness.writes.submit(
-            "memory.code_mode_calls", work, events=runtime.events, delay=delay
-        )
+        self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
 
     # ------------------------------------------------------------------ internals
     async def _opened(

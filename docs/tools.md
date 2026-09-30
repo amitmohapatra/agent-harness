@@ -67,9 +67,11 @@ An `mcp(...)` source with at least 20 tools or 3 servers, all of them `read` in 
 all served by Code Mode clients of the gateway (`is_code_mode_client`: a script sees no other
 server), is given to the agent as Bifrost's Code Mode meta-tools (`listToolFiles`,
 `readToolFile`, `getToolDocs`, `executeToolCode`) scoped to its servers: the model writes one
-Starlark script (`server.tool(param=value)`, `print(...)`) instead of many calls. Scripts run under the run id (`x-bf-parent-request-id`); with
-`memory="read_write"` their nested calls are read from Bifrost's MCP log ten seconds after the
-run and recorded as tool calls. One non-read tool keeps the whole source in normal mode, so a
+Starlark script (`server.tool(param=value)`, `print(...)`) instead of many calls. Scripts run
+under the run id (`x-bf-parent-request-id`); with `memory="read_write"` their nested calls are
+read back from Bifrost's MCP log after the run, in the background — the log is written a few
+seconds behind, so it is read until two reads agree (at most 20 s) — and recorded as tool
+calls. One non-read tool keeps the whole source in normal mode, so a
 script never reaches a write.
 
 ## Inside a run

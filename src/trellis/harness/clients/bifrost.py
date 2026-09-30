@@ -7,8 +7,10 @@ harness so policy and approval sit in front of it.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Final
@@ -24,6 +26,10 @@ CODE_MODE_MIN_TOOLS: Final = 20
 CODE_MODE_MIN_SERVERS: Final = 3
 #: Page size when reading the MCP execution log back.
 LOG_PAGE: Final = 500
+#: The gateway writes its MCP log a few seconds behind: a script's nested calls are read
+#: every :data:`LOG_POLL_SECONDS` until two reads agree, for at most :data:`LOG_SETTLE_SECONDS`.
+LOG_POLL_SECONDS: Final = 2.0
+LOG_SETTLE_SECONDS: Final = 20.0
 
 #: Bifrost's Code Mode meta-tools. The gateway injects these into completions itself and
 #: publishes no schema for them; these are the arguments its executor checks for.
@@ -117,8 +123,17 @@ class Gateway:
         return content
 
     async def code_mode_calls(self, parent_request_id: str, since: datetime) -> list[MCPLog]:
-        """The nested calls one Code Mode script made, from the gateway's log."""
-        return await self.client.mcp_logs(since, LOG_PAGE, parent_request_id=parent_request_id)
+        """The nested calls the Code Mode scripts of one run made, from the gateway's log,
+        once it has caught up (two reads agree, or :data:`LOG_SETTLE_SECONDS` passed)."""
+        deadline = time.monotonic() + LOG_SETTLE_SECONDS
+        seen: list[MCPLog] | None = None
+        while True:
+            found = await self.client.mcp_logs(since, LOG_PAGE, parent_request_id=parent_request_id)
+            settled = seen is not None and found and [e.id for e in found] == [e.id for e in seen]
+            if settled or time.monotonic() >= deadline:
+                return found
+            seen = found
+            await asyncio.sleep(LOG_POLL_SECONDS)
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
         return await self.client.complete(messages, **body)

@@ -47,32 +47,11 @@ class Writes:
         self._queue: asyncio.Queue[_Item] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._workers: list[asyncio.Task[None]] = []
-        self._delayed: dict[asyncio.TimerHandle, _Item] = {}
         self.failed = 0
 
-    def submit(
-        self,
-        label: str,
-        work: Work,
-        *,
-        events: RunEvents | None = None,
-        delay: float = 0.0,
-    ) -> None:
-        """Queue ``work``. ``delay`` postpones it (reading a log that lags behind)."""
+    def submit(self, label: str, work: Work, *, events: RunEvents | None = None) -> None:
+        """Queue ``work``."""
         item = _Item(label, work, events)
-        if delay > 0:
-            handle: asyncio.TimerHandle
-
-            def fire() -> None:
-                self._delayed.pop(handle, None)
-                self._put(item)
-
-            handle = asyncio.get_running_loop().call_later(delay, fire)
-            self._delayed[handle] = item
-            return
-        self._put(item)
-
-    def _put(self, item: _Item) -> None:
         queue = self._ensure()
         try:
             queue.put_nowait(item)
@@ -80,11 +59,7 @@ class Writes:
             self._report(item, "the write queue is full")
 
     async def drain(self) -> None:
-        """Wait until every queued (and every delayed) write has been attempted."""
-        delayed, self._delayed = self._delayed, {}
-        for handle, item in delayed.items():
-            handle.cancel()
-            self._put(item)
+        """Wait until every queued write has been attempted."""
         if self._queue is not None and self._loop is asyncio.get_running_loop():
             await self._queue.join()
 

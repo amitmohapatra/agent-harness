@@ -11,6 +11,7 @@ import respx
 
 from tests.support.memory import AGENT_TOOLS, FakeMemoryService
 from trellis.contracts import ToolCall, ToolError, ToolOutcome, ToolSpec
+from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory
 from trellis.harness.identity import Identity
@@ -82,7 +83,9 @@ async def test_a_call_is_scoped_to_its_server_and_a_failed_tool_raises() -> None
 
 
 @respx.mock
-async def test_code_mode_calls_are_read_back_from_the_log_by_the_run_id() -> None:
+async def test_code_mode_calls_are_read_back_from_the_log_by_the_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     route = respx.get(f"{GATEWAY}/api/mcp-logs").mock(
         return_value=httpx.Response(
             200,
@@ -103,10 +106,13 @@ async def test_code_mode_calls_are_read_back_from_the_log_by_the_run_id() -> Non
             },
         )
     )
+    monkeypatch.setattr(bifrost, "LOG_POLL_SECONDS", 0.0)
     gateway = Gateway(f"{GATEWAY}/v1", None)
     [entry] = await gateway.code_mode_calls("run_1", datetime(2026, 9, 30, tzinfo=UTC))
     assert entry.name == "wiki-search" and entry.arguments == {"q": "x"}
     assert route.calls[0].request.url.params["llm_request_ids"] == "run_1"
+    # the log is read again until two reads agree: it is written behind the calls
+    assert route.call_count == 2
     await gateway.aclose()
 
 

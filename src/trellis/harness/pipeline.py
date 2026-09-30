@@ -13,7 +13,7 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -44,10 +44,6 @@ if TYPE_CHECKING:
     from trellis.harness.agent import Agent
 
 log = logging.getLogger("trellis.run")
-
-#: How long after a Code Mode run its nested calls are read from the gateway's log (the log
-#: is written a few seconds behind).
-CODE_MODE_LOG_DELAY_SECONDS: Final = 10.0
 
 
 async def attempt(
@@ -268,7 +264,7 @@ async def _succeeded(
     agent.recorded_outcome(runtime, success=True, note=None)
     agent.judged(runtime, runtime.task, answer, pushed)
     if runtime.used_code_mode:
-        agent.imported_code_mode_calls(runtime, delay=CODE_MODE_LOG_DELAY_SECONDS)
+        agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)
 
 
