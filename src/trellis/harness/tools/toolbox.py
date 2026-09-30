@@ -3,8 +3,8 @@ virtual key allows, each with its risk tier and approval rule — and the catalo
 
 1. **list** — the local sources, and the gateway's MCP listing for the virtual key;
 2. **tier** — an MCP tool's side effects come from its server's annotations, a local tool's
-   from its declaration; the catalog's ``side_effects`` overrides either, and its
-   ``approve_when`` becomes the tool's approval rule (``tools.policy``);
+   from its declaration; the catalog's ``risk`` (what the memory service decided) overrides
+   either, and its ``approve_when`` becomes the tool's approval rule (``tools.policy``);
 3. **Code Mode** — the Code Mode servers whose tools all only read, when there are at least
    :data:`CODE_MODE_MIN_SERVERS` of them or :data:`CODE_MODE_MIN_TOOLS` tools between them,
    are offered as Bifrost's Code Mode meta-tools (one script instead of many calls); every
