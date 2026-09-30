@@ -1,83 +1,55 @@
 [project]
 name = "trellis-harness"
-version = "0.3.0"
-description = "Framework-neutral runtime harness for agents: context, memory, telemetry, tools, models, policy and evaluation around agents you already have."
+version = "0.4.0"
+description = "Attach memory, tools, approvals, durable runs and evaluation to an agent you already built."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{ name = "Agent Platform Team" }]
-keywords = ["agents", "harness", "opentelemetry", "langfuse", "memory", "langgraph", "deepagents"]
+keywords = ["agents", "harness", "langgraph", "openai-agents", "claude-agent-sdk", "memory"]
 classifiers = [
   "Programming Language :: Python :: 3.12",
   "License :: OSI Approved :: Apache Software License",
   "Typing :: Typed",
 ]
 
-# Core stays small: contracts, config, the OTel API (not the SDK) and the Memory Service SDK.
-# No framework (langgraph/crewai/adk) and no telemetry backend are ever pulled in here.
+# The core imports no agent framework: each adapter imports its framework lazily, the first
+# time a target of that type is wrapped. The extras only decide what gets installed.
 dependencies = [
-  "trellis-contracts>=0.2",
-  # The gateway client, shared with the memory service so its retry and rate-limit
-  # handling has one implementation rather than two that drift.
-  "bifrost-sdk>=0.1",
-  "pydantic>=2.13,<3",
-  "pydantic-settings>=2.15,<3",
-  "opentelemetry-api>=1.44",
+  "trellis-contracts>=0.4",
   "trellis-memory>=0.2",
-  "pyyaml>=6",
+  "bifrost-sdk>=0.2",
+  "pydantic>=2.13,<3",
+  "httpx>=0.28",
+  "croniter>=6",
+  "opentelemetry-api>=1.44",
 ]
 
 [project.optional-dependencies]
-# OpenTelemetry SDK + OTLP exporter (needed only if the application does not configure its own)
+langgraph = ["langgraph>=1.2,<2", "langchain-core>=1.6,<2"]
+deepagents = ["trellis-harness[langgraph]", "deepagents>=0.7.19,<0.8"]
+openai-agents = ["openai-agents>=0.22.3,<0.23"]
+claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
+agui = ["fastapi>=0.115"]
+a2a = ["a2a-sdk[http-server]>=1.1,<2", "fastapi>=0.115"]
+# OTLP export (Langfuse is reached through the same exporter; no Langfuse SDK).
 otel = ["opentelemetry-sdk>=1.44", "opentelemetry-exporter-otlp-proto-http>=1.44"]
-# AI Registry binding: validating a result against the output_schema an agent declared
-registry = ["jsonschema>=4"]
-# Langfuse observability / evaluation / prompt provider
-langfuse = ["langfuse>=3.0"]
-# LangGraph adapter (never installed for plain-Python users)
-langgraph = ["trellis-harness-langgraph"]
-# AG-UI surface (FastAPI + SSE); the core imports nothing of it
-agui = ["trellis-harness-agui"]
-# Framework adapters, one distribution each (design §8). The core imports none of them.
-deepagents = ["trellis-harness-deepagents"]
-openai-agents = ["trellis-harness-openai-agents"]
-claude-agent-sdk = ["trellis-harness-claude-agent-sdk"]
-# A2A surface and client (a2a-sdk): serve agents to agents, call registry agents as tools
-a2a = ["trellis-harness-a2a"]
-# Temporal durability: a workflow per run, Temporal Schedules, behind the same ports
-temporal = ["trellis-harness-temporal"]
-# JSON structured logging via structlog (stdlib logging is used when absent)
-logging = ["structlog>=25.2"]
 all = [
-  "trellis-harness[otel,langfuse,langgraph,logging,registry,agui,a2a,deepagents,openai-agents,claude-agent-sdk,temporal]",
+  "trellis-harness[langgraph,deepagents,openai-agents,claude-agent-sdk,agui,a2a,otel]",
 ]
 
 [dependency-groups]
 dev = [
+  "trellis-harness[all]",
   "pytest>=9.1",
   "pytest-asyncio>=1.4",
-  "pytest-cov>=6",
   "pytest-timeout>=2.3",
-  "hypothesis>=6",
   "respx>=0.22",
   "ruff>=0.16",
   "pyright>=1.1.414",
-  "opentelemetry-sdk>=1.44",
-  "structlog>=25.2",
-  "langgraph>=1.2",
-  "trellis-harness-langgraph",
-  "trellis-harness-agui",
-  "trellis-harness-a2a",
-  "fastapi>=0.115",
-  # The three frameworks the Phase 5 adapters bind, pinned to the ranges their tests
-  # verify. Declared here as well as in each adapter so a dev sync always has them.
-  "deepagents>=0.7.19,<0.8",
-  "openai-agents>=0.22.3,<0.23",
-  "claude-agent-sdk>=0.2.160,<0.3",
-  "trellis-harness-deepagents",
-  "trellis-harness-openai-agents",
-  "trellis-harness-claude-agent-sdk",
-  "trellis-harness-temporal",
+  "uvicorn>=0.30",
+  # Examples point LangGraph at Bifrost's OpenAI-compatible endpoint with this.
+  "langchain-openai>=1.0",
 ]
 
 [build-system]
@@ -85,101 +57,57 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# ``trellis`` is a namespace package shared by every trellis-* distribution: no __init__.py.
+# ``trellis/__init__.py`` extends ``__path__`` (pkgutil style), so trellis.contracts and
+# trellis.memory, installed from their own distributions, stay importable beside it.
 packages = ["src/trellis"]
 
 [tool.uv]
 default-groups = ["dev"]
 
-[tool.uv.workspace]
-members = [
-  "integrations/langgraph",
-  "integrations/agui",
-  "integrations/a2a",
-  "integrations/deepagents",
-  "integrations/openai_agents",
-  "integrations/claude_agent_sdk",
-  "integrations/temporal",
-]
-
 [tool.uv.sources]
-trellis-harness-langgraph = { workspace = true }
-trellis-harness-agui = { workspace = true }
-trellis-harness-deepagents = { workspace = true }
-trellis-harness-openai-agents = { workspace = true }
-trellis-harness-claude-agent-sdk = { workspace = true }
-trellis-harness-a2a = { workspace = true }
-trellis-harness-temporal = { workspace = true }
-# Local development against the Memory Service SDK checkout.
-trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
-# The contract and the gateway client are separate distributions; local while unpublished.
+# Sibling checkouts on their ``overhaul`` branches, while the platform is unpublished.
 trellis-contracts = { path = "../agent-contracts", editable = true }
+trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
 bifrost-sdk = { path = "../bifrost-sdk", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = [
-  "tests",
-  "integrations/langgraph/tests",
-  "integrations/a2a/tests",
-  "integrations/deepagents/tests",
-  "integrations/openai_agents/tests",
-  "integrations/claude_agent_sdk/tests",
-  "integrations/temporal/tests",
-]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
 timeout = 120
-filterwarnings = ["error::DeprecationWarning:trellis.harness.*"]
+filterwarnings = ["error::DeprecationWarning:trellis.*"]
 markers = [
-  "performance: harness overhead benchmarks",
-  "compatibility: framework version compatibility matrix",
-  "live: needs a running Memory Service (MEMORY_SERVICE_URL)",
-  "live_llm: needs a Memory Service *and* a model gateway (BIFROST_URL)",
-  "temporal: needs temporalio's time-skipping test server (downloaded on first use)",
+  "live: needs running services (BIFROST_URL / MEMORY_URL / RUNS_URL); skipped otherwise",
+  "performance: harness overhead benchmark (writes build/benchmark-results.json)",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = [
-  "src",
-  "integrations/langgraph/src",
-  "integrations/agui/src",
-  "integrations/a2a/src",
-  "integrations/deepagents/src",
-  "integrations/openai_agents/src",
-  "integrations/claude_agent_sdk/src",
-  "integrations/temporal/src",
-  "tests",
-]
+src = ["src", "tests"]
+extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PL", "RUF", "ASYNC", "T20"]
 ignore = ["PLR0913", "PLR2004", "B008"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["PLR2004", "T20", "PLC0415", "E501"]
-"integrations/*/tests/**" = ["PLR2004", "T20", "PLC0415", "E501"]
-# E402: sys.path is set up before the imports. PLC0415: fixtures import optional
-# dependencies *after* deciding to skip, so a missing service is a skip not an ImportError.
-"conftest.py" = ["E402", "PLC0415"]
-"examples/**" = ["T20"]
-# A command-line helper whose whole job is to print a table.
-"tools/**" = ["T20"]
+"tests/**" = ["PLR2004", "T20", "PLC0415", "E501", "PLR0915"]
+"examples/**" = ["T20", "PLC0415"]
+# Adapters import their framework on first use, never at module import.
+"src/trellis/harness/adapters/**" = ["PLC0415"]
+"src/trellis/harness/tools/convert/**" = ["PLC0415"]
+"src/trellis/harness/surfaces/**" = ["PLC0415"]
+"src/trellis/eval/__main__.py" = ["T20"]
 
 [tool.pyright]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
-include = [
-  "src",
-  "integrations/langgraph/src",
-  "integrations/agui/src",
-  "integrations/a2a/src",
-  "integrations/deepagents/src",
-  "integrations/openai_agents/src",
-  "integrations/claude_agent_sdk/src",
-  "integrations/temporal/src",
-]
-exclude = ["**/__pycache__", "**/.venv"]
+include = ["src", "tests", "examples"]
+exclude = ["**/__pycache__", "**/.venv", ".claude"]
 typeCheckingMode = "standard"
-reportMissingImports = "warning"
+# ``trellis`` is a pkgutil-style package (it extends ``__path__``) and pyright does not follow
+# that for editable installs: ``make typings`` links trellis.contracts and trellis.memory
+# where pyright looks first.
+stubPath = "typings"

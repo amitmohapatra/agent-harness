@@ -6,6 +6,8 @@ __pycache__/
 .hypothesis/
 dist/
 build/
+# pyright's view of the sibling trellis packages (make typings)
+typings/
 *.egg-info/
 .bench/
 .coverage

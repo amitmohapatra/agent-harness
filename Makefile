@@ -7,106 +7,52 @@ PYTEST ?= $(PY) -m pytest
 
 .PHONY: help
 help:  ## Show this help
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: install
-install:  ## Create the venv and install everything (uv)
-	$(UV) venv --python 3.12 .venv
-	$(UV) sync --all-extras
+install:  ## Create the venv with every extra (uv)
+	$(UV) sync
+
+.PHONY: typings
+typings:  ## Link trellis.contracts and trellis.memory where pyright looks (see pyproject)
+	@mkdir -p typings/trellis
+	@$(PY) -c "import os, trellis.contracts as c, trellis.memory as m; \
+	[os.path.lexists(d) or os.symlink(s, d) for s, d in ((p.__path__[0], 'typings/trellis/' + os.path.basename(p.__path__[0])) for p in (c, m))]"
 
 .PHONY: test
-test:  ## Run every test except the benchmarks
-	$(PYTEST) -q -m "not performance"
-
-.PHONY: test-unit
-test-unit:  ## Unit tests only
-	$(PYTEST) tests/unit -q
-
-.PHONY: test-contract
-test-contract:  ## Port/contract conformance
-	$(PYTEST) tests/contract -q
-
-.PHONY: test-integration
-test-integration:  ## Integration tests
-	$(PYTEST) tests/integration -q
-
-.PHONY: test-e2e
-test-e2e:  ## End-to-end, including the real Memory Service SDK (HTTP mocked)
-	$(PYTEST) tests/e2e -q
-
-.PHONY: test-langgraph
-test-langgraph:  ## LangGraph adapter tests
-	$(PYTEST) integrations/langgraph/tests -q
-
-.PHONY: test-compat
-test-compat:  ## Compatibility matrix (rewrites compatibility-matrix.json)
-	$(PYTEST) tests/compatibility -q
+test:  ## Every test except the benchmark and the live ones
+	$(PYTEST) -q -m "not performance and not live"
 
 .PHONY: test-live
-test-live:  ## End-to-end against a running Memory Service (MEMORY_SERVICE_URL)
-	MEMORY_SERVICE_URL=$${MEMORY_SERVICE_URL:-http://localhost:8080} \
-	MEMORY_API_KEY=$${MEMORY_API_KEY:-dev-key} \
-	$(PYTEST) tests/e2e/test_live_memory_service.py -q -s
-
-.PHONY: test-live-full
-test-live-full:  ## Every feature against a running Memory Service, with database checks
-	MEMORY_SERVICE_URL=$${MEMORY_SERVICE_URL:-http://localhost:8080} \
-	MEMORY_API_KEY=$${MEMORY_API_KEY:-dev-key} \
-	$(PYTEST) tests/e2e/test_live_full_surface.py -q -s
+test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, RUNS_URL)
+	$(PYTEST) -q -m live
 
 .PHONY: bench
-bench:  ## Harness overhead benchmark (writes benchmark-results.json)
+bench:  ## Harness overhead benchmark (writes build/benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s
 
-.PHONY: bench-throughput
-bench-throughput:  ## Turns/second against a running Memory Service (throughput-results.json)
-	$(PYTEST) tests/performance/test_throughput.py -m performance -q -s
+.PHONY: gate
+gate: bench  ## The regression gate CI runs
+	$(PY) -m trellis.eval gate --baseline benchmark-results.json --current build/benchmark-results.json
 
 .PHONY: lint
 lint:  ## Ruff
 	.venv/bin/ruff check .
-
-.PHONY: format
-format:  ## Ruff autofix
-	.venv/bin/ruff check --fix .
+	.venv/bin/ruff format --check .
 
 .PHONY: typecheck
-typecheck:  ## Pyright
+typecheck: typings  ## Pyright
 	.venv/bin/pyright
 
 .PHONY: check
-check: lint typecheck test  ## Everything a release gate runs
+check: lint typecheck test  ## Everything CI runs, except the gate
 	@echo "all gates passed"
 
-.PHONY: coverage
-coverage:  ## Test coverage for the core package
-	$(PYTEST) -q -m "not performance" --cov=trellis.harness --cov-report=term-missing
-
 .PHONY: examples
-examples:  ## Run the runnable examples
-	$(PY) examples/plain_python.py >/dev/null && echo "plain_python ok"
-	$(PY) examples/langgraph_agent.py >/dev/null && echo "langgraph_agent ok"
-	$(PY) examples/reorder_workflow.py >/dev/null && echo "reorder_workflow ok"
-	$(PY) examples/memory_tour.py >/dev/null && echo "memory_tour ok"
-	$(PY) examples/deepagents_agent.py >/dev/null && echo "deepagents_agent ok"
-	$(PY) examples/openai_agents_agent.py >/dev/null && echo "openai_agents_agent ok"
-	$(PY) examples/claude_agent_sdk_agent.py >/dev/null && echo "claude_agent_sdk_agent ok"
-
-.PHONY: examples-live
-examples-live:  ## Run the examples that need a Memory Service (MEMORY_SERVICE_URL)
-	@URL=$${MEMORY_SERVICE_URL:-http://localhost:8080}; \
-	KEY=$${MEMORY_API_KEY:-dev-key}; \
-	curl -sf -m 5 "$$URL/health/live" >/dev/null || \
-	  { echo "no Memory Service at $$URL — nothing to run (start one, or set MEMORY_SERVICE_URL)"; exit 1; }; \
-	MEMORY_SERVICE_URL=$$URL MEMORY_API_KEY=$$KEY $(PY) examples/memory_quickstart.py >/dev/null \
-	  && echo "memory_quickstart ok"; \
-	MEMORY_SERVICE_URL=$$URL MEMORY_API_KEY=$$KEY $(PY) examples/memory_tour.py >/dev/null \
-	  && echo "memory_tour (live) ok"
-
-.PHONY: docs-compat
-docs-compat:  ## Print the README compatibility table from compatibility-matrix.json
-	$(PY) tools/compat_table.py
+examples:  ## Run every example with no services
+	@for f in examples/*.py; do case $$f in */_*) continue;; esac; \
+	  env -u BIFROST_URL -u MEMORY_URL -u RUNS_URL $(PY) $$f >/dev/null && echo "$$f ok" || exit 1; done
 
 .PHONY: clean
 clean:  ## Remove caches
-	rm -rf .pytest_cache .ruff_cache .hypothesis **/__pycache__
+	rm -rf .pytest_cache .ruff_cache build typings **/__pycache__

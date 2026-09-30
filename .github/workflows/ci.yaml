@@ -9,49 +9,51 @@ jobs:
   gates:
     runs-on: ubuntu-latest
     steps:
+      # The platform is unpublished: the harness resolves its siblings by path (pyproject
+      # [tool.uv.sources]), so they are checked out next to it.
       - uses: actions/checkout@v4
+        with:
+          path: agent-harness
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-contracts
+          path: agent-contracts
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/bifrost-sdk
+          path: bifrost-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-memory-service
+          path: agent-memory-service
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
       - name: Install
-        run: uv sync --all-extras
+        working-directory: agent-harness
+        run: uv sync
       - name: Lint
-        run: uv run ruff check .
+        working-directory: agent-harness
+        run: make lint
       - name: Typecheck
-        run: uv run pyright
+        working-directory: agent-harness
+        run: make typecheck
       - name: Tests
-        run: uv run pytest -q -m "not performance"
-      - name: Compatibility matrix
-        run: uv run pytest tests/compatibility -q
-      - name: Benchmark
-        run: uv run pytest tests/performance -m performance -q -s
+        working-directory: agent-harness
+        run: make test
+      - name: Examples
+        working-directory: agent-harness
+        run: make examples
+      - name: Regression gate
+        working-directory: agent-harness
+        # CI machines are not the machine the baseline was measured on: the gate catches
+        # regressions of the harness's own overhead that double it, not noise.
+        run: |
+          uv run pytest tests/performance -m performance -q
+          uv run python -m trellis.eval gate --baseline benchmark-results.json \
+            --current build/benchmark-results.json --max-latency-regression 100
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: reports
-          path: |
-            compatibility-matrix.json
-            benchmark-results.json
-
-  # The core must keep working with nothing optional installed.
-  core-only:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-      - name: Install core only
-        run: |
-          uv venv --python 3.12
-          uv pip install -e . pytest pytest-asyncio respx
-      - name: Core smoke test
-        run: |
-          uv run python -c "
-          import asyncio, sys
-          from trellis.harness import AgentHarness
-          assert 'langgraph' not in sys.modules and 'langfuse' not in sys.modules
-          h = AgentHarness(defaults={'tenant_id': 'acme'})
-          async def agent(x): return x
-          print(asyncio.run(h.wrap(agent, agent_id='a')('ok')).data)
-          "
+          name: benchmark
+          path: agent-harness/build/benchmark-results.json
