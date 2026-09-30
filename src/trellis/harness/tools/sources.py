@@ -131,10 +131,11 @@ class MCPSource:
 
     Normal mode: every tool is its own tool, run one call at a time through the gateway, each
     call under the harness's policy. Code Mode: when the source is large (at least
-    :data:`CODE_MODE_MIN_TOOLS` tools or :data:`CODE_MODE_MIN_SERVERS` servers) *and* the
-    catalog says every one of its tools only reads, the model gets Bifrost's Code Mode
-    meta-tools instead and writes a script against them. Write tools never reach a script:
-    one of them anywhere in the source keeps the whole source in normal mode.
+    :data:`CODE_MODE_MIN_TOOLS` tools or :data:`CODE_MODE_MIN_SERVERS` servers), the catalog
+    says every one of its tools only reads, *and* every server is a Code Mode client in the
+    gateway (a script sees no other server), the model gets Bifrost's Code Mode meta-tools
+    instead and writes a script against them. Write tools never reach a script: one of them
+    anywhere in the source keeps the whole source in normal mode.
     """
 
     def __init__(self, servers: Sequence[str], only: Sequence[str] | None) -> None:
@@ -148,7 +149,8 @@ class MCPSource:
         defs = await gateway.tools(self.servers, self._qualified())
         effects = await services.side_effects([d.name for d in defs])
         large = len(defs) >= CODE_MODE_MIN_TOOLS or len(self.servers) >= CODE_MODE_MIN_SERVERS
-        if large and defs and all(effects.get(d.name) == "read" for d in defs):
+        scriptable = all(d.code_mode and effects.get(d.name) == "read" for d in defs)
+        if large and defs and scriptable:
             return code_mode_tools(gateway, self.servers)
         return [
             Tool(

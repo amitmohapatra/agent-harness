@@ -28,8 +28,9 @@ class Services:
 
 
 class Def:
-    def __init__(self, name: str, client: str) -> None:
+    def __init__(self, name: str, client: str, *, code_mode: bool = True) -> None:
         self.name, self.client, self.description, self.parameters = name, client, f"{name} tool", {}
+        self.code_mode = code_mode
 
 
 class Gateway:
@@ -96,6 +97,13 @@ async def test_a_large_read_only_source_goes_to_code_mode() -> None:
     tools = await mcp("wiki").resolve(Services(Gateway(defs), effects))
     assert [t.name for t in tools] == [s.name for s in CODE_MODE_TOOLS]
     assert all(t.code_mode for t in tools)
+
+
+async def test_a_server_that_is_no_code_mode_client_keeps_its_source_in_normal_mode() -> None:
+    # a script only sees the gateway's Code Mode clients
+    defs = [Def(f"wiki-t{i}", "wiki", code_mode=False) for i in range(20)]
+    tools = await mcp("wiki").resolve(Services(Gateway(defs), {d.name: "read" for d in defs}))
+    assert not any(t.code_mode for t in tools) and len(tools) == 20
 
 
 async def test_one_write_tool_keeps_a_large_source_in_normal_mode() -> None:

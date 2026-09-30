@@ -63,7 +63,10 @@ CODE_MODE_TOOLS: Final[tuple[ToolSpec, ...]] = (
     ),
     ToolSpec(
         name="executeToolCode",
-        description="Run a script that calls the servers' tools; returns what it prints.",
+        description=(
+            "Run a Starlark (Python-like) script that calls the servers' tools as "
+            "server.tool(param=value); returns what it prints."
+        ),
         input_schema={
             "type": "object",
             "properties": {"code": {"type": "string"}},
