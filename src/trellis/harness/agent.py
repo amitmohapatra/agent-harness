@@ -204,7 +204,7 @@ class Agent:
         assert record.awaiting is not None
         identity = self._identity_of(record)
         feedback = resolution.to_feedback(record.awaiting, identity.context())
-        if feedback is not None and self.memory_mode != "off":
+        if feedback is not None and self.memory_mode == "read_write":
             run_memory = self.run_memory(identity)
             if run_memory is not None:
                 self.harness.writes.submit("memory.feedback", lambda: run_memory.feedback(feedback))
@@ -343,7 +343,7 @@ class Agent:
             if verdict is None:
                 return
             metrics.judged(self.id, verdict.score, verdict.method.value)
-            if memory is not None:
+            if memory is not None and self.memory_mode == "read_write":
                 await memory.feedback(verdict.as_feedback(event))
 
         self.harness.writes.submit("judge", work, events=runtime.events)

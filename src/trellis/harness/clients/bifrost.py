@@ -14,8 +14,8 @@ from datetime import datetime
 from typing import Any, Final
 
 from bifrost_sdk import Bifrost, MCPLog, Options, ToolDef
-from trellis.contracts import ToolError, ToolSpec
 
+from trellis.contracts import ToolError, ToolSpec
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import Tool
 

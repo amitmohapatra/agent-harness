@@ -27,6 +27,7 @@ from a2a.utils.constants import (
     PROTOCOL_VERSION_CURRENT,
     TransportProtocol,
 )
+
 from trellis.harness.surfaces.a2a.executor import RunExecutor
 from trellis.harness.surfaces.a2a.identity import (
     EXTENSION_DESCRIPTION,

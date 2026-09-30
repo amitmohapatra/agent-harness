@@ -13,9 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from trellis.contracts import Feedback, ToolCall, ToolOutcome, ToolSpec
-from trellis.memory import MemoryClient
-
 from trellis.harness.identity import Identity
+from trellis.memory import MemoryClient
 
 #: Prompt budget for the pushed context, in tokens.
 CONTEXT_TOKEN_BUDGET: Final = 2000

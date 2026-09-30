@@ -23,12 +23,12 @@ from typing import Final
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from google.protobuf.json_format import MessageToDict
-from trellis.memory.webhooks import DELIVERY_HEADER, EVENT_HEADER, SIGNATURE_HEADER, sign
-
 from a2a.server.tasks import PushNotificationConfigStore, PushNotificationSender
 from a2a.server.tasks.push_notification_sender import PushNotificationEvent
 from a2a.utils.proto_utils import to_stream_response
+from google.protobuf.json_format import MessageToDict
+
+from trellis.memory.webhooks import DELIVERY_HEADER, EVENT_HEADER, SIGNATURE_HEADER, sign
 
 log = logging.getLogger("trellis.a2a.push")
 

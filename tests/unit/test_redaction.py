@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from trellis.contracts import TelemetryRedactor
-
 from trellis.harness.redaction import DEFAULT, MAX_VALUE_CHARS, REDACTED, redact_attributes
 
 

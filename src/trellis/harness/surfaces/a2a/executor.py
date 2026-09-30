@@ -16,6 +16,13 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any, Final
 
+from a2a.helpers import new_task, new_text_part
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import Message, TaskState
+from a2a.utils.errors import InvalidRequestError
+
 from trellis.contracts import (
     ConfigurationError,
     InterruptDecision,
@@ -23,13 +30,6 @@ from trellis.contracts import (
     RunEvent,
     RunStatus,
 )
-
-from a2a.helpers import new_task, new_text_part
-from a2a.server.agent_execution import AgentExecutor, RequestContext
-from a2a.server.events import EventQueue
-from a2a.server.tasks import TaskUpdater
-from a2a.types import Message, TaskState
-from a2a.utils.errors import InvalidRequestError
 from trellis.harness import pipeline
 from trellis.harness.surfaces.a2a.identity import IdentityRefused, UserResolver
 from trellis.harness.surfaces.a2a.tasks import RunTaskStore

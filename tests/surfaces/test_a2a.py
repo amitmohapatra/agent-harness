@@ -26,16 +26,16 @@ from a2a.types import (
 from a2a.utils.errors import A2AError
 from fastapi import FastAPI
 from google.protobuf.json_format import MessageToDict
-from trellis.contracts import RunStatus
-from trellis.memory.webhooks import SIGNATURE_HEADER, verify_signature
 
 from trellis import Harness, Settings, a2a
+from trellis.contracts import RunStatus
 from trellis.harness.agent import Agent
 from trellis.harness.clients.runs import LocalRuns
 from trellis.harness.runtime import Runtime
 from trellis.harness.surfaces.a2a import client as a2a_client
 from trellis.harness.surfaces.a2a.identity import EXTENSION_URI, identity_headers
 from trellis.harness.surfaces.a2a.push import PushNotifier, TargetRefused, validate_url
+from trellis.memory.webhooks import SIGNATURE_HEADER, verify_signature
 
 URL = "http://a2a.test/agents/greeter"
 TENANT = "default"
@@ -342,7 +342,6 @@ async def test_a_remote_question_pauses_the_calling_run(remote: Harness) -> None
 
 def test_an_answer_is_read_as_the_decision_it_names() -> None:
     from trellis.contracts import InterruptDecision, InterruptReason
-
     from trellis.harness.surfaces.a2a.executor import _decision
 
     def message(text: str = "", data: dict[str, Any] | None = None) -> Any:

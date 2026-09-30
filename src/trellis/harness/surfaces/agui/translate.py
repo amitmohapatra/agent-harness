@@ -13,7 +13,6 @@ import json
 from typing import Any, Final
 
 from trellis.contracts.runs import RunEvent, RunEventType, RunOutcome
-
 from trellis.harness.surfaces.agui.events import (
     AGUIEvent,
     AGUIEventType,

@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions
-from trellis.contracts import RunEventType, RunStatus
 
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, tool
+from trellis.contracts import RunEventType, RunStatus
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 refunds: list[str] = []

@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+
+from tests.support.memory import Report
+from tests.support.models import ScriptedChat
 from trellis.contracts import (
     AgentEvalEvent,
     AgentResponse,
@@ -17,9 +20,6 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
 )
-
-from tests.support.memory import Report
-from tests.support.models import ScriptedChat
 from trellis.eval import (
     Dataset,
     DatasetBuilder,

@@ -6,10 +6,10 @@ from __future__ import annotations
 import httpx
 import respx
 from pydantic import BaseModel
-from trellis.contracts import RunStatus
 
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Settings, tool
+from trellis.contracts import RunStatus
 
 
 @tool(side_effects="read")

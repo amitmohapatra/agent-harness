@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from typing import Final
 
-from trellis.contracts import RunRecord, RunStatus
-
 from a2a.server.context import ServerCallContext
 from a2a.server.tasks import InMemoryTaskStore, TaskStore
 from a2a.types import (
@@ -23,6 +21,8 @@ from a2a.types import (
     TaskState,
     TaskStatus,
 )
+
+from trellis.contracts import RunRecord, RunStatus
 from trellis.harness.clients.runs import Runs
 from trellis.harness.surfaces.a2a.identity import IdentityRefused, UserResolver
 from trellis.harness.surfaces.a2a.translate import RESULT_ARTIFACT, asked, value_part

@@ -10,11 +10,11 @@ from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
-from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, current, tool
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 
 executed: list[str] = []
 

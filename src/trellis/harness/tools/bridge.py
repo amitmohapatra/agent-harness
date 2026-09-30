@@ -22,7 +22,6 @@ from trellis.contracts import (
     ToolOutcome,
     ToolStatus,
 )
-
 from trellis.harness.events import NOTICE
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, current

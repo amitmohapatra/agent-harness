@@ -5,10 +5,10 @@ from __future__ import annotations
 
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
-from trellis.contracts import RunStatus
 
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, tool
+from trellis.contracts import RunStatus
 
 refunded: list[str] = []
 

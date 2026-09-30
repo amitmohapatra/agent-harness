@@ -16,8 +16,8 @@ from typing import Any, Final, overload
 
 import httpx
 from pydantic import BaseModel, ConfigDict, create_model
-from trellis.contracts import ToolSpec
 
+from trellis.contracts import ToolSpec
 from trellis.harness.clients.bifrost import (
     CODE_MODE_MIN_SERVERS,
     CODE_MODE_MIN_TOOLS,

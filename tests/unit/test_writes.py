@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 
 from trellis.contracts import AgentExecutionContext, RunEvent
-
 from trellis.harness.events import RunEvents
 from trellis.harness.writes import Writes
 

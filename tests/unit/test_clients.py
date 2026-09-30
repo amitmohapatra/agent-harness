@@ -8,9 +8,9 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 import respx
-from trellis.contracts import ToolCall, ToolError, ToolOutcome, ToolSpec
 
 from tests.support.memory import AGENT_TOOLS, FakeMemoryService
+from trellis.contracts import ToolCall, ToolError, ToolOutcome, ToolSpec
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory
 from trellis.harness.identity import Identity

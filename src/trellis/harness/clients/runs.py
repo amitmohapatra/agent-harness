@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from croniter import croniter
+
 from trellis.contracts import (
     AgentError,
     Interrupt,
@@ -36,7 +37,6 @@ from trellis.contracts import (
     ScheduleSpec,
     new_id,
 )
-
 from trellis.harness.journal import JOURNAL_KEY
 
 #: How long one call to agent-runs may take before the run fails with it.

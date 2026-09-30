@@ -91,6 +91,9 @@ extend-exclude = [".claude"]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PL", "RUF", "ASYNC", "T20"]
 ignore = ["PLR0913", "PLR2004", "B008"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["trellis"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004", "T20", "PLC0415", "E501", "PLR0915"]
 "examples/**" = ["T20", "PLC0415"]

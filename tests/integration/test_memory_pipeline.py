@@ -5,11 +5,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from trellis.contracts import FeedbackTargetKind, RunEventType, RunStatus
-
 from tests.support.memory import FakeMemoryService, Report
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
+from trellis.contracts import FeedbackTargetKind, RunEventType, RunStatus
 from trellis.harness.clients.memory import Memory
 
 
@@ -139,7 +138,7 @@ async def test_the_sampled_judge_scores_against_the_context_and_files_feedback(
         async def fn(input: str, agent: Runtime) -> str:
             return "you prefer email"
 
-        result = await h.wrap(fn, id="judged", memory="read").run("contact?", user="u")
+        result = await h.wrap(fn, id="judged", memory="read_write").run("contact?", user="u")
         await h.writes.drain()
     [(_, verified)] = memory_service.named("verify")
     assert (

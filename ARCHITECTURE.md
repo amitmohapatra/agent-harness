@@ -1,218 +1,143 @@
 # Architecture
 
-## The one rule
+The harness is an attach layer. It owns no control flow: a framework runs the agent, and the
+harness sits around one run of it — identity, the run record, memory in and out, the tools the
+agent may call and who must approve them, the pause, the recording, the judge.
 
-**The harness is not an agent framework.** It owns no control flow, no state model and no
-topology. It is a cross-cutting runtime layer that runs *around* an agent someone else
-wrote, in a framework the harness does not control and whose version it does not pin.
-
-```
-User application
-      |
-LangGraph / CrewAI / plain Python / a future framework
-      |
-Framework adapter                      (the only place a framework may be imported)
-      |
-trellis-harness core           (contracts + pipeline; imports no framework)
-      |
-      +--> Memory Service (trellis-memory SDK)
-      +--> Model client
-      +--> Tool runtime
-      +--> Artifact runtime
-      +--> OpenTelemetry
-      +--> Langfuse (optional)
-      +--> Policy hooks
-      +--> Evaluation events
-```
-
-A test enforces the rule rather than trusting it:
-`tests/compatibility/test_matrix.py::test_core_never_imports_a_framework` imports the core
-in a clean interpreter and asserts that `langgraph`, `crewai`, `google.adk`, `langchain`
-and `langfuse` are absent from `sys.modules`.
-
-## Hexagonal layering
-
-Every outbound dependency is a `Protocol`, and they live in the **contracts distribution**, not
-here: `trellis/contracts/ports.py` in `trellis-contracts`. `MemoryPort`, `ModelClient`,
-`ToolClient`, `ArtifactClient`, `TelemetryProvider`, `TelemetryRedactor`,
-`EvaluationProvider`, `EvaluationSink`, `PromptProvider`, `AgentPolicyProvider`,
-`AgentRegistryClient`, `EventSink`, `RunStore`, `Scheduler`, `FeedbackStore`, `Judge`,
-`AgentDirectory`, `AgentInterceptor`, `LifecycleListener`, `FrameworkAdapter`.
-
-The core depends only on those protocols; concrete adapters are injected. Conformance is
-asserted in `tests/contract/test_ports.py` — every shipped implementation is checked
-against the protocol it claims.
+## Modules
 
 ```
-config/        validated settings (YAML + env + code)
-runtime/       AgentRuntime, cancellation, structured logging, contextvar propagation
-execution/     ContextFactory, ExecutionCoordinator, RuntimeBuilder, retry, sync bridge
-interceptors/  the ordered pipeline (identity, policy, memory, telemetry, judge, timeout, result)
-memory/        Memory Service adapter, policy, visibility checks, writeback queue
-models/        ModelClient implementations (Bifrost, direct) + instrumentation
-tools/         ToolClient implementations (local, MCP, memory, composite) + wrap_tool + bridge
-reasoning/     the bounded ReAct loop and the ContextAssembler (prompt budget, compaction)
-artifacts/     artifact stores + per-run client
-events/        the RunEvent stream, its sinks, webhook delivery, target validation
-interrupts/    one pause mechanism for every framework; the resolution registry
-runs/          the RunStore client over agent-runs, and the ordered run recorder
-evaluation/    the grounded judge, datasets, experiments, the regression gate
-telemetry/     OTel provider, composite, tracer facade, redaction, sampling, metrics
-langfuse/      optional Langfuse provider, interceptor, evaluation, prompts
-policy/        policy providers and the PolicyOutcome vocabulary
-registry/      the AI Registry client, the agent directory, heartbeat and delta sync
+src/trellis/
+  __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory)
+  worker.py            python -m trellis.worker module:harness
+  eval/                judge, budget, grounding, rubric, datasets, experiments, gate (+ __main__)
+  harness/
+    harness.py         Harness: settings → clients, writes, judge; wrap / tools / worker / feedback
+    agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
+    pipeline.py        one attempt of one run (the fixed pipeline below)
+    runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
+    journal.py         what a re-run needs: answers and tool outputs, keyed by content
+    events.py          a run's RunEvent stream (built only when someone listens)
+    writes.py          background writes with auto-drain
+    identity.py        tenant / user / thread / agent / run → memory scope, contracts context
+    result.py          Result
+    settings.py        the environment
+    artifacts.py       payloads too large for a question (ask(table=...))
+    telemetry.py       OTel spans and counters; OTLP / Langfuse export
+    redaction.py       what may leave the process
+    worker.py          Worker: claim, lease, heartbeat
+    adapters/          detect(target) and one adapter per framework (base, langgraph,
+                       openai_agents, claude, react, function)
+    tools/             base (Tool), sources (tool, mcp, a2a, openapi), policy (tiers, approve
+                       rules), bridge (every call), convert/ (one module per native format)
+    clients/           bifrost, memory, runs — the only modules that call those services
+    surfaces/          agui (serve_chat), a2a (serve_a2a, the a2a() client)
 ```
 
-The framework adapters and the two surfaces are **not** in that list: each is its own
-distribution under `integrations/` (`langgraph`, `deepagents`, `openai_agents`,
-`claude_agent_sdk`, `agui`, `a2a`, `temporal`), and the core imports none of them.
+Each service has exactly one client module; nothing else in the harness calls it. The core
+imports no framework: an adapter imports its framework the first time a target of its type is
+wrapped, and `tests/contract` checks that `import trellis` and `Harness()` load none.
+
+## The pipeline
+
+Every run of every framework goes through `pipeline.attempt`:
 
 ```mermaid
-classDiagram
-  direction LR
-  class AgentHarness
-  class MemoryPort { <<Protocol>> }
-  class ModelClient { <<Protocol>> }
-  class ToolClient { <<Protocol>> }
-  class ArtifactClient { <<Protocol>> }
-  class EventSink { <<Protocol>> }
-  class RunStore { <<Protocol>> }
-  class Scheduler { <<Protocol>> }
-  class FeedbackStore { <<Protocol>> }
-  class Judge { <<Protocol>> }
-  class AgentDirectory { <<Protocol>> }
-  class AgentPolicyProvider { <<Protocol>> }
-  class TelemetryProvider { <<Protocol>> }
-  class AgentRegistryClient { <<Protocol>> }
-  class FrameworkAdapter { <<Protocol>> }
-  AgentHarness ..> MemoryPort
-  AgentHarness ..> ModelClient
-  AgentHarness ..> ToolClient
-  AgentHarness ..> ArtifactClient
-  AgentHarness ..> EventSink
-  AgentHarness ..> RunStore
-  AgentHarness ..> Judge
-  AgentHarness ..> AgentPolicyProvider
-  AgentHarness ..> TelemetryProvider
-  AgentHarness ..> AgentRegistryClient
-  DatasetBuilder ..> RunStore
-  DatasetBuilder ..> FeedbackStore
-  A2AAgentClient ..> AgentDirectory
-  MemoryPort <|.. MemoryRuntime
-  ModelClient <|.. BifrostModelClient
-  ToolClient <|.. MCPToolClient
-  EventSink <|.. WebhookEventSink
-  RunStore <|.. RunStoreClient
-  RunStore <|.. TemporalRunStore
-  Scheduler <|.. TemporalScheduler
-  Judge <|.. GroundedJudge
-  AgentDirectory <|.. RegistryAgentDirectory
-  FrameworkAdapter <|.. LangGraphHarness
-  FrameworkAdapter <|.. DeepAgentsHarness
-  FrameworkAdapter <|.. OpenAIAgentsHarness
-  FrameworkAdapter <|.. ClaudeAgentSDKHarness
+flowchart LR
+  A[identity] --> B[run record<br/>agent-runs or in process]
+  B --> C[tools<br/>sources + memory pull]
+  C --> D[memory push<br/>/v1/context]
+  D --> E[adapter<br/>prepare · invoke/stream · extract]
+  E -->|paused| F[record PAUSED<br/>interrupt + journal]
+  E -->|ended| G[record SUCCESS / ERROR]
+  G --> H[background: transcript,<br/>outcome, sampled judge]
 ```
 
-## Execution flow
+A failed memory read is a `warning` event, not a failed run. Writes to agent-runs are awaited
+(a pause that was not recorded cannot be resumed); writes to the memory service are queued.
 
-```
-harness.wrap(agent)(payload, context=ctx)
-  │
-  ├─ ContextFactory            explicit context > ambient parent context > harness defaults
-  ├─ Sampler.decide            one decision per run, deterministic in the run id
-  ├─ RuntimeBuilder.build      memory / model / tools / artifacts, all bound to this run
-  ├─ tracer.agent_span         "agent.run" opens; everything below nests inside it
-  │   ├─ bind(context, runtime)            contextvars for in-process propagation
-  │   ├─ interceptor.before   ascending order
-  │   │     identity → policy → memory context → telemetry → langfuse → timeout → user
-  │   ├─ the developer's agent             inside asyncio.timeout + a cancellation scope
-  │   ├─ AgentResponse.coerce                whatever it returned becomes an AgentResponse
-  │   └─ interceptor.after    descending order
-  │         result validation → memory observation → evaluation → … → telemetry → identity
-  └─ lifecycle events + normalized result (or the original exception re-raised)
-```
+## The adapter contract
 
-Ordering is deterministic: `before` ascends by `Order`, `after` descends, so the pipeline
-nests like an onion *and* the post-execution sequence is exactly
-validation → memory write → evaluation event.
+Four functions per framework, nothing else (`adapters/base.py`):
 
-## Context and identity
+* `prepare_input(target, input, context)` — the framework's input, the memory context as a
+  system message (or appended to the system prompt);
+* `invoke(target, native_input, run)` / `stream(...)` — run it; the stream yields text deltas
+  and finally `Output(value)`;
+* `extract(target, output)` — the answer, the assistant transcript, and a pause the framework
+  reported itself (LangGraph's `interrupt`, an OpenAI Agents `needs_approval`);
+* `resume_input(target, native_input, pending, resolution)` — what continues a pause:
+  `Command(resume=...)` for a checkpointed graph, the SDK's `RunState` for its approvals,
+  otherwise the original input (a re-run).
 
-`AgentExecutionContext` is frozen. A nested agent gets a child via `for_agent()`, which
-inherits the trusted identity (tenant, workspace, principal, thread, session, turn, work,
-request, correlation, trace, deadline) and replaces only the agent-run fields, recording
-`parent_agent_run_id` and `causation_id`.
+Per-run harness tools reach the adapter already converted (`tools/convert/<format>.py`). An
+adapter with fixed tools (a compiled graph) refuses `tools=` at wrap time; its tools come from
+`h.tools(...)` when the graph is built.
 
-Run ids are **derived** whenever the execution has a durable position — thread + turn/task
-+ agent — so a replayed step produces the same id. Idempotency keys for observations,
-artifacts and tool calls hang off that same lineage, which is what makes framework retries
-and checkpoint replays safe (§42, §55).
+## Tools
 
-In-process propagation uses `contextvars` (convenience only). Across services the contract
-is W3C Trace Context via the configured OpenTelemetry propagator; baggage carries ids only
-— never content, never credentials.
+A source resolves to `Tool`s (a contracts `ToolSpec` and a runner), once per agent and again
+after `TOOLS_TTL_SECONDS` (300). Every call, whoever makes it, goes through `tools/bridge.call`:
+
+1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
+   recorded output is returned and nothing runs;
+2. **policy** — the tier from the tool's side effects: `read` runs, `write` runs and is
+   announced (`tool_notice` event), `irreversible` asks for approval. An `approve` rule for the
+   tool replaces the tier: it asks exactly when its condition holds (a small safe expression
+   language, parsed at wrap time; a condition that cannot be evaluated asks);
+3. **execution** — in a `trellis.tool` span, between `TOOL_CALL_*` events; a failure is an
+   error result the model reads, a pause propagates;
+4. **record** — journaled, counted, and with `memory="read_write"` sent to the memory
+   service's tool records in the background.
+
+A tool called outside a harness run is refused.
+
+`mcp(...)` sources are listed through Bifrost (`<client>-<tool>` names) and executed one call at
+a time through it. A source goes to **Code Mode** when it has at least 20 tools or 3 servers
+*and* the memory service's catalog says every one of its tools is `read`: the agent then gets
+Bifrost's meta-tools (`listToolFiles`, `readToolFile`, `getToolDocs`, `executeToolCode`)
+scoped to those servers, scripts run under the run id, and their nested calls are read back
+from Bifrost's MCP log (after `CODE_MODE_LOG_DELAY_SECONDS`, 10) into the memory tool records.
+A write tool anywhere in a source keeps it in normal mode. Agent Mode is never used.
+
+## Pauses and resumes
+
+`Runtime.ask` is the one pause. Its interrupt (a contracts `Interrupt`) has the id
+`<run_id>.<attempt>.<n>.<content key>`: it names its run, so `resume` needs nothing else, and
+the question it asks. How a run continues:
+
+* **LangGraph with a checkpointer**: `ask` *is* `langgraph.types.interrupt`; the resume is
+  `Command(resume={<LangGraph interrupt id>: resolution})` and the graph continues where it stopped.
+* **Everything else**: `ask` raises and the attempt ends (a framework that swallows the
+  exception is still paused: the runtime records the pause first). The resume runs the agent
+  again from its input, as the next attempt, with the **journal**: questions already answered
+  return their answers where they are asked, and tool calls already made return their
+  recorded outputs (keyed by content, consumed in order — a re-planned call nobody approved is
+  asked about again, never matched to another approval).
+
+The journal travels with the run record (`metadata["trellis_journal"]`). agent-runs 0.2 keeps
+the interrupt of a pause but has no field for harness state yet, so `HttpRuns` holds the
+journals of the runs it paused in process (bounded, `MAX_JOURNALS`) and merges them into the
+records it reads back. A run resumed where no journal is available still gets its answer:
+the resolution on `last_resolution` answers the question its interrupt id names (the
+*orphan* rule), and any other question is asked again rather than answered wrongly.
+
+A run started in process (`run`/`stream`) continues in the process that resumes it; a run that
+came from the queue (`start`, a schedule) goes back to it and a worker continues it. Approve,
+reject and edit decisions on tool calls are also feedback records.
+
+## Background writes
+
+`writes.Writes`: a bounded queue (`MAX_PENDING` 10 000) drained by `WRITERS` (4) tasks. A
+failed write is logged, counted (`trellis.writes.failed`) and emitted as a `warning` event to
+the run's listeners. When the event loop shuts down it cancels the workers, and a cancelled
+worker finishes the queue first (the write it was cut off in included; writes are idempotent),
+within `DRAIN_SECONDS` (10). `await h.aclose()` drains explicitly.
 
 ## Telemetry
 
-OpenTelemetry is canonical. The harness needs only the OTel **API** at runtime: with no SDK
-configured, the API's no-op implementation is used and nothing breaks. `HarnessTracer` is
-the single place where three policies are applied — capture (may a payload be attached at
-all), redaction (what an allowed payload may contain) and sampling (is this run traced) —
-so no call site can forget them.
-
-Langfuse is layered on the same spans. Its SDK attaches a span processor to the
-`TracerProvider`, so enabling it adds an exporter rather than a second span tree; the
-harness enriches its existing spans with Langfuse's documented OTel attributes
-(`langfuse.observation.type`, `session.id`, `user.id`, usage/cost details) and tells the
-SDK — through its public `should_export_span` hook — to export harness spans too. A test
-asserts the span count is identical with Langfuse on and off.
-
-## Failure philosophy
-
-| Dependency | Default behaviour |
-| --- | --- |
-| Memory unavailable (read) | run without context, attach a `MEMORY_DEGRADED` warning |
-| Memory unavailable (write) | keep the result, attach `MEMORY_WRITE_FAILED` |
-| Memory, `fail_closed` | raise `MemoryUnavailableError` |
-| Model unavailable | normalized `ModelError` (category `MODEL`) |
-| Tool unavailable | normalized `ToolError` (category `TOOL`) |
-| Langfuse unavailable | execution continues; events buffered or dropped |
-| OTel exporter unavailable | execution continues |
-| Policy provider unavailable | allow (or deny, with `policy.failure_mode: fail_closed`) |
-
-Cancellation is never swallowed: `asyncio.CancelledError` always propagates.
-
-## Complexity budget
-
-| Operation | Cost |
-| --- | --- |
-| Context creation | O(1) |
-| Provider/tool lookup | O(1) average (dict) |
-| Interceptor chain | O(I), chain materialised once at construction |
-| Lifecycle listeners | O(L) |
-| Result mapping | O(R) in the result's own size |
-
-Nothing scans all registered agents or tools per call. In-process state is bounded: the
-writeback queue refuses work above `max_pending` rather than growing, the in-memory
-artifact store evicts, evaluation events carry references rather than payloads, and
-completed executions are exported rather than accumulated.
-
-## Patterns used
-
-Decorator (`wrap`, `wrap_tool`), Interceptor/Middleware (the pipeline), Adapter (framework
-and provider adapters), Strategy (memory/retry/sampling policies), Factory
-(`ContextFactory`, `RuntimeBuilder`, `MemoryFactory`), Registry (tools, descriptors),
-Facade (`AgentHarness`), Observer (lifecycle listeners, evaluation sinks), Composite
-(telemetry providers, evaluation sinks).
-
-## Extension points
-
-* a new framework → a `FrameworkAdapter` in its own distribution;
-* a new model/tool provider → implement `ModelClient` / `ToolClient`;
-* a new observability backend → implement `TelemetryProvider` (compose it, do not replace
-  OpenTelemetry);
-* a new policy engine (OPA, a policy service) → implement `AgentPolicyProvider`;
-* an agent registry → implement `AgentRegistryClient` (default: no-op);
-* prompt management → implement `PromptProvider`;
-* Bifrost / MCP / A2A → `ModelClient`, `ToolClient`, `PromptProvider` and the serializable
-  `AgentRequest`/`AgentResponse` exist so these plug in without rewriting agents.
+The OTel API only: spans `trellis.run` and `trellis.tool`, counters `trellis.runs`,
+`trellis.tool_calls`, `trellis.writes.failed`, histogram `trellis.judge.score`. Attributes pass
+the redactor. `OTEL_EXPORTER_OTLP_ENDPOINT` and/or a Langfuse key pair install an SDK provider
+with OTLP exporters (Langfuse through `/api/public/otel/v1/traces`) — unless the application
+installed one itself.

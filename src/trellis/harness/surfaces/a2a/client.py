@@ -13,8 +13,6 @@ import re
 from typing import Any, Final
 
 import httpx
-from trellis.contracts import ToolError, ToolSpec
-
 from a2a.client import A2ACardResolver, Client, ClientCallContext, ClientConfig, ClientFactory
 from a2a.extensions.common import HTTP_EXTENSION_HEADER
 from a2a.helpers import new_message, new_text_part
@@ -28,6 +26,8 @@ from a2a.types import (
     TaskState,
 )
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, TransportProtocol
+
+from trellis.contracts import ToolError, ToolSpec
 from trellis.harness.runtime import Paused, current
 from trellis.harness.surfaces.a2a.identity import EXTENSION_URI, identity_headers
 from trellis.harness.surfaces.a2a.translate import TERMINAL_STATES, value_part, values

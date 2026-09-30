@@ -5,9 +5,9 @@ from typing import Any
 import httpx
 import pytest
 import respx
-from trellis.contracts import ConfigurationError
 
 from trellis import mcp, openapi, tool
+from trellis.contracts import ConfigurationError
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.tools.sources import as_source
 

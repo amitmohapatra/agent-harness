@@ -14,11 +14,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-from google.protobuf.json_format import MessageToDict
-from trellis.contracts import RunEvent, RunEventType, RunOutcome
-
 from a2a.helpers import new_data_part, new_text_part
 from a2a.types import Message, Part, TaskState
+from google.protobuf.json_format import MessageToDict
+
+from trellis.contracts import RunEvent, RunEventType, RunOutcome
 
 OUTCOME_STATES: Final[dict[RunOutcome, TaskState]] = {
     RunOutcome.SUCCESS: TaskState.TASK_STATE_COMPLETED,

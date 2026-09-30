@@ -6,9 +6,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from trellis.contracts import ArtifactClient, Judge, RunStore, TelemetryRedactor
-
 import trellis
+from trellis.contracts import ArtifactClient, Judge, RunStore, TelemetryRedactor
 from trellis.eval import GroundedJudge, JudgeBudget
 from trellis.harness.artifacts import Artifacts
 from trellis.harness.clients.runs import HttpRuns, LocalRuns

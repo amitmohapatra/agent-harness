@@ -1,65 +1,66 @@
-# Interrupts
+# Pauses: `ask`, approvals, `resume`
 
-Two different things are both called human-in-the-loop; they get two different records
-(design §7). An **interrupt** stops a run to ask; **feedback** judges what happened.
-
-```mermaid
-stateDiagram-v2
-  [*] --> RUNNING
-  RUNNING --> PAUSED: AgentPaused · LangGraph interrupt() · policy require_approval
-  PAUSED --> RUNNING: harness.resume(interrupt, resolution)
-  RUNNING --> SUCCESS
-  RUNNING --> ERROR
-  RUNNING --> REJECTED: policy denial
-  PAUSED --> CANCELLED: resolution CANCEL (the run is not re-run)
-```
-
-**One mechanism, however the agent is built.** Whatever an agent raised, the harness turns it
-into a contracts `Interrupt` (`interrupt_from_signal`): `AgentPaused` carries the question; a
-LangGraph `GraphInterrupt` is read structurally; a policy that answers
-`PolicyOutcome.REQUIRE_APPROVAL` to `authorize_tool` raises `ApprovalRequired` with the tool
-call. The run store receives `paused(interrupt)`, the stream carries `INTERRUPT` and
-`RUN_FINISHED(outcome=interrupt)`, a webhook sink delivers both, and the harness keeps the
-unredacted interrupt in `harness.resolutions` (`announced(tenant_id)`; a surface claims one by
-id with `claim(interrupt_id, tenant_id=..., user_id=..., workspace_id=..., thread_id=...)`,
-which only the run's own caller can do).
-
-**Answering.** `await harness.resume(interrupt, resolution, context=ctx, agent=wrapped)`
-checks that the decision fits the question (an approval takes `APPROVE`, `EDIT`, `REJECT` or
-`CANCEL`; a question takes `ANSWER` or `CANCEL`), records the `InterruptResolution` on the run
-store (after the pause it answers), turns an approval decision into `Feedback` on the Memory
-Service, files the answer for the run, and runs the agent again with the same context, so the
-same run id, and with `payload` (None unless you pass one): a tool call held for approval finds
-its decision (`APPROVE` runs it, `EDIT` runs the edited arguments after the policy has seen
-them, `REJECT` yields a rejected outcome, `CANCEL` ends the run `CANCELLED` without running the
-agent) and an agent that asked a question finds the answer in `runtime.state["resolutions"][ANSWER]` (the constant is
-`trellis.harness.interrupts.ANSWER`, the string `"answer"`). An approval binds the arguments
-the approver saw: a resumed agent that asks for a different call asks a person again. Without
-`agent`, the caller continues the run itself, for instance a LangGraph graph resuming with
-`Command(resume=...)` whose wrapped nodes find the answer the same way.
+## Asking
 
 ```python
-from trellis.harness.interrupts import ANSWER
-
-
-@harness.agent(agent_id="deploy")
-async def deploy(payload, runtime):
-    answer = runtime.state.get("resolutions", {}).get(ANSWER)
-    if answer is None:
-        raise AgentPaused("Which region?", expects={"type": "string"})
-    return f"deploying to {answer.answer}"
-
-
-resolution = InterruptResolution(
-    interrupt_id=interrupt.interrupt_id,
-    run_id=interrupt.run_id,
-    decision=InterruptDecision.ANSWER,
-    answer="eu",
+answer = await trellis.current().ask(
+    "Which supplier?",
+    options=["ACME", "Globex"],
+    assignee="role:procurement",
+    deadline=tomorrow,
+    escalate_to="role:procurement-leads",
 )
-await harness.resume(interrupt, resolution, context=ctx, agent=deploy)
 ```
 
-**Feedback.** `await runtime.memory.feedback("memory", memory_id, "correct", correction=...)`
-or `await harness.feedback(ctx, "run", run_id, "confirm", score=0.9)` record a judgement
-through the Memory Service (`POST /v1/feedback`); a verdict on a memory reinforces, retracts
-or corrects it there.
+The run pauses (`Result.status == PAUSED`, `Result.interrupt` a contracts `Interrupt`) and, on
+resume, the call returns the answer. The UI hint and the reason follow from the arguments:
+
+| Arguments | `ui` | `reason` |
+|---|---|---|
+| `options=` | `choice` | `CHOICE` |
+| `table=` | `table` (`REVIEW` with `expects=`) | `QUESTION` |
+| `ui="diff", expects=` | `diff` | `REVIEW` |
+| anything else | `form` | `QUESTION` |
+
+A table of up to 50 rows travels in `payload`; a larger one is stored as an artifact and
+referenced by `payload_ref` (served by `serve_chat`). `escalate_to` needs a `deadline`; agent-runs
+escalates or times out the run when it passes.
+
+An approval (an `irreversible` tool, an `approve` rule) is the same pause with
+`reason=APPROVAL` and the tool call attached.
+
+## Answering
+
+```python
+await agent.resume(interrupt_id, "answer", answer="ACME", reviewer="lee")
+await agent.resume(interrupt_id, "approve", reviewer="cfo")
+await agent.resume(interrupt_id, "edit", answer={"amount": 9000}, reviewer="cfo")
+await agent.resume(interrupt_id, "reject", reviewer="cfo")
+await agent.resume(interrupt_id, "cancel", reviewer="cfo")
+```
+
+What `ask` returns: the answer; `True`/`False` for approve/reject; the edited value for edit;
+cancel ends the run `CANCELLED`. The interrupt id names its run, so nothing else is needed; a
+resume must answer the interrupt the run currently waits on.
+
+## How a run continues
+
+* **LangGraph with a checkpointer** (Deep Agents with one included): `ask` is LangGraph's
+  `interrupt`, and the resume is `Command(resume=...)` — the graph continues in place. A
+  graph's own `interrupt(value)` is surfaced as a question and resumed with the raw answer;
+  without a checkpointer it cannot be resumed and the run fails saying so.
+* **OpenAI Agents `needs_approval` tools**: the SDK's own pause; the resume approves or rejects
+  on its `RunState` and continues it.
+* **Everything else** re-runs from the input as the next attempt, with the **journal**:
+  answers already given return where their question is asked, and tool calls already made
+  return their recorded outputs instead of running again. Entries are keyed by content (the
+  question; the tool and its arguments) and consumed in order.
+
+The journal is kept with the run record. agent-runs 0.2 has no field for it yet, so
+`HttpRuns` holds the journals of the runs it paused in process; a run resumed without its
+journal still gets the answer to the question its interrupt id names, and asks any earlier
+question again. Tool calls made before the pause would then run again.
+
+A run started with `run`/`stream` continues in the process that calls `resume`; a queued run
+(`start`, a schedule) goes back to the queue and a worker continues it (`Result.status ==
+QUEUED`).

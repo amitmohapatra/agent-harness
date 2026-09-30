@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
+from trellis import Harness, Runtime, tool
 from trellis.contracts import (
     ConfigurationError,
     InterruptReason,
@@ -13,8 +15,6 @@ from trellis.contracts import (
     RunOutcome,
     RunStatus,
 )
-
-from trellis import Harness, Runtime, tool
 
 calls: list[str] = []
 
@@ -220,7 +220,9 @@ async def test_a_tool_outside_a_run_is_refused() -> None:
         await call(resolved, {"order": "o", "amount": 1})
 
 
-async def test_a_resume_without_the_journal_still_answers_the_right_question(harness: Harness) -> None:
+async def test_a_resume_without_the_journal_still_answers_the_right_question(
+    harness: Harness,
+) -> None:
     """Another process resumes: the store kept the interrupt and the answer, not the journal."""
 
     async def asker(input: str, agent: Runtime) -> str:
@@ -229,7 +231,9 @@ async def test_a_resume_without_the_journal_still_answers_the_right_question(har
     agent = harness.wrap(asker, id="asker")
     paused = await agent.run("x", user="u1")
     assert paused.interrupt is not None
-    record, resolution = await agent._resolution(paused.interrupt.interrupt_id, "answer", "blue", "u1")  # noqa: SLF001
+    record, resolution = await agent._resolution(
+        paused.interrupt.interrupt_id, "answer", "blue", "u1"
+    )
     forgetful = record.model_copy(update={"metadata": {}})
-    done = await agent._continue(forgetful, resolution)  # noqa: SLF001
+    done = await agent._continue(forgetful, resolution)
     assert done.status is RunStatus.SUCCESS and done.answer == "blue"

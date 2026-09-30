@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+
 from trellis.contracts import (
     ConfigurationError,
     InterruptDecision,
@@ -32,7 +33,6 @@ from trellis.contracts import (
     RunStatus,
     safe_id,
 )
-
 from trellis.harness import pipeline
 from trellis.harness.result import Result
 from trellis.harness.runtime import run_of

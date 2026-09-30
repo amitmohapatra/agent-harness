@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from trellis.contracts import Interrupt, InterruptDecision, InterruptResolution
-
 from trellis.harness.journal import Journal, Pending, Replay, content_key
 
 
@@ -44,7 +43,10 @@ def test_a_missing_journal_is_empty() -> None:
 
 def test_an_orphan_answers_only_the_question_its_interrupt_names() -> None:
     orphan = InterruptResolution(
-        interrupt_id="run_1.1.1.abcdef123456", run_id="run_1", decision=InterruptDecision.ANSWER, answer="yes"
+        interrupt_id="run_1.1.1.abcdef123456",
+        run_id="run_1",
+        decision=InterruptDecision.ANSWER,
+        answer="yes",
     )
     replay = Replay(Journal(), orphan=orphan)
     assert replay.answer("zzzz") is None

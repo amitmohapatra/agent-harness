@@ -1,152 +1,77 @@
 # Tools
 
-Three ways a tool can reach an agent, one policy surface in front of all of them (design §6).
-Whether the function is local, a gateway's MCP server or another agent over A2A, a call goes
-through the same instrumented client: the same span, the same approval hook, the same tool
-memory, the same idempotency key, the same events.
+## Sources
 
-## One call
+`tools=[...]` on `h.wrap` (and `h.tools(...)`) accepts:
 
-```mermaid
-sequenceDiagram
-  participant A as Agent
-  participant T as InstrumentedToolClient
-  participant P as Policy
-  participant C as ToolClient (local · MCP · A2A)
-  participant M as Memory Service
-  participant S as Event sinks
-  A->>T: runtime.tools.call("refund", amount=40)
-  T->>P: authorize_tool(context, call)
-  alt REQUIRE_APPROVAL
-    P-->>T: require_approval
-    T->>S: INTERRUPT (the run pauses; a person answers)
-  else DENY
-    P-->>T: deny(reason)
-    T-->>A: ToolOutcome(status=REJECTED)
-  else ALLOW
-    T->>S: TOOL_CALL_START · ARGS
-    T->>C: execute, inside timeouts.tool_seconds
-    C-->>T: result or error
-    T->>M: record_tool_call (tool memory)
-    T->>S: TOOL_CALL_END · RESULT
-    T-->>A: ToolOutcome
-  end
-```
+| Source | Tools | Side effects |
+|---|---|---|
+| `tool(fn)`, `@tool(...)`, or a bare function | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph | `side_effects=` (`"write"` by default) |
+| `mcp(*servers, only=None)` | the servers' tools as Bifrost lists them, named `<server>-<tool>` (`only` takes bare or qualified names) | from the memory service's tool catalog; `"write"` when unknown |
+| `a2a(url, *, name=None)` | one: the remote agent, `{"message": string}` in, its answer out | `"write"` |
+| `openapi(spec, *, only=None, base_url=None, headers=None)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
 
-`tool_call_id` on those events **is** the call's idempotency key, derived from the run's
-lineage and the arguments — so a framework replay produces the same id and the call
-deduplicates instead of doubling.
+Tool names must be unique across an agent's sources. Local, OpenAPI and A2A tools are
+published to the memory service's catalog (in the background) when memory is configured.
 
-## The clients
+## Tiers and approve rules
 
-```mermaid
-classDiagram
-  class ToolClient {
-    <<Protocol>>
-    list_tools()
-    call(tool, **args)
-  }
-  class LocalToolClient { register(fn, **spec) }
-  class MCPToolClient {
-    gateway
-    clients
-  }
-  class MemoryToolClient { attach(runtime) }
-  class A2AAgentClient {
-    directory
-    credentials
-  }
-  class CompositeToolClient { clients }
-  class InstrumentedToolClient {
-    policy
-    tracer
-    bridge
-  }
-  ToolClient <|.. LocalToolClient
-  ToolClient <|.. MCPToolClient
-  ToolClient <|.. MemoryToolClient
-  ToolClient <|.. A2AAgentClient
-  ToolClient <|.. CompositeToolClient
-  CompositeToolClient o-- ToolClient
-  InstrumentedToolClient o-- ToolClient
-```
+| Side effects | Tier |
+|---|---|
+| `read` | runs |
+| `write` | runs, announced as a `CUSTOM` `tool_notice` event |
+| `irreversible` | pauses the run for approval (`InterruptReason.APPROVAL`, the call attached) |
 
-| Client | Where the tool runs | Notes |
-| --- | --- | --- |
-| `LocalToolClient` | in your process | `tools=[fn]`, `tools={"name": fn}` or `harness.register_tool(fn)` build one for you |
-| `MCPToolClient(gateway)` | an MCP server behind Bifrost | lists `GET /api/mcp/clients` and executes through the gateway; names stay exactly as the gateway gives them (`<server>-<tool>`), `clients=[…]` restricts which servers are listed |
-| `MemoryToolClient` | the Memory Service | `memory.recall` and `memory.remember`, offered to the model only when `memory.as_tools: true` |
-| `A2AAgentClient` | another agent | every agent the Registry lists becomes a tool — [a2a.md](a2a.md) |
-| `CompositeToolClient([...])` | several of the above | first client that declares a name owns it; `list_tools` is the union |
-| `wrap_tool(fn)` | in your process, called directly | instrument a function you call yourself, no client involved |
-| `ToolCallBridge` | — | what an adapter uses to put a framework's own tool call through this pipeline |
-
-A tool the model may not call is not a listing problem: `policy.authorize_tool` decides per
-call, and `PolicyOutcome.REQUIRE_APPROVAL` turns the call into an `Interrupt` instead of a
-refusal ([interrupts.md](interrupts.md)).
-
-## Example — local tools, MCP tools and memory tools behind one port
-
-Runs as-is; the MCP and memory clients are added only when their dependencies exist, so the
-snippet stays honest about what is actually reachable.
+`approve={"tool-name": rule}` replaces the tier for that tool. A rule is `True` (always ask),
+`False` (never ask) or a condition over the call's arguments:
 
 ```python
-import asyncio
-
-from trellis.harness import AgentHarness, CompositeToolClient, LocalToolClient
-
-
-def reprice(sku: str, pct: float) -> dict:
-    """Reprice one SKU. The docstring becomes the tool's description."""
-    return {"sku": sku, "new_price": round(100 * (1 + pct / 100), 2)}
-
-
-local = LocalToolClient({"reprice": reprice})
-harness = AgentHarness(tools=CompositeToolClient([local]), defaults={"tenant_id": "acme"})
-
-
-@harness.agent(agent_id="pricing-agent")
-async def pricing(payload: dict, agent) -> dict:
-    specs = await agent.tools.list_tools()
-    outcome = await agent.tools.call("reprice", sku=payload["sku"], pct=5)
-    return {"tools": [s.name for s in specs], "status": outcome.status, "data": outcome.output}
-
-
-print(asyncio.run(pricing({"sku": "SKU-1"})).data)
+approve = {"erp-create_po": "amount > 10000 and currency in ['EUR', 'USD']"}
 ```
 
-With a gateway, the same agent gains every MCP tool its virtual key is allowed:
+Conditions allow comparisons, `and`/`or`/`not`, `+ - * / %`, `in`, literals, lists/tuples and
+argument names; anything else fails at `wrap`. A condition that cannot be evaluated on a call
+(a missing argument, a type error) asks. When a rule does not ask, the call runs (announced
+unless the tool only reads).
+
+An approver may approve, reject (the model is told the call was not run), edit (the call runs
+with the edited arguments) or cancel (the run ends `CANCELLED`).
+
+## Every call
+
+The bridge (`tools/bridge.py`) handles every harness tool call whichever framework makes it:
+journal replay, tier, execution in a `trellis.tool` span between `TOOL_CALL_START/ARGS/END/
+RESULT` events (results previewed up to 2000 characters), then the record. A tool that raises
+becomes an error result the model reads (`"<tool> failed: ..."`); a pause is never swallowed. A
+harness tool called outside a run is refused.
+
+## Tools built into the agent: `h.tools`
+
+A compiled LangGraph graph (and Deep Agents) binds its tools when it is built, so `wrap(tools=)`
+is refused for it. Build with the harness tools instead — every call still goes through the
+bridge, under the policy of the agent that is running:
 
 ```python
-from trellis.harness import BifrostModelClient, CompositeToolClient, LocalToolClient, MCPToolClient
-
-model = BifrostModelClient("http://localhost:8091", api_key=virtual_key)
-tools = CompositeToolClient([LocalToolClient({"reprice": reprice}), MCPToolClient(model)])
+tools = await h.tools(stock, mcp("erp"), framework="langgraph", memory=True)
+graph = create_agent(model, tools=tools)
+agent = h.wrap(graph, id="stock", memory="read_write", approve={"erp-create_po": True})
 ```
 
-Passing the `BifrostModelClient` rather than a second gateway client is deliberate:
-inference and tool execution then share one virtual key, one retry policy and one circuit
-breaker.
+`framework="openai-agents"` returns `FunctionTool`s; `framework="claude-agent-sdk"` returns one
+in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its tools,
+`mcp__trellis__<tool>`, in `allowed_tools`).
 
-## What the harness records for every call
+## Code Mode
 
-| Where | What |
-| --- | --- |
-| span `agent.tool.call` | tool name, source, status, duration, the call's idempotency key; arguments and output only when `telemetry.capture.inputs`/`.outputs` allow it |
-| lifecycle bus | `on_tool_start` / `on_tool_end` |
-| `RunEvent` stream | `TOOL_CALL_START` · `ARGS` · `END` · `RESULT` (`status`, `output`, `error_class`, `invocation_id`) |
-| Memory Service | one `tool_invocations` row per call when `tools.record_to_memory` is on, so procedures can be mined from what actually worked |
-| `runtime.tool_calls` | the run's own list of summaries |
+An `mcp(...)` source with at least 20 tools or 3 servers, all of them `read` in the catalog, is
+given to the agent as Bifrost's Code Mode meta-tools (`listToolFiles`, `readToolFile`,
+`getToolDocs`, `executeToolCode`) scoped to its servers: the model writes one script instead of
+many calls. Scripts run under the run id (`x-bf-parent-request-id`); with
+`memory="read_write"` their nested calls are read from Bifrost's MCP log ten seconds after the
+run and recorded as tool calls. One non-read tool keeps the whole source in normal mode, so a
+script never reaches a write.
 
-A tool that raises becomes a `ToolOutcome` with `status=ERROR` and a normalized `ToolError`
-(category `TOOL`); a tool a policy refused becomes `status=REJECTED` with the reason
-(`ToolStatus` is `ok` · `error` · `timeout` · `rejected` · `cancelled` — there is no `DENIED`).
-Neither is an exception your agent has to catch unless you want to.
+## Inside a run
 
-## Tool memory
-
-Tool memory is the Memory Service's, not the harness's: the harness records what it called
-and whether the run succeeded (`memory.record_outcome`), and the service mines validated
-procedures from that. `runtime.memory.tools.plan(task, available_tools=…)` asks for the
-best-known chain for a task. The design is in the service's
-[`docs/TOOL_MEMORY.md`](https://github.com/amitmohapatra/agent-memory-service).
+`trellis.current().tools.call(name, **args)` calls any of the run's tools through the bridge;
+`tools.hints(task)` asks the memory service which of them fit (needs memory).

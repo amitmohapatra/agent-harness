@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 import respx
+
 from trellis.contracts import (
     Interrupt,
     InterruptDecision,
@@ -14,7 +15,6 @@ from trellis.contracts import (
     RunStatus,
     ScheduleSpec,
 )
-
 from trellis.harness.clients.runs import HttpRuns, LeaseLost, LocalRuns, RunStoreError
 from trellis.harness.journal import JOURNAL_KEY
 

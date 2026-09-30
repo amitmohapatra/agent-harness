@@ -9,9 +9,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from trellis.contracts import ConfigurationError, RunStatus
 
 from trellis import Harness, Runtime
+from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.clients.runs import LocalRuns
 from trellis.worker import load, main
 

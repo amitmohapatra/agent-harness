@@ -9,9 +9,9 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI, Request
-from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
 
 from trellis import Harness, Runtime, Settings, tool
+from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
 from trellis.harness.identity import Identity
 from trellis.harness.surfaces.agui.events import AGUIEvent, AGUIEventType
 from trellis.harness.surfaces.agui.hub import MAX_EVENTS_PER_RUN, Hub

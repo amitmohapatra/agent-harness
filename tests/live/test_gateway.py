@@ -57,16 +57,22 @@ async def test_langgraph_with_a_model_pointed_at_bifrost() -> None:
     async with harness() as h:
         model = ChatOpenAI(base_url=URL, api_key=KEY, model=MODEL, max_tokens=2048)  # type: ignore[arg-type]
         graph = create_agent(model, tools=await h.tools(stock, framework="langgraph"))
-        result = await h.wrap(graph, id="live-graph").run("Units of A-1 in stock? Use the tool.", user="live")
+        result = await h.wrap(graph, id="live-graph").run(
+            "Units of A-1 in stock? Use the tool.", user="live"
+        )
     assert result.status is RunStatus.SUCCESS, result.error
     assert "42" in str(result.answer)
 
 
 async def test_openai_agents_with_a_model_pointed_at_bifrost() -> None:
     async with harness() as h:
-        model = OpenAIChatCompletionsModel(model=MODEL, openai_client=AsyncOpenAI(base_url=URL, api_key=KEY))
+        model = OpenAIChatCompletionsModel(
+            model=MODEL, openai_client=AsyncOpenAI(base_url=URL, api_key=KEY)
+        )
         target = Agent(name="stock", instructions="Use the stock tool.", model=model)
-        result = await h.wrap(target, id="live-openai", tools=[stock]).run("Units of A-1?", user="live")
+        result = await h.wrap(target, id="live-openai", tools=[stock]).run(
+            "Units of A-1?", user="live"
+        )
     assert result.status is RunStatus.SUCCESS, result.error
     assert "42" in str(result.answer)
 

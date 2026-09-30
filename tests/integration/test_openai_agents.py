@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 from agents import Agent, function_tool
-from trellis.contracts import InterruptReason, RunEventType, RunStatus
 
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, current, tool
+from trellis.contracts import InterruptReason, RunEventType, RunStatus
 
 done: list[str] = []
 

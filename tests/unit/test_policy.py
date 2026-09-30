@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from trellis.contracts import ConfigurationError, ToolSpec
 
+from trellis.contracts import ConfigurationError, ToolSpec
 from trellis.harness.tools.policy import Condition, Policy, Tier
 
 
