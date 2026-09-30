@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain.agents import create_agent
+
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
@@ -89,11 +92,90 @@ async def test_tool_hints_ask_for_the_tools_section(
 
     agent = memory_harness.wrap(fn, id="h", tools=[stock], memory="read", tool_hints=True)
     result = await agent.run("reorder a", user="u")
-    assert memory_service.named("context")[0].body["tools"]["available"] == [
-        "stock",
-        "memory_search",
-    ]
+    # the candidates are the run's own tools, never the memory service's pull tools
+    assert memory_service.named("context")[0].body["tools"]["available"] == ["stock"]
     assert isinstance(result.answer, ToolHints) and result.answer.candidates[0].name == "stock"
+    assert memory_service.named("tool_hints")[0].body["available"] == ["stock"]
+
+
+async def test_the_tool_search_pull_tool_looks_among_the_runs_tools(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    async def fn(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("tool_search", task="reorder")
+
+    memory_harness.memory.listed = None  # type: ignore[union-attr]
+    memory_service.agent_tools.append(
+        {"name": "tool_search", "description": "Tools for a task.", "input_schema": {}}
+    )
+    result = await memory_harness.wrap(fn, id="h", tools=[stock], memory="read").run("x", user="u")
+    assert result.answer["candidates"][0]["name"] == "stock"
+    assert memory_service.named("tool_hints")[0].body["available"] == ["stock"]
+    assert memory_service.named("call_agent_tool") == []
+
+
+async def test_a_reading_agent_cannot_call_a_memory_tool_that_writes(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    # tools built before the agent existed include the writing ones; the run refuses them
+    tools = await memory_harness.tools(framework="langgraph", memory=True)
+    model = ScriptedChatModel(turns=[("memory_remember", {"content": "x"}), "could not"])
+    graph = create_agent(model, tools=tools)
+    result = await memory_harness.wrap(graph, id="r", memory="read").run("x", user="u")
+    assert result.answer == "could not"
+    assert "only reads" in str(model.seen[1][-1].content)
+    assert memory_service.named("call_agent_tool") == []
+
+
+async def test_an_outcome_the_agent_recorded_is_not_overwritten(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    memory_service.agent_tools.append(
+        {"name": "record_outcome", "description": "Say how it went.", "input_schema": {}}
+    )
+    memory_harness.memory.listed = None  # type: ignore[union-attr]
+
+    async def fn(input: str, agent: Runtime) -> str:
+        await agent.tools.call("record_outcome", success=False, note="wrong warehouse")
+        return "done"
+
+    result = await memory_harness.wrap(fn, id="o", memory="read_write").run("x", user="u")
+    assert result.status is RunStatus.SUCCESS
+    await memory_harness.writes.drain()
+    assert memory_service.named("outcome") == []  # the agent's own verdict stands
+
+
+async def test_the_transcript_is_recorded_on_a_pause_and_on_a_failure(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    async def fn(input: str, agent: Runtime) -> str:
+        if input == "fail":
+            raise RuntimeError("boom")
+        return str(await agent.ask("Sure?"))
+
+    agent = memory_harness.wrap(fn, id="t", memory="read_write")
+    paused = await agent.run("ask", user="u")
+    assert paused.interrupt is not None
+    await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    failed = await agent.run("fail", user="u")
+    assert failed.status is RunStatus.ERROR
+    await memory_harness.writes.drain()
+    sent = [
+        (c.body["role"], c.body["content"], c.idempotency_key)
+        for c in memory_service.named("message")
+    ]
+    run = paused.run_id
+    assert sent[:3] == [
+        ("USER", "ask", f"{run}:user:0"),  # on the pause
+        ("USER", "ask", f"{run}:user:0"),  # again on the resumed attempt: stored once
+        ("ASSISTANT", "yes", f"{run}:2:msg:1"),
+    ]
+    assert sent[3][:2] == ("USER", "fail")  # a failed run's question is kept too
+    # a run with no thread is its own thread
+    assert {c.scope["thread_id"] for c in memory_service.named("message")} == {
+        paused.run_id,
+        failed.run_id,
+    }
 
 
 async def test_a_memory_outage_is_a_warning_not_a_failure(

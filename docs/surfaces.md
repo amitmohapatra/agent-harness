@@ -6,7 +6,7 @@
 |---|---|
 | `POST {path}/run` | An AG-UI `RunAgentInput`. A new run (the client's `runId`, or one the harness names) executes in the background and its events stream as SSE, each with an `id:` numbered per run. A `resume` entry answers the interrupt a paused run on the thread waits on: `payload` is the answer (`true`/`false`/edited arguments for an approval), `status: "cancelled"` cancels, `decision` names a contracts decision outright. |
 | `GET {path}/runs/{run_id}/events` | Reconnect: the run's events after `Last-Event-ID` (or `?after=`), then live until it finishes. Only the run's own user sees it. |
-| `GET {path}/artifacts/{artifact_id}` | Data an interrupt carries by reference (`payload_ref`). |
+| `GET {path}/artifacts/{artifact_id}` | Data an interrupt carries by reference (`payload_ref`), from the paused run's checkpoint. |
 
 The run keeps going when the client disconnects. Each run's events are buffered (2048 per run,
 256 runs, least recently used dropped), so warnings from background writes after the finish

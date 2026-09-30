@@ -43,6 +43,8 @@ class Pending(BaseModel):
     #: The framework's serialised run, when it resumes from one (an OpenAI Agents
     #: ``RunState`` paused on a ``needs_approval`` tool).
     native_state: dict[str, Any] | None = None
+    #: The rows of a table too long to travel in the question (``interrupt.payload_ref``).
+    table: list[dict[str, Any]] | None = None
 
 
 class Journal(BaseModel):

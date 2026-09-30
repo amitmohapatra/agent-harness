@@ -1,7 +1,8 @@
 """The adapter contract: four functions per framework, nothing else.
 
 * ``prepare_input(target, input, context)`` — the framework's input, with the pushed memory
-  context as a system message;
+  context as a system message (``keeps_conversation(target)``: the target holds the thread's
+  messages itself, so the context leaves the recent conversation out);
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
@@ -71,6 +72,8 @@ class Adapter(Protocol):
     #: the target's tools are fixed when it is built (a compiled graph): ``tools=`` is refused
     #: at wrap time, and the harness tools come from ``h.tools(...)`` instead
     fixed_tools: ClassVar[bool]
+
+    def keeps_conversation(self, target: Any) -> bool: ...
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any: ...
 

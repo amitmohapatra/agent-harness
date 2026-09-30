@@ -9,7 +9,7 @@ process otherwise (`LocalRuns`, same behaviour, nothing survives a restart). Bot
 | `agent.run` / `agent.stream` | `RUNNING` (recorded in process), then `PAUSED` or an ending |
 | `agent.start` | `QUEUED`; `RunHandle.result()` waits for a pause or an ending |
 | `agent.resume` | the next attempt: `RUNNING` for an in-process run, `QUEUED` again for one that came from the queue; `CANCELLED` on cancel |
-| `agent.schedule(cron, input, on_behalf_of=, tz=)` | a `Schedule`; each fire queues a run acting for `on_behalf_of` |
+| `agent.schedule(cron, input, on_behalf_of=, tz=)` | a `Schedule`; each fire queues a run acting for `on_behalf_of`. Idempotent: its name derives from the agent, the person, the cadence and the input, so scheduling the same again (a redeploy) updates that schedule |
 
 ## Workers
 

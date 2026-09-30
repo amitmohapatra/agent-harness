@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI, Request
 
 from trellis import Harness, Runtime, Settings, tool
-from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
+from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, RunStatus, new_id
 from trellis.harness.identity import Identity
 from trellis.harness.surfaces.agui.events import AGUIEvent, AGUIEventType
 from trellis.harness.surfaces.agui.hub import MAX_EVENTS_PER_RUN, Hub
@@ -163,6 +163,45 @@ async def test_a_large_table_travels_as_an_artifact(client: httpx.AsyncClient) -
     assert content.headers["content-type"] == "application/json"
     assert len(content.json()) == 60
     assert (await client.get(f"{PATH}/artifacts/art_missing")).status_code == 404
+
+
+async def test_a_large_table_is_served_by_another_replica_and_only_while_awaited() -> None:
+    first, replica = Harness(config=Settings()), Harness(config=Settings())
+    replica.runs = first.runs  # two processes, one run store
+    apps = [FastAPI(), FastAPI()]
+    first.wrap(agent_fn, id="chat").serve_chat(apps[0], identity=user_of)
+    replica.wrap(agent_fn, id="chat").serve_chat(apps[1], identity=user_of)
+    clients = [
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=a), base_url="http://agui", headers={"x-user": "u1"}
+        )
+        for a in apps
+    ]
+    try:
+        paused = finished(decode((await clients[0].post(f"{PATH}/run", json=body("table"))).text))
+        entry = paused["outcome"]["interrupts"][0]
+        reference = entry["metadata"]["payload_ref"]["artifact_id"]
+        served = await clients[1].get(f"{PATH}/artifacts/{reference}")
+        assert served.status_code == 200 and len(served.json()) == 60
+        await clients[1].post(
+            f"{PATH}/run", json=body(resume=[{"interruptId": entry["id"], "payload": "ok"}])
+        )
+        await asyncio.sleep(0.05)
+        assert (await clients[1].get(f"{PATH}/artifacts/{reference}")).status_code == 404
+    finally:
+        for c in clients:
+            await c.aclose()
+        await first.aclose()
+        await replica.aclose()
+
+
+async def test_a_table_too_large_to_wait_with_a_run_is_refused(harness: Harness) -> None:
+    async def huge(input: Any, agent: Runtime) -> Any:
+        return await agent.ask("Check", table=[{"text": "x" * 1000} for _ in range(1000)])
+
+    result = await harness.wrap(huge, id="huge").run("go", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "a page at a time" in result.error.message
 
 
 # --------------------------------------------------------------------------- translate

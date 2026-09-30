@@ -37,6 +37,9 @@ class OpenAIAgentsAdapter:
     tool_format: ClassVar[ToolFormat] = "openai_agents"
     fixed_tools: ClassVar[bool] = False
 
+    def keeps_conversation(self, target: Any) -> bool:
+        return False
+
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         system = [{"role": "system", "content": context}] if context else []
         if isinstance(input, str):

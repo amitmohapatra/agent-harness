@@ -21,6 +21,9 @@ class FunctionAdapter:
     tool_format: ClassVar[ToolFormat] = "none"
     fixed_tools: ClassVar[bool] = False
 
+    def keeps_conversation(self, target: Any) -> bool:
+        return False
+
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         if context and isinstance(input, list):
             return [{"role": "system", "content": context}, *input]

@@ -24,6 +24,10 @@ TOOL_HINTS_K: Final = 8
 READ_ONLY_TOOLS: Final = frozenset(
     {"memory_search", "history_search", "procedures_search", "tool_search"}
 )
+#: The pull tool that says whether the run achieved its task (the harness then records none).
+RECORD_OUTCOME: Final = "record_outcome"
+#: The pull tool for tool hints: answered among the run's own tools.
+TOOL_SEARCH: Final = "tool_search"
 #: What the catalog may call a tool's side effects (anything else is left for it to learn).
 SIDE_EFFECTS: Final = frozenset({"read", "write", "irreversible"})
 
@@ -80,14 +84,17 @@ class RunMemory:
         return await self.ctx.tool_hints(task, available=list(available), k=TOOL_HINTS_K)
 
     # ------------------------------------------------------------------ records
-    async def record_messages(self, messages: Sequence[tuple[str, str]], run_id: str) -> None:
-        """The run's transcript, once: each message keyed by run and position, so a retried
-        write stores nothing twice."""
+    async def record_messages(
+        self, messages: Sequence[tuple[str, str]], run_id: str, attempt: int
+    ) -> None:
+        """One attempt's transcript. The question is keyed by the run (every attempt asks
+        it, and it is stored once); what the agent said, by attempt and position — so a
+        retried write stores nothing twice."""
         for index, (role, content) in enumerate(messages):
-            key = f"{run_id}:msg:{index}"
             if role == "user":
-                await self.ctx.chat.user(content, idempotency_key=key)
+                await self.ctx.chat.user(content, idempotency_key=f"{run_id}:user:{index}")
             else:
+                key = f"{run_id}:{attempt}:msg:{index}"
                 await self.ctx.chat.assistant(content, idempotency_key=key)
 
     async def record_tool(self, call: ToolCall, outcome: ToolOutcome) -> None:

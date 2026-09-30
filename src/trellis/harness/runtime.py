@@ -7,6 +7,8 @@ tools and the one way to pause: :meth:`Runtime.ask`.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar
@@ -40,6 +42,9 @@ log = logging.getLogger("trellis.run")
 
 #: A table this long travels by reference (``payload_ref``), not inside the question.
 TABLE_INLINE_ROWS: Final = 50
+#: The largest table a run may wait on. It is kept in the run's checkpoint, which agent-runs
+#: bounds at 1 MiB with the rest of the journal; a larger table is refused, to be paged.
+TABLE_MAX_BYTES: Final = 768 * 1024
 
 UI = Literal["approve", "form", "table", "diff", "choice"]
 
@@ -91,6 +96,8 @@ class Runtime:
     used_code_mode: bool = False
     #: the worker holding the run's lease, when a worker runs it
     worker_id: str | None = None
+    #: the agent recorded its own outcome (the memory tool ``record_outcome``)
+    outcome_recorded: bool = False
     started_at: datetime | None = None
     _asked: int = 0
     _steps: int = 0
@@ -136,6 +143,10 @@ class Runtime:
         log.info("%s", message, extra={"run_id": self.run_id, **fields})
         self.events.custom(LOG, message=message, **fields)
 
+    def tool_names(self) -> list[str]:
+        """The run's own tools (the memory service's pull tools are not candidates)."""
+        return [name for name, found in self.toolbox.items() if found.spec.source != "memory"]
+
     def next_step(self) -> int:
         self._steps += 1
         return self._steps
@@ -164,16 +175,14 @@ class Runtime:
             if chosen in ("diff", "table") and expects is not None
             else InterruptReason.QUESTION
         )
-        payload, payload_ref = await self._table(table)
         resolution = await self.interrupt(
             content_key("ask", question, chosen, list(options or [])),
+            table=None if table is None else list(table),
             reason=reason,
             question=question,
             ui=chosen,
             expects=expects,
             options=list(options or []),
-            payload=payload,
-            payload_ref=payload_ref,
             assignee=assignee,
             deadline=deadline,
             escalate_to=escalate_to,
@@ -190,21 +199,27 @@ class Runtime:
             tool_call=call,
         )
 
-    async def interrupt(self, key: str, **fields: Any) -> InterruptResolution:
+    async def interrupt(
+        self, key: str, *, table: list[dict[str, Any]] | None = None, **fields: Any
+    ) -> InterruptResolution:
         """The one pause: an answer already given (a re-run), the framework's own suspension,
-        or a :class:`Paused` that ends this attempt."""
+        or a :class:`Paused` that ends this attempt. A ``table`` longer than
+        :data:`TABLE_INLINE_ROWS` waits with the run, in its checkpoint (``payload_ref``)."""
         answered = self.replay.answer(key)
         if answered is not None:
             return answered
         self._asked += 1
+        ident = interrupt_id(self.run_id, self.attempt, self._asked)
+        kept = None
+        if table is not None and len(table) <= TABLE_INLINE_ROWS:
+            fields["payload"] = {"table": table}
+        elif table is not None:
+            fields["payload_ref"], kept = table_ref(ident, table), table
         interrupt = Interrupt(
-            interrupt_id=interrupt_id(self.run_id, self.attempt, self._asked),
-            tenant_id=self.tenant,
-            run_id=self.run_id,
-            **fields,
+            interrupt_id=ident, tenant_id=self.tenant, run_id=self.run_id, **fields
         )
         if self.pending is None:
-            self.pending = Pending(key=key, interrupt=interrupt)
+            self.pending = Pending(key=key, interrupt=interrupt, table=kept)
         if self.suspend is None:
             raise Paused(self.pending.interrupt)
         value = self.suspend({MARKER: True, **interrupt.awaiting()})
@@ -212,16 +227,6 @@ class Runtime:
         self.pending = None
         self.replay.record_answer(key, resolution)
         return resolution
-
-    async def _table(
-        self, table: Sequence[dict[str, Any]] | None
-    ) -> tuple[dict[str, Any] | None, ArtifactRef | None]:
-        if table is None:
-            return None, None
-        rows = list(table)
-        if len(rows) <= TABLE_INLINE_ROWS:
-            return {"table": rows}, None
-        return None, await self.agent.harness.artifacts.put_json(rows)
 
 
 #: The key an ``ask`` marks its LangGraph interrupt value with, telling it apart from a
@@ -232,6 +237,24 @@ MARKER: Final = "trellis_interrupt"
 def interrupt_id(run_id: str, attempt: int, n: int) -> str:
     """Unique per run and attempt, and names its run (``resume`` needs nothing else)."""
     return f"{run_id}.{attempt}.{n}"
+
+
+def table_ref(ident: str, table: list[dict[str, Any]]) -> ArtifactRef:
+    """The reference a large table travels by; the rows wait in the run's checkpoint, where
+    any process serving the run (``serve_chat``'s artifact route) reads them."""
+    data = json.dumps(table, default=str, separators=(",", ":")).encode()
+    if len(data) > TABLE_MAX_BYTES:
+        raise ConfigurationError(
+            f"a table of {len(data)} bytes is too large to wait with a run (at most "
+            f"{TABLE_MAX_BYTES}): ask about it a page at a time"
+        )
+    return ArtifactRef(
+        artifact_id=f"{ident}:table",
+        type="table",
+        mime_type="application/json",
+        size_bytes=len(data),
+        checksum=hashlib.sha256(data).hexdigest(),
+    )
 
 
 def run_of(interrupt_id_: str) -> str:
@@ -269,4 +292,4 @@ class Tools:
         """What the memory service suggests for ``task`` among this run's tools."""
         if self.runtime.run_memory is None:
             raise ConfigurationError("tool hints need memory='read' or 'read_write'")
-        return await self.runtime.run_memory.tool_hints(task, list(self.runtime.toolbox))
+        return await self.runtime.run_memory.tool_hints(task, self.runtime.tool_names())

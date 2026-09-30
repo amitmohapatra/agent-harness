@@ -241,3 +241,30 @@ async def test_a_refused_or_unreachable_store_raises() -> None:
     respx.post("http://runs.test/v1/runs").mock(side_effect=httpx.ConnectError("down"))
     with pytest.raises(RunStoreError, match="unreachable"):
         await runs.started(start())
+
+
+@respx.mock
+async def test_scheduling_again_under_the_same_name_updates_the_schedule() -> None:
+    base = "http://runs.test"
+    spec = ScheduleSpec(
+        tenant_id="t", agent_id="a", name="a:k1", cadence="daily", on_behalf_of="u", input="v2"
+    )
+    stored = {**spec.model_dump(mode="json"), "schedule_id": "s1", "input": "v1"}
+    respx.post(f"{base}/v1/schedules").mock(
+        return_value=httpx.Response(409, json={"detail": "name taken"})
+    )
+    listed = respx.get(f"{base}/v1/schedules").mock(
+        return_value=httpx.Response(
+            200, json=[{**stored, "name": "other", "schedule_id": "s0"}, stored]
+        )
+    )
+    patched = respx.patch(f"{base}/v1/schedules/s1").mock(
+        return_value=httpx.Response(200, json={**stored, "input": "v2"})
+    )
+    runs = HttpRuns(base, "key")
+    updated = await runs.schedule(spec)
+    assert updated.schedule_id == "s1" and updated.input == "v2"
+    assert listed.calls[0].request.url.params["agent_id"] == "a"
+    body = json.loads(patched.calls[0].request.content)
+    assert body["input"] == "v2" and "name" not in body and "on_behalf_of" not in body
+    await runs.aclose()

@@ -22,8 +22,11 @@ resume, the call returns the answer. The UI hint and the reason follow from the 
 | `ui="diff", expects=` | `diff` | `REVIEW` |
 | anything else | `form` | `QUESTION` |
 
-A table of up to 50 rows travels in `payload`; a larger one is stored as an artifact and
-referenced by `payload_ref` (served by `serve_chat`). `escalate_to` needs a `deadline`; agent-runs
+A table of up to 50 rows travels in `payload`; a larger one waits with the run, in its
+checkpoint, referenced by `payload_ref` and served by `serve_chat` at
+`{path}/artifacts/{artifact_id}` from whichever process is asked, for as long as the run waits
+on it. The checkpoint is the one durable store a paused run already has (agent-runs bounds it
+at 1 MiB), so a table over 768 KiB of JSON is refused: ask about it a page at a time. `escalate_to` needs a `deadline`; agent-runs
 escalates or times out the run when it passes.
 
 An approval (an `irreversible` tool, an `approve` rule) is the same pause with

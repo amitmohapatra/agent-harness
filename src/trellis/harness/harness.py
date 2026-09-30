@@ -21,9 +21,14 @@ from trellis.eval.judge import GroundedJudge
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent, MemoryMode
-from trellis.harness.artifacts import Artifacts
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import Memory, RunMemory
+from trellis.harness.clients.memory import (
+    READ_ONLY_TOOLS,
+    RECORD_OUTCOME,
+    TOOL_SEARCH,
+    Memory,
+    RunMemory,
+)
 from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs
 from trellis.harness.identity import Identity
 from trellis.harness.runtime import current
@@ -56,7 +61,6 @@ class Harness:
         self.memory = Memory(s.memory_url, s.memory_api_key) if s.memory_url else None
         self.runs: Runs = HttpRuns(s.runs_url, s.runs_api_key) if s.runs_url else LocalRuns()
         self.writes = Writes()
-        self.artifacts = Artifacts()
         self.judge = GroundedJudge(budget=JudgeBudget(s.eval_sample), model=self.gateway)
         #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
         self.agents: dict[str, Agent] = {}
@@ -217,6 +221,14 @@ def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:
         runtime = current()
         if runtime is None or runtime.run_memory is None:
             raise ConfigurationError(f"{spec.name} needs a run with memory on")
-        return await runtime.run_memory.call_agent_tool(spec.name, args)
+        if runtime.agent.memory_mode == "read" and spec.name not in READ_ONLY_TOOLS:
+            raise ConfigurationError(f"{spec.name} changes memory, and this agent only reads it")
+        if spec.name == TOOL_SEARCH:  # among the tools this run can actually call
+            hints = await runtime.tools.hints(str(args.get("task", "")))
+            return hints.model_dump(mode="json")
+        result = await runtime.run_memory.call_agent_tool(spec.name, args)
+        if spec.name == RECORD_OUTCOME:
+            runtime.outcome_recorded = True
+        return result
 
     return run

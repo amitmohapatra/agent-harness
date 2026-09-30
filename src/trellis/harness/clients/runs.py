@@ -47,6 +47,10 @@ TENANT_HEADER: Final = "X-Trellis-Tenant"
 NO_CONTENT: Final = 204
 NOT_FOUND: Final = 404
 CONFLICT: Final = 409
+#: Schedules of one agent read when a name is taken (agent-runs' page limit).
+SCHEDULES_PAGE: Final = 500
+#: What a repeated ``schedule`` updates on the schedule of that name.
+SCHEDULE_CHANGES: Final = {"cadence", "timezone", "input", "enabled", "metadata"}
 
 
 class RunStoreError(RuntimeError):
@@ -212,8 +216,24 @@ class HttpRuns:
         self._body(response)
 
     async def schedule(self, spec: ScheduleSpec) -> Schedule:
-        data = await self._send(
+        """Create the schedule, or update the one of the same name (a redeploy)."""
+        created = await self._call(
             "POST", "/v1/schedules", spec.tenant_id, json=spec.model_dump(mode="json")
+        )
+        if created.status_code != CONFLICT:
+            return Schedule.model_validate(self._body(created))
+        listed = await self._send(
+            "GET",
+            "/v1/schedules",
+            spec.tenant_id,
+            params={"agent_id": spec.agent_id, "limit": SCHEDULES_PAGE},
+        )
+        existing = next((s for s in listed if s["name"] == spec.name), None)
+        if existing is None:  # the name is taken by another agent's schedule
+            raise RunStoreError(f"schedule name {spec.name!r} is taken: {created.text[:300]}")
+        changes = spec.model_dump(mode="json", include=SCHEDULE_CHANGES)
+        data = await self._send(
+            "PATCH", f"/v1/schedules/{existing['schedule_id']}", spec.tenant_id, json=changes
         )
         return Schedule.model_validate(data)
 
@@ -363,7 +383,10 @@ class LocalRuns:
         self._leases[run_id] = (worker_id, datetime.now(UTC) + timedelta(seconds=lease_seconds))
 
     async def schedule(self, spec: ScheduleSpec) -> Schedule:
+        existing = next((s for s in self._schedules.values() if s.name == spec.name), None)
         schedule = Schedule.from_spec(spec, next_fire_at=_next_fire(spec, datetime.now(UTC)))
+        if existing is not None:
+            schedule = schedule.model_copy(update={"schedule_id": existing.schedule_id})
         self._schedules[schedule.schedule_id] = schedule
         return schedule
 

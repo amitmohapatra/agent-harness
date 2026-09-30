@@ -73,12 +73,15 @@ class Call:
 @dataclass
 class FakeMemoryService:
     context_text: str = "The user prefers email."
+    #: the thread's recent messages as the service renders them ("" for none)
+    conversation: str = ""
     #: the catalog's side effects by tool name
     catalog: dict[str, str] = field(default_factory=dict)
     report: GroundingReport = field(default_factory=GroundingReport)
     #: names of the calls that answer 503
     fail: set[str] = field(default_factory=set)
     calls: list[Call] = field(default_factory=list)
+    agent_tools: list[dict[str, Any]] = field(default_factory=lambda: list(AGENT_TOOLS))
     _ids: itertools.count[int] = field(default_factory=itertools.count)
 
     def client(self) -> MemoryClient:
@@ -114,18 +117,20 @@ class FakeMemoryService:
         return httpx.Response(404, json={"title": "no such route", "status": 404})
 
     def _context(self, call: Call) -> dict[str, Any]:
+        sections = [f"## Recent conversation\n{self.conversation}"] if self.conversation else []
+        rendered = "\n\n".join([*sections, self.context_text])
         return {
             "query": call.body["query"],
             "query_type": "GENERAL_SEMANTIC",
-            "conversation": {},
+            "conversation": {"rendered": self.conversation},
             "evidence": {"status": "COMPLETE"},
             "token_budget": call.body.get("token_budget", 0),
-            "token_estimate": len(self.context_text) // 4,
-            "rendered": self.context_text,
+            "token_estimate": len(rendered) // 4,
+            "rendered": rendered,
         }
 
     def _agent_tools(self, call: Call) -> dict[str, Any]:
-        return {"tools": AGENT_TOOLS}
+        return {"tools": self.agent_tools}
 
     def _call_agent_tool(self, call: Call) -> dict[str, Any]:
         return {"result": [f"{call.path['name']} ok"]}

@@ -22,7 +22,6 @@ src/trellis/
     identity.py        tenant / user / thread / agent / run → memory scope, contracts context
     result.py          Result
     settings.py        the environment
-    artifacts.py       payloads too large for a question (ask(table=...))
     telemetry.py       OTel spans and counters; OTLP / Langfuse export
     redaction.py       what may leave the process
     worker.py          Worker: claim, lease, heartbeat

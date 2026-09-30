@@ -1,7 +1,10 @@
 """LangGraph compiled graphs — and Deep Agents, whose ``create_deep_agent`` returns one.
 
 * input: ``{"messages": [...]}`` with the memory context as a leading system message (a
-  string input becomes one user message; any other state dict passes through untouched);
+  string input becomes one user message; any other state dict passes through untouched).
+  The context message has a fixed id, so a checkpointed thread holds at most one — each turn
+  replaces it in place (``add_messages``) — and it leaves out the recent conversation, which
+  the checkpointer already holds;
 * run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the
   run's thread (or the run id);
 * pause: with a checkpointer, ``trellis.current().ask`` *is* LangGraph's ``interrupt``, and a
@@ -23,6 +26,8 @@ from trellis.harness.runtime import MARKER, answer_of
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"
+#: The id of the memory context message: one per thread, replaced every turn.
+CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
 
 
 class LangGraphAdapter:
@@ -30,8 +35,13 @@ class LangGraphAdapter:
     tool_format: ClassVar[ToolFormat] = "langchain"
     fixed_tools: ClassVar[bool] = True
 
+    def keeps_conversation(self, target: Any) -> bool:
+        return _checkpointed(target)
+
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
-        system = [{"role": "system", "content": context}] if context else []
+        from langchain_core.messages import SystemMessage
+
+        system = [SystemMessage(content=context, id=CONTEXT_MESSAGE_ID)] if context else []
         if isinstance(input, str):
             return {"messages": [*system, {"role": "user", "content": input}]}
         if isinstance(input, list):

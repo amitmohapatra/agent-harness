@@ -101,7 +101,7 @@ async def attempt(
         ):
             tools = await agent.tools_for(runtime)
             runtime.toolbox = {t.name: t for t in tools}
-            pushed = await agent.push(runtime, [t.name for t in tools])
+            pushed = await agent.push(runtime, runtime.tool_names())
             native_input = agent.adapter.prepare_input(agent.target, input, runtime.context)
             if pending is not None and resolution is not None:
                 native_input = agent.adapter.resume_input(
@@ -130,11 +130,11 @@ async def attempt(
         return Result(run_id=identity.run_id, status=RunStatus.CANCELLED)
     paused = _pause(runtime, extracted, error)
     if paused is not None:
-        return await _paused(agent, runtime, journal, paused)
+        return await _paused(agent, runtime, journal, paused, extracted)
     if error is not None:
-        return await _failed(agent, runtime, error)
+        return await _failed(agent, runtime, error, extracted)
     assert extracted is not None
-    return await _succeeded(agent, runtime, query, extracted, pushed)
+    return await _succeeded(agent, runtime, extracted, pushed)
 
 
 def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
@@ -220,7 +220,13 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
     return Pending(key=FOREIGN, interrupt=interrupt, native_id=native.native_id)
 
 
-async def _paused(agent: Agent, runtime: Runtime, journal: Journal, pending: Pending) -> Result:
+async def _paused(
+    agent: Agent,
+    runtime: Runtime,
+    journal: Journal,
+    pending: Pending,
+    extracted: Extracted | None,
+) -> Result:
     journal.pending = pending
     interrupt = pending.interrupt
     await agent.harness.runs.paused(
@@ -229,10 +235,13 @@ async def _paused(agent: Agent, runtime: Runtime, journal: Journal, pending: Pen
     runtime.events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
     runtime.events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)
+    agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
     return Result(run_id=runtime.run_id, status=RunStatus.PAUSED, interrupt=interrupt)
 
 
-async def _failed(agent: Agent, runtime: Runtime, exc: BaseException) -> Result:
+async def _failed(
+    agent: Agent, runtime: Runtime, exc: BaseException, extracted: Extracted | None
+) -> Result:
     error = AgentError.of(exc, source=agent.adapter.name)
     log.warning("run %s failed: %s", runtime.run_id, error.message, exc_info=exc)
     await agent.harness.runs.finished(
@@ -241,12 +250,13 @@ async def _failed(agent: Agent, runtime: Runtime, exc: BaseException) -> Result:
     runtime.events.emit(RunEventType.RUN_ERROR, error=error)
     runtime.events.finished(RunOutcome.ERROR, error=error)
     metrics.run_finished(runtime.agent_id, RunOutcome.ERROR.value)
+    agent.recorded_run(runtime, _transcript(runtime, extracted))
     agent.recorded_outcome(runtime, success=False, note=error.message)
     return Result(run_id=runtime.run_id, status=RunStatus.ERROR, error=error)
 
 
 async def _succeeded(
-    agent: Agent, runtime: Runtime, query: str, extracted: Extracted, pushed: ContextBundle | None
+    agent: Agent, runtime: Runtime, extracted: Extracted, pushed: ContextBundle | None
 ) -> Result:
     answer = extracted.answer
     await agent.harness.runs.finished(
@@ -254,15 +264,21 @@ async def _succeeded(
     )
     runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer))
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
-    transcript = list(extracted.transcript)
-    if not transcript and isinstance(answer, str) and answer:
-        transcript = [("assistant", answer)]
-    agent.recorded_run(runtime, [("user", query), *transcript] if query else transcript)
+    agent.recorded_run(runtime, _transcript(runtime, extracted))
     agent.recorded_outcome(runtime, success=True, note=None)
-    agent.judged(runtime, query, answer, pushed)
+    agent.judged(runtime, runtime.task, answer, pushed)
     if runtime.used_code_mode:
         agent.imported_code_mode_calls(runtime, delay=CODE_MODE_LOG_DELAY_SECONDS)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)
+
+
+def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[tuple[str, str]]:
+    """The attempt's messages: the question, then what the agent said (its answer, when the
+    framework reports no transcript of its own)."""
+    said: list[tuple[str, str]] = list(extracted.transcript) if extracted is not None else []
+    if not said and extracted is not None and isinstance(extracted.answer, str):
+        said = [("assistant", extracted.answer)] if extracted.answer else []
+    return [("user", runtime.task), *said] if runtime.task else said
 
 
 async def _settle_cancelled(

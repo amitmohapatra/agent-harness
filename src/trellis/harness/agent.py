@@ -31,7 +31,7 @@ from trellis.harness import pipeline
 from trellis.harness.adapters import detect
 from trellis.harness.clients.memory import RunMemory
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal
+from trellis.harness.journal import Journal, content_key
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, run_of
 from trellis.harness.telemetry import metrics
@@ -144,11 +144,12 @@ class Agent:
         tenant: str | None = None,
     ) -> Schedule:
         """Queue a run of this agent on ``cron`` (evaluated in ``tz``), acting for
-        ``on_behalf_of``. Workers run them."""
+        ``on_behalf_of``. Workers run them. Idempotent: the same agent, person, cadence and
+        input are one schedule, so a redeploy updates it rather than adding another."""
         spec = ScheduleSpec(
             tenant_id=tenant or self.harness.settings.tenant,
             agent_id=self.id,
-            name=f"{self.id} {cron}",
+            name=schedule_name(self.id, on_behalf_of, cron, input),
             cadence=cron,
             timezone=tz,
             on_behalf_of=on_behalf_of,
@@ -286,8 +287,11 @@ class Agent:
         except Exception as exc:
             runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
             return None
-        runtime.context = bundle.rendered or None
-        runtime.events.emit(RunEventType.CONTEXT_LOADED, data={"chars": len(bundle.rendered)})
+        text = bundle.rendered
+        if self.adapter.keeps_conversation(self.target):
+            text = without_conversation(bundle)
+        runtime.context = text or None
+        runtime.events.emit(RunEventType.CONTEXT_LOADED, data={"chars": len(text)})
         return bundle
 
     def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
@@ -300,18 +304,21 @@ class Agent:
             )
 
     def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
+        """The attempt's transcript, whether the run succeeded, paused or failed."""
         memory = runtime.run_memory
         if memory is not None and self.memory_mode == "read_write" and messages:
-            run_id = runtime.run_id
+            run_id, attempt = runtime.run_id, runtime.attempt
             self.harness.writes.submit(
                 "memory.transcript",
-                lambda: memory.record_messages(messages, run_id),
+                lambda: memory.record_messages(messages, run_id, attempt),
                 events=runtime.events,
             )
 
     def recorded_outcome(self, runtime: Runtime, *, success: bool, note: str | None) -> None:
+        """How the run ended, as its outcome — unless the agent recorded its own
+        (``record_outcome``), which the harness never overwrites."""
         memory = runtime.run_memory
-        if memory is not None and self.memory_mode == "read_write":
+        if memory is not None and self.memory_mode == "read_write" and not runtime.outcome_recorded:
             self.harness.writes.submit(
                 "memory.outcome",
                 lambda: memory.outcome(success=success, note=note),
@@ -409,11 +416,12 @@ class Agent:
         a queued run's input already is."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
+        run_id = run_id or new_id("run_")
         return RunStart(
-            run_id=run_id or new_id("run_"),
+            run_id=run_id,
             tenant_id=tenant or self.harness.settings.tenant,
             agent_id=self.id,
-            thread_id=thread,
+            thread_id=thread or run_id,  # a run with no conversation is its own thread
             user_id=user,
             input=pipeline.jsonable(input) if record_input else input,
         )
@@ -425,9 +433,33 @@ class Agent:
             user=record.user_id or record.on_behalf_of or "system",
             agent_id=record.agent_id,
             run_id=record.run_id,
-            thread=record.thread_id,
+            # a scheduled run has no thread: its transcript is its own
+            thread=record.thread_id or record.run_id,
             workspace=record.workspace_id,
         )
+
+
+def schedule_name(agent_id: str, on_behalf_of: str, cron: str, input: Any) -> str:
+    """A schedule's name, the same for the same agent, person, cadence and input."""
+    digest = content_key("schedule", agent_id, on_behalf_of, cron, pipeline.jsonable(input))
+    return f"{agent_id}:{digest}"
+
+
+#: How the memory service heads the recent conversation in a rendered bundle.
+CONVERSATION_HEADING: Final = "## Recent conversation\n"
+
+
+def without_conversation(bundle: ContextBundle) -> str:
+    """The rendered context without its recent-conversation section (the service renders
+    sections joined by blank lines), for a target that holds the thread's messages itself."""
+    window = bundle.conversation.rendered
+    if not window:
+        return bundle.rendered
+    section = f"{CONVERSATION_HEADING}{window}"
+    parts = bundle.rendered.split(f"\n\n{section}", 1)
+    if len(parts) == 1:
+        parts = bundle.rendered.split(section, 1)
+    return "".join(parts).strip()
 
 
 def _pull(agent: Agent) -> frozenset[str]:

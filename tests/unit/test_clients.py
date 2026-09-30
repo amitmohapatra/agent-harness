@@ -154,10 +154,10 @@ async def test_agent_tools_are_listed_once_and_a_reader_gets_only_the_read_ones(
 async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() -> None:
     service = FakeMemoryService(catalog={"erp-get_stock": "read"})
     run = memory(service).bind(identity())
-    await run.record_messages([("user", "hi"), ("assistant", "hello")], "run_1")
+    await run.record_messages([("user", "hi"), ("assistant", "hello")], "run_1", 2)
     assert [(c.body["role"], c.idempotency_key) for c in service.named("message")] == [
-        ("USER", "run_1:msg:0"),
-        ("ASSISTANT", "run_1:msg:1"),
+        ("USER", "run_1:user:0"),
+        ("ASSISTANT", "run_1:2:msg:1"),
     ]
     await run.record_tool(
         ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)

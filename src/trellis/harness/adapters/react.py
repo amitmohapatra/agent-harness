@@ -55,6 +55,9 @@ class ReActAdapter:
     tool_format: ClassVar[ToolFormat] = "openai_chat"
     fixed_tools: ClassVar[bool] = False
 
+    def keeps_conversation(self, target: Any) -> bool:
+        return False
+
     def prepare_input(self, target: ReAct, input: Any, context: str | None) -> Any:
         system = f"{target.system}\n\n{context}" if context else target.system
         if isinstance(input, list):

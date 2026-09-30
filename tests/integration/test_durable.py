@@ -117,6 +117,11 @@ async def test_a_schedule_fires_runs_for_the_worker(harness: Harness) -> None:
     agent = harness.wrap(briefing, id="briefing")
     schedule = await agent.schedule("0 7 * * 1-5", "inbox", on_behalf_of="ada", tz="Europe/Berlin")
     assert schedule.on_behalf_of == "ada" and schedule.timezone == "Europe/Berlin"
+    # a redeploy schedules the same thing again: one schedule, updated
+    again = await agent.schedule("0 7 * * 1-5", "inbox", on_behalf_of="ada", tz="Europe/Paris")
+    assert again.schedule_id == schedule.schedule_id and again.timezone == "Europe/Paris"
+    other = await agent.schedule("0 7 * * 1-5", "outbox", on_behalf_of="ada")
+    assert other.schedule_id != schedule.schedule_id
     runs = harness.runs
     assert isinstance(runs, LocalRuns)
     runs._schedules[schedule.schedule_id] = schedule.model_copy(

@@ -35,6 +35,9 @@ class ClaudeAdapter:
     tool_format: ClassVar[ToolFormat] = "claude"
     fixed_tools: ClassVar[bool] = False
 
+    def keeps_conversation(self, target: Any) -> bool:
+        return False
+
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         prompt = input if isinstance(input, str) else json.dumps(input, default=str)
         return ClaudeInput(prompt=prompt, context=context)

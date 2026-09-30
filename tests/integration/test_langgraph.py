@@ -185,6 +185,23 @@ async def test_the_memory_context_leads_the_messages(
     assert sent[1].content == memory_service.context_text
 
 
+async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conversation(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    memory_service.conversation = "user: hi\nassistant: hello"
+    model = ScriptedChatModel(turns=["first", "second"])
+    graph = create_agent(model, tools=[], system_prompt="You help.", checkpointer=InMemorySaver())
+    agent = memory_harness.wrap(graph, id="helper", memory="read")
+    for question in ("one?", "two?"):
+        assert (await agent.run(question, user="u1", thread="th")).status is RunStatus.SUCCESS
+    state = await graph.aget_state({"configurable": {"thread_id": "th"}})
+    systems = [m for m in state.values["messages"] if m.type == "system"]
+    # one context message in the checkpointed thread, replaced each turn, and no second
+    # copy of the conversation the checkpointer already holds
+    assert [m.content for m in systems] == [memory_service.context_text]
+    assert [m.type for m in model.seen[1]] == ["system", "system", "human", "ai", "human"]
+
+
 async def test_memory_tools_are_built_in_with_h_tools(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:

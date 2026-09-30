@@ -7,9 +7,8 @@ import subprocess
 import sys
 
 import trellis
-from trellis.contracts import ArtifactClient, Judge, RunStore, TelemetryRedactor
+from trellis.contracts import Judge, RunStore, TelemetryRedactor
 from trellis.eval import GroundedJudge, JudgeBudget
-from trellis.harness.artifacts import Artifacts
 from trellis.harness.clients.runs import HttpRuns, LocalRuns
 from trellis.harness.redaction import Redactor
 
@@ -20,7 +19,6 @@ def test_the_run_stores_are_run_stores() -> None:
 
 
 def test_the_rest_of_the_ports() -> None:
-    assert isinstance(Artifacts(), ArtifactClient)
     assert isinstance(Redactor(), TelemetryRedactor)
     assert isinstance(GroundedJudge(budget=JudgeBudget(0.1)), Judge)
 
