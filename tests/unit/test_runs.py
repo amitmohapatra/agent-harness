@@ -16,7 +16,6 @@ from trellis.contracts import (
     ScheduleSpec,
 )
 from trellis.harness.clients.runs import HttpRuns, LeaseLost, LocalRuns, RunStoreError
-from trellis.harness.journal import JOURNAL_KEY
 
 
 def start(run_id: str = "run_1", agent: str = "a") -> RunStart:
@@ -44,16 +43,16 @@ async def test_a_run_moves_through_the_contract_state_machine() -> None:
     runs = LocalRuns()
     assert (await runs.started(start())).status is RunStatus.RUNNING
     assert (await runs.started(start())).status is RunStatus.RUNNING  # idempotent
-    paused = await runs.paused(interrupt(), journal={"answers": {}})
-    assert paused.status is RunStatus.PAUSED and paused.metadata[JOURNAL_KEY] == {"answers": {}}
+    paused = await runs.paused(interrupt(), checkpoint={"answers": {}})
+    assert paused.status is RunStatus.PAUSED and paused.checkpoint == {"answers": {}}
     assert [r.run_id for r in await runs.list_paused("t", assignee="role:ops")] == ["run_1"]
     assert await runs.list_paused("t", assignee="role:other") == []
     answer = resolution()
     resumed = await runs.resumed(answer)
     assert resumed.status is RunStatus.RUNNING and resumed.attempt == 2
-    assert resumed.last_resolution == answer
+    assert resumed.last_resolution == answer and resumed.checkpoint == {"answers": {}}
     done = await runs.finished("run_1", RunStatus.SUCCESS, output="ok")
-    assert done.final and done.output == "ok"
+    assert done.final and done.output == "ok" and done.checkpoint is None
     with pytest.raises(RunStoreError):
         await runs.finished("run_1", RunStatus.ERROR)
 
@@ -137,7 +136,8 @@ def record_json(status: str = "RUNNING", **fields: object) -> dict[str, object]:
 @respx.mock
 async def test_the_http_store_speaks_the_agent_runs_wire() -> None:
     base = "http://runs.test"
-    paused_json = record_json("PAUSED", awaiting=interrupt().awaiting())
+    checkpoint = {"answers": {"k": []}}
+    paused_json = record_json("PAUSED", awaiting=interrupt().awaiting(), checkpoint=checkpoint)
     started = respx.post(f"{base}/v1/runs").mock(
         return_value=httpx.Response(201, json=record_json("QUEUED"))
     )
@@ -208,13 +208,13 @@ async def test_the_http_store_speaks_the_agent_runs_wire() -> None:
         await runs.heartbeat("run_1", "w", 30)
     assert heartbeat.call_count == 2
 
-    paused = await runs.paused(interrupt(), journal={"answers": {"k": []}}, worker_id="w")
+    paused = await runs.paused(interrupt(), checkpoint=checkpoint, worker_id="w")
     assert pause.calls[0].request.url.params["worker_id"] == "w"
-    assert json.loads(pause.calls[0].request.content)["question"] == "ok?"
-    # agent-runs keeps no journal: this client carries it for the runs it paused
-    assert paused.metadata[JOURNAL_KEY] == {"answers": {"k": []}}
+    sent = json.loads(pause.calls[0].request.content)
+    assert sent["interrupt"]["question"] == "ok?" and sent["checkpoint"] == checkpoint
+    assert paused.checkpoint == checkpoint
     fetched = await runs.get("run_1")
-    assert fetched is not None and fetched.metadata[JOURNAL_KEY] == {"answers": {"k": []}}
+    assert fetched is not None and fetched.checkpoint == checkpoint
 
     assert (await runs.resumed(resolution())).attempt == 2
     assert json.loads(resume.calls[0].request.content)["answer"] == "yes"

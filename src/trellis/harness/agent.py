@@ -217,7 +217,7 @@ class Agent:
             identity,
             record.input,
             number=resumed.attempt,
-            journal=Journal.of(record.metadata),
+            journal=Journal.of(record.checkpoint),
             resolution=resolution,
             listener=listener,
             streaming=listener is not None,
@@ -230,7 +230,7 @@ class Agent:
             self._identity_of(record),
             record.input,
             number=record.attempt,
-            journal=Journal.of(record.metadata),
+            journal=Journal.of(record.checkpoint),
             resolution=record.last_resolution,
             worker_id=worker_id,
         )

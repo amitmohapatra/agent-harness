@@ -196,7 +196,7 @@ class Runtime:
             return answered
         self._asked += 1
         interrupt = Interrupt(
-            interrupt_id=interrupt_id(self.run_id, self.attempt, self._asked, key),
+            interrupt_id=interrupt_id(self.run_id, self.attempt, self._asked),
             tenant_id=self.tenant,
             run_id=self.run_id,
             **fields,
@@ -227,18 +227,13 @@ class Runtime:
 MARKER: Final = "trellis_interrupt"
 
 
-def interrupt_id(run_id: str, attempt: int, n: int, key: str) -> str:
-    """Unique per run and attempt; names its run (``resume`` needs nothing else) and the
-    question it asks (a re-run without its journal still files the answer correctly)."""
-    return f"{run_id}.{attempt}.{n}.{key[:KEY_CHARS]}"
-
-
-#: How much of a question's content key an interrupt id carries.
-KEY_CHARS: Final = 12
+def interrupt_id(run_id: str, attempt: int, n: int) -> str:
+    """Unique per run and attempt, and names its run (``resume`` needs nothing else)."""
+    return f"{run_id}.{attempt}.{n}"
 
 
 def run_of(interrupt_id_: str) -> str:
-    return interrupt_id_.rsplit(".", 3)[0]
+    return interrupt_id_.rsplit(".", 2)[0]
 
 
 def answer_of(resolution: InterruptResolution) -> Any:

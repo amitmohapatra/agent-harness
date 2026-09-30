@@ -1,9 +1,9 @@
 """One attempt of one run: the fixed pipeline every framework goes through.
 
 identity → (the run record, written by the caller) → tools → memory push → the adapter →
-the outcome recorded (paused with its journal, finished with its answer or error) →
-background writes (transcript, outcome, sampled judge). The adapter is the only part that
-knows the framework.
+the outcome recorded (paused with its journal as the run's checkpoint, finished with its
+answer or error) → background writes (transcript, outcome, sampled judge). The adapter is
+the only part that knows the framework.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from trellis.harness.adapters.langgraph import FOREIGN
 from trellis.harness.clients.runs import LeaseLost
 from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal, Pending, Replay, content_key
+from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
 from trellis.harness.runtime import RunCancelled, Runtime, _current, interrupt_id
 from trellis.harness.telemetry import metrics, span
@@ -140,19 +140,11 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     """The cursor this attempt reads the journal with, the resolution filed where the
     re-run will ask for it (or left to the framework, when it resumes from its own state)."""
     pending = journal.pending
-    if resolution is None:
-        return Replay(journal)
-    if pending is None:
-        filed = any(
-            answer.get("interrupt_id") == resolution.interrupt_id
-            for answers in journal.answers.values()
-            for answer in answers
-        )
-        return Replay(journal, orphan=None if filed else resolution)
-    if pending.native_id or pending.native_state:
-        journal.pending = None
-    else:
-        journal.answered(resolution)
+    if resolution is not None and pending is not None:
+        if pending.native_id or pending.native_state:
+            journal.pending = None
+        else:
+            journal.answered(resolution)
     return Replay(journal)
 
 
@@ -197,9 +189,7 @@ def _pause(
 def _foreign(runtime: Runtime, native: NativePause) -> Pending:
     """A pause the framework raised on its own: an SDK approval, or a graph's ``interrupt``."""
     runtime._asked += 1
-    ident = interrupt_id(
-        runtime.run_id, runtime.attempt, runtime._asked, content_key(native.tool or FOREIGN)
-    )
+    ident = interrupt_id(runtime.run_id, runtime.attempt, runtime._asked)
     if native.tool is not None:
         interrupt = Interrupt(
             interrupt_id=ident,
@@ -232,7 +222,9 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
 async def _paused(agent: Agent, runtime: Runtime, journal: Journal, pending: Pending) -> Result:
     journal.pending = pending
     interrupt = pending.interrupt
-    await agent.harness.runs.paused(interrupt, journal=journal.dump(), worker_id=runtime.worker_id)
+    await agent.harness.runs.paused(
+        interrupt, checkpoint=journal.dump(), worker_id=runtime.worker_id
+    )
     runtime.events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
     runtime.events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)

@@ -8,8 +8,9 @@ its arguments) and consumed in order, so the n-th identical call gets the n-th r
 result, and a re-planned call the person never saw is asked about again rather than matched
 to someone else's approval.
 
-The journal travels with the run record (``RunRecord.metadata[JOURNAL_KEY]``), so a worker on
-another machine resumes from it.
+The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
+pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
+no question and no side effect.
 """
 
 from __future__ import annotations
@@ -17,14 +18,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from typing import Any, Final
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from trellis.contracts import Interrupt, InterruptResolution
-
-#: Where the journal lives on a run record's metadata.
-JOURNAL_KEY: Final = "trellis_journal"
 
 
 def content_key(kind: str, *parts: Any) -> str:
@@ -58,9 +56,9 @@ class Journal(BaseModel):
 
     # ------------------------------------------------------------------ persistence
     @classmethod
-    def of(cls, metadata: dict[str, Any] | None) -> Journal:
-        raw = (metadata or {}).get(JOURNAL_KEY)
-        return cls.model_validate(raw) if isinstance(raw, dict) else cls()
+    def of(cls, checkpoint: dict[str, Any] | None) -> Journal:
+        """The journal a run record's checkpoint holds (an empty one for a fresh run)."""
+        return cls() if checkpoint is None else cls.model_validate(checkpoint)
 
     def dump(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
@@ -74,17 +72,12 @@ class Journal(BaseModel):
 
 
 class Replay:
-    """One attempt's cursor over a journal: what the n-th occurrence of a key already got.
+    """One attempt's cursor over a journal: what the n-th occurrence of a key already got."""
 
-    ``orphan`` is an answer whose journal did not travel with the run (a store that keeps
-    only the last resolution): it answers the question its interrupt id names and nothing
-    else — a question it does not name is asked again, never answered wrongly."""
+    __slots__ = ("_seen", "journal")
 
-    __slots__ = ("_seen", "journal", "orphan")
-
-    def __init__(self, journal: Journal, orphan: InterruptResolution | None = None) -> None:
+    def __init__(self, journal: Journal) -> None:
         self.journal = journal
-        self.orphan = orphan
         self._seen: dict[str, int] = defaultdict(int)
 
     def answer(self, key: str) -> InterruptResolution | None:
@@ -94,11 +87,6 @@ class Replay:
         if index < len(recorded):
             self._seen[f"a:{key}"] = index + 1
             return InterruptResolution.model_validate(recorded[index])
-        orphan = self.orphan
-        if orphan is not None and key.startswith(orphan.interrupt_id.rsplit(".", 1)[-1]):
-            self.orphan = None
-            self.record_answer(key, orphan)
-            return orphan
         return None
 
     def call(self, key: str) -> tuple[bool, Any]:

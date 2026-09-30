@@ -21,7 +21,10 @@ python -m trellis.worker app.agents:h        # every agent the Harness `h` wraps
 A worker claims a queued run under a 60 s lease and heartbeats it every 20 s. It names itself
 on the pause and the finish, so a worker whose lease lapsed cannot write over a run another
 worker has since claimed; a heartbeat refused (`409`) stops the run without writing. A lapsed
-lease sends the run back to the queue as its next attempt, which the journal makes idempotent.
+lease sends the run back to the queue as its next attempt. A paused run carries its journal
+as the run's checkpoint, so the worker that claims it after a resume — any worker — repeats no
+question and no tool call made before the pause (calls made after it, in an attempt whose
+lease lapsed, run again).
 
 ## The inbox
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from trellis import Harness, Runtime
+from trellis import Harness, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.clients.runs import LocalRuns
 from trellis.worker import load, main
@@ -40,6 +40,48 @@ async def test_a_started_run_is_queued_until_a_worker_claims_it(harness: Harness
     done = await handle.result(timeout=5)
     assert done.status is RunStatus.SUCCESS and done.answer == "sent=yes"
     assert await worker.run_once() is False
+
+
+async def test_another_process_resumes_from_the_checkpoint_alone() -> None:
+    """Two harnesses share nothing but the run store (as two worker processes share
+    agent-runs): the second continues from the checkpoint and the last resolution, so no
+    question is asked twice and no tool runs twice."""
+    charged: list[int] = []
+
+    def charge(amount: int) -> str:
+        charged.append(amount)
+        return f"charged {amount}"
+
+    async def billing(input: str, agent: Runtime) -> str:
+        receipt = await agent.tools.call("charge", amount=5)
+        size = await agent.ask("Which size?", assignee="role:ops")
+        ship = await agent.ask(f"Ship {size}?", options=["yes", "no"])
+        return f"{receipt}; {size}; {ship}"
+
+    store = LocalRuns()
+    processes = [Harness(config=Settings()) for _ in range(3)]
+    agents = []
+    for h in processes:
+        h.runs = store
+        agents.append(h.wrap(billing, id="billing", tools=[charge]))
+    try:
+        handle = await agents[0].start("order 7", user="u")
+        assert await processes[0].worker([agents[0]]).run_once()
+        first = await handle.result(timeout=5)
+        assert first.interrupt is not None
+        await agents[1].resume(first.interrupt.interrupt_id, "answer", answer="L", reviewer="r")
+        assert await processes[1].worker([agents[1]]).run_once()
+        second = await handle.result(timeout=5)
+        assert second.interrupt is not None and second.interrupt.question == "Ship L?"
+        await agents[2].resume(second.interrupt.interrupt_id, "answer", answer="yes", reviewer="r")
+        assert await processes[2].worker([agents[2]]).run_once()
+        done = await handle.result(timeout=5)
+    finally:
+        for h in processes:
+            await h.aclose()
+    assert done.status is RunStatus.SUCCESS and done.answer == "charged 5; L; yes"
+    assert charged == [5]  # the tool ran once, in the first process
+    assert (await store.get(handle.run_id)).checkpoint is None  # type: ignore[union-attr]
 
 
 async def test_a_worker_runs_concurrently_and_stops_cleanly(harness: Harness) -> None:

@@ -8,15 +8,17 @@ is unset. Both behave the same way:
 * a worker claims a queued run under a lease, heartbeats it, and names itself on the pause
   and the finish so a worker whose lease lapsed cannot write over another's run.
 
-A pause also carries the run's :class:`~trellis.harness.journal.Journal` (what a re-run
-needs), readable as ``record.metadata[JOURNAL_KEY]``. Writes raise when the store refuses or
-cannot be reached: a pause that was not recorded cannot be resumed, so it is not reported.
+A pause also carries the run's checkpoint — its :class:`~trellis.harness.journal.Journal`, what
+a re-run needs — which the store returns as ``RunRecord.checkpoint`` on every read and claim
+until the run ends, so whichever worker resumes the run repeats no question and no side
+effect. Writes raise when the store refuses or cannot be reached: a pause that was not
+recorded cannot be resumed, so it is not reported.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol
@@ -37,7 +39,6 @@ from trellis.contracts import (
     ScheduleSpec,
     new_id,
 )
-from trellis.harness.journal import JOURNAL_KEY
 
 #: How long one call to agent-runs may take before the run fails with it.
 TIMEOUT_SECONDS: Final = 10.0
@@ -46,8 +47,6 @@ TENANT_HEADER: Final = "X-Trellis-Tenant"
 NO_CONTENT: Final = 204
 NOT_FOUND: Final = 404
 CONFLICT: Final = 409
-#: Journals of paused runs this process holds for agent-runs (see :class:`HttpRuns`).
-MAX_JOURNALS: Final = 4096
 
 
 class RunStoreError(RuntimeError):
@@ -68,7 +67,7 @@ class Runs(Protocol):
         self,
         interrupt: Interrupt,
         *,
-        journal: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | None = None,
         worker_id: str | None = None,
     ) -> RunRecord: ...
     async def resumed(self, resolution: InterruptResolution) -> RunRecord: ...
@@ -97,13 +96,7 @@ class Runs(Protocol):
 
 
 class HttpRuns:
-    """agent-runs 0.2 (``docs/api.md`` there). Bodies are the contracts' own models.
-
-    agent-runs keeps the interrupt of a pause but has no field for the harness's journal
-    yet, so this client holds the journals of the runs it paused (bounded) and merges them
-    into the records it reads back: a run paused and resumed by the same process re-runs
-    with its whole journal; elsewhere, with the answer on ``last_resolution`` only.
-    """
+    """agent-runs 0.2 (``docs/api.md`` there). Bodies are the contracts' own models."""
 
     def __init__(
         self, base_url: str, api_key: str | None, *, client: httpx.AsyncClient | None = None
@@ -114,7 +107,6 @@ class HttpRuns:
         )
         #: the tenant of every run this client wrote or read, so later calls can name it
         self._tenants: dict[str, str] = {}
-        self._journals: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     async def queued(self, start: RunStart) -> RunRecord:
         return await self._start(start, queue=True)
@@ -130,34 +122,27 @@ class HttpRuns:
         self,
         interrupt: Interrupt,
         *,
-        journal: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | None = None,
         worker_id: str | None = None,
     ) -> RunRecord:
-        record = self._record(
+        body = {"interrupt": interrupt.model_dump(mode="json"), "checkpoint": checkpoint}
+        return self._record(
             await self._send(
                 "POST",
                 f"/v1/runs/{interrupt.run_id}/pause",
                 interrupt.tenant_id,
-                json=interrupt.model_dump(mode="json"),
+                json=body,
                 params=_worker(worker_id),
             )
         )
-        if journal is not None:
-            self._journals[record.run_id] = journal
-            self._journals.move_to_end(record.run_id)
-            while len(self._journals) > MAX_JOURNALS:
-                self._journals.popitem(last=False)
-        return self._with_journal(record)
 
     async def resumed(self, resolution: InterruptResolution) -> RunRecord:
-        return self._with_journal(
-            self._record(
-                await self._send(
-                    "POST",
-                    f"/v1/runs/{resolution.run_id}/resume",
-                    self._tenants.get(resolution.run_id),
-                    json=resolution.model_dump(mode="json"),
-                )
+        return self._record(
+            await self._send(
+                "POST",
+                f"/v1/runs/{resolution.run_id}/resume",
+                self._tenants.get(resolution.run_id),
+                json=resolution.model_dump(mode="json"),
             )
         )
 
@@ -173,7 +158,6 @@ class HttpRuns:
         body: dict[str, Any] = {"status": status.value, "output": output}
         if error is not None:
             body["error"] = error.model_dump(mode="json")
-        self._journals.pop(run_id, None)
         return self._record(
             await self._send(
                 "POST",
@@ -188,7 +172,7 @@ class HttpRuns:
         response = await self._call("GET", f"/v1/runs/{run_id}", self._tenants.get(run_id))
         if response.status_code == NOT_FOUND:
             return None
-        return self._with_journal(self._record(self._body(response)))
+        return self._record(self._body(response))
 
     async def list_paused(
         self, tenant_id: str, *, limit: int = 100, assignee: str | None = None
@@ -214,7 +198,7 @@ class HttpRuns:
         )
         if response.status_code == NO_CONTENT:
             return None
-        return self._with_journal(self._record(self._body(response)["run"]))
+        return self._record(self._body(response)["run"])
 
     async def heartbeat(self, run_id: str, worker_id: str, lease_seconds: float) -> None:
         response = await self._call(
@@ -241,12 +225,6 @@ class HttpRuns:
         record = RunRecord.model_validate(data)
         self._tenants[record.run_id] = record.tenant_id
         return record
-
-    def _with_journal(self, record: RunRecord) -> RunRecord:
-        journal = self._journals.get(record.run_id)
-        if journal is None or JOURNAL_KEY in record.metadata:
-            return record
-        return record.model_copy(update={"metadata": {**record.metadata, JOURNAL_KEY: journal}})
 
     async def _send(self, method: str, path: str, tenant: str | None, **kwargs: Any) -> Any:
         return self._body(await self._call(method, path, tenant, **kwargs))
@@ -311,24 +289,19 @@ class LocalRuns:
         self,
         interrupt: Interrupt,
         *,
-        journal: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | None = None,
         worker_id: str | None = None,
     ) -> RunRecord:
         record = self._fenced(interrupt.run_id, worker_id)
-        metadata = dict(record.metadata)
-        if journal is not None:
-            metadata[JOURNAL_KEY] = journal
         self._leases.pop(record.run_id, None)
-        return self._move(record, RunStatus.PAUSED, awaiting=interrupt, metadata=metadata)
+        return self._move(record, RunStatus.PAUSED, awaiting=interrupt, checkpoint=checkpoint)
 
     async def resumed(self, resolution: InterruptResolution) -> RunRecord:
         record = self._require(resolution.run_id)
         if record.awaiting is None or not resolution.resolves(record.awaiting):
             raise RunStoreError(f"run {record.run_id} is not waiting on {resolution.interrupt_id}")
         if resolution.decision is InterruptDecision.CANCEL:
-            return self._move(
-                record, RunStatus.CANCELLED, awaiting=None, last_resolution=resolution
-            )
+            return self._move(record, RunStatus.CANCELLED, last_resolution=resolution)
         requeue = record.run_id in self._queued
         moved = self._move(
             record,
@@ -352,7 +325,7 @@ class LocalRuns:
     ) -> RunRecord:
         record = self._fenced(run_id, worker_id)
         self._leases.pop(run_id, None)
-        return self._move(record, status, output=output, error=error, awaiting=None)
+        return self._move(record, status, output=output, error=error)
 
     async def get(self, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
@@ -419,6 +392,8 @@ class LocalRuns:
     def _move(self, record: RunRecord, status: RunStatus, **changes: Any) -> RunRecord:
         if record.status is not status and not record.status.can_become(status):
             raise RunStoreError(f"run {record.run_id}: {record.status} cannot become {status}")
+        if status.final:  # an ending clears what the run waited on and would resume from
+            changes.update(awaiting=None, checkpoint=None)
         moved = RunRecord.model_validate(
             {**record.model_dump(), **changes, "status": status, "updated_at": datetime.now(UTC)}
         )

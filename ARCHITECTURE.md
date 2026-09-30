@@ -103,8 +103,8 @@ A write tool anywhere in a source keeps it in normal mode. Agent Mode is never u
 ## Pauses and resumes
 
 `Runtime.ask` is the one pause. Its interrupt (a contracts `Interrupt`) has the id
-`<run_id>.<attempt>.<n>.<content key>`: it names its run, so `resume` needs nothing else, and
-the question it asks. How a run continues:
+`<run_id>.<attempt>.<n>`: it names its run, so `resume` needs nothing else. How a run
+continues:
 
 * **LangGraph with a checkpointer**: `ask` *is* `langgraph.types.interrupt`; the resume is
   `Command(resume={<LangGraph interrupt id>: resolution})` and the graph continues where it stopped.
@@ -115,12 +115,10 @@ the question it asks. How a run continues:
   recorded outputs (keyed by content, consumed in order — a re-planned call nobody approved is
   asked about again, never matched to another approval).
 
-The journal travels with the run record (`metadata["trellis_journal"]`). agent-runs 0.2 keeps
-the interrupt of a pause but has no field for harness state yet, so `HttpRuns` holds the
-journals of the runs it paused in process (bounded, `MAX_JOURNALS`) and merges them into the
-records it reads back. A run resumed where no journal is available still gets its answer:
-the resolution on `last_resolution` answers the question its interrupt id names (the
-*orphan* rule), and any other question is asked again rather than answered wrongly.
+The journal is the run's checkpoint: `runs.paused(interrupt, checkpoint=journal)` stores it
+with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
+clears it when the run ends), and the attempt that resumes the run — in this process or in a
+worker elsewhere — files `last_resolution` under the pending question and replays the rest.
 
 A run started in process (`run`/`stream`) continues in the process that resumes it; a run that
 came from the queue (`start`, a schedule) goes back to it and a worker continues it. Approve,

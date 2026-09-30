@@ -56,10 +56,10 @@ resume must answer the interrupt the run currently waits on.
   return their recorded outputs instead of running again. Entries are keyed by content (the
   question; the tool and its arguments) and consumed in order.
 
-The journal is kept with the run record. agent-runs 0.2 has no field for it yet, so
-`HttpRuns` holds the journals of the runs it paused in process; a run resumed without its
-journal still gets the answer to the question its interrupt id names, and asks any earlier
-question again. Tool calls made before the pause would then run again.
+The journal is the run's checkpoint: the pause stores it with the run (`RunRecord.checkpoint`
+in agent-runs, cleared when the run ends), and whichever process or worker resumes the run
+reads it back with the resolution, so a resume elsewhere repeats no question and no tool
+call.
 
 A run started with `run`/`stream` continues in the process that calls `resume`; a queued run
 (`start`, a schedule) goes back to the queue and a worker continues it (`Result.status ==

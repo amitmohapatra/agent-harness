@@ -31,26 +31,10 @@ def test_an_answer_is_filed_under_the_pending_question_and_survives_a_round_trip
     journal = Journal(pending=Pending(key="q", interrupt=interrupt))
     journal.answered(resolution("blue"))
     assert journal.pending is None
-    restored = Journal.of({"trellis_journal": journal.dump()})
+    restored = Journal.of(journal.dump())
     answered = Replay(restored).answer("q")
     assert answered is not None and answered.answer == "blue"
 
 
-def test_a_missing_journal_is_empty() -> None:
+def test_a_run_without_a_checkpoint_has_an_empty_journal() -> None:
     assert Journal.of(None) == Journal()
-    assert Journal.of({"trellis_journal": "garbage"}) == Journal()
-
-
-def test_an_orphan_answers_only_the_question_its_interrupt_names() -> None:
-    orphan = InterruptResolution(
-        interrupt_id="run_1.1.1.abcdef123456",
-        run_id="run_1",
-        decision=InterruptDecision.ANSWER,
-        answer="yes",
-    )
-    replay = Replay(Journal(), orphan=orphan)
-    assert replay.answer("zzzz") is None
-    answered = replay.answer("abcdef1234567890")
-    assert answered is orphan
-    assert replay.answer("abcdef1234567890") is None  # used once, and filed
-    assert Replay(replay.journal).answer("abcdef1234567890") == orphan
