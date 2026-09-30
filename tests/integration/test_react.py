@@ -63,6 +63,9 @@ async def test_a_loop_that_never_answers_is_stopped(harness: Harness) -> None:
 
 @respx.mock
 async def test_a_model_name_goes_to_bifrost() -> None:
+    respx.get("http://gw.test/api/mcp/clients").mock(
+        return_value=httpx.Response(200, json={"clients": []})
+    )
     route = respx.post("http://gw.test/v1/chat/completions").mock(
         return_value=httpx.Response(
             200, json={"choices": [{"message": {"role": "assistant", "content": "hi"}}]}

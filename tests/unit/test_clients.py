@@ -13,7 +13,13 @@ from tests.support.memory import AGENT_TOOLS, FakeMemoryService
 from trellis.contracts import ToolCall, ToolError, ToolOutcome, ToolSpec
 from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory
+from trellis.harness.clients.memory import (
+    READ_ONLY_TOOLS,
+    Governance,
+    Memory,
+    catalog_entry,
+    read_only,
+)
 from trellis.harness.identity import Identity
 
 GATEWAY = "http://gw.test"
@@ -48,11 +54,25 @@ CLIENTS = {
 
 
 @respx.mock
-async def test_the_gateway_lists_scoped_tools_by_their_execution_name() -> None:
+async def test_the_gateway_lists_what_the_virtual_key_allows_by_execution_name() -> None:
     respx.get(f"{GATEWAY}/api/mcp/clients").mock(return_value=httpx.Response(200, json=CLIENTS))
+    listing = respx.post(f"{GATEWAY}/mcp").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "tools": [{"name": "erp-get_stock", "annotations": {"readOnlyHint": True}}]
+                },
+            },
+        )
+    )
     gateway = Gateway(f"{GATEWAY}/v1", "vk")
-    tools = await gateway.tools(["erp"], ["erp-get_stock"])
-    assert [t.name for t in tools] == ["erp-get_stock"]
+    [stock] = await gateway.tools()
+    assert stock.name == "erp-get_stock"
+    assert stock.annotations is not None and stock.annotations.read_only_hint is True
+    assert listing.calls[0].request.headers["authorization"] == "Bearer vk"
     await gateway.aclose()
 
 
@@ -125,11 +145,20 @@ def memory(service: FakeMemoryService) -> Memory:
     return Memory("http://mem", None, client=service.client())
 
 
+async def test_the_key_says_who_the_deployment_is() -> None:
+    service = FakeMemoryService(tenant="acme", role="reader")
+    key = await memory(service).key()
+    assert (key.tenant_id, key.principal) == ("acme", "svc:harness")
+    assert read_only(key) is True
+    assert read_only(await memory(FakeMemoryService()).key()) is False
+
+
 async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
     service = FakeMemoryService()
     run = memory(service).bind(identity())
-    bundle = await run.context("q", tools=["erp-get_stock"])
-    assert bundle.rendered == service.context_text
+    pushed = await run.context("q", tools=["erp-get_stock"], window=False)
+    assert pushed.rendered.startswith(service.context_text)
+    assert pushed.bundle_id is not None and pushed.bundle_id.startswith("bnd_")
     [call] = service.named("context")
     assert call.scope == {
         "tenant_id": "t",
@@ -140,7 +169,7 @@ async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
         "custom_metadata": {},
     }
     assert call.body["tools"] == {"available": ["erp-get_stock"], "k": 8}
-    assert call.body["token_budget"] == 2000
+    assert call.body["token_budget"] == 2000 and call.body["window"] is False
 
 
 async def test_agent_tools_are_listed_once_and_a_reader_gets_only_the_read_ones() -> None:
@@ -158,26 +187,50 @@ async def test_agent_tools_are_listed_once_and_a_reader_gets_only_the_read_ones(
 
 
 async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() -> None:
-    service = FakeMemoryService(catalog={"erp-get_stock": "read"})
+    service = FakeMemoryService(
+        catalog={"erp-get_stock": {"risk": "read", "approve_when": "qty > 5"}}
+    )
     run = memory(service).bind(identity())
     await run.record_messages([("user", "hi"), ("assistant", "hello")], "run_1", 2)
-    assert [(c.body["role"], c.idempotency_key) for c in service.named("message")] == [
+    [batch] = service.named("messages")
+    # each message names itself, so a re-recorded attempt stores it once
+    assert [(m["role"], m["source_message_id"]) for m in batch.body["messages"]] == [
         ("USER", "run_1:user:0"),
         ("ASSISTANT", "run_1:2:msg:1"),
     ]
+    assert {m["source_system"] for m in batch.body["messages"]} == {"trellis-harness"}
     await run.record_tool(
         ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)
     )
     assert service.named("record_tool")[0].body["status"] == "ok"
-    assert await run.side_effects(["erp-get_stock", "missing"]) == {"erp-get_stock": "read"}
+    found = await run.catalog(["erp-get_stock", "missing"])
+    assert found == {"erp-get_stock": Governance(risk="read", approve_when="qty > 5")}
+    await run.run_feedback("confirm", source="system", key="run_1:outcome")
+    [feedback] = service.named("feedback")
+    assert feedback.body["target_kind"] == "run" and feedback.body["target_id"] == "run_1"
+    assert feedback.body["source"] == "system" and feedback.idempotency_key == "run_1:outcome"
+    # the grounding score: the share of the answer's claims the evidence supports
+    assert await run.verify("the answer", "bnd_1") == 0.8
+    assert service.named("verify")[0].body["bundle_id"] == "bnd_1"
+
+
+async def test_catalog_entries_carry_what_the_harness_knows_and_no_more() -> None:
+    service = FakeMemoryService()
+    run = memory(service).scoped("t")
     await run.publish_catalog(
         [
-            ToolSpec(name="refund", side_effects="irreversible", source="local"),
-            ToolSpec(name="remote", source="a2a"),  # side effects unknown: left to the catalog
+            catalog_entry(
+                ToolSpec(name="refund", side_effects="irreversible", source="local"), None
+            ),
+            catalog_entry(
+                ToolSpec(name="erp-get", source="mcp", server="erp", side_effects="write"),
+                {"readOnlyHint": True},
+            ),
         ]
     )
-    refund, remote = service.named("put_catalog")[0].body["tools"]
-    assert refund["side_effects"] == "irreversible" and "side_effects" not in remote
+    refund, mcp_tool = service.named("put_catalog")[0].body["tools"]
+    assert refund["side_effects"] == "irreversible" and "annotations" not in refund
+    assert mcp_tool["annotations"] == {"readOnlyHint": True} and "side_effects" not in mcp_tool
     await memory(service).scoped("t", "a").register_model_key("sk")
     [key] = service.named("model_key")
     assert key.body["virtual_key"] == "sk"

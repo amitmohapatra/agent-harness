@@ -1,9 +1,11 @@
 """One attempt of one run: the fixed pipeline every framework goes through.
 
-identity → (the run record, written by the caller) → tools → memory push → the adapter →
-the outcome recorded (paused with its journal as the run's checkpoint, finished with its
-answer or error) → background writes (transcript, outcome, sampled judge). The adapter is
-the only part that knows the framework.
+identity → (the run record, written by the caller) → tools → memory push (with the tool
+hints that narrow what the model is offered) → the adapter → the outcome recorded (paused
+with its journal as the run's checkpoint, finished with its answer or error) → background
+writes (transcript, the run's ``system`` outcome, the sampled grounding check). The adapter is
+the only part that knows the framework. Each attempt is one ``invoke_agent`` span in the run's
+trace.
 """
 
 from __future__ import annotations
@@ -37,8 +39,8 @@ from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
 from trellis.harness.runtime import RunCancelled, Runtime, _current, interrupt_id
-from trellis.harness.telemetry import metrics, span
-from trellis.memory.models import ContextBundle
+from trellis.harness.telemetry import RunTrace, agent_span, metrics, output
+from trellis.memory.models import PromptContext
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -74,41 +76,46 @@ async def attempt(
         replay=replay,
         attempt=number,
         worker_id=worker_id,
-        run_memory=agent.run_memory(identity),
+        run_memory=await agent.run_memory(identity),
+        writes_memory=await agent.harness.writes_memory(),
+        used=set(journal.used),
         task=query,
         started_at=datetime.now(UTC),
     )
     events.emit(RunEventType.RUN_STARTED, data={"agent_id": identity.agent_id})
     extracted: Extracted | None = None
-    pushed: ContextBundle | None = None
+    pushed: PromptContext | None = None
     error: Exception | None = None
     cancelled = False
     token = _current.set(runtime)
     try:
-        with span(
-            "trellis.run",
-            {
-                "run.id": identity.run_id,
-                "run.attempt": number,
-                "agent.id": identity.agent_id,
-                "agent.framework": agent.adapter.name,
-                "tenant.id": identity.tenant,
-            },
-        ):
+        run_trace = RunTrace(
+            run_id=identity.run_id,
+            agent_id=identity.agent_id,
+            tenant=identity.tenant,
+            user=identity.user,
+            thread=identity.thread,
+            framework=agent.adapter.name,
+            attempt=number,
+        )
+        with agent_span(run_trace, query) as span:
             tools = await agent.tools_for(runtime)
             runtime.toolbox = {t.name: t for t in tools}
-            pushed = await agent.push(runtime, runtime.tool_names())
+            pushed = await agent.push(runtime)
             native_input = agent.adapter.prepare_input(agent.target, input, runtime.context)
             if pending is not None and resolution is not None:
                 native_input = agent.adapter.resume_input(
                     agent.target, native_input, pending, resolution
                 )
             run_tools = [] if agent.adapter.fixed_tools else tools
+            if agent.adapter.narrows == "run":
+                run_tools = [t for t in run_tools if runtime.offers(t.name)]
             invocation = Invocation(
                 runtime, run_tools, convert(agent.adapter.tool_format, run_tools)
             )
-            output = await _execute(agent, native_input, invocation, streaming=streaming)
-            extracted = agent.adapter.extract(agent.target, output)
+            produced = await _execute(agent, native_input, invocation, streaming=streaming)
+            extracted = agent.adapter.extract(agent.target, produced)
+            output(span, jsonable(extracted.answer))
     except RunCancelled:
         cancelled = True
     except asyncio.CancelledError:
@@ -247,12 +254,12 @@ async def _failed(
     runtime.events.finished(RunOutcome.ERROR, error=error)
     metrics.run_finished(runtime.agent_id, RunOutcome.ERROR.value)
     agent.recorded_run(runtime, _transcript(runtime, extracted))
-    agent.recorded_outcome(runtime, success=False, note=error.message)
+    agent.recorded_outcome(runtime, RunStatus.ERROR, error.message)
     return Result(run_id=runtime.run_id, status=RunStatus.ERROR, error=error)
 
 
 async def _succeeded(
-    agent: Agent, runtime: Runtime, extracted: Extracted, pushed: ContextBundle | None
+    agent: Agent, runtime: Runtime, extracted: Extracted, pushed: PromptContext | None
 ) -> Result:
     answer = extracted.answer
     await agent.harness.runs.finished(
@@ -261,8 +268,8 @@ async def _succeeded(
     runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer))
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
     agent.recorded_run(runtime, _transcript(runtime, extracted))
-    agent.recorded_outcome(runtime, success=True, note=None)
-    agent.judged(runtime, runtime.task, answer, pushed)
+    agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
+    agent.grounded(runtime, answer, pushed)
     if runtime.used_code_mode:
         agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)

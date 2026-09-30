@@ -34,8 +34,13 @@ from trellis.harness.clients.runs import LocalRuns
 from trellis.harness.runtime import Runtime
 from trellis.harness.surfaces.a2a import client as a2a_client
 from trellis.harness.surfaces.a2a.identity import EXTENSION_URI, identity_headers
-from trellis.harness.surfaces.a2a.push import PushNotifier, TargetRefused, validate_url
-from trellis.memory.webhooks import SIGNATURE_HEADER, verify_signature
+from trellis.harness.surfaces.a2a.push import (
+    SIGNATURE_HEADER,
+    PushNotifier,
+    TargetRefused,
+    validate_url,
+    verify_signature,
+)
 
 URL = "http://a2a.test/agents/greeter"
 TENANT = "default"

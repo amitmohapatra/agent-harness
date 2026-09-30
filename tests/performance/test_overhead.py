@@ -1,8 +1,11 @@
 """What the harness costs per run, measured against calling the agent directly.
 
-Writes ``build/benchmark-results.json``; CI compares it with the committed baseline
-(``benchmark-results.json``) through ``python -m trellis.eval gate``. The numbers are the
-harness's own overhead (nothing configured: in-process runs, memory off), not a service's.
+Writes ``build/benchmark-results.json`` and fails when a median or p95 is more than
+:data:`MAX_REGRESSION` times the committed baseline (``benchmark-results.json``; CI machines
+are not the machine it was measured on, so this catches a doubled overhead, not noise). The
+numbers are the harness's own overhead (nothing configured: in-process runs, memory off), not
+a service's. Whether an *agent* got worse is Langfuse's question (experiments over datasets
+with its evaluators), not this benchmark's.
 """
 
 from __future__ import annotations
@@ -19,7 +22,13 @@ import pytest
 from trellis import Harness, Runtime, Settings, tool
 
 ITERATIONS = 500
-OUT = Path(__file__).resolve().parents[2] / "build" / "benchmark-results.json"
+ROOT = Path(__file__).resolve().parents[2]
+OUT = ROOT / "build" / "benchmark-results.json"
+BASELINE = ROOT / "benchmark-results.json"
+#: How many times the baseline a percentile may reach before the benchmark fails.
+MAX_REGRESSION = 2.0
+#: Below this many milliseconds a percentile is noise, whatever its ratio.
+FLOOR_MS = 0.5
 
 
 @tool(side_effects="read")
@@ -71,4 +80,11 @@ async def test_harness_overhead() -> None:
         }
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text(json.dumps({"iterations": ITERATIONS, "results": results}, indent=2) + "\n")
-    assert results["run"]["p50"] < 5.0  # milliseconds, on anything that can run the suite
+    baseline = json.loads(BASELINE.read_text())["results"]
+    regressions = [
+        f"{case} {p}: {results[case][p]} ms vs {baseline[case][p]} ms"
+        for case in baseline
+        for p in ("p50", "p95")
+        if results[case][p] > max(baseline[case][p] * MAX_REGRESSION, FLOOR_MS)
+    ]
+    assert not regressions, regressions

@@ -5,8 +5,8 @@
 2. **policy** — the risk tier: ``auto`` runs, ``notify`` is announced on the run's stream,
    ``ask`` pauses the run for approval (an approver may edit the arguments, or reject);
 3. **execution** — inside a span, with ``TOOL_CALL_*`` events around it;
-4. **record** — journaled for a later resume, counted, and (``memory="read_write"``) sent
-   to the memory service's tool records in the background.
+4. **record** — journaled for a later resume, counted, and (memory on) sent to the memory
+   service's tool records in the background.
 """
 
 from __future__ import annotations
@@ -25,9 +25,10 @@ from trellis.contracts import (
 from trellis.harness.events import NOTICE
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, current
-from trellis.harness.telemetry import metrics, span
+from trellis.harness.telemetry import metrics, tool_span
+from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import Tool
-from trellis.harness.tools.policy import Tier
+from trellis.harness.tools.policy import Tier, tier
 
 #: How much of a tool result rides on the event stream.
 PREVIEW_CHARS: Final = 2000
@@ -53,8 +54,8 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         _events(runtime, ref, tool_call, ToolOutcome(tool=tool.name, output=output, cached=True))
         return ToolOutcome(tool=tool.name, output=output, cached=True)
 
-    tier, why = runtime.agent.policy.tier(tool.spec, args)
-    if tier is Tier.ASK:
+    chosen, why = tier(tool, args)
+    if chosen is Tier.ASK:
         resolution = await runtime.approve(tool_call, why)
         decision = answer_of(resolution)  # raises RunCancelled on CANCEL
         if resolution.decision is InterruptDecision.REJECT or decision is False:
@@ -69,20 +70,17 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         if resolution.decision is InterruptDecision.EDIT and isinstance(decision, dict):
             args = decision
             tool_call = tool_call.model_copy(update={"args": args})
-    elif tier is Tier.NOTIFY:
+    elif chosen is Tier.NOTIFY:
         runtime.events.custom(NOTICE, tool=tool.name, args=args, side_effects=tool.side_effects)
 
     runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool.name)
     runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)
     runtime.used_code_mode |= tool.code_mode
+    runtime.used.add(tool.name)
     started = time.perf_counter()
-    with span(
-        "trellis.tool",
-        {"tool.name": tool.name, "tool.source": tool.spec.source, "run.id": runtime.run_id},
-    ):
+    with tool_span(tool.name, ref, args, source=tool.spec.source, tier=chosen.value) as span:
         try:
-            output = await tool.run(args)
-            outcome = ToolOutcome(tool=tool.name, output=output)
+            outcome = ToolOutcome(tool=tool.name, output=await tool.run(args))
         except (Paused, RunCancelled):
             raise
         except Exception as exc:
@@ -92,9 +90,10 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
                 output=f"{tool.name} failed: {exc}",
                 error_class=type(exc).__name__,
             )
+        span_output(span, outcome.output, key="gen_ai.tool.call.result")
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     if outcome.ok:
-        runtime.replay.record_call(key, outcome.output)
+        runtime.replay.record_call(key, outcome.output, tool=tool.name)
     runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=tool.name)
     runtime.events.tool(
         RunEventType.TOOL_CALL_RESULT,

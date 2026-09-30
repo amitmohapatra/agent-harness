@@ -12,9 +12,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Mapping
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from a2a.server.context import ServerCallContext
+
+if TYPE_CHECKING:
+    from trellis.harness.harness import Harness
 
 log = logging.getLogger("trellis.a2a")
 
@@ -38,11 +41,11 @@ class IdentityRefused(PermissionError):
 
 
 class HeaderIdentity:
-    """The default resolver: the trusted header when present (its tenant must be the
-    harness's), otherwise :data:`ANONYMOUS`."""
+    """The default resolver: the trusted header when present (its tenant must be the one
+    ``TRELLIS_API_KEY`` speaks for), otherwise :data:`ANONYMOUS`."""
 
-    def __init__(self, tenant: str) -> None:
-        self.tenant = tenant
+    def __init__(self, harness: Harness) -> None:
+        self.harness = harness
         self._warned = False
 
     def __call__(self, context: ServerCallContext) -> str:
@@ -66,7 +69,8 @@ class HeaderIdentity:
         if not isinstance(claimed, Mapping):
             raise IdentityRefused("the platform identity header must be a JSON object")
         tenant = claimed.get("tenant_id")
-        if tenant and tenant != self.tenant:
+        served = self.harness.known_tenant
+        if tenant and tenant != served:
             raise IdentityRefused(f"tenant {tenant!r} is not served here")
         user = claimed.get("user_id")
         if not user:

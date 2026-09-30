@@ -45,8 +45,14 @@ async def test_a_run_moves_through_the_contract_state_machine() -> None:
     assert (await runs.started(start())).status is RunStatus.RUNNING  # idempotent
     paused = await runs.paused(interrupt(), checkpoint={"answers": {}})
     assert paused.status is RunStatus.PAUSED and paused.checkpoint == {"answers": {}}
-    assert [r.run_id for r in await runs.list_paused("t", assignee="role:ops")] == ["run_1"]
-    assert await runs.list_paused("t", assignee="role:other") == []
+    [waiting] = await runs.inbox("t", "role:ops")
+    assert (waiting.run_id, waiting.assignee, waiting.status) == (
+        "run_1",
+        "role:ops",
+        paused.status,
+    )
+    assert await runs.inbox("t", "role:other") == []
+    assert [r.run_id for r in await runs.inbox("t", None)] == ["run_1"]
     answer = resolution()
     resumed = await runs.resumed(answer)
     assert resumed.status is RunStatus.RUNNING and resumed.attempt == 2
@@ -172,7 +178,16 @@ async def test_the_http_store_speaks_the_agent_runs_wire() -> None:
             httpx.Response(409, json={"detail": "lease lost"}),
         ]
     )
-    inbox = respx.get(f"{base}/v1/runs").mock(return_value=httpx.Response(200, json=[paused_json]))
+    summary = {
+        "run_id": "run_1",
+        "agent_id": "a",
+        "status": "PAUSED",
+        "awaiting": interrupt().awaiting(),
+        "assignee": "role:ops",
+        "deadline": None,
+        "updated_at": "2026-09-30T00:00:00Z",
+    }
+    inbox = respx.get(f"{base}/v1/runs").mock(return_value=httpx.Response(200, json=[summary]))
     respx.get(f"{base}/v1/runs/run_1").mock(return_value=httpx.Response(200, json=paused_json))
     schedule = respx.post(f"{base}/v1/schedules").mock(
         return_value=httpx.Response(
@@ -222,8 +237,10 @@ async def test_the_http_store_speaks_the_agent_runs_wire() -> None:
     assert json.loads(finish.calls[0].request.content) == {"status": "SUCCESS", "output": "ok"}
     assert finish.calls[0].request.url.params["worker_id"] == "w"
 
-    assert (await runs.list_paused("t", assignee="role:ops"))[0].awaiting is not None
+    [waiting] = await runs.inbox("t", "role:ops")
+    assert waiting.awaiting is not None and waiting.assignee == "role:ops"
     assert inbox.calls[0].request.url.params["assignee"] == "role:ops"
+    assert inbox.calls[0].request.url.params["status"] == "PAUSED"
     spec = ScheduleSpec(tenant_id="t", agent_id="a", name="n", cadence="@daily", on_behalf_of="u")
     assert (await runs.schedule(spec)).schedule_id == "s1"
     assert schedule.called
@@ -244,27 +261,67 @@ async def test_a_refused_or_unreachable_store_raises() -> None:
 
 
 @respx.mock
-async def test_scheduling_again_under_the_same_name_updates_the_schedule() -> None:
+async def test_a_schedule_is_one_post_the_service_upserts() -> None:
     base = "http://runs.test"
     spec = ScheduleSpec(
-        tenant_id="t", agent_id="a", name="a:k1", cadence="daily", on_behalf_of="u", input="v2"
+        tenant_id="t", agent_id="a", name="a for u", cadence="daily", on_behalf_of="u", input="v"
     )
-    stored = {**spec.model_dump(mode="json"), "schedule_id": "s1", "input": "v1"}
-    respx.post(f"{base}/v1/schedules").mock(
-        return_value=httpx.Response(409, json={"detail": "name taken"})
-    )
-    listed = respx.get(f"{base}/v1/schedules").mock(
-        return_value=httpx.Response(
-            200, json=[{**stored, "name": "other", "schedule_id": "s0"}, stored]
-        )
-    )
-    patched = respx.patch(f"{base}/v1/schedules/s1").mock(
-        return_value=httpx.Response(200, json={**stored, "input": "v2"})
+    stored = {**spec.model_dump(mode="json"), "schedule_id": "s1"}
+    route = respx.post(f"{base}/v1/schedules").mock(
+        side_effect=[httpx.Response(201, json=stored), httpx.Response(200, json=stored)]
     )
     runs = HttpRuns(base, "key")
-    updated = await runs.schedule(spec)
-    assert updated.schedule_id == "s1" and updated.input == "v2"
-    assert listed.calls[0].request.url.params["agent_id"] == "a"
-    body = json.loads(patched.calls[0].request.content)
-    assert body["input"] == "v2" and "name" not in body and "on_behalf_of" not in body
+    first, again = await runs.schedule(spec), await runs.schedule(spec)
+    assert first.schedule_id == again.schedule_id == "s1"
+    assert route.call_count == 2 and len(respx.calls) == 2  # no listing, no PATCH
     await runs.aclose()
+
+
+async def test_local_schedules_upsert_on_agent_person_cadence_and_input() -> None:
+    runs = LocalRuns()
+
+    def spec(**changes: object) -> ScheduleSpec:
+        fields = {"tenant_id": "t", "agent_id": "a", "name": "n", "cadence": "daily"}
+        return ScheduleSpec(**{**fields, "on_behalf_of": "u", "input": {"x": 1}, **changes})
+
+    first = await runs.schedule(spec())
+    assert (await runs.schedule(spec(name="renamed"))).schedule_id == first.schedule_id
+    assert (await runs.schedule(spec(input={"x": 2}))).schedule_id != first.schedule_id
+    assert (await runs.schedule(spec(on_behalf_of="v"))).schedule_id != first.schedule_id
+
+
+@respx.mock
+async def test_artifacts_are_uploaded_with_their_checksum_and_read_back() -> None:
+    base = "http://runs.test"
+    ref = {
+        "artifact_id": "art_1",
+        "type": "blob",
+        "uri": "/v1/artifacts/art_1",
+        "mime_type": "application/json",
+        "checksum": "sha256:x",
+        "size_bytes": 2,
+    }
+    upload = respx.post(f"{base}/v1/runs/run_1/artifacts").mock(
+        return_value=httpx.Response(201, json=ref)
+    )
+    respx.get(f"{base}/v1/artifacts/art_1").mock(return_value=httpx.Response(200, content=b"[]"))
+    respx.get(f"{base}/v1/artifacts/gone").mock(return_value=httpx.Response(404))
+    runs = HttpRuns(base, "key")
+    stored = await runs.put_artifact("run_1", b"[]", worker_id="w")
+    assert stored.artifact_id == "art_1"
+    request = upload.calls[0].request
+    assert request.content == b"[]" and request.headers["content-type"] == "application/json"
+    assert request.url.params["worker_id"] == "w"
+    assert request.url.params["checksum"].startswith("sha256:")
+    assert await runs.artifact("art_1", "t") == b"[]"
+    assert await runs.artifact("gone", "t") is None
+    await runs.aclose()
+
+
+async def test_local_artifacts_are_kept_per_tenant() -> None:
+    runs = LocalRuns()
+    await runs.started(start())
+    ref = await runs.put_artifact("run_1", b'{"a":1}')
+    assert ref.size_bytes == 7
+    assert await runs.artifact(ref.artifact_id, "t") == b'{"a":1}'
+    assert await runs.artifact(ref.artifact_id, "other") is None

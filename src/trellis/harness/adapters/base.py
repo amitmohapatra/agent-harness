@@ -2,7 +2,7 @@
 
 * ``prepare_input(target, input, context)`` — the framework's input, with the pushed memory
   context as a system message (``keeps_conversation(target)``: the target holds the thread's
-  messages itself, so the context leaves the recent conversation out);
+  messages itself, so the context is asked for without the recent conversation);
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
@@ -11,6 +11,12 @@
 ``run`` carries the per-run tools (already converted by ``tools.convert`` for the format the
 adapter names) and the runtime. Adapters never wrap models, never re-implement a loop, and
 use only their framework's public API.
+
+``narrows`` says how far the tool schemas sent to the model follow the tool hints
+(``Runtime.offers``): ``"turn"`` — every model call sees the tools offered at that moment
+(ReAct; OpenAI Agents through ``FunctionTool.is_enabled``); ``"run"`` — the tools offered when
+the run starts (Claude: the CLI lists an MCP server's tools once per query); ``"none"`` — the
+framework binds its tools when it is built (LangGraph) or has no model (a function).
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from trellis.harness.runtime import Runtime
 from trellis.harness.tools.base import Tool
 
 ToolFormat = Literal["langchain", "openai_agents", "claude", "openai_chat", "none"]
+Narrowing = Literal["turn", "run", "none"]
 Role = Literal["user", "assistant"]
 
 
@@ -72,6 +79,7 @@ class Adapter(Protocol):
     #: the target's tools are fixed when it is built (a compiled graph): ``tools=`` is refused
     #: at wrap time, and the harness tools come from ``h.tools(...)`` instead
     fixed_tools: ClassVar[bool]
+    narrows: ClassVar[Narrowing]
 
     def keeps_conversation(self, target: Any) -> bool: ...
 

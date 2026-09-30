@@ -26,6 +26,8 @@ class ScriptedModel(Model):
         self.turns = list(turns)
         self.inputs: list[Any] = []
         self.system: list[str | None] = []
+        #: the tool names each call was offered
+        self.tools: list[list[str]] = []
 
     def _next(self, input: Any, system: str | None) -> list[Any]:
         self.inputs.append(input)
@@ -54,8 +56,15 @@ class ScriptedModel(Model):
         ]
 
     async def get_response(
-        self, system_instructions: str | None, input: Any, *args: Any, **kwargs: Any
+        self,
+        system_instructions: str | None,
+        input: Any,
+        model_settings: Any = None,
+        tools: Any = (),
+        *args: Any,
+        **kwargs: Any,
     ) -> ModelResponse:
+        self.tools.append([t.name for t in tools])
         return ModelResponse(
             output=self._next(input, system_instructions), usage=Usage(), response_id=None
         )

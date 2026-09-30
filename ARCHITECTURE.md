@@ -2,7 +2,7 @@
 
 The harness is an attach layer. It owns no control flow: a framework runs the agent, and the
 harness sits around one run of it — identity, the run record, memory in and out, the tools the
-agent may call and who must approve them, the pause, the recording, the judge.
+agent may call and who must approve them, the pause, the recording, the trace.
 
 ## Modules
 
@@ -10,9 +10,9 @@ agent may call and who must approve them, the pause, the recording, the judge.
 src/trellis/
   __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory)
   worker.py            python -m trellis.worker module:harness
-  eval/                judge, budget, grounding, rubric, datasets, experiments, gate (+ __main__)
   harness/
-    harness.py         Harness: settings → clients, writes, judge; wrap / tools / worker / feedback
+    harness.py         Harness: settings → clients, writes, scores; the key (tenant, role);
+                       wrap / tools / worker / inbox / feedback
     agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
     pipeline.py        one attempt of one run (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
@@ -22,13 +22,14 @@ src/trellis/
     identity.py        tenant / user / thread / agent / run → memory scope, contracts context
     result.py          Result
     settings.py        the environment
-    telemetry.py       OTel spans and counters; OTLP / Langfuse export
+    telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; Langfuse scores
     redaction.py       what may leave the process
     worker.py          Worker: claim, lease, heartbeat
     adapters/          detect(target) and one adapter per framework (base, langgraph,
                        openai_agents, claude, react, function)
-    tools/             base (Tool), sources (tool, mcp, a2a, openapi), policy (tiers, approve
-                       rules), bridge (every call), convert/ (one module per native format)
+    tools/             base (Tool), sources (tool, a2a, openapi), toolbox (MCP tools, catalog
+                       tiers and approve_when, Code Mode, publishing), policy (tiers,
+                       conditions), bridge (every call), convert/ (one module per native format)
     clients/           bifrost, memory, runs — the only modules that call those services
     surfaces/          agui (serve_chat), a2a (serve_a2a, the a2a() client)
 ```
@@ -44,12 +45,12 @@ Every run of every framework goes through `pipeline.attempt`:
 ```mermaid
 flowchart LR
   A[identity] --> B[run record<br/>agent-runs or in process]
-  B --> C[tools<br/>sources + memory pull]
-  C --> D[memory push<br/>/v1/context]
+  B --> C[toolbox<br/>local + MCP + memory pull]
+  C --> D[memory push<br/>/v1/context + tool candidates]
   D --> E[adapter<br/>prepare · invoke/stream · extract]
   E -->|paused| F[record PAUSED<br/>interrupt + journal]
   E -->|ended| G[record SUCCESS / ERROR]
-  G --> H[background: transcript,<br/>outcome, sampled judge]
+  G --> H[background: transcript,<br/>system outcome, sampled grounding]
 ```
 
 A failed memory read is a `warning` event, not a failed run. Writes to agent-runs are awaited
@@ -75,29 +76,29 @@ adapter with fixed tools (a compiled graph) refuses `tools=` at wrap time; its t
 
 ## Tools
 
-A source resolves to `Tool`s (a contracts `ToolSpec` and a runner), once per agent and again
-after `TOOLS_TTL_SECONDS` (300). Every call, whoever makes it, goes through `tools/bridge.call`:
+The toolbox (`tools/toolbox.py`) is resolved once per agent and tenant and again after
+`TOOLS_TTL_SECONDS` (300): the local sources, every MCP tool the Bifrost virtual key allows,
+the catalog's word on each (`side_effects`, `approve_when`), Code Mode for the read-only Code
+Mode servers when there are enough of them, and every tool published to the catalog in the
+background. Every call, whoever makes it, goes through `tools/bridge.call`:
 
 1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
    recorded output is returned and nothing runs;
-2. **policy** — the tier from the tool's side effects: `read` runs, `write` runs and is
-   announced (`tool_notice` event), `irreversible` asks for approval. An `approve` rule for the
-   tool replaces the tier: it asks exactly when its condition holds (a small safe expression
-   language, parsed at wrap time; a condition that cannot be evaluated asks);
-3. **execution** — in a `trellis.tool` span, between `TOOL_CALL_*` events; a failure is an
+2. **policy** — the tier from the tool's side effects (annotations → declaration → the
+   catalog's `risk`): `read` runs, `write` runs and is announced (`tool_notice` event),
+   `irreversible` asks for approval. The catalog's `approve_when` replaces the tier: it asks
+   exactly when the expression holds, evaluated by `trellis.memory.approval` — the memory
+   service's own implementation, which also writes and validates the rules (a rule that cannot
+   be read or evaluated asks);
+3. **execution** — in an `execute_tool` span, between `TOOL_CALL_*` events; a failure is an
    error result the model reads, a pause propagates;
-4. **record** — journaled, counted, and with `memory="read_write"` sent to the memory
-   service's tool records in the background.
+4. **record** — journaled (the tool is then offered for the rest of the run), counted, and
+   with memory writes on sent to the memory service's tool records in the background.
 
-A tool called outside a harness run is refused.
-
-`mcp(...)` sources are listed through Bifrost (`<client>-<tool>` names) and executed one call at
-a time through it. A source goes to **Code Mode** when it has at least 20 tools or 3 servers
-*and* the memory service's catalog says every one of its tools is `read`: the agent then gets
-Bifrost's meta-tools (`listToolFiles`, `readToolFile`, `getToolDocs`, `executeToolCode`)
-scoped to those servers, scripts run under the run id, and their nested calls are read back
-from Bifrost's MCP log (after `CODE_MODE_LOG_DELAY_SECONDS`, 10) into the memory tool records.
-A write tool anywhere in a source keeps it in normal mode. Agent Mode is never used.
+A tool called outside a harness run is refused. What the model is *offered* (the tool hints'
+candidates, the memory tools, the tools already used) is `Runtime.offers`; each adapter
+narrows as far as its framework allows (`Adapter.narrows`: per turn, per run, or none).
+Agent Mode is never used.
 
 ## Pauses and resumes
 
@@ -133,8 +134,10 @@ within `DRAIN_SECONDS` (10). `await h.aclose()` drains explicitly.
 
 ## Telemetry
 
-The OTel API only: spans `trellis.run` and `trellis.tool`, counters `trellis.runs`,
-`trellis.tool_calls`, `trellis.writes.failed`, histogram `trellis.judge.score`. Attributes pass
-the redactor. `OTEL_EXPORTER_OTLP_ENDPOINT` and/or a Langfuse key pair install an SDK provider
-with OTLP exporters (Langfuse through `/api/public/otel/v1/traces`) — unless the application
-installed one itself.
+The OTel API only: an `invoke_agent` span per attempt in a trace whose id derives from the run
+id (every attempt, score and piece of feedback of a run in one trace), `execute_tool`,
+`chat` (the `ReAct` model calls) and `retrieve memory` spans with GenAI attributes and
+Langfuse's trace attributes, `score` spans; counters `trellis.runs`, `trellis.tool_calls`,
+`trellis.writes.failed`. Attributes pass the redactor and are built only for a recording span.
+`OTEL_EXPORTER_OTLP_ENDPOINT` installs an SDK provider with one OTLP exporter unless the
+application installed one. See [docs/observability.md](docs/observability.md).

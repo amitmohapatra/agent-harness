@@ -1,5 +1,6 @@
-"""Every implementation the harness ships satisfies the contracts port it stands for, and
-the public API is exactly the documented one."""
+"""The harness's implementations of contracts ports, and the public API is exactly the
+documented one. (The run stores are not the contracts ``RunStore``: agent-runs lists runs as
+summaries, ``Runs.inbox``, where the port still lists whole records.)"""
 
 from __future__ import annotations
 
@@ -7,20 +8,12 @@ import subprocess
 import sys
 
 import trellis
-from trellis.contracts import Judge, RunStore, TelemetryRedactor
-from trellis.eval import GroundedJudge, JudgeBudget
-from trellis.harness.clients.runs import HttpRuns, LocalRuns
+from trellis.contracts import TelemetryRedactor
 from trellis.harness.redaction import Redactor
 
 
-def test_the_run_stores_are_run_stores() -> None:
-    assert isinstance(LocalRuns(), RunStore)
-    assert isinstance(HttpRuns("http://runs", None), RunStore)
-
-
-def test_the_rest_of_the_ports() -> None:
+def test_the_redactor_is_the_contracts_redactor() -> None:
     assert isinstance(Redactor(), TelemetryRedactor)
-    assert isinstance(GroundedJudge(budget=JudgeBudget(0.1)), Judge)
 
 
 def test_the_public_api_is_the_documented_one() -> None:
@@ -30,11 +23,11 @@ def test_the_public_api_is_the_documented_one() -> None:
         "ReAct",
         "Result",
         "RunHandle",
+        "RunSummary",
         "Runtime",
         "Settings",
         "a2a",
         "current",
-        "mcp",
         "openapi",
         "tool",
     ]
@@ -46,7 +39,7 @@ def test_importing_trellis_loads_no_framework_and_contracts_stay_cheap() -> None
     code = (
         "import sys, trellis.contracts, trellis.memory\n"
         "assert 'trellis.harness' not in sys.modules\n"
-        "from trellis import Harness, mcp, tool, a2a, openapi, ReAct, current\n"
+        "from trellis import Harness, tool, a2a, openapi, ReAct, current\n"
         "Harness()\n"
         "loaded = {m.split('.')[0] for m in sys.modules}\n"
         "assert not loaded & {'langgraph', 'langchain_core', 'agents', 'claude_agent_sdk', 'a2a', 'fastapi'}, loaded\n"

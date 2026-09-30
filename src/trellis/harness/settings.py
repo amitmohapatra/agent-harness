@@ -1,19 +1,19 @@
 """The deployment facts the harness reads, and nothing else (every one is in ``.env.example``).
 
-Everything that is a design decision — limits, timeouts, prompts, sample floors — is a named
-constant next to the code that uses it. A setting here says *where* a service is and *whether*
-it exists in this deployment.
+Everything that is a design decision — limits, timeouts, prompts, sample rates — is a named
+constant next to the code that uses it. A setting here says *where* a service is, *whether* it
+exists in this deployment, and the credentials it is reached with. Who the deployment is (its
+tenant, whether it may write memory) is not configured: the memory service says so about
+``TRELLIS_API_KEY`` (``GET /v1/keys/self``).
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from urllib.parse import unquote
 
 from pydantic import BaseModel, ConfigDict, Field
-
-#: The tenant a single-tenant deployment runs as when a call names none.
-DEFAULT_TENANT = "default"
 
 
 class Settings(BaseModel):
@@ -21,19 +21,21 @@ class Settings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    tenant: str = DEFAULT_TENANT
+    #: Bifrost's OpenAI-compatible ``/v1`` base: MCP tools, ``ReAct`` models.
     bifrost_url: str | None = None
+    #: The agent's Bifrost virtual key: which models and MCP tools it may use, its budget —
+    #: and the key the memory service's own LLM work for this agent is billed to.
     bifrost_virtual_key: str | None = None
+    #: The one Trellis key, for the memory service and agent-runs alike.
+    api_key: str | None = None
+    #: The memory service: memory is on exactly when this is set.
     memory_url: str | None = None
-    memory_api_key: str | None = None
-    memory_model_key: str | None = None
+    #: agent-runs: durable runs, the worker queue, the inbox and schedules (else in process).
     runs_url: str | None = None
-    runs_api_key: str | None = None
-    eval_sample: float = Field(default=0.1, ge=0.0, le=1.0)
+    #: OTLP/HTTP traces endpoint (Langfuse's, or a collector's).
     otlp_endpoint: str | None = None
-    langfuse_public_key: str | None = None
-    langfuse_secret_key: str | None = None
-    langfuse_host: str | None = None
+    #: OTLP headers (``OTEL_EXPORTER_OTLP_HEADERS``, parsed).
+    otlp_headers: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -43,19 +45,23 @@ class Settings(BaseModel):
             value = env.get(name, "").strip()
             return value or None
 
-        sample = get("TRELLIS_EVAL_SAMPLE")
         return cls(
-            tenant=get("TRELLIS_TENANT") or DEFAULT_TENANT,
             bifrost_url=get("BIFROST_URL"),
             bifrost_virtual_key=get("BIFROST_VIRTUAL_KEY"),
+            api_key=get("TRELLIS_API_KEY"),
             memory_url=get("MEMORY_URL"),
-            memory_api_key=get("MEMORY_API_KEY"),
-            memory_model_key=get("TRELLIS_MEMORY_MODEL_KEY"),
             runs_url=get("RUNS_URL"),
-            runs_api_key=get("RUNS_API_KEY"),
-            eval_sample=float(sample) if sample is not None else 0.1,
             otlp_endpoint=get("OTEL_EXPORTER_OTLP_ENDPOINT"),
-            langfuse_public_key=get("LANGFUSE_PUBLIC_KEY"),
-            langfuse_secret_key=get("LANGFUSE_SECRET_KEY"),
-            langfuse_host=get("LANGFUSE_HOST"),
+            otlp_headers=parse_headers(get("OTEL_EXPORTER_OTLP_HEADERS") or ""),
         )
+
+
+def parse_headers(text: str) -> dict[str, str]:
+    """``OTEL_EXPORTER_OTLP_HEADERS`` as the OTel spec writes it: ``k1=v1,k2=v2``, values
+    URL-encoded. Keys are kept lower-case (headers are case-insensitive)."""
+    headers: dict[str, str] = {}
+    for pair in text.split(","):
+        key, sep, value = pair.partition("=")
+        if sep and key.strip():
+            headers[key.strip().lower()] = unquote(value.strip())
+    return headers

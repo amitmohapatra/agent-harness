@@ -21,9 +21,6 @@ from trellis.contracts import ToolError, ToolSpec
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import Tool
 
-#: A source this large (tools, or servers) goes to Code Mode when all of it only reads.
-CODE_MODE_MIN_TOOLS: Final = 20
-CODE_MODE_MIN_SERVERS: Final = 3
 #: Page size when reading the MCP execution log back.
 LOG_PAGE: Final = 500
 #: The gateway writes its MCP log a few seconds behind: a script's nested calls are read
@@ -90,10 +87,9 @@ class Gateway:
     def __init__(self, url: str, virtual_key: str | None, *, client: Bifrost | None = None) -> None:
         self.client = client or Bifrost(url, api_key=virtual_key)
 
-    async def tools(self, servers: Sequence[str], only: Sequence[str] | None) -> list[ToolDef]:
-        return await self.client.tools(
-            clients=list(servers), only=None if only is None else list(only)
-        )
+    async def tools(self) -> list[ToolDef]:
+        """Every MCP tool the virtual key allows (the gateway's own view of the key)."""
+        return await self.client.tools()
 
     async def execute(
         self,

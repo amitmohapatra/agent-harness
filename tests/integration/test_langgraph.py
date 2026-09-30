@@ -124,7 +124,9 @@ async def review(state: Draft) -> Draft:
     runtime = current()
     assert runtime is not None
     verdict = await runtime.ask(
-        f"Publish the draft about {state['topic']}?", ui="diff", expects={"type": "string"}
+        f"Publish the draft about {state['topic']}?",
+        diff=("", state["topic"]),
+        expects={"type": "string"},
     )
     return {"topic": state["topic"], "verdict": verdict}
 
@@ -179,7 +181,7 @@ async def test_the_memory_context_leads_the_messages(
 ) -> None:
     model = ScriptedChatModel(turns=["you prefer email"])
     graph = create_agent(model, tools=[], system_prompt="You help.")
-    await memory_harness.wrap(graph, id="helper", memory="read").run("how to reach me?", user="u1")
+    await memory_harness.wrap(graph, id="helper").run("how to reach me?", user="u1")
     sent = model.seen[0]
     assert [m.type for m in sent][:2] == ["system", "system"]
     assert sent[1].content == memory_service.context_text
@@ -188,30 +190,35 @@ async def test_the_memory_context_leads_the_messages(
 async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conversation(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    memory_service.conversation = "user: hi\nassistant: hello"
     model = ScriptedChatModel(turns=["first", "second"])
     graph = create_agent(model, tools=[], system_prompt="You help.", checkpointer=InMemorySaver())
-    agent = memory_harness.wrap(graph, id="helper", memory="read")
+    agent = memory_harness.wrap(graph, id="helper")
     for question in ("one?", "two?"):
         assert (await agent.run(question, user="u1", thread="th")).status is RunStatus.SUCCESS
     state = await graph.aget_state({"configurable": {"thread_id": "th"}})
     systems = [m for m in state.values["messages"] if m.type == "system"]
-    # one context message in the checkpointed thread, replaced each turn, and no second
-    # copy of the conversation the checkpointer already holds
+    # one context message in the checkpointed thread, replaced each turn, asked for without
+    # the conversation the checkpointer already holds
     assert [m.content for m in systems] == [memory_service.context_text]
     assert [m.type for m in model.seen[1]] == ["system", "system", "human", "ai", "human"]
+    assert [c.body["window"] for c in memory_service.named("context")] == [False, False]
 
 
 async def test_memory_tools_are_built_in_with_h_tools(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    tools = await memory_harness.tools(stock, framework="langgraph", memory=True)
-    assert [t.name for t in tools] == ["stock", "memory_search", "memory_remember"]
-    model = ScriptedChatModel(turns=[("memory_search", {"query": "x"}), "found"])
+    tools = await memory_harness.tools(stock, framework="langgraph")
+    assert [t.name for t in tools] == ["stock", "memory_search", "memory_remember", "tool_search"]
+    model = ScriptedChatModel(
+        turns=[("memory_search", {"query": "x"}), ("stock", {"sku": "a"}), "found"]
+    )
     graph = create_agent(model, tools=tools)
-    result = await memory_harness.wrap(graph, id="m", memory="read_write").run("x", user="u1")
+    result = await memory_harness.wrap(graph, id="m").run("x", user="u1")
     assert result.answer == "found"
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
+    await memory_harness.writes.drain()
+    # the graph's harness tools are recorded like any agent's
+    assert [c.body["tool"] for c in memory_service.named("record_tool")] == ["stock"]
 
 
 async def test_a_compiled_graph_refuses_tools_at_wrap(harness: Harness) -> None:

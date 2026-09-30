@@ -2,35 +2,44 @@
 
 ``Memory`` is the process's client; ``Memory.bind(identity)`` is a :class:`RunMemory`, the
 calls one run makes in its own scope. The SDK's ``MemoryContext`` it wraps (``.ctx``) is also
-what tools and nodes get as ``trellis.current().memory``: the harness adds the pull tools as
-tool specs and the records the pipeline queues.
+what tools and nodes get as ``trellis.current().memory``.
 """
 
 from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from typing import Final
+from dataclasses import dataclass
+from typing import Any, Final
 
-from trellis.contracts import Feedback, ToolCall, ToolOutcome, ToolSpec
+from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
-from trellis.memory.models import AgentTool, ContextBundle, GroundingReport, ToolHints
+from trellis.memory.models import AgentTool, KeyInfo, PromptContext, SideEffects
 
 #: Prompt budget for the pushed context, in tokens.
 CONTEXT_TOKEN_BUDGET: Final = 2000
-#: Tool candidates asked for when ``tool_hints`` is on.
-TOOL_HINTS_K: Final = 8
-#: Pull tools a ``memory="read"`` agent gets: the ones that change nothing.
-READ_ONLY_TOOLS: Final = frozenset(
-    {"memory_search", "history_search", "procedures_search", "tool_search"}
-)
-#: The pull tool that says whether the run achieved its task (the harness then records none).
-RECORD_OUTCOME: Final = "record_outcome"
-#: The pull tool for tool hints: answered among the run's own tools.
+#: Pull tools a read-only key gets: the ones that change nothing.
+READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
+#: The pull tool that chooses among the run's own tools (which the harness passes).
 TOOL_SEARCH: Final = "tool_search"
-#: What the catalog may call a tool's side effects (anything else is left for it to learn).
-SIDE_EFFECTS: Final = frozenset({"read", "write", "irreversible"})
+#: Key roles that may read memory but not change it (``GET /v1/keys/self``).
+READ_ONLY_ROLES: Final = frozenset({"reader"})
+#: What the harness calls the transcript it writes, so a re-recorded message is stored once.
+SOURCE_SYSTEM: Final = "trellis-harness"
+
+
+def read_only(key: KeyInfo) -> bool:
+    return key.role in READ_ONLY_ROLES
+
+
+@dataclass(frozen=True, slots=True)
+class Governance:
+    """The catalog's word on one tool: the tier it decided, and the approval rule an
+    administrator (or an accepted suggestion) set."""
+
+    risk: SideEffects
+    approve_when: str | None = None
 
 
 class Memory:
@@ -43,17 +52,17 @@ class Memory:
         #: the agent-tool listing: a fixed set, listed once per process
         self.listed: list[ToolSpec] | None = None
 
+    async def key(self) -> KeyInfo:
+        """Who ``TRELLIS_API_KEY`` is: its tenant, principal and role."""
+        return await self.client.tenant.keys.whoami()
+
     def bind(self, identity: Identity) -> RunMemory:
         return RunMemory(self, self.client.bind(**identity.scope()))
 
     def scoped(self, tenant: str, agent_id: str | None = None) -> RunMemory:
-        """Calls made outside a run: tenant-wide (the tool catalog, tools built before a run)
-        or for one agent (its model key)."""
-        scope = (
-            {"tenant_id": tenant}
-            if agent_id is None
-            else {"tenant_id": tenant, "agent_id": agent_id}
-        )
+        """Calls made outside a run: tenant-wide (the tool catalog) or for one agent (its
+        model key)."""
+        scope = {"tenant_id": tenant} | ({"agent_id": agent_id} if agent_id else {})
         return RunMemory(self, self.client.bind(**scope))
 
     async def aclose(self) -> None:
@@ -70,12 +79,14 @@ class RunMemory:
         self.ctx = ctx
 
     # ------------------------------------------------------------------ push
-    async def context(self, query: str, *, tools: Sequence[str] | None) -> ContextBundle:
-        """What the prompt gets (``.rendered``), and what a judge verifies the answer against."""
+    async def context(
+        self, query: str, *, tools: Sequence[str] | None, window: bool
+    ) -> PromptContext:
+        """What the prompt gets, and the tools that fit the task (``tool_candidates``, when
+        ``tools`` are given). ``window=False`` when the framework keeps the thread's messages
+        itself: the service then leaves the recent conversation out."""
         return await self.ctx.context(
-            query,
-            token_budget=CONTEXT_TOKEN_BUDGET,
-            tools=None if tools is None else {"available": list(tools), "k": TOOL_HINTS_K},
+            query, token_budget=CONTEXT_TOKEN_BUDGET, tools=tools, window=window
         )
 
     # ------------------------------------------------------------------ pull
@@ -84,25 +95,35 @@ class RunMemory:
             self.memory.listed = [_agent_tool(t) for t in await self.ctx.agent_tools()]
         return [t for t in self.memory.listed if not read_only or t.name in READ_ONLY_TOOLS]
 
-    async def call_agent_tool(self, name: str, args: dict[str, object]) -> object:
-        return await self.ctx.call_agent_tool(name, args)
+    async def call_agent_tool(
+        self, name: str, args: dict[str, object], *, toolbox: Sequence[str] | None = None
+    ) -> object:
+        """One memory tool, in this run's scope; ``toolbox`` is what ``tool_search`` chooses
+        among (the run's own tools)."""
+        return await self.ctx.call_agent_tool(name, args, toolbox=toolbox)
 
-    async def tool_hints(self, task: str, available: Sequence[str]) -> ToolHints:
-        return await self.ctx.tool_hints(task, available=list(available), k=TOOL_HINTS_K)
+    async def tool_hints(self, task: str, available: Sequence[str]) -> Any:
+        return await self.ctx.tool_hints(task, available=list(available))
 
     # ------------------------------------------------------------------ records
     async def record_messages(
         self, messages: Sequence[tuple[str, str]], run_id: str, attempt: int
     ) -> None:
-        """One attempt's transcript. The question is keyed by the run (every attempt asks
-        it, and it is stored once); what the agent said, by attempt and position — so a
-        retried write stores nothing twice."""
-        for index, (role, content) in enumerate(messages):
-            if role == "user":
-                await self.ctx.chat.user(content, idempotency_key=f"{run_id}:user:{index}")
-            else:
-                key = f"{run_id}:{attempt}:msg:{index}"
-                await self.ctx.chat.assistant(content, idempotency_key=key)
+        """One attempt's transcript, in one request. Each message names itself (the run for
+        the question, which every attempt asks; the attempt and position for what the agent
+        said), and the service stores a message it has seen before once."""
+        batch = [
+            {
+                "role": role.upper(),
+                "content": content,
+                "source_system": SOURCE_SYSTEM,
+                "source_message_id": f"{run_id}:user:{index}"
+                if role == "user"
+                else f"{run_id}:{attempt}:msg:{index}",
+            }
+            for index, (role, content) in enumerate(messages)
+        ]
+        await self.ctx.history.add(batch, idempotency_key=f"{run_id}:{attempt}:transcript")
 
     async def record_tool(self, call: ToolCall, outcome: ToolOutcome) -> None:
         await self.ctx.record_tool(
@@ -116,28 +137,56 @@ class RunMemory:
             step=call.step,
         )
 
-    async def outcome(self, *, success: bool, note: str | None) -> None:
-        await self.ctx.outcome(success=success, note=note)
+    async def run_feedback(
+        self,
+        verdict: Any,
+        *,
+        source: Any,
+        key: str,
+        correction: Any = None,
+        comment: str | None = None,
+        reviewer: str | None = None,
+    ) -> None:
+        """A verdict on this scope's run (``source`` ``system`` for how it ended, ``human``
+        for a person's); ``key`` makes a retry store it once."""
+        run_id = self.ctx.scope.agent_run_id
+        assert run_id is not None
+        await self.ctx.feedback(
+            "run",
+            run_id,
+            verdict,
+            correction=correction,
+            comment=comment,
+            reviewer=reviewer,
+            source=source,
+            idempotency_key=key,
+        )
 
-    async def feedback(self, feedback: Feedback) -> None:
-        await self.ctx.feedback(feedback)
+    async def feedback(self, record: Any) -> None:
+        """A contracts ``Feedback`` record as it is (an interrupt's decision)."""
+        await self.ctx.feedback(record)
 
-    async def verify(self, answer: str, bundle: ContextBundle) -> GroundingReport:
-        return await self.ctx.verify(answer, bundle=bundle)
+    async def verify(self, answer: str, bundle_id: str) -> float | None:
+        """The grounding score of ``answer`` against the context the run was given (the share
+        of its claims the evidence supports), or ``None`` for an answer with no checkable
+        claim. The service records the verdict as the run's ``judge`` feedback itself; this is
+        the same number, for the run's trace."""
+        report = await self.ctx.verify(answer, bundle_id=bundle_id)
+        if not report.claims:
+            return None
+        return round(1.0 - report.per_claim_hallucination_rate, 4)
 
     # ------------------------------------------------------------------ catalog
-    async def side_effects(self, names: Sequence[str]) -> dict[str, str]:
-        """What the catalog says each named tool does; tools it does not know are absent."""
+    async def catalog(self, names: Sequence[str]) -> dict[str, Governance]:
+        """What the catalog says about each named tool: the tier it decided, and the rule an
+        administrator (or an accepted suggestion) set. Tools it does not know are absent."""
         return {
-            entry.name: entry.side_effects
+            entry.name: Governance(risk=entry.risk, approve_when=entry.approve_when or None)
             for entry in await self.ctx.advanced.tools.catalog(names=list(names))
-            if entry.side_effects is not None
         }
 
-    async def publish_catalog(self, specs: Sequence[ToolSpec]) -> None:
-        """Tools whose side effects the harness knows (local, OpenAPI, A2A). A tool whose
-        effects are unknown goes in without them: the catalog learns them elsewhere."""
-        await self.ctx.advanced.tools.put_catalog([_catalog_entry(s) for s in specs])
+    async def publish_catalog(self, entries: Sequence[dict[str, object]]) -> None:
+        await self.ctx.advanced.tools.put_catalog(list(entries))
 
     async def register_model_key(self, key: str) -> None:
         """The agent-level LLM key the service uses for this agent's memory, in an agent
@@ -148,7 +197,10 @@ class RunMemory:
         await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent}:{digest}")
 
 
-def _catalog_entry(spec: ToolSpec) -> dict[str, object]:
+def catalog_entry(spec: ToolSpec, annotations: dict[str, bool] | None) -> dict[str, object]:
+    """A tool as the catalog stores it. ``side_effects`` only where the harness knows them (a
+    local tool declares them, an OpenAPI method implies them); an MCP tool sends its server's
+    annotations instead and the service derives the tier, so an administrator's stays."""
     entry: dict[str, object] = {
         "name": spec.name,
         "description": spec.description,
@@ -156,8 +208,10 @@ def _catalog_entry(spec: ToolSpec) -> dict[str, object]:
         "source": spec.source,
         "server": spec.server,
     }
-    if spec.side_effects in SIDE_EFFECTS:
+    if spec.source != "mcp" and spec.side_effects in ("read", "write", "irreversible"):
         entry["side_effects"] = spec.side_effects
+    if annotations:
+        entry["annotations"] = annotations
     return entry
 
 

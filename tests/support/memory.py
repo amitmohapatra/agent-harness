@@ -1,8 +1,9 @@
 """The memory service's HTTP API, as far as the harness uses it, in process.
 
-Tests talk to it through the real SDK (``FakeMemoryService.client()`` is a ``MemoryClient``
-on an ``httpx.MockTransport``), so what the harness sends and reads is exactly what the SDK
-sends and reads. Every request lands in ``calls``; the answers are whatever a test sets.
+Tests talk to it through the real SDK (``FakeMemoryService.client()`` is a ``MemoryClient`` on
+an ``httpx.MockTransport``), so what the harness sends and reads is exactly what the SDK sends
+and reads. Request and response shapes are the service's (its ``docs/api``); every request
+lands in ``calls``; the answers are whatever a test sets.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from typing import Any, Final
 import httpx
 
 from trellis.memory import MemoryClient
-from trellis.memory.models import GroundingReport
 
 URL: Final = "http://memory.test"
 
@@ -40,19 +40,28 @@ AGENT_TOOLS: Final = [
             "required": ["content"],
         },
     },
+    {
+        "name": "tool_search",
+        "description": "Which tool to use next for a task.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"task": {"type": "string"}},
+            "required": ["task"],
+        },
+    },
 ]
 
 #: (method, path pattern) -> the name a call is filed under
 ROUTES: Final = [
+    ("GET", r"/v1/keys/self", "key"),
     ("POST", r"/v1/context", "context"),
     ("GET", r"/v1/agent-tools", "agent_tools"),
     ("POST", r"/v1/agent-tools/(?P<name>[^/]+)", "call_agent_tool"),
     ("POST", r"/v1/tools/hints", "tool_hints"),
     ("POST", r"/v1/tools/invocations", "record_tool"),
-    ("POST", r"/v1/runs/(?P<run>[^/]+)/outcome", "outcome"),
     ("POST", r"/v1/feedback", "feedback"),
     ("POST", r"/v1/verify", "verify"),
-    ("POST", r"/v1/messages", "message"),
+    ("POST", r"/v1/messages", "messages"),
     ("GET", r"/v1/tools", "catalog"),
     ("PUT", r"/v1/tools/catalog", "put_catalog"),
     ("PUT", r"/v1/agents/model-key", "model_key"),
@@ -65,7 +74,7 @@ class Call:
     scope: dict[str, Any]
     body: Any
     idempotency_key: str | None
-    #: the path's parameters (a tool name, a run id)
+    #: the path's parameters (a tool name)
     path: dict[str, str]
     query: httpx.QueryParams
 
@@ -73,16 +82,27 @@ class Call:
 @dataclass
 class FakeMemoryService:
     context_text: str = "The user prefers email."
-    #: the thread's recent messages as the service renders them ("" for none)
-    conversation: str = ""
-    #: the catalog's side effects by tool name
-    catalog: dict[str, str] = field(default_factory=dict)
-    report: GroundingReport = field(default_factory=GroundingReport)
+    #: what ``GET /v1/keys/self`` says about the key
+    tenant: str | None = "acme"
+    role: str = "service"
+    #: the catalog by tool name: risk / approve_when / annotations / side_effects
+    catalog: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: tool-hint candidates (names), in rank order; ``None``: the first available one
+    candidates: list[str] | None = None
+    #: the context answers without a ``tool_candidates`` field at all
+    omit_candidates: bool = False
+    #: candidates for a particular task, over ``candidates``
+    candidates_for: dict[str, list[str]] = field(default_factory=dict)
+    #: the claims ``/v1/verify`` finds, and how many of them the evidence does not support
+    claims: int = 5
+    unsupported: int = 1
     #: names of the calls that answer 503
     fail: set[str] = field(default_factory=set)
     calls: list[Call] = field(default_factory=list)
     agent_tools: list[dict[str, Any]] = field(default_factory=lambda: list(AGENT_TOOLS))
     _ids: itertools.count[int] = field(default_factory=itertools.count)
+    #: the ``source_message_id``s already stored (the service's own message identity)
+    _stored: set[str] = field(default_factory=set)
 
     def client(self) -> MemoryClient:
         transport = httpx.MockTransport(self._handle)
@@ -116,18 +136,31 @@ class FakeMemoryService:
                 return httpx.Response(200, json=getattr(self, f"_{name}")(call))
         return httpx.Response(404, json={"title": "no such route", "status": 404})
 
-    def _context(self, call: Call) -> dict[str, Any]:
-        sections = [f"## Recent conversation\n{self.conversation}"] if self.conversation else []
-        rendered = "\n\n".join([*sections, self.context_text])
+    def _key(self, call: Call) -> dict[str, Any]:
         return {
-            "query": call.body["query"],
-            "query_type": "GENERAL_SEMANTIC",
-            "conversation": {"rendered": self.conversation},
-            "evidence": {"status": "COMPLETE"},
-            "token_budget": call.body.get("token_budget", 0),
-            "token_estimate": len(rendered) // 4,
-            "rendered": rendered,
+            "key_id": "key_1",
+            "tenant_id": self.tenant,
+            "principal": "svc:harness",
+            "role": self.role,
+            "may_act_as": ["*"],
         }
+
+    def _context(self, call: Call) -> dict[str, Any]:
+        rendered = self.context_text
+        available = (call.body.get("tools") or {}).get("available")
+        answer: dict[str, Any] = {
+            "rendered": rendered,
+            "bundle_id": f"bnd_{next(self._ids)}",
+            "token_estimate": 0,
+        }
+        if available is not None:
+            chosen = self._candidates("", available)
+            rendered += "\n\n## Tools\nnext: " + (chosen[0] if chosen else "-")
+            if not self.omit_candidates:
+                answer["tool_candidates"] = chosen
+            answer["rendered"] = rendered
+        answer["token_estimate"] = len(rendered) // 4
+        return answer
 
     def _agent_tools(self, call: Call) -> dict[str, Any]:
         return {"tools": self.agent_tools}
@@ -135,15 +168,25 @@ class FakeMemoryService:
     def _call_agent_tool(self, call: Call) -> dict[str, Any]:
         return {"result": [f"{call.path['name']} ok"]}
 
+    def _candidates(self, task: str, available: list[str]) -> list[str]:
+        names = self.candidates_for.get(
+            task, self.candidates if self.candidates is not None else available[:1]
+        )
+        return [n for n in names if n in available][:8]
+
     def _tool_hints(self, call: Call) -> dict[str, Any]:
         available = call.body.get("available") or []
-        return {"candidates": [{"name": n, "score": 1.0} for n in available[:1]]}
+        chosen = self._candidates(call.body["task"], available)
+        return {
+            "candidates": [{"name": n, "score": 1.0 - i / 10} for i, n in enumerate(chosen)],
+            "next": chosen[0] if chosen else None,
+            "plan": None,
+            "prefill": {},
+            "missing": [],
+        }
 
     def _record_tool(self, call: Call) -> dict[str, Any]:
         return {"invocation_id": self._id("inv"), "step": call.body.get("step") or 0}
-
-    def _outcome(self, call: Call) -> dict[str, Any]:
-        return {"run_id": call.path["run"], "success": call.body["success"], "source": "outcome"}
 
     def _feedback(self, call: Call) -> dict[str, Any]:
         return {
@@ -153,23 +196,49 @@ class FakeMemoryService:
         }
 
     def _verify(self, call: Call) -> dict[str, Any]:
-        return self.report.model_dump(mode="json")
-
-    def _message(self, call: Call) -> dict[str, Any]:
-        n = next(self._ids)
+        claims = [
+            {
+                "claim": f"claim {i}",
+                "verdict": "supported" if i >= self.unsupported else "unsupported",
+            }
+            for i in range(self.claims)
+        ]
         return {
-            "message_id": f"msg_{n}",
-            "thread_id": call.scope.get("thread_id") or "thr_1",
-            "session_id": "ses_1",
-            "turn_id": f"turn_{n}",
-            "sequence": n,
+            "claims": claims,
+            "supported": self.claims - self.unsupported,
+            "unsupported": self.unsupported,
+            "per_claim_hallucination_rate": (
+                self.unsupported / self.claims if self.claims else 0.0
+            ),
+            "feedback_id": self._id("fb"),
         }
+
+    def _messages(self, call: Call) -> dict[str, Any]:
+        """One durable append. A message the service has already stored under its
+        ``source_message_id`` is acknowledged as ``deduplicated``."""
+        thread = call.scope.get("thread_id") or call.scope.get("agent_run_id") or "thr_1"
+        acks = []
+        for message in call.body["messages"]:
+            n = next(self._ids)
+            source_id = message.get("source_message_id") or f"anon_{n}"
+            acks.append(
+                {
+                    "message_id": f"msg_{n}",
+                    "thread_id": thread,
+                    "session_id": "ses_1",
+                    "turn_id": f"trn_{n}",
+                    "sequence": n,
+                    "deduplicated": source_id in self._stored,
+                }
+            )
+            self._stored.add(source_id)
+        return {"messages": acks}
 
     def _catalog(self, call: Call) -> dict[str, Any]:
         names = call.query.get_list("names")
         return {
             "tools": [
-                {"tool_id": f"tool_{n}", "name": n, "side_effects": self.catalog[n]}
+                {"tool_id": f"tool_{n}", "name": n, "risk": "write", **self.catalog[n]}
                 for n in names
                 if n in self.catalog
             ]

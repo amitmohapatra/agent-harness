@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 
 from _offline import langchain_model
 from langchain.agents import create_agent
@@ -37,8 +36,7 @@ async def main() -> None:
             tools=await h.tools(stock, reorder, framework="langgraph"),
             system_prompt="You keep stock above 10 units. Check stock, then reorder 20 if low.",
         )
-        memory = "read_write" if os.environ.get("MEMORY_URL") else "off"
-        agent = h.wrap(graph, id="stock-keeper", memory=memory)
+        agent = h.wrap(graph, id="stock-keeper")  # memory is on when MEMORY_URL is set
 
         result = await agent.run("Is SKU-1 low? Top it up if so.", user="ada")
         while result.interrupt is not None:  # the reorder is irreversible: a person approves it

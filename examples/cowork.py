@@ -1,8 +1,8 @@
 """Co-work: a queued run that asks a person, waits in their inbox, and continues when they
 answer — executed by a worker, not by the caller.
 
-    .venv/bin/python examples/cowork.py                 # runs kept in process
-    RUNS_URL=... RUNS_API_KEY=... python examples/cowork.py   # runs in agent-runs
+    .venv/bin/python examples/cowork.py                                 # runs kept in process
+    RUNS_URL=... MEMORY_URL=... TRELLIS_API_KEY=... python examples/cowork.py  # agent-runs
 """
 
 from __future__ import annotations
@@ -14,10 +14,11 @@ from trellis import Harness, Runtime
 
 
 async def draft_contract(input: dict[str, Any], agent: Runtime) -> str:
+    previous = f"Contract with {input['customer']}: net 60"
     draft = f"Contract with {input['customer']}: {input['terms']}"
     verdict = await agent.ask(
         f"Review the draft for {input['customer']}",
-        ui="diff",
+        diff=(previous, draft),
         expects={"type": "string"},
         assignee="role:legal",
     )
@@ -34,7 +35,7 @@ async def main() -> None:
         paused = await handle.result(timeout=10)
         print("paused:", paused.status.value)
 
-        [waiting] = await h.runs.list_paused(h.settings.tenant, assignee="role:legal")
+        [waiting] = await h.inbox("role:legal")
         assert waiting.awaiting is not None
         print("legal inbox:", waiting.awaiting.question)
         resumed = await agent.resume(

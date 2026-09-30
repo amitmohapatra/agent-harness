@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import (
-    AgentEvalEvent,
     ConfigurationError,
     InterruptDecision,
     InterruptResolution,
@@ -31,22 +31,24 @@ from trellis.harness import pipeline
 from trellis.harness.adapters import detect
 from trellis.harness.clients.memory import RunMemory
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal, content_key
+from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, run_of
-from trellis.harness.telemetry import metrics
+from trellis.harness.telemetry import output, retrieval_span
 from trellis.harness.tools.base import Tool
-from trellis.harness.tools.policy import Policy, Rule
 from trellis.harness.tools.sources import as_source
-from trellis.memory.models import ContextBundle
+from trellis.memory.models import PromptContext
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
 
-MemoryMode = Literal["off", "read", "read_write"]
-MEMORY_MODES: Final = frozenset({"off", "read", "read_write"})
-#: How long a resolved tool list is reused before its sources are listed again.
+#: How long a resolved toolbox is reused before its sources and the catalog are read again.
 TOOLS_TTL_SECONDS: Final = 300.0
+#: From this many tools, the tool hints are asked for and narrow what the model is offered.
+TOOL_HINTS_MIN: Final = 5
+#: The share of successful runs whose answer is checked against the context it was given
+#: (``/v1/verify``); chosen by the run id, so a run is either always or never sampled.
+GROUNDING_SAMPLE: Final = 0.1
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
 
@@ -54,25 +56,7 @@ POLL_SECONDS: Final = 0.5
 class Agent:
     """Run it, stream it, queue it, resume it, schedule it, serve it."""
 
-    def __init__(
-        self,
-        harness: Harness,
-        target: Any,
-        *,
-        id: str,
-        tools: Sequence[Any] = (),
-        memory: MemoryMode = "off",
-        approve: Mapping[str, Rule] | None = None,
-        tool_hints: bool = False,
-    ) -> None:
-        if memory not in MEMORY_MODES:
-            raise ConfigurationError(
-                f"memory must be one of {sorted(MEMORY_MODES)}, not {memory!r}"
-            )
-        if memory != "off" and harness.memory is None:
-            raise ConfigurationError(f"agent {id!r} has memory={memory!r} but MEMORY_URL is unset")
-        if tool_hints and memory == "off":
-            raise ConfigurationError("tool_hints needs memory='read' or 'read_write'")
+    def __init__(self, harness: Harness, target: Any, *, id: str, tools: Sequence[Any] = ()):
         self.harness = harness
         self.target = target
         self.id = safe_id(id)
@@ -83,11 +67,8 @@ class Agent:
                 f"await h.tools(..., framework='langgraph') to the graph instead of tools="
             )
         self.sources = [as_source(t) for t in tools]
-        self.memory_mode: MemoryMode = memory
-        self.policy = Policy(approve)
-        self.tool_hints = tool_hints
-        self._tools: list[Tool] | None = None
-        self._tools_at = 0.0
+        #: the resolved toolbox per tenant, and when it was resolved
+        self._tools: dict[str, tuple[float, list[Tool]]] = {}
 
     # ------------------------------------------------------------------ running
     async def run(
@@ -116,7 +97,7 @@ class Agent:
             json.dumps(input)
         except (TypeError, ValueError) as exc:
             raise ConfigurationError("a queued run's input must be JSON") from exc
-        start = self._start(input, user=user, thread=thread, tenant=tenant)
+        start = await self._start(input, user=user, thread=thread, tenant=tenant)
         await self.harness.runs.queued(start)
         return RunHandle(self, start.run_id)
 
@@ -145,11 +126,12 @@ class Agent:
     ) -> Schedule:
         """Queue a run of this agent on ``cron`` (evaluated in ``tz``), acting for
         ``on_behalf_of``. Workers run them. Idempotent: the same agent, person, cadence and
-        input are one schedule, so a redeploy updates it rather than adding another."""
+        input are one schedule (agent-runs answers the existing one), so a redeploy adds none.
+        Pause or resume it in agent-runs (``PATCH /v1/schedules/{id} {"enabled": …}``)."""
         spec = ScheduleSpec(
-            tenant_id=tenant or self.harness.settings.tenant,
+            tenant_id=await self.harness.tenant(tenant),
             agent_id=self.id,
-            name=schedule_name(self.id, on_behalf_of, cron, input),
+            name=f"{self.id} for {on_behalf_of}",
             cadence=cron,
             timezone=tz,
             on_behalf_of=on_behalf_of,
@@ -206,10 +188,9 @@ class Agent:
         assert record.awaiting is not None
         identity = self._identity_of(record)
         feedback = resolution.to_feedback(record.awaiting, identity.context())
-        if feedback is not None and self.memory_mode == "read_write":
-            run_memory = self.run_memory(identity)
-            if run_memory is not None:
-                self.harness.writes.submit("memory.feedback", lambda: run_memory.feedback(feedback))
+        run_memory = await self.run_memory(identity)
+        if feedback is not None and run_memory is not None and await self.harness.writes_memory():
+            self.harness.writes.submit("memory.feedback", lambda: run_memory.ctx.feedback(feedback))
         resumed = await runs.resumed(resolution)
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
@@ -256,47 +237,57 @@ class Agent:
                 task.cancel()
 
     # ------------------------------------------------------------------ used by the pipeline
-    def run_memory(self, identity: Identity) -> RunMemory | None:
+    async def run_memory(self, identity: Identity) -> RunMemory | None:
         memory = self.harness.memory
-        if self.memory_mode == "off" or memory is None:
+        if memory is None:
             return None
-        self.harness.registered(memory, identity)
+        await self.harness.registered(memory, identity)
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
-        """The agent's own tools (resolved once per TTL) and the memory pull tools."""
+        """The toolbox (resolved once per TTL and tenant) and the memory pull tools."""
         now = time.monotonic()
-        if self._tools is None or now - self._tools_at > TOOLS_TTL_SECONDS:
-            self._tools = await self.harness.resolve(self.sources, tenant=runtime.tenant)
-            self._tools_at = now
-        tools = list(self._tools)
+        cached = self._tools.get(runtime.tenant)
+        if cached is None or now - cached[0] > TOOLS_TTL_SECONDS:
+            sources = self.harness.built if self.adapter.fixed_tools else self.sources
+            cached = (now, await self.harness.resolve(sources, tenant=runtime.tenant))
+            self._tools[runtime.tenant] = cached
+        tools = list(cached[1])
         if runtime.run_memory is not None and not self.adapter.fixed_tools:
-            tools.extend(
-                await self.harness.memory_tools(runtime.run_memory, self.memory_mode == "read")
-            )
+            tools.extend(await self.harness.memory_tools(runtime.run_memory, runtime.writes_memory))
         return tools
 
-    async def push(self, runtime: Runtime, tool_names: list[str]) -> ContextBundle | None:
-        """The memory context for this run, in the runtime; a failure is a warning."""
-        if runtime.run_memory is None or not runtime.task:
+    async def push(self, runtime: Runtime) -> PromptContext | None:
+        """The memory context for this run, in the runtime — with the tools section once the
+        toolbox is large enough, whose candidates narrow the tools the model is offered. A
+        failure is a warning."""
+        memory = runtime.run_memory
+        if memory is None or not runtime.task:
             return None
-        try:
-            bundle = await runtime.run_memory.context(
-                runtime.task, tools=tool_names if self.tool_hints else None
-            )
-        except Exception as exc:
-            runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
-            return None
-        text = bundle.rendered
-        if self.adapter.keeps_conversation(self.target):
-            text = without_conversation(bundle)
-        runtime.context = text or None
-        runtime.events.emit(RunEventType.CONTEXT_LOADED, data={"chars": len(text)})
-        return bundle
+        own = runtime.tool_names()
+        hinted = len(own) >= TOOL_HINTS_MIN
+        with retrieval_span(runtime.task) as span:
+            try:
+                pushed = await memory.context(
+                    runtime.task,
+                    tools=own if hinted else None,
+                    window=not self.adapter.keeps_conversation(self.target),
+                )
+            except Exception as exc:
+                runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
+                return None
+            output(span, pushed.rendered)
+        # candidates the model is offered; no candidates at all narrows nothing
+        candidates = [n for n in pushed.tool_candidates or () if n in runtime.toolbox]
+        if hinted and candidates and self.adapter.narrows != "none":
+            runtime.offered = set(candidates)
+        runtime.context = pushed.rendered or None
+        runtime.events.emit(RunEventType.CONTEXT_LOADED, data={"chars": len(pushed.rendered)})
+        return pushed
 
     def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
-        if memory is not None and self.memory_mode == "read_write" and call.tool not in _pull(self):
+        if memory is not None and runtime.writes_memory and call.tool not in _pull(self):
             self.harness.writes.submit(
                 "memory.record_tool",
                 lambda: memory.record_tool(call, outcome),
@@ -306,7 +297,7 @@ class Agent:
     def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
         """The attempt's transcript, whether the run succeeded, paused or failed."""
         memory = runtime.run_memory
-        if memory is not None and self.memory_mode == "read_write" and messages:
+        if memory is not None and runtime.writes_memory and messages:
             run_id, attempt = runtime.run_id, runtime.attempt
             self.harness.writes.submit(
                 "memory.transcript",
@@ -314,53 +305,47 @@ class Agent:
                 events=runtime.events,
             )
 
-    def recorded_outcome(self, runtime: Runtime, *, success: bool, note: str | None) -> None:
-        """How the run ended, as its outcome — unless the agent recorded its own
-        (``record_outcome``), which the harness never overwrites."""
+    def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
+        """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
+        its outcome (the judge's and a person's override it in the memory service)."""
         memory = runtime.run_memory
-        if memory is not None and self.memory_mode == "read_write" and not runtime.outcome_recorded:
-            self.harness.writes.submit(
-                "memory.outcome",
-                lambda: memory.outcome(success=success, note=note),
-                events=runtime.events,
-            )
-
-    def judged(
-        self, runtime: Runtime, question: str, answer: Any, bundle: ContextBundle | None
-    ) -> None:
-        """The sampled online judge, in the background: grounded against the context the run
-        was given, its verdict a feedback record on the answer and a metric."""
-        judge = self.harness.judge
-        if not isinstance(answer, str) or not answer or not judge.admits(self.id, runtime.run_id):
+        verdict = OUTCOME_VERDICTS.get(status)
+        if memory is None or not runtime.writes_memory or verdict is None:
             return
-        memory = runtime.run_memory
-        event = AgentEvalEvent(
-            agent_id=self.id,
-            agent_run_id=runtime.run_id,
-            tenant_id=runtime.tenant,
-            trace_id=runtime.identity.context().trace_id,
+        run_id = runtime.run_id
+        self.harness.writes.submit(
+            "memory.outcome",
+            lambda: memory.run_feedback(
+                verdict, source="system", comment=note, key=f"{run_id}:outcome"
+            ),
+            events=runtime.events,
         )
 
-        async def work() -> None:
-            verdict = await judge.verdict(
-                event,
-                question=question,
-                answer=answer,
-                verifier=memory,
-                bundle=bundle,
-                evidence=bundle.rendered if bundle is not None else "",
-            )
-            if verdict is None:
-                return
-            metrics.judged(self.id, verdict.score, verdict.method.value)
-            if memory is not None and self.memory_mode == "read_write":
-                await memory.feedback(verdict.as_feedback(event))
+    def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
+        """On a sampled run, the answer checked against the context it was given (the memory
+        service's ``/v1/verify``, which records it as the run's ``judge`` feedback), and the
+        score put on the run's trace."""
+        memory = runtime.run_memory
+        if (
+            memory is None
+            or pushed is None
+            or not isinstance(answer, str)
+            or not answer
+            or not sampled(runtime.run_id, GROUNDING_SAMPLE)
+        ):
+            return
+        bundle_id, run_id = pushed.bundle_id, runtime.run_id
 
-        self.harness.writes.submit("judge", work, events=runtime.events)
+        async def work() -> None:
+            score = await memory.verify(answer, bundle_id)
+            if score is not None:
+                await self.harness.score(run_id, "grounding", score, key=f"{run_id}:grounding")
+
+        self.harness.writes.submit("memory.verify", work, events=runtime.events)
 
     def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway
-        if memory is None or gateway is None or self.memory_mode != "read_write":
+        if memory is None or gateway is None or not runtime.writes_memory:
             return
         run_id, since, task = runtime.run_id, runtime.started_at or datetime.now(UTC), runtime.task
 
@@ -394,13 +379,13 @@ class Agent:
     ) -> Identity:
         """Record an in-process run as started; its identity. (Surfaces pass their own
         ``run_id`` when the protocol names the run.)"""
-        start = self._start(
+        start = await self._start(
             input, user=user, thread=thread, tenant=tenant, run_id=run_id, record_input=True
         )
         await self.harness.runs.started(start)
         return self._identity_of(RunRecord.from_start(start))
 
-    def _start(
+    async def _start(
         self,
         input: Any,
         *,
@@ -417,7 +402,7 @@ class Agent:
         run_id = run_id or new_id("run_")
         return RunStart(
             run_id=run_id,
-            tenant_id=tenant or self.harness.settings.tenant,
+            tenant_id=await self.harness.tenant(tenant),
             agent_id=self.id,
             thread_id=thread or run_id,  # a run with no conversation is its own thread
             user_id=user,
@@ -437,27 +422,15 @@ class Agent:
         )
 
 
-def schedule_name(agent_id: str, on_behalf_of: str, cron: str, input: Any) -> str:
-    """A schedule's name, the same for the same agent, person, cadence and input."""
-    digest = content_key("schedule", agent_id, on_behalf_of, cron, pipeline.jsonable(input))
-    return f"{agent_id}:{digest}"
+#: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
+#: about the agent).
+OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
 
 
-#: How the memory service heads the recent conversation in a rendered bundle.
-CONVERSATION_HEADING: Final = "## Recent conversation\n"
-
-
-def without_conversation(bundle: ContextBundle) -> str:
-    """The rendered context without its recent-conversation section (the service renders
-    sections joined by blank lines), for a target that holds the thread's messages itself."""
-    window = bundle.conversation.rendered
-    if not window:
-        return bundle.rendered
-    section = f"{CONVERSATION_HEADING}{window}"
-    parts = bundle.rendered.split(f"\n\n{section}", 1)
-    if len(parts) == 1:
-        parts = bundle.rendered.split(section, 1)
-    return "".join(parts).strip()
+def sampled(run_id: str, rate: float) -> bool:
+    """Whether ``run_id`` falls in the ``rate`` sample (stable across processes)."""
+    digest = hashlib.blake2b(run_id.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / 2**64 < rate
 
 
 def _pull(agent: Agent) -> frozenset[str]:
@@ -495,4 +468,4 @@ class RunHandle:
                 await asyncio.sleep(POLL_SECONDS)
 
 
-__all__ = ["Agent", "MemoryMode", "RunHandle"]
+__all__ = ["Agent", "RunHandle"]

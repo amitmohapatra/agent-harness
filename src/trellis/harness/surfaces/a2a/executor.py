@@ -66,6 +66,7 @@ class RunExecutor(AgentExecutor):
         self._settled: OrderedDict[str, None] = OrderedDict()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        await self.agent.harness.key()  # the tenant an identity header is checked against
         user = self._user(context)
         task = context.current_task
         task_id = str(context.task_id or "")

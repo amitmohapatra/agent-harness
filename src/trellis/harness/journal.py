@@ -43,8 +43,6 @@ class Pending(BaseModel):
     #: The framework's serialised run, when it resumes from one (an OpenAI Agents
     #: ``RunState`` paused on a ``needs_approval`` tool).
     native_state: dict[str, Any] | None = None
-    #: The rows of a table too long to travel in the question (``interrupt.payload_ref``).
-    table: list[dict[str, Any]] | None = None
 
 
 class Journal(BaseModel):
@@ -54,6 +52,8 @@ class Journal(BaseModel):
 
     answers: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     calls: dict[str, list[Any]] = Field(default_factory=dict)
+    #: the tools the run has called (they stay offered to the model after a pause)
+    used: list[str] = Field(default_factory=list)
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence
@@ -100,9 +100,11 @@ class Replay:
         self._seen[f"c:{key}"] = index + 1
         return True, recorded[index]
 
-    def record_call(self, key: str, output: Any) -> None:
+    def record_call(self, key: str, output: Any, *, tool: str) -> None:
         self.journal.calls.setdefault(key, []).append(output)
         self._seen[f"c:{key}"] += 1
+        if tool not in self.journal.used:
+            self.journal.used.append(tool)
 
     def record_answer(self, key: str, resolution: InterruptResolution) -> None:
         self.journal.answers.setdefault(key, []).append(resolution.model_dump(mode="json"))

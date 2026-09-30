@@ -8,6 +8,7 @@ stringified before truncation.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import json
 import re
@@ -100,12 +101,9 @@ class Redactor:
         return self._payload(value)
 
     # -- internals ---------------------------------------------------------------
-    def _sensitive_key(self, key: str) -> bool:
-        segments = _segments(key)
-        if SENSITIVE_KEY_WORDS & set(segments):
-            return True
-        pairs = set(itertools.pairwise(segments))
-        return bool(pairs & SENSITIVE_KEY_PHRASES)
+    @staticmethod
+    def _sensitive_key(key: str) -> bool:
+        return _sensitive(key)
 
     def _scalar(self, value: Any) -> Any:
         if isinstance(value, bool | int | float):
@@ -133,6 +131,15 @@ class Redactor:
 
 
 _SEGMENT = re.compile(r"[^a-z0-9]+")
+
+
+@functools.lru_cache(maxsize=4096)
+def _sensitive(key: str) -> bool:
+    """Whether an attribute name is sensitive (names repeat: the answer is cached)."""
+    segments = _segments(key)
+    if SENSITIVE_KEY_WORDS & set(segments):
+        return True
+    return bool(set(itertools.pairwise(segments)) & SENSITIVE_KEY_PHRASES)
 
 
 def _segments(key: str) -> tuple[str, ...]:

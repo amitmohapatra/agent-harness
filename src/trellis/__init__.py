@@ -1,10 +1,10 @@
-"""Trellis: attach memory, tools, approvals, durable runs and evaluation to an agent you
-already built.
+"""Trellis: attach memory, tools, approvals, durable runs and tracing to an agent you already
+built.
 
-    from trellis import Harness, mcp, tool, a2a, openapi, ReAct
+    from trellis import Harness
 
-    h = Harness()
-    agent = h.wrap(graph, id="procurement", tools=[mcp("erp")], memory="read_write")
+    h = Harness()                                   # the deployment is the environment
+    agent = h.wrap(graph, id="procurement")
     result = await agent.run("reorder SKU-1", user="u1")
 
 ``trellis`` is shared with the other trellis distributions (``trellis.contracts``,
@@ -22,15 +22,15 @@ __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 if TYPE_CHECKING:
     from trellis.harness.adapters.react import ReAct
     from trellis.harness.agent import Agent, RunHandle
+    from trellis.harness.clients.runs import RunSummary
     from trellis.harness.harness import Harness
     from trellis.harness.result import Result
     from trellis.harness.runtime import Runtime, current
     from trellis.harness.settings import Settings
-    from trellis.harness.tools.sources import a2a, mcp, openapi, tool
+    from trellis.harness.tools.sources import a2a, openapi, tool
 
 _EXPORTS = {
     "Harness": "trellis.harness.harness",
-    "mcp": "trellis.harness.tools.sources",
     "tool": "trellis.harness.tools.sources",
     "a2a": "trellis.harness.tools.sources",
     "openapi": "trellis.harness.tools.sources",
@@ -38,6 +38,7 @@ _EXPORTS = {
     "current": "trellis.harness.runtime",
     "Agent": "trellis.harness.agent",
     "RunHandle": "trellis.harness.agent",
+    "RunSummary": "trellis.harness.clients.runs",
     "Result": "trellis.harness.result",
     "Runtime": "trellis.harness.runtime",
     "Settings": "trellis.harness.settings",
@@ -49,11 +50,11 @@ __all__ = [
     "ReAct",
     "Result",
     "RunHandle",
+    "RunSummary",
     "Runtime",
     "Settings",
     "a2a",
     "current",
-    "mcp",
     "openapi",
     "tool",
 ]

@@ -13,24 +13,27 @@ answer = await trellis.current().ask(
 ```
 
 The run pauses (`Result.status == PAUSED`, `Result.interrupt` a contracts `Interrupt`) and, on
-resume, the call returns the answer. The UI hint and the reason follow from the arguments:
+resume, the call returns the answer. What the person is shown follows from what is asked:
 
-| Arguments | `ui` | `reason` |
-|---|---|---|
-| `options=` | `choice` | `CHOICE` |
-| `table=` | `table` (`REVIEW` with `expects=`) | `QUESTION` |
-| `ui="diff", expects=` | `diff` | `REVIEW` |
-| anything else | `form` | `QUESTION` |
+| Arguments | `ui` | `reason` | `payload` |
+|---|---|---|---|
+| `options=` | `choice` | `CHOICE` | |
+| `table=rows` | `table` | `QUESTION` (`REVIEW` with `expects=`) | `{"table": rows}` |
+| `diff=(before, after)` | `diff` | `QUESTION` (`REVIEW` with `expects=`) | `{"diff": {"before", "after"}}` |
+| anything else | `form` (`expects=` its schema) | `QUESTION` | |
 
-A table of up to 50 rows travels in `payload`; a larger one waits with the run, in its
-checkpoint, referenced by `payload_ref` and served by `serve_chat` at
-`{path}/artifacts/{artifact_id}` from whichever process is asked, for as long as the run waits
-on it. The checkpoint is the one durable store a paused run already has (agent-runs bounds it
-at 1 MiB), so a table over 768 KiB of JSON is refused: ask about it a page at a time. `escalate_to` needs a `deadline`; agent-runs
-escalates or times out the run when it passes.
+The question is the run's user's to answer (`assignee="user:<user>"`) unless `assignee` names
+someone else (`user:…`, `role:…`); it is in their inbox (`h.inbox(assignee)`). `escalate_to`
+needs a `deadline`; agent-runs escalates or times out the run when it passes.
 
-An approval (an `irreversible` tool, an `approve` rule) is the same pause with
-`reason=APPROVAL` and the tool call attached.
+A payload up to 16 KiB of JSON travels in the interrupt. A larger one is stored as a run
+artifact in agent-runs (`POST /v1/runs/{id}/artifacts`, up to 50 MiB, kept 7 days after the
+run ends) and travels as `payload_ref`; `serve_chat` serves it at
+`{path}/runs/{run_id}/artifacts/{artifact_id}` from whichever process is asked, while the run
+waits on it. The run's checkpoint stays small.
+
+An approval (an `irreversible` tool, a catalog `approve_when` that holds) is the same pause
+with `reason=APPROVAL` and the tool call attached.
 
 ## Answering
 

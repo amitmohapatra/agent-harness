@@ -18,8 +18,8 @@ def test_content_keys_are_stable_and_order_insensitive_for_arguments() -> None:
 def test_the_nth_occurrence_of_a_call_gets_the_nth_recorded_output() -> None:
     journal = Journal()
     first = Replay(journal)
-    first.record_call("k", 1)
-    first.record_call("k", 2)
+    first.record_call("k", 1, tool="t")
+    first.record_call("k", 2, tool="t")
     again = Replay(journal)
     assert again.call("k") == (True, 1)
     assert again.call("k") == (True, 2)

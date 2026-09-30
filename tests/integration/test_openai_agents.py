@@ -44,7 +44,7 @@ async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness
         [("eta", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped, arriving tomorrow"]
     )
     target = Agent(name="shipper", instructions="You ship orders.", model=model, tools=[eta])
-    agent = harness.wrap(target, id="shipper", tools=[ship], approve={"ship": False})
+    agent = harness.wrap(target, id="shipper", tools=[tool(ship.fn, side_effects="write")])
     result = await agent.run("ship o1", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "shipped, arriving tomorrow"
     assert done == ["o1"]
@@ -121,7 +121,31 @@ async def test_the_context_is_a_system_message_and_memory_tools_are_added(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedModel([("memory_search", {"query": "prefs"}), "email"])
-    agent = memory_harness.wrap(Agent(name="m", model=model), id="m", memory="read_write")
+    agent = memory_harness.wrap(Agent(name="m", model=model), id="m")
     assert (await agent.run("how to reach me?", user="u1")).answer == "email"
     assert model.inputs[0][0] == {"role": "system", "content": memory_service.context_text}
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
+
+
+async def test_the_hints_narrow_the_tools_each_turn_and_the_teams_own_stay(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    @function_tool
+    def eta(order: str) -> str:
+        return "tomorrow"
+
+    def make(i: int) -> Any:
+        def lookup(key: str) -> str:
+            return f"t{i}"
+
+        return tool(lookup, name=f"t{i}", side_effects="read")
+
+    memory_service.candidates = ["t2"]
+    memory_service.candidates_for = {"find t4": ["t4"]}
+    model = ScriptedModel([("tool_search", {"task": "find t4"}), ("t4", {"key": "k"}), "done"])
+    target = Agent(name="n", model=model, tools=[eta])
+    agent = memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)])
+    assert (await agent.run("find t2", user="u1")).answer == "done"
+    memory_tools = ["memory_search", "memory_remember", "tool_search"]
+    assert model.tools[0] == ["eta", "t2", *memory_tools]
+    assert model.tools[1] == ["eta", "t2", "t4", *memory_tools]  # tool_search offered t4

@@ -1,10 +1,11 @@
-"""The four tool sources ``tools=[...]`` accepts: ``tool(fn)``, ``mcp(...)``, ``a2a(url)`` and
-``openapi(spec)``. A bare function in the list is ``tool(fn)``.
+"""The tools ``tools=[...]`` accepts — the ones this process runs itself: ``tool(fn)`` (a bare
+function in the list is ``tool(fn)``), ``a2a(url)`` (a remote agent) and ``openapi(spec)``.
+MCP tools are not listed here: they are whatever the agent's Bifrost virtual key allows,
+loaded automatically (``tools.toolbox``).
 
-Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. Side effects
-decide the risk tier a call gets (read runs, write is announced, irreversible asks a person):
-a local function says what it does, an OpenAPI operation is judged by its method, an MCP
-tool is looked up in the memory service's catalog.
+Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A local
+function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
+the tool catalog may override either (``tools.policy``).
 """
 
 from __future__ import annotations
@@ -18,18 +19,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, create_model
 
 from trellis.contracts import ToolSpec
-from trellis.harness.clients.bifrost import (
-    CODE_MODE_MIN_SERVERS,
-    CODE_MODE_MIN_TOOLS,
-    code_mode_tools,
-)
-from trellis.harness.tools.base import (
-    DEFAULT_SIDE_EFFECTS,
-    Services,
-    SideEffects,
-    Source,
-    Tool,
-)
+from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects, Source, Tool
 
 #: What an OpenAPI method does, as a risk tier.
 METHOD_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
@@ -73,7 +63,7 @@ class FunctionTool:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.fn(*args, **kwargs)
 
-    async def resolve(self, services: Services) -> list[Tool]:
+    async def resolve(self) -> list[Tool]:
         return [Tool(self.spec, self._run)]
 
     async def _run(self, args: dict[str, Any]) -> Any:
@@ -84,7 +74,14 @@ class FunctionTool:
 
 
 @overload
-def tool(fn: Callable[..., Any], /) -> FunctionTool: ...
+def tool(
+    fn: Callable[..., Any],
+    /,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+) -> FunctionTool: ...
 @overload
 def tool(
     *,
@@ -123,68 +120,6 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
     )
 
 
-# --------------------------------------------------------------------------- MCP via Bifrost
-
-
-class MCPSource:
-    """Tools of MCP servers registered in the Bifrost gateway.
-
-    Normal mode: every tool is its own tool, run one call at a time through the gateway, each
-    call under the harness's policy. Code Mode: when the source is large (at least
-    :data:`CODE_MODE_MIN_TOOLS` tools or :data:`CODE_MODE_MIN_SERVERS` servers), the catalog
-    says every one of its tools only reads, *and* every server is a Code Mode client in the
-    gateway (a script sees no other server), the model gets Bifrost's Code Mode meta-tools
-    instead and writes a script against them. Write tools never reach a script: one of them
-    anywhere in the source keeps the whole source in normal mode.
-    """
-
-    def __init__(self, servers: Sequence[str], only: Sequence[str] | None) -> None:
-        if not servers:
-            raise ValueError("mcp() needs at least one server name")
-        self.servers = tuple(servers)
-        self.only = None if only is None else tuple(only)
-
-    async def resolve(self, services: Services) -> list[Tool]:
-        gateway = services.gateway
-        defs = await gateway.tools(self.servers, self._qualified())
-        effects = await services.side_effects([d.name for d in defs])
-        large = len(defs) >= CODE_MODE_MIN_TOOLS or len(self.servers) >= CODE_MODE_MIN_SERVERS
-        scriptable = all(d.code_mode and effects.get(d.name) == "read" for d in defs)
-        if large and defs and scriptable:
-            return code_mode_tools(gateway, self.servers)
-        return [
-            Tool(
-                ToolSpec(
-                    name=d.name,
-                    description=d.description,
-                    input_schema=d.parameters or {"type": "object"},
-                    source="mcp",
-                    server=d.client,
-                    side_effects=effects.get(d.name, DEFAULT_SIDE_EFFECTS),
-                ),
-                functools.partial(gateway.execute, d.name, clients=(d.client,)),
-            )
-            for d in defs
-        ]
-
-    def _qualified(self) -> tuple[str, ...] | None:
-        """``only`` as the gateway names tools: ``<server>-<tool>``."""
-        if self.only is None:
-            return None
-        qualified: set[str] = set()
-        for name in self.only:
-            if any(name.startswith(f"{server}-") for server in self.servers):
-                qualified.add(name)
-            else:
-                qualified.update(f"{server}-{name}" for server in self.servers)
-        return tuple(sorted(qualified))
-
-
-def mcp(*servers: str, only: Iterable[str] | None = None) -> MCPSource:
-    """Tools of the named MCP servers in Bifrost; ``only`` narrows to these tool names."""
-    return MCPSource(servers, None if only is None else list(only))
-
-
 # --------------------------------------------------------------------------- A2A
 
 
@@ -195,7 +130,7 @@ class A2ASource:
         self.url = url
         self.name = name
 
-    async def resolve(self, services: Services) -> list[Tool]:
+    async def resolve(self) -> list[Tool]:
         from trellis.harness.surfaces.a2a.client import remote_agent_tool  # noqa: PLC0415
 
         return [await remote_agent_tool(self.url, name=self.name)]
@@ -226,7 +161,7 @@ class OpenAPISource:
         self.headers = dict(headers or {})
         self._client: httpx.AsyncClient | None = None
 
-    async def resolve(self, services: Services) -> list[Tool]:
+    async def resolve(self) -> list[Tool]:
         document = await self._document()
         base = self.base_url or _server_url(document)
         if not base:

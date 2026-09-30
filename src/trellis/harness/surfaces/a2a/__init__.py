@@ -47,7 +47,7 @@ VERSION: Final = "1"
 
 def mount(app: Any, agent: Agent, *, url: str, identity: UserResolver | None = None) -> None:
     """Add the card and JSON-RPC routes for ``agent`` to a FastAPI/Starlette ``app``."""
-    user_of = identity or HeaderIdentity(agent.harness.settings.tenant)
+    user_of = identity or HeaderIdentity(agent.harness)
     configs = InMemoryPushNotificationConfigStore(owner_resolver=owner(user_of))
     notifier = PushNotifier(configs)
     card = agent_card(agent, url)

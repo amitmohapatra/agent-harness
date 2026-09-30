@@ -5,12 +5,13 @@
   in the background: a client that goes away does not stop it.
 * ``GET {path}/runs/{run_id}/events`` — reconnect: the run's events after ``Last-Event-ID``
   (or ``?after=``), then live until it finishes.
-* ``GET {path}/artifacts/{artifact_id}`` — data an interrupt carries by reference
-  (``payload_ref``, a large ``ask(table=...)``), read from the paused run's checkpoint.
+* ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
+  waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
+  agent-runs.
 
 Identity is the deployment's: ``identity(request)`` returns the user, and the tenant is the
-deployment's own (``TRELLIS_TENANT``). Nothing the client sends (``forwardedProps``...)
-decides who is calling.
+one ``TRELLIS_API_KEY`` speaks for. Nothing the client sends (``forwardedProps``...) decides
+who is calling.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from trellis.contracts import (
     ConfigurationError,
@@ -34,7 +35,6 @@ from trellis.contracts import (
     safe_id,
 )
 from trellis.harness import pipeline
-from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runtime import run_of
 from trellis.harness.surfaces.agui.events import (
@@ -93,7 +93,7 @@ class _Surface:
         """Start the run (or its resume) in the background; its buffer, and the number of
         the last event the caller already has."""
         agent = self.agent
-        tenant = agent.harness.settings.tenant
+        tenant = await agent.harness.tenant()
         if body.resume:
             return await self._resume(body, body.resume[-1], user, tenant)
         if body.run_id and (safe_id(body.run_id) != body.run_id or self.hub.get(body.run_id)):
@@ -194,25 +194,31 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         start = last_event_id if last_event_id is not None else after
         return StreamingResponse(_sse(buffer, start), media_type=MEDIA_TYPE)
 
-    @router.get("/artifacts/{artifact_id}", summary="Data an interrupt carries by reference")
-    async def artifact(request: Request, artifact_id: str) -> JSONResponse:
-        """The rows of a large ``ask(table=...)``, from the paused run's checkpoint — so any
-        replica serves them, while the run waits on that question."""
+    @router.get(
+        "/runs/{run_id}/artifacts/{artifact_id}",
+        summary="Data the interrupt a paused run waits on carries by reference",
+    )
+    async def artifact(request: Request, run_id: str, artifact_id: str) -> Response:
+        """The bytes of the ``payload_ref`` of the interrupt the run waits on (an ``ask``
+        table or diff), from agent-runs — so any replica serves them."""
         await surface.user(request)
         agent = surface.agent
-        record = await agent.harness.runs.get(run_of(artifact_id))
+        tenant = await agent.harness.tenant()
+        record = await agent.harness.runs.get(run_id)
         awaiting = record.awaiting if record is not None else None
+        ref = awaiting.payload_ref if awaiting is not None else None
         if (
             record is None
-            or record.tenant_id != agent.harness.settings.tenant
+            or record.tenant_id != tenant
             or record.agent_id != agent.id
-            or awaiting is None
-            or awaiting.payload_ref is None
-            or awaiting.payload_ref.artifact_id != artifact_id
+            or ref is None
+            or ref.artifact_id != artifact_id
         ):
             raise HTTPException(404, f"no artifact {artifact_id}")
-        pending = Journal.of(record.checkpoint).pending
-        return JSONResponse(pending.table if pending is not None else [])
+        data = await agent.harness.runs.artifact(artifact_id, tenant)
+        if data is None:
+            raise HTTPException(404, f"no artifact {artifact_id}")
+        return Response(data, media_type=ref.mime_type or "application/octet-stream")
 
     return router
 

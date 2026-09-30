@@ -1,0 +1,84 @@
+# OpenTelemetry Collector (contrib distribution) for Trellis agents.
+#
+# The harness exports one OTLP/HTTP stream here (OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318).
+# Every span goes to Datadog (end-to-end traces: HTTP, databases, agents); the GenAI and agent
+# spans (gen_ai.* / langfuse.* attributes) also go to Langfuse, the eval system of record.
+#
+# Langfuse credentials: the collector forwards the Authorization header the harness sends
+# (OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>,x-langfuse-host=<url>), so one
+# collector serves several Langfuse projects and the harness can post scores to the same
+# project. Collector env: LANGFUSE_OTLP_ENDPOINT (e.g. https://cloud.langfuse.com/api/public/otel),
+# DD_API_KEY, DD_SITE (e.g. datadoghq.eu).
+#
+#   docker run -p 4318:4318 -v $PWD/deploy/otel-collector.yaml:/etc/otelcol-contrib/config.yaml \
+#     -e LANGFUSE_OTLP_ENDPOINT -e DD_API_KEY -e DD_SITE otel/opentelemetry-collector-contrib
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  # Langfuse's credentials are the caller's own Authorization header.
+  headers_setter:
+    headers:
+      - action: upsert
+        key: Authorization
+        from_context: authorization
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        include_metadata: true  # keeps the caller's headers for headers_setter
+      grpc:
+        endpoint: 0.0.0.0:4317
+        include_metadata: true
+
+connectors:
+  # APM trace metrics (hits, errors, latency) computed before sampling, as Datadog expects.
+  datadog/connector: {}
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+  # Batches per Langfuse credential, so each batch is sent with its own Authorization.
+  batch/langfuse:
+    metadata_keys: [authorization]
+  # Langfuse receives only the GenAI / agent spans: every span the harness emits carries
+  # gen_ai.operation.name or langfuse.observation.type; framework instrumentations following
+  # the GenAI conventions carry gen_ai.operation.name. Everything else is dropped here.
+  filter/genai:
+    error_mode: ignore
+    traces:
+      span:
+        - attributes["gen_ai.operation.name"] == nil and attributes["langfuse.observation.type"] == nil
+
+exporters:
+  datadog:
+    api:
+      key: ${env:DD_API_KEY}
+      site: ${env:DD_SITE}
+  otlphttp/langfuse:
+    endpoint: ${env:LANGFUSE_OTLP_ENDPOINT}
+    auth:
+      authenticator: headers_setter
+    headers:
+      x-langfuse-ingestion-version: "4"
+
+service:
+  extensions: [health_check, headers_setter]
+  pipelines:
+    traces/all:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [datadog/connector, datadog]
+    metrics/datadog:
+      receivers: [datadog/connector, otlp]
+      processors: [memory_limiter, batch]
+      exporters: [datadog]
+    traces/langfuse:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/genai, batch/langfuse]
+      exporters: [otlphttp/langfuse]

@@ -1,7 +1,8 @@
-"""A tool as the harness holds it: what it is (a contracts ``ToolSpec``) and how to run it.
+"""A tool as the harness holds it: what it is (a contracts ``ToolSpec``), how to run it, and
+when a person must approve a call.
 
-Every source — a local function, an MCP server behind Bifrost, an A2A agent, an OpenAPI
-operation, the memory service's agent tools — resolves to :class:`Tool`\\ s. The native
+Every source — a local function, an MCP tool the Bifrost virtual key allows, an A2A agent, an
+OpenAPI operation, the memory service's agent tools — resolves to :class:`Tool`\\ s. The native
 converters (``tools.convert``) wrap a ``Tool`` in the framework's own tool type, and every
 call goes through the bridge (policy, approval, journal, recording) before ``run``.
 """
@@ -28,6 +29,8 @@ class Tool:
     run: Runner = field(repr=False)
     #: Bifrost Code Mode meta-tool: its nested calls are recorded from the gateway's log.
     code_mode: bool = False
+    #: the catalog's ``approve_when`` expression: a call asks exactly when it holds
+    approve_when: str | None = None
 
     @property
     def name(self) -> str:
@@ -38,16 +41,7 @@ class Tool:
         return self.spec.side_effects
 
 
-class Services(Protocol):
-    """What a source may need to resolve: the gateway, and the tool catalog."""
-
-    @property
-    def gateway(self) -> Any: ...
-
-    async def side_effects(self, names: list[str]) -> dict[str, str]: ...
-
-
 class Source(Protocol):
     """Something ``tools=[...]`` accepts. Resolved once per agent, then cached."""
 
-    async def resolve(self, services: Services) -> list[Tool]: ...
+    async def resolve(self) -> list[Tool]: ...

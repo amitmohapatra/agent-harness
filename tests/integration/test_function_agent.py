@@ -68,7 +68,8 @@ async def test_ask_pauses_and_resume_returns_the_answer_where_it_was_asked(
     assert first.status is RunStatus.PAUSED and first.interrupt is not None
     assert first.interrupt.reason is InterruptReason.CHOICE and first.interrupt.ui == "choice"
     assert first.interrupt.assignee == "role:design"
-    assert [r.run_id for r in await harness.runs.list_paused("default")] == [first.run_id]
+    assert [r.run_id for r in await harness.inbox("role:design")] == [first.run_id]
+    assert await harness.inbox("user:u1") == []
     second = await agent.resume(
         first.interrupt.interrupt_id, "answer", answer="blue", reviewer="u1"
     )
@@ -122,13 +123,35 @@ async def test_an_approver_can_edit_or_reject(harness: Harness) -> None:
     assert "rejected" in rejected.answer
 
 
-async def test_approve_rules_ask_only_when_they_hold(harness: Harness) -> None:
-    async def worker(input: float, agent: Runtime) -> Any:
-        return await agent.tools.call("note", text=str(input))
+async def test_what_is_asked_decides_how_it_is_shown_and_the_user_answers_by_default(
+    harness: Harness,
+) -> None:
+    async def reviewer(input: str, agent: Runtime) -> Any:
+        rows = await agent.ask("Check these lines", table=[{"sku": "a", "qty": 2}])
+        text = await agent.ask(
+            "Accept the rewrite?", diff=("old text", "new text"), expects={"type": "string"}
+        )
+        plain = await agent.ask("Anything else?")
+        return [rows, text, plain]
 
-    agent = harness.wrap(worker, id="notes", tools=[note], approve={"note": "text == '999'"})
-    assert (await agent.run(1, user="u1")).status is RunStatus.SUCCESS
-    assert (await agent.run(999, user="u1")).status is RunStatus.PAUSED
+    agent = harness.wrap(reviewer, id="reviewer")
+    paused = await agent.run("x", user="u1")
+    first = paused.interrupt
+    assert first is not None and first.ui == "table" and first.reason is InterruptReason.QUESTION
+    assert first.payload == {"table": [{"sku": "a", "qty": 2}]}
+    assert first.assignee == "user:u1"  # the run's user, when nobody else is named
+    assert [r.run_id for r in await harness.inbox("user:u1")] == [paused.run_id]
+    paused = await agent.resume(first.interrupt_id, "answer", answer="ok", reviewer="u1")
+    second = paused.interrupt
+    assert second is not None and second.ui == "diff" and second.reason is InterruptReason.REVIEW
+    assert second.payload == {"diff": {"before": "old text", "after": "new text"}}
+    paused = await agent.resume(
+        second.interrupt_id, "edit", answer={"text": "newer"}, reviewer="u1"
+    )
+    third = paused.interrupt
+    assert third is not None and third.ui == "form"
+    done = await agent.resume(third.interrupt_id, "answer", answer="no", reviewer="u1")
+    assert done.answer == ["ok", {"text": "newer"}, "no"]
 
 
 async def test_a_cancel_ends_the_run(harness: Harness) -> None:
@@ -199,10 +222,6 @@ async def test_wrap_refuses_what_it_cannot_do(harness: Harness) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return input
 
-    with pytest.raises(ConfigurationError, match="MEMORY_URL"):
-        harness.wrap(fn, id="m", memory="read")
-    with pytest.raises(ConfigurationError, match="memory must be"):
-        harness.wrap(fn, id="m", memory="everything")  # type: ignore[arg-type]
     with pytest.raises(ConfigurationError, match="cannot wrap"):
         harness.wrap(object(), id="o")
     harness.wrap(fn, id="dup")
@@ -213,7 +232,7 @@ async def test_wrap_refuses_what_it_cannot_do(harness: Harness) -> None:
 
 
 async def test_a_tool_outside_a_run_is_refused() -> None:
-    [resolved] = await refund.resolve(None)  # type: ignore[arg-type]
+    [resolved] = await refund.resolve()
     from trellis.harness.tools.bridge import call
 
     with pytest.raises(Exception, match="inside a Harness run"):

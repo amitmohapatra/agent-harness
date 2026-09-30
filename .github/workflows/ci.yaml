@@ -44,14 +44,10 @@ jobs:
       - name: Examples
         working-directory: agent-harness
         run: make examples
-      - name: Regression gate
+      - name: Overhead benchmark
         working-directory: agent-harness
-        # CI machines are not the machine the baseline was measured on: the gate catches
-        # regressions of the harness's own overhead that double it, not noise.
-        run: |
-          uv run pytest tests/performance -m performance -q
-          uv run python -m trellis.eval gate --baseline benchmark-results.json \
-            --current build/benchmark-results.json --max-latency-regression 100
+        # fails when the harness's own overhead doubles against benchmark-results.json
+        run: make bench
       - uses: actions/upload-artifact@v4
         if: always()
         with:

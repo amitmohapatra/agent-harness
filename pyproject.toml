@@ -1,7 +1,7 @@
 [project]
 name = "trellis-harness"
 version = "0.4.0"
-description = "Attach memory, tools, approvals, durable runs and evaluation to an agent you already built."
+description = "Attach memory, tools, approvals, durable runs and tracing to an agent you already built."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -101,7 +101,6 @@ known-first-party = ["trellis"]
 "src/trellis/harness/adapters/**" = ["PLC0415"]
 "src/trellis/harness/tools/convert/**" = ["PLC0415"]
 "src/trellis/harness/surfaces/**" = ["PLC0415"]
-"src/trellis/eval/__main__.py" = ["T20"]
 
 [tool.pyright]
 pythonVersion = "3.12"

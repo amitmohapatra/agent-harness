@@ -1,4 +1,6 @@
-"""Harness tools as OpenAI Agents SDK ``FunctionTool``\\ s."""
+"""Harness tools as OpenAI Agents SDK ``FunctionTool``\\ s. Each is enabled per turn only while
+the run offers it (``Runtime.offers``: the tool hints' candidates, the memory tools, the tools
+already used), so the model sees the tool schemas that fit the task."""
 
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ from typing import Any
 from agents import FunctionTool
 from agents.tool_context import ToolContext
 
+from trellis.harness.runtime import current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert import text_of
@@ -30,4 +33,10 @@ def _one(tool: Tool) -> FunctionTool:
         on_invoke_tool=invoke,
         # the schema is the tool's own (MCP, OpenAPI...), not one written for strict mode
         strict_json_schema=False,
+        is_enabled=lambda _context, _agent: _offered(tool.name),
     )
+
+
+def _offered(name: str) -> bool:
+    runtime = current()
+    return runtime is None or runtime.offers(name)

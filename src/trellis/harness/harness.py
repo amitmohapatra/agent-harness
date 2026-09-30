@@ -1,43 +1,35 @@
 """``Harness``: the one object an application constructs. It reads the deployment from the
-environment, owns the clients (Bifrost, memory, runs), the background writes and the judge,
-and attaches all of it to agents with :meth:`Harness.wrap`."""
+environment, owns the clients (Bifrost, memory, runs), the background writes and the scores,
+and attaches all of it to agents with :meth:`Harness.wrap`.
+
+Nothing about an agent is configured beyond ``h.wrap(target, id=...)``: memory is on when the
+deployment has a memory service, the MCP tools are the ones the Bifrost virtual key allows,
+risk tiers and approval rules come from the tools and the catalog, and who the deployment is
+(its tenant, whether it may write memory) comes from ``TRELLIS_API_KEY`` itself.
+"""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Final, Literal
 
-from trellis.contracts import (
-    ConfigurationError,
-    Feedback,
-    FeedbackSource,
-    FeedbackTargetKind,
-    FeedbackVerdict,
-    ToolSpec,
-)
-from trellis.eval.budget import JudgeBudget
-from trellis.eval.judge import GroundedJudge
+from trellis.contracts import ConfigurationError, FeedbackVerdict, ToolSpec
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
-from trellis.harness.agent import Agent, MemoryMode
+from trellis.harness.agent import Agent
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import (
-    READ_ONLY_TOOLS,
-    RECORD_OUTCOME,
-    TOOL_SEARCH,
-    Memory,
-    RunMemory,
-)
-from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs
+from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory, read_only
+from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs, RunSummary
 from trellis.harness.identity import Identity
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
+from trellis.harness.tools import toolbox
 from trellis.harness.tools.base import Source, Tool
-from trellis.harness.tools.policy import Rule
 from trellis.harness.tools.sources import as_source
 from trellis.harness.worker import WORKER_CONCURRENCY, Worker
 from trellis.harness.writes import Writes
+from trellis.memory.models import KeyInfo
 
 Framework = Literal["langgraph", "openai-agents", "claude-agent-sdk"]
 #: The native tool format each framework's agents are built with.
@@ -46,8 +38,10 @@ FORMATS: Final = {
     "openai-agents": "openai_agents",
     "claude-agent-sdk": "claude",
 }
-#: Sources whose side effects the harness knows, and so publishes to the tool catalog.
-KNOWN_EFFECTS: Final = frozenset({"local", "openapi", "a2a"})
+#: The tenant of a deployment with no memory service (development: nothing to ask).
+LOCAL_TENANT: Final = "default"
+#: How a person's verdict reads as a Langfuse score.
+VERDICT_SCORES: Final = {"confirm": 1.0, "approve": 1.0, "edit": 0.5, "correct": 0.0, "reject": 0.0}
 
 
 class Harness:
@@ -57,97 +51,102 @@ class Harness:
     def __init__(self, config: Settings | None = None) -> None:
         self.settings = config or Settings.from_env()
         s = self.settings
+        if s.runs_url and not s.memory_url:
+            raise ConfigurationError(
+                "RUNS_URL needs MEMORY_URL: agent-runs accepts the keys the memory service "
+                "issues, and the harness learns its tenant from there"
+            )
         self.gateway = Gateway(s.bifrost_url, s.bifrost_virtual_key) if s.bifrost_url else None
-        self.memory = Memory(s.memory_url, s.memory_api_key) if s.memory_url else None
-        self.runs: Runs = HttpRuns(s.runs_url, s.runs_api_key) if s.runs_url else LocalRuns()
+        self.memory = Memory(s.memory_url, s.api_key) if s.memory_url else None
+        self.runs: Runs = HttpRuns(s.runs_url, s.api_key) if s.runs_url else LocalRuns()
         self.writes = Writes()
-        self.judge = GroundedJudge(budget=JudgeBudget(s.eval_sample), model=self.gateway)
+        self.scores = telemetry.Scores.of(s)
         #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
         self.agents: dict[str, Agent] = {}
+        #: the tools built with :meth:`tools` (by the object passed): a LangGraph agent's toolbox
+        self._built: dict[int, Source] = {}
+        self._key: KeyInfo | None = None
         self._registered: set[tuple[str, str]] = set()
+        self._published: dict[str, set[str]] = {}
         telemetry.configure(s)
 
     # ------------------------------------------------------------------ attaching
     def wrap(
-        self,
-        target: Any,
-        *,
-        id: str,
-        tools: Sequence[Source | Callable[..., Any]] = (),
-        memory: MemoryMode = "off",
-        approve: Mapping[str, Rule] | None = None,
-        tool_hints: bool = False,
+        self, target: Any, *, id: str, tools: Sequence[Source | Callable[..., Any]] = ()
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
-        ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``)."""
-        agent = Agent(
-            self, target, id=id, tools=tools, memory=memory, approve=approve, tool_hints=tool_hints
-        )
+        ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
+        ``tools`` are the agent's own, run in this process (functions, ``a2a``, ``openapi``);
+        its MCP tools are the ones the Bifrost virtual key allows."""
+        agent = Agent(self, target, id=id, tools=tools)
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
         self.agents[agent.id] = agent
         return agent
 
-    async def tools(
-        self, *sources: Source | Callable[..., Any], framework: Framework, memory: bool = False
-    ) -> Any:
-        """The sources as ``framework``'s own tools, for building an agent with them before
+    async def tools(self, *sources: Source | Callable[..., Any], framework: Framework) -> Any:
+        """The toolbox as ``framework``'s own tools, for building an agent with them before
         wrapping it: LangChain tools (LangGraph, Deep Agents), ``FunctionTool``\\ s (OpenAI
-        Agents), or one in-process MCP server (Claude). ``memory=True`` adds the memory
-        service's agent tools. Every call is still the harness's: policy, approval, record."""
-        tools = await self.resolve([as_source(s) for s in sources], tenant=self.settings.tenant)
-        if memory:
-            if self.memory is None:
-                raise ConfigurationError("memory tools need MEMORY_URL")
-            scope = self.memory.scoped(self.settings.tenant)
-            tools.extend(await self.memory_tools(scope, read_only=False))
+        Agents), or one in-process MCP server (Claude). It holds ``sources``, the MCP tools
+        the virtual key allows and — memory on — the memory service's agent tools. Every call
+        is still the harness's: policy, approval, record."""
+        mine = [self._built.setdefault(id(s), as_source(s)) for s in sources]
+        tenant = await self.tenant()
+        tools = await self.resolve(mine, tenant=tenant)
+        if self.memory is not None:
+            scope = self.memory.scoped(tenant)
+            tools.extend(await self.memory_tools(scope, await self.writes_memory()))
         return convert(FORMATS[framework], tools)  # type: ignore[arg-type]
 
     def worker(self, agents: Sequence[Agent], *, concurrency: int = WORKER_CONCURRENCY) -> Worker:
         """A worker that claims these agents' queued runs and executes them."""
         return Worker(self, agents, concurrency=concurrency)
 
+    async def inbox(self, assignee: str | None = None) -> list[RunSummary]:
+        """The paused runs waiting on a person — ``assignee`` (``user:…``, ``role:…``), or
+        everyone in the tenant — newest first. Answer one with ``agent.resume``."""
+        return list(await self.runs.inbox(await self.tenant(), assignee))
+
     async def feedback(
-        self,
-        run_id: str,
-        verdict: FeedbackVerdict | str,
-        correction: Any = None,
-        *,
-        reviewer: str | None = None,
-    ) -> Feedback:
-        """What a person said about a run, stored in the memory service."""
-        if self.memory is None:
-            raise ConfigurationError("feedback is stored in the memory service: set MEMORY_URL")
+        self, run_id: str, verdict: FeedbackVerdict | str, correction: Any = None
+    ) -> None:
+        """What a person said about a run: a score on its trace (Langfuse, when the OTLP
+        settings reach it; a ``score`` span otherwise) and — memory on — the run's ``human``
+        feedback, which outranks the judge's and the run's own."""
+        chosen = FeedbackVerdict(verdict)
         record = await self.runs.get(run_id)
         if record is None:
             raise ConfigurationError(f"no run {run_id}")
-        feedback = Feedback(
-            tenant_id=record.tenant_id,
-            workspace_id=record.workspace_id,
-            user_id=record.user_id,
-            agent_id=record.agent_id,
-            agent_run_id=run_id,
-            target_kind=FeedbackTargetKind.RUN,
-            target_id=run_id,
-            verdict=FeedbackVerdict(verdict),
-            correction=correction,
-            reviewer=reviewer or record.user_id,
-            source=FeedbackSource.HUMAN,
+        if self.memory is not None:
+            scope = Identity(
+                tenant=record.tenant_id,
+                user=record.user_id or record.on_behalf_of or "system",
+                agent_id=record.agent_id,
+                run_id=run_id,
+                thread=record.thread_id,
+            )
+            await self.memory.bind(scope).run_feedback(
+                chosen.value,
+                source="human",
+                correction=correction,
+                reviewer=scope.user,
+                key=f"{run_id}:human:{chosen.value}",
+            )
+        comment = None if correction is None else str(correction)
+        await self.score(
+            run_id,
+            "feedback",
+            VERDICT_SCORES[chosen.value],
+            key=f"{run_id}:feedback",
+            comment=comment,
         )
-        scope = Identity(
-            tenant=record.tenant_id,
-            user=record.user_id or "system",
-            agent_id=record.agent_id,
-            run_id=run_id,
-            thread=record.thread_id,
-        )
-        await self.memory.bind(scope).feedback(feedback)
-        return feedback
 
     async def aclose(self) -> None:
         """Finish the queued writes and close the clients."""
         await self.writes.aclose()
-        closers = [c.aclose() for c in (self.gateway, self.memory, self.runs) if c is not None]
+        closers = [
+            c.aclose() for c in (self.gateway, self.memory, self.runs, self.scores) if c is not None
+        ]
         await asyncio.gather(*closers)
 
     async def __aenter__(self) -> Harness:
@@ -156,77 +155,94 @@ class Harness:
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
 
+    # ------------------------------------------------------------------ who we are
+    async def key(self) -> KeyInfo:
+        """What the memory service says about ``TRELLIS_API_KEY`` (asked once)."""
+        if self._key is None:
+            if self.memory is None:
+                self._key = KeyInfo(
+                    key_id="local", tenant_id=LOCAL_TENANT, principal="local", role="service"
+                )
+            else:
+                self._key = await self.memory.key()
+        return self._key
+
+    async def tenant(self, requested: str | None = None) -> str:
+        """The tenant a call runs in: the key's own. Only a platform key (no tenant of its
+        own) names one per call."""
+        own = (await self.key()).tenant_id
+        if own is None:
+            if requested is None:
+                raise ConfigurationError("a platform key names the tenant: pass tenant=")
+            return requested
+        if requested is not None and requested != own:
+            raise ConfigurationError(f"TRELLIS_API_KEY speaks for {own!r}, not {requested!r}")
+        return own
+
+    @property
+    def built(self) -> list[Source]:
+        """The sources :meth:`tools` built agents with."""
+        return list(self._built.values())
+
+    @property
+    def known_tenant(self) -> str | None:
+        """The key's tenant once :meth:`key` has been asked (``None`` before, or for a
+        platform key)."""
+        return self._key.tenant_id if self._key is not None else None
+
+    async def writes_memory(self) -> bool:
+        return self.memory is not None and not read_only(await self.key())
+
     # ------------------------------------------------------------------ used by agents
     async def resolve(self, sources: Sequence[Source], *, tenant: str) -> list[Tool]:
-        """Every source's tools. Names must be unique across an agent's sources."""
-        services = _Services(self, tenant)
-        tools: dict[str, Tool] = {}
-        for source in sources:
-            for found in await source.resolve(services):
-                if found.name in tools:
-                    raise ConfigurationError(f"two tools are named {found.name!r}")
-                tools[found.name] = found
-        known = [t.spec for t in tools.values() if t.spec.source in KNOWN_EFFECTS]
-        if known and self.memory is not None:
-            catalog = services.catalog()
-            self.writes.submit("memory.tool_catalog", lambda: catalog.publish_catalog(known))
-        return list(tools.values())
+        """The toolbox: ``sources`` and the MCP tools, tiered by the catalog."""
+        catalog = self.memory.scoped(tenant) if self.memory is not None else None
+        return await toolbox.resolve(
+            sources,
+            gateway=self.gateway,
+            catalog=catalog,
+            writes=self.writes,
+            published=self._published.setdefault(tenant, set()),
+        )
 
-    async def memory_tools(self, run_memory: RunMemory, read_only: bool) -> list[Tool]:
+    async def memory_tools(self, run_memory: RunMemory, writes: bool) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
         return [
             Tool(spec, _memory_call(spec))
-            for spec in await run_memory.agent_tools(read_only=read_only)
+            for spec in await run_memory.agent_tools(read_only=not writes)
         ]
 
-    def registered(self, memory: Memory, identity: Identity) -> None:
-        """Register ``TRELLIS_MEMORY_MODEL_KEY`` for an agent once per process (idempotent)."""
-        key = self.settings.memory_model_key
+    async def registered(self, memory: Memory, identity: Identity) -> None:
+        """Register ``BIFROST_VIRTUAL_KEY`` as the agent's memory model key, once per process
+        and agent (idempotent in the service)."""
+        key = self.settings.bifrost_virtual_key
         scope = (identity.tenant, identity.agent_id)
-        if key is None or scope in self._registered:
+        if key is None or scope in self._registered or not await self.writes_memory():
             return
         self._registered.add(scope)
         agent_memory = memory.scoped(identity.tenant, identity.agent_id)
         self.writes.submit("memory.model_key", lambda: agent_memory.register_model_key(key))
 
-
-class _Services:
-    """What sources may use while resolving: the gateway, and the catalog's side effects."""
-
-    def __init__(self, harness: Harness, tenant: str) -> None:
-        self.harness = harness
-        self.tenant = tenant
-
-    @property
-    def gateway(self) -> Gateway:
-        if self.harness.gateway is None:
-            raise ConfigurationError("mcp() tools are served by Bifrost: set BIFROST_URL")
-        return self.harness.gateway
-
-    def catalog(self) -> RunMemory:
-        memory = self.harness.memory
-        assert memory is not None
-        return memory.scoped(self.tenant)
-
-    async def side_effects(self, names: list[str]) -> dict[str, str]:
-        if self.harness.memory is None or not names:
-            return {}
-        return await self.catalog().side_effects(names)
+    async def score(
+        self, run_id: str, name: str, value: float, *, key: str, comment: str | None = None
+    ) -> None:
+        """A score on the run's trace: a ``score`` span always, and Langfuse's scores API
+        when the OTLP settings reach it."""
+        telemetry.score_span(run_id, name, value, comment)
+        if self.scores is not None:
+            await self.scores.post(
+                run_id, name, value, data_type="NUMERIC", comment=comment, key=key
+            )
 
 
 def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:
     async def run(args: dict[str, Any]) -> Any:
         runtime = current()
         if runtime is None or runtime.run_memory is None:
-            raise ConfigurationError(f"{spec.name} needs a run with memory on")
-        if runtime.agent.memory_mode == "read" and spec.name not in READ_ONLY_TOOLS:
-            raise ConfigurationError(f"{spec.name} changes memory, and this agent only reads it")
+            raise ConfigurationError(f"{spec.name} needs a run with memory on (MEMORY_URL)")
         if spec.name == TOOL_SEARCH:  # among the tools this run can actually call
             hints = await runtime.tools.hints(str(args.get("task", "")))
-            return hints.model_dump(mode="json")
-        result = await runtime.run_memory.call_agent_tool(spec.name, args)
-        if spec.name == RECORD_OUTCOME:
-            runtime.outcome_recorded = True
-        return result
+            return hints.model_dump(mode="json", include={"next", "plan", "prefill", "missing"})
+        return await runtime.run_memory.call_agent_tool(spec.name, args)
 
     return run

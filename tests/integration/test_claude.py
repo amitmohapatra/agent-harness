@@ -47,7 +47,7 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
         [{"tool": "refund", "args": {"order": "o1"}}, {"text": "refunded o1"}],
         system_prompt="You refund.",
     )
-    agent = harness.wrap(target, id="refunds", tools=[refund], approve={"refund": False})
+    agent = harness.wrap(target, id="refunds", tools=[tool(refund.fn, side_effects="write")])
     result = await agent.run("refund o1", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "refunded o1"
     assert refunds == ["o1"]
@@ -77,8 +77,27 @@ async def test_the_context_is_appended_to_the_system_prompt(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
     target = options(tmp_path, [{"text": "email"}], system_prompt="You help.")
-    await memory_harness.wrap(target, id="helper", memory="read").run("reach me how?", user="u1")
+    await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
     assert started_with(tmp_path)["system_prompt"] == f"You help.\n\n{memory_service.context_text}"
+
+
+async def test_the_hints_narrow_the_tools_for_the_run(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    def make(i: int) -> Any:
+        def lookup(key: str) -> str:
+            return f"t{i}"
+
+        return tool(lookup, name=f"t{i}", side_effects="read")
+
+    memory_service.candidates = ["t2", "t5"]
+    target = options(tmp_path, [{"text": "done"}])
+    await memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)]).run("x", user="u1")
+    allowed = started_with(tmp_path)["allowed_tools"].split(",")
+    assert allowed == [
+        f"mcp__trellis__{n}"
+        for n in ("t2", "t5", "memory_search", "memory_remember", "tool_search")
+    ]
 
 
 async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: Path) -> None:

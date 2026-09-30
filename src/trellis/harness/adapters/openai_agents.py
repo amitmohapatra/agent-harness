@@ -16,7 +16,14 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from trellis.contracts import InterruptDecision, InterruptResolution
-from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, ToolFormat
+from trellis.harness.adapters.base import (
+    Extracted,
+    Invocation,
+    Narrowing,
+    NativePause,
+    Output,
+    ToolFormat,
+)
 from trellis.harness.journal import Pending
 
 #: The raw streaming event that carries a text delta.
@@ -36,6 +43,7 @@ class OpenAIAgentsAdapter:
     name: ClassVar[str] = "openai_agents"
     tool_format: ClassVar[ToolFormat] = "openai_agents"
     fixed_tools: ClassVar[bool] = False
+    narrows: ClassVar[Narrowing] = "turn"
 
     def keeps_conversation(self, target: Any) -> bool:
         return False

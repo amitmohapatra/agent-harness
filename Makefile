@@ -24,16 +24,12 @@ test:  ## Every test except the benchmark and the live ones
 	$(PYTEST) -q -m "not performance and not live"
 
 .PHONY: test-live
-test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, RUNS_URL)
+test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, RUNS_URL, TRELLIS_API_KEY)
 	$(PYTEST) -q -m live
 
 .PHONY: bench
-bench:  ## Harness overhead benchmark (writes build/benchmark-results.json)
+bench:  ## Harness overhead vs the committed baseline (writes build/benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s
-
-.PHONY: gate
-gate: bench  ## The regression gate CI runs
-	$(PY) -m trellis.eval gate --baseline benchmark-results.json --current build/benchmark-results.json
 
 .PHONY: lint
 lint:  ## Ruff
@@ -45,13 +41,14 @@ typecheck: typings  ## Pyright
 	.venv/bin/pyright
 
 .PHONY: check
-check: lint typecheck test  ## Everything CI runs, except the gate
+check: lint typecheck test  ## Everything CI runs, except the benchmark
 	@echo "all gates passed"
 
 .PHONY: examples
 examples:  ## Run every example with no services
 	@for f in examples/*.py; do case $$f in */_*) continue;; esac; \
-	  env -u BIFROST_URL -u MEMORY_URL -u RUNS_URL $(PY) $$f >/dev/null && echo "$$f ok" || exit 1; done
+	  env -u BIFROST_URL -u MEMORY_URL -u RUNS_URL -u TRELLIS_API_KEY -u OTEL_EXPORTER_OTLP_ENDPOINT \
+	    $(PY) $$f >/dev/null && echo "$$f ok" || exit 1; done
 
 .PHONY: clean
 clean:  ## Remove caches

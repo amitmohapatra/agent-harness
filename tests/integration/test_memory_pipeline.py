@@ -1,19 +1,25 @@
-"""Memory in the pipeline: push (context as a system message), pull (the service's agent
-tools), and the background records — against the in-process memory service."""
+"""Memory in the pipeline, against the in-process memory service: who the key says the
+deployment is, push (the context as a system message, the tool hints narrowing the tools),
+pull (the service's agent tools), the background records, the run's outcome, the sampled
+grounding check and people's feedback."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from langchain.agents import create_agent
+import httpx
+import pytest
+import respx
 
-from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus
+from trellis.harness import agent as agent_module
+from trellis.harness import telemetry
 from trellis.harness.clients.memory import Memory
-from trellis.memory.models import GroundingReport, ToolHints
+from trellis.memory.models import ToolHints
 
 
 @tool(side_effects="read")
@@ -22,127 +28,230 @@ def stock(sku: str) -> int:
     return 7
 
 
+def many(n: int) -> list[Any]:
+    """``n`` read tools: a toolbox large enough for tool hints."""
+
+    def make(i: int) -> Any:
+        def lookup(key: str) -> str:
+            return f"t{i}:{key}"
+
+        return tool(lookup, name=f"t{i}", side_effects="read", description=f"Tool {i}.")
+
+    return [make(i) for i in range(n)]
+
+
+def harness_with(service: FakeMemoryService, **settings: Any) -> Harness:
+    h = Harness(config=Settings(memory_url="http://m", **settings))
+    h.memory = Memory("http://m", None, client=service.client())
+    return h
+
+
+# --------------------------------------------------------------------------- who we are
+async def test_the_tenant_is_the_keys_own(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    async def fn(input: str, agent: Runtime) -> str:
+        return agent.tenant
+
+    result = await memory_harness.wrap(fn, id="t").run("x", user="u")
+    assert result.answer == "acme"
+    assert len(memory_service.named("key")) == 1  # asked once
+    await memory_harness.wrap(fn, id="t2").run("y", user="u")
+    assert len(memory_service.named("key")) == 1
+    with pytest.raises(ConfigurationError, match="speaks for 'acme'"):
+        await memory_harness.wrap(fn, id="t3").run("x", user="u", tenant="globex")
+
+
+async def test_a_platform_key_names_the_tenant_per_call(memory_service: FakeMemoryService) -> None:
+    memory_service.tenant = None
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return agent.tenant
+
+    async with harness_with(memory_service) as h:
+        agent = h.wrap(fn, id="p")
+        with pytest.raises(ConfigurationError, match="platform key"):
+            await agent.run("x", user="u")
+        assert (await agent.run("x", user="u", tenant="globex")).answer == "globex"
+
+
+def test_agent_runs_needs_the_memory_services_keys() -> None:
+    with pytest.raises(ConfigurationError, match="MEMORY_URL"):
+        Harness(config=Settings(runs_url="http://runs"))
+
+
+# --------------------------------------------------------------------------- push
 async def test_push_injects_the_context_as_a_system_message(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat(["7 units"])
-    agent = memory_harness.wrap(
-        ReAct(system="You answer stock questions.", model=model), id="stock", memory="read"
-    )
+    agent = memory_harness.wrap(ReAct(system="You answer stock questions.", model=model), id="s")
     result = await agent.run("how many a?", user="u1", thread="t1")
     assert result.answer == "7 units"
     system = model.requests[0]["messages"][0]
-    assert system["role"] == "system"
-    assert system["content"] == f"You answer stock questions.\n\n{memory_service.context_text}"
+    assert system == {
+        "role": "system",
+        "content": f"You answer stock questions.\n\n{memory_service.context_text}",
+    }
     [call] = memory_service.named("context")
-    assert (
-        call.scope["user_id"] == "u1"
-        and call.scope["thread_id"] == "t1"
-        and call.body["query"] == "how many a?"
-    )
-    await memory_harness.writes.drain()
-    assert memory_service.named("message") == []  # read: nothing written
+    assert call.scope["user_id"] == "u1" and call.scope["thread_id"] == "t1"
+    assert call.body["query"] == "how many a?" and call.body["token_budget"] == 2000
+    assert call.body["window"] is True  # ReAct keeps no conversation of its own
+    assert "tools" not in call.body  # fewer than 5 tools: no hints
+    assert memory_service.named("tool_hints") == []
 
 
-async def test_read_write_records_the_transcript_tools_and_outcome_once(
+async def test_a_memory_outage_is_a_warning_not_a_failure(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
-    agent = memory_harness.wrap(
-        ReAct(system="s", model=model), id="stock", tools=[stock], memory="read_write"
-    )
-    await agent.run("how many a?", user="u1")
+    memory_service.fail = {"context", "messages"}
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "fine"
+
+    events = [e async for e in memory_harness.wrap(fn, id="o").stream("x", user="u")]
+    warnings = [
+        e.data for e in events if e.type is RunEventType.CUSTOM and e.data["name"] == "warning"
+    ]
+    assert warnings[0]["code"] == "memory_unavailable"
+    assert events[-1].type is RunEventType.RUN_FINISHED
     await memory_harness.writes.drain()
-    messages = [(c.body["role"], c.body["content"]) for c in memory_service.named("message")]
-    assert messages == [("USER", "how many a?"), ("ASSISTANT", "7 units")]
-    [recorded] = memory_service.named("record_tool")
-    assert recorded.body["tool"] == "stock" and recorded.body["task"] == "how many a?"
-    [outcome] = memory_service.named("outcome")
-    assert outcome.body["success"] is True and outcome.path["run"] == outcome.scope["agent_run_id"]
+    assert memory_harness.writes.failed == 1  # the transcript write, reported and counted
 
 
+# --------------------------------------------------------------------------- tool hints
+async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    memory_service.candidates = ["t3", "t1"]
+    memory_service.candidates_for = {"archive it": ["t5"]}
+    model = ScriptedChat([("t3", {"key": "a"}), ("tool_search", {"task": "archive it"}), "done"])
+    agent = memory_harness.wrap(ReAct(system="s", model=model), id="n", tools=many(6))
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+
+    [context] = memory_service.named("context")
+    assert context.body["tools"] == {"available": [f"t{i}" for i in range(6)], "k": 8}
+    assert "## Tools" in model.requests[0]["messages"][0]["content"]  # next/prefill/missing
+    offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
+    memory_tools = ["memory_search", "memory_remember", "tool_search"]
+    # the candidates and the memory tools, never all six
+    assert offered[0] == ["t1", "t3", *memory_tools]
+    assert offered[1] == ["t1", "t3", *memory_tools]
+    # tool_search found t5 among the run's own tools: offered from the next call on
+    assert offered[2] == ["t1", "t3", "t5", *memory_tools]
+
+
+@pytest.mark.parametrize("omit", [True, False], ids=["no-candidates-field", "nothing-fits"])
+async def test_without_candidates_every_tool_is_offered(
+    memory_harness: Harness, memory_service: FakeMemoryService, omit: bool
+) -> None:
+    memory_service.omit_candidates = omit
+    memory_service.candidates = []
+    model = ScriptedChat(["done"])
+    await memory_harness.wrap(ReAct(system="s", model=model), id="n", tools=many(6)).run(
+        "x", user="u"
+    )
+    assert len(model.requests[0]["tools"]) == 9  # six of the agent's own, three of memory's
+
+
+async def test_tool_search_answers_among_the_runs_tools_and_offers_them(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    memory_service.candidates = ["t4"]
+
+    async def fn(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("tool_search", task="reorder")
+
+    agent = memory_harness.wrap(fn, id="h", tools=many(6))
+    result = await agent.run("x", user="u")
+    assert result.answer == {"next": "t4", "plan": None, "prefill": {}, "missing": []}
+    assert memory_service.named("tool_hints")[-1].body["available"] == [f"t{i}" for i in range(6)]
+    assert memory_service.named("call_agent_tool") == []  # answered by the harness
+
+
+async def test_tools_hints_inside_a_run(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    async def fn(input: str, agent: Runtime) -> Any:
+        return await agent.tools.hints("reorder")
+
+    result = await memory_harness.wrap(fn, id="h", tools=[stock]).run("reorder a", user="u")
+    assert isinstance(result.answer, ToolHints) and result.answer.candidates[0].name == "stock"
+    # the candidates are the run's own tools, never the memory service's pull tools
+    assert memory_service.named("tool_hints")[0].body["available"] == ["stock"]
+
+
+# --------------------------------------------------------------------------- pull
 async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat([("memory_search", {"query": "preferences"}), "email"])
-    agent = memory_harness.wrap(ReAct(system="s", model=model), id="prefs", memory="read_write")
+    agent = memory_harness.wrap(ReAct(system="s", model=model), id="prefs")
     result = await agent.run("how do I like to be contacted?", user="u1")
     assert result.answer == "email"
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
-    assert offered == ["memory_search", "memory_remember"]
+    assert offered == ["memory_search", "memory_remember", "tool_search"]
     [call] = memory_service.named("call_agent_tool")
     assert call.path["name"] == "memory_search" and call.body["args"] == {"query": "preferences"}
     await memory_harness.writes.drain()
     assert memory_service.named("record_tool") == []  # the service logs its own tools
 
 
-async def test_a_reader_gets_only_the_read_only_tools(memory_harness: Harness) -> None:
-    model = ScriptedChat(["ok"])
-    await memory_harness.wrap(ReAct(system="s", model=model), id="r", memory="read").run(
-        "x", user="u"
-    )
-    assert [t["function"]["name"] for t in model.requests[0]["tools"]] == ["memory_search"]
-
-
-async def test_tool_hints_ask_for_the_tools_section(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    async def fn(input: str, agent: Runtime) -> Any:
-        return await agent.tools.hints("reorder")
-
-    agent = memory_harness.wrap(fn, id="h", tools=[stock], memory="read", tool_hints=True)
-    result = await agent.run("reorder a", user="u")
-    # the candidates are the run's own tools, never the memory service's pull tools
-    assert memory_service.named("context")[0].body["tools"]["available"] == ["stock"]
-    assert isinstance(result.answer, ToolHints) and result.answer.candidates[0].name == "stock"
-    assert memory_service.named("tool_hints")[0].body["available"] == ["stock"]
-
-
-async def test_the_tool_search_pull_tool_looks_among_the_runs_tools(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    async def fn(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call("tool_search", task="reorder")
-
-    memory_harness.memory.listed = None  # type: ignore[union-attr]
-    memory_service.agent_tools.append(
-        {"name": "tool_search", "description": "Tools for a task.", "input_schema": {}}
-    )
-    result = await memory_harness.wrap(fn, id="h", tools=[stock], memory="read").run("x", user="u")
-    assert result.answer["candidates"][0]["name"] == "stock"
-    assert memory_service.named("tool_hints")[0].body["available"] == ["stock"]
-    assert memory_service.named("call_agent_tool") == []
-
-
-async def test_a_reading_agent_cannot_call_a_memory_tool_that_writes(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    # tools built before the agent existed include the writing ones; the run refuses them
-    tools = await memory_harness.tools(framework="langgraph", memory=True)
-    model = ScriptedChatModel(turns=[("memory_remember", {"content": "x"}), "could not"])
-    graph = create_agent(model, tools=tools)
-    result = await memory_harness.wrap(graph, id="r", memory="read").run("x", user="u")
-    assert result.answer == "could not"
-    assert "only reads" in str(model.seen[1][-1].content)
-    assert memory_service.named("call_agent_tool") == []
-
-
-async def test_an_outcome_the_agent_recorded_is_not_overwritten(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    memory_service.agent_tools.append(
-        {"name": "record_outcome", "description": "Say how it went.", "input_schema": {}}
-    )
-    memory_harness.memory.listed = None  # type: ignore[union-attr]
-
-    async def fn(input: str, agent: Runtime) -> str:
-        await agent.tools.call("record_outcome", success=False, note="wrong warehouse")
-        return "done"
-
-    result = await memory_harness.wrap(fn, id="o", memory="read_write").run("x", user="u")
+async def test_a_read_only_key_reads_and_records_nothing(memory_service: FakeMemoryService) -> None:
+    memory_service.role = "reader"
+    model = ScriptedChat([("stock", {"sku": "a"}), "7"])
+    async with harness_with(memory_service, bifrost_virtual_key="vk") as h:
+        result = await h.wrap(ReAct(system="s", model=model), id="r", tools=[stock]).run(
+            "x", user="u"
+        )
+        await h.writes.drain()
     assert result.status is RunStatus.SUCCESS
+    offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
+    assert offered == ["stock", "memory_search", "tool_search"]
+    assert memory_service.named("context")  # it reads
+    for write in ("messages", "record_tool", "feedback", "model_key"):
+        assert memory_service.named(write) == [], write
+
+
+# --------------------------------------------------------------------------- records
+async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
+    agent = memory_harness.wrap(ReAct(system="s", model=model), id="stock", tools=[stock])
+    result = await agent.run("how many a?", user="u1")
     await memory_harness.writes.drain()
-    assert memory_service.named("outcome") == []  # the agent's own verdict stands
+    [batch] = memory_service.named("messages")
+    assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
+        ("USER", "how many a?", f"{result.run_id}:user:0"),
+        ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:1"),
+    ]
+    [recorded] = memory_service.named("record_tool")
+    assert recorded.body["tool"] == "stock" and recorded.body["task"] == "how many a?"
+    [outcome] = memory_service.named("feedback")
+    assert outcome.body["target_kind"] == "run" and outcome.body["target_id"] == result.run_id
+    assert outcome.body["verdict"] == "confirm" and outcome.body["source"] == "system"
+    assert outcome.idempotency_key == f"{result.run_id}:outcome"
+
+
+async def test_a_failed_run_is_rejected_and_a_cancelled_one_says_nothing(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    async def fn(input: str, agent: Runtime) -> str:
+        if input == "fail":
+            raise RuntimeError("boom")
+        return str(await agent.ask("Sure?"))
+
+    agent = memory_harness.wrap(fn, id="t")
+    failed = await agent.run("fail", user="u")
+    paused = await agent.run("ask", user="u")
+    assert paused.interrupt is not None
+    await agent.resume(paused.interrupt.interrupt_id, "cancel", reviewer="u")
+    await memory_harness.writes.drain()
+    [outcome] = memory_service.named("feedback")
+    assert outcome.body["target_id"] == failed.run_id and outcome.body["verdict"] == "reject"
+    assert outcome.body["comment"] == "boom"
 
 
 async def test_the_transcript_is_recorded_on_a_pause_and_on_a_failure(
@@ -153,86 +262,28 @@ async def test_the_transcript_is_recorded_on_a_pause_and_on_a_failure(
             raise RuntimeError("boom")
         return str(await agent.ask("Sure?"))
 
-    agent = memory_harness.wrap(fn, id="t", memory="read_write")
+    agent = memory_harness.wrap(fn, id="t")
     paused = await agent.run("ask", user="u")
     assert paused.interrupt is not None
     await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
     failed = await agent.run("fail", user="u")
     assert failed.status is RunStatus.ERROR
     await memory_harness.writes.drain()
+    batches = memory_service.named("messages")
     sent = [
-        (c.body["role"], c.body["content"], c.idempotency_key)
-        for c in memory_service.named("message")
+        (m["role"], m["content"], m["source_message_id"])
+        for b in batches
+        for m in b.body["messages"]
     ]
     run = paused.run_id
     assert sent[:3] == [
         ("USER", "ask", f"{run}:user:0"),  # on the pause
-        ("USER", "ask", f"{run}:user:0"),  # again on the resumed attempt: stored once
-        ("ASSISTANT", "yes", f"{run}:2:msg:1"),
+        ("USER", "ask", f"{run}:user:0"),  # again on the resumed attempt: the service stores
+        ("ASSISTANT", "yes", f"{run}:2:msg:1"),  # it once (its source id is the same)
     ]
     assert sent[3][:2] == ("USER", "fail")  # a failed run's question is kept too
     # a run with no thread is its own thread
-    assert {c.scope["thread_id"] for c in memory_service.named("message")} == {
-        paused.run_id,
-        failed.run_id,
-    }
-
-
-async def test_a_memory_outage_is_a_warning_not_a_failure(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    memory_service.fail = {"context", "message"}
-
-    async def fn(input: str, agent: Runtime) -> str:
-        return "fine"
-
-    agent = memory_harness.wrap(fn, id="o", memory="read_write")
-    events = [e async for e in agent.stream("x", user="u")]
-    warnings = [
-        e.data for e in events if e.type is RunEventType.CUSTOM and e.data["name"] == "warning"
-    ]
-    assert warnings[0]["code"] == "memory_unavailable"
-    assert events[-1].type is RunEventType.RUN_FINISHED
-    await memory_harness.writes.drain()
-    assert memory_harness.writes.failed == 1  # the transcript write, reported and counted
-
-
-async def test_the_model_key_is_registered_once_per_agent(
-    memory_service: FakeMemoryService,
-) -> None:
-    async with Harness(config=Settings(memory_url="http://m", memory_model_key="sk-mem")) as h:
-        h.memory = Memory("http://m", None, client=memory_service.client())
-
-        async def fn(input: str, agent: Runtime) -> str:
-            return "ok"
-
-        agent = h.wrap(fn, id="keyed", memory="read")
-        await agent.run("a", user="u")
-        await agent.run("b", user="u")
-        await h.writes.drain()
-    [key] = memory_service.named("model_key")
-    assert key.body["virtual_key"] == "sk-mem"
-    assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:keyed:")
-    assert key.scope["agent_id"] == "keyed" and "user_id" not in key.scope
-
-
-async def test_the_sampled_judge_scores_against_the_context_and_files_feedback(
-    memory_service: FakeMemoryService,
-) -> None:
-    memory_service.report = GroundingReport(supported=2)
-    async with Harness(config=Settings(memory_url="http://m", eval_sample=1.0)) as h:
-        h.memory = Memory("http://m", None, client=memory_service.client())
-
-        async def fn(input: str, agent: Runtime) -> str:
-            return "you prefer email"
-
-        result = await h.wrap(fn, id="judged", memory="read_write").run("contact?", user="u")
-        await h.writes.drain()
-    [verified] = memory_service.named("verify")
-    assert verified.body["answer"] == "you prefer email" and verified.body["items"] == []
-    [feedback] = memory_service.named("feedback")
-    assert feedback.body["target_kind"] == "answer" and feedback.body["score"] == 1.0
-    assert feedback.body["source"] == "judge" and feedback.body["agent_run_id"] == result.run_id
+    assert {b.scope["thread_id"] for b in batches} == {paused.run_id, failed.run_id}
 
 
 async def test_an_approval_decision_is_feedback_on_the_tool_call(
@@ -246,52 +297,165 @@ async def test_an_approval_decision_is_feedback_on_the_tool_call(
     async def fn(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("wipe", disk="d1")
 
-    agent = memory_harness.wrap(fn, id="ops", tools=[wipe], memory="read_write")
+    agent = memory_harness.wrap(fn, id="ops", tools=[wipe])
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
     await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="boss")
     await memory_harness.writes.drain()
-    [feedback] = memory_service.named("feedback")
-    assert feedback.body["target_kind"] == "tool_call" and feedback.body["reviewer"] == "boss"
-    assert feedback.body["verdict"] == "reject"
+    decided = [f for f in memory_service.named("feedback") if f.body["target_kind"] == "tool_call"]
+    [feedback] = decided
+    assert feedback.body["reviewer"] == "boss" and feedback.body["verdict"] == "reject"
     # what approval patterns are learned from: the tool and the arguments it was asked about
     assert feedback.body["metadata"]["tool"] == "wipe"
     assert feedback.body["metadata"]["args"] == {"disk": "d1"}
 
 
-async def test_explicit_feedback_on_a_run(
+async def test_the_virtual_key_is_registered_as_the_model_key_once_per_agent(
+    memory_service: FakeMemoryService,
+) -> None:
+    async with harness_with(memory_service, bifrost_virtual_key="sk-bf-agent") as h:
+
+        async def fn(input: str, agent: Runtime) -> str:
+            return "ok"
+
+        agent = h.wrap(fn, id="keyed")
+        await agent.run("a", user="u")
+        await agent.run("b", user="u")
+        await h.writes.drain()
+    [key] = memory_service.named("model_key")
+    assert key.body["virtual_key"] == "sk-bf-agent"
+    assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:keyed:")
+    assert key.scope["agent_id"] == "keyed" and "user_id" not in key.scope
+
+
+# --------------------------------------------------------------------------- the catalog
+async def test_the_catalog_decides_tiers_and_approvals(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    @tool(side_effects="write")
+    def pay(amount: int) -> str:
+        """Pay an invoice."""
+        return f"paid {amount}"
+
+    memory_service.catalog = {"pay": {"side_effects": "write", "approve_when": "amount > 100"}}
+
+    async def fn(input: int, agent: Runtime) -> Any:
+        return await agent.tools.call("pay", amount=input)
+
+    agent = memory_harness.wrap(fn, id="payer", tools=[pay])
+    assert (await agent.run(50, user="u")).answer == "paid 50"
+    paused = await agent.run(500, user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.question == "Approve pay? amount > 100."
+    await memory_harness.writes.drain()
+    [put] = memory_service.named("put_catalog")
+    assert put.scope["tenant_id"] == "acme" and "user_id" not in put.scope
+    assert put.body["tools"] == [
+        {
+            "name": "pay",
+            "description": "Pay an invoice.",
+            "input_schema": put.body["tools"][0]["input_schema"],
+            "source": "local",
+            "server": None,
+            "side_effects": "write",
+        }
+    ]
+
+
+# --------------------------------------------------------------------------- grounding
+@respx.mock
+async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
+    memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", 1.0)
+    scores = respx.post("https://lf.test/api/public/scores").mock(
+        return_value=httpx.Response(200, json={"id": "x"})
+    )
+    otlp = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": "https://lf.test"}
+    async with harness_with(memory_service, otlp_headers=otlp) as h:
+
+        async def fn(input: str, agent: Runtime) -> str:
+            return "you prefer email"
+
+        result = await h.wrap(fn, id="judged").run("contact?", user="u")
+        await h.writes.drain()
+    [verified] = memory_service.named("verify")
+    [context] = memory_service.named("context")
+    assert verified.body["answer"] == "you prefer email"
+    assert verified.body["bundle_id"].startswith("bnd_")
+    [posted] = [c for c in scores.calls if b"grounding" in c.request.content]
+    body = json.loads(posted.request.content)
+    assert body == {
+        "id": f"{result.run_id}:grounding",
+        "traceId": telemetry.trace_hex(result.run_id),
+        "name": "grounding",
+        "value": 0.8,
+        "dataType": "NUMERIC",
+    }
+    assert context.body["query"] == "contact?"
+
+
+async def test_an_unsampled_run_is_not_verified(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", 0.0)
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "answer"
+
+    await memory_harness.wrap(fn, id="n").run("q", user="u")
+    await memory_harness.writes.drain()
+    assert memory_service.named("verify") == []
+
+
+# --------------------------------------------------------------------------- feedback
+@respx.mock
+async def test_feedback_fans_out_to_langfuse_and_the_memory_service(
+    memory_service: FakeMemoryService,
+) -> None:
+    scores = respx.post("https://lf.test/api/public/scores").mock(
+        return_value=httpx.Response(200, json={"id": "x"})
+    )
+    # (an OTLP endpoint would install a global exporter: the scores API is reached by name)
+    otlp = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": "https://lf.test"}
+    async with harness_with(memory_service, otlp_headers=otlp) as h:
+
+        async def fn(input: str, agent: Runtime) -> str:
+            return "12"
+
+        result = await h.wrap(fn, id="f").run("stock?", user="u")
+        await h.writes.drain()
+        await h.feedback(result.run_id, "correct", "13")
+    bodies = [json.loads(c.request.content) for c in scores.calls]
+    [body] = [b for b in bodies if b["name"] == "feedback"]
+    assert body["value"] == 0.0 and body["comment"] == "13"
+    assert body["traceId"] == telemetry.trace_hex(result.run_id)
+    human = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
+    [sent] = human
+    assert sent.body["target_kind"] == "run" and sent.body["target_id"] == result.run_id
+    assert sent.body["verdict"] == "correct" and sent.body["correction"] == "13"
+    assert sent.body["reviewer"] == "u"
+
+
+async def test_feedback_without_langfuse_is_a_score_span_and_memory_feedback(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return "12"
 
     result = await memory_harness.wrap(fn, id="f").run("stock?", user="u")
-    feedback = await memory_harness.feedback(result.run_id, "correct", "13")
-    assert feedback.correction == "13" and feedback.reviewer == "u"
-    [sent] = memory_service.named("feedback")
-    assert sent.body["feedback_id"] == feedback.feedback_id and sent.body["verdict"] == "correct"
+    assert memory_harness.scores is None
+    await memory_harness.feedback(result.run_id, "confirm")
+    assert [f.body["verdict"] for f in memory_service.named("feedback")][-1] == "confirm"
+    with pytest.raises(ConfigurationError, match="no run"):
+        await memory_harness.feedback("run_missing", "confirm")
 
 
-async def test_local_tool_side_effects_are_published_to_the_catalog(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    async def fn(input: str, agent: Runtime) -> str:
-        return "ok"
-
-    await memory_harness.wrap(fn, id="c", tools=[stock]).run("x", user="u")
-    await memory_harness.writes.drain()
-    [put] = memory_service.named("put_catalog")
-    assert put.scope["tenant_id"] == "default" and "user_id" not in put.scope
-    assert (
-        put.body["tools"][0]["name"] == "stock" and put.body["tools"][0]["side_effects"] == "read"
-    )
-
-
-async def test_status_of_a_run_with_memory_is_unchanged_by_it(memory_harness: Harness) -> None:
+async def test_runtime_memory_is_the_sdk_in_the_runs_scope(memory_harness: Harness) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         assert agent.context is not None
         remembered = await agent.memory.call_agent_tool("memory_search", {"query": input})
         return str(remembered)
 
-    result = await memory_harness.wrap(fn, id="direct", memory="read").run("x", user="u")
+    result = await memory_harness.wrap(fn, id="direct").run("x", user="u")
     assert result.status is RunStatus.SUCCESS and "memory_search ok" in result.answer

@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 from trellis.contracts import InterruptResolution
-from trellis.harness.adapters.base import Extracted, Invocation, Output, ToolFormat
+from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
 from trellis.harness.journal import Pending
 
 
@@ -34,6 +34,7 @@ class ClaudeAdapter:
     name: ClassVar[str] = "claude_agent_sdk"
     tool_format: ClassVar[ToolFormat] = "claude"
     fixed_tools: ClassVar[bool] = False
+    narrows: ClassVar[Narrowing] = "run"
 
     def keeps_conversation(self, target: Any) -> bool:
         return False

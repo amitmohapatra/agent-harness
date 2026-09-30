@@ -1,12 +1,14 @@
 """``ReAct``: a tool-calling loop over chat completions, for teams with no framework.
 
     agent = h.wrap(ReAct(system="You answer stock questions.", model="gemini/gemini-3.8-flash"),
-                   id="stock", tools=[mcp("erp")])
+                   id="stock")
 
 Native tool messages (``tool_calls`` in, ``role: tool`` out), structured output when
 ``output=`` names a pydantic model (``response_format`` JSON schema), and at most
-``max_steps`` model calls. A model name goes to Bifrost (``BIFROST_URL``); any object with the
-:class:`ChatModel` shape can stand in for it (a scripted model in a test).
+``max_steps`` model calls. Each call is sent the tools the run offers at that moment (the
+tool hints' candidates, the memory tools, the tools already used) and is a ``chat`` span. A
+model name goes to Bifrost (``BIFROST_URL``); any object with the :class:`ChatModel` shape can
+stand in for it (a scripted model in a test).
 """
 
 from __future__ import annotations
@@ -19,10 +21,12 @@ from typing import Any, ClassVar, Final, Protocol
 from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError, InterruptResolution, ModelError
-from trellis.harness.adapters.base import Extracted, Invocation, Output, ToolFormat
+from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
 from trellis.harness.journal import Pending
+from trellis.harness.telemetry import model_span, usage
+from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
-from trellis.harness.tools.convert import text_of
+from trellis.harness.tools.convert import openai_chat, text_of
 
 #: Model calls one run may make before it is stopped.
 MAX_STEPS: Final = 12
@@ -54,6 +58,7 @@ class ReActAdapter:
     name: ClassVar[str] = "react"
     tool_format: ClassVar[ToolFormat] = "openai_chat"
     fixed_tools: ClassVar[bool] = False
+    narrows: ClassVar[Narrowing] = "turn"
 
     def keeps_conversation(self, target: Any) -> bool:
         return False
@@ -75,10 +80,9 @@ class ReActAdapter:
 
     async def stream(self, target: ReAct, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         model = _model(target, run)
+        runtime = run.runtime
         tools = {t.name: t for t in run.tools}
         body: dict[str, Any] = {}
-        if run.native_tools:
-            body["tools"] = run.native_tools
         if target.output is not None:
             body["response_format"] = {
                 "type": "json_schema",
@@ -89,9 +93,15 @@ class ReActAdapter:
             }
         messages = list(native_input)
         result = ReActResult(messages=messages)
+        name = target.model if isinstance(target.model, str) else type(target.model).__name__
         for _ in range(target.max_steps):
-            reply = await model.complete(messages, **body)
-            message = _message(reply)
+            offered = openai_chat.convert([t for t in run.tools if runtime.offers(t.name)])
+            request = {**body, "tools": offered} if offered else body
+            with model_span(name, messages) as span:
+                reply = await model.complete(messages, **request)
+                usage(span, reply)
+                message = _message(reply)
+                span_output(span, message.get("content") or message.get("tool_calls"))
             messages.append(message)
             content = message.get("content")
             if isinstance(content, str) and content:

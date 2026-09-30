@@ -11,13 +11,17 @@ is unset. Both behave the same way:
 A pause also carries the run's checkpoint — its :class:`~trellis.harness.journal.Journal`, what
 a re-run needs — which the store returns as ``RunRecord.checkpoint`` on every read and claim
 until the run ends, so whichever worker resumes the run repeats no question and no side
-effect. Writes raise when the store refuses or cannot be reached: a pause that was not
-recorded cannot be resumed, so it is not reported.
+effect. Data too large for a question (an ``ask`` table or diff) is a run artifact, stored
+beside the run and referenced from its interrupt (``payload_ref``). Writes raise when the store
+refuses or cannot be reached: a pause that was not recorded cannot be resumed, so it is not
+reported.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections import deque
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -26,9 +30,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from croniter import croniter
+from pydantic import BaseModel, ConfigDict
 
 from trellis.contracts import (
     AgentError,
+    ArtifactRef,
     Interrupt,
     InterruptDecision,
     InterruptResolution,
@@ -39,6 +45,7 @@ from trellis.contracts import (
     ScheduleSpec,
     new_id,
 )
+from trellis.contracts.ids import now
 
 #: How long one call to agent-runs may take before the run fails with it.
 TIMEOUT_SECONDS: Final = 10.0
@@ -47,10 +54,25 @@ TENANT_HEADER: Final = "X-Trellis-Tenant"
 NO_CONTENT: Final = 204
 NOT_FOUND: Final = 404
 CONFLICT: Final = 409
-#: Schedules of one agent read when a name is taken (agent-runs' page limit).
-SCHEDULES_PAGE: Final = 500
-#: What a repeated ``schedule`` updates on the schedule of that name.
-SCHEDULE_CHANGES: Final = {"cadence", "timezone", "input", "enabled", "metadata"}
+#: The most paused runs one inbox read returns (agent-runs' page limit).
+INBOX_LIMIT: Final = 500
+#: What an artifact of JSON is sent as.
+JSON_MIME: Final = "application/json"
+
+
+class RunSummary(BaseModel):
+    """A run as a listing shows it (agent-runs ``GET /v1/runs``): enough for an inbox; read
+    the run for the rest."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    run_id: str
+    agent_id: str
+    status: RunStatus
+    awaiting: Interrupt | None = None
+    assignee: str | None = None
+    deadline: datetime | None = None
+    updated_at: datetime
 
 
 class RunStoreError(RuntimeError):
@@ -85,14 +107,16 @@ class Runs(Protocol):
         worker_id: str | None = None,
     ) -> RunRecord: ...
     async def get(self, run_id: str) -> RunRecord | None: ...
-    async def list_paused(
-        self, tenant_id: str, *, limit: int = 100, assignee: str | None = None
-    ) -> Sequence[RunRecord]: ...
+    async def inbox(self, tenant_id: str, assignee: str | None) -> Sequence[RunSummary]: ...
     async def claim(
         self, worker_id: str, agent_ids: Sequence[str], lease_seconds: float
     ) -> RunRecord | None: ...
     async def heartbeat(self, run_id: str, worker_id: str, lease_seconds: float) -> None: ...
     async def schedule(self, spec: ScheduleSpec) -> Schedule: ...
+    async def put_artifact(
+        self, run_id: str, data: bytes, *, worker_id: str | None = None
+    ) -> ArtifactRef: ...
+    async def artifact(self, artifact_id: str, tenant_id: str) -> bytes | None: ...
     async def aclose(self) -> None: ...
 
 
@@ -178,14 +202,12 @@ class HttpRuns:
             return None
         return self._record(self._body(response))
 
-    async def list_paused(
-        self, tenant_id: str, *, limit: int = 100, assignee: str | None = None
-    ) -> Sequence[RunRecord]:
-        params: dict[str, Any] = {"status": RunStatus.PAUSED.value, "limit": limit}
+    async def inbox(self, tenant_id: str, assignee: str | None) -> Sequence[RunSummary]:
+        params: dict[str, Any] = {"status": RunStatus.PAUSED.value, "limit": INBOX_LIMIT}
         if assignee is not None:
             params["assignee"] = assignee
         rows = await self._send("GET", "/v1/runs", tenant_id, params=params)
-        return [self._record(row) for row in rows]
+        return [RunSummary.model_validate(row) for row in rows]
 
     async def claim(
         self, worker_id: str, agent_ids: Sequence[str], lease_seconds: float
@@ -216,26 +238,35 @@ class HttpRuns:
         self._body(response)
 
     async def schedule(self, spec: ScheduleSpec) -> Schedule:
-        """Create the schedule, or update the one of the same name (a redeploy)."""
-        created = await self._call(
+        """Create the schedule; the same agent, person, cadence and input answer the one
+        that exists (agent-runs upserts on them)."""
+        data = await self._send(
             "POST", "/v1/schedules", spec.tenant_id, json=spec.model_dump(mode="json")
         )
-        if created.status_code != CONFLICT:
-            return Schedule.model_validate(self._body(created))
-        listed = await self._send(
-            "GET",
-            "/v1/schedules",
-            spec.tenant_id,
-            params={"agent_id": spec.agent_id, "limit": SCHEDULES_PAGE},
-        )
-        existing = next((s for s in listed if s["name"] == spec.name), None)
-        if existing is None:  # the name is taken by another agent's schedule
-            raise RunStoreError(f"schedule name {spec.name!r} is taken: {created.text[:300]}")
-        changes = spec.model_dump(mode="json", include=SCHEDULE_CHANGES)
-        data = await self._send(
-            "PATCH", f"/v1/schedules/{existing['schedule_id']}", spec.tenant_id, json=changes
-        )
         return Schedule.model_validate(data)
+
+    async def put_artifact(
+        self, run_id: str, data: bytes, *, worker_id: str | None = None
+    ) -> ArtifactRef:
+        """Store ``data`` (JSON) as an artifact of the run; the same bytes again answer the
+        artifact already stored."""
+        params = {**_worker(worker_id), "checksum": f"sha256:{hashlib.sha256(data).hexdigest()}"}
+        body = await self._send(
+            "POST",
+            f"/v1/runs/{run_id}/artifacts",
+            self._tenants.get(run_id),
+            content=data,
+            params=params,
+            headers={"Content-Type": JSON_MIME},
+        )
+        return ArtifactRef.model_validate(body)
+
+    async def artifact(self, artifact_id: str, tenant_id: str) -> bytes | None:
+        response = await self._call("GET", f"/v1/artifacts/{artifact_id}", tenant_id)
+        if response.status_code == NOT_FOUND:
+            return None
+        self._body_ok(response)
+        return response.content
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -250,23 +281,33 @@ class HttpRuns:
         return self._body(await self._call(method, path, tenant, **kwargs))
 
     async def _call(
-        self, method: str, path: str, tenant: str | None, **kwargs: Any
+        self,
+        method: str,
+        path: str,
+        tenant: str | None,
+        *,
+        headers: dict[str, str] | None = None,
+        **kwargs: Any,
     ) -> httpx.Response:
-        headers = {TENANT_HEADER: tenant} if tenant else {}
+        sent = {**(headers or {}), **({TENANT_HEADER: tenant} if tenant else {})}
         try:
-            return await self._client.request(method, path, headers=headers, **kwargs)
+            return await self._client.request(method, path, headers=sent, **kwargs)
         except httpx.HTTPError as exc:
             raise RunStoreError(f"agent-runs unreachable: {type(exc).__name__}: {exc}") from exc
 
+    @classmethod
+    def _body(cls, response: httpx.Response) -> Any:
+        cls._body_ok(response)
+        return response.json()
+
     @staticmethod
-    def _body(response: httpx.Response) -> Any:
+    def _body_ok(response: httpx.Response) -> None:
         if response.is_error:
             error = LeaseLost if response.status_code == CONFLICT else RunStoreError
             raise error(
                 f"agent-runs {response.request.method} {response.request.url.path}: "
                 f"HTTP {response.status_code} {response.text[:300]}"
             )
-        return response.json()
 
 
 def _worker(worker_id: str | None) -> dict[str, str]:
@@ -287,6 +328,8 @@ class LocalRuns:
         self._queued: set[str] = set()
         self._leases: dict[str, tuple[str, datetime]] = {}
         self._schedules: dict[str, Schedule] = {}
+        #: artifact id -> (tenant, bytes)
+        self._artifacts: dict[str, tuple[str, bytes]] = {}
         self._lock = asyncio.Lock()
 
     async def queued(self, start: RunStart) -> RunRecord:
@@ -350,9 +393,7 @@ class LocalRuns:
     async def get(self, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
 
-    async def list_paused(
-        self, tenant_id: str, *, limit: int = 100, assignee: str | None = None
-    ) -> Sequence[RunRecord]:
+    async def inbox(self, tenant_id: str, assignee: str | None) -> Sequence[RunSummary]:
         paused = [
             r
             for r in self._runs.values()
@@ -360,7 +401,19 @@ class LocalRuns:
             and r.status is RunStatus.PAUSED
             and (assignee is None or (r.awaiting is not None and r.awaiting.assignee == assignee))
         ]
-        return sorted(paused, key=lambda r: r.updated_at, reverse=True)[:limit]
+        paused.sort(key=lambda r: r.updated_at, reverse=True)
+        return [
+            RunSummary(
+                run_id=r.run_id,
+                agent_id=r.agent_id,
+                status=r.status,
+                awaiting=r.awaiting,
+                assignee=r.awaiting.assignee if r.awaiting is not None else None,
+                deadline=r.deadline,
+                updated_at=r.updated_at,
+            )
+            for r in paused[:INBOX_LIMIT]
+        ]
 
     async def claim(
         self, worker_id: str, agent_ids: Sequence[str], lease_seconds: float
@@ -383,12 +436,35 @@ class LocalRuns:
         self._leases[run_id] = (worker_id, datetime.now(UTC) + timedelta(seconds=lease_seconds))
 
     async def schedule(self, spec: ScheduleSpec) -> Schedule:
-        existing = next((s for s in self._schedules.values() if s.name == spec.name), None)
+        identity = schedule_identity(spec)
+        existing = next(
+            (s for s in self._schedules.values() if schedule_identity(s) == identity), None
+        )
+        if existing is not None:  # the upsert agent-runs does: the existing one, unchanged
+            return existing
         schedule = Schedule.from_spec(spec, next_fire_at=_next_fire(spec, datetime.now(UTC)))
-        if existing is not None:
-            schedule = schedule.model_copy(update={"schedule_id": existing.schedule_id})
         self._schedules[schedule.schedule_id] = schedule
         return schedule
+
+    async def put_artifact(
+        self, run_id: str, data: bytes, *, worker_id: str | None = None
+    ) -> ArtifactRef:
+        record = self._fenced(run_id, worker_id)
+        digest = hashlib.sha256(data).hexdigest()
+        artifact_id = f"art_{digest[:24]}"
+        self._artifacts[artifact_id] = (record.tenant_id, data)
+        return ArtifactRef(
+            artifact_id=artifact_id,
+            type="blob",
+            mime_type=JSON_MIME,
+            checksum=f"sha256:{digest}",
+            size_bytes=len(data),
+            created_at=now(),
+        )
+
+    async def artifact(self, artifact_id: str, tenant_id: str) -> bytes | None:
+        found = self._artifacts.get(artifact_id)
+        return found[1] if found is not None and found[0] == tenant_id else None
 
     async def aclose(self) -> None:
         return None
@@ -455,6 +531,27 @@ class LocalRuns:
             )
 
 
-def _next_fire(spec: ScheduleSpec, after: datetime) -> datetime:
+def schedule_identity(spec: ScheduleSpec) -> tuple[str, str, str, str, str]:
+    """What makes two schedules one (agent-runs' upsert key): tenant, agent, person, cadence
+    and the SHA-256 of the input as canonical JSON."""
+    canonical = json.dumps(spec.input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    return (spec.tenant_id, spec.agent_id, spec.on_behalf_of, spec.cadence, digest)
+
+
+#: agent-runs' named cadences, as cron (local midnight; weekly on Monday); ``manual`` never
+#: fires on its own.
+NAMED_CADENCES: Final = {
+    "hourly": "0 * * * *",
+    "daily": "0 0 * * *",
+    "weekly": "0 0 * * 1",
+    "weekdays": "0 0 * * 1-5",
+}
+
+
+def _next_fire(spec: ScheduleSpec, after: datetime) -> datetime | None:
+    if spec.cadence == "manual":
+        return None
     local = after.astimezone(ZoneInfo(spec.timezone))
-    return croniter(spec.cadence, local).get_next(datetime).astimezone(UTC)
+    cron = NAMED_CADENCES.get(spec.cadence, spec.cadence)
+    return croniter(cron, local).get_next(datetime).astimezone(UTC)

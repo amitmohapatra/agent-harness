@@ -20,7 +20,14 @@ from collections.abc import AsyncIterator
 from typing import Any, ClassVar, Final
 
 from trellis.contracts import ConfigurationError, InterruptResolution
-from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, ToolFormat
+from trellis.harness.adapters.base import (
+    Extracted,
+    Invocation,
+    Narrowing,
+    NativePause,
+    Output,
+    ToolFormat,
+)
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import MARKER, answer_of
 
@@ -34,6 +41,7 @@ class LangGraphAdapter:
     name: ClassVar[str] = "langgraph"
     tool_format: ClassVar[ToolFormat] = "langchain"
     fixed_tools: ClassVar[bool] = True
+    narrows: ClassVar[Narrowing] = "none"
 
     def keeps_conversation(self, target: Any) -> bool:
         return _checkpointed(target)

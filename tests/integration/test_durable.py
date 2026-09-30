@@ -29,7 +29,7 @@ async def test_a_started_run_is_queued_until_a_worker_claims_it(harness: Harness
     assert await worker.run_once() is True
     paused = await handle.result(timeout=5)
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    inbox = await harness.runs.list_paused("default", assignee="role:editor")
+    inbox = await harness.inbox("role:editor")
     assert [r.run_id for r in inbox] == [handle.run_id]
 
     resumed = await agent.resume(
@@ -117,9 +117,9 @@ async def test_a_schedule_fires_runs_for_the_worker(harness: Harness) -> None:
     agent = harness.wrap(briefing, id="briefing")
     schedule = await agent.schedule("0 7 * * 1-5", "inbox", on_behalf_of="ada", tz="Europe/Berlin")
     assert schedule.on_behalf_of == "ada" and schedule.timezone == "Europe/Berlin"
-    # a redeploy schedules the same thing again: one schedule, updated
+    # a redeploy schedules the same thing again: the one schedule, as it is
     again = await agent.schedule("0 7 * * 1-5", "inbox", on_behalf_of="ada", tz="Europe/Paris")
-    assert again.schedule_id == schedule.schedule_id and again.timezone == "Europe/Paris"
+    assert again.schedule_id == schedule.schedule_id and again.timezone == "Europe/Berlin"
     other = await agent.schedule("0 7 * * 1-5", "outbox", on_behalf_of="ada")
     assert other.schedule_id != schedule.schedule_id
     runs = harness.runs
