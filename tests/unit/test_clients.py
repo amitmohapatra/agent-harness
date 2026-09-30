@@ -1,0 +1,162 @@
+"""The gateway and memory client modules: the only places the harness calls those services."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+
+import httpx
+import pytest
+import respx
+from trellis.contracts import ToolCall, ToolError, ToolOutcome, ToolSpec
+
+from tests.support.memory import AGENT_TOOLS, FakeMemoryService
+from trellis.harness.clients.bifrost import Gateway
+from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory
+from trellis.harness.identity import Identity
+
+GATEWAY = "http://gw.test"
+
+CLIENTS = {
+    "clients": [
+        {
+            "config": {
+                "client_id": "c1",
+                "name": "erp",
+                "connection_type": "http",
+                "connection_string": {"value": "http://erp", "type": "plain_text"},
+                "tools_to_execute": ["*"],
+                "is_code_mode_client": False,
+            },
+            "tools": [
+                {
+                    "name": "get_stock",
+                    "description": "Stock of a SKU.",
+                    "parameters": {"type": "object"},
+                },
+                {
+                    "name": "create_po",
+                    "description": "Create a PO.",
+                    "parameters": {"type": "object"},
+                },
+            ],
+            "state": "healthy",
+        }
+    ]
+}
+
+
+@respx.mock
+async def test_the_gateway_lists_scoped_tools_by_their_execution_name() -> None:
+    respx.get(f"{GATEWAY}/api/mcp/clients").mock(return_value=httpx.Response(200, json=CLIENTS))
+    gateway = Gateway(f"{GATEWAY}/v1", "vk")
+    tools = await gateway.tools(["erp"], ["erp-get_stock"])
+    assert [t.name for t in tools] == ["erp-get_stock"]
+    await gateway.aclose()
+
+
+@respx.mock
+async def test_a_call_is_scoped_to_its_server_and_a_failed_tool_raises() -> None:
+    route = respx.post(f"{GATEWAY}/v1/mcp/tool/execute").mock(
+        side_effect=[
+            httpx.Response(
+                200, json={"role": "tool", "content": '{"units": 7}', "tool_call_id": "c"}
+            ),
+            httpx.Response(200, json={"role": "tool", "content": "no such sku", "is_error": True}),
+        ]
+    )
+    gateway = Gateway(f"{GATEWAY}/v1", "vk")
+    assert await gateway.execute(
+        "erp-get_stock", {"sku": "a"}, clients=["erp"], parent_request_id="run_1"
+    ) == {"units": 7}
+    request = route.calls[0].request
+    assert request.headers["x-bf-mcp-include-clients"] == "erp"
+    assert request.headers["x-bf-parent-request-id"] == "run_1"
+    assert json.loads(request.content)["function"] == {
+        "name": "erp-get_stock",
+        "arguments": '{"sku": "a"}',
+    }
+    with pytest.raises(ToolError, match="no such sku"):
+        await gateway.execute("erp-get_stock", {"sku": "?"}, clients=["erp"])
+    await gateway.aclose()
+
+
+@respx.mock
+async def test_code_mode_calls_are_read_back_from_the_log_by_the_run_id() -> None:
+    route = respx.get(f"{GATEWAY}/api/mcp-logs").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "logs": [
+                    {
+                        "id": "l1",
+                        "timestamp": "2026-09-30T00:00:00Z",
+                        "server_label": "wiki",
+                        "tool_name": "search",
+                        "status": "success",
+                        "llm_request_id": "run_1",
+                        "arguments": '{"q": "x"}',
+                        "result": "found",
+                        "latency": 12,
+                    }
+                ]
+            },
+        )
+    )
+    gateway = Gateway(f"{GATEWAY}/v1", None)
+    [entry] = await gateway.code_mode_calls("run_1", datetime(2026, 9, 30, tzinfo=UTC))
+    assert entry.name == "wiki-search" and entry.arguments == {"q": "x"}
+    assert route.calls[0].request.url.params["llm_request_ids"] == "run_1"
+    await gateway.aclose()
+
+
+# --------------------------------------------------------------------------- memory
+def identity() -> Identity:
+    return Identity(tenant="t", user="u", agent_id="a", run_id="run_1", thread="th")
+
+
+async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
+    service = FakeMemoryService()
+    run = Memory("http://mem", None, client=service).bind(identity())
+    pushed = await run.context("q", tools=["erp-get_stock"])
+    assert pushed.text == service.context_text
+    [(scope, payload)] = service.named("context")
+    assert scope == {
+        "tenant_id": "t",
+        "user_id": "u",
+        "agent_id": "a",
+        "agent_run_id": "run_1",
+        "thread_id": "th",
+    }
+    assert payload["tools"] == {"available": ["erp-get_stock"], "k": 8}
+
+
+async def test_agent_tools_are_listed_once_and_a_reader_gets_only_the_read_ones() -> None:
+    service = FakeMemoryService()
+    memory = Memory("http://mem", None, client=service)
+    everything = await memory.bind(identity()).agent_tools(read_only=False)
+    reads = await memory.bind(identity()).agent_tools(read_only=True)
+    assert [t.name for t in everything] == [t["name"] for t in AGENT_TOOLS]
+    assert {t.name for t in reads} <= READ_ONLY_TOOLS
+    assert len(service.named("agent_tools")) == 1
+
+
+async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() -> None:
+    service = FakeMemoryService(catalog={"erp-get_stock": "read", "odd": "sideways"})
+    run = Memory("http://mem", None, client=service).bind(identity())
+    await run.record_messages([("user", "hi"), ("assistant", "hello")], "run_1")
+    assert [p["idempotency_key"] for _, p in service.named("message")] == [
+        "run_1:msg:0",
+        "run_1:msg:1",
+    ]
+    await run.record_tool(
+        ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)
+    )
+    assert service.named("record_tool")[0][1]["status"] == "ok"
+    assert await run.side_effects(["erp-get_stock", "odd", "missing"]) == {"erp-get_stock": "read"}
+    await run.publish_catalog(
+        [ToolSpec(name="refund", side_effects="irreversible", source="local")]
+    )
+    assert service.named("put_catalog")[0][1][0]["side_effects"] == "irreversible"
+    await run.register_model_key("sk", "a")
+    assert service.named("model_key")[0][1] == {"key": "sk", "idempotency_key": "model-key:a"}
