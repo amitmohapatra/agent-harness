@@ -146,6 +146,14 @@ make test-live   # opt-in tests against BIFROST_URL / MEMORY_URL / RUNS_URL
 make gate        # the benchmark and the regression gate
 ```
 
+`make test-live` reads the deployment environment (`.env.example`) and skips whatever is unset
+or unreachable. Against all three services it runs every target (LangGraph, Deep Agents, OpenAI
+Agents, `ReAct`, a function, Claude through a scripted CLI) with memory and an MCP server plus
+a local tool, Code Mode, the agent-runs wire (queue, lease loss, escalation), a run continued by
+three worker processes, a schedule fired by the ticker, AG-UI with replay, an A2A round trip,
+and what the memory service learns from it all. It registers public MCP servers in the gateway
+for the session (`tests/live/conftest.py`) and removes them after.
+
 Docs: [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/README.md).
 
 ## Removed in 0.4.0
