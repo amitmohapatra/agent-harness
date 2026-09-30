@@ -28,7 +28,7 @@ LIVE_TIMEOUT: Final = 60.0
 MODEL: Final = "openrouter/openai/gpt-4.1-nano"
 #: A public MCP server the suite registers in the gateway as a Code Mode client, and removes.
 DEEPWIKI_URL: Final = "https://mcp.deepwiki.com/mcp"
-#: Three servers make an ``mcp(...)`` source large enough for Code Mode.
+#: Three servers are enough for Code Mode (a key that allows them all).
 WIKIS: Final = ("trellislivewiki", "trellislivewiki2", "trellislivewiki3")
 TOOLS_PER_WIKI: Final = 3
 #: The one wiki tool the framework tests' key allows.

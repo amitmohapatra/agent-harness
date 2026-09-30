@@ -75,7 +75,7 @@ The harness uses the credentials the OTLP headers already carry — no extra var
 
 | Score | When | Value |
 |---|---|---|
-| `grounding` | a sampled 10 % of successful runs with a text answer (`GROUNDING_SAMPLE`, chosen by the run id): the memory service's `/v1/verify {bundle_id, answer}` against the context the run was given — the one grounding judge, which owns the evidence and records the run's `judge` feedback itself | the service's score, 0..1 |
+| `grounding` | a sampled 10 % of successful runs with a text answer (`GROUNDING_SAMPLE`, chosen by the run id): the memory service's `/v1/verify {bundle_id, answer, run_id}` against the context the run was given — the one grounding judge, which owns the evidence and records the run's `judge` feedback itself | the share of the answer's claims the evidence supports, 0..1 (an answer with no checkable claim is no score) |
 | `feedback` | `h.feedback(run_id, verdict, correction=None)` — also the run's `human` feedback in the memory service, which outranks the judge's and the run's own | confirm/approve 1.0, edit 0.5, correct/reject 0.0; the correction as the comment |
 
 Online LLM-as-judge on the traces, annotation queues, datasets built from traces, and
