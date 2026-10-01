@@ -52,6 +52,19 @@ TOOL_HINTS_MIN: Final = 5
 GROUNDING_SAMPLE: Final = 0.1
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
+#: What the model is told when memory has nothing for the question (``evidence_status``
+#: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
+#: the user's history, instead of a confident guess the memory never held.
+ABSTAIN_NOTES: Final = {
+    "INSUFFICIENT": (
+        "## Memory\nMemory holds nothing about this question. If the answer depends on "
+        "something the user told you before, say you do not know it; do not guess."
+    ),
+    "INCOMPLETE": (
+        "## Memory\nMemory covers only part of this question, or someone else. Say what "
+        "you do not know rather than fill the gap."
+    ),
+}
 
 
 class Agent:
@@ -286,8 +299,14 @@ class Agent:
         candidates = [n for n in pushed.tool_candidates or () if n in runtime.toolbox]
         if hinted and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
-        runtime.context = pushed.rendered or None
-        runtime.events.emit(RunEventType.CONTEXT_LOADED, data={"chars": len(pushed.rendered)})
+        status = getattr(pushed, "evidence_status", "COMPLETE")
+        note = ABSTAIN_NOTES.get(status)
+        rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
+        runtime.context = rendered or None
+        runtime.events.emit(
+            RunEventType.CONTEXT_LOADED,
+            data={"chars": len(rendered), "evidence_status": status},
+        )
         return pushed
 
     def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:

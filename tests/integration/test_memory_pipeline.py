@@ -459,3 +459,31 @@ async def test_runtime_memory_is_the_sdk_in_the_runs_scope(memory_harness: Harne
 
     result = await memory_harness.wrap(fn, id="direct").run("x", user="u")
     assert result.status is RunStatus.SUCCESS and "memory_search ok" in result.answer
+
+
+@pytest.mark.parametrize(
+    ("status", "note"),
+    [
+        ("INSUFFICIENT", "say you do not know it; do not guess"),
+        ("INCOMPLETE", "Say what you do not know rather than fill the gap"),
+        ("COMPLETE", None),
+        (None, None),  # an older server that does not say
+    ],
+)
+async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
+    memory_harness: Harness, memory_service: FakeMemoryService, status: str | None, note: str | None
+) -> None:
+    """Abstention: memory with no evidence for the question must turn into "I don't know",
+    not a confident guess; the harness says so to the model with the context."""
+    memory_service.evidence_status = status
+    model = ScriptedChat(["I don't know your sister's name."])
+    agent = memory_harness.wrap(ReAct(system="You help.", model=model), id="s")
+    events = [e async for e in agent.stream("What is my sister's name?", user="u1")]
+    system = model.requests[0]["messages"][0]["content"]
+    assert system.startswith(f"You help.\n\n{memory_service.context_text}")
+    if note is None:
+        assert "## Memory" not in system
+    else:
+        assert note in system
+    [loaded] = [e for e in events if e.type is RunEventType.CONTEXT_LOADED]
+    assert loaded.data["evidence_status"] == (status or "COMPLETE")
