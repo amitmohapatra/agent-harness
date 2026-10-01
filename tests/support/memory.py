@@ -82,6 +82,8 @@ class Call:
 @dataclass
 class FakeMemoryService:
     context_text: str = "The user prefers email."
+    #: what the context says about its evidence; None leaves the field out (an older server)
+    evidence_status: str | None = "COMPLETE"
     #: what ``GET /v1/keys/self`` says about the key
     tenant: str | None = "acme"
     role: str = "service"
@@ -159,6 +161,8 @@ class FakeMemoryService:
             "bundle_id": f"bnd_{next(self._ids)}",
             "token_estimate": 0,
         }
+        if self.evidence_status is not None:
+            answer["evidence_status"] = self.evidence_status
         if available is not None:
             chosen = self._candidates("", available)
             rendered += "\n\n## Tools\nnext: " + (chosen[0] if chosen else "-")
