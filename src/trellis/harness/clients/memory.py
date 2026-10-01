@@ -163,8 +163,10 @@ class RunMemory:
         )
 
     async def feedback(self, record: Any) -> None:
-        """A contracts ``Feedback`` record as it is (an interrupt's decision)."""
-        await self.ctx.feedback(record)
+        """A contracts ``Feedback`` record as it is (an interrupt's decision). Its id is the
+        idempotency key: an interrupt's feedback id is fixed by its run and interrupt, so the
+        client may retry a failed send and the service stores and counts it once."""
+        await self.ctx.feedback(record, idempotency_key=record.feedback_id)
 
     async def verify(self, answer: str, bundle_id: str) -> float | None:
         """The grounding score of ``answer`` against the context the run was given (the share
