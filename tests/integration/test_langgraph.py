@@ -224,3 +224,31 @@ async def test_memory_tools_are_built_in_with_h_tools(
 async def test_a_compiled_graph_refuses_tools_at_wrap(harness: Harness) -> None:
     with pytest.raises(ConfigurationError, match=r"h\.tools"):
         harness.wrap(review_graph(), id="x", tools=[stock])
+
+
+async def test_two_graphs_may_each_have_a_tool_of_the_same_name(harness: Harness) -> None:
+    """Each ``h.tools`` call is its own toolbox: a graph's agent knows only the tools its graph
+    was built with, so a second graph with another ``lookup`` is no clash."""
+
+    @tool(side_effects="read", name="lookup")
+    def lookup_stock(sku: str) -> str:
+        """Look a SKU up in stock."""
+        executed.append(f"stock:{sku}")
+        return "7 in stock"
+
+    @tool(side_effects="read", name="lookup")
+    def lookup_price(sku: str) -> str:
+        """Look a SKU's price up."""
+        executed.append(f"price:{sku}")
+        return "$3"
+
+    graphs = []
+    for fn, answer in ((lookup_stock, "7"), (lookup_price, "$3")):
+        model = ScriptedChatModel(turns=[("lookup", {"sku": "a"}), answer])
+        graphs.append(create_agent(model, tools=await harness.tools(fn, framework="langgraph")))
+    stock_agent = harness.wrap(graphs[0], id="stock-lookup")
+    price_agent = harness.wrap(graphs[1], id="price-lookup")
+    assert (await stock_agent.run("a?", user="u1")).answer == "7"
+    assert (await price_agent.run("a?", user="u1")).answer == "$3"
+    assert executed == ["stock:a", "price:a"]
+    assert stock_agent.sources != price_agent.sources

@@ -149,7 +149,7 @@ async def test_a_target_runs_with_memory_and_tools(
         if framework in ("function", "claude", "react"):
             assert f"{deepwiki}-{WIKI_TOOL}" in called  # the MCP tool, through Bifrost
         # the key allows one tool of one wiki: the toolbox holds exactly that MCP tool
-        toolbox = await h.resolve(agent.sources or h.built, tenant=await h.tenant())
+        toolbox = await h.resolve(agent.sources, tenant=await h.tenant())
         assert [t.name for t in toolbox if t.spec.source == "mcp"] == [f"{deepwiki}-{WIKI_TOOL}"]
         if framework == "claude":
             started = json.loads((tmp_path / "cli.json").read_text())

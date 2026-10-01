@@ -134,6 +134,14 @@ class LangGraphAdapter:
         return {"configurable": {"thread_id": runtime.thread or runtime.run_id}}
 
 
+def bound_tools(target: Any) -> list[Any]:
+    """The tools a compiled graph's tool nodes run (Deep Agents included)."""
+    found: list[Any] = []
+    for node in getattr(target, "nodes", {}).values():
+        found.extend(getattr(getattr(node, "bound", None), "tools_by_name", {}).values())
+    return found
+
+
 def _checkpointed(target: Any) -> bool:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 

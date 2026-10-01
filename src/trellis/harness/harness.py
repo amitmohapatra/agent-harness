@@ -38,6 +38,8 @@ FORMATS: Final = {
     "openai-agents": "openai_agents",
     "claude-agent-sdk": "claude",
 }
+#: The metadata key on a LangChain tool built by :meth:`Harness.tools`: which call built it.
+TOOLBOX: Final = "trellis_toolbox"
 #: The tenant of a deployment with no memory service (development: nothing to ask).
 LOCAL_TENANT: Final = "default"
 #: How a person's verdict reads as a Langfuse score.
@@ -63,8 +65,9 @@ class Harness:
         self.scores = telemetry.Scores.of(s)
         #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
         self.agents: dict[str, Agent] = {}
-        #: the tools built with :meth:`tools` (by the object passed): a LangGraph agent's toolbox
-        self._built: dict[int, Source] = {}
+        #: the sources of each :meth:`tools` call, by the toolbox number its tools carry: a
+        #: LangGraph agent's toolbox is the sources of the calls its graph's tools came from
+        self._built: dict[int, list[Source]] = {}
         self._key: KeyInfo | None = None
         self._registered: set[tuple[str, str]] = set()
         self._published: dict[str, set[str]] = {}
@@ -90,13 +93,19 @@ class Harness:
         Agents), or one in-process MCP server (Claude). It holds ``sources``, the MCP tools
         the virtual key allows and — memory on — the memory service's agent tools. Every call
         is still the harness's: policy, approval, record."""
-        mine = [self._built.setdefault(id(s), as_source(s)) for s in sources]
+        mine = [as_source(s) for s in sources]
         tenant = await self.tenant()
         tools = await self.resolve(mine, tenant=tenant)
         if self.memory is not None:
             scope = self.memory.scoped(tenant)
             tools.extend(await self.memory_tools(scope, await self.writes_memory()))
-        return convert(FORMATS[framework], tools)  # type: ignore[arg-type]
+        native = convert(FORMATS[framework], tools)  # type: ignore[arg-type]
+        if framework == "langgraph" and native:
+            number = len(self._built)
+            self._built[number] = mine
+            for tool in native:
+                tool.metadata = {**(tool.metadata or {}), TOOLBOX: number}
+        return native
 
     def worker(self, agents: Sequence[Agent], *, concurrency: int = WORKER_CONCURRENCY) -> Worker:
         """A worker that claims these agents' queued runs and executes them."""
@@ -179,10 +188,13 @@ class Harness:
             raise ConfigurationError(f"TRELLIS_API_KEY speaks for {own!r}, not {requested!r}")
         return own
 
-    @property
-    def built(self) -> list[Source]:
-        """The sources :meth:`tools` built agents with."""
-        return list(self._built.values())
+    def built_for(self, tools: Sequence[Any]) -> list[Source]:
+        """The sources of the :meth:`tools` calls that ``tools`` (a graph's bound tools) came
+        from — each graph has its own toolbox, so two graphs may each have a ``search``."""
+        numbers = {
+            n for t in tools if (n := (getattr(t, "metadata", None) or {}).get(TOOLBOX)) is not None
+        }
+        return [s for n in sorted(numbers) for s in self._built[n]]
 
     @property
     def known_tenant(self) -> str | None:

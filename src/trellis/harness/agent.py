@@ -29,6 +29,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline
 from trellis.harness.adapters import detect
+from trellis.harness.adapters.langgraph import bound_tools
 from trellis.harness.clients.memory import RunMemory
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
@@ -67,6 +68,8 @@ class Agent:
                 f"await h.tools(..., framework='langgraph') to the graph instead of tools="
             )
         self.sources = [as_source(t) for t in tools]
+        if self.adapter.fixed_tools:
+            self.sources = harness.built_for(bound_tools(target))
         #: the resolved toolbox per tenant, and when it was resolved
         self._tools: dict[str, tuple[float, list[Tool]]] = {}
 
@@ -249,8 +252,7 @@ class Agent:
         now = time.monotonic()
         cached = self._tools.get(runtime.tenant)
         if cached is None or now - cached[0] > TOOLS_TTL_SECONDS:
-            sources = self.harness.built if self.adapter.fixed_tools else self.sources
-            cached = (now, await self.harness.resolve(sources, tenant=runtime.tenant))
+            cached = (now, await self.harness.resolve(self.sources, tenant=runtime.tenant))
             self._tools[runtime.tenant] = cached
         tools = list(cached[1])
         if runtime.run_memory is not None and not self.adapter.fixed_tools:
