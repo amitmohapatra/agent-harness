@@ -86,9 +86,10 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
 
         assert await eventually(suggested)
 
-        # feedback on a run is stored with the run, as a person's verdict
-        [stored] = await scope.feedback.list_for("run", run_ids[0])
-        assert stored.verdict == "confirm" and stored.source == "human"
+        # feedback on a run is stored with the run, as a person's verdict (beside the run's
+        # own ``system`` outcome, which it outranks)
+        stored = await scope.feedback.list_for("run", run_ids[0])
+        assert [f.verdict for f in stored if f.source == "human"] == ["confirm"]
 
 
 async def test_a_profile_block_an_agent_edits_is_in_the_next_context() -> None:

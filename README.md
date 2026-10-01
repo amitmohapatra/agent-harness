@@ -9,11 +9,11 @@ it through the framework's public API.
 ```python
 from trellis import Harness
 
-h = Harness()                               # the deployment is the environment
-agent = h.wrap(graph, id="procurement")     # nothing else to configure
+h = Harness()  # the deployment is the environment
+agent = h.wrap(graph, id="procurement")  # nothing else to configure
 
 result = await agent.run("Reorder SKU-1 if low", user="ada")
-if result.interrupt:                        # a person has to approve something
+if result.interrupt:  # a person has to approve something
     result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="cfo")
 ```
 
