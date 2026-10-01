@@ -98,18 +98,22 @@ class FakeMemoryService:
     unsupported: int = 1
     #: names of the calls that answer 503
     fail: set[str] = field(default_factory=set)
+    #: names of the calls that answer 503 this many times, then succeed
+    fail_times: dict[str, int] = field(default_factory=dict)
+    #: feedback by id, each stored once however often it is sent
+    stored_feedback: dict[str, dict[str, Any]] = field(default_factory=dict)
     calls: list[Call] = field(default_factory=list)
     agent_tools: list[dict[str, Any]] = field(default_factory=lambda: list(AGENT_TOOLS))
     _ids: itertools.count[int] = field(default_factory=itertools.count)
     #: the ``source_message_id``s already stored (the service's own message identity)
     _stored: set[str] = field(default_factory=set)
 
-    def client(self) -> MemoryClient:
+    def client(self, *, max_retries: int = 0) -> MemoryClient:
         transport = httpx.MockTransport(self._handle)
         return MemoryClient(
             URL,
             api_key="test",
-            max_retries=0,
+            max_retries=max_retries,
             http_client=httpx.AsyncClient(base_url=URL, transport=transport),
         )
 
@@ -130,7 +134,9 @@ class FakeMemoryService:
                     path=matched.groupdict(),
                     query=request.url.params,
                 )
-                if name in self.fail:
+                if name in self.fail or self.fail_times.get(name, 0) > 0:
+                    if name in self.fail_times:
+                        self.fail_times[name] -= 1
                     return httpx.Response(503, json={"title": f"{name} is down", "status": 503})
                 self.calls.append(call)
                 return httpx.Response(200, json=getattr(self, f"_{name}")(call))
@@ -189,11 +195,15 @@ class FakeMemoryService:
         return {"invocation_id": self._id("inv"), "step": call.body.get("step") or 0}
 
     def _feedback(self, call: Call) -> dict[str, Any]:
-        return {
-            "feedback_id": call.body.get("feedback_id") or self._id("fb"),
-            "created_at": datetime.now(UTC).isoformat(),
-            **call.body,
-        }
+        # as the service does: a feedback id already stored answers with the stored record
+        feedback_id = call.body.get("feedback_id") or self._id("fb")
+        if feedback_id not in self.stored_feedback:
+            self.stored_feedback[feedback_id] = {
+                "feedback_id": feedback_id,
+                "created_at": datetime.now(UTC).isoformat(),
+                **call.body,
+            }
+        return self.stored_feedback[feedback_id]
 
     def _verify(self, call: Call) -> dict[str, Any]:
         claims = [

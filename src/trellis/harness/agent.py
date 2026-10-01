@@ -191,10 +191,13 @@ class Agent:
         assert record.awaiting is not None
         identity = self._identity_of(record)
         feedback = resolution.to_feedback(record.awaiting, identity.context())
+        # The run store first: a decision is feedback only once it took effect. A resume
+        # the store refuses (answered already, a stale interrupt) raises here, before
+        # anything is sent, so approval patterns never learn from a decision that never was.
+        resumed = await runs.resumed(resolution)
         run_memory = await self.run_memory(identity)
         if feedback is not None and run_memory is not None and await self.harness.writes_memory():
-            self.harness.writes.submit("memory.feedback", lambda: run_memory.ctx.feedback(feedback))
-        resumed = await runs.resumed(resolution)
+            self.harness.writes.submit("memory.feedback", lambda: run_memory.feedback(feedback))
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
