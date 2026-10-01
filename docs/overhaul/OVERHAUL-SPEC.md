@@ -252,12 +252,15 @@ documents, graph, briefs, webhooks, admin/tenant APIs, model keys. Remove remove
 ```python
 from trellis import Harness, mcp, tool, a2a, openapi, ReAct
 
-h = Harness()                       # reads env (§6.4); one constructor, no kwargs except config=
-agent = h.wrap(target, id="procurement",
-               tools=[mcp("erp", only=["get_stock"]), my_fn, a2a(url)],   # optional
-               memory="read_write",       # "off" | "read" | "read_write"  (default "off")
-               approve={"erp-create_po": "amount > 10000"},  # optional
-               tool_hints=False)          # optional
+h = Harness()  # reads env (§6.4); one constructor, no kwargs except config=
+agent = h.wrap(
+    target,
+    id="procurement",
+    tools=[mcp("erp", only=["get_stock"]), my_fn, a2a(url)],  # optional
+    memory="read_write",  # "off" | "read" | "read_write"  (default "off")
+    approve={"erp-create_po": "amount > 10000"},  # optional
+    tool_hints=False,
+)  # optional
 ```
 `target` = compiled LangGraph graph (includes Deep Agents, which returns a compiled graph),
 OpenAI Agents `Agent`, Claude Agent SDK `ClaudeAgentOptions`, `ReAct(system=..., model=...)`,
