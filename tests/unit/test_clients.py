@@ -24,55 +24,37 @@ from trellis.harness.identity import Identity
 
 GATEWAY = "http://gw.test"
 
-CLIENTS = {
-    "clients": [
-        {
-            "config": {
-                "client_id": "c1",
-                "name": "erp",
-                "connection_type": "http",
-                "connection_string": {"value": "http://erp", "type": "plain_text"},
-                "tools_to_execute": ["*"],
-                "is_code_mode_client": False,
-            },
-            "tools": [
-                {
-                    "name": "get_stock",
-                    "description": "Stock of a SKU.",
-                    "parameters": {"type": "object"},
-                },
-                {
-                    "name": "create_po",
-                    "description": "Create a PO.",
-                    "parameters": {"type": "object"},
-                },
-            ],
-            "state": "healthy",
-        }
-    ]
-}
-
 
 @respx.mock
 async def test_the_gateway_lists_what_the_virtual_key_allows_by_execution_name() -> None:
-    respx.get(f"{GATEWAY}/api/mcp/clients").mock(return_value=httpx.Response(200, json=CLIENTS))
-    listing = respx.post(f"{GATEWAY}/mcp").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {
-                    "tools": [{"name": "erp-get_stock", "annotations": {"readOnlyHint": True}}]
-                },
-            },
-        )
-    )
+    """With admin auth on, ``/api`` refuses a virtual key: the toolbox is the gateway's ``/mcp``
+    ``tools/list`` asked with the key — Code Mode clients through their meta-tools."""
+    admin = respx.get(f"{GATEWAY}/api/mcp/clients").mock(return_value=httpx.Response(401))
+
+    def rpc(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["method"] == "tools/list":
+            tools = [
+                {"name": "erp-get_stock", "annotations": {"readOnlyHint": True}},
+                {"name": "listToolFiles", "annotations": {}},
+                {"name": "executeToolCode", "annotations": {}},
+            ]
+            result: dict[str, object] = {"tools": tools}
+        elif body["params"]["name"] == "listToolFiles":
+            result = {"content": [{"type": "text", "text": "servers/\n  wiki.pyi"}]}
+        else:
+            text = "def read(repo: str) -> dict:  # Read a wiki.\n"
+            result = {"content": [{"type": "text", "text": text}]}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
+
+    listing = respx.post(f"{GATEWAY}/mcp").mock(side_effect=rpc)
     gateway = Gateway(f"{GATEWAY}/v1", "vk")
-    [stock] = await gateway.tools()
-    assert stock.name == "erp-get_stock"
+    stock, read = await gateway.tools()
+    assert stock.name == "erp-get_stock" and not stock.code_mode
     assert stock.annotations is not None and stock.annotations.read_only_hint is True
-    assert listing.calls[0].request.headers["authorization"] == "Bearer vk"
+    assert (read.name, read.client, read.code_mode) == ("wiki-read", "wiki", True)
+    assert all(c.request.headers["authorization"] == "Bearer vk" for c in listing.calls)
+    assert not admin.called
     await gateway.aclose()
 
 

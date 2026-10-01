@@ -88,7 +88,8 @@ class Gateway:
         self.client = client or Bifrost(url, api_key=virtual_key)
 
     async def tools(self) -> list[ToolDef]:
-        """Every MCP tool the virtual key allows (the gateway's own view of the key)."""
+        """Every MCP tool the virtual key allows: the gateway's own `/mcp` listing asked with
+        the key (never `/api`, which admin auth closes to it), Code Mode clients included."""
         return await self.client.tools()
 
     async def execute(
