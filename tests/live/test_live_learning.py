@@ -80,16 +80,19 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
 
         assert await eventually(counted)
 
-        async def suggested() -> bool:
-            found = await scope.advanced.tools.approval_suggestions(tool=reorder_name)
-            return any(s.suggestion == "auto_approve" and s.support >= APPROVALS for s in found)
+        # however often a reorder was approved, an irreversible tool is never offered
+        # "approve automatically": the next order is still asked about
+        found = await scope.advanced.tools.approval_suggestions(tool=reorder_name)
+        assert not any(s.suggestion == "auto_approve" for s in found)
 
-        assert await eventually(suggested)
-
-        # feedback on a run is stored with the run, as a person's verdict (beside the run's
-        # own ``system`` outcome, which it outranks)
+        # feedback on a run is stored with the run as a person's verdict, waiting for the
+        # tenant administrator (the memory service's ADR 0028) beside the run's own
+        # ``system`` outcome, which was applied as it arrived
         stored = await scope.feedback.list_for("run", run_ids[0])
-        assert [f.verdict for f in stored if f.source == "human"] == ["confirm"]
+        [human] = [f for f in stored if f.source == "human"]
+        assert human.verdict == "confirm" and human.review is not None
+        assert human.review.state == "pending"
+        assert all(f.review is None for f in stored if f.source == "system")
 
 
 async def test_a_profile_block_an_agent_edits_is_in_the_next_context() -> None:
@@ -127,3 +130,21 @@ async def test_the_virtual_key_is_registered_as_the_agents_model_key() -> None:
         scope = h.memory.scoped(await h.tenant(), agent.id)
         status = await scope.ctx.advanced.model_keys.status()
     assert status.registered and not status.revoked
+
+
+async def test_a_document_added_for_a_user_is_in_their_next_context() -> None:
+    suffix = uuid.uuid4().hex[:8]
+    user = f"live-user-{suffix}"
+    policy = f"Returns are accepted within 45 days of delivery (policy {suffix})."
+
+    async def assistant(input: str, agent: Runtime) -> Any:
+        return agent.context
+
+    async with live_harness() as h:
+        info = await h.add_document(
+            ("returns.txt", policy.encode(), "text/plain"), user=user, title="Returns"
+        )
+        assert info.status == "READY"
+        agent = h.wrap(assistant, id=f"live-docs-{suffix}")
+        later = await agent.run("How many days do I have to return an order?", user=user)
+        assert "45 days" in str(later.answer)

@@ -272,7 +272,7 @@ class Agent:
             self._tools[runtime.tenant] = cached
         tools = list(cached[1])
         if runtime.run_memory is not None and not self.adapter.fixed_tools:
-            tools.extend(await self.harness.memory_tools(runtime.run_memory, runtime.writes_memory))
+            tools.extend(await self.harness.memory_tools(runtime.run_memory))
         return tools
 
     async def push(self, runtime: Runtime) -> PromptContext | None:

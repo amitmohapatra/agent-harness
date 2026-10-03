@@ -16,7 +16,6 @@ from tests.live.support import memory_scope
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 from trellis.harness import agent as agent_module
-from trellis.harness.clients.memory import read_only
 
 pytestmark = [pytest.mark.live, needs_memory]
 
@@ -25,7 +24,7 @@ async def test_the_key_names_the_tenant_and_its_role() -> None:
     async with live_harness() as h:
         key = await h.key()
         assert key.tenant_id is not None and await h.tenant() == key.tenant_id
-        assert await h.writes_memory() is not read_only(key)
+        assert key.role in ("service", "admin") and await h.writes_memory()
 
 
 async def test_an_approval_rule_in_the_catalog_decides_which_calls_wait() -> None:

@@ -26,8 +26,6 @@ process.
 * **Tenant** — the key's own. A platform key (no tenant) names one per call (`tenant=` on
   `run`/`stream`/`start`/`schedule`); a tenant key refuses any other. Without a memory
   service the tenant is `default`.
-* **Memory writes** — a key whose role is read-only (`reader`) reads memory and records
-  nothing (no transcript, tool records, outcomes or model key).
 * **Memory model key** — `BIFROST_VIRTUAL_KEY` is registered as each agent's model key once
   per process (idempotently): the memory service's LLM work for the agent runs on it.
 

@@ -19,7 +19,7 @@ from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory, read_only
+from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs, RunSummary
 from trellis.harness.identity import Identity
 from trellis.harness.runtime import current
@@ -29,7 +29,7 @@ from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.sources import as_source
 from trellis.harness.worker import WORKER_CONCURRENCY, Worker
 from trellis.harness.writes import Writes
-from trellis.memory.models import KeyInfo
+from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
 
 Framework = Literal["langgraph", "openai-agents", "claude-agent-sdk"]
 #: The native tool format each framework's agents are built with.
@@ -98,7 +98,7 @@ class Harness:
         tools = await self.resolve(mine, tenant=tenant)
         if self.memory is not None:
             scope = self.memory.scoped(tenant)
-            tools.extend(await self.memory_tools(scope, await self.writes_memory()))
+            tools.extend(await self.memory_tools(scope))
         native = convert(FORMATS[framework], tools)  # type: ignore[arg-type]
         if framework == "langgraph" and native:
             number = len(self._built)
@@ -118,14 +118,17 @@ class Harness:
 
     async def feedback(
         self, run_id: str, verdict: FeedbackVerdict | str, correction: Any = None
-    ) -> None:
+    ) -> Feedback | None:
         """What a person said about a run: a score on its trace (Langfuse, when the OTLP
         settings reach it; a ``score`` span otherwise) and — memory on — the run's ``human``
-        feedback, which outranks the judge's and the run's own."""
+        feedback. The memory service stores it pending (``review.state``) until the tenant
+        administrator approves it, and only then does it outrank the judge's and the run's
+        own; the stored record is returned (None with memory off)."""
         chosen = FeedbackVerdict(verdict)
         record = await self.runs.get(run_id)
         if record is None:
             raise ConfigurationError(f"no run {run_id}")
+        stored: Feedback | None = None
         if self.memory is not None:
             scope = Identity(
                 tenant=record.tenant_id,
@@ -134,7 +137,7 @@ class Harness:
                 run_id=run_id,
                 thread=record.thread_id,
             )
-            await self.memory.bind(scope).run_feedback(
+            stored = await self.memory.bind(scope).run_feedback(
                 chosen.value,
                 source="human",
                 correction=correction,
@@ -149,6 +152,27 @@ class Harness:
             key=f"{run_id}:feedback",
             comment=comment,
         )
+        return stored
+
+    async def add_document(
+        self,
+        file: Any,
+        *,
+        user: str,
+        tenant: str | None = None,
+        thread: str | None = None,
+        title: str | None = None,
+        visibility: str | None = None,
+        wait: float | None = 60.0,
+    ) -> DocumentInfo:
+        """Add a file to ``user``'s document memory (or one thread's, with ``thread``) so the
+        agents' context cites it: bytes, a path, or a (filename, bytes, media_type) tuple.
+        Waits until it is indexed unless ``wait`` is None. ``visibility`` widens who may
+        retrieve it (``WORKSPACE``, ``TENANT``)."""
+        if self.memory is None:
+            raise ConfigurationError("memory is off in this deployment: set MEMORY_URL")
+        scope = self.memory.for_user(await self.tenant(tenant), user, thread)
+        return await scope.add_document(file, title=title, visibility=visibility, wait=wait)
 
     async def aclose(self) -> None:
         """Finish the queued writes and close the clients."""
@@ -203,7 +227,7 @@ class Harness:
         return self._key.tenant_id if self._key is not None else None
 
     async def writes_memory(self) -> bool:
-        return self.memory is not None and not read_only(await self.key())
+        return self.memory is not None
 
     # ------------------------------------------------------------------ used by agents
     async def resolve(self, sources: Sequence[Source], *, tenant: str) -> list[Tool]:
@@ -217,12 +241,9 @@ class Harness:
             published=self._published.setdefault(tenant, set()),
         )
 
-    async def memory_tools(self, run_memory: RunMemory, writes: bool) -> list[Tool]:
+    async def memory_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
-        return [
-            Tool(spec, _memory_call(spec))
-            for spec in await run_memory.agent_tools(read_only=not writes)
-        ]
+        return [Tool(spec, _memory_call(spec)) for spec in await run_memory.agent_tools()]
 
     async def registered(self, memory: Memory, identity: Identity) -> None:
         """Register ``BIFROST_VIRTUAL_KEY`` as the agent's memory model key, once per process

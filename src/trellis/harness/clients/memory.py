@@ -15,7 +15,14 @@ from typing import Any, Final
 from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
-from trellis.memory.models import AgentTool, KeyInfo, PromptContext, SideEffects
+from trellis.memory.models import (
+    AgentTool,
+    DocumentInfo,
+    Feedback,
+    KeyInfo,
+    PromptContext,
+    SideEffects,
+)
 
 #: Prompt budget for the pushed context, in tokens.
 CONTEXT_TOKEN_BUDGET: Final = 2000
@@ -24,13 +31,8 @@ READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 #: The pull tool that chooses among the run's own tools (which the harness passes).
 TOOL_SEARCH: Final = "tool_search"
 #: Key roles that may read memory but not change it (``GET /v1/keys/self``).
-READ_ONLY_ROLES: Final = frozenset({"reader"})
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
-
-
-def read_only(key: KeyInfo) -> bool:
-    return key.role in READ_ONLY_ROLES
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +60,11 @@ class Memory:
 
     def bind(self, identity: Identity) -> RunMemory:
         return RunMemory(self, self.client.bind(**identity.scope()))
+
+    def for_user(self, tenant: str, user: str, thread: str | None = None) -> RunMemory:
+        """Calls made for a person outside a run (adding a document they can retrieve)."""
+        scope = {"tenant_id": tenant, "user_id": user} | ({"thread_id": thread} if thread else {})
+        return RunMemory(self, self.client.bind(**scope))
 
     def scoped(self, tenant: str, agent_id: str | None = None) -> RunMemory:
         """Calls made outside a run: tenant-wide (the tool catalog) or for one agent (its
@@ -90,10 +97,10 @@ class RunMemory:
         )
 
     # ------------------------------------------------------------------ pull
-    async def agent_tools(self, *, read_only: bool) -> list[ToolSpec]:
+    async def agent_tools(self) -> list[ToolSpec]:
         if self.memory.listed is None:
             self.memory.listed = [_agent_tool(t) for t in await self.ctx.agent_tools()]
-        return [t for t in self.memory.listed if not read_only or t.name in READ_ONLY_TOOLS]
+        return list(self.memory.listed)
 
     async def call_agent_tool(
         self, name: str, args: dict[str, object], *, toolbox: Sequence[str] | None = None
@@ -146,12 +153,14 @@ class RunMemory:
         correction: Any = None,
         comment: str | None = None,
         reviewer: str | None = None,
-    ) -> None:
+    ) -> Feedback:
         """A verdict on this scope's run (``source`` ``system`` for how it ended, ``human``
-        for a person's); ``key`` makes a retry store it once."""
+        for a person's); ``key`` makes a retry store it once. The stored record comes back:
+        a person's verdict waits for the tenant administrator (``review.state`` pending,
+        ADR 0028 of the memory service) where the run's own status is applied at once."""
         run_id = self.ctx.scope.agent_run_id
         assert run_id is not None
-        await self.ctx.feedback(
+        return await self.ctx.feedback(
             "run",
             run_id,
             verdict,
@@ -186,6 +195,26 @@ class RunMemory:
             entry.name: Governance(risk=entry.risk, approve_when=entry.approve_when or None)
             for entry in await self.ctx.advanced.tools.catalog(names=list(names))
         }
+
+    async def add_document(
+        self,
+        file: Any,
+        *,
+        title: str | None = None,
+        visibility: str | None = None,
+        wait: float | None = 60.0,
+    ) -> DocumentInfo:
+        """Upload a file into this scope's document memory - bytes, a path, or a (filename,
+        bytes, media_type) tuple - and, unless ``wait`` is None, wait until it is indexed.
+        Context for this user (and thread) then cites it like any other document."""
+        handle = await self.ctx.advanced.documents.add(
+            file,
+            title=title,
+            visibility=visibility,  # type: ignore[arg-type]
+        )
+        if wait is None:
+            return await self.ctx.advanced.documents.document(handle.document_id)
+        return await self.ctx.advanced.documents.wait_ready(handle.document_id, max_wait=wait)
 
     async def publish_catalog(self, entries: Sequence[dict[str, object]]) -> None:
         await self.ctx.advanced.tools.put_catalog(list(entries))

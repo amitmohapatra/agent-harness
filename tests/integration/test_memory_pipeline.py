@@ -198,22 +198,6 @@ async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     assert memory_service.named("record_tool") == []  # the service logs its own tools
 
 
-async def test_a_read_only_key_reads_and_records_nothing(memory_service: FakeMemoryService) -> None:
-    memory_service.role = "reader"
-    model = ScriptedChat([("stock", {"sku": "a"}), "7"])
-    async with harness_with(memory_service, bifrost_virtual_key="vk") as h:
-        result = await h.wrap(ReAct(system="s", model=model), id="r", tools=[stock]).run(
-            "x", user="u"
-        )
-        await h.writes.drain()
-    assert result.status is RunStatus.SUCCESS
-    offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
-    assert offered == ["stock", "memory_search", "tool_search"]
-    assert memory_service.named("context")  # it reads
-    for write in ("messages", "record_tool", "feedback", "model_key"):
-        assert memory_service.named(write) == [], write
-
-
 # --------------------------------------------------------------------------- records
 async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     memory_harness: Harness, memory_service: FakeMemoryService
@@ -445,8 +429,16 @@ async def test_feedback_without_langfuse_is_a_score_span_and_memory_feedback(
 
     result = await memory_harness.wrap(fn, id="f").run("stock?", user="u")
     assert memory_harness.scores is None
-    await memory_harness.feedback(result.run_id, "confirm")
+    await memory_harness.writes.drain()  # the run's own outcome is a queued write
+    stored = await memory_harness.feedback(result.run_id, "confirm")
     assert [f.body["verdict"] for f in memory_service.named("feedback")][-1] == "confirm"
+    # a person's verdict waits for the tenant administrator; the run's own status did not
+    assert stored is not None and stored.review is not None
+    assert stored.review.state == "pending"
+    outcome = next(
+        f for f in memory_service.stored_feedback.values() if f.get("source") == "system"
+    )
+    assert "review" not in outcome
     with pytest.raises(ConfigurationError, match="no run"):
         await memory_harness.feedback("run_missing", "confirm")
 
@@ -487,3 +479,18 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
         assert note in system
     [loaded] = [e for e in events if e.type is RunEventType.CONTEXT_LOADED]
     assert loaded.data["evidence_status"] == (status or "COMPLETE")
+
+
+async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    info = await memory_harness.add_document(
+        ("terms.txt", b"Returns are accepted for 30 days.", "text/plain"),
+        user="u",
+        thread="thr_1",
+        title="Return policy",
+    )
+    assert info.status == "READY"
+    [upload] = memory_service.named("add_document")
+    assert upload.scope["tenant_id"] == "acme" and upload.scope["user_id"] == "u"
+    assert memory_service.documents[info.document_id]["thread_id"] == "thr_1"

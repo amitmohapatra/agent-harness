@@ -18,7 +18,6 @@ from trellis.harness.clients.memory import (
     Governance,
     Memory,
     catalog_entry,
-    read_only,
 )
 from trellis.harness.identity import Identity
 
@@ -128,11 +127,9 @@ def memory(service: FakeMemoryService) -> Memory:
 
 
 async def test_the_key_says_who_the_deployment_is() -> None:
-    service = FakeMemoryService(tenant="acme", role="reader")
+    service = FakeMemoryService(tenant="acme")
     key = await memory(service).key()
-    assert (key.tenant_id, key.principal) == ("acme", "svc:harness")
-    assert read_only(key) is True
-    assert read_only(await memory(FakeMemoryService()).key()) is False
+    assert (key.tenant_id, key.principal, key.role) == ("acme", "svc:harness", "service")
 
 
 async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
@@ -154,13 +151,14 @@ async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
     assert call.body["token_budget"] == 2000 and call.body["window"] is False
 
 
-async def test_agent_tools_are_listed_once_and_a_reader_gets_only_the_read_ones() -> None:
+async def test_agent_tools_are_listed_once_and_tiered_read_or_write() -> None:
     service = FakeMemoryService()
     mem = memory(service)
-    everything = await mem.bind(identity()).agent_tools(read_only=False)
-    reads = await mem.bind(identity()).agent_tools(read_only=True)
-    assert [t.name for t in everything] == [t["name"] for t in AGENT_TOOLS]
-    assert {t.name for t in reads} <= READ_ONLY_TOOLS
+    listed = await mem.bind(identity()).agent_tools()
+    again = await mem.bind(identity()).agent_tools()
+    assert [t.name for t in listed] == [t["name"] for t in AGENT_TOOLS] == [t.name for t in again]
+    assert {t.name for t in listed if t.side_effects == "read"} <= READ_ONLY_TOOLS
+    assert {t.name for t in listed if t.side_effects == "write"} == {"memory_remember"}
     assert len(service.named("agent_tools")) == 1
     # the SDK returns the tool's result itself
     assert await mem.bind(identity()).call_agent_tool("memory_search", {"query": "x"}) == [
