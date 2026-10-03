@@ -65,6 +65,8 @@ ROUTES: Final = [
     ("GET", r"/v1/tools", "catalog"),
     ("PUT", r"/v1/tools/catalog", "put_catalog"),
     ("PUT", r"/v1/agents/model-key", "model_key"),
+    ("POST", r"/v1/documents", "add_document"),
+    ("GET", r"/v1/documents/(?P<document_id>[^/]+)", "document"),
 ]
 
 
@@ -104,6 +106,8 @@ class FakeMemoryService:
     fail_times: dict[str, int] = field(default_factory=dict)
     #: feedback by id, each stored once however often it is sent
     stored_feedback: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: uploaded documents by id, with the scope they were uploaded in
+    documents: dict[str, dict[str, Any]] = field(default_factory=dict)
     calls: list[Call] = field(default_factory=list)
     agent_tools: list[dict[str, Any]] = field(default_factory=lambda: list(AGENT_TOOLS))
     _ids: itertools.count[int] = field(default_factory=itertools.count)
@@ -127,7 +131,12 @@ class FakeMemoryService:
         for method, pattern, name in ROUTES:
             matched = re.fullmatch(pattern, request.url.path)
             if request.method == method and matched:
-                body = json.loads(request.content) if request.content else None
+                json_body = request.headers.get("content-type", "").startswith("application/json")
+                body = json.loads(request.content) if request.content and json_body else None
+                if not json_body and request.content:
+                    # a multipart upload carries its scope as a JSON form field
+                    found = re.search(rb'name="scope"\r\n\r\n(\{.*?\})\r\n', request.content)
+                    body = {"scope": json.loads(found.group(1))} if found else None
                 call = Call(
                     name=name,
                     scope=_scope(request, body),
@@ -206,8 +215,32 @@ class FakeMemoryService:
                 "feedback_id": feedback_id,
                 "created_at": datetime.now(UTC).isoformat(),
                 **call.body,
+                **({"review": {"state": "pending"}} if _waits_for_review(call) else {}),
             }
         return self.stored_feedback[feedback_id]
+
+    def _add_document(self, call: Call) -> dict[str, Any]:
+        document_id = self._id("doc")
+        self.documents[document_id] = call.scope
+        return {
+            "document_id": document_id,
+            "filename": "upload",
+            "checksum": "0" * 64,
+            "size_bytes": 1,
+            "job_ids": [self._id("job")],
+        }
+
+    def _document(self, call: Call) -> dict[str, Any]:
+        return {
+            "document_id": call.path["document_id"],
+            "title": "upload",
+            "filename": "upload",
+            "media_type": "text/plain",
+            "size_bytes": 1,
+            "checksum": "0" * 64,
+            "status": "READY",
+            "archive_status": "ARCHIVED",
+        }
 
     def _verify(self, call: Call) -> dict[str, Any]:
         claims = [
@@ -266,6 +299,19 @@ class FakeMemoryService:
 
     def _id(self, prefix: str) -> str:
         return f"{prefix}_{next(self._ids)}"
+
+
+def _waits_for_review(call: Call) -> bool:
+    """The service's rule (its ADR 0028): a vote waits for the tenant administrator; a run's
+    own status citing nothing, a decision on a tool call and an owner's edit of a memory
+    do not."""
+    body = call.body
+    if body.get("target_kind") == "tool_call":
+        return False
+    if body.get("target_kind") == "memory" and body.get("verdict") not in ("confirm", "approve"):
+        return False
+    own_run = body.get("target_id") == (body.get("agent_run_id") or call.scope.get("agent_run_id"))
+    return not (body.get("source") == "system" and own_run and not body.get("evidence_refs"))
 
 
 def _scope(request: httpx.Request, body: Any) -> dict[str, Any]:

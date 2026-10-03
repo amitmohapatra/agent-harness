@@ -38,7 +38,7 @@ The service's agent tools (listed once per process) are added to the run's tools
 | `profile_edit(block, old?, new)` | edit a pinned profile block |
 | `tool_search(task)` | the next step, plan, prefill and missing arguments among the run's own tools — the harness passes the run's toolbox with the call, and offers the candidates it names to the model |
 
-A read-only key gets `memory_search` and `tool_search`. For a compiled graph they are built in
+`memory_search` and `tool_search` only read (they run unannounced); the others write. For a compiled graph they are built in
 with `h.tools(...)`. Inside a tool or a node, `trellis.current().memory` is the memory SDK's
 context bound to the run, with all its verbs.
 
@@ -55,6 +55,15 @@ In the background, after each attempt — whether it succeeded, paused or failed
   Mode's nested calls from Bifrost's log;
 * approve/reject/edit decisions as `TOOL_CALL` feedback.
 
+## Documents
+
+`h.add_document(file, user=..., thread=None, title=None, visibility=None, wait=60)` uploads a
+file to the memory service (`POST /v1/documents`) in that user's scope (or one thread's) and
+waits until it is parsed and indexed (`GET /v1/documents/{id}`). Nothing else is needed: the
+push context of the user's next run retrieves and cites its passages like any other
+document. `visibility` widens who may retrieve it (`WORKSPACE`, `TENANT`); inside a run the
+SDK's `agent.memory.advanced.documents` does the same in the run's scope.
+
 ## Outcome and grounding
 
 The run's outcome is a projection in the memory service of the feedback on the run, by
@@ -68,7 +77,12 @@ precedence **human > judge > system**:
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim is no verdict and no score.
-* **human** — `h.feedback(run_id, verdict, correction=None)`.
+* **human** — `h.feedback(run_id, verdict, correction=None)`. The memory service stores a
+  person's verdict as a vote that waits for the tenant administrator (`review.state ==
+  "pending"`, its ADR 0028): it changes the run's outcome, and the confidence of what the run
+  cited, only once approved (`GET /v1/feedback/pending`, `POST /v1/feedback/{id}/approve`
+  with the tenant's admin key). The stored record is returned so a surface can show that.
+  The `system` outcome and the judge's verdict are applied as they arrive.
 
 ## The memory model key
 
