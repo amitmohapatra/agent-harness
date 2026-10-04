@@ -541,6 +541,43 @@ async def test_a_catalog_rule_set_after_the_graph_was_built_decides_its_calls(
         assert done.status is RunStatus.SUCCESS and case.ledger == ["email:ops"]
 
 
+@pytest.mark.timeout(TIMEOUT_SECONDS)
+async def test_a_deep_agents_sub_agent_call_waits_in_agent_runs(tmp_path: Path) -> None:
+    """The irreversible call is the sub-agent's (``task``): it pauses the run like any other,
+    and the approval resumes the sub-agent in place."""
+    async with live_harness() as h:
+        case = Case(h, "deepagents", tmp_path)
+        native = await h.tools(*case.tools(), framework="langgraph")
+        buyer = PlannedChatModel(plan=[(case.reorder, {"sku": "A-1", "qty": 20})], final="{last}")
+        model = PlannedChatModel(
+            plan=[("task", {"description": "Reorder 20 x A-1.", "subagent_type": "buyer"})]
+        )
+        graph = create_deep_agent(
+            model=model,
+            tools=native,
+            subagents=[
+                {
+                    "name": "buyer",
+                    "description": "Reorders stock.",
+                    "system_prompt": "Reorder what you are asked to.",
+                    "tools": native,
+                    "model": buyer,
+                }
+            ],
+            checkpointer=InMemorySaver(),
+        )
+        agent = h.wrap(graph, id=case.agent_id)
+        paused = await agent.run(QUESTION, user=case.user, thread=case.thread)
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+        assert paused.interrupt.tool_call is not None
+        assert paused.interrupt.tool_call.tool == case.reorder and case.ledger == []
+        assert (await stored(h, paused.run_id)).status is RunStatus.PAUSED
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="fv-lead")
+        assert done.status is RunStatus.SUCCESS and done.answer == "Done. ordered 20 x A-1"
+        assert case.ledger == ["reorder:A-1:20"] and len(buyer.seen) == 2  # resumed in place
+        await written_back(h, case, done.run_id, done.answer, tool_name=case.reorder, approvals=1)
+
+
 # --------------------------------------------------------------------------- workers
 @pytest.mark.timeout(TIMEOUT_SECONDS)
 async def test_workers_claim_pause_resume_and_survive_a_crash(
