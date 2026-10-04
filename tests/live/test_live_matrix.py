@@ -901,7 +901,8 @@ async def test_a_document_added_is_cited_by_the_next_context(tmp_path: Path) -> 
 @pytest.mark.timeout(TIMEOUT_SECONDS)
 async def test_feedback_waits_for_review_in_memory_and_is_scored() -> None:
     with StubLangfuse() as langfuse:
-        async with live_harness(**langfuse.settings()) as h:
+        # no grounding check: a sampled run's /v1/verify would add a ``judge`` record
+        async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
             case = Case(h, "feedback", Path("."))
 
             async def answer(input: str, agent: Runtime) -> str:
