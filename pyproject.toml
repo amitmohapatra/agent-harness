@@ -26,7 +26,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-langgraph = ["langgraph>=1.2,<2", "langchain-core>=1.6,<2"]
+# `create_agent` and its middleware (HumanInTheLoopMiddleware, TodoListMiddleware) are
+# the `langchain` package: LangChain v1 agents are LangGraph graphs.
+langgraph = ["langgraph>=1.2,<2", "langchain-core>=1.6,<2", "langchain>=1.4,<2"]
 deepagents = ["trellis-harness[langgraph]", "deepagents>=0.7.19,<0.8"]
 openai-agents = ["openai-agents>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
@@ -43,6 +45,7 @@ dev = [
   "trellis-harness[all]",
   "pytest>=9.1",
   "pytest-asyncio>=1.4",
+  "pytest-cov>=7.0",
   "pytest-timeout>=2.3",
   "respx>=0.22",
   # tests/contract: the siblings' OpenAPI documents (3.1: JSON Schema 2020-12) check the wire

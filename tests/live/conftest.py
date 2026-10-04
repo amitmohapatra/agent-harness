@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Final
 
 import httpx
@@ -18,7 +18,7 @@ import pytest
 from bifrost_sdk import Bifrost, MCPClientConfig, MCPConnection
 from bifrost_sdk.admin import Admin
 
-from trellis import Harness, Settings
+from trellis import Evaluator, Harness, Settings
 from trellis.harness.clients.memory import Memory
 from trellis.memory import MemoryClient
 
@@ -66,13 +66,16 @@ def settings(**changes: object) -> Settings:
     return Settings.from_env().model_copy(update=changes)
 
 
-def live_harness(key: str | None = None, **changes: object) -> Harness:
+def live_harness(
+    key: str | None = None, *, judges: Sequence[Evaluator] = (), **changes: object
+) -> Harness:
     """A harness for the environment's deployment, with the virtual key ``key`` (a session
-    key from the fixtures; the environment's otherwise); its memory client waits longer than
-    a deployment's would, since the services share one development machine."""
+    key from the fixtures; the environment's otherwise) and the online ``judges``; its memory
+    client waits longer than a deployment's would, since the services share one development
+    machine."""
     if key is not None:
         changes["bifrost_virtual_key"] = key
-    h = Harness(config=settings(**changes))
+    h = Harness(config=settings(**changes), judges=judges)
     s = h.settings
     if s.memory_url is not None:
         client = MemoryClient(s.memory_url, api_key=s.api_key, timeout=LIVE_TIMEOUT)

@@ -16,7 +16,12 @@ the [README](../README.md); how it works is in [ARCHITECTURE.md](../ARCHITECTURE
 
 Teams bring their own model objects pointed at Bifrost's OpenAI-compatible endpoint
 (`ChatOpenAI(base_url=BIFROST_URL)`, `OpenAIChatCompletionsModel(AsyncOpenAI(base_url=...))`);
-the harness wraps agents, not models.
+the harness wraps agents, not models. Each target has a page with the lines to add to an
+existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.md),
+[Deep Agents](frameworks/deepagents.md), [OpenAI Agents SDK](frameworks/openai-agents.md),
+[Claude Agent SDK](frameworks/claude-agent-sdk.md), [ReAct](frameworks/react.md),
+[plain functions](frameworks/functions.md); the short decision tables are in
+[docs/README.md](README.md#what-to-use-when).
 
 ## Where a tool comes from
 
@@ -60,10 +65,12 @@ Where the answer comes from does not matter to the run: `await agent.resume(inte
 decision, answer=..., reviewer=...)` in code, a `resume` entry from the chat UI, or the next
 A2A message on the task.
 
-How the run continues: a LangGraph graph with a checkpointer resumes where it stopped; every
-other target runs again from its input, and the journal returns the answers and tool outputs
-it already has. Keep side effects in harness tools: a call through the bridge runs once, but
-code outside a tool (and the model calls) run again on the re-run.
+How the run continues: a LangGraph graph with a checkpointer resumes where it stopped (where
+that checkpointer still holds the pause — an `InMemorySaver` only in the process that paused),
+and an OpenAI Agents `needs_approval` pause continues the SDK's saved run; every other pause
+runs the target again from its input, and the journal returns the answers and tool outputs it
+already has. Keep side effects in harness tools: a call through the bridge runs once, but code
+outside a tool (and the model calls) run again on the re-run.
 
 ## Running it
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any, Final, Literal
 
 from trellis.contracts import ConfigurationError, FeedbackVerdict, ToolSpec
@@ -146,14 +147,15 @@ class Harness:
         is still the harness's: policy, approval, record."""
         mine = [as_source(s) for s in sources]
         tenant = await self.tenant()
-        tools = await self.resolve(mine, tenant=tenant)
+        number = len(self._built)
+        self._built[number] = mine
+        # each tool names this call: its calls read the toolbox's governance as it is then
+        tools = [replace(t, toolbox=number) for t in await self.resolve(mine, tenant=tenant)]
         if self.memory is not None:
             scope = self.memory.scoped(tenant)
             tools.extend(await self.memory_tools(scope))
         native = convert(FORMATS[framework], tools)  # type: ignore[arg-type]
         if framework == "langgraph" and native:
-            number = len(self._built)
-            self._built[number] = mine
             for tool in native:
                 tool.metadata = {**(tool.metadata or {}), TOOLBOX: number}
         return native
@@ -319,6 +321,10 @@ class Harness:
         if requested is not None and requested != own:
             raise ConfigurationError(f"TRELLIS_API_KEY speaks for {own!r}, not {requested!r}")
         return own
+
+    def built(self, number: int) -> list[Source]:
+        """The sources of the :meth:`tools` call ``number``."""
+        return self._built[number]
 
     def built_for(self, tools: Sequence[Any]) -> list[Source]:
         """The sources of the :meth:`tools` calls that ``tools`` (a graph's bound tools) came

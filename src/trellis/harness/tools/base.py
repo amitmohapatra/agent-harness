@@ -31,6 +31,9 @@ class Tool:
     code_mode: bool = False
     #: the catalog's ``approve_when`` expression: a call asks exactly when it holds
     approve_when: str | None = None
+    #: which ``Harness.tools`` call built it into an agent: a call reads that toolbox's
+    #: governance as it is then, not as it was when the agent was built
+    toolbox: int | None = None
 
     @property
     def name(self) -> str:

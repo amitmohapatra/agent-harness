@@ -21,7 +21,10 @@ nothing (attributes are built only for a recording span).
 | `score <name>` — a grounding score or feedback | `langfuse.observation.type=evaluator`, `trellis.run_id`, `trellis.score.name`, `.value`, `.comment`, and a `score` event |
 
 A framework's own model calls are its instrumentation's (LangChain, OpenAI Agents and Claude
-all have OTel GenAI instrumentations); they nest under the attempt's span.
+all have OTel GenAI instrumentations); they nest under the attempt's span. A framework's own
+tools (Deep Agents' file tools, Claude Code's built-ins, an OpenAI `function_tool` of your own)
+are not harness tools and get no `execute_tool` span of the harness's
+([framework pages](README.md#which-target)).
 
 ### Trace attributes (Langfuse's mapping, verified against its OTel docs)
 

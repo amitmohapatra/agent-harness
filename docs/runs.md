@@ -44,6 +44,12 @@ drains (at most 10 s; what is left is spooled or counted lost — [memory.md](me
 process exits `0`. Give the container at least 40 s to stop (e.g. a termination grace period of
 45 s). Cancelling `worker.run()` instead cancels the runs it holds: they end `CANCELLED`.
 
+A worker runs any target. Build it the same way in every worker process (at import, in the
+module the worker loads); a LangGraph graph's own `interrupt()` (or HITL middleware) pause needs a
+checkpointer every worker can reach — a harness approval or `ask` resumed by another worker is
+answered from the journal even with an `InMemorySaver`
+([langgraph.md](frameworks/langgraph.md#approvals-and-pauses)).
+
 A worker claims a queued run under a 60 s lease and heartbeats it every 20 s (a failed
 heartbeat is logged and retried at the next beat). It names itself
 on the pause, the finish and an artifact upload, so a worker whose lease lapsed cannot write

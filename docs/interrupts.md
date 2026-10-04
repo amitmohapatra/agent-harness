@@ -73,6 +73,14 @@ resume must answer the interrupt the run currently waits on.
   return their recorded outputs instead of running again. Entries are keyed by content (the
   question; the tool and its arguments) and consumed in order.
 
+Per framework — which pauses resume in place, what the model is asked again, the frameworks'
+own gates — see the [framework pages](README.md#which-target). A checkpointed graph resumes in
+place only where its checkpointer still holds the pause — with `InMemorySaver`, the process
+that paused it. Resumed elsewhere (a worker, a replica), an approval or `ask` of the harness's
+is answered from the journal (a re-run, as without a checkpointer), and a graph's own
+`interrupt()` or middleware pause fails the run: those need a shared checkpointer
+([langgraph.md](frameworks/langgraph.md#approvals-and-pauses)).
+
 The journal is the run's checkpoint: the pause stores it with the run (`RunRecord.checkpoint`
 in agent-runs, cleared when the run ends), and whichever process or worker resumes the run
 reads it back with the resolution, so a resume elsewhere repeats no question and no tool

@@ -15,7 +15,7 @@ import pytest
 import respx
 
 from tests.support.memory import CONTRACT, ROUTES, FakeMemoryService
-from tests.support.openapi import RUNS_OPENAPI, OpenAPI
+from tests.support.openapi import runs_contract
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import (
     Interrupt,
@@ -121,17 +121,11 @@ def test_the_checker_catches_a_body_the_contract_refuses() -> None:
 
 
 # --------------------------------------------------------------------------- agent-runs
-def _runs_contract() -> OpenAPI:
-    if not RUNS_OPENAPI.exists():
-        pytest.skip(f"agent-runs commits no OpenAPI document at {RUNS_OPENAPI}")
-    return OpenAPI.load(RUNS_OPENAPI, strict_query=True)
-
-
 @respx.mock
 async def test_every_runs_call_the_harness_makes_speaks_the_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    contract = _runs_contract()
+    contract = runs_contract()
     violations: list[str] = []
     start = RunStart(run_id="run_1", tenant_id="t", agent_id="a", thread_id="thr", user_id="u")
     record = RunRecord.from_start(start, status=RunStatus.RUNNING)
@@ -211,7 +205,7 @@ async def test_every_runs_call_the_harness_makes_speaks_the_contract(
 
 
 def test_the_runs_problem_document_reads_as_the_runs_client_reads_it() -> None:
-    contract = _runs_contract()
+    contract = runs_contract()
     schemas = contract.document["components"]["schemas"]
     assert (
         "LEASE_LOST" in schemas["ErrorCode"]["enum"] and "CONFLICT" in schemas["ErrorCode"]["enum"]

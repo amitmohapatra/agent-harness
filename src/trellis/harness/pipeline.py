@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from trellis.contracts import (
     AgentError,
+    ConfigurationError,
     Interrupt,
     InterruptReason,
     InterruptResolution,
@@ -34,7 +35,7 @@ from trellis.contracts import (
 )
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
-from trellis.harness.adapters.langgraph import FOREIGN, HITL, is_hitl
+from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.clients.runs import Conflict, LeaseLost
 from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
@@ -74,6 +75,7 @@ async def attempt(
     ``lease_seconds`` its length (progress checkpoints extend it). ``observe`` is told the memory
     context the run was given (an offline evaluation's evaluators read it)."""
     journal = journal or Journal()
+    unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
     replay = _replay(journal, resolution)
     events = RunEvents(identity.context(), number)
@@ -116,6 +118,8 @@ async def attempt(
             pushed = await agent.push(runtime)
             if observe is not None:
                 observe(pushed)
+            if unresumable is not None:
+                raise unresumable
             native_input = agent.adapter.prepare_input(agent.target, input, runtime.context)
             if pending is not None and resolution is not None:
                 native_input = agent.adapter.resume_input(
@@ -173,6 +177,35 @@ async def _concluded(
         return await _failed(agent, runtime, error, extracted)
     assert extracted is not None
     return await _succeeded(agent, runtime, extracted, pushed)
+
+
+async def _unheld(
+    agent: Agent, identity: Identity, journal: Journal, resolution: InterruptResolution | None
+) -> ConfigurationError | None:
+    """A checkpointed graph's pause resumes in place only where its checkpointer still holds it
+    (an ``InMemorySaver`` is the pausing process's). Where it does not, a pause of the harness's
+    own (an approval, an ``ask``) is answered from the journal instead — the graph runs again
+    from its input, as without a checkpointer — and a graph's own pause (its ``interrupt()``,
+    the HITL middleware's), which only the checkpointer can answer, is the error the attempt
+    fails with."""
+    pending = journal.pending
+    if (
+        resolution is None
+        or pending is None
+        or pending.native_id is None
+        or pending.native_state is not None  # a serialised run (OpenAI Agents) travels along
+        or await holds(agent.target, identity.thread or identity.run_id, pending.native_id)
+    ):
+        return None
+    if pending.key in (FOREIGN, HITL):
+        return ConfigurationError(
+            f"the graph's checkpointer no longer holds the pause {pending.native_id} of thread "
+            f"{identity.thread}: resume it where it paused, or give every process a shared "
+            "checkpointer"
+        )
+    log.info("run %s: its checkpointer lost the pause; answered from the journal", identity.run_id)
+    journal.pending = pending.model_copy(update={"native_id": None})
+    return None
 
 
 def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:

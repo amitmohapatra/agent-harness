@@ -3,7 +3,8 @@
 * input: the prompt, and the memory context appended to the options' system prompt;
 * run: ``query(prompt, options)`` on a copy of the options that also carries the harness
   tools as one in-process MCP server (``mcp__trellis__*``, pre-allowed: the bridge is the
-  permission check);
+  permission check) beside the team's own servers — a ``mcp_servers`` given as a config file
+  or JSON text is read, since the SDK serves an in-process server only from a dict;
 * pause: ``trellis.current().ask`` inside a harness tool stops consuming the query (the CLI
   process ends) and a resume re-runs it against the journal.
 """
@@ -13,9 +14,10 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, ClassVar
 
-from trellis.contracts import InterruptResolution
+from trellis.contracts import ConfigurationError, InterruptResolution
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
 from trellis.harness.journal import Pending
 
@@ -109,10 +111,26 @@ def _options(options: Any, context: str | None, run: Invocation) -> Any:
     if context:
         changes["system_prompt"] = _with_context(options.system_prompt, context)
     if run.native_tools is not None:
-        servers = options.mcp_servers if isinstance(options.mcp_servers, dict) else {}
+        servers = configured_servers(options.mcp_servers)
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
         changes["allowed_tools"] = [*options.allowed_tools, *convert.allowed_names(run.tools)]
     return dataclasses.replace(options, **changes) if changes else options
+
+
+def configured_servers(configured: Any) -> dict[str, Any]:
+    """The team's MCP servers as a dict, so the harness's in-process server (which the SDK
+    serves only from a dict) goes beside them: a dict as it is; a path to, or the JSON text of,
+    what the CLI's ``--mcp-config`` reads (``{"mcpServers": {...}}``) read into one."""
+    if isinstance(configured, dict):
+        return configured
+    if not configured:
+        return {}
+    text = str(configured).strip()
+    data = json.loads(text if text.startswith("{") else Path(text).read_text())
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        raise ConfigurationError(f"mcp_servers {text[:80]!r} holds no mcpServers object")
+    return servers
 
 
 def _with_context(system_prompt: Any, context: str) -> Any:

@@ -30,7 +30,10 @@ async with Harness() as h:
 h = Harness(judges=[llm_judge("Polite, correct and concise.", name="quality")])
 ```
 
-`examples/evaluate_offline.py` and `examples/online_judges.py` run both with no services.
+`examples/evaluate_offline.py` and `examples/online_judges.py` run both with no services. Both
+work on every target ([framework pages](README.md#which-target)); against the real memory
+service, `tests/live/test_live_matrix.py` runs them with grounding, `exact_match` and a scripted
+judge, and checks the Langfuse dataset run, scores and experiment attributes.
 
 ## Evaluators
 

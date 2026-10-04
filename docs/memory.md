@@ -15,7 +15,7 @@ attribute on the target or its `model`, or a LangChain model's `profile`), betwe
 8000, else 2000 — answered in
 the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, tools?}`, items cited
 by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
-message (see the README's matrix) and is `trellis.current().context`; the `bundle_id` is what
+message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what
 the grounding check verifies the answer against.
 
 * `window=false` when the framework keeps the thread's messages itself (a LangGraph graph with

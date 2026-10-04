@@ -4,7 +4,9 @@ executes the runs the schedule queues.
     .venv/bin/python examples/schedule.py      # waits for the next minute (≤ 60 s), then exits
 
 In production the schedule lives in agent-runs (``RUNS_URL``) and its ticker queues the runs;
-here the in-process run store fires it when the worker asks for work.
+here the in-process run store fires it when the worker asks for work. With ``MEMORY_URL`` set a
+scheduled run is the person's like any other: its context is pushed from their memory, and its
+transcript and outcome are recorded (its own thread: the run id).
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ async def main() -> None:
 
     async def briefing(input: str, agent: Runtime) -> str:
         text = f"Morning briefing for {agent.user}: {input}"
+        if agent.context:  # memory on: what the service knows about the person and the task
+            text += f" (memory context: {len(agent.context)} characters)"
         print(text)
         briefed.set()
         return text
