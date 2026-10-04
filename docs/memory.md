@@ -30,7 +30,9 @@ it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` s
 
 ## Pull
 
-The service's agent tools (listed once per process) are added to the run's tools: 
+The service's agent tools (listed again every 10 minutes; while the service cannot be reached
+the last listing stands, and a run when they were never listed goes without them, with a
+`warning` event) are added to the run's tools:
 
 | Tool | |
 |---|---|

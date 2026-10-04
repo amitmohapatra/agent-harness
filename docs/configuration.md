@@ -40,8 +40,11 @@ mapping instead of `os.environ`, and blank values count as unset):
 ## Who the deployment is
 
 Not configured: the memory service says it about `TRELLIS_API_KEY`
-(`GET /v1/keys/self` → `{key_id, tenant_id, principal, role, may_act_as}`), asked once per
-process.
+(`GET /v1/keys/self` → `{key_id, tenant_id, principal, role, may_act_as}`), asked at first use
+and again every 10 minutes. While the service cannot be reached the last answer stands (asked
+again after 30 s), so an outage does not stop runs; a key the service refuses (`401`/`403`), or
+one it could never be asked about (the first ask failed), raises `ConfigurationError` with what
+went wrong.
 
 * **Tenant** — the key's own. A platform key (no tenant) names one per call (`tenant=` on
   `run`/`stream`/`start`/`schedule`); a tenant key refuses any other. Without a memory

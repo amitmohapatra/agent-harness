@@ -5,7 +5,9 @@ and attaches all of it to agents with :meth:`Harness.wrap`.
 Nothing about an agent is configured beyond ``h.wrap(target, id=...)``: memory is on when the
 deployment has a memory service, the MCP tools are the ones the Bifrost virtual key allows,
 risk tiers and approval rules come from the tools and the catalog, and who the deployment is
-(its tenant, whether it may write memory) comes from ``TRELLIS_API_KEY`` itself.
+(its tenant) comes from ``TRELLIS_API_KEY`` itself — asked of the memory service, remembered
+for the process (asked again every :data:`KEY_TTL_SECONDS`, the last answer kept while the
+service is down).
 """
 
 from __future__ import annotations
@@ -21,14 +23,16 @@ from trellis.harness.agent import Agent
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs, RunSummary
+from trellis.harness.fresh import Fresh
 from trellis.harness.identity import Identity
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
-from trellis.harness.tools import toolbox
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.sources import as_source
+from trellis.harness.tools.toolbox import Published, Toolbox
 from trellis.harness.worker import Worker
 from trellis.harness.writes import Writes
+from trellis.memory.errors import AuthenticationError, AuthorizationError
 from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
 
 Framework = Literal["langgraph", "openai-agents", "claude-agent-sdk"]
@@ -42,6 +46,11 @@ FORMATS: Final = {
 TOOLBOX: Final = "trellis_toolbox"
 #: The tenant of a deployment with no memory service (development: nothing to ask).
 LOCAL_TENANT: Final = "default"
+#: How long what the memory service said about ``TRELLIS_API_KEY`` is kept before it is asked
+#: again; while the service cannot be reached the last answer is kept (asked again after the
+#: retry interval).
+KEY_TTL_SECONDS: Final = 600.0
+KEY_RETRY_SECONDS: Final = 30.0
 #: How a person's verdict reads as a Langfuse score.
 VERDICT_SCORES: Final = {"confirm": 1.0, "approve": 1.0, "edit": 0.5, "correct": 0.0, "reject": 0.0}
 
@@ -68,9 +77,15 @@ class Harness:
         #: the sources of each :meth:`tools` call, by the toolbox number its tools carry: a
         #: LangGraph agent's toolbox is the sources of the calls its graph's tools came from
         self._built: dict[int, list[Source]] = {}
-        self._key: KeyInfo | None = None
+        self._key = Fresh(
+            self._whoami,
+            what="who TRELLIS_API_KEY is",
+            ttl=KEY_TTL_SECONDS,
+            retry=KEY_RETRY_SECONDS,
+            fatal=(ConfigurationError,),
+        )
         self._registered: set[tuple[str, str]] = set()
-        self._published: dict[str, set[str]] = {}
+        self._published: dict[str, Published] = {}
         telemetry.configure(s)
 
     # ------------------------------------------------------------------ attaching
@@ -191,15 +206,30 @@ class Harness:
 
     # ------------------------------------------------------------------ who we are
     async def key(self) -> KeyInfo:
-        """What the memory service says about ``TRELLIS_API_KEY`` (asked once)."""
-        if self._key is None:
-            if self.memory is None:
-                self._key = KeyInfo(
-                    key_id="local", tenant_id=LOCAL_TENANT, principal="local", role="service"
-                )
-            else:
-                self._key = await self.memory.key()
-        return self._key
+        """What the memory service says about ``TRELLIS_API_KEY``: asked at first use, then
+        every :data:`KEY_TTL_SECONDS`; while the service cannot be reached the last answer
+        stands. ``ConfigurationError`` when the service refuses the key, or could never be
+        reached to say who it is."""
+        return await self._key.get()
+
+    async def _whoami(self) -> KeyInfo:
+        if self.memory is None:
+            return KeyInfo(
+                key_id="local", tenant_id=LOCAL_TENANT, principal="local", role="service"
+            )
+        try:
+            return await self.memory.key()
+        except (AuthenticationError, AuthorizationError) as exc:
+            raise ConfigurationError(
+                f"the memory service at MEMORY_URL refused TRELLIS_API_KEY: {exc}"
+            ) from exc
+        except Exception as exc:
+            if self._key.value is not None:
+                raise  # a known key stands while the service is away
+            raise ConfigurationError(
+                "the memory service at MEMORY_URL could not be reached to say who "
+                f"TRELLIS_API_KEY is (its tenant): {type(exc).__name__}: {exc}"
+            ) from exc
 
     async def tenant(self, requested: str | None = None) -> str:
         """The tenant a call runs in: the key's own. Only a platform key (no tenant of its
@@ -225,23 +255,28 @@ class Harness:
     def known_tenant(self) -> str | None:
         """The key's tenant once :meth:`key` has been asked (``None`` before, or for a
         platform key)."""
-        return self._key.tenant_id if self._key is not None else None
+        return self._key.value.tenant_id if self._key.value is not None else None
 
     async def writes_memory(self) -> bool:
         """Whether runs record their transcript, tool calls and outcome: memory is on."""
         return self.memory is not None
 
     # ------------------------------------------------------------------ used by agents
-    async def resolve(self, sources: Sequence[Source], *, tenant: str) -> list[Tool]:
-        """The toolbox: ``sources`` and the MCP tools, tiered by the catalog."""
+    def toolbox(self, sources: Sequence[Source], *, tenant: str) -> Toolbox:
+        """A toolbox of ``sources`` and the MCP tools in ``tenant``, tiered by the catalog and
+        kept fresh (``tools/toolbox.py``)."""
         catalog = self.memory.scoped(tenant) if self.memory is not None else None
-        return await toolbox.resolve(
+        return Toolbox(
             sources,
             gateway=self.gateway,
             catalog=catalog,
             writes=self.writes,
-            published=self._published.setdefault(tenant, set()),
+            published=self._published.setdefault(tenant, Published()),
         )
+
+    async def resolve(self, sources: Sequence[Source], *, tenant: str) -> list[Tool]:
+        """The toolbox once: ``sources`` and the MCP tools, tiered by the catalog."""
+        return await self.toolbox(sources, tenant=tenant).tools()
 
     def _replay(self, record: dict[str, Any]) -> Callable[[], Awaitable[object]] | None:
         """A memory write an earlier process spooled, as a write again (memory on)."""

@@ -52,14 +52,15 @@ src/trellis/
   __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory)
   worker.py            python -m trellis.worker module:harness
   harness/
-    harness.py         Harness: settings → clients, writes, scores; the key (tenant, role);
+    harness.py         Harness: settings → clients, writes, scores; the key (tenant, kept fresh);
                        wrap / tools / worker / inbox / feedback / add_document
     agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
     pipeline.py        one attempt of one run (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
     journal.py         what a re-run needs: answers and tool outputs, keyed by content
     events.py          a run's RunEvent stream (built only when someone listens)
-    writes.py          background writes with auto-drain
+    writes.py          background writes: retries, backpressure, the spool, auto-drain
+    fresh.py           a value read from a service, kept for a TTL, the last one through outages
     identity.py        tenant / user / thread / agent / run → memory scope, contracts context
     result.py          Result
     settings.py        the environment
@@ -152,8 +153,13 @@ flowchart LR
   G --> H[background: transcript,<br/>system outcome, sampled grounding]
 ```
 
-A failed memory read is a `warning` event, not a failed run. Writes to agent-runs are awaited
-(a pause that was not recorded cannot be resumed); writes to the memory service are queued.
+A memory service that is down degrades a run, it never fails it: a failed context read is a
+`warning` event; the memory tools that cannot be listed are left out (a `warning` event); a
+catalog that cannot be read makes every tool that does more than read ask; who
+`TRELLIS_API_KEY` is stays what it was last read (`fresh.Fresh`). Only a key the service refuses,
+or one it could never be asked about, is a `ConfigurationError`. Writes to agent-runs are
+awaited (a pause that was not recorded cannot be resumed) and retried; writes to the memory
+service are queued.
 
 ### One run, end to end
 
@@ -176,12 +182,12 @@ sequenceDiagram
   participant LF as Langfuse (scores API / OTLP)
 
   User->>Agent: await agent.run(input, user=, thread=)
-  Agent->>Mem: GET /v1/keys/self (once per process: tenant, role)
+  Agent->>Mem: GET /v1/keys/self (tenant, kept 10 min, the last answer while memory is down)
   Agent->>Runs: started(RunStart) → RUNNING
   Agent->>P: attempt(agent, identity, input)
-  P->>GW: MCP tools/list with the virtual key (toolbox, cached 300 s)
-  P->>Mem: GET /v1/tools?names= (catalog tiers, approve_when)
-  P->>Mem: GET /v1/agent-tools (pull tools, once per process)
+  P->>GW: MCP tools/list with the virtual key (definitions, kept 300 s)
+  P->>Mem: GET /v1/tools?names= + If-None-Match (tiers, approve_when, every 30 s)
+  P->>Mem: GET /v1/agent-tools (pull tools, kept 10 min)
   P->>Mem: POST /v1/context (memory recall: retrieve memory span)
   Mem-->>P: rendered, bundle_id, tools [name, confidence]
   P->>FW: prepare_input(input, context), invoke(native tools)
@@ -232,11 +238,18 @@ adapter with fixed tools (a compiled graph) refuses `tools=` at wrap time; its t
 
 ## Tools
 
-The toolbox (`tools/toolbox.py`) is resolved once per agent and tenant and again after
-`TOOLS_TTL_SECONDS` (300): the local sources, every MCP tool the Bifrost virtual key allows,
-the catalog's word on each (`side_effects`, `approve_when`), Code Mode for the read-only Code
-Mode servers when there are enough of them, and every tool published to the catalog in the
-background. Every call, whoever makes it, goes through `tools/bridge.call`:
+The toolbox (`tools/toolbox.py`, one `Toolbox` per agent and tenant) keeps two things fresh on
+two clocks: the definitions — the local sources and every MCP tool the Bifrost virtual key
+allows — listed again after `TOOLS_TTL_SECONDS` (300), and the governance — the catalog's word on
+each tool (`risk`, `approve_when`) — read again after `GOVERNANCE_TTL_SECONDS` (30) with the last
+answer's `ETag` (`If-None-Match`; a `304` keeps what was read), so an administrator's new rule
+reaches running agents within half a minute. One refresh at a time: concurrent runs that find
+the toolbox stale share one read. Code Mode is chosen for the read-only Code Mode servers when
+there are enough of them, and every tool is published to the catalog in the background (and
+published again at the next listing if that failed). A catalog that cannot be read leaves each
+tool its own tier, except that every tool that does more than read asks for approval
+(`policy.CATALOG_UNREAD`) until it can (governance read in the last 300 s still stands); the
+warning is logged once. Every call, whoever makes it, goes through `tools/bridge.call`:
 
 1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
    recorded output is returned and nothing runs;

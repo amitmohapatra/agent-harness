@@ -183,8 +183,17 @@ async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() ->
         ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)
     )
     assert service.named("record_tool")[0].body["status"] == "ok"
-    found = await run.catalog(["erp-get_stock", "missing"])
+    found, etag = await run.catalog(["erp-get_stock", "missing"])
     assert found == {"erp-get_stock": Governance(risk="read", approve_when="qty > 5")}
+    assert etag is not None
+    # asked again with that ETag: nothing changed, nothing sent back
+    assert await run.catalog(["erp-get_stock", "missing"], etag=etag) == (None, etag)
+    service.catalog["erp-get_stock"]["approve_when"] = "qty > 9"
+    changed, newer = await run.catalog(["erp-get_stock", "missing"], etag=etag)
+    assert changed == {"erp-get_stock": Governance(risk="read", approve_when="qty > 9")}
+    assert newer not in (None, etag)
+    service.etags = False  # a service that sends no ETag is read in full every time
+    assert (await run.catalog(["erp-get_stock"], etag=newer))[1] is None
     await run.run_feedback("confirm", source="system", key="run_1:outcome")
     [feedback] = service.named("feedback")
     assert feedback.body["target_kind"] == "run" and feedback.body["target_id"] == "run_1"

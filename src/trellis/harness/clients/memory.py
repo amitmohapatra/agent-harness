@@ -14,10 +14,12 @@ from typing import Any, Final
 
 from trellis.contracts import Feedback as Decision
 from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
+from trellis.harness.fresh import Fresh
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.models import (
     AgentTool,
+    CatalogTool,
     DocumentInfo,
     Feedback,
     KeyInfo,
@@ -34,6 +36,11 @@ READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 TOOL_SEARCH: Final = "tool_search"
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
+#: How long the agent-tool listing is kept before it is listed again; while the service
+#: cannot be reached, the last listing is kept and asked for again after the retry interval.
+AGENT_TOOLS_TTL_SECONDS: Final = 600.0
+AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
+NOT_MODIFIED: Final = 304
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +59,28 @@ class Memory:
         self, url: str, api_key: str | None, *, client: MemoryClient | None = None
     ) -> None:
         self.client = client or MemoryClient(url, api_key=api_key)
-        #: the agent-tool listing: a fixed set, listed once per process
-        self.listed: list[ToolSpec] | None = None
+        self._lister = self.client.bind()
+        self._agent_tools = Fresh(
+            self._list_agent_tools,
+            what="the memory service's agent tools",
+            ttl=AGENT_TOOLS_TTL_SECONDS,
+            retry=AGENT_TOOLS_RETRY_SECONDS,
+        )
+
+    @property
+    def listed(self) -> list[ToolSpec] | None:
+        """The agent tools last listed (``None`` before the first listing)."""
+        return self._agent_tools.value
+
+    async def agent_tools(self, ctx: MemoryContext) -> list[ToolSpec]:
+        """The memory service's agent tools (a fixed set, listed in the asking run's scope):
+        listed again every :data:`AGENT_TOOLS_TTL_SECONDS`, the last listing kept while the
+        service is down; raises only when they were never listed."""
+        self._lister = ctx
+        return list(await self._agent_tools.get())
+
+    async def _list_agent_tools(self) -> list[ToolSpec]:
+        return [_agent_tool(t) for t in await self._lister.agent_tools()]
 
     async def key(self) -> KeyInfo:
         """Who ``TRELLIS_API_KEY`` is: its tenant, principal and role."""
@@ -127,9 +154,7 @@ class RunMemory:
 
     # ------------------------------------------------------------------ pull
     async def agent_tools(self) -> list[ToolSpec]:
-        if self.memory.listed is None:
-            self.memory.listed = [_agent_tool(t) for t in await self.ctx.agent_tools()]
-        return list(self.memory.listed)
+        return await self.memory.agent_tools(self.ctx)
 
     async def call_agent_tool(self, name: str, args: dict[str, object]) -> object:
         """One memory tool, in this run's scope."""
@@ -214,13 +239,29 @@ class RunMemory:
         return round(1.0 - report.per_claim_hallucination_rate, 4)
 
     # ------------------------------------------------------------------ catalog
-    async def catalog(self, names: Sequence[str]) -> dict[str, Governance]:
-        """What the catalog says about each named tool: the tier it decided, and the rule an
-        administrator (or an accepted suggestion) set. Tools it does not know are absent."""
-        return {
+    async def catalog(
+        self, names: Sequence[str], *, etag: str | None = None
+    ) -> tuple[dict[str, Governance] | None, str | None]:
+        """What the catalog says about each named tool — the tier it decided, and the rule an
+        administrator (or an accepted suggestion) set; tools it does not know are absent —
+        and the answer's ``ETag``. With the ``etag`` of an earlier answer the request is
+        conditional (``If-None-Match``): ``None`` means nothing changed since. A service that
+        sends no ``ETag`` is simply read in full each time."""
+        headers = {"If-None-Match": etag} if etag else None
+        # the SDK's transport (auth, scope headers, retries, problem errors), for the headers
+        # of the answer its catalog() does not return
+        response = await self.ctx.client.transport._perform(
+            "GET", "/v1/tools", scope=self.ctx.scope, params={"names": list(names)}, headers=headers
+        )
+        tag = response.headers.get("etag")
+        if response.status_code == NOT_MODIFIED:
+            return None, tag or etag
+        entries = [CatalogTool.model_validate(t) for t in response.json().get("tools", [])]
+        governance = {
             entry.name: Governance(risk=entry.risk, approve_when=entry.approve_when or None)
-            for entry in await self.ctx.advanced.tools.catalog(names=list(names))
+            for entry in entries
         }
+        return governance, tag
 
     async def add_document(
         self,

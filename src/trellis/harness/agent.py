@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
@@ -38,13 +37,12 @@ from trellis.harness.runtime import Runtime, run_of
 from trellis.harness.telemetry import output, retrieval_span
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.sources import as_source
+from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
 
-#: How long a resolved toolbox is reused before its sources and the catalog are read again.
-TOOLS_TTL_SECONDS: Final = 300.0
 #: From this many tools, the tool hints are asked for and narrow what the model is offered.
 TOOL_HINTS_MIN: Final = 5
 #: The share of successful runs whose answer is checked against the context it was given
@@ -83,8 +81,8 @@ class Agent:
         self.sources = [as_source(t) for t in tools]
         if self.adapter.fixed_tools:
             self.sources = harness.built_for(bound_tools(target))
-        #: the resolved toolbox per tenant, and when it was resolved
-        self._tools: dict[str, tuple[float, list[Tool]]] = {}
+        #: the toolbox per tenant, kept fresh
+        self._toolboxes: dict[str, Toolbox] = {}
 
     # ------------------------------------------------------------------ running
     async def run(
@@ -268,15 +266,19 @@ class Agent:
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
-        """The toolbox (resolved once per TTL and tenant) and the memory pull tools."""
-        now = time.monotonic()
-        cached = self._tools.get(runtime.tenant)
-        if cached is None or now - cached[0] > TOOLS_TTL_SECONDS:
-            cached = (now, await self.harness.resolve(self.sources, tenant=runtime.tenant))
-            self._tools[runtime.tenant] = cached
-        tools = list(cached[1])
+        """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
+        tools — none, with a warning, when the memory service cannot list them."""
+        box = self._toolboxes.get(runtime.tenant)
+        if box is None:
+            box = self._toolboxes[runtime.tenant] = self.harness.toolbox(
+                self.sources, tenant=runtime.tenant
+            )
+        tools = await box.tools()
         if runtime.run_memory is not None and not self.adapter.fixed_tools:
-            tools.extend(await self.harness.memory_tools(runtime.run_memory))
+            try:
+                tools.extend(await self.harness.memory_tools(runtime.run_memory))
+            except Exception as exc:
+                runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return tools
 
     async def push(self, runtime: Runtime) -> PromptContext | None:

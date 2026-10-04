@@ -2,8 +2,9 @@
 
 ## The toolbox
 
-An agent's tools, resolved once per agent and tenant and again after `TOOLS_TTL_SECONDS`
-(300), in `tools/toolbox.py`:
+An agent's tools, per agent and tenant, in `tools/toolbox.py` — their definitions listed again
+after `TOOLS_TTL_SECONDS` (300), their governance (the catalog) read again after
+`GOVERNANCE_TTL_SECONDS` (30; see below):
 
 | Where from | Tools | Side effects |
 |---|---|---|
@@ -16,10 +17,13 @@ An agent's tools, resolved once per agent and tenant and again after `TOOLS_TTL_
 `tools=` takes only what runs in this process; which MCP tools an agent has is decided where
 its virtual key is configured, in the gateway. Tool names must be unique across the toolbox.
 
-With memory on, the tool catalog (`GET /v1/tools?names=`) is read for every tool, and every
-tool is published to it in the background, once per content: MCP tools with their annotations
-(never a `side_effects` of the harness's making, so an administrator's stays), local, OpenAPI
-and A2A tools with their declared side effects.
+With memory on, the tool catalog (`GET /v1/tools?names=`) is read for every tool — every 30 s,
+conditionally (`If-None-Match` with the last answer's `ETag`: a `304` keeps what was read; a
+service that sends no `ETag` is read in full) — and every tool is published to it in the
+background, once per content: MCP tools with their annotations (never a `side_effects` of the
+harness's making, so an administrator's stays), local, OpenAPI and A2A tools with their declared
+side effects. A content counts as published once the service stored it: a publish that failed
+is sent again at the next listing. Concurrent runs that find the toolbox stale share one read.
 
 ## Tiers and `approve_when`
 
@@ -48,6 +52,13 @@ two): comparisons, `and`/`or`/`not`, `in`, literals, lists, dotted argument path
 parse, or cannot be evaluated on a call, asks: the policy fails closed. When it does not hold
 the call runs (announced unless the tool only reads). With memory off there is no catalog: the
 tiers are the tools' own.
+
+**A catalog that cannot be read** (the memory service down, slow, refusing) does not fail the
+run. Governance read in the last 300 s still stands; past that, or with none read, each tool
+keeps its own tier — except that every tool that does more than read asks for approval, since
+whether an administrator wants its calls approved is unknown (the approver reads "… the tool
+catalog that says when it needs approval could not be read"). A warning is logged once; the
+catalog is asked again every 30 s, and its answer ends the fallback.
 
 An approver may approve, reject (the model is told the call was not run), edit (the call runs
 with the edited arguments) or cancel (the run ends `CANCELLED`). Each decision is also

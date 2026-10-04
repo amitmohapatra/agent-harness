@@ -8,6 +8,7 @@ lands in ``calls``; the answers are whatever a test sets.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import re
@@ -100,16 +101,24 @@ class FakeMemoryService:
     #: the claims ``/v1/verify`` finds, and how many of them the evidence does not support
     claims: int = 5
     unsupported: int = 1
-    #: names of the calls that answer 503
+    #: names of the calls that answer 503 (DEPENDENCY_UNAVAILABLE)
     fail: set[str] = field(default_factory=set)
     #: names of the calls that answer 503 this many times, then succeed
     fail_times: dict[str, int] = field(default_factory=dict)
+    #: names of the calls that fail another way: an HTTP status (its problem document, with
+    #: ``Retry-After`` on a 429/503), ``"timeout"`` (no answer in time) or ``"malformed"`` (a
+    #: 200 whose body is not JSON)
+    failures: dict[str, int | str] = field(default_factory=dict)
+    #: the ``Retry-After`` (seconds) a 429 or 503 carries
+    retry_after: str = "0"
     #: feedback by id, each stored once however often it is sent
     stored_feedback: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: uploaded documents by id, with the scope they were uploaded in
     documents: dict[str, dict[str, Any]] = field(default_factory=dict)
     calls: list[Call] = field(default_factory=list)
     agent_tools: list[dict[str, Any]] = field(default_factory=lambda: list(AGENT_TOOLS))
+    #: whether the catalog listing answers with an ETag (and honours If-None-Match)
+    etags: bool = True
     _ids: itertools.count[int] = field(default_factory=itertools.count)
     #: the ``source_message_id``s already stored (the service's own message identity)
     _stored: set[str] = field(default_factory=set)
@@ -148,10 +157,20 @@ class FakeMemoryService:
                 if name in self.fail or self.fail_times.get(name, 0) > 0:
                     if name in self.fail_times:
                         self.fail_times[name] -= 1
-                    return httpx.Response(503, json={"title": f"{name} is down", "status": 503})
+                    return problem(503, request.url.path, retry_after=self.retry_after)
+                failure = self.failures.get(name)
+                if failure == "timeout":
+                    raise httpx.ReadTimeout(f"{name} timed out", request=request)
+                if failure == "malformed":
+                    return httpx.Response(200, content=b"<html>proxy error</html>")
+                if isinstance(failure, int):
+                    return problem(failure, request.url.path, retry_after=self.retry_after)
                 self.calls.append(call)
-                return httpx.Response(200, json=getattr(self, f"_{name}")(call))
-        return httpx.Response(404, json={"title": "no such route", "status": 404})
+                answer = getattr(self, f"_{name}")(call)
+                if name == "catalog" and self.etags:
+                    return _conditional(request, answer)
+                return httpx.Response(200, json=answer)
+        return problem(404, request.url.path)
 
     def _key(self, call: Call) -> dict[str, Any]:
         return {
@@ -316,6 +335,50 @@ def _waits_for_review(call: Call) -> bool:
         return False
     own_run = body.get("target_id") == (body.get("agent_run_id") or call.scope.get("agent_run_id"))
     return not (body.get("source") == "system" and own_run and not body.get("evidence_refs"))
+
+
+#: The service's problem codes by status (its ``api/errors.py``), and whether a retry may pass.
+PROBLEMS: Final[dict[int, tuple[str, bool]]] = {
+    401: ("AUTHENTICATION", False),
+    403: ("SCOPE_DENIED", False),
+    404: ("NOT_FOUND", False),
+    409: ("CONFLICT", False),
+    413: ("VALIDATION", False),
+    422: ("VALIDATION", False),
+    429: ("RATE_LIMIT", True),
+    503: ("DEPENDENCY_UNAVAILABLE", True),
+    504: ("TIMEOUT", True),
+}
+
+
+def problem(status: int, instance: str, *, retry_after: str = "0") -> httpx.Response:
+    """An RFC 9457 problem document as the memory service writes it."""
+    code, retryable = PROBLEMS.get(status, ("INTERNAL", False))
+    body: dict[str, Any] = {
+        "type": f"urn:trellis:problem:{code.lower().replace('_', '-')}",
+        "title": code.replace("_", " ").capitalize(),
+        "status": status,
+        "detail": f"{code.lower()} (the fake memory service)",
+        "instance": instance,
+        "code": code,
+        "retryable": retryable,
+        "request_id": "req_fake",
+    }
+    if status == 422:
+        body["details"] = {"errors": [{"loc": ["body"], "msg": "invalid"}]}
+    headers = {"content-type": "application/problem+json"}
+    if retryable and status in (429, 503):
+        headers["retry-after"] = retry_after
+    return httpx.Response(status, content=json.dumps(body).encode(), headers=headers)
+
+
+def _conditional(request: httpx.Request, answer: Any) -> httpx.Response:
+    """A listing with a strong ETag of its content: ``304`` when the client already has it."""
+    digest = hashlib.sha256(json.dumps(answer, sort_keys=True).encode()).hexdigest()[:16]
+    etag = f'"{digest}"'
+    if request.headers.get("if-none-match") == etag:
+        return httpx.Response(304, headers={"etag": etag})
+    return httpx.Response(200, json=answer, headers={"etag": etag})
 
 
 def _scope(request: httpx.Request, body: Any) -> dict[str, Any]:
