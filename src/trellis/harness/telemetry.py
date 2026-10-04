@@ -33,6 +33,7 @@ score is only the ``score`` span, which every backend receives.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Iterator, Mapping
@@ -68,6 +69,10 @@ _tools = _meter.create_counter("trellis.tool_calls", description="tool calls, by
 _writes = _meter.create_counter(
     "trellis.writes.failed", description="background writes that failed"
 )
+_undelivered = _meter.create_counter(
+    "trellis.writes.undelivered",
+    description="background writes given up by this process, by outcome (spooled or lost)",
+)
 
 
 class _Metrics:
@@ -84,6 +89,10 @@ class _Metrics:
     @staticmethod
     def write_failed(label: str) -> None:
         _writes.add(1, {"write": label})
+
+    @staticmethod
+    def write_undelivered(label: str, outcome: str) -> None:
+        _undelivered.add(1, {"write": label, "outcome": outcome})
 
 
 metrics = _Metrics()
@@ -332,6 +341,20 @@ def configure(settings: Settings) -> bool:
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     return True
+
+
+#: How long closing the harness waits for the spans still queued to be exported.
+FLUSH_TIMEOUT_MS: Final = 5_000
+
+
+async def flush() -> None:
+    """Export the spans still queued (the batch processor sends every few seconds): closing
+    the harness - a worker's shutdown, a script's end - must not leave the last runs' traces
+    behind. The export blocks, so it runs off the event loop."""
+    provider = trace.get_tracer_provider()
+    force_flush = getattr(provider, "force_flush", None)
+    if force_flush is not None:
+        await asyncio.to_thread(force_flush, FLUSH_TIMEOUT_MS)
 
 
 def traces_url(endpoint: str) -> str:

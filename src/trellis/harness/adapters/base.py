@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal, Protocol
+from typing import Any, ClassVar, Final, Literal, Protocol
 
 from trellis.contracts import InterruptResolution
 from trellis.harness.journal import Pending
@@ -127,3 +127,21 @@ def query_of(input: Any) -> str:
             if role in ("user", "human") and isinstance(content, str):
                 return content
     return ""
+
+
+#: Where a target (or its ``model``) says how many tokens its model reads: an attribute of
+#: either name, or a LangChain chat model's ``profile["max_input_tokens"]``.
+WINDOW_ATTRIBUTES: Final = ("context_window", "max_input_tokens")
+
+
+def context_window(target: Any) -> int | None:
+    """The context window of the target's model, in tokens, when the target or its model
+    says (``None`` otherwise: a compiled graph, a model named by a string)."""
+    for holder in (target, getattr(target, "model", None)):
+        profile = getattr(holder, "profile", None)
+        found = [getattr(holder, name, None) for name in WINDOW_ATTRIBUTES]
+        found.append(profile.get("max_input_tokens") if isinstance(profile, dict) else None)
+        for value in found:
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    return None

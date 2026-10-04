@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
@@ -29,8 +28,9 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline
 from trellis.harness.adapters import detect
+from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import bound_tools
-from trellis.harness.clients.memory import RunMemory
+from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
@@ -38,13 +38,12 @@ from trellis.harness.runtime import Runtime, run_of
 from trellis.harness.telemetry import output, retrieval_span
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.sources import as_source
+from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
 
-#: How long a resolved toolbox is reused before its sources and the catalog are read again.
-TOOLS_TTL_SECONDS: Final = 300.0
 #: From this many tools, the tool hints are asked for and narrow what the model is offered.
 TOOL_HINTS_MIN: Final = 5
 #: The share of successful runs whose answer is checked against the context it was given
@@ -75,6 +74,8 @@ class Agent:
         self.target = target
         self.id = safe_id(id)
         self.adapter = detect(target)
+        #: the pushed context's token budget: a share of the model's window when it is known
+        self.context_budget = context_budget(context_window(target))
         if tools and self.adapter.fixed_tools:
             raise ConfigurationError(
                 f"a {self.adapter.name} target binds its tools when it is built: pass "
@@ -83,8 +84,8 @@ class Agent:
         self.sources = [as_source(t) for t in tools]
         if self.adapter.fixed_tools:
             self.sources = harness.built_for(bound_tools(target))
-        #: the resolved toolbox per tenant, and when it was resolved
-        self._tools: dict[str, tuple[float, list[Tool]]] = {}
+        #: the toolbox per tenant, kept fresh
+        self._toolboxes: dict[str, Toolbox] = {}
 
     # ------------------------------------------------------------------ running
     async def run(
@@ -210,7 +211,11 @@ class Agent:
         resumed = await runs.resumed(resolution)
         run_memory = await self.run_memory(identity)
         if feedback is not None and run_memory is not None and await self.harness.writes_memory():
-            self.harness.writes.submit("memory.feedback", lambda: run_memory.feedback(feedback))
+            await self.harness.writes.submit(
+                "memory.feedback",
+                lambda: run_memory.feedback(feedback),
+                record=run_memory.record("feedback", record=feedback.model_dump(mode="json")),
+            )
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
@@ -264,15 +269,19 @@ class Agent:
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
-        """The toolbox (resolved once per TTL and tenant) and the memory pull tools."""
-        now = time.monotonic()
-        cached = self._tools.get(runtime.tenant)
-        if cached is None or now - cached[0] > TOOLS_TTL_SECONDS:
-            cached = (now, await self.harness.resolve(self.sources, tenant=runtime.tenant))
-            self._tools[runtime.tenant] = cached
-        tools = list(cached[1])
+        """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
+        tools — none, with a warning, when the memory service cannot list them."""
+        box = self._toolboxes.get(runtime.tenant)
+        if box is None:
+            box = self._toolboxes[runtime.tenant] = self.harness.toolbox(
+                self.sources, tenant=runtime.tenant
+            )
+        tools = await box.tools()
         if runtime.run_memory is not None and not self.adapter.fixed_tools:
-            tools.extend(await self.harness.memory_tools(runtime.run_memory))
+            try:
+                tools.extend(await self.harness.memory_tools(runtime.run_memory))
+            except Exception as exc:
+                runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return tools
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
@@ -290,6 +299,7 @@ class Agent:
                     runtime.task,
                     tools=own if hinted else None,
                     window=not self.adapter.keeps_conversation(self.target),
+                    budget=self.context_budget,
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
@@ -299,7 +309,7 @@ class Agent:
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
         if hinted and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
-        status = getattr(pushed, "evidence_status", "COMPLETE")
+        status = pushed.evidence_status
         note = ABSTAIN_NOTES.get(status)
         rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
         runtime.context = rendered or None
@@ -309,43 +319,58 @@ class Agent:
         )
         return pushed
 
-    def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
+    async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
         if memory is not None and runtime.writes_memory and call.tool not in _pull(self):
-            self.harness.writes.submit(
+            await self.harness.writes.submit(
                 "memory.record_tool",
                 lambda: memory.record_tool(call, outcome),
                 events=runtime.events,
+                record=memory.record(
+                    "record_tool",
+                    call=call.model_dump(mode="json"),
+                    outcome=outcome.model_dump(mode="json"),
+                ),
             )
 
-    def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
+    async def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
         """The attempt's transcript, whether the run succeeded, paused or failed."""
         memory = runtime.run_memory
         if memory is not None and runtime.writes_memory and messages:
             run_id, attempt = runtime.run_id, runtime.attempt
-            self.harness.writes.submit(
+            await self.harness.writes.submit(
                 "memory.transcript",
                 lambda: memory.record_messages(messages, run_id, attempt),
                 events=runtime.events,
+                record=memory.record(
+                    "record_messages",
+                    messages=[list(m) for m in messages],
+                    run_id=run_id,
+                    attempt=attempt,
+                ),
             )
 
-    def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
+    async def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
         its outcome (the judge's and a person's override it in the memory service)."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
         if memory is None or not runtime.writes_memory or verdict is None:
             return
-        run_id = runtime.run_id
-        self.harness.writes.submit(
+        feedback = {
+            "verdict": verdict,
+            "source": "system",
+            "comment": note,
+            "key": f"{runtime.run_id}:outcome",
+        }
+        await self.harness.writes.submit(
             "memory.outcome",
-            lambda: memory.run_feedback(
-                verdict, source="system", comment=note, key=f"{run_id}:outcome"
-            ),
+            lambda: memory.run_feedback(**feedback),
             events=runtime.events,
+            record=memory.record("run_feedback", **feedback),
         )
 
-    def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
+    async def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
         """On a sampled run, the answer checked against the context it was given (the memory
         service's ``/v1/verify``, which records it as the run's ``judge`` feedback), and the
         score put on the run's trace."""
@@ -365,9 +390,9 @@ class Agent:
             if score is not None:
                 await self.harness.score(run_id, "grounding", score, key=f"{run_id}:grounding")
 
-        self.harness.writes.submit("memory.verify", work, events=runtime.events)
+        await self.harness.writes.submit("memory.verify", work, events=runtime.events)
 
-    def imported_code_mode_calls(self, runtime: Runtime) -> None:
+    async def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway
         if memory is None or gateway is None or not runtime.writes_memory:
             return
@@ -389,7 +414,7 @@ class Agent:
                 )
                 await memory.record_tool(call, outcome)
 
-        self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
+        await self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
 
     # ------------------------------------------------------------------ internals
     async def _opened(

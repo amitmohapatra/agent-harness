@@ -9,7 +9,10 @@ tools, no records and no catalog, and `trellis.current().memory`, `tools.hints(.
 
 ## Push
 
-Before the agent runs, `/v1/context` for the run's question (budget 2000 tokens), answered in
+Before the agent runs, `/v1/context` for the run's question — its token budget 5 % of the
+model's context window when the target says it (a `context_window` or `max_input_tokens`
+attribute on the target or its `model`, or a LangChain model's `profile`), between 2000 and
+8000, else 2000 — answered in
 the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, tools?}`, items cited
 by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
 message (see the README's matrix) and is `trellis.current().context`; the `bundle_id` is what
@@ -30,7 +33,9 @@ it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` s
 
 ## Pull
 
-The service's agent tools (listed once per process) are added to the run's tools: 
+The service's agent tools (listed again every 10 minutes; while the service cannot be reached
+the last listing stands, and a run when they were never listed goes without them, with a
+`warning` event) are added to the run's tools:
 
 | Tool | |
 |---|---|
@@ -57,6 +62,30 @@ In the background, after each attempt — whether it succeeded, paused or failed
 * every harness tool call (not the memory tools, which the service logs itself), and Code
   Mode's nested calls from Bifrost's log;
 * approve/reject/edit decisions as `TOOL_CALL` feedback.
+
+## Background writes: what is guaranteed
+
+Every write above is queued and the run moves on (`writes.py`); four writers drain the queue.
+
+* A write that fails is tried again — 3 attempts in all, full-jitter backoff from 0.5 s — when
+  the failure may pass (the service unavailable, a timeout, a dropped connection); a refusal the
+  same request would get again (a `4xx` the SDK marks not retryable) is not repeated.
+* A full queue (10 000 writes) holds the run that writes, for up to 5 s, rather than dropping
+  the write after the run was told it would happen.
+* A write still undelivered — its attempts spent, a queue that stayed full, the process
+  stopping with it queued (shutdown drains for at most 10 s) — is logged and counted
+  (`trellis.writes.undelivered`). With `TRELLIS_SPOOL_DIR` set, a write that is data (a
+  transcript, a tool record, the run's outcome, a decision, catalog entries) is appended to
+  `<dir>/trellis-writes.jsonl` and replayed — the file claimed by renaming it, then removed —
+  the next time a harness with the same directory starts writing (a worker at its start, any
+  other process at its first write). The service stores a replayed write that had in fact
+  landed once (every write carries its idempotency key or message id). Without the directory,
+  or for a write that is not data (the sampled grounding check, the model key, Code Mode
+  calls read back from the gateway), it is lost: counted (`trellis.writes.failed`) and, during a
+  run, a `warning` event.
+
+So: delivered at least once while the process lives or, with a spool directory on a volume that
+outlives the process, after its next start; never silently dropped.
 
 ## Documents
 
@@ -91,4 +120,7 @@ precedence **human > judge > system**:
 
 `BIFROST_VIRTUAL_KEY` is registered for each agent (tenant, agent) once per process, in the
 background, idempotently: the memory service's own LLM work for the agent (extraction,
-summaries, procedures, the grounding judge) runs on the agent's own key and budget.
+summaries, procedures, the grounding judge) runs on the agent's own key and budget. A memory
+service that takes no model keys (`PUT /v1/agents/model-key` answers that its credential
+encryption is not configured) is logged once per process, at `INFO`, and not asked again — no
+failed-write warning for it; the service then uses the tenant's or the operator's key.

@@ -20,26 +20,74 @@ if result.interrupt:  # a person has to approve something
 Everything else is automatic: memory is on when the deployment has a memory service; the MCP
 tools are the ones the agent's Bifrost virtual key allows; which calls run, which are
 announced and which wait for a person follows from the tools' own annotations and the tool
-catalog; the tool schemas the model sees are narrowed to what fits the task; the tenant and
-whether the agent may write memory come from the key.
+catalog; the tool schemas the model sees are narrowed to what fits the task; the tenant comes
+from the key. (What a run may write in memory is the memory service's to decide, per scope —
+its relationship checks — not a property of the key's role: with memory on, every run records
+its transcript, tool calls and outcome, and a refused write is a reported warning.)
 
 ## Install
 
-One distribution; each framework is an extra (the core imports none of them).
+The platform is not published to PyPI yet: install from source, with the sibling repositories
+checked out next to this one — they are path dependencies (`[tool.uv.sources]` in
+`pyproject.toml`):
 
 ```bash
-pip install 'trellis-harness[langgraph]'          # LangGraph
-pip install 'trellis-harness[deepagents]'         # Deep Agents (brings langgraph)
-pip install 'trellis-harness[openai-agents]'      # OpenAI Agents SDK
-pip install 'trellis-harness[claude-agent-sdk]'   # Claude Agent SDK
-pip install 'trellis-harness[agui]'               # serve_chat (FastAPI)
-pip install 'trellis-harness[a2a]'                # serve_a2a and a2a() tools
-pip install 'trellis-harness[otel]'               # OTLP export (Langfuse, a collector)
-pip install 'trellis-harness[all]'
+mkdir trellis && cd trellis
+for repo in agent-contracts bifrost-sdk agent-memory-service agent-harness; do
+  git clone https://github.com/amitmohapatra/$repo.git
+done
+cd agent-harness
+uv sync --all-extras    # the core, every framework extra and the dev tools, in .venv
 ```
+
+Into an environment of your own, with pip, the siblings first:
+
+```bash
+pip install -e ../agent-contracts -e ../bifrost-sdk -e ../agent-memory-service/sdk/python
+pip install -e '.[langgraph]'    # or any extras, below
+```
+
+One distribution; each framework is an extra (the core imports none of them): `langgraph`,
+`deepagents` (brings `langgraph`), `openai-agents`, `claude-agent-sdk`, `agui` (`serve_chat`,
+FastAPI), `a2a` (`serve_a2a` and `a2a()` tools), `otel` (OTLP export to Langfuse or a
+collector), `all`.
 
 `trellis` is shared with `trellis-contracts` (`trellis.contracts`) and `trellis-memory`
 (`trellis.memory`); importing either does not load the harness.
+
+### Quickstart
+
+With nothing configured everything runs in process (no memory, runs kept in memory, tenant
+`default`). With the memory service's development stack the agent remembers — and nothing else
+changes: a development key speaks for the tenant `default`, so no `tenant=` anywhere.
+
+```bash
+(cd ../agent-memory-service && docker compose up -d)   # http://localhost:8080, key "dev-key"
+export MEMORY_URL=http://localhost:8080 TRELLIS_API_KEY=dev-key
+```
+
+```python
+import asyncio
+
+from trellis import Harness, Runtime
+
+
+async def answer(question: str, agent: Runtime) -> str:
+    return f"{agent.context or 'Nothing remembered yet.'}\n\n(asked: {question})"
+
+
+async def main() -> None:
+    async with Harness() as h:  # the environment above, or nothing
+        agent = h.wrap(answer, id="hello")
+        result = await agent.run("How do I like to be contacted?", user="ada")
+        print(result.status, result.answer)
+
+
+asyncio.run(main())
+```
+
+Swap `answer` for your LangGraph graph, OpenAI Agents `Agent`, `ClaudeAgentOptions` or a
+`ReAct` and keep the rest; `make examples` runs one of each with no services.
 
 ## Configuration
 
@@ -49,10 +97,12 @@ The environment, and nothing else ([`.env.example`](.env.example)):
 |---|---|
 | `BIFROST_URL` | Bifrost's `/v1` base: the MCP tools, `ReAct` model names |
 | `BIFROST_VIRTUAL_KEY` | the agent's virtual key: its models, its MCP tools, its budget — and, registered automatically, the key the memory service's LLM work for the agent is billed to |
-| `TRELLIS_API_KEY` | the one Trellis key, for the memory service and agent-runs; its tenant and role are asked of the memory service (`GET /v1/keys/self`) |
+| `TRELLIS_API_KEY` | the one Trellis key, for the memory service and agent-runs (required with `MEMORY_URL`); its tenant is asked of the memory service (`GET /v1/keys/self`) |
 | `MEMORY_URL` | the memory service; memory is on exactly when it is set |
 | `RUNS_URL` | agent-runs; unset keeps runs, the queue and schedules in process |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | OTLP traces: Langfuse's endpoint, or a collector ([deploy/otel-collector.yaml](deploy/otel-collector.yaml)) |
+| `TRELLIS_SPOOL_DIR` | where memory writes this process could not deliver are kept and replayed from at the next start |
+| `TRELLIS_WORKER_CONCURRENCY` | runs a worker executes at once (default: the CPU count, 1 to 8) |
 
 ## The API
 
@@ -61,10 +111,10 @@ Everything public is importable from `trellis`:
 | Name | What it is |
 |---|---|
 | `Harness(config=None)` | Reads the environment; `config=Settings(...)` instead of it. `async with` (or `await h.aclose()`) drains the background writes and closes the clients. `h.agents` is every agent it wraps, by id. |
-| `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
+| `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=, spool_dir=, worker_concurrency=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
 | `h.wrap(target, *, id, tools=()) -> Agent` | Attach the harness. The framework is detected from the target's type. `tools` are the agent's own, run in this process: functions, `a2a(url)`, `openapi(spec)`. |
 | `await h.tools(*sources, framework=...)` | The toolbox as the framework's own tools, for an agent built with them before wrapping (a compiled LangGraph graph binds its tools): LangChain tools (`"langgraph"`), `FunctionTool`s (`"openai-agents"`), one in-process MCP server (`"claude-agent-sdk"`). It holds `sources`, the MCP tools and the memory tools. |
-| `h.worker(agents, *, concurrency=4)` | Claims queued runs of these agents and executes them: `await worker.run()` (until cancelled) or `await worker.run_once()`. |
+| `h.worker(agents, *, concurrency=None)` | Claims queued runs of these agents and executes them, `concurrency` at a time (default `TRELLIS_WORKER_CONCURRENCY`, else the CPU count from 1 to 8): `await worker.run()` (until `worker.stop()`: the runs held finish, or are released after a grace period) or `await worker.run_once()`. |
 | `await h.inbox(assignee=None) -> list[RunSummary]` | The paused runs waiting on `assignee` (`user:…`, `role:…`) or on anyone, newest first. |
 | `await h.feedback(run_id, verdict, correction=None) -> Feedback \| None` | What a person said about a run (`verdict`: `confirm`, `approve`, `reject`, `correct` or `edit`, the last two with a `correction`): a `feedback` score on its trace (Langfuse; 1.0, 0.5 for `edit`, 0.0 for `correct`/`reject`) and — memory on — the run's `human` feedback in the memory service, returned as stored (`None` with memory off). It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
 | `await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed (`wait=None`: return at once): the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`); `tenant` only for a platform key. Needs `MEMORY_URL`. |
@@ -101,7 +151,7 @@ deadline, escalate_to)` (pauses the run; returns the answer on resume —
 Run a worker for every agent a module's harness wraps:
 
 ```bash
-python -m trellis.worker app.agents:h
+python -m trellis.worker app.agents:h [--concurrency N]   # SIGTERM stops it gracefully
 ```
 
 ## What happens automatically
@@ -159,6 +209,13 @@ make test-live   # opt-in tests against BIFROST_URL / MEMORY_URL / RUNS_URL / TR
 
 `make test-live` reads the deployment environment and skips whatever is unset or
 unreachable; see `tests/live/conftest.py` for what it registers in the gateway for the session.
+
+The memory service in the tests is an in-process fake (`tests/support/memory.py`) behind the
+real SDK, and every request the harness sends it and every answer it gives is checked against
+the memory service's committed `docs/openapi.json` (a test with a mismatch fails);
+`tests/contract/test_openapi.py` drives every call once and does the same for the runs client
+against agent-runs' `docs/openapi.json` — both read from the sibling checkouts (CI checks out
+`main` of each), or from `TRELLIS_MEMORY_OPENAPI` / `TRELLIS_RUNS_OPENAPI`.
 
 Docs: [ARCHITECTURE.md](ARCHITECTURE.md) (diagrams: system context, components, a run, a
 pause through agent-runs, an A2A call, run states), [docs/scenarios.md](docs/scenarios.md)

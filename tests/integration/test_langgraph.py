@@ -12,7 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.memory import FakeMemoryService
+from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 
@@ -208,7 +208,7 @@ async def test_memory_tools_are_built_in_with_h_tools(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     tools = await memory_harness.tools(stock, framework="langgraph")
-    assert [t.name for t in tools] == ["stock", "memory_search", "memory_remember", "tool_search"]
+    assert [t.name for t in tools] == ["stock", *MEMORY_TOOLS]
     model = ScriptedChatModel(
         turns=[("memory_search", {"query": "x"}), ("stock", {"sku": "a"}), "found"]
     )

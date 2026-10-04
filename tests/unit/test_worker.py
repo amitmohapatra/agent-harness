@@ -183,7 +183,168 @@ async def test_a_worker_stopped_as_its_run_finishes_still_stops(
         await execute
 
 
+# --------------------------------------------------------------------------- stopping
+
+
+async def test_a_stopped_worker_lets_its_runs_finish_and_claims_nothing_more(
+    harness: Harness,
+) -> None:
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow(input: str, agent: Runtime) -> str:
+        started.set()
+        await release.wait()
+        return "done"
+
+    agent = harness.wrap(slow, id="slow")
+    first = await agent.start("a", user="u")
+    worker = harness.worker([agent], concurrency=1)
+    task = asyncio.create_task(worker.run())
+    await started.wait()
+    second = await agent.start("b", user="u")  # queued after the stop: left for later
+    worker.stop()
+    await asyncio.sleep(0.01)
+    assert not task.done()  # waiting for the run it holds
+    release.set()
+    await asyncio.wait_for(task, 5)
+    assert (await first.status()).status is RunStatus.SUCCESS
+    assert (await second.status()).status is RunStatus.QUEUED
+
+
+async def test_a_run_past_the_grace_period_is_released_not_cancelled(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    started = asyncio.Event()
+
+    async def forever(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    monkeypatch.setattr(worker_module, "GRACE_SECONDS", 0.05)
+    agent = harness.wrap(forever, id="forever")
+    handle = await agent.start("x", user="u")
+    worker = harness.worker([agent])
+    task = asyncio.create_task(worker.run())
+    await started.wait()
+    with caplog.at_level(logging.WARNING, logger="trellis.worker"):
+        worker.stop()
+        await asyncio.wait_for(task, 5)
+    # nothing written: the lease lapses and another worker runs it again
+    assert (await handle.status()).status is RunStatus.RUNNING
+    assert f"run {handle.run_id} released" in caplog.text
+
+
+async def test_a_second_stop_releases_the_runs_at_once(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = asyncio.Event()
+
+    async def forever(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    monkeypatch.setattr(worker_module, "GRACE_SECONDS", 60.0)
+    agent = harness.wrap(forever, id="forever")
+    handle = await agent.start("x", user="u")
+    worker = harness.worker([agent])
+    task = asyncio.create_task(worker.run())
+    await started.wait()
+    worker.stop()
+    await asyncio.sleep(0.01)
+    worker.stop()
+    await asyncio.wait_for(task, 5)
+    assert (await handle.status()).status is RunStatus.RUNNING
+
+
+async def test_a_stop_while_every_slot_is_busy_is_heard(harness: Harness) -> None:
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    worker = harness.worker([harness.wrap(echo, id="echo")], concurrency=1)
+    slots = asyncio.Semaphore(1)
+    await slots.acquire()
+    waiting = asyncio.create_task(worker._slot(slots))
+    await asyncio.sleep(0)
+    worker.stop()
+    assert await waiting is False
+    assert await worker._slot(asyncio.Semaphore(1)) is False  # stopped: no slot at all
+
+
+async def test_a_slot_freed_as_the_stop_comes_is_given_back(harness: Harness) -> None:
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    worker = harness.worker([harness.wrap(echo, id="echo")], concurrency=1)
+    slots = asyncio.Semaphore(1)
+    await slots.acquire()
+    waiting = asyncio.create_task(worker._slot(slots))
+    await asyncio.sleep(0)
+    slots.release()
+    worker.stop()
+    assert await waiting is False
+    assert not slots.locked()
+
+
+async def test_an_idle_worker_backs_off_up_to_a_cap(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waits: list[float] = []
+    real_timeout = asyncio.timeout
+
+    def recording(delay: float | None) -> Any:
+        waits.append(delay or 0.0)
+        return real_timeout(0)
+
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    worker = harness.worker([harness.wrap(echo, id="echo")])
+    monkeypatch.setattr(worker_module.asyncio, "timeout", recording)
+    for rounds in (1, 2, 3, 30):
+        await worker._idle(rounds)
+    first, second, third, capped = waits
+    assert 0.25 <= first <= 0.5 and 0.5 <= second <= 1.0 and 1.0 <= third <= 2.0
+    assert worker_module.IDLE_MAX_SECONDS / 2 <= capped <= worker_module.IDLE_MAX_SECONDS
+
+
+async def test_the_default_concurrency_is_the_cpu_count_within_bounds(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    agent = harness.wrap(echo, id="echo")
+    for cpus, expected in ((None, 1), (2, 2), (64, 8)):
+        monkeypatch.setattr(worker_module.os, "cpu_count", lambda cpus=cpus: cpus)
+        assert harness.worker([agent]).concurrency == expected
+    assert harness.worker([agent], concurrency=3).concurrency == 3
+    configured = Harness(config=Settings(worker_concurrency=5))
+    assert configured.worker([configured.wrap(echo, id="echo")]).concurrency == 5
+    with pytest.raises(ConfigurationError, match="at least one run"):
+        harness.worker([agent], concurrency=-1)
+
+
 # --------------------------------------------------------------------------- the CLI
+
+
+async def test_sigterm_stops_the_served_worker_gracefully(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import signal
+
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    harness = Harness(config=Settings())
+    harness.wrap(echo, id="echo")
+    task = asyncio.create_task(serve(harness, concurrency=1))
+    await asyncio.sleep(0.05)
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(task, 5)  # returned on its own: no cancellation needed
+    loop = asyncio.get_running_loop()
+    assert loop.remove_signal_handler(signal.SIGTERM) is False  # serve removed its handler
 
 
 async def test_serving_a_harness_closes_it_when_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,21 +379,22 @@ def test_main_serves_the_named_harness_and_exits_cleanly(
         "h.wrap(echo, id='echo')\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    served: list[list[str]] = []
+    served: list[list[str | int | None]] = []
 
-    async def once(harness: Harness) -> None:
-        served.append(list(harness.agents))
+    async def once(harness: Harness, *, concurrency: int | None) -> None:
+        served.append([*harness.agents, concurrency])
 
-    async def interrupted(harness: Harness) -> None:
+    async def interrupted(harness: Harness, *, concurrency: int | None) -> None:
         raise KeyboardInterrupt
 
     import trellis.worker as cli
 
     monkeypatch.setattr(cli, "serve", once)
     assert main(["served_app:h"]) == 0
+    assert main(["served_app:h", "--concurrency", "3"]) == 0
     monkeypatch.setattr(cli, "serve", interrupted)
     assert main(["served_app:h"]) == 0  # Ctrl-C is a clean stop
-    assert served == [["echo"]]
+    assert served == [["echo", None], ["echo", 3]]
 
 
 def test_running_the_module_without_a_target_prints_its_usage(

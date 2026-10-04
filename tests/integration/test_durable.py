@@ -168,4 +168,9 @@ def test_the_worker_cli_loads_a_harness_by_module_path(
     for bad in ("deployed:not_a_harness", "deployed:empty", "deployed"):
         with pytest.raises(SystemExit):
             load(bad)
-    assert main([]) == 2
+    with pytest.raises(SystemExit) as usage:
+        main([])
+    assert usage.value.code == 2
+    with pytest.raises(SystemExit) as refused:
+        main(["deployed:h", "--concurrency", "0"])
+    assert refused.value.code == 2

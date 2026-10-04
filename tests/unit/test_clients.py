@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -158,12 +159,14 @@ async def test_agent_tools_are_listed_once_and_tiered_read_or_write() -> None:
     again = await mem.bind(identity()).agent_tools()
     assert [t.name for t in listed] == [t["name"] for t in AGENT_TOOLS] == [t.name for t in again]
     assert {t.name for t in listed if t.side_effects == "read"} <= READ_ONLY_TOOLS
-    assert {t.name for t in listed if t.side_effects == "write"} == {"memory_remember"}
+    writes = {"memory_remember", "memory_update", "memory_forget", "profile_edit"}
+    assert {t.name for t in listed if t.side_effects == "write"} == writes
+    search = next(t for t in listed if t.name == "memory_search")
+    assert (search.input_schema or {})["required"] == ["query"]  # the service's own schema
     assert len(service.named("agent_tools")) == 1
     # the SDK returns the tool's result itself
-    assert await mem.bind(identity()).call_agent_tool("memory_search", {"query": "x"}) == [
-        "memory_search ok"
-    ]
+    found: Any = await mem.bind(identity()).call_agent_tool("memory_search", {"query": "x"})
+    assert [item["kind"] for item in found] == ["memory", "chunk"] and found[0]["id"] == "mem_1"
 
 
 async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() -> None:
@@ -183,8 +186,17 @@ async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() ->
         ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)
     )
     assert service.named("record_tool")[0].body["status"] == "ok"
-    found = await run.catalog(["erp-get_stock", "missing"])
+    found, etag = await run.catalog(["erp-get_stock", "missing"])
     assert found == {"erp-get_stock": Governance(risk="read", approve_when="qty > 5")}
+    assert etag is not None
+    # asked again with that ETag: nothing changed, nothing sent back
+    assert await run.catalog(["erp-get_stock", "missing"], etag=etag) == (None, etag)
+    service.catalog["erp-get_stock"]["approve_when"] = "qty > 9"
+    changed, newer = await run.catalog(["erp-get_stock", "missing"], etag=etag)
+    assert changed == {"erp-get_stock": Governance(risk="read", approve_when="qty > 9")}
+    assert newer not in (None, etag)
+    service.etags = False  # a service that sends no ETag is read in full every time
+    assert (await run.catalog(["erp-get_stock"], etag=newer))[1] is None
     await run.run_feedback("confirm", source="system", key="run_1:outcome")
     [feedback] = service.named("feedback")
     assert feedback.body["target_kind"] == "run" and feedback.body["target_id"] == "run_1"
@@ -242,5 +254,67 @@ async def test_an_answer_with_no_checkable_claim_has_no_grounding_score() -> Non
 async def test_a_document_can_be_added_without_waiting_for_it() -> None:
     service = FakeMemoryService()
     info = await memory(service).for_user("t", "u").add_document(b"text", wait=None)
-    assert info.status == "READY"
+    assert info.status == "STAGED"  # its parse job has not run yet
     assert [c.name for c in service.named("document")] == ["document"]  # read once, not polled
+
+
+async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
+    """Each write the harness spools (its ``record``) is the same request again, in the scope
+    it was made in, when an empty process replays it."""
+    from trellis.contracts import (
+        AgentExecutionContext,
+        Interrupt,
+        InterruptDecision,
+        InterruptReason,
+        InterruptResolution,
+    )
+
+    service = FakeMemoryService()
+    memory = Memory("http://memory.test", "key", client=service.client())
+    scope = Identity(tenant="acme", user="ada", agent_id="a", run_id="run_1", thread="thr")
+    run = memory.bind(scope)
+    call, outcome = ToolCall(tool="erp-get", args={"sku": "1"}), ToolOutcome(tool="erp-get")
+    asked = Interrupt(
+        interrupt_id="run_1.1.1",
+        tenant_id="acme",
+        run_id="run_1",
+        question="Refund?",
+        reason=InterruptReason.APPROVAL,
+        tool_call=ToolCall(tool="refund", args={"amount": 5}),
+    )
+    decision = InterruptResolution(
+        interrupt_id="run_1.1.1", run_id="run_1", decision=InterruptDecision.APPROVE, reviewer="cfo"
+    ).to_feedback(
+        asked, AgentExecutionContext.create(tenant_id="acme", agent_id="a", agent_run_id="run_1")
+    )
+    assert decision is not None
+    records = [
+        run.record("record_messages", messages=[["user", "hi"]], run_id="run_1", attempt=1),
+        run.record(
+            "record_tool",
+            call=call.model_dump(mode="json"),
+            outcome=outcome.model_dump(mode="json"),
+        ),
+        run.record(
+            "run_feedback", verdict="confirm", source="system", comment=None, key="run_1:outcome"
+        ),
+        run.record("feedback", record=decision.model_dump(mode="json")),
+        run.record(
+            "publish_catalog", entries=[{"name": "erp-get", "description": "", "source": "local"}]
+        ),
+    ]
+    for record in json.loads(json.dumps(records)):  # through the spool's JSON and back
+        work = memory.replay(record)
+        assert work is not None
+        await work()
+    assert [c.name for c in service.calls] == [
+        "messages",
+        "record_tool",
+        "feedback",
+        "feedback",
+        "put_catalog",
+    ]
+    assert all(c.scope.get("tenant_id") == "acme" for c in service.calls)
+    assert service.named("messages")[0].body["messages"][0]["source_message_id"] == "run_1:user:0"
+    assert memory.replay({"op": "unknown", "scope": {}, "args": {}}) is None
+    await memory.aclose()

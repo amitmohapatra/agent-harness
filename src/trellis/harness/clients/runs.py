@@ -15,6 +15,17 @@ effect. Data too large for a question (an ``ask`` table or diff) is a run artifa
 beside the run and referenced from its interrupt (``payload_ref``). Writes raise when the store
 refuses or cannot be reached: a pause that was not recorded cannot be resumed, so it is not
 reported.
+
+Every call to agent-runs is retried — up to :data:`RETRIES` times, with exponential backoff and
+full jitter, or after the ``Retry-After`` the service sent (at most
+:data:`RETRY_AFTER_MAX_SECONDS`) — when it failed on the way: a transport error, ``429``,
+``502``, ``503``, ``504``. That is safe for every write: starting a run is idempotent on its id,
+a repeated pause or finish from the same worker with the same status answers the stored record,
+a repeated artifact is the same artifact, a repeated schedule is the one that exists; a claim
+whose answer was lost leaves its run leased and unworked until the lease lapses and agent-runs
+queues it again. A refusal
+is read from the service's problem document (RFC 9457) by its ``code``: ``LEASE_LOST`` is
+:class:`LeaseLost`, ``CONFLICT`` :class:`Conflict`, ``NOT_FOUND`` :class:`NotFound`.
 """
 
 from __future__ import annotations
@@ -22,9 +33,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import random
+import re
 from collections import deque
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any, Final, Protocol
 from zoneinfo import ZoneInfo
 
@@ -47,15 +62,29 @@ from trellis.contracts import (
 )
 from trellis.contracts.ids import now
 
-#: How long one call to agent-runs may take before the run fails with it.
+log = logging.getLogger("trellis.runs")
+
+#: How long one call to agent-runs may take before it counts as failed (and is retried).
 TIMEOUT_SECONDS: Final = 10.0
 #: The header a platform key names the tenant it acts for with.
 TENANT_HEADER: Final = "X-Trellis-Tenant"
 NO_CONTENT: Final = 204
 NOT_FOUND: Final = 404
 CONFLICT: Final = 409
-#: The most paused runs one inbox read returns (agent-runs' page limit).
+#: Retries of a call that failed on the way, after the first attempt.
+RETRIES: Final = 3
+#: The answers that mean "try again": too many requests, and a gateway or service in trouble.
+RETRY_STATUSES: Final = frozenset({429, 502, 503, 504})
+#: The backoff ceiling of the first retry, doubled for each one after it (full jitter: the
+#: wait is uniform between 0 and the ceiling), and the highest ceiling.
+BACKOFF_SECONDS: Final = 0.25
+BACKOFF_MAX_SECONDS: Final = 5.0
+#: The longest ``Retry-After`` honoured.
+RETRY_AFTER_MAX_SECONDS: Final = 30.0
+#: Paused runs one inbox page asks for (agent-runs' page limit), and the pages one inbox
+#: read follows at most: past that the newest are returned and a warning is logged.
 INBOX_LIMIT: Final = 500
+INBOX_MAX_PAGES: Final = 10
 #: What an artifact of JSON is sent as.
 JSON_MIME: Final = "application/json"
 
@@ -76,11 +105,46 @@ class RunSummary(BaseModel):
 
 
 class RunStoreError(RuntimeError):
-    """The run store refused a write or could not be reached."""
+    """The run store refused a call or could not be reached. ``code`` is the problem's
+    (agent-runs' error code), ``status`` the HTTP status (``None`` without a response), and
+    ``retryable`` whether the same call may succeed later — what a run's ``AgentError``
+    keeps."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        code: str | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.retryable = retryable
 
 
 class LeaseLost(RunStoreError):
     """The worker no longer holds the run: stop working it, and write nothing more."""
+
+
+class Conflict(RunStoreError):
+    """The run (or schedule, or artifact) is not in a state that allows the call: a run id
+    taken, an answer to an interrupt the run does not wait on, an illegal transition."""
+
+
+class NotFound(RunStoreError):
+    """The store has no such run (or artifact) for this tenant."""
+
+
+#: The problem codes that have a class of their own; any other refusal is a RunStoreError.
+ERRORS: Final[dict[str, type[RunStoreError]]] = {
+    "LEASE_LOST": LeaseLost,
+    "CONFLICT": Conflict,
+    "NOT_FOUND": NotFound,
+}
+#: The class of a refusal without a ``code`` (a proxy's answer, an older service).
+ERRORS_BY_STATUS: Final[dict[int, type[RunStoreError]]] = {404: NotFound, 409: Conflict}
 
 
 class Runs(Protocol):
@@ -203,10 +267,25 @@ class HttpRuns:
         return self._record(self._body(response))
 
     async def inbox(self, tenant_id: str, assignee: str | None) -> Sequence[RunSummary]:
+        """Every paused run waiting on ``assignee``, newest first, page by page (the
+        ``Link: rel="next"`` cursor agent-runs sends), at most :data:`INBOX_MAX_PAGES`."""
         params: dict[str, Any] = {"status": RunStatus.PAUSED.value, "limit": INBOX_LIMIT}
         if assignee is not None:
             params["assignee"] = assignee
-        rows = await self._send("GET", "/v1/runs", tenant_id, params=params)
+        rows: list[Any] = []
+        for _ in range(INBOX_MAX_PAGES):
+            response = await self._call("GET", "/v1/runs", tenant_id, params=params)
+            rows.extend(self._body(response))
+            cursor = next_cursor(response.headers.get("link"))
+            if cursor is None:
+                break
+            params = {**params, "cursor": cursor}
+        else:
+            log.warning(
+                "the inbox of %s holds more than %d paused runs: the newest are returned",
+                assignee or tenant_id,
+                len(rows),
+            )
         return [RunSummary.model_validate(row) for row in rows]
 
     async def claim(
@@ -234,7 +313,8 @@ class HttpRuns:
             json={"worker_id": worker_id, "lease_seconds": lease_seconds},
         )
         if response.status_code == CONFLICT:
-            raise LeaseLost(f"{worker_id} no longer holds {run_id}")
+            # whatever its code: this worker does not hold a running lease on the run
+            raise LeaseLost(f"{worker_id} no longer holds {run_id}", status=CONFLICT)
         self._body(response)
 
     async def schedule(self, spec: ScheduleSpec) -> Schedule:
@@ -289,11 +369,26 @@ class HttpRuns:
         headers: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> httpx.Response:
+        """One call, retried while it fails on the way (see the module's docstring)."""
         sent = {**(headers or {}), **({TENANT_HEADER: tenant} if tenant else {})}
-        try:
-            return await self._client.request(method, path, headers=sent, **kwargs)
-        except httpx.HTTPError as exc:
-            raise RunStoreError(f"agent-runs unreachable: {type(exc).__name__}: {exc}") from exc
+        retry = 0
+        while True:
+            try:
+                response = await self._client.request(method, path, headers=sent, **kwargs)
+            except httpx.TransportError as exc:
+                if retry == RETRIES:
+                    raise RunStoreError(
+                        f"agent-runs unreachable: {type(exc).__name__}: {exc}", retryable=True
+                    ) from exc
+                delay = backoff(retry, None)
+            except httpx.HTTPError as exc:
+                raise RunStoreError(f"agent-runs call failed: {type(exc).__name__}: {exc}") from exc
+            else:
+                if response.status_code not in RETRY_STATUSES or retry == RETRIES:
+                    return response
+                delay = backoff(retry, response.headers.get("retry-after"))
+            retry += 1
+            await _pause(delay)
 
     @classmethod
     def _body(cls, response: httpx.Response) -> Any:
@@ -303,11 +398,71 @@ class HttpRuns:
     @staticmethod
     def _body_ok(response: httpx.Response) -> None:
         if response.is_error:
-            error = LeaseLost if response.status_code == CONFLICT else RunStoreError
-            raise error(
-                f"agent-runs {response.request.method} {response.request.url.path}: "
-                f"HTTP {response.status_code} {response.text[:300]}"
-            )
+            raise refusal(response)
+
+
+def refusal(response: httpx.Response) -> RunStoreError:
+    """The error an error response means: by the problem's ``code`` (else by the status),
+    keeping its words and whether it may be retried."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    problem: dict[str, Any] = body if isinstance(body, dict) else {}
+    status = response.status_code
+    code = problem.get("code") if isinstance(problem.get("code"), str) else None
+    cls = ERRORS.get(code, RunStoreError) if code else ERRORS_BY_STATUS.get(status, RunStoreError)
+    retryable = problem.get("retryable")
+    detail = problem.get("detail") or problem.get("title") or response.text[:300]
+    return cls(
+        f"agent-runs {response.request.method} {response.request.url.path}: "
+        f"HTTP {status}{f' {code}' if code else ''}: {detail}",
+        status=status,
+        code=code,
+        retryable=retryable if isinstance(retryable, bool) else status in RETRY_STATUSES,
+    )
+
+
+def backoff(retry: int, retry_after: str | None) -> float:
+    """How long to wait before retry number ``retry + 1``: the service's ``Retry-After``
+    (seconds or an HTTP date, at most :data:`RETRY_AFTER_MAX_SECONDS`) when it sent one,
+    else full jitter under an exponentially growing ceiling."""
+    asked = _retry_after(retry_after)
+    if asked is not None:
+        return min(asked, RETRY_AFTER_MAX_SECONDS)
+    ceiling = min(BACKOFF_MAX_SECONDS, BACKOFF_SECONDS * 2**retry)
+    return random.uniform(0, ceiling)  # jitter, not a secret
+
+
+def _retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (when - datetime.now(UTC)).total_seconds())
+
+
+async def _pause(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+_NEXT_LINK: Final = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?')
+
+
+def next_cursor(link: str | None) -> str | None:
+    """The ``cursor`` of a ``Link`` header's ``rel="next"`` target; None on the last page."""
+    for part in (link or "").split(","):
+        match = _NEXT_LINK.search(part)
+        if match is not None:
+            cursor = httpx.URL(match.group(1)).params.get("cursor")
+            return cursor or None
+    return None
 
 
 def _worker(worker_id: str | None) -> dict[str, str]:
@@ -362,7 +517,7 @@ class LocalRuns:
     async def resumed(self, resolution: InterruptResolution) -> RunRecord:
         record = self._require(resolution.run_id)
         if record.awaiting is None or not resolution.resolves(record.awaiting):
-            raise RunStoreError(f"run {record.run_id} is not waiting on {resolution.interrupt_id}")
+            raise Conflict(f"run {record.run_id} is not waiting on {resolution.interrupt_id}")
         if resolution.decision is InterruptDecision.CANCEL:
             return self._move(record, RunStatus.CANCELLED, last_resolution=resolution)
         requeue = record.run_id in self._queued
@@ -412,7 +567,7 @@ class LocalRuns:
                 deadline=r.deadline,
                 updated_at=r.updated_at,
             )
-            for r in paused[:INBOX_LIMIT]
+            for r in paused[: INBOX_LIMIT * INBOX_MAX_PAGES]
         ]
 
     async def claim(
@@ -473,7 +628,7 @@ class LocalRuns:
     def _require(self, run_id: str) -> RunRecord:
         record = self._runs.get(run_id)
         if record is None:
-            raise RunStoreError(f"no run {run_id}")
+            raise NotFound(f"no run {run_id}")
         return record
 
     def _fenced(self, run_id: str, worker_id: str | None) -> RunRecord:
@@ -490,7 +645,7 @@ class LocalRuns:
 
     def _move(self, record: RunRecord, status: RunStatus, **changes: Any) -> RunRecord:
         if record.status is not status and not record.status.can_become(status):
-            raise RunStoreError(f"run {record.run_id}: {record.status} cannot become {status}")
+            raise Conflict(f"run {record.run_id}: {record.status} cannot become {status}")
         if status.final:  # an ending clears what the run waited on and would resume from
             changes.update(awaiting=None, checkpoint=None)
         moved = RunRecord.model_validate(

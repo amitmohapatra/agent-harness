@@ -459,3 +459,94 @@ async def test_an_artifact_the_store_no_longer_has_is_not_found(
         assert (await http.get(route)).status_code == 404
         assert (await http.get(f"{PATH}/runs/run_unknown/artifacts/art_1")).status_code == 404
     await harness.aclose()
+
+
+# --------------------------------------------------------------------------- the contract
+
+
+async def test_a_refusal_is_a_problem_document(client: httpx.AsyncClient) -> None:
+    entry = finished(await post(client, body("refund")))["outcome"]["interrupts"][0]
+    refused = await client.post(
+        f"{PATH}/run", json=body(resume=[{"interruptId": entry["id"], "payload": "maybe"}])
+    )
+    assert refused.status_code == 409
+    assert refused.headers["content-type"] == "application/problem+json"
+    problem = refused.json()
+    assert problem["code"] == "CONFLICT" and problem["detail"].startswith("BAD_RESUME:")
+    assert problem["instance"] == f"{PATH}/run" and problem["retryable"] is False
+    missing = await client.get(f"{PATH}/runs/run_nope/events")
+    assert (missing.status_code, missing.json()["code"]) == (404, "NOT_FOUND")
+    gone = await client.get(f"{PATH}/runs/run_nope/artifacts/art_1")
+    assert (gone.status_code, gone.json()["code"]) == (404, "NOT_FOUND")
+    client.headers["x-user"] = ""
+    nobody = await client.post(f"{PATH}/run", json=body("hi"))
+    assert (nobody.status_code, nobody.json()["code"]) == (401, "AUTHENTICATION")
+
+
+async def test_a_decision_or_a_role_outside_the_vocabulary_is_a_validation_error(
+    client: httpx.AsyncClient,
+) -> None:
+    entry = finished(await post(client, body("refund")))["outcome"]["interrupts"][0]
+    bad = await client.post(
+        f"{PATH}/run",
+        json=body(resume=[{"interruptId": entry["id"], "decision": "perhaps"}]),
+    )
+    assert bad.status_code == 422  # not a 409 BAD_RESUME: the request itself is invalid
+    odd = await client.post(
+        f"{PATH}/run", json={"threadId": "t1", "messages": [{"role": "robot", "content": "x"}]}
+    )
+    assert odd.status_code == 422
+    approved = await post(
+        client, body(resume=[{"interruptId": entry["id"], "decision": "approve"}])
+    )  # any case
+    assert finished(approved)["result"] == "refunded o1"
+
+
+def test_the_routes_are_in_the_openapi_document() -> None:
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    agent = harness.wrap(agent_fn, id="chat", tools=[refund])
+    agent.serve_chat(app, identity=user_of)
+    agent.serve_chat(app, path="/agui2", identity=user_of)  # a second mount: one tag
+    doc = app.openapi()
+    assert doc["info"]["title"] == "chat agent" and doc["info"]["version"] != "0.1.0"
+    assert [t["name"] for t in doc["tags"]] == ["agui"]
+    run = doc["paths"][f"{PATH}/run"]["post"]
+    assert list(run["responses"]["200"]["content"]) == ["text/event-stream"]
+    for status in ("401", "404", "409"):
+        assert list(run["responses"][status]["content"]) == ["application/problem+json"]
+    assert set(run["responses"]["422"]["content"]) == {
+        "application/problem+json",
+        "application/json",
+    }
+    events = doc["paths"][f"{PATH}/runs/{{run_id}}/events"]["get"]
+    assert list(events["responses"]["200"]["content"]) == ["text/event-stream"]
+    artifact = doc["paths"][f"{PATH}/runs/{{run_id}}/artifacts/{{artifact_id}}"]["get"]
+    assert "application/octet-stream" in artifact["responses"]["200"]["content"]
+    schemas = doc["components"]["schemas"]
+    assert schemas["Resume"]["properties"]["decision"]["anyOf"][0] == {
+        "$ref": "#/components/schemas/InterruptDecision"
+    }
+    assert "user" in schemas["Role"]["enum"]
+
+
+def test_an_app_that_named_itself_keeps_its_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    from importlib import metadata
+
+    from trellis.harness.surfaces import agui
+
+    harness = Harness(config=Settings())
+    named = FastAPI(title="Procurement", version="3.1")
+    harness.wrap(agent_fn, id="chat").serve_chat(named, identity=user_of)
+    assert (named.openapi()["info"]["title"], named.version) == ("Procurement", "3.1")
+    versioned = FastAPI(version="2.0")  # titled by the surface, its own version kept
+    harness.wrap(agent_fn, id="versioned").serve_chat(versioned, identity=user_of)
+    assert (versioned.title, versioned.version) == ("versioned agent", "2.0")
+
+    def missing(name: str) -> str:
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(agui.metadata, "version", missing)
+    unnamed = FastAPI()
+    harness.wrap(agent_fn, id="other").serve_chat(unnamed, identity=user_of)
+    assert unnamed.version == "0"

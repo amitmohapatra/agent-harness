@@ -1,20 +1,29 @@
-"""``python -m trellis.worker module:attribute`` — run a worker for every agent a Harness
-wraps (the attribute names the ``Harness``; importing the module wraps the agents)."""
+"""``python -m trellis.worker module:attribute [--concurrency N]`` — run a worker for every agent
+a Harness wraps (the attribute names the ``Harness``; importing the module wraps the agents).
+
+SIGTERM and SIGINT stop it gracefully: no new claims, the runs it holds finish (or, past the
+grace period, are released for another worker), the memory writes drain, and it exits ``0``.
+A second signal releases the runs at once."""
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import contextlib
 import importlib
 import logging
+import signal
 import sys
 
 from trellis.harness.harness import Harness
+
+USAGE = "python -m trellis.worker module:harness_attribute [--concurrency N]"
 
 
 def load(target: str) -> Harness:
     module_name, _, attribute = target.partition(":")
     if not module_name or not attribute:
-        raise SystemExit("usage: python -m trellis.worker module:harness_attribute")
+        raise SystemExit(f"usage: {USAGE}")
     harness = getattr(importlib.import_module(module_name), attribute, None)
     if not isinstance(harness, Harness):
         raise SystemExit(f"{target} is not a trellis Harness")
@@ -23,21 +32,40 @@ def load(target: str) -> Harness:
     return harness
 
 
-async def serve(harness: Harness) -> None:
+async def serve(harness: Harness, *, concurrency: int | None = None) -> None:
+    """Work until SIGTERM/SIGINT (or cancellation), then close the harness."""
+    worker = harness.worker(list(harness.agents.values()), concurrency=concurrency)
+    loop = asyncio.get_running_loop()
+    handled: list[signal.Signals] = []
+    for stop in (signal.SIGTERM, signal.SIGINT):
+        # not on the main thread, or no signals here (Windows): Ctrl-C stays KeyboardInterrupt
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(stop, worker.stop)
+            handled.append(stop)
     try:
-        await harness.worker(list(harness.agents.values())).run()
+        await worker.run()
     finally:
+        for stop in handled:
+            loop.remove_signal_handler(stop)
         await harness.aclose()
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 1:
-        print("usage: python -m trellis.worker module:harness_attribute", file=sys.stderr)  # noqa: T201
-        return 2
+    parser = argparse.ArgumentParser(prog="python -m trellis.worker", usage=USAGE)
+    parser.add_argument("target", help="module:attribute naming the Harness")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="runs executed at once (default TRELLIS_WORKER_CONCURRENCY, else the CPU count, 1-8)",
+    )
+    args = parser.parse_args(argv)
+    if args.concurrency is not None and args.concurrency < 1:
+        parser.error("--concurrency must be at least 1")
     logging.basicConfig(level=logging.INFO)
-    harness = load(argv[0])
+    harness = load(args.target)
     try:
-        asyncio.run(serve(harness))
+        asyncio.run(serve(harness, concurrency=args.concurrency))
     except KeyboardInterrupt:
         return 0
     return 0

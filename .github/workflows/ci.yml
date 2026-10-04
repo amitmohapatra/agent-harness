@@ -14,7 +14,7 @@ jobs:
     steps:
       # The platform is unpublished: the harness resolves its siblings by path (pyproject
       # [tool.uv.sources] ../agent-contracts, ../bifrost-sdk,
-      # ../agent-memory-service/sdk/python), so they are checked out next to it.
+      # ../agent-memory-service/sdk/python), so they are checked out next to it, on main.
       - uses: actions/checkout@v4
         with:
           path: agent-harness
@@ -30,6 +30,12 @@ jobs:
         with:
           repository: amitmohapatra/agent-memory-service
           path: agent-memory-service
+      # not a dependency: its committed docs/openapi.json is what tests/contract checks the
+      # runs client against (as agent-memory-service/docs/openapi.json is for the memory fake)
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-runs
+          path: agent-runs
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"

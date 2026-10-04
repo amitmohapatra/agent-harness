@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from agents import Agent, function_tool
 
-from tests.support.memory import FakeMemoryService
+from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunStatus
@@ -146,7 +146,7 @@ async def test_the_hints_narrow_the_tools_each_turn_and_the_teams_own_stay(
     target = Agent(name="n", model=model, tools=[eta])
     agent = memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "done"
-    memory_tools = ["memory_search", "memory_remember", "tool_search"]
+    memory_tools = MEMORY_TOOLS
     assert model.tools[0] == ["eta", "t2", *memory_tools]
     assert model.tools[1] == ["eta", "t2", "t4", *memory_tools]  # tool_search offered t4
 

@@ -12,6 +12,12 @@
 Identity is the deployment's: ``identity(request)`` returns the user, and the tenant is the
 one ``TRELLIS_API_KEY`` speaks for. Nothing the client sends (``forwardedProps``...) decides
 who is calling.
+
+The routes are in the app's OpenAPI document (tag ``agui``): the streams as
+``text/event-stream``, every refusal as an RFC 9457 problem document (``code``, ``detail``).
+Each run's events are buffered in this process (``hub.py``), so with several replicas a
+reconnect must reach the replica that served the run: route a thread's requests to one replica
+(sticky sessions).
 """
 
 from __future__ import annotations
@@ -20,10 +26,12 @@ import asyncio
 import inspect
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from importlib import metadata
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
 
 from trellis.contracts import (
     ConfigurationError,
@@ -61,6 +69,65 @@ ANONYMOUS: Final = "anonymous"
 #: ``RUN_ERROR`` codes the surface itself emits.
 BAD_RESUME: Final = "BAD_RESUME"
 RUN_ABORTED: Final = "RUN_ABORTED"
+#: The platform's problem code of each refusal the surface answers.
+PROBLEM_CODES: Final = {401: "AUTHENTICATION", 404: "NOT_FOUND", 409: "CONFLICT", 422: "VALIDATION"}
+PROBLEM_MEDIA_TYPE: Final = "application/problem+json"
+#: What the surface tells an app's OpenAPI document about itself.
+TAG: Final = {
+    "name": "agui",
+    "description": "AG-UI chat surface (serve_chat): run an agent for a thread and stream its "
+    "AG-UI events as server-sent events, reconnect to a run, read interrupt artifacts. Run "
+    "events are buffered per process: with several replicas, keep a thread on one (sticky "
+    "sessions).",
+    "externalDocs": {"description": "AG-UI protocol", "url": "https://docs.ag-ui.com"},
+}
+
+
+class Problem(BaseModel):
+    """A refusal, as an RFC 9457 problem document (the platform's shape)."""
+
+    type: str
+    title: str
+    status: int
+    detail: str
+    instance: str
+    code: str
+    retryable: bool = False
+
+
+class EventStream(StreamingResponse):
+    """A stream of AG-UI events as server-sent events."""
+
+    media_type = MEDIA_TYPE
+
+
+_SSE_DOC: Final = {
+    "description": "AG-UI events as server-sent events: one `data:` JSON event per message, "
+    "each with an `id:` numbered per run (send it back as `Last-Event-ID` to reconnect), "
+    "ending with RUN_FINISHED or RUN_ERROR.",
+    "content": {MEDIA_TYPE: {"schema": {"type": "string"}}},
+}
+
+
+def _refusals(*statuses: int) -> dict[int | str, dict[str, Any]]:
+    why = {
+        401: "the deployment's identity(request) named nobody",
+        404: "no such run, interrupt or artifact for this caller",
+        409: "a resume that cannot be read as a decision, or that the run refuses (BAD_RESUME)",
+        422: "a runId that is not a fresh identifier (a problem document), or a body that is "
+        "not a RunAgentInput (FastAPI's validation error)",
+    }
+    problem = {PROBLEM_MEDIA_TYPE: {"schema": Problem.model_json_schema()}}
+    validation = {
+        "application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}
+    }
+    return {
+        status: {
+            "description": why[status],
+            "content": problem | (validation if status == 422 else {}),
+        }
+        for status in statuses
+    }
 
 
 def mount(app: FastAPI, agent: Agent, *, path: str, identity: Identity | None) -> None:
@@ -71,6 +138,23 @@ def mount(app: FastAPI, agent: Agent, *, path: str, identity: Identity | None) -
             ANONYMOUS,
         )
     app.include_router(_router(_Surface(agent, identity), path))
+    _describe(app, agent)
+
+
+def _describe(app: FastAPI, agent: Agent) -> None:
+    """The surface in the app's OpenAPI document: the ``agui`` tag, and a title and
+    description for an app that has not named itself."""
+    tags = app.openapi_tags or []
+    if not any(t.get("name") == TAG["name"] for t in tags):
+        app.openapi_tags = [*tags, TAG]
+    if app.title == "FastAPI":  # FastAPI's default: nobody named this app
+        app.title = f"{agent.id} agent"
+        app.description = app.description or (
+            f"The {agent.id} agent, served by trellis-harness: AG-UI chat (tag `agui`)."
+        )
+        if app.version == "0.1.0":  # FastAPI's default too
+            app.version = _version()
+    app.openapi_schema = None  # built again, with the routes just added
 
 
 class _Surface:
@@ -142,6 +226,26 @@ class _Surface:
         )
         return buffer, after
 
+    async def artifact(self, request: Request, run_id: str, artifact_id: str) -> Response:
+        await self.user(request)
+        agent = self.agent
+        tenant = await agent.harness.tenant()
+        record = await agent.harness.runs.get(run_id)
+        awaiting = record.awaiting if record is not None else None
+        ref = awaiting.payload_ref if awaiting is not None else None
+        if (
+            record is None
+            or record.tenant_id != tenant
+            or record.agent_id != agent.id
+            or ref is None
+            or ref.artifact_id != artifact_id
+        ):
+            raise HTTPException(404, f"no artifact {artifact_id}")
+        data = await agent.harness.runs.artifact(artifact_id, tenant)
+        if data is None:
+            raise HTTPException(404, f"no artifact {artifact_id}")
+        return Response(data, media_type=ref.mime_type or "application/octet-stream")
+
     def _launch(
         self,
         buffer: RunBuffer,
@@ -171,56 +275,93 @@ class _Surface:
         task.add_done_callback(self._tasks.discard)
 
 
+def _version() -> str:
+    try:
+        return metadata.version("trellis-harness")
+    except metadata.PackageNotFoundError:  # a source tree never installed
+        return "0"
+
+
 def _router(surface: _Surface, path: str) -> APIRouter:
     router = APIRouter(prefix=path, tags=["agui"])
 
-    @router.post("/run", summary="Run the agent for a thread and stream AG-UI events")
-    async def run(request: Request, body: RunAgentInput) -> StreamingResponse:
-        user = await surface.user(request)
-        buffer, after = await surface.run(body, user)
-        return StreamingResponse(_sse(buffer, after), media_type=MEDIA_TYPE)
+    @router.post(
+        "/run",
+        summary="Run the agent for a thread and stream AG-UI events",
+        response_class=EventStream,
+        responses={200: _SSE_DOC, **_refusals(401, 404, 409, 422)},
+    )
+    async def run(request: Request, body: RunAgentInput) -> Response:
+        """A new run (the client's `runId`, or one the harness names) executes in the
+        background and its events stream back; a `resume` entry answers the interrupt a paused
+        run of the thread waits on instead."""
+        try:
+            user = await surface.user(request)
+            buffer, after = await surface.run(body, user)
+        except HTTPException as exc:
+            return _problem(exc, request)
+        return EventStream(_sse(buffer, after))
 
-    @router.get("/runs/{run_id}/events", summary="Reconnect to a run's events")
+    @router.get(
+        "/runs/{run_id}/events",
+        summary="Reconnect to a run's events",
+        response_class=EventStream,
+        responses={200: _SSE_DOC, **_refusals(401, 404)},
+    )
     async def events(
         request: Request,
         run_id: str,
         after: int = -1,
         last_event_id: int | None = Header(default=None),
-    ) -> StreamingResponse:
-        user = await surface.user(request)
-        buffer = surface.hub.get(run_id)
-        if buffer is None or buffer.user != user:
-            raise HTTPException(404, f"no run {run_id} here")
+    ) -> Response:
+        """The run's events after `Last-Event-ID` (or `?after=`), then live until it
+        finishes. Only the run's own user, on the replica that served it."""
+        try:
+            user = await surface.user(request)
+            buffer = surface.hub.get(run_id)
+            if buffer is None or buffer.user != user:
+                raise HTTPException(404, f"no run {run_id} here")
+        except HTTPException as exc:
+            return _problem(exc, request)
         start = last_event_id if last_event_id is not None else after
-        return StreamingResponse(_sse(buffer, start), media_type=MEDIA_TYPE)
+        return EventStream(_sse(buffer, start))
 
     @router.get(
         "/runs/{run_id}/artifacts/{artifact_id}",
         summary="Data the interrupt a paused run waits on carries by reference",
+        response_class=Response,
+        responses={
+            200: {
+                "description": "the artifact's bytes, as the media type it was stored with",
+                "content": {"application/json": {}, "application/octet-stream": {}},
+            },
+            **_refusals(401, 404),
+        },
     )
     async def artifact(request: Request, run_id: str, artifact_id: str) -> Response:
-        """The bytes of the ``payload_ref`` of the interrupt the run waits on (an ``ask``
+        """The bytes of the `payload_ref` of the interrupt the run waits on (an `ask`
         table or diff), from agent-runs — so any replica serves them."""
-        await surface.user(request)
-        agent = surface.agent
-        tenant = await agent.harness.tenant()
-        record = await agent.harness.runs.get(run_id)
-        awaiting = record.awaiting if record is not None else None
-        ref = awaiting.payload_ref if awaiting is not None else None
-        if (
-            record is None
-            or record.tenant_id != tenant
-            or record.agent_id != agent.id
-            or ref is None
-            or ref.artifact_id != artifact_id
-        ):
-            raise HTTPException(404, f"no artifact {artifact_id}")
-        data = await agent.harness.runs.artifact(artifact_id, tenant)
-        if data is None:
-            raise HTTPException(404, f"no artifact {artifact_id}")
-        return Response(data, media_type=ref.mime_type or "application/octet-stream")
+        try:
+            return await surface.artifact(request, run_id, artifact_id)
+        except HTTPException as exc:
+            return _problem(exc, request)
 
     return router
+
+
+def _problem(exc: HTTPException, request: Request) -> JSONResponse:
+    code = PROBLEM_CODES.get(exc.status_code, "INTERNAL")
+    body = Problem(
+        type=f"urn:trellis:problem:{code.lower()}",
+        title=code.capitalize(),
+        status=exc.status_code,
+        detail=str(exc.detail),
+        instance=request.url.path,
+        code=code,
+    )
+    return JSONResponse(
+        body.model_dump(), status_code=exc.status_code, media_type=PROBLEM_MEDIA_TYPE
+    )
 
 
 async def _sse(buffer: RunBuffer, after: int) -> AsyncIterator[str]:
@@ -232,8 +373,8 @@ def _decision(answer: Resume, reason: InterruptReason) -> InterruptDecision:
     """The contracts decision a protocol resume entry means: ``cancelled`` abandons the run;
     an approval is answered ``true`` (approve), ``false`` (reject) or with the edited
     arguments; anything else answers a question. The ``decision`` extension names it."""
-    if answer.decision:
-        return InterruptDecision(answer.decision.upper())
+    if answer.decision is not None:
+        return answer.decision
     if answer.status is ResumeStatus.CANCELLED:
         return InterruptDecision.CANCEL
     if reason is not InterruptReason.APPROVAL:

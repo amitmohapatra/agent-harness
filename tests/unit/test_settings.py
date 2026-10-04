@@ -19,9 +19,12 @@ def test_every_variable_is_read_from_the_environment() -> None:
             "RUNS_URL": "http://runs",
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel",
             "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Basic%20cGs6c2s=,x-langfuse-host=http://lf",
+            "TRELLIS_SPOOL_DIR": "/var/spool/trellis",
+            "TRELLIS_WORKER_CONCURRENCY": "6",
         }
     )
     assert settings.api_key == "tk"
+    assert settings.spool_dir == "/var/spool/trellis" and settings.worker_concurrency == 6
     assert settings.runs_url == "http://runs"
     assert settings.otlp_headers == {
         "authorization": "Basic cGs6c2s=",

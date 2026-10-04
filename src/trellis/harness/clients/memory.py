@@ -8,11 +8,13 @@ what tools and nodes get as ``trellis.current().memory``.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
+from trellis.contracts import Feedback as Decision
 from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
+from trellis.harness.fresh import Fresh
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.models import (
@@ -24,8 +26,12 @@ from trellis.memory.models import (
     SideEffects,
 )
 
-#: Prompt budget for the pushed context, in tokens.
+#: Prompt budget for the pushed context, in tokens, when the model's context window is not
+#: known; with it known, :data:`CONTEXT_SHARE` of the window, between that and
+#: :data:`CONTEXT_TOKEN_MAX`.
 CONTEXT_TOKEN_BUDGET: Final = 2000
+CONTEXT_SHARE: Final = 0.05
+CONTEXT_TOKEN_MAX: Final = 8000
 #: The pull tools that change nothing: listed with side_effects "read", the rest "write".
 READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 #: The pull tool that chooses among the run's own tools: the harness answers it with
@@ -33,6 +39,10 @@ READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 TOOL_SEARCH: Final = "tool_search"
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
+#: How long the agent-tool listing is kept before it is listed again; while the service
+#: cannot be reached, the last listing is kept and asked for again after the retry interval.
+AGENT_TOOLS_TTL_SECONDS: Final = 600.0
+AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +61,28 @@ class Memory:
         self, url: str, api_key: str | None, *, client: MemoryClient | None = None
     ) -> None:
         self.client = client or MemoryClient(url, api_key=api_key)
-        #: the agent-tool listing: a fixed set, listed once per process
-        self.listed: list[ToolSpec] | None = None
+        self._lister = self.client.bind()
+        self._agent_tools = Fresh(
+            self._list_agent_tools,
+            what="the memory service's agent tools",
+            ttl=AGENT_TOOLS_TTL_SECONDS,
+            retry=AGENT_TOOLS_RETRY_SECONDS,
+        )
+
+    @property
+    def listed(self) -> list[ToolSpec] | None:
+        """The agent tools last listed (``None`` before the first listing)."""
+        return self._agent_tools.value
+
+    async def agent_tools(self, ctx: MemoryContext) -> list[ToolSpec]:
+        """The memory service's agent tools (a fixed set, listed in the asking run's scope):
+        listed again every :data:`AGENT_TOOLS_TTL_SECONDS`, the last listing kept while the
+        service is down; raises only when they were never listed."""
+        self._lister = ctx
+        return list(await self._agent_tools.get())
+
+    async def _list_agent_tools(self) -> list[ToolSpec]:
+        return [_agent_tool(t) for t in await self._lister.agent_tools()]
 
     async def key(self) -> KeyInfo:
         """Who ``TRELLIS_API_KEY`` is: its tenant, principal and role."""
@@ -72,6 +102,28 @@ class Memory:
         scope = {"tenant_id": tenant} | ({"agent_id": agent_id} if agent_id else {})
         return RunMemory(self, self.client.bind(**scope))
 
+    def replay(self, record: Mapping[str, Any]) -> Callable[[], Awaitable[object]] | None:
+        """The write a spooled record describes (:meth:`RunMemory.record`), in its scope;
+        ``None`` for a record of no write this client replays."""
+        run = RunMemory(self, self.client.bind(**record["scope"]))
+        args = record["args"]
+        match record["op"]:
+            case "record_messages":
+                messages = [(role, content) for role, content in args["messages"]]
+                return lambda: run.record_messages(messages, args["run_id"], args["attempt"])
+            case "record_tool":
+                call = ToolCall.model_validate(args["call"])
+                outcome = ToolOutcome.model_validate(args["outcome"])
+                return lambda: run.record_tool(call, outcome)
+            case "run_feedback":
+                return lambda: run.run_feedback(**args)
+            case "feedback":
+                decision = Decision.model_validate(args["record"])
+                return lambda: run.feedback(decision)
+            case "publish_catalog":
+                return lambda: run.publish_catalog(args["entries"])
+        return None
+
     async def aclose(self) -> None:
         await self.client.aclose()
 
@@ -85,22 +137,29 @@ class RunMemory:
         self.memory = memory
         self.ctx = ctx
 
+    def record(self, op: str, **args: Any) -> dict[str, Any]:
+        """A write of this scope as data — the method (``op``) and its arguments as JSON — so
+        the write spool can keep it and :meth:`Memory.replay` run it after a restart."""
+        scope = self.ctx.scope.model_dump(mode="json", exclude_none=True)
+        return {"op": op, "scope": scope, "args": args}
+
     # ------------------------------------------------------------------ push
     async def context(
-        self, query: str, *, tools: Sequence[str] | None, window: bool
+        self,
+        query: str,
+        *,
+        tools: Sequence[str] | None,
+        window: bool,
+        budget: int = CONTEXT_TOKEN_BUDGET,
     ) -> PromptContext:
-        """What the prompt gets, and the tools that fit the task (``tools``, when
-        ``tools`` are given). ``window=False`` when the framework keeps the thread's messages
-        itself: the service then leaves the recent conversation out."""
-        return await self.ctx.context(
-            query, token_budget=CONTEXT_TOKEN_BUDGET, tools=tools, window=window
-        )
+        """What the prompt gets (at most ``budget`` tokens), and the tools that fit the task
+        (``tools``, when ``tools`` are given). ``window=False`` when the framework keeps the
+        thread's messages itself: the service then leaves the recent conversation out."""
+        return await self.ctx.context(query, token_budget=budget, tools=tools, window=window)
 
     # ------------------------------------------------------------------ pull
     async def agent_tools(self) -> list[ToolSpec]:
-        if self.memory.listed is None:
-            self.memory.listed = [_agent_tool(t) for t in await self.ctx.agent_tools()]
-        return list(self.memory.listed)
+        return await self.memory.agent_tools(self.ctx)
 
     async def call_agent_tool(self, name: str, args: dict[str, object]) -> object:
         """One memory tool, in this run's scope."""
@@ -185,13 +244,22 @@ class RunMemory:
         return round(1.0 - report.per_claim_hallucination_rate, 4)
 
     # ------------------------------------------------------------------ catalog
-    async def catalog(self, names: Sequence[str]) -> dict[str, Governance]:
-        """What the catalog says about each named tool: the tier it decided, and the rule an
-        administrator (or an accepted suggestion) set. Tools it does not know are absent."""
-        return {
+    async def catalog(
+        self, names: Sequence[str], *, etag: str | None = None
+    ) -> tuple[dict[str, Governance] | None, str | None]:
+        """What the catalog says about each named tool — the tier it decided, and the rule an
+        administrator (or an accepted suggestion) set; tools it does not know are absent —
+        and the answer's ``ETag``. With the ``etag`` of an earlier answer the request is
+        conditional (``If-None-Match``): ``None`` means nothing changed since. A service that
+        sends no ``ETag`` is simply read in full each time."""
+        entries, tag = await self.ctx.advanced.tools.catalog_if_changed(names, etag=etag)
+        if entries is None:
+            return None, tag
+        governance = {
             entry.name: Governance(risk=entry.risk, approve_when=entry.approve_when or None)
-            for entry in await self.ctx.advanced.tools.catalog(names=list(names))
+            for entry in entries
         }
+        return governance, tag
 
     async def add_document(
         self,
@@ -223,6 +291,14 @@ class RunMemory:
         agent = self.ctx.scope.agent_id
         digest = hashlib.blake2b(key.encode(), digest_size=8).hexdigest()
         await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent}:{digest}")
+
+
+def context_budget(window: int | None) -> int:
+    """The pushed context's token budget for a model reading ``window`` tokens (``None``: not
+    known)."""
+    if not window:
+        return CONTEXT_TOKEN_BUDGET
+    return max(CONTEXT_TOKEN_BUDGET, min(CONTEXT_TOKEN_MAX, int(window * CONTEXT_SHARE)))
 
 
 def catalog_entry(spec: ToolSpec, annotations: dict[str, bool] | None) -> dict[str, object]:

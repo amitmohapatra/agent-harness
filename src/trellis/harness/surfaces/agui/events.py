@@ -6,8 +6,10 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
+
+from trellis.contracts import InterruptDecision
 
 
 class AGUIEventType(StrEnum):
@@ -36,6 +38,18 @@ class OutcomeType(StrEnum):
     SUCCESS = "success"
     INTERRUPT = "interrupt"
     CANCELLED = "cancelled"
+
+
+class Role(StrEnum):
+    """``Message.role``: who said a message of the thread."""
+
+    DEVELOPER = "developer"
+    SYSTEM = "system"
+    ASSISTANT = "assistant"
+    USER = "user"
+    TOOL = "tool"
+    ACTIVITY = "activity"
+    REASONING = "reasoning"
 
 
 class ResumeStatus(StrEnum):
@@ -100,7 +114,7 @@ class AGUIEvent(_Wire):
 
 class InputMessage(_Wire):
     id: str | None = None
-    role: str
+    role: Role
     content: str | None = None
 
 
@@ -114,7 +128,16 @@ class Resume(_Wire):
     status: ResumeStatus = ResumeStatus.RESOLVED
     payload: Any = None
     metadata: dict[str, Any] | None = None
-    decision: str | None = None
+    decision: InterruptDecision | None = Field(
+        default=None,
+        description="the contracts decision outright (any case): answer, approve, reject, "
+        "edit or cancel",
+    )
+
+    @field_validator("decision", mode="before")
+    @classmethod
+    def _any_case(cls, value: Any) -> Any:
+        return value.upper() if isinstance(value, str) else value
 
 
 class RunAgentInput(_Wire):
@@ -133,6 +156,6 @@ class RunAgentInput(_Wire):
 
     def latest_user_text(self) -> str | None:
         for message in reversed(self.messages):
-            if message.role == "user" and message.content:
+            if message.role is Role.USER and message.content:
                 return message.content
         return None

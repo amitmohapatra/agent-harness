@@ -220,6 +220,8 @@ async def test_ask_and_resume_continue_in_other_worker_processes(tmp_path: Path)
         assert await eventually(charged_once)
 
 
+# longer than the suite's 120 s: the ticker's fire is waited for up to 240 s
+@pytest.mark.timeout(360)
 async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> None:
     suffix = uuid.uuid4().hex[:8]
     async with live_harness() as h:

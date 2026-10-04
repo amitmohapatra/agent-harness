@@ -42,6 +42,7 @@ class Tool:
 
 
 class Source(Protocol):
-    """Something ``tools=[...]`` accepts. Resolved once per agent, then cached."""
+    """Something ``tools=[...]`` accepts. Resolved again each time the toolbox lists its
+    definitions (``toolbox.TOOLS_TTL_SECONDS``)."""
 
     async def resolve(self) -> list[Tool]: ...

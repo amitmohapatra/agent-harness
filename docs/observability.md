@@ -68,6 +68,10 @@ unless the application installed a provider itself, which it keeps. Two deployme
   serves several Langfuse projects. Collector env: `LANGFUSE_OTLP_ENDPOINT`, `DD_API_KEY`,
   `DD_SITE`.
 
+Spans are exported in batches every few seconds; closing the harness (`async with Harness()`
+ending, `aclose()`, a worker's shutdown) first exports what is still queued, so a short script
+or a stopping worker does not leave its last runs' traces behind.
+
 ## Scores
 
 Langfuse ingests scores through its public API (`POST /api/public/scores`), not through OTLP.

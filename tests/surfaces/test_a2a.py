@@ -369,3 +369,32 @@ def test_an_answer_is_read_as_the_decision_it_names() -> None:
     )
     with pytest.raises(ValueError, match="approval"):
         _decision(approval, message("maybe"))
+
+
+async def test_the_a2a_routes_are_in_the_openapi_document_and_still_served_by_the_sdk() -> None:
+    from fastapi import HTTPException
+    from starlette.applications import Starlette
+
+    from trellis.harness.surfaces.a2a import served_by_the_sdk
+
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    agent = harness.wrap(greeter, id="greeter")
+    agent.serve_a2a(app, URL)
+    harness.wrap(greeter, id="other").serve_a2a(app, "http://a2a.test/agents/other")  # one tag
+    doc = app.openapi()
+    assert [t["name"] for t in doc["tags"]] == ["a2a"]
+    rpc = doc["paths"]["/agents/greeter"]["post"]
+    methods = rpc["requestBody"]["content"]["application/json"]["schema"]["properties"]["method"]
+    assert {"SendMessage", "SendStreamingMessage", "CancelTask"} <= set(methods["enum"])
+    assert set(rpc["responses"]["200"]["content"]) == {"application/json", "text/event-stream"}
+    assert "get" in doc["paths"]["/agents/greeter/.well-known/agent-card.json"]
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://a2a.test") as http:
+        card = await http.get("/agents/greeter/.well-known/agent-card.json")
+        assert card.status_code == 200 and card.json()["name"] == "greeter"  # the SDK's route
+    with pytest.raises(HTTPException):
+        await served_by_the_sdk()
+    bare = Starlette()
+    agent.serve_a2a(bare, URL)  # a plain Starlette app: served, nothing to document
+    assert len(bare.router.routes) == 2

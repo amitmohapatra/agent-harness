@@ -15,7 +15,30 @@ from trellis.contracts import (
     RunStatus,
     ScheduleSpec,
 )
-from trellis.harness.clients.runs import HttpRuns, LeaseLost, LocalRuns, RunStoreError
+from trellis.harness.clients import runs as runs_module
+from trellis.harness.clients.runs import (
+    Conflict,
+    HttpRuns,
+    LeaseLost,
+    LocalRuns,
+    NotFound,
+    RunStoreError,
+    backoff,
+    next_cursor,
+)
+from trellis.harness.clients.runs import _pause as real_pause
+
+
+@pytest.fixture(autouse=True)
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The backoff waits a test's retries asked for, without waiting them."""
+    asked: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        asked.append(seconds)
+
+    monkeypatch.setattr(runs_module, "_pause", pause)
+    return asked
 
 
 def start(run_id: str = "run_1", agent: str = "a") -> RunStart:
@@ -248,16 +271,185 @@ async def test_the_http_store_speaks_the_agent_runs_wire() -> None:
 
 
 @respx.mock
-async def test_a_refused_or_unreachable_store_raises() -> None:
+async def test_a_refused_or_unreachable_store_raises(waits: list[float]) -> None:
     respx.post("http://runs.test/v1/runs").mock(return_value=httpx.Response(409, text="duplicate"))
     respx.get("http://runs.test/v1/runs/nope").mock(return_value=httpx.Response(404))
     runs = HttpRuns("http://runs.test", None)
-    with pytest.raises(RunStoreError, match="409"):
+    with pytest.raises(Conflict, match="409") as refused:  # no problem code: by the status
         await runs.started(start())
+    assert not isinstance(refused.value, LeaseLost) and refused.value.retryable is False
     assert await runs.get("nope") is None
-    respx.post("http://runs.test/v1/runs").mock(side_effect=httpx.ConnectError("down"))
-    with pytest.raises(RunStoreError, match="unreachable"):
+    route = respx.post("http://runs.test/v1/runs").mock(side_effect=httpx.ConnectError("down"))
+    route.calls.clear()
+    with pytest.raises(RunStoreError, match="unreachable") as unreachable:
         await runs.started(start())
+    assert unreachable.value.retryable is True
+    assert route.call_count == 1 + runs_module.RETRIES and len(waits) == runs_module.RETRIES
+    respx.post("http://runs.test/v1/runs").mock(side_effect=httpx.TooManyRedirects("loop"))
+    with pytest.raises(RunStoreError, match="call failed: TooManyRedirects"):
+        await runs.started(start())  # not a failure on the way: not retried
+    await runs.aclose()
+
+
+def problem(status: int, code: str, *, retryable: bool = False) -> httpx.Response:
+    """agent-runs' error body (RFC 9457, the platform's shape)."""
+    return httpx.Response(
+        status,
+        json={
+            "type": f"urn:trellis:problem:{code.lower().replace('_', '-')}",
+            "title": code.replace("_", " ").title(),
+            "status": status,
+            "detail": f"{code} detail",
+            "instance": "/v1/runs/run_1/finish",
+            "code": code,
+            "retryable": retryable,
+        },
+        headers={"content-type": "application/problem+json"},
+    )
+
+
+@respx.mock
+async def test_a_refusal_is_read_by_its_problem_code() -> None:
+    base = "http://runs.test"
+    finish = respx.post(f"{base}/v1/runs/run_1/finish")
+    runs = HttpRuns(base, "key")
+    finish.mock(return_value=problem(409, "LEASE_LOST"))
+    with pytest.raises(LeaseLost, match="LEASE_LOST detail"):
+        await runs.finished("run_1", RunStatus.SUCCESS, worker_id="w")
+    finish.mock(return_value=problem(409, "CONFLICT"))
+    with pytest.raises(Conflict) as conflict:  # another conflict is not a lost lease
+        await runs.finished("run_1", RunStatus.SUCCESS, worker_id="w")
+    assert not isinstance(conflict.value, LeaseLost)
+    assert (conflict.value.status, conflict.value.code) == (409, "CONFLICT")
+    finish.mock(return_value=problem(404, "NOT_FOUND"))
+    with pytest.raises(NotFound):
+        await runs.finished("run_1", RunStatus.SUCCESS)
+    finish.mock(return_value=problem(422, "VALIDATION"))
+    with pytest.raises(RunStoreError, match="HTTP 422 VALIDATION") as invalid:
+        await runs.finished("run_1", RunStatus.SUCCESS)
+    assert type(invalid.value) is RunStoreError and invalid.value.code == "VALIDATION"
+    finish.mock(return_value=httpx.Response(500, text="<html>oops</html>"))
+    with pytest.raises(RunStoreError, match="oops"):
+        await runs.finished("run_1", RunStatus.SUCCESS)
+    # a heartbeat refused is a lost lease whatever its code: the run is not this worker's
+    respx.post(f"{base}/v1/runs/run_1/heartbeat").mock(return_value=problem(409, "CONFLICT"))
+    with pytest.raises(LeaseLost):
+        await runs.heartbeat("run_1", "w", 30)
+    await runs.aclose()
+
+
+@respx.mock
+async def test_calls_that_fail_on_the_way_are_retried_with_backoff(waits: list[float]) -> None:
+    base = "http://runs.test"
+    finish = respx.post(f"{base}/v1/runs/run_1/finish").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(502),
+            problem(503, "DEPENDENCY_UNAVAILABLE", retryable=True),
+            httpx.Response(200, json=record_json("SUCCESS")),
+        ]
+    )
+    runs = HttpRuns(base, "key")
+    done = await runs.finished("run_1", RunStatus.SUCCESS, output="ok", worker_id="w")
+    assert done.status is RunStatus.SUCCESS and finish.call_count == 4
+    assert len(waits) == 3
+    # full jitter under a ceiling that doubles each time
+    ceilings = [runs_module.BACKOFF_SECONDS * 2**n for n in range(3)]
+    assert all(0 <= w <= c for w, c in zip(waits, ceilings, strict=True))
+    await runs.aclose()
+
+
+@respx.mock
+async def test_retry_after_is_honoured_up_to_its_cap(waits: list[float]) -> None:
+    base = "http://runs.test"
+    respx.post(f"{base}/v1/runs/claim").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "2"}),
+            httpx.Response(503, headers={"Retry-After": "3600"}),
+            httpx.Response(204),
+        ]
+    )
+    runs = HttpRuns(base, "key")
+    assert await runs.claim("w", ["a"], 30) is None
+    assert waits == [2.0, runs_module.RETRY_AFTER_MAX_SECONDS]
+    await runs.aclose()
+
+
+@respx.mock
+async def test_a_call_still_failing_after_its_retries_raises_retryable(
+    waits: list[float],
+) -> None:
+    base = "http://runs.test"
+    route = respx.post(f"{base}/v1/runs/run_1/pause").mock(
+        return_value=problem(503, "DEPENDENCY_UNAVAILABLE", retryable=True)
+    )
+    runs = HttpRuns(base, "key")
+    with pytest.raises(RunStoreError, match="503") as failed:
+        await runs.paused(interrupt(), worker_id="w")
+    assert failed.value.retryable is True and route.call_count == 1 + runs_module.RETRIES
+    route.mock(return_value=httpx.Response(504))
+    with pytest.raises(RunStoreError) as gateway:  # no body: retryable by its status
+        await runs.paused(interrupt(), worker_id="w")
+    assert gateway.value.retryable is True
+    await runs.aclose()
+
+
+def test_backoff_reads_retry_after_in_seconds_or_as_a_date() -> None:
+    assert backoff(0, "1.5") == 1.5
+    assert backoff(0, "-4") == 0.0
+    assert backoff(0, "Wed, 21 Oct 2015 07:28:00 GMT") == 0.0  # long past
+    later = (datetime.now(UTC) + timedelta(seconds=20)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    assert 15 <= backoff(0, later) <= 20
+    assert 0 <= backoff(5, "soon") <= runs_module.BACKOFF_MAX_SECONDS  # unreadable: jitter
+    assert 0 <= backoff(1, None) <= 2 * runs_module.BACKOFF_SECONDS
+
+
+async def test_the_backoff_wait_is_a_real_sleep() -> None:
+    await real_pause(0)
+
+
+def test_next_cursor_reads_the_next_link() -> None:
+    assert next_cursor(None) is None
+    assert next_cursor('</v1/runs?cursor=c2&limit=500>; rel="next"') == "c2"
+    assert (
+        next_cursor('<https://r/v1/runs?limit=5>; rel="prev", </v1/runs?cursor=c3>; rel=next')
+        == "c3"
+    )
+    assert next_cursor('</v1/runs?limit=5>; rel="next"') is None
+    assert next_cursor('</v1/runs?cursor=c1>; rel="prev"') is None
+
+
+@respx.mock
+async def test_the_inbox_follows_every_page(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    base = "http://runs.test"
+
+    def summary(n: int) -> dict[str, object]:
+        return {
+            "run_id": f"run_{n}",
+            "agent_id": "a",
+            "status": "PAUSED",
+            "updated_at": "2026-09-30T00:00:00Z",
+        }
+
+    def page(request: httpx.Request) -> httpx.Response:
+        cursor = request.url.params.get("cursor")
+        n = int(cursor) if cursor else 0
+        link = {"link": f'</v1/runs?status=PAUSED&cursor={n + 1}>; rel="next"'} if n < 2 else {}
+        return httpx.Response(200, json=[summary(n)], headers=link)
+
+    listing = respx.get(f"{base}/v1/runs").mock(side_effect=page)
+    runs = HttpRuns(base, "key")
+    assert [s.run_id for s in await runs.inbox("t", "role:ops")] == ["run_0", "run_1", "run_2"]
+    assert listing.call_count == 3
+    assert all(c.request.url.params["assignee"] == "role:ops" for c in listing.calls)
+    assert listing.calls[2].request.url.params["cursor"] == "2"
+    monkeypatch.setattr(runs_module, "INBOX_MAX_PAGES", 2)
+    with caplog.at_level("WARNING", logger="trellis.runs"):
+        assert len(await runs.inbox("t", None)) == 2  # capped, and said so
+    assert "more than 2 paused runs" in caplog.text
+    await runs.aclose()
 
 
 @respx.mock

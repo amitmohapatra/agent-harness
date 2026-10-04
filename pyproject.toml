@@ -45,6 +45,8 @@ dev = [
   "pytest-asyncio>=1.4",
   "pytest-timeout>=2.3",
   "respx>=0.22",
+  # tests/contract: the siblings' OpenAPI documents (3.1: JSON Schema 2020-12) check the wire
+  "jsonschema>=4.23",
   "ruff>=0.16",
   "pyright>=1.1.414",
   "uvicorn>=0.30",

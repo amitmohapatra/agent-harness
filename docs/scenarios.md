@@ -74,6 +74,8 @@ code outside a tool (and the model calls) run again on the re-run.
 | A run that outlives this process: long work, approvals that take days, many workers | `await agent.start(...)`, `h.worker([...]).run()` (or `python -m trellis.worker module:h`), and `RUNS_URL` |
 | A run on a cadence, acting for someone | `await agent.schedule(cron, input, on_behalf_of=...)` — idempotent, so it is safe in deployment code |
 | Development and tests | leave `RUNS_URL` unset: runs, the queue and schedules live in the process (`LocalRuns`) and nothing survives a restart |
+| Workers in production: deploys, scaling, stop signals | `python -m trellis.worker module:h --concurrency N` (or `TRELLIS_WORKER_CONCURRENCY`; default the CPU count, 1–8); `SIGTERM` lets held runs finish for 25 s, then releases them for another worker — give the container ~45 s ([runs.md](runs.md#workers)) |
+| Memory writes that survive an outage and a restart | `TRELLIS_SPOOL_DIR` on a volume that outlives the process: what could not be delivered is replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 
 A run started with `run`/`stream` resumes in the process that calls `resume`; one started with
 `start` (or by a schedule) goes back to the queue on resume and any worker continues it.
@@ -89,6 +91,10 @@ A run started with `run`/`stream` resumes in the process that calls `resume`; on
 Both surfaces can be mounted on one FastAPI app (`examples/serve_chat.py`). Identity is always
 the deployment's: pass `identity=` (or put an authenticating edge in front for A2A's trusted
 header); without it every caller is `anonymous`.
+
+Both show up in the app's OpenAPI document (tags `agui`, `a2a`). With several replicas, keep a
+chat thread on one (sticky sessions): its events are buffered in the process that serves it
+([surfaces.md](surfaces.md#ag-ui-agentserve_chatapp--pathagui-identitynone)).
 
 ## Seeing what happened
 

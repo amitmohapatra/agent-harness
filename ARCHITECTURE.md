@@ -52,14 +52,15 @@ src/trellis/
   __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory)
   worker.py            python -m trellis.worker module:harness
   harness/
-    harness.py         Harness: settings → clients, writes, scores; the key (tenant, role);
+    harness.py         Harness: settings → clients, writes, scores; the key (tenant, kept fresh);
                        wrap / tools / worker / inbox / feedback / add_document
     agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
     pipeline.py        one attempt of one run (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
     journal.py         what a re-run needs: answers and tool outputs, keyed by content
     events.py          a run's RunEvent stream (built only when someone listens)
-    writes.py          background writes with auto-drain
+    writes.py          background writes: retries, backpressure, the spool, auto-drain
+    fresh.py           a value read from a service, kept for a TTL, the last one through outages
     identity.py        tenant / user / thread / agent / run → memory scope, contracts context
     result.py          Result
     settings.py        the environment
@@ -77,7 +78,9 @@ src/trellis/
 
 Each service has exactly one client module; nothing else in the harness calls it. The core
 imports no framework: an adapter imports its framework the first time a target of its type is
-wrapped, and `tests/contract` checks that `import trellis` and `Harness()` load none.
+wrapped, and `tests/contract` checks that `import trellis` and `Harness()` load none — and that
+what the clients send, and what the test doubles of the memory service and agent-runs answer,
+match those services' committed OpenAPI documents.
 
 ### Components
 
@@ -152,8 +155,13 @@ flowchart LR
   G --> H[background: transcript,<br/>system outcome, sampled grounding]
 ```
 
-A failed memory read is a `warning` event, not a failed run. Writes to agent-runs are awaited
-(a pause that was not recorded cannot be resumed); writes to the memory service are queued.
+A memory service that is down degrades a run, it never fails it: a failed context read is a
+`warning` event; the memory tools that cannot be listed are left out (a `warning` event); a
+catalog that cannot be read makes every tool that does more than read ask; who
+`TRELLIS_API_KEY` is stays what it was last read (`fresh.Fresh`). Only a key the service refuses,
+or one it could never be asked about, is a `ConfigurationError`. Writes to agent-runs are
+awaited (a pause that was not recorded cannot be resumed) and retried; writes to the memory
+service are queued.
 
 ### One run, end to end
 
@@ -176,12 +184,12 @@ sequenceDiagram
   participant LF as Langfuse (scores API / OTLP)
 
   User->>Agent: await agent.run(input, user=, thread=)
-  Agent->>Mem: GET /v1/keys/self (once per process: tenant, role)
+  Agent->>Mem: GET /v1/keys/self (tenant, kept 10 min, the last answer while memory is down)
   Agent->>Runs: started(RunStart) → RUNNING
   Agent->>P: attempt(agent, identity, input)
-  P->>GW: MCP tools/list with the virtual key (toolbox, cached 300 s)
-  P->>Mem: GET /v1/tools?names= (catalog tiers, approve_when)
-  P->>Mem: GET /v1/agent-tools (pull tools, once per process)
+  P->>GW: MCP tools/list with the virtual key (definitions, kept 300 s)
+  P->>Mem: GET /v1/tools?names= + If-None-Match (tiers, approve_when, every 30 s)
+  P->>Mem: GET /v1/agent-tools (pull tools, kept 10 min)
   P->>Mem: POST /v1/context (memory recall: retrieve memory span)
   Mem-->>P: rendered, bundle_id, tools [name, confidence]
   P->>FW: prepare_input(input, context), invoke(native tools)
@@ -232,11 +240,18 @@ adapter with fixed tools (a compiled graph) refuses `tools=` at wrap time; its t
 
 ## Tools
 
-The toolbox (`tools/toolbox.py`) is resolved once per agent and tenant and again after
-`TOOLS_TTL_SECONDS` (300): the local sources, every MCP tool the Bifrost virtual key allows,
-the catalog's word on each (`side_effects`, `approve_when`), Code Mode for the read-only Code
-Mode servers when there are enough of them, and every tool published to the catalog in the
-background. Every call, whoever makes it, goes through `tools/bridge.call`:
+The toolbox (`tools/toolbox.py`, one `Toolbox` per agent and tenant) keeps two things fresh on
+two clocks: the definitions — the local sources and every MCP tool the Bifrost virtual key
+allows — listed again after `TOOLS_TTL_SECONDS` (300), and the governance — the catalog's word on
+each tool (`risk`, `approve_when`) — read again after `GOVERNANCE_TTL_SECONDS` (30) with the last
+answer's `ETag` (`If-None-Match`; a `304` keeps what was read), so an administrator's new rule
+reaches running agents within half a minute. One refresh at a time: concurrent runs that find
+the toolbox stale share one read. Code Mode is chosen for the read-only Code Mode servers when
+there are enough of them, and every tool is published to the catalog in the background (and
+published again at the next listing if that failed). A catalog that cannot be read leaves each
+tool its own tier, except that every tool that does more than read asks for approval
+(`policy.CATALOG_UNREAD`) until it can (governance read in the last 300 s still stands); the
+warning is logged once. Every call, whoever makes it, goes through `tools/bridge.call`:
 
 1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
    recorded output is returned and nothing runs;
@@ -396,10 +411,41 @@ Every attempt (each `RUNNING` stretch) is one `invoke_agent` span in the run's o
 ## Background writes
 
 `writes.Writes`: a bounded queue (`MAX_PENDING` 10 000) drained by `WRITERS` (4) tasks. A
-failed write is logged, counted (`trellis.writes.failed`) and emitted as a `warning` event to
-the run's listeners. When the event loop shuts down it cancels the workers, and a cancelled
-worker finishes the queue first (the write it was cut off in included; writes are idempotent),
-within `DRAIN_SECONDS` (10). `await h.aclose()` drains explicitly.
+write whose failure may pass is tried again (`WRITE_ATTEMPTS` 3, full-jitter backoff); a full
+queue makes the writer wait (`SUBMIT_WAIT_SECONDS` 5) instead of dropping the write. A write
+given up is logged, counted and emitted as a `warning` event to the run's listeners — or, with
+`TRELLIS_SPOOL_DIR`, appended to a JSONL spool that the next process replays. When the event loop
+shuts down it cancels the workers, and a cancelled worker finishes the queue first (the write it
+was cut off in included; writes are idempotent), within `DRAIN_SECONDS` (10); what is left is
+spooled or counted lost (`trellis.writes.undelivered`). `await h.aclose()` drains explicitly.
+The guarantee is in [docs/memory.md](docs/memory.md#background-writes-what-is-guaranteed).
+
+## Stopping a worker
+
+`python -m trellis.worker` turns `SIGTERM`/`SIGINT` into `Worker.stop()`:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant OS as Orchestrator
+  participant CLI as python -m trellis.worker
+  participant Wk as Worker
+  participant R as Runs it holds
+  participant AR as agent-runs
+  participant W as Writes
+  OS->>CLI: SIGTERM
+  CLI->>Wk: stop()
+  Wk--xAR: no more claims
+  par within GRACE_SECONDS (25 s)
+    R->>AR: finish / pause (as usual)
+  end
+  alt a run is still going
+    Wk->>R: cancel(RELEASED): nothing written
+    Note over AR: its lease lapses → QUEUED, next attempt
+  end
+  CLI->>W: aclose(): drain ≤ DRAIN_SECONDS, then spool or count the rest
+  CLI-->>OS: exit 0
+```
 
 ## Telemetry
 

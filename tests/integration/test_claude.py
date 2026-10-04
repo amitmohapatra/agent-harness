@@ -10,7 +10,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions
 
-from tests.support.memory import FakeMemoryService
+from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, tool
 from trellis.contracts import RunEventType, RunStatus
 
@@ -94,10 +94,7 @@ async def test_the_hints_narrow_the_tools_for_the_run(
     target = options(tmp_path, [{"text": "done"}])
     await memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)]).run("x", user="u1")
     allowed = started_with(tmp_path)["allowed_tools"].split(",")
-    assert allowed == [
-        f"mcp__trellis__{n}"
-        for n in ("t2", "t5", "memory_search", "memory_remember", "tool_search")
-    ]
+    assert allowed == [f"mcp__trellis__{n}" for n in ("t2", "t5", *MEMORY_TOOLS)]
 
 
 async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: Path) -> None:

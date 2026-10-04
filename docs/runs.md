@@ -21,16 +21,28 @@ where it cannot, and so does its answer.
 ## Workers
 
 ```python
-await h.worker([agent_a, agent_b]).run()     # until cancelled; 4 runs at a time
-python -m trellis.worker app.agents:h        # every agent the Harness `h` wraps
+await h.worker([agent_a, agent_b]).run()               # until stopped; CPU count runs at a time
+python -m trellis.worker app.agents:h                  # every agent the Harness `h` wraps
+python -m trellis.worker app.agents:h --concurrency 8
 ```
 
-`h.worker(agents, *, concurrency=4)` needs at least one agent. `await worker.run()` claims
-and executes until cancelled, `concurrency` runs at a time, asking again every second when
-the queue is empty; cancelling it cancels the runs it holds (they end `CANCELLED`) and drains
-the background writes. `await worker.run_once()` claims one run and executes it to its end or
-pause, and returns `False` when nothing was queued. A claim that fails is logged and counts as
-no work; a run that breaks the harness itself is logged and the worker goes on.
+`h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
+at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and
+8. `await worker.run()` claims and executes until stopped: an idle worker asks again after
+0.5 s, doubling the pause while the queue stays empty up to 10 s (half of it random, so a fleet
+of idle workers does not ask in step), and asks at once again after it got work.
+`await worker.run_once()` claims one run and executes it to its end or pause, and returns
+`False` when nothing was queued. A claim that fails is logged and counts as no work; a run that
+breaks the harness itself is logged and the worker goes on.
+
+**Stopping.** `worker.stop()` — what `python -m trellis.worker` calls on `SIGTERM` or `SIGINT` —
+stops claiming and lets the runs the worker holds finish, for up to 25 s (`GRACE_SECONDS`). A run
+still going then is *released*: stopped without writing anything, so its lease lapses and
+agent-runs queues it again as its next attempt for another worker (the journal replays what its
+last pause checkpointed). A second signal releases the runs at once. Then the memory write queue
+drains (at most 10 s; what is left is spooled or counted lost — [memory.md](memory.md)) and the
+process exits `0`. Give the container at least 40 s to stop (e.g. a termination grace period of
+45 s). Cancelling `worker.run()` instead cancels the runs it holds: they end `CANCELLED`.
 
 A worker claims a queued run under a 60 s lease and heartbeats it every 20 s (a failed
 heartbeat is logged and retried at the next beat). It names itself
@@ -67,6 +79,29 @@ subscriptions (`POST /v1/webhooks`), not a harness setting.
 checkpoint), `POST /v1/runs/{id}/resume` (an `InterruptResolution`),
 `POST /v1/runs/{id}/finish?worker_id=`, `POST /v1/runs/{id}/artifacts?worker_id=&checksum=`
 (an `ask` payload, → `ArtifactRef`), `GET /v1/artifacts/{id}`, `GET /v1/runs/{id}`,
-`GET /v1/runs?status=PAUSED&assignee=` (summaries), `POST /v1/schedules` (`ScheduleSpec`). A
-refused or unreachable write raises `RunStoreError` (`LeaseLost` for a lease that is no longer
-the worker's).
+`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=` (summaries, page by page),
+`POST /v1/schedules` (`ScheduleSpec`).
+
+Every call is retried when it fails on the way — a transport error (a refused connection, a
+timeout), `429`, `502`, `503` or `504` — up to 3 times, after the `Retry-After` agent-runs sent
+(at most 30 s) or else with exponential backoff and full jitter (a random wait under a ceiling
+of 0.25 s, doubled for each retry, at most 5 s). Every write is safe to repeat: a run start is
+idempotent on its id, a pause or finish repeated by the same worker with the same status
+answers the stored record, an artifact is stored once per checksum, a schedule is upserted. A
+claim whose answer was lost leaves that run leased to this worker unworked until the lease
+lapses (60 s), when agent-runs queues it again — late, never lost or run twice at once. A
+pause or finish the store refuses as a conflict is read back once: when the run already is
+what was written (the first attempt landed, its answer did not), the run goes on as recorded —
+it is not failed, queued again or executed again.
+
+A refusal raises `RunStoreError` — with the problem's `code`, the `status` and `retryable`, so a
+run that fails on it keeps whether it may be retried — read from agent-runs' problem document
+(RFC 9457) by its `code`: `LEASE_LOST` is `LeaseLost` (the worker no longer holds the run: it
+stops and writes nothing more), `CONFLICT` is `Conflict` (a run id taken, an answer to another
+interrupt, an illegal transition), `NOT_FOUND` is `NotFound`; an answer without a code is read
+by its status (`409` `Conflict`, `404` `NotFound`). A heartbeat refused with `409`, whatever its
+code, is `LeaseLost`. A call that still fails after its retries raises `RunStoreError` with
+`retryable` true.
+
+The inbox follows agent-runs' `Link: <…>; rel="next"` cursor page by page (500 runs a page), up
+to 10 pages; past that it returns the newest 5000 and logs a warning.
