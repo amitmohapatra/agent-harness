@@ -15,6 +15,11 @@ Spans (every attribute passes the redactor first):
 * ``retrieve memory`` — the pushed context;
 * ``score <name>`` — a grounding score or a person's feedback, in the run's trace.
 
+A run ``h.evaluate`` runs is an item of a Langfuse experiment: inside :func:`experiment`, every
+span above carries Langfuse's experiment attributes (``langfuse.experiment.*``), as its own SDK's
+experiment runner sets them — what Langfuse v4 builds experiments from (v3 links dataset runs
+through ``POST /api/public/dataset-run-items``, which the harness also sends).
+
 Every attempt of a run is in one trace whose id is derived from the run id
 (:func:`trace_id_of`), so a resume in another process, a score computed later and
 ``h.feedback`` all land on the trace the run started.
@@ -36,10 +41,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 from urllib.parse import quote
 
@@ -71,6 +78,22 @@ LANGFUSE_RUN_ITEMS_PATH: Final = "/api/public/dataset-run-items"
 #: Dataset items one page asks for (Langfuse's default page size).
 LANGFUSE_PAGE: Final = 50
 SCORES_TIMEOUT_SECONDS: Final = 10.0
+
+#: Langfuse's experiment attributes, as its Python SDK names them (``_client/attributes.py``).
+EXPERIMENT_ID: Final = "langfuse.experiment.id"
+EXPERIMENT_NAME: Final = "langfuse.experiment.name"
+EXPERIMENT_DESCRIPTION: Final = "langfuse.experiment.description"
+EXPERIMENT_METADATA: Final = "langfuse.experiment.metadata"
+EXPERIMENT_DATASET_ID: Final = "langfuse.experiment.dataset.id"
+EXPERIMENT_ITEM_ID: Final = "langfuse.experiment.item.id"
+EXPERIMENT_ITEM_EXPECTED_OUTPUT: Final = "langfuse.experiment.item.expected_output"
+EXPERIMENT_ITEM_METADATA: Final = "langfuse.experiment.item.metadata"
+EXPERIMENT_ITEM_ROOT_OBSERVATION_ID: Final = "langfuse.experiment.item.root_observation_id"
+LANGFUSE_ENVIRONMENT: Final = "langfuse.environment"
+#: The environment the SDK puts an experiment item's spans in.
+EXPERIMENT_ENVIRONMENT: Final = "sdk-experiment"
+#: The longest propagated value the SDK keeps (a longer one is dropped, not cut).
+PROPAGATED_MAX_CHARS: Final = 200
 
 _tracer = trace.get_tracer(TRACER_NAME)
 _meter = otel_metrics.get_meter(TRACER_NAME)
@@ -133,6 +156,102 @@ def _run_context(run_id: str) -> otel_context.Context:
     return trace.set_span_in_context(trace.NonRecordingSpan(parent))
 
 
+# --------------------------------------------------------------------------- experiments
+
+
+def serialized(value: Any) -> str | None:
+    """A value as Langfuse's SDK writes it into an attribute: text as it is, anything else as
+    JSON (``None`` stays ``None``)."""
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value, default=str)
+
+
+def flattened(metadata: Mapping[str, Any] | None) -> dict[str, str]:
+    """Metadata as the SDK propagates it: nested keys joined with dots, values serialized, none
+    left out."""
+    found: dict[str, str] = {}
+
+    def walk(path: str, value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                walk(f"{path}.{key}", nested)
+            return
+        text = serialized(value)
+        if text is not None:
+            found[path] = text
+
+    for key, value in (metadata or {}).items():
+        walk(str(key), value)
+    return found
+
+
+@dataclass(slots=True)
+class Experiment:
+    """An evaluated run's place in a Langfuse experiment: the dataset run (``id``, ``name``), the
+    dataset and item, and the run's root span once it started (``root_observation_id``)."""
+
+    id: str
+    name: str
+    item_id: str
+    dataset_id: str | None = None
+    description: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    expected_output: str | None = None
+    item_metadata: dict[str, str] = field(default_factory=dict)
+    root_observation_id: str | None = None
+
+    def propagated(self) -> dict[str, Any]:
+        """What every span of the run carries (the SDK's propagated experiment attributes; a
+        value over :data:`PROPAGATED_MAX_CHARS` is left out, as the SDK leaves it out)."""
+        values: dict[str, str | None] = {
+            EXPERIMENT_ID: self.id,
+            EXPERIMENT_NAME: self.name,
+            EXPERIMENT_DATASET_ID: self.dataset_id,
+            EXPERIMENT_ITEM_ID: self.item_id,
+            EXPERIMENT_ITEM_ROOT_OBSERVATION_ID: self.root_observation_id,
+        }
+        values.update({f"{EXPERIMENT_METADATA}.{k}": v for k, v in self.metadata.items()})
+        values.update({f"{EXPERIMENT_ITEM_METADATA}.{k}": v for k, v in self.item_metadata.items()})
+        if self.root_observation_id is not None:
+            values[LANGFUSE_ENVIRONMENT] = EXPERIMENT_ENVIRONMENT
+        return {k: v for k, v in values.items() if v is not None and len(v) <= PROPAGATED_MAX_CHARS}
+
+    def root(self) -> dict[str, Any]:
+        """What the run's root span carries: the propagated attributes, the description and the
+        expected output."""
+        values = self.propagated()
+        if self.description is not None:
+            values[EXPERIMENT_DESCRIPTION] = self.description
+        if self.expected_output is not None:
+            values[EXPERIMENT_ITEM_EXPECTED_OUTPUT] = self.expected_output
+        return values
+
+
+_experiment: ContextVar[Experiment | None] = ContextVar("trellis_experiment", default=None)
+
+
+@contextmanager
+def experiment(item: Experiment) -> Iterator[Experiment]:
+    """Run the code inside as ``item`` of a Langfuse experiment: the spans it starts carry the
+    experiment's attributes (the first ``invoke_agent`` span is the item's root observation)."""
+    token = _experiment.set(item)
+    try:
+        yield item
+    finally:
+        _experiment.reset(token)
+
+
+def _experimented(span: trace.Span, *, root: bool = False) -> None:
+    """Put the current experiment's attributes on ``span`` (a recording one)."""
+    current = _experiment.get()
+    if current is None:
+        return
+    if root and current.root_observation_id is None:
+        current.root_observation_id = format(span.get_span_context().span_id, "016x")
+    span.set_attributes(redact_attributes(current.root() if root else current.propagated()))
+
+
 # --------------------------------------------------------------------------- spans
 
 
@@ -178,6 +297,7 @@ def agent_span(run: RunTrace, task: str) -> Iterator[trace.Span]:
         if current.is_recording():
             attributes = {**run.attributes(), "langfuse.observation.input": _text(task)}
             current.set_attributes(redact_attributes(attributes))
+            _experimented(current, root=True)
         yield current
 
 
@@ -198,6 +318,7 @@ def tool_span(
                 "trellis.tool.tier": tier,
             }
             current.set_attributes(redact_attributes(attributes))
+            _experimented(current)
         yield current
 
 
@@ -213,6 +334,7 @@ def model_span(model: str, messages: Any) -> Iterator[trace.Span]:
                 "langfuse.observation.input": _text(messages),
             }
             current.set_attributes(redact_attributes(attributes))
+            _experimented(current)
         yield current
 
 
@@ -226,6 +348,7 @@ def retrieval_span(query: str) -> Iterator[trace.Span]:
                 "langfuse.observation.input": _text(query),
             }
             current.set_attributes(redact_attributes(attributes))
+            _experimented(current)
         yield current
 
 
@@ -261,6 +384,8 @@ def score_span(run_id: str, name: str, value: float | str, comment: str | None) 
         f"score {name}", context=_run_context(run_id), attributes=redact_attributes(attributes)
     ) as current:
         current.add_event("score", redact_attributes({"name": name, "value": value}))
+        if current.is_recording():
+            _experimented(current)
 
 
 def _text(value: Any) -> str:
@@ -319,9 +444,10 @@ class Langfuse:
         response = await self._client.post(LANGFUSE_SCORES_PATH, json=body)
         response.raise_for_status()
 
-    async def dataset_items(self, name: str) -> list[dict[str, Any]]:
-        """The active items of the dataset ``name``, in Langfuse's order, every page of them.
-        A dataset Langfuse does not have is a ``ConfigurationError``."""
+    async def dataset(self, name: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """The dataset ``name`` (its ``id``, ``projectId``...) and its active items, in
+        Langfuse's order, every page of them. A dataset Langfuse does not have is a
+        ``ConfigurationError``."""
         found = await self._client.get(LANGFUSE_DATASET_PATH.format(name=quote(name, safe="")))
         if found.status_code == httpx.codes.NOT_FOUND:
             raise ConfigurationError(f"Langfuse has no dataset {name!r}")
@@ -338,7 +464,7 @@ class Langfuse:
             items.extend(i for i in body["data"] if i.get("status", "ACTIVE") == "ACTIVE")
             pages = int((body.get("meta") or {}).get("totalPages") or 0)
             page += 1
-        return items
+        return found.json(), items
 
     async def link(
         self,
@@ -347,17 +473,28 @@ class Langfuse:
         run_name: str,
         item_id: str,
         metadata: dict[str, Any],
-    ) -> None:
+        description: str | None = None,
+    ) -> str | None:
         """Link the run's trace to the dataset run ``run_name`` as the result of the dataset
-        item ``item_id`` (the dataset run is created by its first item)."""
-        body = {
+        item ``item_id`` (the dataset run is created by its first item); the dataset run's id.
+        Langfuse v3 (and a self-hosted v3) takes it; v4 builds the run from the spans'
+        experiment attributes instead (:class:`Experiment`)."""
+        body: dict[str, Any] = {
             "runName": run_name,
             "datasetItemId": item_id,
             "traceId": trace_hex(run_id),
             "metadata": metadata,
         }
+        if description is not None:
+            body["runDescription"] = description
         response = await self._client.post(LANGFUSE_RUN_ITEMS_PATH, json=body)
         response.raise_for_status()
+        run = response.json().get("datasetRunId")
+        return run if isinstance(run, str) and run else None
+
+    def dataset_run_url(self, project_id: str, dataset_id: str, run_id: str) -> str:
+        """Where Langfuse shows a dataset run (an experiment)."""
+        return f"{self.host}/project/{project_id}/datasets/{dataset_id}/runs/{run_id}"
 
     def trace_url(self, run_id: str) -> str:
         """Where Langfuse shows the run's trace (its ``/trace/{id}`` page finds the project)."""

@@ -105,7 +105,8 @@ evaluator where one will do.
 ## Offline: `h.evaluate`
 
 ```python
-await h.evaluate(agent, dataset, evaluators, *, run_name=None, concurrency=4, limit=None, user=None)
+await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None,
+                 concurrency=4, limit=None, user=None)
 ```
 
 * **`dataset`** — a Langfuse dataset's name, or a sequence of items: mappings with `input` (and
@@ -116,26 +117,60 @@ await h.evaluate(agent, dataset, evaluators, *, run_name=None, concurrency=4, li
   `ConfigurationError`.
 * **Each item** runs through the normal pipeline — memory push and pull, the toolbox, risk tiers
   and approvals, records, traces — acting for `user` (default `trellis-evaluate`; memory is
-  scoped to it, so give an evaluation its own user when its writes should stay apart). Then the
-  evaluators score the answer, each score goes on the run's trace, and, for a Langfuse dataset,
-  the run's trace is linked to the dataset run `run_name` as that item's result
-  (`POST /api/public/dataset-run-items {runName, datasetItemId, traceId, metadata}`; the run is
-  created by its first item). A link Langfuse refuses is a warning.
+  scoped to it, so give an evaluation its own user when its writes should stay apart), as an
+  item of a Langfuse experiment (below). Then the evaluators score the answer and each score
+  goes on the run's trace.
 * **What cannot stop it**: an item whose run fails is `error` (with its message), one that
   pauses for a person is `interrupted` — its run is cancelled so it does not wait in an inbox —
   and one whose run is cancelled is `cancelled`; only `success` items are scored.
-* **`concurrency`** items run at once (at least 1), **`limit`** keeps the first items only, and
-  **`run_name`** defaults to `<agent id>-<UTC time>`.
+* **`concurrency`** items run at once (at least 1), **`limit`** keeps the first items only,
+  **`run_name`** (default `<agent id>-<UTC time>`) names the experiment, and `description` and
+  `metadata` describe it (the metadata always holds `agent_id`).
 * **At the end** the background writes are drained and the spans exported, so the scores are in
   Langfuse when the call returns.
 
-`EvalReport`: `run_name`, `dataset` (the Langfuse dataset's name, or `None`), `items` — in
+`EvalReport`: `run_name`, `dataset` (the Langfuse dataset's name, or `None`), `experiment_id`
+and `dataset_run_url` (below), `items` — in
 dataset order, each an `EvalResult(input, expected, output, status, run_id, scores, failed,
 error, trace_url)` (`trace_url` is `<langfuse host>/trace/<trace id>` when Langfuse is
 configured) — `statuses` (how many items ended each way) and `summary`: each evaluator's
 `EvaluatorStats(mean, count, failures)` by name — the mean of its numeric and bool scores
 (`None` for categorical ones), how many scores it gave, how many items it failed on.
 `print(report)` and `print(report.summary)` are tables.
+
+### Each run is an item of a Langfuse experiment (v3, self-hosted, and v4)
+
+The harness does what Langfuse's own SDK experiment runner does (`langfuse-python`,
+`_process_experiment_item`), so an evaluation is an experiment on Langfuse v3 — Cloud and
+self-hosted — and on v4 alike:
+
+1. **The dataset run link (v3).** For an item of a Langfuse dataset, before the run, its trace is
+   linked to the dataset run `run_name` as that item's result:
+   `POST /api/public/dataset-run-items {runName, runDescription?, datasetItemId, traceId,
+   metadata}` (the dataset run is created by its first item). Langfuse answers with the dataset
+   run's id (`datasetRunId`), which becomes the experiment's id and gives
+   `report.dataset_run_url` (`<host>/project/<projectId>/datasets/<datasetId>/runs/<id>`). A link
+   Langfuse refuses — Langfuse v4 has no such endpoint — is a warning, and nothing else changes.
+2. **The experiment attributes (v4 reads these).** Every span of the run — its `invoke_agent`
+   span (the item's root observation), `chat`, `execute_tool` and `retrieve memory` spans, and
+   the `score` spans of its evaluators — carries:
+
+| Attribute | Value |
+|---|---|
+| `langfuse.experiment.id` | the dataset run's id; else one id made once per `evaluate` call (16 hex characters), the same for all its items — also `report.experiment_id` |
+| `langfuse.experiment.name` | `run_name` |
+| `langfuse.experiment.metadata.<key>` | the experiment's `metadata`, flattened (`params.temperature`) and each value serialized (text as is, anything else as JSON) |
+| `langfuse.experiment.dataset.id` | the Langfuse dataset's id (not for a local list) |
+| `langfuse.experiment.item.id` | the dataset item's id (or an `EvalItem`'s `id`); else the first 16 hex characters of the SHA-256 of the serialized input |
+| `langfuse.experiment.item.metadata.<key>` | the item's metadata, flattened and serialized the same way |
+| `langfuse.experiment.item.root_observation_id` | the run's `invoke_agent` span id (16 hex characters) |
+| `langfuse.environment` | `sdk-experiment`, as the SDK marks an experiment's spans |
+
+The root span also carries `langfuse.experiment.description` (`description`, when given) and
+`langfuse.experiment.item.expected_output` (the item's `expected`, serialized). As in the SDK, a
+propagated value longer than 200 characters is left out. Spans a framework's own
+instrumentation creates (a LangChain or OpenAI Agents tracer) do not carry them; the harness's
+spans do.
 
 ## Online: `Harness(judges=[...])`
 
@@ -170,7 +205,8 @@ scores are **scores on the traces**: filter traces by score, chart them per agen
 name is the agent id) and over time, and send low scores to an annotation queue.
 
 The API shapes are those of Langfuse's own definitions (`fern/apis/server/definition` in its
-repository: `datasets.yml`, `dataset-items.yml`, `dataset-run-items.yml`, `scores.yml`). Langfuse
-marks `POST /api/public/dataset-run-items` deprecated for Langfuse v4 — on Langfuse Cloud it is
-to be removed on 16 November 2026, while self-hosted v3 deployments keep it; past that date a
-link Langfuse refuses is a warning and the scores still land on the traces.
+repository: `datasets.yml`, `dataset-items.yml`, `dataset-run-items.yml`, `scores.yml`), and the
+experiment attributes those of its Python SDK (`langfuse/_client/attributes.py`,
+`propagation.py`). Evaluation works on Langfuse v3 (Cloud and self-hosted), through the dataset
+run link, and on v4, through the spans' experiment attributes — the harness sends both, as the
+SDK does.

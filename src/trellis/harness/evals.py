@@ -13,8 +13,11 @@ score, or ``None`` when it has nothing to say about this case. Built in:
   is the deployment's (``TRELLIS_JUDGE_MODEL``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), never the code's.
 
 Langfuse is the system of record: every score goes on the run's trace (``POST
-/api/public/scores``, and a ``score`` span), and a dataset read from Langfuse gets each run's
-trace linked to the dataset run (``POST /api/public/dataset-run-items``).
+/api/public/scores``, and a ``score`` span); each run is an item of a Langfuse experiment, as
+its SDK's experiment runner makes one — a dataset read from Langfuse gets each run's trace
+linked to the dataset run (``POST /api/public/dataset-run-items``, Langfuse v3), and every
+span of the run carries the experiment's attributes (``langfuse.experiment.*``, what Langfuse v4
+builds experiments from: ``telemetry.Experiment``).
 
 * **Offline** — ``await h.evaluate(agent, dataset, evaluators)``: each item is run through the
   normal pipeline (memory, tools, approvals), evaluated, and scored; :class:`EvalReport` says
@@ -27,8 +30,10 @@ trace linked to the dataset run (``POST /api/public/dataset-run-items``).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -165,6 +170,11 @@ class EvalReport:
     summary: Summary
     #: the Langfuse dataset it ran, when it came from one
     dataset: str | None = None
+    #: the experiment's id in Langfuse: the dataset run's (as Langfuse answered the first
+    #: link), else one made for this evaluation — what every item's spans carry
+    experiment_id: str | None = None
+    #: where Langfuse shows the dataset run, when it is one
+    dataset_run_url: str | None = None
 
     @property
     def statuses(self) -> dict[str, int]:
@@ -176,7 +186,8 @@ class EvalReport:
 
     def __str__(self) -> str:
         ended = ", ".join(f"{n} {status}" for status, n in self.statuses.items())
-        return f"{self.run_name}: {len(self.items)} items ({ended})\n{self.summary}"
+        where = f" — {self.dataset_run_url}" if self.dataset_run_url else ""
+        return f"{self.run_name}: {len(self.items)} items ({ended}){where}\n{self.summary}"
 
 
 # --------------------------------------------------------------------------- evaluators
@@ -401,6 +412,67 @@ def _langfuse_item(item: Mapping[str, Any]) -> EvalItem:
     )
 
 
+def item_id_of(item: EvalItem) -> str:
+    """The experiment item id: the dataset item's, else — as Langfuse's SDK makes it — the first
+    16 hex characters of the SHA-256 of the serialized input."""
+    if item.id:
+        return item.id
+    text = telemetry.serialized(item.input)
+    return hashlib.sha256((text if text is not None else "null").encode()).hexdigest()[:16]
+
+
+@dataclass(slots=True)
+class _Run:
+    """One evaluation, as its items share it: where its items go in Langfuse."""
+
+    name: str
+    agent_id: str
+    langfuse: telemetry.Langfuse | None
+    #: the Langfuse dataset (its ``id``, ``projectId``), when the items came from one
+    dataset: dict[str, Any] | None
+    description: str | None
+    metadata: dict[str, Any]
+    #: the experiment id when no dataset run says one (made once per evaluation, as the SDK
+    #: makes its fallback)
+    fallback_id: str = field(default_factory=lambda: os.urandom(8).hex())
+    #: the dataset run's id, as Langfuse answered the first link
+    dataset_run_id: str | None = None
+
+    async def experiment(self, run_id: str, item: EvalItem) -> telemetry.Experiment:
+        """The item's experiment: linked to the dataset run first (v3; a refusal is a warning),
+        so the run's spans carry the dataset run's id."""
+        linked: str | None = None
+        if self.langfuse is not None and self.dataset is not None and item.id:
+            try:
+                linked = await self.langfuse.link(
+                    run_id,
+                    run_name=self.name,
+                    item_id=item.id,
+                    metadata=self.metadata,
+                    description=self.description,
+                )
+            except Exception as exc:
+                log.warning("run %s was not linked to dataset run %s: %s", run_id, self.name, exc)
+        self.dataset_run_id = self.dataset_run_id or linked
+        return telemetry.Experiment(
+            id=linked or self.dataset_run_id or self.fallback_id,
+            name=self.name,
+            item_id=item_id_of(item),
+            dataset_id=self.dataset.get("id") if self.dataset is not None else None,
+            description=self.description,
+            metadata=telemetry.flattened(self.metadata),
+            expected_output=telemetry.serialized(item.expected),
+            item_metadata=telemetry.flattened(item.metadata),
+        )
+
+    def url(self) -> str | None:
+        dataset = self.dataset or {}
+        project, dataset_id = dataset.get("projectId"), dataset.get("id")
+        if self.langfuse is None or not (project and dataset_id and self.dataset_run_id):
+            return None
+        return self.langfuse.dataset_run_url(project, dataset_id, self.dataset_run_id)
+
+
 async def evaluate(
     harness: Harness,
     agent: Agent,
@@ -408,6 +480,8 @@ async def evaluate(
     evaluators: Sequence[Evaluator],
     *,
     run_name: str | None = None,
+    description: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
     concurrency: int = CONCURRENCY,
     limit: int | None = None,
     user: str | None = None,
@@ -416,57 +490,64 @@ async def evaluate(
     if concurrency < 1:
         raise ConfigurationError("evaluate runs at least one item at a time")
     langfuse = harness.scores
-    source: str | None = None
+    found: dict[str, Any] | None = None
     if isinstance(dataset, str):
         if langfuse is None:
             raise ConfigurationError(
                 f"the dataset {dataset!r} is read from Langfuse: set OTEL_EXPORTER_OTLP_ENDPOINT "
                 "and OTEL_EXPORTER_OTLP_HEADERS to Langfuse's (or pass the items themselves)"
             )
-        source = dataset
-        items = [_langfuse_item(i) for i in await langfuse.dataset_items(dataset)]
+        found, rows = await langfuse.dataset(dataset)
+        items = [_langfuse_item(i) for i in rows]
     else:
         items = items_of(dataset)
     items = items[:limit] if limit is not None else items
-    name = run_name or f"{agent.id}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    run = _Run(
+        name=run_name or f"{agent.id}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
+        agent_id=agent.id,
+        langfuse=langfuse,
+        dataset=found,
+        description=description,
+        metadata={"agent_id": agent.id, **(metadata or {})},
+    )
     slots = asyncio.Semaphore(concurrency)
 
     async def one(item: EvalItem) -> EvalResult:
         async with slots:
-            result = await _item(harness, agent, item, evaluators, user or EVAL_USER)
-            if source is not None and langfuse is not None and item.id and result.run_id:
-                try:
-                    await langfuse.link(
-                        result.run_id,
-                        run_name=name,
-                        item_id=item.id,
-                        metadata={"agent_id": agent.id},
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "run %s was not linked to dataset run %s: %s", result.run_id, name, exc
-                    )
-            return result
+            return await _item(harness, agent, item, evaluators, user=user or EVAL_USER, run=run)
 
     results = await asyncio.gather(*(one(item) for item in items))
     await harness.writes.drain()
     await telemetry.flush()
     return EvalReport(
-        run_name=name, items=list(results), summary=_summary(results, evaluators), dataset=source
+        run_name=run.name,
+        items=list(results),
+        summary=_summary(results, evaluators),
+        dataset=dataset if isinstance(dataset, str) else None,
+        experiment_id=run.dataset_run_id or run.fallback_id,
+        dataset_run_url=run.url(),
     )
 
 
 async def _item(
-    harness: Harness, agent: Agent, item: EvalItem, evaluators: Sequence[Evaluator], user: str
+    harness: Harness,
+    agent: Agent,
+    item: EvalItem,
+    evaluators: Sequence[Evaluator],
+    *,
+    user: str,
+    run: _Run,
 ) -> EvalResult:
-    """Run one item through the pipeline and evaluate its answer; whatever goes wrong is the
-    item's error, never the evaluation's."""
+    """Run one item through the pipeline, as an item of the experiment, and evaluate its
+    answer; whatever goes wrong is the item's error, never the evaluation's."""
     pushed: list[Any] = []
     run_id: str | None = None
     try:
         identity = await agent._opened(item.input, user=user, thread=None, tenant=None)
         run_id = identity.run_id
-        result = await pipeline.attempt(agent, identity, item.input, observe=pushed.append)
+        current = await run.experiment(run_id, item)
+        with telemetry.experiment(current):
+            result = await pipeline.attempt(agent, identity, item.input, observe=pushed.append)
         if result.status is RunStatus.PAUSED and result.interrupt is not None:
             await agent.resume(result.interrupt.interrupt_id, "cancel", reviewer=EVAL_REVIEWER)
     except Exception as exc:
@@ -493,7 +574,8 @@ async def _item(
         metadata=item.metadata,
         agent=agent,
     )
-    scores, failed = await scored(harness, case, evaluators)
+    with telemetry.experiment(current):  # the score spans are the experiment's too
+        scores, failed = await scored(harness, case, evaluators)
     return _result(harness, item, result.answer, "success", run_id, scores=scores, failed=failed)
 
 

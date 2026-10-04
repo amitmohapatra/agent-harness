@@ -37,7 +37,7 @@ flowchart LR
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`clients/runs.py`) |
 | Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`surfaces/agui`) |
 | Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)`: `SendStreamingMessage`, `CancelTask` (`surfaces/a2a`) |
-| Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces; grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
+| Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces (an evaluated run's spans with Langfuse's experiment attributes); grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
 
 
 Unset variables remove a box: no `BIFROST_URL` means no MCP tools and no `ReAct` model names,
@@ -410,14 +410,14 @@ sequenceDiagram
     H->>LF: GET /api/public/dataset-items?datasetName=&page=&limit=50
   end
   par concurrency items at a time
-    H->>P: attempt(agent, identity, item.input, observe)
+    H->>LF: POST /api/public/dataset-run-items {runName, datasetItemId, traceId} → datasetRunId (v3)
+    H->>P: attempt(...) inside telemetry.experiment: every span gets langfuse.experiment.* (v4)
     P->>Mem: POST /v1/context (bundle_id)
     P-->>H: Result (SUCCESS · PAUSED → cancelled, interrupted · ERROR)
     H->>Mem: grounding: POST /v1/verify {bundle_id, answer}
     H->>GW: llm_judge: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL, temperature 0)
     GW-->>H: {"score", "reasoning"} (malformed → asked once more)
     H->>LF: POST /api/public/scores (each score, on the run's trace)
-    H->>LF: POST /api/public/dataset-run-items {runName, datasetItemId, traceId}
   end
   H->>W: drain, then export the spans
   H-->>Dev: EvalReport (items in dataset order, summary per evaluator)

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Final, Literal
 
 from trellis.contracts import ConfigurationError, FeedbackVerdict, ToolSpec
@@ -233,6 +233,8 @@ class Harness:
         evaluators: Sequence[Evaluator],
         *,
         run_name: str | None = None,
+        description: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
         concurrency: int = 4,
         limit: int | None = None,
         user: str | None = None,
@@ -246,7 +248,9 @@ class Harness:
         ``EvalItem``\\ s). Each item runs through the normal pipeline — memory, tools,
         approvals — ``concurrency`` at a time (the first ``limit`` items only, with ``limit``),
         acting for ``user``; its scores go on its run's trace, and an item of a Langfuse dataset
-        is linked to the dataset run ``run_name``. An item that pauses for a person is
+        is linked to the dataset run ``run_name`` (with ``description`` and ``metadata``), and
+        every run's spans carry Langfuse's experiment attributes (Langfuse v4 builds the
+        experiment from them). An item that pauses for a person is
         ``interrupted`` (its run is cancelled) and one that fails is ``error``: neither stops the
         evaluation. The report lists the items in dataset order."""
         return await run_evaluation(
@@ -255,6 +259,8 @@ class Harness:
             dataset,
             evaluators,
             run_name=run_name,
+            description=description,
+            metadata=metadata,
             concurrency=concurrency,
             limit=limit,
             user=user,
