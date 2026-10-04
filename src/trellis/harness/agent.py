@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import dataclasses
+import functools
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
@@ -30,8 +31,17 @@ from trellis.harness import pipeline
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
+from trellis.harness.adapters.react import ReAct
 from trellis.harness.clients.memory import RunMemory, context_budget
-from trellis.harness.evals import EvalCase, Evaluator, name_of, scored
+from trellis.harness.evals import (
+    EvalCase,
+    EvalServices,
+    Evaluator,
+    grounding_score,
+    judge,
+    name_of,
+    sampled,
+)
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
@@ -84,6 +94,13 @@ class Agent:
             self.sources = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
         self._toolboxes: dict[str, Toolbox] = {}
+
+    @functools.cached_property
+    def evals(self) -> EvalServices:
+        """What this agent's runs are evaluated with: the harness's services, the judge falling
+        back to a ``ReAct`` target's own model when ``TRELLIS_JUDGE_MODEL`` is unset."""
+        model = self.target.model if isinstance(self.target, ReAct) else None
+        return dataclasses.replace(self.harness.evals, fallback_model=model)
 
     # ------------------------------------------------------------------ running
     async def run(
@@ -391,7 +408,7 @@ class Agent:
         bundle_id, run_id = pushed.bundle_id, runtime.run_id
 
         async def work() -> None:
-            score = await memory.verify(answer, bundle_id)
+            score = await grounding_score(memory.ctx, answer, bundle_id)
             if score is not None:
                 await self.harness.score(run_id, "grounding", score, key=f"{run_id}:grounding")
 
@@ -399,32 +416,33 @@ class Agent:
 
     async def judged(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
         """On a sampled run (``TRELLIS_JUDGE_SAMPLE``), each of the harness's online judges in
-        the background — never on the request path — its score on the run's trace. A judge
-        that fails is a warning."""
+        the background — never on the request path — as ``judge(case, [it], services=self.evals)``,
+        its score on the run's trace. A judge that fails is a warning."""
         judges = self.harness.judges
         rate = self.harness.judge_sample
         if not judges or not isinstance(answer, str) or not answer:
             return
         if not sampled(f"{runtime.run_id}:judges", rate):
             return
+        memory = runtime.run_memory
         case = EvalCase(
             input=runtime.task,
             output=answer,
             run_id=runtime.run_id,
             bundle_id=pushed.bundle_id if pushed is not None else None,
             context=runtime.context,
-            agent=self,
+            memory=memory.ctx if memory is not None else None,
         )
-        harness, events = self.harness, runtime.events
-        for judge in judges:
-            name = name_of(judge)
+        services, events = self.evals, runtime.events
+        for evaluator in judges:
+            name = name_of(evaluator)
 
-            async def work(judge: Evaluator = judge, name: str = name) -> None:
-                _, failed = await scored(harness, case, [judge])
+            async def work(evaluator: Evaluator = evaluator, name: str = name) -> None:
+                _, failed = await judge(case, [evaluator], services=services)
                 if failed:
                     events.warning("judge_failed", f"judge {name}: {failed[name]}")
 
-            await harness.writes.submit(f"judge.{name}", work, events=events)
+            await self.harness.writes.submit(f"judge.{name}", work, events=events)
 
     async def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway
@@ -508,12 +526,6 @@ class Agent:
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
-
-
-def sampled(run_id: str, rate: float) -> bool:
-    """Whether ``run_id`` falls in the ``rate`` sample (stable across processes)."""
-    digest = hashlib.blake2b(run_id.encode(), digest_size=8).digest()
-    return int.from_bytes(digest, "big") / 2**64 < rate
 
 
 def _pull(agent: Agent) -> frozenset[str]:

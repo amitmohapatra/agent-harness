@@ -136,7 +136,7 @@ async def test_the_collector_sends_only_genai_spans_to_langfuse_with_the_callers
             pass
         with tracer.start_as_current_span("GET /inventory"):  # an HTTP span: Datadog's only
             pass
-    telemetry.score_span(run_id, "grounding", 0.9, None)
+    telemetry.score_span(telemetry.trace_hex(run_id), "grounding", 0.9, None, run_id=run_id)
     provider.force_flush()
 
     async def arrived() -> bool:

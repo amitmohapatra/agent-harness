@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from trellis import Settings
 from trellis.harness import telemetry
 from trellis.harness.redaction import REDACTED
-from trellis.harness.telemetry import RunTrace, Scores
+from trellis.harness.telemetry import Langfuse, RunTrace
 
 
 @pytest.fixture
@@ -60,13 +60,22 @@ def test_every_attempt_and_score_of_a_run_share_its_trace(spans) -> None:
     for attempt in (1, 2):
         with telemetry.agent_span(dataclasses.replace(RUN, attempt=attempt), "q"):
             pass
-    telemetry.score_span("run_1", "grounding", 0.9, None)
+    telemetry.score_span(telemetry.trace_hex("run_1"), "grounding", 0.9, None, run_id="run_1")
     traces = {s.context.trace_id for s in spans.get_finished_spans() if s.context}
     assert traces == {telemetry.trace_id_of("run_1")}
     assert telemetry.trace_hex("run_1") == format(telemetry.trace_id_of("run_1"), "032x")
     score = spans.get_finished_spans()[-1]
     assert score.name == "score grounding"
     assert (score.attributes or {})["trellis.score.value"] == 0.9
+    assert (score.attributes or {})["trellis.run_id"] == "run_1"
+
+
+def test_a_score_can_go_on_a_trace_no_run_made(spans) -> None:
+    trace_id = "0af7651916cd43dd8448eb211c80319c"  # the team's own tracing made it
+    telemetry.score_span(trace_id, "helpful", 1.0, "yes")
+    [score] = spans.get_finished_spans()
+    assert score.context is not None and format(score.context.trace_id, "032x") == trace_id
+    assert "trellis.run_id" not in (score.attributes or {})
 
 
 def test_tool_and_model_spans_follow_the_genai_conventions(spans) -> None:
@@ -137,7 +146,7 @@ def test_nothing_configured_installs_nothing() -> None:
     ids=["langfuse-direct", "collector-named-host", "collector-only", "no-auth", "not-basic"],
 )
 def test_the_scores_api_is_reached_only_with_langfuse_credentials(endpoint, headers, host) -> None:
-    scores = Scores.of(Settings(otlp_endpoint=endpoint, otlp_headers=headers))
+    scores = Langfuse.of(Settings(otlp_endpoint=endpoint, otlp_headers=headers))
     assert (scores.host if scores is not None else None) == host
 
 
@@ -146,13 +155,14 @@ async def test_a_score_is_posted_on_the_runs_trace_idempotently() -> None:
     route = respx.post("https://lf.example/api/public/scores").mock(
         return_value=httpx.Response(200, json={"id": "k"})
     )
-    scores = Scores("https://lf.example", "Basic eHg6eXk=")
-    await scores.post("run_1", "grounding", 0.75, data_type="NUMERIC", key="run_1:grounding")
+    scores = Langfuse("https://lf.example", "Basic eHg6eXk=")
+    trace = telemetry.trace_hex("run_1")
+    await scores.post(trace, "grounding", 0.75, data_type="NUMERIC", key="run_1:grounding")
     request = route.calls[0].request
     assert request.headers["authorization"] == "Basic eHg6eXk="
     assert json.loads(request.content) == {
         "id": "run_1:grounding",
-        "traceId": telemetry.trace_hex("run_1"),
+        "traceId": trace,
         "name": "grounding",
         "value": 0.75,
         "dataType": "NUMERIC",
@@ -238,9 +248,14 @@ async def test_a_score_with_a_comment_carries_it() -> None:
     route = respx.post("https://lf.example/api/public/scores").mock(
         return_value=httpx.Response(200, json={"id": "k"})
     )
-    scores = Scores("https://lf.example/", "Basic eHg6eXk=")
+    scores = Langfuse("https://lf.example/", "Basic eHg6eXk=")
     await scores.post(
-        "run_1", "feedback", 0.0, data_type="NUMERIC", key="run_1:feedback", comment="13"
+        telemetry.trace_hex("run_1"),
+        "feedback",
+        0.0,
+        data_type="NUMERIC",
+        key="run_1:feedback",
+        comment="13",
     )
     assert json.loads(route.calls[0].request.content)["comment"] == "13"
     assert scores.host == "https://lf.example"

@@ -19,7 +19,7 @@ covers, and which feature to use when.
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, schedules, the inbox, the agent-runs wire |
 | [surfaces.md](surfaces.md) | `serve_chat` (AG-UI), `serve_a2a`, and `a2a(url)` tools |
 | [observability.md](observability.md) | OTel GenAI spans, Langfuse, scores, the collector |
-| [evaluation.md](evaluation.md) | offline (`h.evaluate` over a dataset) and online (`judges=`) evaluation, the evaluators, the judge's model and budget |
+| [evaluation.md](evaluation.md) | offline (a dataset) and online (sampled runs) evaluation: automatic in `h.wrap` (`h.evaluate`, `judges=`), or `EvalServices`, `evaluate` and `judge` in your own code; the evaluators, the judge's model and budget |
 
 `docs/agents/` holds notes for coding agents working on this repo.
 
@@ -117,6 +117,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | an exact or partial match against an expected answer | `exact_match()`, `contains()` (offline: they need `expected`) |
 | grounding as an explicit evaluator in a report | `grounding()` |
 | quality on live traffic | `Harness(judges=[...])`, sampled by `TRELLIS_JUDGE_SAMPLE` |
+| the same for an agent you do not wrap | `evaluate(my_agent, dataset, [...])` and `judge(case, [...], services=EvalServices.from_env())` ([evaluation.md](evaluation.md#way-2-pluggable-from-your-own-code)) |
 
 ### What each environment variable turns on
 

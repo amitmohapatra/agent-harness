@@ -267,11 +267,13 @@ async def test_feedback_with_memory_off_is_only_a_score(
     async def echo(input: str, agent: Runtime) -> str:
         return input
 
-    scored: list[tuple[str, str, float, str | None]] = []
-    monkeypatch.setattr(telemetry, "score_span", lambda *args: scored.append(args))
+    scored: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append((*args, kw)))
     result = await harness.wrap(echo, id="echo").run("q", user="u")
     assert await harness.feedback(result.run_id, "edit", correction={"fixed": True}) is None
-    assert scored == [(result.run_id, "feedback", 0.5, "{'fixed': True}")]
+    trace = telemetry.trace_hex(result.run_id)
+    run = {"run_id": result.run_id}
+    assert scored == [(trace, "feedback", 0.5, "{'fixed': True}", run)]
 
 
 async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
@@ -282,7 +284,7 @@ async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
     memory_service.claims = 0
     memory_service.unsupported = 0
     scored: list[Any] = []
-    monkeypatch.setattr(telemetry, "score_span", lambda *args: scored.append(args))
+    monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append(args))
     settings = Settings(memory_url="http://m", api_key="test", grounding_sample=1.0)
     async with Harness(config=settings) as h:
         h.memory = Memory("http://m", None, client=memory_service.client())

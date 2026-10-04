@@ -129,8 +129,10 @@ agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(ur
 ## Evaluation
 
 `await h.evaluate(agent, dataset, [grounding(), exact_match(), llm_judge("...")])` and
-`Harness(judges=[...])` work on the graph unchanged; `llm_judge` needs `TRELLIS_JUDGE_MODEL`
-(the harness does not know a graph's model).
+`Harness(judges=[...])` work on the graph unchanged (the evaluators come from
+`trellis.harness.evals`); `llm_judge` needs `TRELLIS_JUDGE_MODEL` (the harness does not know a
+graph's model). A graph you do not wrap is evaluated and judged as it is, with `evaluate` and
+`judge` ([evaluation.md](../evaluation.md#with-langgraph)).
 
 ## Limits
 

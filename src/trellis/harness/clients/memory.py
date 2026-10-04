@@ -1,4 +1,6 @@
-"""The memory service, as the harness uses it: every call the harness makes goes through here.
+"""The memory service, as the harness uses it: every call the harness makes goes through here,
+except the blocks usable without ``Harness`` — the tool catalog (``governance/catalog.py``) and
+the grounding check (``evals.grounding_score``) — which call the SDK's ``MemoryContext`` itself.
 
 ``Memory`` is the process's client; ``Memory.bind(identity)`` is a :class:`RunMemory`, the
 calls one run makes in its own scope. The SDK's ``MemoryContext`` it wraps (``.ctx``) is also
@@ -222,16 +224,6 @@ class RunMemory:
         idempotency key: an interrupt's feedback id is fixed by its run and interrupt, so the
         client may retry a failed send and the service stores and counts it once."""
         await self.ctx.feedback(record, idempotency_key=record.feedback_id)
-
-    async def verify(self, answer: str, bundle_id: str) -> float | None:
-        """The grounding score of ``answer`` against the context the run was given (the share
-        of its claims the evidence supports), or ``None`` for an answer with no checkable
-        claim. The service records the verdict as the run's ``judge`` feedback itself; this is
-        the same number, for the run's trace."""
-        report = await self.ctx.verify(answer, bundle_id=bundle_id)
-        if not report.claims:
-            return None
-        return round(1.0 - report.per_claim_hallucination_rate, 4)
 
     # ------------------------------------------------------------------ documents, model key
     async def add_document(

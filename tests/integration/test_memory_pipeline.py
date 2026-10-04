@@ -511,7 +511,7 @@ async def test_feedback_without_langfuse_is_a_score_span_and_memory_feedback(
         return "12"
 
     result = await memory_harness.wrap(fn, id="f").run("stock?", user="u")
-    assert memory_harness.scores is None
+    assert memory_harness.evals.langfuse is None
     await memory_harness.writes.drain()  # the run's own outcome is a queued write
     stored = await memory_harness.feedback(result.run_id, "confirm")
     assert [f.body["verdict"] for f in memory_service.named("feedback")][-1] == "confirm"

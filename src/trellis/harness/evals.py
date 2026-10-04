@@ -1,16 +1,20 @@
-"""Evaluation: score what an agent answered, offline over a dataset or online on live runs.
+"""Evaluation: score what an agent answered, offline over a dataset or online on live runs —
+for a wrapped agent, or for any code.
 
 An :class:`Evaluator` is any ``async (EvalCase) -> EvalScore | None``: it reads the case — the
 input, the answer, what was expected, the memory context the run was given — and returns a
 score, or ``None`` when it has nothing to say about this case. Built in:
 
 * :func:`grounding` — the answer checked against the memory context the run was given (the
-  memory service's ``/v1/verify`` with the run's ``bundle_id``: the same check as the sampled
-  one every run gets);
+  memory service's ``/v1/verify`` with the run's ``bundle_id``: :func:`grounding_score`, the
+  same check as the sampled one every wrapped run gets);
 * :func:`exact_match`, :func:`contains` — against the case's ``expected``;
 * :func:`llm_judge` — a judge model scores the answer against plain-language criteria (strict
   JSON ``{score, reasoning}`` at temperature 0). Which model, and through which virtual key,
   is the deployment's (``TRELLIS_JUDGE_MODEL``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), never the code's.
+
+What evaluation reaches — Langfuse, the judge's gateway and model — is an
+:class:`EvalServices`: ``EvalServices.from_env()``, or a wrapped agent's own (``agent.evals``).
 
 Langfuse is the system of record: every score goes on the run's trace (``POST
 /api/public/scores``, and a ``score`` span); each run is an item of a Langfuse experiment, as
@@ -19,12 +23,14 @@ linked to the dataset run (``POST /api/public/dataset-run-items``, Langfuse v3),
 span of the run carries the experiment's attributes (``langfuse.experiment.*``, what Langfuse v4
 builds experiments from: ``telemetry.Experiment``).
 
-* **Offline** — ``await h.evaluate(agent, dataset, evaluators)``: each item is run through the
-  normal pipeline (memory, tools, approvals), evaluated, and scored; :class:`EvalReport` says
-  how each item went and the mean of each evaluator.
-* **Online** — ``Harness(judges=[...])``: after a sampled successful run (``TRELLIS_JUDGE_SAMPLE``,
-  by the run id) each judge runs in the background writes queue, never on the request path,
-  and its score lands on the run's trace. A judge that fails is a warning, never a failed run.
+* **Offline** — :func:`evaluate` (``h.evaluate`` for a wrapped agent): each item is run —
+  through the normal pipeline (memory, tools, approvals) for a wrapped agent, as a call of any
+  ``async (input) -> answer`` otherwise — evaluated, and scored; :class:`EvalReport` says how
+  each item went and the mean of each evaluator.
+* **Online** — :func:`judge` scores one case from any code. A wrapped agent does it by itself:
+  ``Harness(judges=[...])`` — after a sampled successful run (``TRELLIS_JUDGE_SAMPLE``, by the
+  run id) each judge runs in the background writes queue, never on the request path, and its
+  score lands on the run's trace. A judge that fails is a warning, never a failed run.
 """
 
 from __future__ import annotations
@@ -36,19 +42,22 @@ import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trellis.contracts import ConfigurationError, RunStatus
+from trellis.contracts import ConfigurationError, RunStatus, new_id
 from trellis.harness import pipeline, telemetry
-from trellis.harness.adapters.react import ReAct, _message, _Named, _unfenced
+from trellis.harness.adapters.react import _message, _Named, _unfenced
+from trellis.harness.clients.bifrost import Gateway
+from trellis.harness.settings import Settings
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
-    from trellis.harness.harness import Harness
+    from trellis.memory import MemoryContext
 
 log = logging.getLogger("trellis.evals")
 
@@ -89,13 +98,18 @@ class EvalCase:
     output: Any
     #: what the answer should be, when the dataset says
     expected: Any = None
+    #: the run: its trace gets the scores (``telemetry.trace_hex(run_id)``) unless ``trace_id``
+    #: names another
     run_id: str | None = None
+    #: the trace the scores go on (32 hex characters), when it is not the run's: a trace the
+    #: team's own tracing made
+    trace_id: str | None = None
     #: the memory context pushed into the run (its ``bundle_id`` and rendered text), if any
     bundle_id: str | None = None
     context: str | None = None
+    #: the memory scope the context was built in (what :func:`grounding` verifies in)
+    memory: MemoryContext | None = field(default=None, repr=False, compare=False)
     metadata: Mapping[str, Any] = field(default_factory=dict)
-    #: the agent that answered (built-in evaluators reach the harness through it)
-    agent: Agent | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +123,22 @@ class EvalScore:
 
 
 Evaluator = Callable[[EvalCase], Awaitable[EvalScore | None]]
+
+
+@dataclass(frozen=True, slots=True)
+class EvalOutput:
+    """What a target of :func:`evaluate` may return instead of its bare answer: the answer, and
+    the memory context it was given — its ``bundle_id`` and the scope it was built in — which
+    :func:`grounding` checks the answer against."""
+
+    answer: Any
+    bundle_id: str | None = None
+    memory: MemoryContext | None = field(default=None, repr=False, compare=False)
+
+
+#: Any code :func:`evaluate` can run on an item: ``async (input) -> answer`` (or an
+#: :class:`EvalOutput`).
+Target = Callable[[Any], Awaitable[Any]]
 
 
 class EvalItem(BaseModel):
@@ -190,6 +220,113 @@ class EvalReport:
         return f"{self.run_name}: {len(self.items)} items ({ended}){where}\n{self.summary}"
 
 
+# --------------------------------------------------------------------------- the services
+
+
+@dataclass(slots=True)
+class EvalServices:
+    """What evaluation reaches: Langfuse (``None``: scores are ``score`` spans only, and a
+    dataset must be given as items), the judge's gateway, and the model :func:`llm_judge` asks —
+    ``judge_model`` (``TRELLIS_JUDGE_MODEL``, a Bifrost model name; a chat model is asked as it
+    is), else ``fallback_model`` (a wrapped ``ReAct``'s own model, logged once). The deployment
+    chooses the judge, never the code: :meth:`from_env` reads it from the environment, and a
+    wrapped agent's (``agent.evals``) are its harness's."""
+
+    langfuse: telemetry.Langfuse | None = None
+    judge_gateway: Gateway | None = None
+    judge_model: Any = None
+    fallback_model: Any = None
+    _shares_logged: bool = field(default=False, init=False, repr=False)
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> EvalServices:
+        """The services the environment names: Langfuse through the OTLP variables (which also
+        export the spans, unless the application installed its own tracer provider), the judge
+        through ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else
+        ``BIFROST_VIRTUAL_KEY``) and ``TRELLIS_JUDGE_MODEL``. Close them with :meth:`aclose`
+        (or ``async with``)."""
+        settings = Settings.from_env(environ)
+        telemetry.configure(settings)
+        return cls.of(settings)
+
+    @classmethod
+    def of(cls, settings: Settings, *, gateway: Gateway | None = None) -> EvalServices:
+        """The services ``settings`` name. ``gateway`` is the agents' own (``Harness``): the
+        judge's too, unless the judge has a virtual key of its own (its budget apart)."""
+        own_key = settings.judge_virtual_key not in (None, settings.bifrost_virtual_key)
+        judge_gateway = gateway
+        if settings.bifrost_url and (gateway is None or own_key):
+            key = settings.judge_virtual_key or settings.bifrost_virtual_key
+            judge_gateway = Gateway(settings.bifrost_url, key)
+        return cls(
+            langfuse=telemetry.Langfuse.of(settings),
+            judge_gateway=judge_gateway,
+            judge_model=settings.judge_model,
+        )
+
+    def model(self) -> Any:
+        """The chat model the judge asks: the judge's model through the judge's gateway, else
+        the fallback model (logged once: a model grading its own answers is biased)."""
+        model = self.judge_model
+        if model is None:
+            model = self.fallback_model
+            if model is None:
+                raise ConfigurationError(
+                    "llm_judge needs a model: set TRELLIS_JUDGE_MODEL (a Bifrost model name)"
+                )
+            if not self._shares_logged:
+                self._shares_logged = True
+                log.warning(
+                    "TRELLIS_JUDGE_MODEL is unset: the judge shares the model of the agent it "
+                    "judges (set a different, stronger model so it does not grade itself)"
+                )
+        if not isinstance(model, str):
+            return model
+        if self.judge_gateway is None:
+            raise ConfigurationError("llm_judge with a model name needs BIFROST_URL")
+        return _Named(self.judge_gateway, model)
+
+    async def score(
+        self,
+        trace_id: str,
+        name: str,
+        value: float | bool | str,
+        *,
+        key: str,
+        comment: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        """A score on the trace ``trace_id`` (32 hex characters; a run's is
+        ``telemetry.trace_hex(run_id)``): a ``score`` span always, and Langfuse's scores API
+        when it is reached — a number (``NUMERIC``), a bool (``BOOLEAN``, 1 or 0) or a
+        category (``CATEGORICAL``). ``key`` makes a retry update the score rather than add one."""
+        data_type: telemetry.ScoreType = "NUMERIC"
+        if isinstance(value, bool):
+            data_type, value = "BOOLEAN", float(value)
+        elif isinstance(value, str):
+            data_type = "CATEGORICAL"
+        telemetry.score_span(trace_id, name, value, comment, run_id=run_id)
+        if self.langfuse is not None:
+            await self.langfuse.post(
+                trace_id, name, value, data_type=data_type, comment=comment, key=key
+            )
+
+    async def aclose(self) -> None:
+        """Close the clients (the ones :meth:`from_env` made; a harness closes its own)."""
+        clients = (self.judge_gateway, self.langfuse)
+        await asyncio.gather(*(c.aclose() for c in clients if c is not None))
+
+    async def __aenter__(self) -> EvalServices:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+
+#: The services the evaluators of the current :func:`judge` call use (:func:`llm_judge`'s model).
+_services: ContextVar[EvalServices | None] = ContextVar("trellis_eval_services", default=None)
+
+
 # --------------------------------------------------------------------------- evaluators
 
 
@@ -201,24 +338,31 @@ def name_of(evaluator: Evaluator) -> str:
 
 @dataclass(frozen=True, slots=True)
 class grounding:
-    """The share of the answer's claims the run's memory context supports (``/v1/verify``
-    with its ``bundle_id``); no score without memory, without a pushed context, or for an
-    answer with no checkable claim."""
+    """The share of the answer's claims the run's memory context supports
+    (:func:`grounding_score`: ``/v1/verify`` with the case's ``bundle_id``, in its ``memory``
+    scope); no score without memory, without a pushed context, or for an answer with no
+    checkable claim."""
 
     name: str = "grounding"
 
     async def __call__(self, case: EvalCase) -> EvalScore | None:
-        agent = case.agent
-        if agent is None or case.bundle_id is None or case.run_id is None:
+        if case.memory is None or case.bundle_id is None:
             return None
         if not isinstance(case.output, str) or not case.output:
             return None
-        record = await agent.harness.runs.get(case.run_id)
-        memory = await agent.run_memory(agent._identity_of(record)) if record else None
-        if memory is None:
-            return None
-        score = await memory.verify(case.output, case.bundle_id)
+        score = await grounding_score(case.memory, case.output, case.bundle_id)
         return None if score is None else EvalScore(self.name, score)
+
+
+async def grounding_score(memory: MemoryContext, answer: str, bundle_id: str) -> float | None:
+    """The share of ``answer``'s claims the context ``bundle_id`` supports (the memory service's
+    ``/v1/verify``, in the scope ``memory`` built it in), or ``None`` for an answer with no
+    checkable claim. In a run's scope the service records the verdict as the run's ``judge``
+    feedback itself; this is the same number, for the run's trace."""
+    report = await memory.verify(answer, bundle_id=bundle_id)
+    if not report.claims:
+        return None
+    return round(1.0 - report.per_claim_hallucination_rate, 4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,18 +408,21 @@ class contains:
 @dataclass(frozen=True, slots=True)
 class llm_judge:
     """A judge model scores the answer against ``criteria`` (0 to 1, with its reasoning as the
-    comment). The model is ``TRELLIS_JUDGE_MODEL`` through ``BIFROST_URL`` with
-    ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else ``BIFROST_VIRTUAL_KEY``); with no judge model set, the
-    judged agent's own model (logged once). A reply that is not the JSON asked for is asked
-    once more; a second one is no score, with a warning."""
+    comment). The model is the one :func:`evaluate` or :func:`judge` was given
+    (:meth:`EvalServices.model`: ``TRELLIS_JUDGE_MODEL`` through ``BIFROST_URL`` with
+    ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). A reply that is not the JSON
+    asked for is asked once more; a second one is no score, with a warning."""
 
     criteria: str
     name: str = "llm_judge"
 
     async def __call__(self, case: EvalCase) -> EvalScore | None:
-        if case.agent is None:
-            raise ConfigurationError("llm_judge judges a harness agent's runs")
-        model = judge_model(case.agent)
+        services = _services.get()
+        if services is None:
+            raise ConfigurationError(
+                "llm_judge runs inside evaluate() or judge(): their services name the judge's model"
+            )
+        model = services.model()
         messages = [
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user", "content": _judge_prompt(self.criteria, case)},
@@ -295,34 +442,6 @@ class llm_judge:
             case.run_id,
         )
         return None
-
-
-def judge_model(agent: Agent) -> Any:
-    """The chat model the judge asks: ``TRELLIS_JUDGE_MODEL`` through the judge's gateway, else
-    the judged agent's own model (logged once per harness)."""
-    harness = agent.harness
-    if harness._judge_model is not None:  # a stand-in, in tests
-        return harness._judge_model
-    model: Any = harness.settings.judge_model
-    if model is None:
-        target = agent.target
-        model = target.model if isinstance(target, ReAct) else None
-        if model is None:
-            raise ConfigurationError(
-                "llm_judge needs a model: set TRELLIS_JUDGE_MODEL (a Bifrost model name)"
-            )
-        if not harness._judge_shares_logged:
-            harness._judge_shares_logged = True
-            log.warning(
-                "TRELLIS_JUDGE_MODEL is unset: the judge shares the model of agent %s (set a "
-                "different, stronger model so it does not grade itself)",
-                agent.id,
-            )
-        if not isinstance(model, str):
-            return model
-    if harness.judge_gateway is None:
-        raise ConfigurationError("llm_judge with a model name needs BIFROST_URL")
-    return _Named(harness.judge_gateway, model)
 
 
 def _judge_prompt(criteria: str, case: EvalCase) -> str:
@@ -361,37 +480,62 @@ def _verdict(content: Any) -> tuple[tuple[float, str] | None, str]:
 # --------------------------------------------------------------------------- running them
 
 
-async def scored(
-    harness: Harness, case: EvalCase, evaluators: Sequence[Evaluator]
+async def judge(
+    case: EvalCase,
+    judges: Sequence[Evaluator],
+    *,
+    services: EvalServices,
+    sample: float | None = None,
 ) -> tuple[list[EvalScore], dict[str, str]]:
-    """Run each evaluator on ``case`` and put each score on the run's trace; an evaluator that
-    raises is a failure (logged), and a score Langfuse refuses a warning — never an exception."""
+    """Score ``case`` with each of ``judges`` — from any code, on-line — and put each score on
+    its trace (``case.trace_id``, else its run's); the scores, and the judges that failed with
+    why. With ``sample`` (0 to 1) only that share of cases is judged, chosen by the case's run
+    id (else its trace id) so a run is always or never judged, whichever process asks. A judge
+    that raises is a failure (logged), and a score Langfuse refuses a warning — never an
+    exception."""
+    ref = case.run_id or case.trace_id
+    if sample is not None:
+        if ref is None:
+            raise ConfigurationError("a sampled case needs a run_id or a trace_id to sample by")
+        if not sampled(f"{ref}:judges", sample):
+            return [], {}
+    trace_id = case.trace_id or (telemetry.trace_hex(case.run_id) if case.run_id else None)
     scores: list[EvalScore] = []
     failed: dict[str, str] = {}
-    for evaluator in evaluators:
+    for evaluator in judges:
         name = name_of(evaluator)
+        token = _services.set(services)
         try:
             score = await evaluator(case)
         except Exception as exc:
             failed[name] = f"{type(exc).__name__}: {exc}"
-            log.warning("evaluator %s failed on run %s: %s", name, case.run_id, exc)
+            log.warning("evaluator %s failed on run %s: %s", name, ref, exc)
             continue
+        finally:
+            _services.reset(token)
         if score is None:
             continue
         scores.append(score)
-        if case.run_id is None:
+        if trace_id is None:
             continue
         try:
-            await harness.score(
-                case.run_id,
+            await services.score(
+                trace_id,
                 score.name,
                 score.value,
-                key=f"{case.run_id}:{score.name}",
+                key=f"{ref}:{score.name}",
                 comment=score.comment,
+                run_id=case.run_id,
             )
         except Exception as exc:
-            log.warning("score %s of run %s was not posted: %s", score.name, case.run_id, exc)
+            log.warning("score %s of run %s was not posted: %s", score.name, ref, exc)
     return scores, failed
+
+
+def sampled(key: str, rate: float) -> bool:
+    """Whether ``key`` (a run id) falls in the ``rate`` sample (stable across processes)."""
+    digest = hashlib.blake2b(key.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / 2**64 < rate
 
 
 def items_of(dataset: Sequence[Any]) -> list[EvalItem]:
@@ -426,7 +570,6 @@ class _Run:
     """One evaluation, as its items share it: where its items go in Langfuse."""
 
     name: str
-    agent_id: str
     langfuse: telemetry.Langfuse | None
     #: the Langfuse dataset (its ``id``, ``projectId``), when the items came from one
     dataset: dict[str, Any] | None
@@ -474,22 +617,72 @@ class _Run:
 
 
 async def evaluate(
-    harness: Harness,
-    agent: Agent,
+    target: Agent | Target,
     dataset: str | Sequence[Any],
     evaluators: Sequence[Evaluator],
     *,
+    services: EvalServices | None = None,
+    user: str | None = None,
     run_name: str | None = None,
     description: str | None = None,
     metadata: Mapping[str, Any] | None = None,
     concurrency: int = CONCURRENCY,
     limit: int | None = None,
-    user: str | None = None,
 ) -> EvalReport:
-    """What ``Harness.evaluate`` does (see there)."""
+    """Run ``target`` on every item of ``dataset`` and score its answers with ``evaluators``.
+
+    ``target`` is a wrapped ``Agent`` — each item runs through the normal pipeline, as
+    ``h.evaluate`` (see there) — or any ``async (input) -> answer`` (the answer, or an
+    :class:`EvalOutput` with the memory context it was given): each item is one call, in a span
+    of its own under a run id made for it, in that run's trace. Either way each run is an item
+    of the Langfuse experiment ``run_name`` (linked to the dataset run, for a Langfuse dataset,
+    and its spans carrying ``langfuse.experiment.*``), and its scores go on its trace.
+
+    ``services`` are the agent's own by default (``agent.evals``), else
+    :meth:`EvalServices.from_env` (closed at the end). ``user`` is whom the runs act for
+    (default ``trellis-evaluate``)."""
+    from trellis.harness.agent import Agent  # noqa: PLC0415 - agent.py imports this module
+
     if concurrency < 1:
         raise ConfigurationError("evaluate runs at least one item at a time")
-    langfuse = harness.scores
+    agent = target if isinstance(target, Agent) else None
+    owned = services is None and agent is None
+    if services is None:
+        services = agent.evals if agent is not None else EvalServices.from_env()
+    try:
+        return await _evaluated(
+            target,
+            agent,
+            dataset,
+            evaluators,
+            services=services,
+            user=user or EVAL_USER,
+            run_name=run_name,
+            description=description,
+            metadata=metadata,
+            concurrency=concurrency,
+            limit=limit,
+        )
+    finally:
+        if owned:
+            await services.aclose()
+
+
+async def _evaluated(
+    target: Agent | Target,
+    agent: Agent | None,
+    dataset: str | Sequence[Any],
+    evaluators: Sequence[Evaluator],
+    *,
+    services: EvalServices,
+    user: str,
+    run_name: str | None,
+    description: str | None,
+    metadata: Mapping[str, Any] | None,
+    concurrency: int,
+    limit: int | None,
+) -> EvalReport:
+    langfuse = services.langfuse
     found: dict[str, Any] | None = None
     if isinstance(dataset, str):
         if langfuse is None:
@@ -502,22 +695,28 @@ async def evaluate(
     else:
         items = items_of(dataset)
     items = items[:limit] if limit is not None else items
+    name = agent.id if agent is not None else _name_of(target)
     run = _Run(
-        name=run_name or f"{agent.id}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
-        agent_id=agent.id,
+        name=run_name or f"{name}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
         langfuse=langfuse,
         dataset=found,
         description=description,
-        metadata={"agent_id": agent.id, **(metadata or {})},
+        metadata={"agent_id": name, **(metadata or {})},
     )
     slots = asyncio.Semaphore(concurrency)
 
     async def one(item: EvalItem) -> EvalResult:
         async with slots:
-            return await _item(harness, agent, item, evaluators, user=user or EVAL_USER, run=run)
+            if agent is not None:
+                return await _item(agent, item, evaluators, services=services, user=user, run=run)
+            call = cast("Target", target)  # not an Agent
+            return await _called(
+                call, name, item, evaluators, services=services, user=user, run=run
+            )
 
     results = await asyncio.gather(*(one(item) for item in items))
-    await harness.writes.drain()
+    if agent is not None:
+        await agent.harness.writes.drain()
     await telemetry.flush()
     return EvalReport(
         run_name=run.name,
@@ -529,12 +728,18 @@ async def evaluate(
     )
 
 
+def _name_of(target: Any) -> str:
+    """A callable target's name: its function's, else its type's."""
+    named = getattr(target, "__name__", None)
+    return named if isinstance(named, str) else type(target).__name__
+
+
 async def _item(
-    harness: Harness,
     agent: Agent,
     item: EvalItem,
     evaluators: Sequence[Evaluator],
     *,
+    services: EvalServices,
     user: str,
     run: _Run,
 ) -> EvalResult:
@@ -552,7 +757,7 @@ async def _item(
             await agent.resume(result.interrupt.interrupt_id, "cancel", reviewer=EVAL_REVIEWER)
     except Exception as exc:
         log.warning("evaluation item failed: %s", exc)
-        return _result(harness, item, None, "error", run_id, error=f"{type(exc).__name__}: {exc}")
+        return _result(services, item, None, "error", run_id, error=f"{type(exc).__name__}: {exc}")
     if result.status is not RunStatus.SUCCESS:
         status: ItemStatus = (
             "interrupted"
@@ -562,8 +767,9 @@ async def _item(
             else "error"
         )
         error = result.error.message if result.error is not None else None
-        return _result(harness, item, None, status, run_id, error=error)
+        return _result(services, item, None, status, run_id, error=error)
     context = pushed[0] if pushed else None
+    memory = await agent.run_memory(identity)
     case = EvalCase(
         input=item.input,
         output=result.answer,
@@ -571,23 +777,63 @@ async def _item(
         run_id=run_id,
         bundle_id=getattr(context, "bundle_id", None),
         context=getattr(context, "rendered", None),
+        memory=memory.ctx if memory is not None else None,
         metadata=item.metadata,
-        agent=agent,
     )
     with telemetry.experiment(current):  # the score spans are the experiment's too
-        scores, failed = await scored(harness, case, evaluators)
-    return _result(harness, item, result.answer, "success", run_id, scores=scores, failed=failed)
+        scores, failed = await judge(case, evaluators, services=services)
+    return _result(services, item, result.answer, "success", run_id, scores=scores, failed=failed)
+
+
+async def _called(
+    target: Target,
+    name: str,
+    item: EvalItem,
+    evaluators: Sequence[Evaluator],
+    *,
+    services: EvalServices,
+    user: str,
+    run: _Run,
+) -> EvalResult:
+    """Call ``target`` on one item, in its own span as an item of the experiment, and evaluate
+    its answer; whatever the call raises is the item's error, never the evaluation's."""
+    run_id = new_id("run_")
+    current = await run.experiment(run_id, item)
+    try:
+        with (
+            telemetry.experiment(current),
+            telemetry.item_span(run_id, name, item.input, user=user) as span,
+        ):
+            returned = await target(item.input)
+            output = returned if isinstance(returned, EvalOutput) else EvalOutput(returned)
+            telemetry.output(span, output.answer)
+    except Exception as exc:
+        log.warning("evaluation item failed: %s", exc)
+        return _result(services, item, None, "error", run_id, error=f"{type(exc).__name__}: {exc}")
+    case = EvalCase(
+        input=item.input,
+        output=output.answer,
+        expected=item.expected,
+        run_id=run_id,
+        bundle_id=output.bundle_id,
+        memory=output.memory,
+        metadata=item.metadata,
+    )
+    with telemetry.experiment(current):
+        scores, failed = await judge(case, evaluators, services=services)
+    return _result(services, item, output.answer, "success", run_id, scores=scores, failed=failed)
 
 
 def _result(
-    harness: Harness,
+    services: EvalServices,
     item: EvalItem,
     output: Any,
     status: ItemStatus,
     run_id: str | None,
     **fields: Any,
 ) -> EvalResult:
-    url = harness.scores.trace_url(run_id) if harness.scores is not None and run_id else None
+    langfuse = services.langfuse
+    url = langfuse.trace_url(run_id) if langfuse is not None and run_id else None
     return EvalResult(
         input=item.input,
         expected=item.expected,
@@ -616,14 +862,20 @@ def _summary(results: Sequence[EvalResult], evaluators: Sequence[Evaluator]) -> 
 __all__ = [
     "EvalCase",
     "EvalItem",
+    "EvalOutput",
     "EvalReport",
     "EvalResult",
     "EvalScore",
+    "EvalServices",
     "Evaluator",
     "EvaluatorStats",
     "Summary",
+    "Target",
     "contains",
+    "evaluate",
     "exact_match",
     "grounding",
+    "grounding_score",
+    "judge",
     "llm_judge",
 ]

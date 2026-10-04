@@ -24,7 +24,7 @@ from trellis.harness.agent import Agent
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs, RunSummary
-from trellis.harness.evals import EvalReport, Evaluator
+from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
@@ -91,23 +91,18 @@ class Harness:
                 "without a key (a development memory service takes one of its trusted_dev keys)"
             )
         self.gateway = Gateway(s.bifrost_url, s.bifrost_virtual_key) if s.bifrost_url else None
-        #: where ``llm_judge`` calls go: the gateway, with the judge's own virtual key when it
-        #: has one (its budget apart from the agents')
-        self.judge_gateway = self.gateway
-        if s.bifrost_url and s.judge_virtual_key not in (None, s.bifrost_virtual_key):
-            self.judge_gateway = Gateway(s.bifrost_url, s.judge_virtual_key)
+        #: what evaluation reaches: Langfuse (scores, datasets, dataset runs) and the judge —
+        #: the gateway, with the judge's own virtual key when it has one (its budget apart from
+        #: the agents'); each agent's are ``agent.evals``
+        self.evals = EvalServices.of(s, gateway=self.gateway)
         #: the online judges, and the share of runs they score
         self.judges: list[Evaluator] = list(judges)
         self.judge_sample = (
             s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
         )
-        #: a stand-in for the judge's model (tests); the judge's model is configuration
-        self._judge_model: Any = None
-        self._judge_shares_logged = False
         self.memory = Memory(s.memory_url, s.api_key) if s.memory_url else None
         self.runs: Runs = HttpRuns(s.runs_url, s.api_key) if s.runs_url else LocalRuns()
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
-        self.scores = telemetry.Scores.of(s)
         #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
         self.agents: dict[str, Agent] = {}
         #: the sources of each :meth:`tools` call, by the number its LangChain tools carry in
@@ -244,8 +239,9 @@ class Harness:
         user: str | None = None,
     ) -> EvalReport:
         """Run ``agent`` on every item of ``dataset`` and score its answers with
-        ``evaluators`` (``trellis.grounding()``, ``exact_match()``, ``contains()``,
-        ``llm_judge(criteria)``, or any ``async (EvalCase) -> EvalScore | None``).
+        ``evaluators`` (from ``trellis.harness.evals``: ``grounding()``, ``exact_match()``,
+        ``contains()``, ``llm_judge(criteria)``, or any ``async (EvalCase) -> EvalScore |
+        None``) — ``evaluate(agent, ...)``, with the agent's own services.
 
         ``dataset`` is a Langfuse dataset's name (Langfuse configured through the OTLP
         settings) or the items themselves (``{"input", "expected"?, "metadata"?}`` or
@@ -258,7 +254,6 @@ class Harness:
         ``interrupted`` (its run is cancelled) and one that fails is ``error``: neither stops the
         evaluation. The report lists the items in dataset order."""
         return await run_evaluation(
-            self,
             agent,
             dataset,
             evaluators,
@@ -274,8 +269,9 @@ class Harness:
         """Finish the queued writes, export the queued spans and close the clients."""
         await self.writes.aclose()
         await telemetry.flush()
-        judge = self.judge_gateway if self.judge_gateway is not self.gateway else None
-        clients = (self.gateway, judge, self.memory, self.runs, self.scores)
+        judge = self.evals.judge_gateway
+        judge = judge if judge is not self.gateway else None
+        clients = (self.gateway, judge, self.memory, self.runs, self.evals.langfuse)
         closers = [c.aclose() for c in clients if c is not None]
         await asyncio.gather(*closers)
 
@@ -420,19 +416,11 @@ class Harness:
         key: str,
         comment: str | None = None,
     ) -> None:
-        """A score on the run's trace: a ``score`` span always, and Langfuse's scores API
-        when the OTLP settings reach it — a number (``NUMERIC``), a bool (``BOOLEAN``, 1 or 0)
-        or a category (``CATEGORICAL``)."""
-        data_type: telemetry.ScoreType = "NUMERIC"
-        if isinstance(value, bool):
-            data_type, value = "BOOLEAN", float(value)
-        elif isinstance(value, str):
-            data_type = "CATEGORICAL"
-        telemetry.score_span(run_id, name, value, comment)
-        if self.scores is not None:
-            await self.scores.post(
-                run_id, name, value, data_type=data_type, comment=comment, key=key
-            )
+        """A score on the run's trace (``EvalServices.score``): a ``score`` span always, and
+        Langfuse's scores API when the OTLP settings reach it — a number (``NUMERIC``), a bool
+        (``BOOLEAN``, 1 or 0) or a category (``CATEGORICAL``)."""
+        trace_id = telemetry.trace_hex(run_id)
+        await self.evals.score(trace_id, name, value, key=key, comment=comment, run_id=run_id)
 
 
 def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:

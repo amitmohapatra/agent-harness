@@ -119,7 +119,9 @@ The environment, and nothing else ([`.env.example`](.env.example)):
 
 ## The API
 
-Everything public is importable from `trellis`:
+The wrapped API is importable from `trellis`; the blocks usable without `Harness` from their own
+modules — `trellis.harness.governance` ([docs/governance.md](docs/governance.md)) and
+`trellis.harness.evals` (below):
 
 | Name | What it is |
 |---|---|
@@ -130,9 +132,7 @@ Everything public is importable from `trellis`:
 | `h.worker(agents, *, concurrency=None)` | Claims queued runs of these agents and executes them, `concurrency` at a time (default `TRELLIS_WORKER_CONCURRENCY`, else the CPU count from 1 to 8): `await worker.run()` (until `worker.stop()`: the runs held finish, or are released after a grace period) or `await worker.run_once()`. |
 | `await h.inbox(assignee=None) -> list[RunSummary]` | The paused runs waiting on `assignee` (`user:…`, `role:…`) or on anyone, newest first. |
 | `await h.feedback(run_id, verdict, correction=None) -> Feedback \| None` | What a person said about a run (`verdict`: `confirm`, `approve`, `reject`, `correct` or `edit`, the last two with a `correction`): a `feedback` score on its trace (Langfuse; 1.0, 0.5 for `edit`, 0.0 for `correct`/`reject`) and — memory on — the run's `human` feedback in the memory service, returned as stored (`None` with memory off). It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
-| `await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None, concurrency=4, limit=None, user=None) -> EvalReport` | Run the agent on every item of a dataset — a Langfuse dataset's name, or `[{"input", "expected"?, "metadata"?}]` / `EvalItem`s — through the normal pipeline, `concurrency` at a time, score each answer with `evaluators` onto its run's trace, and make each run an item of the Langfuse experiment `run_name` (the dataset run link on Langfuse v3, the `langfuse.experiment.*` span attributes on v4). A failing or pausing item is reported (`error`, `interrupted`), never fatal. The `EvalReport` has every item in order and each evaluator's mean, count and failures ([docs/evaluation.md](docs/evaluation.md)). |
-| `EvalItem`, `EvalCase`, `EvalScore`, `EvalReport`, `EvalResult`, `Evaluator` | The evaluation types: a dataset item; what an evaluator is given (input, output, expected, run, memory context); what it returns (`EvalScore(name, value, comment=None)`); the report and each item's result; an `Evaluator` is any `async (EvalCase) -> EvalScore \| None` ([docs/evaluation.md](docs/evaluation.md)). |
-| `grounding()`, `exact_match()`, `contains()`, `llm_judge(criteria, *, name=None)` | The built-in evaluators: grounding against the run's memory context (`/v1/verify`), against `expected`, and a judge model (`TRELLIS_JUDGE_MODEL` through Bifrost with `TRELLIS_JUDGE_VIRTUAL_KEY`). An evaluator is any `async (EvalCase) -> EvalScore \| None`. |
+| `await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None, concurrency=4, limit=None, user=None) -> EvalReport` | Run the agent on every item of a dataset — a Langfuse dataset's name, or `[{"input", "expected"?, "metadata"?}]` / `EvalItem`s — through the normal pipeline, `concurrency` at a time, score each answer with `evaluators` onto its run's trace, and make each run an item of the Langfuse experiment `run_name` (the dataset run link on Langfuse v3, the `langfuse.experiment.*` span attributes on v4). A failing or pausing item is reported (`error`, `interrupted`), never fatal. The `EvalReport` has every item in order and each evaluator's mean, count and failures. The evaluation names (the evaluators, `EvalItem`, `EvalReport`...) are imported from `trellis.harness.evals`, which also evaluates and judges code that is not wrapped (below, and [docs/evaluation.md](docs/evaluation.md)). |
 | `await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed (`wait=None`: return at once): the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`); `tenant` only for a platform key. Needs `MEMORY_URL`. |
 | `tool(fn, *, name=None, description=None, side_effects="write")` / `@tool` / `@tool(...)` | A Python function (sync or async) as a tool: the schema from its signature (pydantic validates the arguments), the description from its docstring's first paragraph, `side_effects` `"read"`, `"write"` (default) or `"irreversible"`. It stays callable as the function. A bare function in `tools=[...]` is `tool(fn)`. |
 | `a2a(url, *, name=None)` | A remote A2A agent (its card at `{url}/.well-known/agent-card.json`) as one `write` tool, `{"message": string}` in, its answer out; `name` overrides the card's. |
@@ -217,11 +217,24 @@ traces, the grounding score and people's feedback, and makes both kinds of evalu
 ([docs/evaluation.md](docs/evaluation.md)):
 
 ```python
+from trellis.harness.evals import grounding, llm_judge
+
 report = await h.evaluate(agent, "support-golden", [grounding(), llm_judge("Cites the policy.")])
 print(report)  # offline: a Langfuse dataset (or a list), every answer scored, runs linked
 
 h = Harness(judges=[llm_judge("Polite and correct.")])  # online: sampled runs, in the background
 ```
+
+Evaluation is also a block for code that is not wrapped — a LangGraph graph, an OpenAI Agents
+`Runner`, a Claude Agent SDK `query`, plain functions — from `trellis.harness.evals`:
+
+| Name | What it is |
+|---|---|
+| `EvalServices.from_env()` | Langfuse (the OTLP variables) and the judge (`BIFROST_URL`, `TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`) the environment names; `async with` closes them. A wrapped agent's are `agent.evals`. |
+| `await evaluate(target, dataset, evaluators, *, services=None, user=None, run_name=None, description=None, metadata=None, concurrency=4, limit=None) -> EvalReport` | `h.evaluate` for a wrapped `Agent`, or any `async (input) -> answer` — each item one call in a root span of its own, an item of the Langfuse experiment the same way. Return `EvalOutput(answer, bundle_id, memory)` for grounding. |
+| `await judge(case, judges, *, services, sample=None)` | Score one `EvalCase` on-line, on its trace (`trace_id`, else its run's); `sample` judges a stable share of runs. A judge that fails is reported, never raised. |
+| `EvalItem`, `EvalCase`, `EvalScore`, `EvalReport`, `EvalResult`, `EvalOutput`, `Evaluator` | A dataset item; what an evaluator is given (input, output, expected, run and trace, memory context and scope); what it returns (`EvalScore(name, value, comment=None)`); the report and each item's result; what a callable target may return; an `Evaluator` is any `async (EvalCase) -> EvalScore \| None`. |
+| `grounding()`, `exact_match()`, `contains()`, `llm_judge(criteria, *, name="llm_judge")` | The built-in evaluators: grounding against the run's memory context (`grounding_score`: `/v1/verify`), against `expected`, and a judge model (`TRELLIS_JUDGE_MODEL` through Bifrost with `TRELLIS_JUDGE_VIRTUAL_KEY`). |
 
 The judge's model and virtual key are configuration (`TRELLIS_JUDGE_MODEL`,
 `TRELLIS_JUDGE_VIRTUAL_KEY`): pick a stronger model than the agent's, on its own budget. See
@@ -247,8 +260,8 @@ Each runs with no services (scripted models, runs in process) and uses the real 
 | `serve_chat.py` | AG-UI and A2A on one FastAPI app |
 | `a2a_agents.py` | an agent served over A2A and consumed by another as a tool; the remote question answered |
 | `memory_features.py` | a document the next context cites, `agent.memory`, a person's feedback (memory on) |
-| `evaluate_offline.py` | a dataset scored by exact match, contains and a judge; the report |
-| `online_judges.py` | judges on live runs, in the background |
+| `evaluate_offline.py` | a dataset scored by exact match, contains and a judge, for a wrapped agent (`h.evaluate`) and a plain function (`evaluate`); the reports |
+| `online_judges.py` | judges on live runs, in the background; `judge()` on a run of your own code |
 
 ## Development
 

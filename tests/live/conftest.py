@@ -18,8 +18,9 @@ import pytest
 from bifrost_sdk import Bifrost, MCPClientConfig, MCPConnection
 from bifrost_sdk.admin import Admin
 
-from trellis import Evaluator, Harness, Settings
+from trellis import Harness, Settings
 from trellis.harness.clients.memory import Memory
+from trellis.harness.evals import Evaluator
 from trellis.memory import MemoryClient
 
 #: How long a memory call may take here (a deployment keeps the SDK's 10 s).

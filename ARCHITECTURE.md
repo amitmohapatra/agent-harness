@@ -33,7 +33,7 @@ flowchart LR
 | Neighbour | What the harness uses it for | Endpoints (module) |
 |---|---|---|
 | Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s model calls, the MCP log of Code Mode scripts | `POST /mcp` (`tools/list`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs` (`clients/bifrost.py`, through `bifrost-sdk`) |
-| Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, and the tool catalog's `/v1/tools`, `/v1/tools/catalog` and approval feedback in `governance/catalog.py`, through `trellis-memory`) |
+| Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, the tool catalog's `/v1/tools`, `/v1/tools/catalog` and approval feedback in `governance/catalog.py`, and `/v1/verify` in `evals.grounding_score`, through `trellis-memory`) |
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`clients/runs.py`) |
 | Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`surfaces/agui`) |
 | Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)`: `SendStreamingMessage`, `CancelTask` (`surfaces/a2a`) |
@@ -52,9 +52,9 @@ src/trellis/
   __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory)
   worker.py            python -m trellis.worker module:harness
   harness/
-    harness.py         Harness: settings → clients, writes, scores; the key (tenant, kept fresh);
-                       governance per tenant; wrap / tools / worker / inbox / feedback /
-                       add_document
+    harness.py         Harness: settings → clients, writes, evaluation services; the key (tenant,
+                       kept fresh); governance per tenant; wrap / tools / worker / inbox /
+                       feedback / add_document / evaluate / score
     agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
     pipeline.py        one attempt of one run (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
@@ -64,7 +64,10 @@ src/trellis/
     fresh.py           a value read from a service, kept for a TTL, the last one through outages
     identity.py        tenant / user / thread / agent / run → memory scope, contracts context
     result.py          Result
-    evals.py           evaluators (grounding, exact_match, contains, llm_judge), h.evaluate, online judges
+    evals.py           evaluation, usable without Harness: EvalServices (Langfuse, the judge;
+                       from_env), evaluate (a wrapped Agent or any async callable), judge
+                       (on-line, from any code), the evaluators (grounding with grounding_score,
+                       exact_match, contains, llm_judge)
     settings.py        the environment
     telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; the Langfuse
                        client (scores, datasets, dataset runs)
@@ -84,8 +87,9 @@ src/trellis/
 ```
 
 Each service has exactly one client module; nothing else in the harness calls it — except the
-tool catalog, which `governance/catalog.py` reads and writes through the memory SDK itself, so
-governance works without a `Harness`. The core imports no framework: an adapter imports its
+tool catalog, which `governance/catalog.py` reads and writes through the memory SDK itself, and
+the grounding check, which `evals.grounding_score` asks through the memory SDK's
+`MemoryContext`, so governance and evaluation work without a `Harness`. The core imports no framework: an adapter imports its
 framework the first time a target of its type is wrapped, and `tests/contract` checks that
 `import trellis` and `Harness()` load none — and that what the clients send, and what the test
 doubles of the memory service and agent-runs answer, match those services' committed OpenAPI
@@ -105,9 +109,11 @@ flowchart TB
   harness --> workerm["worker.Worker"]
   harness --> writes["writes.Writes"]
   harness --> telemetry["telemetry<br/>(spans, counters, Langfuse)"]
-  harness --> evals["evals<br/>(evaluate, evaluators)"]
+  harness --> evals["evals<br/>(EvalServices · evaluate · judge<br/>evaluators · grounding_score)"]
+  agent --> evals
   evals --> pipeline
   evals --> telemetry
+  evals --> bifrost
   workerm --> agent
   agent --> pipeline["pipeline.attempt"]
   agent --> surfaces
@@ -405,19 +411,32 @@ sequenceDiagram
 
 ## Evaluation
 
-`evals.py`: an evaluator is any `async (EvalCase) -> EvalScore | None`; the built-ins are
-`grounding()` (the memory service's `/v1/verify`), `exact_match()`, `contains()` and
-`llm_judge(criteria)`, whose model and virtual key are the deployment's
-(`TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`: `Harness.judge_gateway`). Every score goes
-on the run's trace through `Harness.score` ([docs/evaluation.md](docs/evaluation.md)).
+`evals.py` is a block usable with or without `Harness`: an evaluator is any
+`async (EvalCase) -> EvalScore | None`; the built-ins are `grounding()` (`grounding_score`: the
+memory service's `/v1/verify` in the case's memory scope — the same function the sampled check
+of a wrapped run calls), `exact_match()`, `contains()` and `llm_judge(criteria)`. What they reach
+is an `EvalServices`: Langfuse, and the judge's gateway and model — the deployment's
+(`TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`), never the code's. `EvalServices.from_env()`
+builds them for any code; a harness builds one (`h.evals`, sharing its gateway and Langfuse
+client) and each wrapped agent has its own copy (`agent.evals`), whose judge falls back to a
+`ReAct` target's model. `evaluate(target, ...)` runs a wrapped `Agent` through the pipeline
+(`h.evaluate` delegates to it) or calls any `async (input) -> answer` in a root span of its own;
+`judge(case, judges, services=)` scores one case on-line from any code, and is what a wrapped
+agent's online judges run. Every score goes on a trace through `EvalServices.score` (`h.score`
+delegates to it): the case's `trace_id`, else its run's ([docs/evaluation.md](docs/evaluation.md)).
 
 ### Offline: `h.evaluate` over a Langfuse dataset
+
+A callable target takes the same path, with one difference: instead of `pipeline.attempt`, the
+item is one call of the callable inside `telemetry.item_span` (the item's root span, in the trace
+of a run id made for the item), and only what the callable returns as an `EvalOutput` (a
+`bundle_id` and the memory scope) gives grounding something to check.
 
 ```mermaid
 sequenceDiagram
   autonumber
   actor Dev as Developer / CI
-  participant H as Harness h.evaluate
+  participant H as evaluate (h.evaluate)
   participant LF as Langfuse
   participant P as pipeline.attempt (per item)
   participant Mem as Memory service
@@ -461,7 +480,7 @@ sequenceDiagram
   P->>P: sampled(run_id, TRELLIS_JUDGE_SAMPLE)?
   P-)W: submit judge.<name> (one per judge)
   P-->>User: Result(SUCCESS, answer): nothing waits for the judges
-  W->>J: judge(EvalCase(question, answer, context, run_id))
+  W->>J: judge(EvalCase(question, answer, context, memory, run_id), [one judge], services=agent.evals)
   J->>GW: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL)
   GW-->>J: {"score", "reasoning"}
   J->>LF: POST /api/public/scores on the run's trace (and a score span)

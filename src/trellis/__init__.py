@@ -23,18 +23,6 @@ if TYPE_CHECKING:
     from trellis.harness.adapters.react import ReAct
     from trellis.harness.agent import Agent, RunHandle
     from trellis.harness.clients.runs import RunSummary
-    from trellis.harness.evals import (
-        EvalCase,
-        EvalItem,
-        EvalReport,
-        EvalResult,
-        EvalScore,
-        Evaluator,
-        contains,
-        exact_match,
-        grounding,
-        llm_judge,
-    )
     from trellis.harness.harness import Harness
     from trellis.harness.result import Result
     from trellis.harness.runtime import Runtime, current
@@ -54,26 +42,10 @@ _EXPORTS = {
     "Result": "trellis.harness.result",
     "Runtime": "trellis.harness.runtime",
     "Settings": "trellis.harness.settings",
-    "EvalCase": "trellis.harness.evals",
-    "EvalItem": "trellis.harness.evals",
-    "EvalReport": "trellis.harness.evals",
-    "EvalResult": "trellis.harness.evals",
-    "EvalScore": "trellis.harness.evals",
-    "Evaluator": "trellis.harness.evals",
-    "contains": "trellis.harness.evals",
-    "exact_match": "trellis.harness.evals",
-    "grounding": "trellis.harness.evals",
-    "llm_judge": "trellis.harness.evals",
 }
 
 __all__ = [
     "Agent",
-    "EvalCase",
-    "EvalItem",
-    "EvalReport",
-    "EvalResult",
-    "EvalScore",
-    "Evaluator",
     "Harness",
     "ReAct",
     "Result",
@@ -82,11 +54,7 @@ __all__ = [
     "Runtime",
     "Settings",
     "a2a",
-    "contains",
     "current",
-    "exact_match",
-    "grounding",
-    "llm_judge",
     "openapi",
     "tool",
 ]

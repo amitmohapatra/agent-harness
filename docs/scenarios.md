@@ -121,6 +121,7 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 | Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_JUDGE_SAMPLE`) judged in the background |
 | A judge that does not grade itself, on its own budget | `TRELLIS_JUDGE_MODEL` (a stronger model than the agent's) and `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | A check of your own | any `async (EvalCase) -> EvalScore \| None` in the evaluators or judges |
+| Evaluation of an agent you do not wrap | `evaluate(any_async_callable, dataset, [...])` and `judge(case, [...], services=...)` from `trellis.harness.evals` ([evaluation.md](evaluation.md#way-2-pluggable-from-your-own-code)) |
 
 Annotation queues and datasets built from traces are Langfuse's ([evaluation.md](evaluation.md));
 whether the harness itself got slower is `make bench`.

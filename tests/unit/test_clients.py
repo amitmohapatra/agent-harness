@@ -183,9 +183,6 @@ async def test_records_carry_idempotency() -> None:
     [feedback] = service.named("feedback")
     assert feedback.body["target_kind"] == "run" and feedback.body["target_id"] == "run_1"
     assert feedback.body["source"] == "system" and feedback.idempotency_key == "run_1:outcome"
-    # the grounding score: the share of the answer's claims the evidence supports
-    assert await run.verify("the answer", "bnd_1") == 0.8
-    assert service.named("verify")[0].body["bundle_id"] == "bnd_1"
 
 
 async def test_the_model_key_is_registered_once_in_the_agents_scope() -> None:
@@ -211,11 +208,6 @@ async def test_a_tool_result_that_is_not_json_is_returned_as_it_came() -> None:
         {"type": "text", "text": "x"}
     ]
     await gateway.aclose()
-
-
-async def test_an_answer_with_no_checkable_claim_has_no_grounding_score() -> None:
-    service = FakeMemoryService(claims=0, unsupported=0)
-    assert await memory(service).bind(identity()).verify("hello", "bnd_1") is None
 
 
 async def test_a_document_can_be_added_without_waiting_for_it() -> None:

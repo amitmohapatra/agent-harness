@@ -58,7 +58,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.live.conftest import RUNS_URL, live_harness, needs_memory, needs_runs
 from tests.live.support import StubLangfuse, eventually, memory_scope
 from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
-from trellis import Agent, Harness, ReAct, Runtime, a2a, exact_match, grounding, llm_judge, tool
+from trellis import Agent, Harness, ReAct, Runtime, a2a, tool
 from trellis.contracts import (
     InterruptReason,
     RunEvent,
@@ -69,6 +69,7 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness import worker as worker_module
+from trellis.harness.evals import exact_match, grounding, llm_judge
 from trellis.harness.governance import catalog as governance_catalog
 from trellis.harness.surfaces.agui.sse import decode
 from trellis.harness.tools.convert import text_of
@@ -970,7 +971,7 @@ async def test_offline_evaluation_scores_a_langfuse_dataset(spans: InMemorySpanE
     ]
     with StubLangfuse(f"fv-golden-{suffix}", items) as langfuse:
         async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
-            h._judge_model = judge = Judge()
+            h.evals.judge_model = judge = Judge()
             agent = h.wrap(answer_from_table, id=f"fv-eval-{suffix}")
             user = f"fv-eval-{suffix}"
             scope = await memory_scope(h, user=user, agent_id=agent.id)
@@ -1027,7 +1028,7 @@ async def test_online_judges_score_every_sampled_run() -> None:
         async with live_harness(
             judge_sample=1.0, judges=[llm_judge("Answers the question.")], **langfuse.settings()
         ) as h:
-            h._judge_model = judge
+            h.evals.judge_model = judge
             agent = h.wrap(answer_from_table, id=f"fv-judged-{suffix}")
             user = f"fv-judged-{suffix}"
             scope = await memory_scope(h, user=user, agent_id=agent.id)

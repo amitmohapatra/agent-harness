@@ -18,7 +18,8 @@ nothing (attributes are built only for a recording span).
 | `retrieve memory` — the pushed context | `gen_ai.operation.name=retrieve`, `langfuse.observation.type=retriever`, input (the question), output (the rendered context) |
 | `execute_tool <tool>` — one per call | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` (`extension` for MCP, else `function`), `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `langfuse.observation.type=tool`, `trellis.tool.source`, `trellis.governance.action` (`run`, `announce` or `ask`: [governance.md](governance.md)) |
 | `chat <model>` — a model call the harness makes (`ReAct`) | `gen_ai.operation.name=chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`, `langfuse.observation.type=generation`, input/output |
-| `score <name>` — a grounding score or feedback | `langfuse.observation.type=evaluator`, `trellis.run_id`, `trellis.score.name`, `.value`, `.comment`, and a `score` event |
+| `score <name>` — a grounding score, an evaluator's or feedback | `langfuse.observation.type=evaluator`, `trellis.run_id` (when the score is a run's), `trellis.score.name`, `.value`, `.comment`, and a `score` event; in the run's trace, or the trace an `EvalCase` names (`trace_id`) |
+| `invoke_agent <name>` — a callable's item in `evaluate(callable, ...)` | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `langfuse.trace.name`, `langfuse.observation.type=agent`, `user.id`, `trellis.run_id`, input/output, and the experiment attributes ([evaluation.md](evaluation.md#each-run-is-an-item-of-a-langfuse-experiment-v3-self-hosted-and-v4)) |
 
 A framework's own model calls are its instrumentation's (LangChain, OpenAI Agents and Claude
 all have OTel GenAI instrumentations); they nest under the attempt's span. A framework's own
@@ -90,11 +91,12 @@ The harness uses the credentials the OTLP headers already carry — no extra var
 | Score | When | Value |
 |---|---|---|
 | `grounding` | a sampled share of successful runs with a text answer (`TRELLIS_GROUNDING_SAMPLE`, default 0.1, chosen by the run id): the memory service's `/v1/verify {bundle_id, answer, run_id}` against the context the run was given — the one grounding judge, which owns the evidence and records the run's `judge` feedback itself | the share of the answer's claims the evidence supports, 0..1 (an answer with no checkable claim is no score) |
-| an evaluator's name (`exact_match`, `llm_judge`, ...) | `h.evaluate` (every item of a dataset) or an online judge (`Harness(judges=[...])`, a sampled share of runs) — [evaluation.md](evaluation.md) | 0..1 (`NUMERIC`), a bool (`BOOLEAN`), or a category (`CATEGORICAL`); the evaluator's comment (a judge's reasoning) |
+| an evaluator's name (`exact_match`, `llm_judge`, ...) | `h.evaluate` or `evaluate` (every item of a dataset), an online judge (`Harness(judges=[...])`, a sampled share of runs), or `judge(...)` from your own code — [evaluation.md](evaluation.md) | 0..1 (`NUMERIC`), a bool (`BOOLEAN`), or a category (`CATEGORICAL`); the evaluator's comment (a judge's reasoning) |
 | `feedback` | `h.feedback(run_id, verdict, correction=None)` — also the run's `human` feedback in the memory service, which outranks the judge's and the run's own | confirm/approve 1.0, edit 0.5, correct/reject 0.0; the correction as the comment |
 
 LLM-as-judge on the traces and dataset runs against an agent are the harness's
-(`Harness(judges=[...])`, `h.evaluate` — [evaluation.md](evaluation.md)); annotation queues and
+(`Harness(judges=[...])`, `h.evaluate`, and `judge`, `evaluate` for code that is not wrapped —
+[evaluation.md](evaluation.md)); annotation queues and
 datasets built from traces are configured in Langfuse. Whether the *harness* got slower is `make bench`
 (`tests/performance`, against the committed `benchmark-results.json`).
 
