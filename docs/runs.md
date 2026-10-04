@@ -1,10 +1,9 @@
 # Runs, workers, schedules
 
 This page is Way 1, wrapped: the harness records every run of an agent it wraps, and gives
-you the inbox, schedules and workers. A team that keeps its own framework (LangGraph, OpenAI
-Agents, the Claude Agent SDK, plain code) uses agent-runs directly, with the same calls:
-`trellis.runs.RunsClient`, and `trellis.runs.Worker` for its own workers (pip `trellis-runs`;
-[its README](https://github.com/amitmohapatra/agent-runs/blob/main/sdk/python/README.md)).
+you the inbox, schedules and workers. A team that keeps its own framework uses agent-runs
+directly, with `trellis.runs.RunsClient` and `trellis.runs.Worker`:
+[blocks/runs.md](blocks/runs.md) (Way 2).
 
 Every run has a record (contracts `RunRecord`): in agent-runs when `RUNS_URL` is set
 (`h.runs` is a `trellis.runs.RunsClient`), in process otherwise (`h.runs` is a `LocalRuns`:
@@ -37,9 +36,7 @@ python -m trellis.harness.worker app.agents:h --concurrency 8
 The claim loop is agent-runs' SDK's, `trellis.runs.Worker`; the harness's worker
 (`trellis.harness.worker`) runs it with your wrapped agents: each claimed run is its agent's
 next attempt, and the harness's background writes start before the first claim and drain when
-the loop ends. A team on its own framework runs the same loop with its own handler,
-`Worker(RunsClient(), handle, ["triage"]).serve()` (its
-[README](https://github.com/amitmohapatra/agent-runs/blob/main/sdk/python/README.md#the-worker)).
+the loop ends. The same loop with a handler of your own: [blocks/runs.md](blocks/runs.md#workers).
 
 `h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
 at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and
@@ -115,7 +112,8 @@ logs a warning.
 
 Notifications (a run paused, escalated or finished) are agent-runs' tenant webhook
 subscriptions (`RunsClient.webhooks.create`, `POST /v1/webhooks`), not a harness setting; a
-receiver checks each delivery with `trellis.runs.webhooks.verify_signature`.
+receiver checks each delivery with `trellis.runs.webhooks.verify_signature`
+([blocks/runs.md](blocks/runs.md#webhooks)).
 
 ## agent-runs wire
 

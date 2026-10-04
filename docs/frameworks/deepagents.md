@@ -7,6 +7,9 @@ This page is what is particular to Deep Agents.
 
 **Install:** `pip install 'trellis-harness[deepagents]'` (brings `[langgraph]`).
 
+This page is Way 1: the harness runs the Deep Agent. Called yourself, a Deep Agent is a
+LangGraph graph, and the Way 2 recipe applies as it is: [blocks/langgraph.md](../blocks/langgraph.md).
+
 ## Using an existing Deep Agents project
 
 ```python

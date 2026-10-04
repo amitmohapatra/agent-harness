@@ -2,13 +2,12 @@
 
 Two ways in, one way out. `serve_chat` puts an agent in front of a person's chat UI (AG-UI over
 server-sent events); `serve_a2a` publishes it to other agents (A2A JSON-RPC); `a2a(url)` makes
-another agent one of this agent's tools, and `remote(url, ...)` calls one from any code. Each
-surface runs the agent through the same pipeline as `agent.run`: the run record, memory, tools,
-approvals and traces are the same whichever way a run came in — and whichever framework the
-agent is built with ([framework pages](README.md#which-target)). Both need an extra: `[agui]`
+another agent one of this agent's tools. Each surface runs the agent through the same pipeline
+as `agent.run`: the run record, memory, tools, approvals and traces are the same whichever way
+a run came in — and whichever framework the agent is built with ([framework pages](README.md#which-target)). Both need an extra: `[agui]`
 (FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
 The code is `trellis.harness.agui` (the AG-UI server) and `trellis.harness.a2a` (`server`, and
-`client`: `remote`, `RemoteAgent`, `InputRequired`).
+`client`, the A2A client the `a2a(url)` tool is built on).
 
 **The servers are Way 1.** `serve_chat` and `serve_a2a` serve a *wrapped* agent: `h.wrap(x)`
 first, then `agent.serve_chat(app)` / `agent.serve_a2a(app, url)`. A server has to record the
@@ -19,7 +18,7 @@ own framework and wants these servers wraps the part it serves: any async functi
 ([frameworks/functions.md](frameworks/functions.md)), so the function that calls your graph,
 your OpenAI Agents runner or your own loop is enough. Otherwise use the protocols' own SDKs
 (AG-UI's, the A2A SDK) with the Trellis blocks inside. *Calling* another agent needs none of
-this: [`remote()`](#calling-an-a2a-agent-from-your-own-code) works from any code.
+this: `remote(url, tenant=, user=)` works from any code ([blocks/a2a.md](blocks/a2a.md), Way 2).
 
 ## AG-UI: `agent.serve_chat(app, *, path="/agui", identity=None)`
 
@@ -139,7 +138,7 @@ or no user is refused.
 
 A remote agent is one tool (`write`), named after its card (or `name`; unsafe characters become
 `_`, at most 64), described by the card, taking `{"message": string}`. The card is read once;
-each call is a [`RemoteAgent`](#calling-an-a2a-agent-from-your-own-code) as the calling run.
+each call is a `RemoteAgent` ([blocks/a2a.md](blocks/a2a.md)) as the calling run.
 The message goes with the calling run's identity on the trusted-identity header (and the extension header) and its
 thread as the context id, so a conversation between two agents is one thread on both sides.
 The answer is the remote task's `result` artifact (several artifacts as a list), or its text.
@@ -150,68 +149,3 @@ When the remote agent asks something (`input-required`), the calling run asks th
 itself (`ask` is the `RemoteAgent`'s `on_input`), and the answer goes back on the same remote
 task. If that pauses the calling run, the remote task is cancelled; the resumed run calls again and the journal answers the
 question, so the remote agent gets the answer on its new task.
-
-## Calling an A2A agent from your own code
-
-`trellis.harness.a2a.remote` is the A2A client itself — the `a2a(url)` tool above is built on
-it — and needs no `Harness`: any code, on any framework, awaits it.
-
-```python
-remote(url, *, tenant, user, thread=None, on_input=None, name=None, headers=None,
-       timeout=120.0, client=None) -> RemoteAgent
-```
-
-| | |
-|---|---|
-| `url` | the remote agent's base URL; its card is at `{url}/.well-known/agent-card.json` |
-| `tenant`, `user` | who the call is for, sent on the trusted-identity header (a harness-served agent takes the call when `tenant` is the one its key speaks for) |
-| `thread` | the A2A context id: one conversation on both sides. `None`: each call its own |
-| `on_input` | `on_input(question) -> answer`, sync or async: answers a remote question on the same task. Without it, a question is raised as `InputRequired` |
-| `name` | the tool name in `spec` (else the card's; unsafe characters become `_`, at most 64) |
-| `headers` | sent on every request (an edge's `Authorization`, say); they never replace the identity |
-| `timeout`, `client` | the HTTP client a `RemoteAgent` opens (`timeout` seconds per exchange), or an `httpx.AsyncClient` of yours, which it never closes |
-
-A `RemoteAgent`:
-
-* `await agent(message)` — a new task with `message` (text, or a JSON value as a data part);
-  the answer is the task's `result` artifact (several artifacts as a list), or its text.
-* `await agent.connect()` / `async with remote(...) as agent` — reads the card once (a call
-  connects first when nothing has); `aclose()` closes the HTTP client it opened.
-* `agent.card` — the remote `AgentCard`; `agent.spec` — a `trellis.contracts.ToolSpec` (`write`,
-  `{"message": string}` in) for exposing it as a tool in any framework. Both after `connect`.
-* A remote question: `on_input(question)` answers it and the call goes on. Without `on_input`,
-  `InputRequired` is raised (`question`, `task_id`); the remote task keeps waiting, and
-  `await agent.reply(task_id, answer)` continues it — the task's answer, or the next question.
-  If `on_input` raises (a graph's `interrupt`, the harness's own pause), the remote task is
-  cancelled and the exception goes on: a resumed caller calls again.
-* A task that ends `failed`, `rejected` or `canceled`, and a remote agent that cannot be
-  reached, are a `ToolError` (`source="a2a"`).
-
-Plain asyncio:
-
-```python
-from trellis.harness.a2a import InputRequired, remote
-
-async with remote(url, tenant="acme", user="ada") as planner:
-    try:
-        plan = await planner("deploy the shop")
-    except InputRequired as asked:
-        plan = await planner.reply(asked.task_id, input(asked.question))
-```
-
-A LangGraph (LangChain) tool — the remote question becomes the graph's own `interrupt`, and
-`Command(resume=...)` answers it (the tool runs again, the interrupt returns the answer):
-
-```python
-planner = remote(url, tenant="acme", user="ada", on_input=interrupt)  # langgraph.types
-
-
-@tool  # langchain_core.tools
-async def plan(message: str) -> Any:
-    """Plan a deployment with the remote planner agent."""
-    return await planner(message)
-```
-
-`planner.spec` carries the card's name and description for a framework that builds tools from
-a schema (OpenAI Agents' `FunctionTool`, an MCP server). Inside a wrapped agent, prefer
-`a2a(url)`: the identity, the thread and the pause come from the run.

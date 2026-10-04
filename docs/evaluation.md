@@ -7,14 +7,16 @@ annotation queues live there. Trellis fills it two ways:
 |---|---|---|
 | What | an agent run over a dataset, every answer scored | live runs scored as they happen |
 | Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, evaluators)` | automatic: `Harness(judges=[...])`, and the sampled grounding check |
-| Way 2, your own code | `report = await evaluate(my_agent, dataset, evaluators)` | `await judge(case, judges, services=services)` |
 | Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with a text answer (`TRELLIS_JUDGE_SAMPLE`, or `sample=`) |
 | When | now: the call returns an `EvalReport` | after the run — in the background writes queue, never on the request path, when wrapped |
 | Where the scores go | each run's trace (Langfuse scores, and a `score` span); a Langfuse dataset's runs are linked to the dataset run | each run's trace (or the trace a case names) |
 
 Every evaluation name is imported from `trellis.harness.evals` (the `trellis` package holds the
-wrapped API only). `examples/evaluate_offline.py` and `examples/online_judges.py` run both ways
-with no services. Against the real memory service, `tests/live/test_live_matrix.py` runs a
+wrapped API only). This page is how evaluation works and what a wrapped agent gets (Way 1);
+evaluating your own code, not wrapped, with `evaluate` and `judge` is
+[blocks/evaluation.md](blocks/evaluation.md) (Way 2): the same evaluators, judge and Langfuse
+records. `examples/evaluate_offline.py` and `examples/online_judges.py` run Way 1 with no
+services. Against the real memory service, `tests/live/test_live_matrix.py` runs a
 wrapped evaluation with grounding, `exact_match` and a scripted judge, and checks the Langfuse
 dataset run, scores and experiment attributes.
 
@@ -42,7 +44,7 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
 
 * **Automatic.** With memory on, a sampled share of successful runs is checked against the
   context it was given (`TRELLIS_GROUNDING_SAMPLE`, [memory.md](memory.md)), and with `judges=`
-  a sampled share is judged (`TRELLIS_JUDGE_SAMPLE`, [Online](#online-judges-and-judge) below).
+  a sampled share is judged (`TRELLIS_JUDGE_SAMPLE`, [Online](#online-judges) below).
   Nothing to call.
 * **`h.evaluate`** runs each item through the normal pipeline — memory, tools, governance and
   approvals — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
@@ -51,151 +53,6 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
   falls back to a `ReAct` target's own model when `TRELLIS_JUDGE_MODEL` is unset.
 
 This works for every target ([framework pages](README.md#which-target)).
-
-## Way 2 (pluggable): from your own code
-
-A team that keeps its own framework — a LangGraph graph, an OpenAI Agents `Runner`, a Claude
-Agent SDK `query`, plain functions — and does not wrap its agent, imports evaluation as a block.
-It needs three things:
-
-```python
-from trellis.harness.evals import EvalCase, EvalServices, evaluate, exact_match, judge, llm_judge
-
-services = EvalServices.from_env()  # Langfuse and the judge: the deployment's, never the code's
-
-
-async def my_agent(question: str) -> str: ...  # your agent, as it is
-
-
-# offline: a dataset, every answer scored, each call an item of a Langfuse experiment
-report = await evaluate(my_agent, "support-golden", [exact_match()], services=services)
-
-# online: one run of yours, judged on its trace
-scores, failed = await judge(
-    EvalCase(input=question, output=answer, run_id=run_id),
-    [llm_judge("Polite, correct and concise.", name="quality")],
-    services=services,
-    sample=0.1,
-)
-await services.aclose()  # or: async with EvalServices.from_env() as services
-```
-
-**`EvalServices.from_env(environ=None)`** reads only the environment:
-
-| Variable | |
-|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse's public API for scores, datasets and dataset runs ([Langfuse setup](#langfuse-setup)); the endpoint also exports the spans, unless the application installed its own tracer provider |
-| `BIFROST_URL`, `TRELLIS_JUDGE_VIRTUAL_KEY` (else `BIFROST_VIRTUAL_KEY`) | the judge's gateway |
-| `TRELLIS_JUDGE_MODEL` | the judge's model; unset, `llm_judge` is a failure that says so (there is no agent model to fall back to) |
-
-Unset variables leave a service out: no Langfuse means scores are `score` spans only and a
-dataset must be given as items; no judge means only `llm_judge` fails. `EvalServices(langfuse,
-judge_gateway, judge_model, fallback_model)` is the same as fields; close what `from_env` opened
-with `await services.aclose()` or `async with`.
-
-**`evaluate(target, dataset, evaluators, *, services=None, user=None, ...)`** takes any
-`async (input) -> answer` as `target` (or a wrapped `Agent`: that is `h.evaluate`). Each item is
-one call, inside a root span of its own (`invoke_agent <the function's name>`) in the trace of a
-run id made for the item, carrying the Langfuse experiment attributes; spans your framework's
-own OpenTelemetry instrumentation makes during the call are its children. `services` defaults to
-`EvalServices.from_env()`, opened and closed by the call. To be graded for grounding, return
-`EvalOutput(answer, bundle_id, memory)`: the answer, the `bundle_id` of the memory context it was
-given, and the `MemoryContext` (`trellis.memory`) it was built in.
-
-**`judge(case, judges, *, services, sample=None)`** scores one `EvalCase` and returns
-`(scores, failed)`: the `EvalScore`s, and each judge that raised with why (logged, never raised).
-Each score goes on the case's trace: `trace_id` (32 hex characters — the trace your own tracing
-made), else its run's (`run_id`). A case with neither is scored and kept off any trace.
-`sample` (0 to 1) judges only that share of cases, chosen by the run id (else the trace id) so a
-run is always or never judged; `None` judges every case. To let the deployment choose, pass
-`Settings.from_env().judge_sample` (`TRELLIS_JUDGE_SAMPLE`; `None` when it is unset). `judge` runs where it is awaited: run it after the response
-is sent (your web framework's background task), so the judge model is never on the request path.
-
-### With LangGraph
-
-```python
-import os
-
-from trellis.harness.evals import EvalOutput, EvalServices, evaluate, grounding, llm_judge
-from trellis.memory import MemoryClient
-
-memory = MemoryClient(os.environ["MEMORY_URL"], api_key=os.environ["TRELLIS_API_KEY"])
-
-
-async def support(question: str) -> EvalOutput:
-    scope = memory.bind(user_id="trellis-evaluate", agent_id="support")
-    pushed = await scope.context(question)  # the context your graph is given
-    state = await graph.ainvoke({"messages": [("system", pushed.rendered), ("user", question)]})
-    return EvalOutput(state["messages"][-1].content, pushed.bundle_id, scope)
-
-
-async with EvalServices.from_env() as services:
-    report = await evaluate(
-        support,
-        "support-golden",
-        [grounding(), llm_judge("Answers the question and cites the policy.")],
-        services=services,
-        run_name="nightly",
-    )
-```
-
-On-line, judge each run after it answers, on the trace your tracing made for it:
-
-```python
-from opentelemetry import trace
-
-from trellis.harness.evals import EvalCase, EvalServices, judge, llm_judge
-
-tracer = trace.get_tracer("support")
-services = EvalServices.from_env()  # once, at start-up
-
-
-async def answer(question: str, run_id: str) -> str:
-    with tracer.start_as_current_span("support") as span:
-        state = await graph.ainvoke({"messages": [("user", question)]})
-        trace_id = format(span.get_span_context().trace_id, "032x")
-    text = state["messages"][-1].content
-    case = EvalCase(input=question, output=text, run_id=run_id, trace_id=trace_id)
-    await judge(case, [llm_judge("Polite and correct.")], services=services, sample=0.1)
-    return text
-```
-
-### With the OpenAI Agents SDK
-
-```python
-from agents import Agent, Runner
-
-from trellis.harness.evals import evaluate, exact_match, llm_judge
-
-concierge = Agent(name="concierge", instructions="Answer briefly.")
-
-
-async def ask(question: str) -> str:
-    return (await Runner.run(concierge, question)).final_output
-
-
-report = await evaluate(ask, dataset, [exact_match(), llm_judge("Correct.")], services=services)
-```
-
-### With the Claude Agent SDK
-
-```python
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
-
-from trellis.harness.evals import contains, evaluate
-
-options = ClaudeAgentOptions(system_prompt="Answer briefly.")
-
-
-async def ask(question: str) -> str:
-    async for message in query(prompt=question, options=options):
-        if isinstance(message, ResultMessage):
-            return message.result or ""
-    return ""
-
-
-report = await evaluate(ask, dataset, [contains()], services=services)
-```
 
 ## Evaluators
 
@@ -276,13 +133,12 @@ evaluator where one will do.
 ```python
 await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None,
                  concurrency=4, limit=None, user=None)
-await evaluate(target, dataset, evaluators, *, services=None, user=None, run_name=None,
-               description=None, metadata=None, concurrency=4, limit=None)
 ```
 
-`h.evaluate(agent, ...)` is `evaluate(agent, ...)` with the agent's own services
-(`agent.evals`); `target` is a wrapped `Agent` or any `async (input) -> answer`
-([Way 2](#way-2-pluggable-from-your-own-code)).
+`h.evaluate(agent, ...)` is `evaluate(agent, ...)` (`trellis.harness.evals`) with the agent's
+own services (`agent.evals`). `evaluate` also takes any `async (input) -> answer` as its
+target, for code you do not wrap ([blocks/evaluation.md](blocks/evaluation.md#offline-evaluate));
+the dataset, the report and the experiment below are the same for both.
 
 * **`dataset`** — a Langfuse dataset's name, or a sequence of items: mappings with `input` (and
   `expected`, `metadata`) or `EvalItem(input, expected=None, metadata={}, id=None)`s. A
@@ -295,10 +151,6 @@ await evaluate(target, dataset, evaluators, *, services=None, user=None, run_nam
   `trellis-evaluate`; memory is scoped to it, so give an evaluation its own user when its writes
   should stay apart), as an item of a Langfuse experiment (below). Then the evaluators score the
   answer — `grounding` in the run's own memory scope — and each score goes on the run's trace.
-* **Each item of a callable** is one call, `await target(input)`, under a run id made
-  for it (`run_…`), inside its `invoke_agent <name>` span (the function's name, else its type's;
-  `user.id` is `user`), as an item of the experiment. What it returns is the answer — or, as an
-  `EvalOutput`, the answer with the memory context `grounding` checks it against.
 * **What cannot stop it**: an item whose run fails (or whose call raises) is `error` (with its
   message), one that pauses for a person is `interrupted` — its run is cancelled so it does not
   wait in an inbox — and one whose run is cancelled is `cancelled`; only `success` items are
@@ -353,7 +205,7 @@ propagated value longer than 200 characters is left out. Spans a framework's own
 instrumentation creates (a LangChain or OpenAI Agents tracer) do not carry them; the harness's
 spans do.
 
-## Online: judges and `judge()`
+## Online: judges
 
 ```python
 h = Harness(judges=[llm_judge("Polite, correct and concise.", name="quality"), cites_policy])
@@ -369,8 +221,8 @@ and a log line.
 **`TRELLIS_JUDGE_SAMPLE`** is the share of runs judged, 0 to 1. Unset, it is 0.1 when the harness
 has judges (and nothing is judged without judges). The run id decides — salted apart from the
 grounding sample (`TRELLIS_GROUNDING_SAMPLE`), so the two samples are independent — so a run is
-either always or never judged, whichever process asks. `judge(..., sample=rate)` from your own
-code samples the same way: a run the harness would judge, your code judges too.
+either always or never judged, whichever process asks. `judge(..., sample=rate)` from code you
+do not wrap samples the same way ([blocks/evaluation.md](blocks/evaluation.md#online-judge)).
 
 ## Langfuse setup
 

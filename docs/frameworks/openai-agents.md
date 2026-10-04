@@ -8,6 +8,11 @@ your agent that also carries the harness tools; your agent object is never chang
 through Bifrost. `agents.set_tracing_disabled(True)` keeps the SDK's own tracing (which goes to
 OpenAI) off; the harness traces through OpenTelemetry.
 
+This page is Way 1: the harness runs the agent. To keep calling `Runner.run` yourself and plug
+in the blocks (memory, `needs_approval` from governance, the `RunState` as the run's
+checkpoint in agent-runs, a judge), see the Way 2 recipe:
+[blocks/openai-agents.md](../blocks/openai-agents.md).
+
 ## Using an existing OpenAI Agents project
 
 ```python

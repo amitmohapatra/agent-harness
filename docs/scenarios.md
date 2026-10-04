@@ -1,7 +1,9 @@
 # Which to use when
 
-The harness has one way to attach (`h.wrap(target, id=...)`) and a few choices around it. Each
-section below starts from what you are trying to do and names the call. The API itself is in
+The harness has one way to attach (`h.wrap(target, id=...)`) and a few choices around it: this
+page is Way 1. (Not wrapping, and calling the blocks from your own framework, is Way 2:
+[docs/README.md](README.md#way-2-pluggable-blocks-your-framework-our-pieces).) Each section
+below starts from what you are trying to do and names the call. The API itself is in
 the [README](../README.md); how it works is in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## What to wrap
@@ -121,7 +123,7 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 | Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_JUDGE_SAMPLE`) judged in the background |
 | A judge that does not grade itself, on its own budget | `TRELLIS_JUDGE_MODEL` (a stronger model than the agent's) and `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | A check of your own | any `async (EvalCase) -> EvalScore \| None` in the evaluators or judges |
-| Evaluation of an agent you do not wrap | `evaluate(any_async_callable, dataset, [...])` and `judge(case, [...], services=...)` from `trellis.harness.evals` ([evaluation.md](evaluation.md#way-2-pluggable-from-your-own-code)) |
+| Evaluation of an agent you do not wrap | `evaluate(any_async_callable, dataset, [...])` and `judge(case, [...], services=...)` from `trellis.harness.evals` ([blocks/evaluation.md](blocks/evaluation.md)) |
 
 Annotation queues and datasets built from traces are Langfuse's ([evaluation.md](evaluation.md));
 whether the harness itself got slower is `make bench`.

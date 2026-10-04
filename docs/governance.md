@@ -5,12 +5,10 @@ Governance decides, for each tool call, one of three actions: the call **runs**,
 this decision is made. Tools do not carry policy. A tool says what it does (its side effects),
 and governance decides what that means for a call.
 
-You can use governance in two ways:
-
-* **Inside `h.wrap`.** Every harness tool call goes through governance and nothing has to be
-  written ([Way 1](#way-1-inside-hwrap)).
-* **From your own code.** A team that keeps its own framework imports `Governance` and checks
-  its own tools with it ([Way 2](#way-2-from-your-own-code)).
+This page is how the decision is made, and what a wrapped agent (`h.wrap`, Way 1) does with
+it: every harness tool call goes through governance with nothing to write. A team that keeps
+its own framework checks its own tools with the same decisions, from the same catalog:
+[blocks/governance.md](blocks/governance.md) (Way 2).
 
 ## How a call is decided
 
@@ -150,109 +148,3 @@ an `approve_when` in the harness, or each call is approved twice.
 A framework's own tools are not harness tools, so governance does not see them. Examples are
 Deep Agents' file tools, Claude Code's built-ins and your own `function_tool`s
 ([framework pages](README.md#which-target)).
-
-## Way 2: from your own code
-
-A team that keeps its own framework, and does not wrap its agent, imports governance as a
-block:
-
-```python
-from trellis.contracts import ToolSpec
-from trellis.harness.governance import Governance
-
-gov = Governance.from_env(agent_id="procurement")
-
-# once at start-up: the tools an administrator governs
-await gov.publish([ToolSpec(name="create_po", side_effects="irreversible")])
-
-d = await gov.check("create_po", {"sku": "A-1", "qty": 50}, side_effects="irreversible")
-if d.asks:
-    ...  # ask a person d.question; run, edit or drop the call
-elif d.announces:
-    ...  # tell whoever watches
-```
-
-`Governance.from_env(agent_id=None, tenant=None, environ=None)` reads two variables:
-
-* With `MEMORY_URL` and `TRELLIS_API_KEY`, it uses the memory service's catalog, in `tenant`
-  (or in the key's own tenant).
-* With `MEMORY_URL` unset, it uses no catalog, and the tools' own risks decide.
-
-`MEMORY_URL` without a key is a `ConfigurationError`. Close it with `await gov.aclose()`.
-
-| Call | What it does |
-|---|---|
-| `await gov.check(tool, args, *, side_effects="write")` | the `Decision` for one call |
-| `governed(fn, gov, *, name=None, side_effects="write", on_ask, on_announce=None)` | `fn` (sync or async) as an async callable taking the tool's arguments as keywords, checked at every call |
-| `await gov.publish(specs, *, annotations=None)` | tells the catalog about the tools (`ToolSpec`s; an MCP tool's annotations by name), once per content |
-| `await gov.decided(decision, "approve" \| "reject" \| "edit", *, reviewer, run_id, user, edited=None)` | records what a person decided, as `TOOL_CALL` feedback the memory service learns approval suggestions from; idempotent per run and call; needs `agent_id` and `tenant` |
-| `await gov.rules(names)` | the catalog's `Rule` (`risk`, `approve_when`) for each name, `None` where it has none |
-
-`governed` runs the checks for you:
-
-* When a call **asks**, `governed` calls `on_ask(decision)`, which may be sync or async. Its
-  answer decides what happens:
-  * `True` runs the call;
-  * `False` raises `Rejected`;
-  * a dict runs the call with those edited arguments;
-  * an exception, such as LangGraph's `interrupt`, propagates.
-* When a call is **announced**, `governed` calls `on_announce(decision)` first, if it was given.
-
-Keeping a pause durable is the team's job, through its own checkpointer.
-
-### With LangGraph
-
-LangGraph's `interrupt` is a natural `on_ask`. The graph's checkpointer keeps the pause, and
-`Command(resume=...)` carries the person's decision back:
-
-```python
-from typing import Any, TypedDict
-
-from langgraph.config import get_config
-from langgraph.types import Command, interrupt
-from trellis.harness.governance import Decision, Governance, Rejected, governed
-
-gov = Governance.from_env(agent_id="procurement", tenant="acme")
-
-
-async def create_po(sku: str, qty: int) -> str: ...  # your ERP call
-
-
-async def ask(d: Decision) -> bool | dict[str, Any]:
-    # the graph pauses here; the answer comes back as Command(resume=...)
-    answer = interrupt({"question": d.question, "tool": d.tool, "args": dict(d.args)})
-    run = get_config()["configurable"]
-    await gov.decided(
-        d,
-        answer["verdict"],
-        reviewer=answer["reviewer"],
-        run_id=run["thread_id"],
-        user=run["user"],
-        edited=answer.get("args"),
-    )
-    return {"approve": True, "reject": False, "edit": answer.get("args")}[answer["verdict"]]
-
-
-po = governed(create_po, gov, side_effects="irreversible", on_ask=ask)
-
-
-class State(TypedDict):
-    sku: str
-    qty: int
-    result: str
-
-
-async def order(state: State) -> dict[str, str]:
-    try:
-        return {"result": await po(sku=state["sku"], qty=state["qty"])}
-    except Rejected:
-        return {"result": "not ordered"}
-
-
-# build and compile the graph with a checkpointer, then:
-# await graph.ainvoke({...}, config)             -> pauses: result["__interrupt__"]
-# await graph.ainvoke(Command(resume={"verdict": "approve", "reviewer": "user:lead"}), config)
-```
-
-The same `approve_when` an administrator sets in the catalog governs both this graph and any
-wrapped agent in the tenant.

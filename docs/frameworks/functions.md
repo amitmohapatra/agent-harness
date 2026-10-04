@@ -2,7 +2,10 @@
 
 Code that decides itself what happens — a workflow, a router, glue between agents, a step with
 no model — is a target as it is: `async def fn(input, agent) -> answer`. `agent` is the run's
-`Runtime` (the same object `trellis.current()` returns). Nothing else to install.
+`Runtime` (the same object `trellis.current()` returns). Nothing else to install. This is
+Way 1: the harness runs the function. Plain code that calls the blocks itself, unwrapped, is
+Way 2 ([docs/README.md](../README.md#way-2-pluggable-blocks-your-framework-our-pieces);
+[blocks/runs.md](../blocks/runs.md) has a `Worker` with a handler of your own).
 
 ```python
 from trellis import Harness, Runtime, tool

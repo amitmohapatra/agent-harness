@@ -8,6 +8,10 @@ too, with a page of its own ([deepagents.md](deepagents.md)).
 `langchain`, which has `create_agent` and its middleware). Your model is your own LangChain chat
 model — `ChatOpenAI(base_url=BIFROST_URL, ...)` to go through Bifrost.
 
+This page is Way 1: the harness runs the graph. To keep calling the graph yourself and plug in
+the blocks (memory, governed tools asking through `interrupt`, the pause in agent-runs, a
+judge), see the Way 2 recipe: [blocks/langgraph.md](../blocks/langgraph.md).
+
 ## Using an existing LangGraph project
 
 Your graph stays as it is. Three changes:
@@ -60,7 +64,7 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 | Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
 | Memory pull | the memory tools are in `h.tools(...)` |
 | Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
-| Tiers and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
+| Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
 | Tool hints | the context is asked for with the toolbox's names (5 or more); the graph's bound tools are not narrowed (`narrows="none"`) |
 | Grounding, judges | sampled successful runs with a text answer ([evaluation.md](../evaluation.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per harness call, `retrieve memory`; LangChain's own instrumentation nests under it |
@@ -124,17 +128,14 @@ worker loads).
 
 `agent.serve_chat(app, identity=...)` and `agent.serve_a2a(app, url)` serve the graph like any
 agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(url)` in
-`h.tools(...)`. A graph you do not wrap calls one with `trellis.harness.a2a.remote(url,
-tenant=, user=, on_input=interrupt)` in a `@tool` of its own: the remote question becomes the
-graph's `interrupt` ([surfaces.md](../surfaces.md#calling-an-a2a-agent-from-your-own-code)).
+`h.tools(...)`.
 
 ## Evaluation
 
 `await h.evaluate(agent, dataset, [grounding(), exact_match(), llm_judge("...")])` and
 `Harness(judges=[...])` work on the graph unchanged (the evaluators come from
 `trellis.harness.evals`); `llm_judge` needs `TRELLIS_JUDGE_MODEL` (the harness does not know a
-graph's model). A graph you do not wrap is evaluated and judged as it is, with `evaluate` and
-`judge` ([evaluation.md](../evaluation.md#with-langgraph)).
+graph's model).
 
 ## Limits
 

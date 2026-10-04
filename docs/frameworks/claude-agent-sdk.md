@@ -8,6 +8,11 @@ options object is never changed.
 drives. Through Bifrost: `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic",
 "ANTHROPIC_API_KEY": "<virtual key>"}` in the options.
 
+This page is Way 1: the harness runs `query()`. To keep calling `query()` yourself and plug in
+the blocks (memory, `can_use_tool` from governance, the session as the run's checkpoint in
+agent-runs, a judge), see the Way 2 recipe:
+[blocks/claude-agent-sdk.md](../blocks/claude-agent-sdk.md).
+
 ## Using an existing Claude Agent SDK project
 
 ```python
