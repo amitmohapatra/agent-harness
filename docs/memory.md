@@ -10,8 +10,8 @@ tools, no records and no catalog, and `trellis.current().memory`, `tools.hints(.
 ## Push
 
 Before the agent runs, `/v1/context` for the run's question (budget 2000 tokens), answered in
-the prompt format — `{rendered, bundle_id, token_estimate, tool_candidates}`, items cited by
-short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
+the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, tools?}`, items cited
+by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
 message (see the README's matrix) and is `trellis.current().context`; the `bundle_id` is what
 the grounding check verifies the answer against.
 
@@ -21,8 +21,9 @@ the grounding check verifies the answer against.
   replaces.
 * With 5 or more tools of the run's own, the request carries their names: the context then
   includes the procedures learned for the task and the tools section (next step, argument
-  values found in memory, what is missing), and its `tool_candidates` narrow the tools the
-  model is offered ([tools.md](tools.md)). One call: the harness asks for no hints of its own.
+  values found in memory, what is missing), and its `tools` (`[{name, confidence}]`,
+  confidence 0–1) narrow the tools the model is offered ([tools.md](tools.md)). One call: the
+  harness asks for no hints of its own.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
 it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
@@ -38,7 +39,7 @@ The service's agent tools (listed once per process) are added to the run's tools
 | `memory_update(id, content)` | replace a memory (an `[m1]` handle from the context works) |
 | `memory_forget(id)` | forget one |
 | `profile_edit(block, old?, new)` | edit a pinned profile block |
-| `tool_search(task)` | the next step, plan, prefill and missing arguments among the run's own tools — the harness passes the run's toolbox with the call, and offers the candidates it names to the model |
+| `tool_search(task)` | the next step, plan, prefill and missing arguments among the run's own tools — the harness passes the run's toolbox with the call, and offers the tools it returns (`{tools: [{name, confidence, next?, args?, missing?}], plan?}`) to the model |
 
 `memory_search` and `tool_search` only read (they run unannounced); the others write. For a compiled graph they are built in
 with `h.tools(...)`. Inside a tool or a node, `trellis.current().memory` is the memory SDK's

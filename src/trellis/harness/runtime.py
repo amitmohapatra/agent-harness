@@ -303,5 +303,5 @@ class Tools:
         if self.runtime.run_memory is None:
             raise ConfigurationError("tool hints come from the memory service: set MEMORY_URL")
         hints = await self.runtime.run_memory.tool_hints(task, self.runtime.tool_names())
-        self.runtime.offer([c.name for c in hints.candidates])
+        self.runtime.offer([t.name for t in hints.tools])
         return hints  # type: ignore[no-any-return]

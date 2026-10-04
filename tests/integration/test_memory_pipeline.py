@@ -132,7 +132,7 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
 
     [context] = memory_service.named("context")
     assert context.body["tools"] == {"available": [f"t{i}" for i in range(6)], "k": 8}
-    assert "## Tools" in model.requests[0]["messages"][0]["content"]  # next/prefill/missing
+    assert "## Tools" in model.requests[0]["messages"][0]["content"]  # confidence/args/missing
     offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
     memory_tools = ["memory_search", "memory_remember", "tool_search"]
     # the candidates and the memory tools, never all six
@@ -165,7 +165,8 @@ async def test_tool_search_answers_among_the_runs_tools_and_offers_them(
 
     agent = memory_harness.wrap(fn, id="h", tools=many(6))
     result = await agent.run("x", user="u")
-    assert result.answer == {"next": "t4", "plan": None, "prefill": {}, "missing": []}
+    # what the model reads: the choice, its confidence, and nothing empty
+    assert result.answer == {"tools": [{"name": "t4", "confidence": 0.9, "next": True}]}
     assert memory_service.named("tool_hints")[-1].body["available"] == [f"t{i}" for i in range(6)]
     assert memory_service.named("call_agent_tool") == []  # answered by the harness
 
@@ -177,7 +178,7 @@ async def test_tools_hints_inside_a_run(
         return await agent.tools.hints("reorder")
 
     result = await memory_harness.wrap(fn, id="h", tools=[stock]).run("reorder a", user="u")
-    assert isinstance(result.answer, ToolHints) and result.answer.candidates[0].name == "stock"
+    assert isinstance(result.answer, ToolHints) and result.answer.tools[0].name == "stock"
     # the candidates are the run's own tools, never the memory service's pull tools
     assert memory_service.named("tool_hints")[0].body["available"] == ["stock"]
 

@@ -17,7 +17,7 @@ classifiers = [
 # time a target of that type is wrapped. The extras only decide what gets installed.
 dependencies = [
   "trellis-contracts>=0.4",
-  "trellis-memory>=0.2",
+  "trellis-memory>=0.4",
   "bifrost-sdk>=0.2",
   "pydantic>=2.13,<3",
   "httpx>=0.28",

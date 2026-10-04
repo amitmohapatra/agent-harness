@@ -65,11 +65,11 @@ A harness tool called outside a run is refused.
 
 When the run's own tools (not the memory tools) number at least `TOOL_HINTS_MIN` (5), the
 memory context is asked for with their names: it comes back with the tools section (the next
-step, argument values found in memory, what is missing) and the `tool_candidates` that fit the
-task — one call, no separate hints request. The model is then offered:
+step, argument values found in memory, what is missing) and the `tools` that fit the task
+(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. The model is then offered:
 
 * the memory tools,
-* the candidates the service named (at most 8),
+* the tools the service named (at most 8),
 * every tool the run has already called (kept in the journal across a pause),
 * whatever a `tool_search` call found during the run.
 
@@ -82,7 +82,7 @@ task — one call, no separate hints request. The model is then offered:
 | function | n/a: it calls tools by name |
 
 A tool outside the offered set still runs if the model calls it. When the context call fails,
-or the service names no candidates, every tool is offered.
+or the service names no tools, every tool is offered.
 
 ## Code Mode
 
@@ -117,4 +117,4 @@ for among these tools.
 ## Inside a run
 
 `trellis.current().tools.call(name, **args)` calls any of the run's tools through the bridge;
-`tools.hints(task)` asks the memory service which of them fit (and offers the candidates).
+`tools.hints(task)` asks the memory service which of them fit (and offers the tools it names).

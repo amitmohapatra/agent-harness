@@ -296,7 +296,7 @@ class Agent:
                 return None
             output(span, pushed.rendered)
         # candidates the model is offered; no candidates at all narrows nothing
-        candidates = [n for n in pushed.tool_candidates or () if n in runtime.toolbox]
+        candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
         if hinted and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
         status = getattr(pushed, "evidence_status", "COMPLETE")

@@ -89,7 +89,7 @@ class RunMemory:
     async def context(
         self, query: str, *, tools: Sequence[str] | None, window: bool
     ) -> PromptContext:
-        """What the prompt gets, and the tools that fit the task (``tool_candidates``, when
+        """What the prompt gets, and the tools that fit the task (``tools``, when
         ``tools`` are given). ``window=False`` when the framework keeps the thread's messages
         itself: the service then leaves the recent conversation out."""
         return await self.ctx.context(
