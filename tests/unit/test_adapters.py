@@ -1,0 +1,313 @@
+"""Each adapter's four functions on their own: what the framework is given, what is read back
+from it, and what a resume continues with — the shapes the integration tests do not reach."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+)
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.types import GraphOutput
+
+from trellis.contracts import (
+    ConfigurationError,
+    Interrupt,
+    InterruptDecision,
+    InterruptResolution,
+)
+from trellis.harness.adapters import convert, detect
+from trellis.harness.adapters.base import Invocation, Output, query_of
+from trellis.harness.adapters.claude import ClaudeAdapter, ClaudeRunError, _with_context
+from trellis.harness.adapters.function import FunctionAdapter
+from trellis.harness.adapters.langgraph import (
+    CONTEXT_MESSAGE_ID,
+    LangGraphAdapter,
+    bound_tools,
+)
+from trellis.harness.adapters.openai_agents import OpenAIAgentsAdapter, _Continue
+from trellis.harness.adapters.react import ReAct, ReActAdapter, ReActResult, _unfenced
+from trellis.harness.journal import Pending
+
+# --------------------------------------------------------------------------- the query
+
+
+def test_the_query_is_the_text_the_user_asked() -> None:
+    assert query_of("plain") == "plain"
+    assert query_of({"messages": [{"role": "user", "content": "in a state"}]}) == "in a state"
+    assert query_of({"question": "  ", "prompt": "the first text field"}) == "the first text field"
+    assert query_of({"count": 3}) == ""
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "latest"},
+    ]
+    assert query_of(messages) == "latest"
+    assert query_of([HumanMessage(content="a LangChain message"), AIMessage(content="x")]) == (
+        "a LangChain message"
+    )
+    assert query_of([{"role": "user", "content": [{"type": "image"}]}]) == ""
+    assert query_of(42) == ""
+
+
+# --------------------------------------------------------------------------- detection
+
+
+@pytest.mark.parametrize("module", ["langgraph.fake", "agents.fake", "claude_agent_sdk.fake"])
+def test_a_lookalike_from_a_framework_module_is_not_wrapped(module: str) -> None:
+    lookalike = type("Graph", (), {"__module__": module})()
+    with pytest.raises(ConfigurationError, match="cannot wrap Graph"):
+        detect(lookalike)
+
+
+def test_an_object_with_an_async_call_is_a_function_target() -> None:
+    class Callable_:
+        async def __call__(self, input: Any, agent: Any) -> Any:
+            return input
+
+    assert isinstance(detect(Callable_()), FunctionAdapter)
+
+
+def test_no_tools_or_no_format_converts_to_nothing() -> None:
+    assert convert("langchain", []) is None
+    assert convert("none", [object()]) is None  # type: ignore[list-item]
+
+
+# --------------------------------------------------------------------------- function
+
+
+def test_a_function_gets_the_context_before_a_message_list() -> None:
+    adapter = FunctionAdapter()
+    messages = [{"role": "user", "content": "hi"}]
+    assert adapter.prepare_input(None, messages, "ctx") == [
+        {"role": "system", "content": "ctx"},
+        *messages,
+    ]
+    assert adapter.prepare_input(None, "hi", "ctx") == "hi"  # read from agent.context instead
+    assert adapter.extract(None, {"a": 1}).transcript == []
+
+
+# --------------------------------------------------------------------------- Claude
+
+
+@pytest.mark.parametrize(
+    ("system_prompt", "expected"),
+    [
+        (None, "CTX"),
+        ("You ship.", "You ship.\n\nCTX"),
+        (
+            {"type": "preset", "preset": "claude_code"},
+            {"type": "preset", "preset": "claude_code", "append": "CTX"},
+        ),
+        (
+            {"type": "preset", "preset": "claude_code", "append": "Be brief."},
+            {"type": "preset", "preset": "claude_code", "append": "Be brief.\n\nCTX"},
+        ),
+        ({"type": "custom", "prompt": "Mine."}, {"type": "custom", "prompt": "Mine.\n\nCTX"}),
+        ({"type": "file", "path": "prompt.md"}, {"type": "file", "path": "prompt.md"}),
+    ],
+    ids=["none", "text", "preset", "preset-appended", "custom", "file-untouched"],
+)
+def test_the_context_joins_whatever_system_prompt_the_options_have(
+    system_prompt: Any, expected: Any
+) -> None:
+    assert _with_context(system_prompt, "CTX") == expected
+
+
+def test_a_structured_input_is_the_prompt_as_json() -> None:
+    prepared = ClaudeAdapter().prepare_input(None, {"order": 7}, None)
+    assert (prepared.prompt, prepared.context) == ('{"order": 7}', None)
+
+
+def _result(**fields: Any) -> ResultMessage:
+    base: dict[str, Any] = {
+        "subtype": "success",
+        "duration_ms": 1,
+        "duration_api_ms": 1,
+        "is_error": False,
+        "num_turns": 1,
+        "session_id": "s",
+    }
+    return ResultMessage(**{**base, **fields})
+
+
+def test_a_failed_cli_run_raises_with_its_errors() -> None:
+    adapter = ClaudeAdapter()
+    with pytest.raises(ClaudeRunError, match="rate limited; retry later"):
+        adapter.extract(None, [_result(is_error=True, errors=["rate limited", "retry later"])])
+    with pytest.raises(ClaudeRunError, match="error_max_turns"):
+        adapter.extract(None, [_result(is_error=True, subtype="error_max_turns")])
+
+
+def test_structured_output_outranks_the_result_text() -> None:
+    said = AssistantMessage(
+        content=[TextBlock(text="thinking"), ToolUseBlock("t", "x", {})], model="m"
+    )
+    extracted = ClaudeAdapter().extract(
+        None, [said, _result(result="text", structured_output={"n": 1})]
+    )
+    assert extracted.answer == {"n": 1}
+    assert extracted.transcript == [("assistant", "thinking")]
+
+
+async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    import claude_agent_sdk
+
+    messages = [
+        AssistantMessage(content=[ToolUseBlock("t1", "mcp__trellis__x", {})], model="m"),
+        AssistantMessage(content=[TextBlock(text=""), TextBlock(text="done")], model="m"),
+        _result(result="done"),
+    ]
+    seen: list[ClaudeAgentOptions] = []
+
+    async def query(*, prompt: str, options: ClaudeAgentOptions) -> Any:
+        seen.append(options)
+        for message in messages:
+            yield message
+
+    monkeypatch.setattr(claude_agent_sdk, "query", query)
+    run = Invocation(runtime=SimpleNamespace(pending=None), tools=[])  # type: ignore[arg-type]
+    adapter = ClaudeAdapter()
+    native = adapter.prepare_input(None, "go", None)
+    options = ClaudeAgentOptions(system_prompt="Mine.")
+    items = [i async for i in adapter.stream(options, native, run)]
+    assert items[:-1] == ["done"]
+    assert isinstance(items[-1], Output) and items[-1].value == messages
+    assert seen == [options]  # no context and no harness tools: the options as they were
+
+
+# --------------------------------------------------------------------------- LangGraph
+
+
+def test_the_context_message_leads_every_input_shape() -> None:
+    adapter = LangGraphAdapter()
+    listed = adapter.prepare_input(None, [{"role": "user", "content": "hi"}], "ctx")
+    first = listed["messages"][0]
+    assert isinstance(first, SystemMessage) and first.id == CONTEXT_MESSAGE_ID
+    state = adapter.prepare_input(
+        None, {"messages": [{"role": "user", "content": "hi"}], "n": 1}, "ctx"
+    )
+    assert state["n"] == 1 and isinstance(state["messages"][0], SystemMessage)
+    assert adapter.prepare_input(None, {"topic": "tides"}, "ctx") == {"topic": "tides"}
+
+
+def test_the_answer_is_the_structured_response_or_the_last_ai_text() -> None:
+    adapter = LangGraphAdapter()
+    structured = adapter.extract(None, GraphOutput(value={"structured_response": {"n": 1}}))
+    assert structured.answer == {"n": 1} and structured.transcript == []
+    messages = [AIMessage(content="first"), HumanMessage(content="q"), AIMessage(content="")]
+    assert adapter.extract(None, GraphOutput(value={"messages": messages})).answer == "first"
+    assert adapter.extract(None, GraphOutput(value={"messages": []})).answer is None
+    assert adapter.extract(None, GraphOutput(value=None)).answer is None
+
+
+async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
+    class Graph:
+        checkpointer = None
+
+        async def astream(self, *args: Any, **kwargs: Any) -> Any:
+            yield {"type": "messages", "data": (AIMessage(content="hel"), {})}
+            yield {"type": "messages", "data": (HumanMessage(content="not ours"), {})}
+            yield {"type": "custom", "data": "progress"}
+            yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
+
+    runtime = SimpleNamespace(thread=None, run_id="run_1")
+    run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
+    items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]
+    assert items[0] == "hel" and len(items) == 2
+    assert items[1].value == GraphOutput(value={"messages": []}, interrupts=())
+
+
+def test_a_graph_without_tool_nodes_binds_no_tools() -> None:
+    assert bound_tools(object()) == []
+    node = SimpleNamespace(bound=SimpleNamespace(tools_by_name={"a": "tool-a"}))
+    assert bound_tools(SimpleNamespace(nodes={"tools": node, "agent": SimpleNamespace()})) == [
+        "tool-a"
+    ]
+
+
+# --------------------------------------------------------------------------- OpenAI Agents
+
+
+def test_the_context_is_the_first_system_message_of_every_input_shape() -> None:
+    adapter = OpenAIAgentsAdapter()
+    system = {"role": "system", "content": "ctx"}
+    assert adapter.prepare_input(None, "hi", None) == "hi"
+    assert adapter.prepare_input(None, "hi", "ctx") == [system, {"role": "user", "content": "hi"}]
+    assert adapter.prepare_input(None, [{"role": "user", "content": "hi"}], "ctx")[0] == system
+    assert adapter.prepare_input(None, {"order": 7}, None) == [
+        {"role": "user", "content": '{"order": 7}'}
+    ]
+
+
+def _pending(**fields: Any) -> Pending:
+    interrupt = Interrupt(interrupt_id="run_1.1.1", tenant_id="t", run_id="run_1", question="?")
+    return Pending(key="k", interrupt=interrupt, **fields)
+
+
+def test_only_an_sdk_approval_resumes_from_its_run_state() -> None:
+    adapter = OpenAIAgentsAdapter()
+    approve = InterruptResolution(
+        interrupt_id="run_1.1.1", run_id="run_1", decision=InterruptDecision.APPROVE
+    )
+    reject = approve.model_copy(update={"decision": InterruptDecision.REJECT})
+    assert adapter.resume_input(None, ["input"], _pending(), approve) == ["input"]
+    state = {"serialised": True}
+    pending = _pending(native_id="call_1", native_state=state)
+    assert adapter.resume_input(None, ["input"], pending, approve) == _Continue(
+        state, "call_1", True
+    )
+    assert adapter.resume_input(None, ["input"], pending, reject).approve is False
+
+
+# --------------------------------------------------------------------------- ReAct
+
+
+def test_react_puts_its_system_prompt_and_the_context_first() -> None:
+    adapter = ReActAdapter()
+    target = ReAct(system="You help.", model="m")
+    listed = adapter.prepare_input(target, [{"role": "user", "content": "hi"}], "ctx")
+    assert listed[0] == {"role": "system", "content": "You help.\n\nctx"}
+    structured = adapter.prepare_input(target, {"n": 1}, None)
+    assert structured[1] == {"role": "user", "content": '{"n": 1}'}
+    pending = _pending()
+    answer = InterruptResolution(
+        interrupt_id="run_1.1.1", run_id="run_1", decision=InterruptDecision.ANSWER
+    )
+    assert adapter.resume_input(target, listed, pending, answer) is listed
+
+
+async def test_a_reply_without_a_message_is_a_model_error(harness: Any) -> None:
+    class Broken:
+        async def complete(self, messages: Any, **body: Any) -> dict[str, Any]:
+            return {"choices": []}
+
+    result = await harness.wrap(ReAct(system="s", model=Broken()), id="broken").run("q", user="u")
+    assert result.error is not None and "returned no message" in result.error.message
+
+
+def test_a_fenced_json_answer_is_unfenced() -> None:
+    assert _unfenced('```json\n{"n": 1}\n```') == '{"n": 1}'
+    assert _unfenced("```") == ""
+    assert _unfenced(' {"n": 1} ') == '{"n": 1}'
+
+
+def test_react_extracts_the_assistant_text_as_its_transcript() -> None:
+    result = ReActResult(
+        messages=[
+            {"role": "system", "content": "s"},
+            {"role": "assistant", "tool_calls": []},
+            {"role": "assistant", "content": "done"},
+        ],
+        answer="done",
+    )
+    assert ReActAdapter().extract(ReAct(system="s", model="m"), result).transcript == [
+        ("assistant", "done")
+    ]

@@ -90,3 +90,45 @@ async def test_openapi_reads_a_document_by_url_and_keeps_only_what_was_asked_for
     respx.get("http://erp.test/openapi.json").mock(return_value=httpx.Response(200, json=DOCUMENT))
     tools = await openapi("http://erp.test/openapi.json", only=["get_order"]).resolve()
     assert [t.name for t in tools] == ["get_order"]
+
+
+async def test_variadic_parameters_are_not_tool_arguments() -> None:
+    def flexible(sku: str, *rest: str, **options: str) -> str:
+        return sku
+
+    [resolved] = await tool(flexible).resolve()
+    assert resolved.spec.input_schema is not None
+    assert set(resolved.spec.input_schema["properties"]) == {"sku"}
+
+
+async def test_an_openapi_document_must_say_where_its_server_is() -> None:
+    with pytest.raises(ValueError, match="names no server; pass base_url="):
+        await openapi({"openapi": "3.1.0", "paths": {}}).resolve()
+
+
+@respx.mock
+async def test_only_operations_are_tools_and_an_optional_body_is_optional() -> None:
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/notes": {
+                "summary": "not an operation",
+                "parameters": [{"name": "shared", "in": "query"}],
+                "post": {
+                    "operationId": "add_note",
+                    "requestBody": {
+                        "content": {"application/json": {"schema": {"type": "object"}}}
+                    },
+                },
+                "get": {"summary": "no operationId: not a tool"},
+            }
+        },
+    }
+    respx.post("http://notes.test/notes").mock(return_value=httpx.Response(204))
+    source = openapi(document, base_url="http://notes.test", headers={"X-Key": "k"})
+    [add] = await source.resolve()
+    assert add.name == "add_note" and add.spec.description == ""
+    assert add.spec.input_schema is not None and add.spec.input_schema["required"] == []
+    assert await add.run({}) is None  # no content, no result
+    again = await source.resolve()  # one HTTP client per source, however often it resolves
+    assert [t.name for t in again] == ["add_note"]

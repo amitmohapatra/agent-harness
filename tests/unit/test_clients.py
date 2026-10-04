@@ -216,3 +216,31 @@ async def test_catalog_entries_carry_what_the_harness_knows_and_no_more() -> Non
     assert key.body["virtual_key"] == "sk"
     assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:a:")
     assert key.scope == {"tenant_id": "t", "agent_id": "a", "custom_metadata": {}}
+
+
+@respx.mock
+async def test_a_tool_result_that_is_not_json_is_returned_as_it_came() -> None:
+    respx.post(f"{GATEWAY}/v1/mcp/tool/execute").mock(
+        side_effect=[
+            httpx.Response(200, json={"role": "tool", "content": "plain words"}),
+            httpx.Response(200, json={"role": "tool", "content": [{"type": "text", "text": "x"}]}),
+        ]
+    )
+    gateway = Gateway(f"{GATEWAY}/v1", "vk")
+    assert await gateway.execute("wiki-read", {}, clients=["wiki"]) == "plain words"
+    assert await gateway.execute("wiki-read", {}, clients=["wiki"]) == [
+        {"type": "text", "text": "x"}
+    ]
+    await gateway.aclose()
+
+
+async def test_an_answer_with_no_checkable_claim_has_no_grounding_score() -> None:
+    service = FakeMemoryService(claims=0, unsupported=0)
+    assert await memory(service).bind(identity()).verify("hello", "bnd_1") is None
+
+
+async def test_a_document_can_be_added_without_waiting_for_it() -> None:
+    service = FakeMemoryService()
+    info = await memory(service).for_user("t", "u").add_document(b"text", wait=None)
+    assert info.status == "READY"
+    assert [c.name for c in service.named("document")] == ["document"]  # read once, not polled

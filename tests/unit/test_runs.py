@@ -325,3 +325,37 @@ async def test_local_artifacts_are_kept_per_tenant() -> None:
     assert ref.size_bytes == 7
     assert await runs.artifact(ref.artifact_id, "t") == b'{"a":1}'
     assert await runs.artifact(ref.artifact_id, "other") is None
+
+
+@respx.mock
+async def test_a_failed_finish_carries_its_error_and_the_whole_inbox_names_no_assignee() -> None:
+    from trellis.contracts import AgentError
+
+    base = "http://runs.test"
+    finish = respx.post(f"{base}/v1/runs/run_1/finish").mock(
+        return_value=httpx.Response(200, json=record_json("ERROR"))
+    )
+    inbox = respx.get(f"{base}/v1/runs").mock(return_value=httpx.Response(200, json=[]))
+    runs = HttpRuns(base, None)
+    error = AgentError(code="Boom", message="it broke")
+    await runs.finished("run_1", RunStatus.ERROR, error=error)
+    sent = json.loads(finish.calls[0].request.content)
+    assert sent["status"] == "ERROR" and sent["error"]["message"] == "it broke"
+    assert "x-api-key" not in finish.calls[0].request.headers  # no key configured, none sent
+    assert await runs.inbox("t", None) == []
+    assert "assignee" not in inbox.calls[0].request.url.params
+    await runs.aclose()
+
+
+async def test_a_resume_of_a_run_the_store_never_had_is_refused() -> None:
+    with pytest.raises(RunStoreError, match="no run run_1"):
+        await LocalRuns().resumed(resolution())
+
+
+async def test_a_manual_schedule_never_fires_on_its_own() -> None:
+    runs = LocalRuns()
+    manual = await runs.schedule(
+        ScheduleSpec(tenant_id="t", agent_id="a", name="m", cadence="manual", on_behalf_of="u")
+    )
+    assert manual.next_fire_at is None
+    assert await runs.claim("w", ["a"], 30) is None
