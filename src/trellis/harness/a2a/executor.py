@@ -31,9 +31,9 @@ from trellis.contracts import (
     RunStatus,
 )
 from trellis.harness import pipeline
-from trellis.harness.surfaces.a2a.identity import IdentityRefused, UserResolver
-from trellis.harness.surfaces.a2a.tasks import RunTaskStore
-from trellis.harness.surfaces.a2a.translate import (
+from trellis.harness.a2a.identity import IdentityRefused, UserResolver
+from trellis.harness.a2a.tasks import RunTaskStore
+from trellis.harness.a2a.translate import (
     RESULT_ARTIFACT,
     TERMINAL_STATES,
     Update,

@@ -17,7 +17,7 @@ covers, and which feature to use when.
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts |
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, schedules, the inbox, the agent-runs wire |
-| [surfaces.md](surfaces.md) | `serve_chat` (AG-UI), `serve_a2a`, and `a2a(url)` tools |
+| [surfaces.md](surfaces.md) | `serve_chat` (AG-UI), `serve_a2a`, `a2a(url)` tools, and `remote(url)` from any code |
 | [observability.md](observability.md) | OTel GenAI spans, Langfuse, scores, the collector |
 | [evaluation.md](evaluation.md) | offline (a dataset) and online (sampled runs) evaluation: automatic in `h.wrap` (`h.evaluate`, `judges=`), or `EvalServices`, `evaluate` and `judge` in your own code; the evaluators, the judge's model and budget |
 
@@ -73,6 +73,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | a person in a chat UI | `serve_chat`: SSE, reconnect with `Last-Event-ID`, interrupts as resume entries |
 | another agent that should call yours | `serve_a2a`: agent card, JSON-RPC, streaming, signed push notifications |
 | your agent needs another agent | `a2a(url)` in `tools=[...]` or `h.tools(...)`: its questions become your run's |
+| code that is not wrapped (any framework) needs another agent | `trellis.harness.a2a.remote(url, tenant=, user=)`: an async callable; its questions go to `on_input` or raise `InputRequired` |
 
 ### Which tools
 

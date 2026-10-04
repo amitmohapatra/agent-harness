@@ -58,7 +58,7 @@ pip install -e '.[langgraph]'    # or any extras, below
 One distribution; each framework is an extra (the core imports none of them): `langgraph`
 (LangGraph, and `langchain` for `create_agent` and its middleware), `deepagents` (brings
 `langgraph`), `openai-agents`, `claude-agent-sdk`, `agui` (`serve_chat`,
-FastAPI), `a2a` (`serve_a2a` and `a2a()` tools), `otel` (OTLP export to Langfuse or a
+FastAPI), `a2a` (`serve_a2a`, `a2a()` tools and `remote()`), `otel` (OTLP export to Langfuse or a
 collector), `all`.
 
 `trellis` is shared with `trellis-contracts` (`trellis.contracts`) and `trellis-memory`
@@ -136,6 +136,7 @@ modules — `trellis.harness.governance` ([docs/governance.md](docs/governance.m
 | `await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed (`wait=None`: return at once): the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`); `tenant` only for a platform key. Needs `MEMORY_URL`. |
 | `tool(fn, *, name=None, description=None, side_effects="write")` / `@tool` / `@tool(...)` | A Python function (sync or async) as a tool: the schema from its signature (pydantic validates the arguments), the description from its docstring's first paragraph, `side_effects` `"read"`, `"write"` (default) or `"irreversible"`. It stays callable as the function. A bare function in `tools=[...]` is `tool(fn)`. |
 | `a2a(url, *, name=None)` | A remote A2A agent (its card at `{url}/.well-known/agent-card.json`) as one `write` tool, `{"message": string}` in, its answer out; `name` overrides the card's. |
+| `trellis.harness.a2a.remote(url, *, tenant, user, thread=None, on_input=None, ...)` | The same A2A client for any code, no `Harness`: a `RemoteAgent` — `await agent(message)` is the answer; `card`, `spec` (a `ToolSpec`); a remote question goes to `on_input(question)`, else raises `InputRequired` and `reply(task_id, answer)` continues it ([docs/surfaces.md](docs/surfaces.md#calling-an-a2a-agent-from-your-own-code)). |
 | `openapi(spec, *, only=None, base_url=None, headers=None)` | The operations of an OpenAPI 3 document (a URL or the parsed document) as tools, one per `operationId` (`only` keeps those named); `base_url` when the document names no server; `headers` on every request. |
 | `ReAct(system, model, output=None, max_steps=12, *, max_result_chars=20000, max_repeats=3)` | A tool-calling loop over chat completions, for teams with no framework: `model` is a Bifrost model name (needs `BIFROST_URL`) or any object with `async complete(messages, **body)`; `output` a pydantic model for a structured answer. Arguments that are not JSON or do not fit the tool's schema are an error the model reads (the tool does not run); a result longer than `max_result_chars` is cut with a marker (the whole of it kept as a run artifact); the same call in `max_repeats` consecutive steps stops the run; a resume replays the model steps already taken. |
 | `current() -> Runtime \| None` | Inside a tool or a node: the run it executes in. |
@@ -260,7 +261,7 @@ Each runs with no services (scripted models, runs in process) and uses the real 
 | `cowork.py` | start → worker → ask with a diff → inbox → resume → worker |
 | `schedule.py` | a schedule a worker runs (memory on: the person's context) |
 | `serve_chat.py` | AG-UI and A2A on one FastAPI app |
-| `a2a_agents.py` | an agent served over A2A and consumed by another as a tool; the remote question answered |
+| `a2a_agents.py` | an agent served over A2A and consumed by another as a tool; the remote question answered; the same agent called from plain code with `remote()` |
 | `memory_features.py` | a document the next context cites, `agent.memory`, a person's feedback (memory on) |
 | `evaluate_offline.py` | a dataset scored by exact match, contains and a judge, for a wrapped agent (`h.evaluate`) and a plain function (`evaluate`); the reports |
 | `online_judges.py` | judges on live runs, in the background; `judge()` on a run of your own code |

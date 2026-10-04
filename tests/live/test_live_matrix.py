@@ -68,9 +68,9 @@ from trellis.contracts import (
     RunStatus,
 )
 from trellis.harness import telemetry
+from trellis.harness.agui.sse import decode
 from trellis.harness.evals import exact_match, grounding, llm_judge
 from trellis.harness.governance import catalog as governance_catalog
-from trellis.harness.surfaces.agui.sse import decode
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.sources import FunctionTool
 from trellis.memory import MemoryContext

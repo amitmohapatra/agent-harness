@@ -124,7 +124,9 @@ worker loads).
 
 `agent.serve_chat(app, identity=...)` and `agent.serve_a2a(app, url)` serve the graph like any
 agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(url)` in
-`h.tools(...)`.
+`h.tools(...)`. A graph you do not wrap calls one with `trellis.harness.a2a.remote(url,
+tenant=, user=, on_input=interrupt)` in a `@tool` of its own: the remote question becomes the
+graph's `interrupt` ([surfaces.md](../surfaces.md#calling-an-a2a-agent-from-your-own-code)).
 
 ## Evaluation
 

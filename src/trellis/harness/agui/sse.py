@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any, Final
 
-from trellis.harness.surfaces.agui.events import AGUIEvent
+from trellis.harness.agui.events import AGUIEvent
 
 MEDIA_TYPE: Final = "text/event-stream"
 

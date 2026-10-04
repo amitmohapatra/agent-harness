@@ -15,7 +15,7 @@ from collections import OrderedDict, deque
 from collections.abc import AsyncIterator
 from typing import Final
 
-from trellis.harness.surfaces.agui.events import AGUIEvent
+from trellis.harness.agui.events import AGUIEvent
 
 MAX_EVENTS_PER_RUN: Final = 2048
 MAX_RUNS: Final = 256

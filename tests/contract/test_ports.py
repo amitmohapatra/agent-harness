@@ -66,6 +66,7 @@ def test_importing_trellis_loads_no_framework_and_contracts_stay_cheap() -> None
         "assert 'trellis.harness' not in sys.modules\n"
         "from trellis import Harness, tool, a2a, openapi, ReAct, current\n"
         "Harness()\n"
+        "assert not {'trellis.harness.a2a', 'trellis.harness.agui'} & set(sys.modules)\n"
         "loaded = {m.split('.')[0] for m in sys.modules}\n"
         "assert not loaded & {'langgraph', 'langchain_core', 'agents', 'claude_agent_sdk', 'a2a', 'fastapi'}, loaded\n"
     )

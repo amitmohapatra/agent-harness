@@ -1,6 +1,6 @@
-"""The A2A surface and client against the real a2a-sdk server, over ``httpx.ASGITransport``:
-the card, a run streamed to completion, a pause answered by the next message, cancellation,
-signed push notifications, and a remote agent called as a tool (its pause becoming ours)."""
+"""The A2A server against the real a2a-sdk client, over ``httpx.ASGITransport``: the card, a
+run streamed to completion, a pause answered by the next message, cancellation and signed push
+notifications. Calling a remote agent is ``test_a2a_remote``."""
 
 from __future__ import annotations
 
@@ -27,14 +27,12 @@ from a2a.utils.errors import A2AError
 from fastapi import FastAPI
 from google.protobuf.json_format import MessageToDict
 
-from trellis import Harness, Settings, a2a
+from trellis import Harness, Settings
 from trellis.contracts import RunStatus
+from trellis.harness.a2a.identity import EXTENSION_URI, identity_headers
+from trellis.harness.a2a.push import PushNotifier, TargetRefused, validate_url
 from trellis.harness.agent import Agent
-from trellis.harness.runs import LocalRuns
 from trellis.harness.runtime import Runtime
-from trellis.harness.surfaces.a2a import client as a2a_client
-from trellis.harness.surfaces.a2a.identity import EXTENSION_URI, identity_headers
-from trellis.harness.surfaces.a2a.push import PushNotifier, TargetRefused, validate_url
 from trellis.runs.webhooks import SIGNATURE_HEADER, verify_signature
 
 URL = "http://a2a.test/agents/greeter"
@@ -294,55 +292,12 @@ async def test_a_push_is_signed_with_the_registered_token() -> None:
     assert not await notifier.validate_url("https://localhost/hook")
 
 
-# --------------------------------------------------------------------------- calling
-
-
-@pytest.fixture
-def remote(monkeypatch: pytest.MonkeyPatch) -> Harness:
-    """The greeter served in process, and the A2A client pointed at it."""
-    app, harness, _ = serve()
-    monkeypatch.setattr(a2a_client, "_http", lambda: asgi(app))
-    return harness
-
-
-async def delegate(input: Any, agent: Runtime) -> Any:
-    return await agent.tools.call("greeter", message=input)
-
-
-async def test_a_remote_agent_is_a_tool(remote: Harness) -> None:
-    harness = Harness(config=Settings())
-    agent = harness.wrap(delegate, id="caller", tools=[a2a(URL)])
-    result = await agent.run("world", user="u1", thread="t1")
-    assert result.status is RunStatus.SUCCESS
-    assert result.answer == "hello world"
-    tool = (await harness.resolve([a2a(URL)], tenant=TENANT))[0]
-    assert tool.spec.name == "greeter" and tool.spec.side_effects == "write"
-    assert tool.spec.input_schema is not None and "message" in tool.spec.input_schema["properties"]
-    await harness.aclose()
-    await remote.aclose()
-
-
-async def test_a_remote_question_pauses_the_calling_run(remote: Harness) -> None:
-    harness = Harness(config=Settings())
-    agent = harness.wrap(delegate, id="caller", tools=[a2a(URL)])
-    paused = await agent.run("ask me", user="u1", thread="t1")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.question == "Which region?"
-    # the remote task the local pause abandoned was cancelled, not left waiting
-    assert isinstance(remote.runs, LocalRuns)
-    remote_runs = list(remote.runs._runs.values())
-    assert [r.status for r in remote_runs] == [RunStatus.CANCELLED]
-
-    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="eu", reviewer="u1")
-    assert done.status is RunStatus.SUCCESS
-    assert done.answer == "deploying to eu"
-    await harness.aclose()
-    await remote.aclose()
+# --------------------------------------------------------------------------- answers
 
 
 def test_an_answer_is_read_as_the_decision_it_names() -> None:
     from trellis.contracts import InterruptDecision, InterruptReason
-    from trellis.harness.surfaces.a2a.executor import _decision
+    from trellis.harness.a2a.executor import _decision
 
     def message(text: str = "", data: dict[str, Any] | None = None) -> Any:
         parts = [new_text_part(text)] if text else []
@@ -370,7 +325,7 @@ async def test_the_a2a_routes_are_in_the_openapi_document_and_still_served_by_th
     from fastapi import HTTPException
     from starlette.applications import Starlette
 
-    from trellis.harness.surfaces.a2a import served_by_the_sdk
+    from trellis.harness.a2a.server import served_by_the_sdk
 
     harness = Harness(config=Settings())
     app = FastAPI()

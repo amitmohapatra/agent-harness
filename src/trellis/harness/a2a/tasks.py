@@ -24,9 +24,9 @@ from a2a.types import (
 )
 
 from trellis.contracts import RunRecord, RunStatus
+from trellis.harness.a2a.identity import IdentityRefused, UserResolver
+from trellis.harness.a2a.translate import RESULT_ARTIFACT, asked, value_part
 from trellis.harness.runs import RunStore
-from trellis.harness.surfaces.a2a.identity import IdentityRefused, UserResolver
-from trellis.harness.surfaces.a2a.translate import RESULT_ARTIFACT, asked, value_part
 
 #: The owner a refused call is scoped to: no real caller can be it.
 REFUSED_OWNER: Final = "\x00refused"

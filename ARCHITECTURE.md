@@ -8,7 +8,7 @@ agent may call and who must approve them, the pause, the recording, the trace.
 
 What a process that imports `trellis` talks to. Every arrow out of the harness is one client
 module (`clients/bifrost.py`, `clients/memory.py`, and `runs.py`, whose store is the agent-runs
-SDK's `trellis.runs.RunsClient`) or one surface (`surfaces/agui`, `surfaces/a2a`); the OTLP
+SDK's `trellis.runs.RunsClient`) or one protocol package (`agui`, `a2a`); the OTLP
 exporter and the Langfuse scores API are `telemetry.py`.
 
 ```mermaid
@@ -35,8 +35,8 @@ flowchart LR
 | Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s model calls, the MCP log of Code Mode scripts | `POST /mcp` (`tools/list`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs` (`clients/bifrost.py`, through `bifrost-sdk`) |
 | Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, the tool catalog's `/v1/tools`, `/v1/tools/catalog` and approval feedback in `governance/catalog.py`, and `/v1/verify` in `evals.grounding_score`, through `trellis-memory`) |
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`runs.py`, through `trellis.runs.RunsClient`) |
-| Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`surfaces/agui`) |
-| Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)`: `SendStreamingMessage`, `CancelTask` (`surfaces/a2a`) |
+| Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`agui`) |
+| Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)` and `remote(url)`: `SendStreamingMessage`, `CancelTask` (`a2a`) |
 | Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces (an evaluated run's spans with Langfuse's experiment attributes); grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
 
 
@@ -88,7 +88,10 @@ src/trellis/
                        side effects, Code Mode, publishing), bridge (every call: governance,
                        then pause / announce / run), convert/ (one module per native format)
     clients/           bifrost, memory — the only modules that call those services
-    surfaces/          agui (serve_chat), a2a (serve_a2a, the a2a() client)
+    agui/              serve_chat: mount, the Hub (buffered events), translate, sse
+    a2a/               A2A both ways: client (remote() → RemoteAgent, usable from any code;
+                       the a2a() tool is built on it), server (serve_a2a: mount, the card),
+                       executor, tasks, identity, push, translate
 ```
 
 Each service has exactly one client module; nothing else in the harness calls it (agent-runs'
@@ -103,8 +106,8 @@ documents.
 ### Components
 
 How the modules depend on each other (an arrow reads "uses"). The adapters and the tool
-converters are the only modules that import a framework; the surfaces are the only ones that
-import FastAPI or the A2A SDK.
+converters are the only modules that import a framework; `agui` and `a2a` are the only ones
+that import FastAPI or the A2A SDK.
 
 ```mermaid
 flowchart TB
@@ -122,13 +125,10 @@ flowchart TB
   workerm --> agent
   workerm --> sdk
   agent --> pipeline["pipeline.attempt"]
-  agent --> surfaces
-  subgraph surfaces["surfaces"]
-    agui["agui: mount · Hub · translate · sse"]
-    a2a["a2a: mount · RunExecutor · RunTaskStore<br/>PushNotifier · HeaderIdentity · client"]
-  end
+  agent --> agui["agui<br/>(mount · Hub · translate · sse)"]
+  agent --> a2aserver["a2a.server<br/>(mount · RunExecutor · RunTaskStore<br/>PushNotifier · HeaderIdentity)"]
   agui --> pipeline
-  a2a --> pipeline
+  a2aserver --> pipeline
   pipeline --> runtime["runtime.Runtime · ask"]
   pipeline --> journal["journal.Journal · Replay"]
   pipeline --> events["events.RunEvents"]
@@ -149,7 +149,8 @@ flowchart TB
   agent --> toolbox["tools.toolbox.Toolbox"]
   toolbox --> governance
   toolbox --> sources["tools.sources<br/>(tool · a2a · openapi)"]
-  sources --> a2a
+  sources --> a2aclient["a2a.client<br/>(remote · RemoteAgent)"]
+  a2aclient --> runtime
   subgraph clients["clients (one per service)"]
     bifrost["bifrost.Gateway"]
     memory["memory.Memory · RunMemory"]
@@ -163,7 +164,7 @@ flowchart TB
   harness --> clients
   harness --> runs
   runs --> sdk
-  a2a --> sdk
+  a2aserver --> sdk
   telemetry --> redaction["redaction.Redactor"]
   pipeline --> telemetry
   bridge --> telemetry
@@ -387,14 +388,18 @@ started with `run`/`stream` resumes in the process that calls `resume` (no queue
 
 ## Calling a remote agent over A2A
 
-`a2a(url)` makes a remote agent one tool. The remote side is another harness's
-`serve_a2a(app, url)` (or any A2A server); the task id there is the remote run id.
+`remote(url, tenant=, user=)` (`a2a/client.py`) is the one A2A client: a `RemoteAgent` any
+code awaits with a message; a remote question goes to its `on_input`, or is raised as
+`InputRequired` and answered with `reply(task_id, answer)`. `a2a(url)` makes a remote agent one
+tool: the card read once, then each call a `RemoteAgent` as the calling run, with `on_input`
+the run's `ask`. The remote side is another harness's `serve_a2a(app, url)` (or any A2A server);
+the task id there is the remote run id.
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant P as Calling run (bridge)
-  participant C as a2a(url) tool (surfaces.a2a.client)
+  participant C as a2a(url) tool (a2a.client RemoteAgent)
   participant S as Remote serve_a2a (DefaultRequestHandler)
   participant X as RunExecutor
   participant RP as Remote pipeline.attempt
@@ -410,8 +415,8 @@ sequenceDiagram
   C-->>P: the result artifact (or the text)
   alt the remote run asks something
     X-->>C: INPUT_REQUIRED + the question
-    C->>P: runtime.ask(question): the calling run pauses
-    C->>S: CancelTask (the remote task is not left waiting)
+    C->>P: on_input = runtime.ask(question): the calling run pauses
+    C->>S: CancelTask (on_input raised: the remote task is not left waiting)
     Note over P: on resume the call is made again and ask returns the answer,<br/>which is sent on the new remote task as the next message
   else the remote run fails
     X-->>C: FAILED

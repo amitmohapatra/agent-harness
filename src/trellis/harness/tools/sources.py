@@ -131,7 +131,7 @@ class A2ASource:
         self.name = name
 
     async def resolve(self) -> list[Tool]:
-        from trellis.harness.surfaces.a2a.client import remote_agent_tool  # noqa: PLC0415
+        from trellis.harness.a2a.client import remote_agent_tool  # noqa: PLC0415
 
         return [await remote_agent_tool(self.url, name=self.name)]
 

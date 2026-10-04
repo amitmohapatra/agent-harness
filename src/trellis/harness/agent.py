@@ -179,13 +179,13 @@ class Agent:
     # ------------------------------------------------------------------ surfaces
     def serve_chat(self, app: Any, *, path: str = "/agui", identity: Any = None) -> None:
         """Mount the AG-UI routes for this agent on a FastAPI ``app``."""
-        from trellis.harness.surfaces.agui import mount  # noqa: PLC0415 - optional extra
+        from trellis.harness.agui import mount  # noqa: PLC0415 - optional extra
 
         mount(app, self, path=path, identity=identity)
 
     def serve_a2a(self, app: Any, url: str, *, identity: Any = None) -> None:
         """Publish this agent over A2A at ``url`` (its card and JSON-RPC routes on ``app``)."""
-        from trellis.harness.surfaces.a2a import mount  # noqa: PLC0415 - optional extra
+        from trellis.harness.a2a.server import mount  # noqa: PLC0415 - optional extra
 
         mount(app, self, url=url, identity=identity)
 

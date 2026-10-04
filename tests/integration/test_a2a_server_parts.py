@@ -1,6 +1,5 @@
-"""The A2A surface piece by piece: who is calling, where a push may go and how it is signed,
-the task store, run events as task updates, the executor's refusals and endings, and what a
-remote agent's reply reduces to."""
+"""The A2A server piece by piece: who is calling, where a push may go and how it is signed,
+the task store, run events as task updates, and the executor's refusals and endings."""
 
 from __future__ import annotations
 
@@ -17,16 +16,12 @@ from a2a.helpers import new_data_part, new_message, new_text_part
 from a2a.server.agent_execution import RequestContext
 from a2a.server.context import ServerCallContext
 from a2a.types import (
-    Artifact,
     CancelTaskRequest,
     ListTasksRequest,
-    Message,
     Part,
     Role,
     SendMessageRequest,
-    StreamResponse,
     Task,
-    TaskArtifactUpdateEvent,
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
@@ -34,7 +29,7 @@ from a2a.types import (
 from a2a.utils.errors import InvalidRequestError
 from fastapi import FastAPI
 
-from tests.surfaces.test_a2a import (
+from tests.integration.test_a2a_server import (
     URL,
     asgi,
     caller,
@@ -54,15 +49,11 @@ from trellis.contracts import (
     RunRecord,
     RunStart,
     RunStatus,
-    ToolError,
 )
-from trellis.harness.agent import Agent
-from trellis.harness.runs import LocalRuns
-from trellis.harness.surfaces.a2a import agent_card, push
-from trellis.harness.surfaces.a2a import client as a2a_client
-from trellis.harness.surfaces.a2a import executor as executor_module
-from trellis.harness.surfaces.a2a.executor import RunExecutor
-from trellis.harness.surfaces.a2a.identity import (
+from trellis.harness.a2a import executor as executor_module
+from trellis.harness.a2a import push
+from trellis.harness.a2a.executor import RunExecutor
+from trellis.harness.a2a.identity import (
     ANONYMOUS,
     IDENTITY_HEADER,
     HeaderIdentity,
@@ -70,20 +61,23 @@ from trellis.harness.surfaces.a2a.identity import (
     header,
     identity_headers,
 )
-from trellis.harness.surfaces.a2a.push import (
+from trellis.harness.a2a.push import (
     PushNotifier,
     TargetRefused,
     check_addresses,
     validate_url,
 )
-from trellis.harness.surfaces.a2a.tasks import RunTaskStore, task_from_run
-from trellis.harness.surfaces.a2a.translate import (
+from trellis.harness.a2a.server import agent_card
+from trellis.harness.a2a.tasks import RunTaskStore, task_from_run
+from trellis.harness.a2a.translate import (
     Update,
     text_and_data,
     update_for,
     value_part,
     values,
 )
+from trellis.harness.agent import Agent
+from trellis.harness.runs import LocalRuns
 from trellis.runs.webhooks import verify_signature
 
 TENANT = "default"
@@ -618,81 +612,3 @@ async def test_an_unreadable_decision_asks_again(wire: tuple[Client, Harness]) -
     assert "Which region?" in status_texts(again)
     done = await send(client, "eu", task_id=task_id)
     assert states(done)[-1] == TaskState.TASK_STATE_COMPLETED
-
-
-# --------------------------------------------------------------------------- the client
-
-
-def test_a_reply_reduces_to_its_artifacts_or_its_text() -> None:
-    reply = a2a_client._Reply()
-    assert reply.output is None
-    reply.absorb(
-        StreamResponse(
-            task=Task(
-                id="t1",
-                context_id="c",
-                status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
-                artifacts=[Artifact(artifact_id="a1", parts=[new_text_part("part one")])],
-            )
-        )
-    )
-    reply.absorb(
-        StreamResponse(
-            artifact_update=TaskArtifactUpdateEvent(
-                task_id="t1",
-                context_id="c",
-                artifact=Artifact(artifact_id="a2", parts=[new_data_part({"n": 2})]),
-            )
-        )
-    )
-    reply.absorb(StreamResponse(message=Message(message_id="m", parts=[new_text_part("a note")])))
-    reply.absorb(StreamResponse())  # a response with no payload says nothing
-    assert reply.task_id == "t1"
-    assert reply.output == ["part one", {"n": 2.0}]
-    assert reply.text == "a note"
-    texts_only = a2a_client._Reply()
-    texts_only.absorb(
-        StreamResponse(message=Message(message_id="m", parts=[new_text_part("only text")]))
-    )
-    assert texts_only.output == "only text"
-
-
-async def test_a_remote_agent_outside_a_run_or_unreachable_is_a_tool_error() -> None:
-    card = agent_card(Harness(config=Settings()).wrap(slow_greeter, id="greeter"), URL)
-    with pytest.raises(ToolError, match="inside a harness run"):
-        await a2a_client._exchange(card, "hi")
-
-    class Down:
-        def send_message(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-            raise ConnectionError("refused")
-
-    message = new_message([new_text_part("hi")], role=Role.ROLE_USER)
-    with pytest.raises(ToolError, match="ConnectionError: refused"):
-        await a2a_client._send(Down(), message, None)  # type: ignore[arg-type]
-    async with a2a_client._http() as http:
-        assert http.timeout.read == a2a_client.TIMEOUT_SECONDS
-
-
-async def test_a_remote_failure_is_the_tool_error_the_calling_model_reads(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def failing(input: Any, agent: Runtime) -> Any:
-        raise RuntimeError("out of stock")
-
-    remote = Harness(config=Settings())
-    app = FastAPI()
-    remote.wrap(failing, id="greeter").serve_a2a(app, URL)
-    monkeypatch.setattr(a2a_client, "_http", lambda: asgi(app))
-
-    async def delegate(input: Any, agent: Runtime) -> Any:
-        return await agent.tools.call("greeter", message=input)
-
-    from trellis import a2a
-
-    harness = Harness(config=Settings())
-    result = await harness.wrap(delegate, id="caller", tools=[a2a(URL)]).run("x", user="u1")
-    assert result.status is RunStatus.SUCCESS
-    assert "greeter failed" in result.answer and "TASK_STATE_FAILED" in result.answer
-    assert "out of stock" in result.answer
-    await harness.aclose()
-    await remote.aclose()

@@ -12,11 +12,11 @@ from fastapi import FastAPI, Request
 
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
+from trellis.harness.agui.events import AGUIEvent, AGUIEventType
+from trellis.harness.agui.hub import MAX_EVENTS_PER_RUN, Hub
+from trellis.harness.agui.sse import decode
+from trellis.harness.agui.translate import translate
 from trellis.harness.identity import Identity
-from trellis.harness.surfaces.agui.events import AGUIEvent, AGUIEventType
-from trellis.harness.surfaces.agui.hub import MAX_EVENTS_PER_RUN, Hub
-from trellis.harness.surfaces.agui.sse import decode
-from trellis.harness.surfaces.agui.translate import translate
 
 PATH = "/agui"
 RELEASE = asyncio.Event()
@@ -268,7 +268,7 @@ async def test_a_buffer_keeps_its_last_events_and_numbers_them() -> None:
 
 
 def test_the_hub_forgets_finished_runs_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trellis.harness.surfaces.agui import hub as module
+    from trellis.harness.agui import hub as module
 
     monkeypatch.setattr(module, "MAX_RUNS", 2)
     runs = Hub()
@@ -325,14 +325,14 @@ def test_an_event_the_protocol_has_no_type_for_is_not_sent(
 ) -> None:
     import importlib
 
-    module = importlib.import_module("trellis.harness.surfaces.agui.translate")
+    module = importlib.import_module("trellis.harness.agui.translate")
     monkeypatch.setattr(module, "CUSTOM_EVENTS", {})
     loaded = RunEvent.of(_context(), RunEventType.CONTEXT_LOADED, 0, data={"chars": 1})
     assert translate(loaded) is None
 
 
 def test_values_that_are_not_json_travel_as_their_text() -> None:
-    from trellis.harness.surfaces.agui.translate import _json
+    from trellis.harness.agui.translate import _json
     from trellis.harness.tools.convert import text_of
 
     odd = {("a", "b"): 1}  # a key JSON cannot carry
@@ -533,7 +533,7 @@ def test_the_routes_are_in_the_openapi_document() -> None:
 def test_an_app_that_named_itself_keeps_its_name(monkeypatch: pytest.MonkeyPatch) -> None:
     from importlib import metadata
 
-    from trellis.harness.surfaces import agui
+    from trellis.harness import agui
 
     harness = Harness(config=Settings())
     named = FastAPI(title="Procurement", version="3.1")

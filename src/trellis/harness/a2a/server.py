@@ -34,15 +34,15 @@ from a2a.utils.constants import (
 )
 from fastapi import FastAPI, HTTPException
 
-from trellis.harness.surfaces.a2a.executor import RunExecutor
-from trellis.harness.surfaces.a2a.identity import (
+from trellis.harness.a2a.executor import RunExecutor
+from trellis.harness.a2a.identity import (
     EXTENSION_DESCRIPTION,
     EXTENSION_URI,
     HeaderIdentity,
     UserResolver,
 )
-from trellis.harness.surfaces.a2a.push import PushNotifier
-from trellis.harness.surfaces.a2a.tasks import RunTaskStore, owner
+from trellis.harness.a2a.push import PushNotifier
+from trellis.harness.a2a.tasks import RunTaskStore, owner
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent

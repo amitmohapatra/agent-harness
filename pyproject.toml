@@ -108,7 +108,8 @@ known-first-party = ["trellis"]
 # Adapters import their framework on first use, never at module import.
 "src/trellis/harness/adapters/**" = ["PLC0415"]
 "src/trellis/harness/tools/convert/**" = ["PLC0415"]
-"src/trellis/harness/surfaces/**" = ["PLC0415"]
+"src/trellis/harness/a2a/**" = ["PLC0415"]
+"src/trellis/harness/agui/**" = ["PLC0415"]
 
 [tool.pyright]
 pythonVersion = "3.12"

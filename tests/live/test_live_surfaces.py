@@ -1,5 +1,6 @@
 """The serving surfaces against the real run store (and memory): AG-UI over SSE with a
-reconnect that replays, and an A2A round trip over real HTTP between two harnesses."""
+reconnect that replays, an A2A round trip over real HTTP between two harnesses, and the same
+served agent called from plain code with ``remote()``."""
 
 from __future__ import annotations
 
@@ -19,7 +20,8 @@ from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import memory_scope
 from trellis import Harness, Runtime, a2a
 from trellis.contracts import RunStatus
-from trellis.harness.surfaces.agui.sse import decode
+from trellis.harness.a2a import InputRequired, remote
+from trellis.harness.agui.sse import decode
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]
 
@@ -142,3 +144,29 @@ async def test_a2a_round_trip_with_a_remote_question(remote_url: str) -> None:
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == "deploying the shop to eu"
         await asyncio.sleep(0)
+
+
+async def test_remote_calls_the_served_agent_from_plain_code(remote_url: str) -> None:
+    async with live_harness() as h:
+        tenant = await h.tenant()
+    thread = f"live-remote-{uuid.uuid4().hex[:6]}"
+    asked: list[str] = []
+
+    async def answer(question: str) -> str:
+        asked.append(question)
+        return "us"
+
+    async with remote(
+        remote_url, tenant=tenant, user="live-ada", thread=thread, on_input=answer
+    ) as planner:
+        assert planner.card.supported_interfaces[0].url == remote_url
+        assert planner.spec.source == "a2a"
+        assert await planner("the shop") == "deploying the shop to us"
+    assert asked == ["Which region?"]
+
+    async with remote(remote_url, tenant=tenant, user="live-ada", thread=thread) as planner:
+        with pytest.raises(InputRequired) as waiting:
+            await planner("the warehouse")
+        assert waiting.value.question == "Which region?"
+        done = await planner.reply(waiting.value.task_id, "eu")
+    assert done == "deploying the warehouse to eu"

@@ -55,7 +55,9 @@ the bridge runs once), and code outside them runs again on each attempt.
 `stream` yields the tool events and `RUN_FINISHED` (a function has no text deltas). `start` +
 workers (the input must be JSON), `schedule`, `serve_chat`, `serve_a2a` and `h.evaluate` work as
 for every target; `llm_judge` needs `TRELLIS_JUDGE_MODEL`. An object with an `async __call__`
-is a target too.
+is a target too. Wrapping a function is also how code on its own framework gets the AG-UI and
+A2A servers, which serve wrapped agents only: wrap the function that calls your graph or runner
+([surfaces.md](../surfaces.md#surfaces)).
 
 ## Run it
 

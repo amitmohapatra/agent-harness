@@ -43,9 +43,7 @@ from trellis.contracts import (
     safe_id,
 )
 from trellis.harness import pipeline
-from trellis.harness.result import Result
-from trellis.harness.runtime import run_of
-from trellis.harness.surfaces.agui.events import (
+from trellis.harness.agui.events import (
     AGUIEvent,
     AGUIEventType,
     Outcome,
@@ -54,9 +52,11 @@ from trellis.harness.surfaces.agui.events import (
     ResumeStatus,
     RunAgentInput,
 )
-from trellis.harness.surfaces.agui.hub import Hub, RunBuffer
-from trellis.harness.surfaces.agui.sse import MEDIA_TYPE, encode
-from trellis.harness.surfaces.agui.translate import translate
+from trellis.harness.agui.hub import Hub, RunBuffer
+from trellis.harness.agui.sse import MEDIA_TYPE, encode
+from trellis.harness.agui.translate import translate
+from trellis.harness.result import Result
+from trellis.harness.runtime import run_of
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
