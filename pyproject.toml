@@ -45,6 +45,7 @@ dev = [
   "trellis-harness[all]",
   "pytest>=9.1",
   "pytest-asyncio>=1.4",
+  "pytest-cov>=7.0",
   "pytest-timeout>=2.3",
   "respx>=0.22",
   # tests/contract: the siblings' OpenAPI documents (3.1: JSON Schema 2020-12) check the wire

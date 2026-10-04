@@ -20,8 +20,8 @@ typings:  ## Link trellis.contracts and trellis.memory where pyright looks (see 
 	[os.path.lexists(d) or os.symlink(s, d) for s, d in ((p.__path__[0], 'typings/trellis/' + os.path.basename(p.__path__[0])) for p in (c, m))]"
 
 .PHONY: test
-test:  ## Every test except the benchmark and the live ones
-	$(PYTEST) -q -m "not performance and not live"
+test:  ## Every test except the benchmark and the live ones, at 100% line and branch coverage
+	$(PYTEST) -q -m "not performance and not live" --cov=trellis.harness --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=100
 
 .PHONY: test-live
 test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, RUNS_URL, TRELLIS_API_KEY)
