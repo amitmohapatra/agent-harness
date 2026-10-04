@@ -69,7 +69,9 @@ A framework's own approval gate — LangChain's `HumanInTheLoopMiddleware`, Deep
 `interrupt_on`, OpenAI Agents' `needs_approval` — pauses the run as the same approval and takes
 the same decisions ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
 Gate a tool in one place: a tool the framework gates should not also be `irreversible` or under
-an `approve_when` in the harness, or each call is approved twice.
+an `approve_when` in the harness, or each call is approved twice. A framework's own tools —
+Deep Agents' file tools, Claude Code's built-ins, your own `function_tool`s — are not harness
+tools: no tier, journal or record ([framework pages](README.md#which-target)).
 
 ## Every call
 

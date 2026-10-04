@@ -2043,6 +2043,7 @@ all = [
     { name = "claude-agent-sdk" },
     { name = "deepagents" },
     { name = "fastapi" },
+    { name = "langchain" },
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "openai-agents" },
@@ -2054,10 +2055,12 @@ claude-agent-sdk = [
 ]
 deepagents = [
     { name = "deepagents" },
+    { name = "langchain" },
     { name = "langchain-core" },
     { name = "langgraph" },
 ]
 langgraph = [
+    { name = "langchain" },
     { name = "langchain-core" },
     { name = "langgraph" },
 ]
@@ -2093,6 +2096,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'a2a'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'agui'", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "langchain", marker = "extra == 'langgraph'", specifier = ">=1.4,<2" },
     { name = "langchain-core", marker = "extra == 'langgraph'", specifier = ">=1.6,<2" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.2,<2" },
     { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.22.3,<0.23" },

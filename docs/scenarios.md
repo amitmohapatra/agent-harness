@@ -16,7 +16,12 @@ the [README](../README.md); how it works is in [ARCHITECTURE.md](../ARCHITECTURE
 
 Teams bring their own model objects pointed at Bifrost's OpenAI-compatible endpoint
 (`ChatOpenAI(base_url=BIFROST_URL)`, `OpenAIChatCompletionsModel(AsyncOpenAI(base_url=...))`);
-the harness wraps agents, not models.
+the harness wraps agents, not models. Each target has a page with the lines to add to an
+existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.md),
+[Deep Agents](frameworks/deepagents.md), [OpenAI Agents SDK](frameworks/openai-agents.md),
+[Claude Agent SDK](frameworks/claude-agent-sdk.md), [ReAct](frameworks/react.md),
+[plain functions](frameworks/functions.md); the short decision tables are in
+[docs/README.md](README.md#what-to-use-when).
 
 ## Where a tool comes from
 

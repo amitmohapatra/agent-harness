@@ -1,0 +1,149 @@
+# LangGraph and LangChain
+
+A compiled LangGraph graph is a target: LangChain v1's `create_agent` (it returns one), a
+`StateGraph` you built by hand, with or without a checkpointer. Deep Agents is a LangGraph graph
+too, with a page of its own ([deepagents.md](deepagents.md)).
+
+**Install:** `pip install 'trellis-harness[langgraph]'` (LangGraph, `langchain-core` and
+`langchain`, which has `create_agent` and its middleware). Your model is your own LangChain chat
+model — `ChatOpenAI(base_url=BIFROST_URL, ...)` to go through Bifrost.
+
+## Using an existing LangGraph project
+
+Your graph stays as it is. Three changes:
+
+```python
+from trellis import Harness, tool
+
+h = Harness()  # the deployment is the environment
+
+
+@tool(side_effects="irreversible")  # what it does decides whether a person approves a call
+def reorder(sku: str, qty: int) -> str:
+    """Order more units of a SKU."""
+    ...
+
+
+# 1. build the graph with the harness's tools (a compiled graph binds its tools when built)
+tools = await h.tools(stock, reorder, framework="langgraph")
+graph = create_agent(model, tools=tools, system_prompt="...", checkpointer=saver)
+#    ...or your own StateGraph: ToolNode(tools), model.bind_tools(tools)
+
+# 2. wrap it
+agent = h.wrap(graph, id="stock-keeper")
+
+# 3. call the agent where you called the graph
+result = await agent.run("Is SKU-1 low?", user="ada", thread="ticket-7")  # was graph.ainvoke
+async for event in agent.stream("Is SKU-1 low?", user="ada"):
+    ...  # was graph.astream
+result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="lead")
+```
+
+`h.tools(...)` returns LangChain `BaseTool`s: your functions (and `a2a(url)`, `openapi(spec)`),
+every MCP tool the Bifrost virtual key allows, and — memory on — the memory tools
+(`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`,
+`tool_search`). Tools that are not the harness's (a `@langchain_core.tools.tool` of your own)
+keep working; they are not tiered, journaled or recorded. `h.wrap(graph, tools=...)` is refused
+for a compiled graph: pass the tools to the graph instead.
+
+**`graph.invoke` itself is not intercepted.** The harness runs the graph through
+`agent.run` / `agent.stream` / `agent.resume` / `agent.start`; called directly, the graph runs
+without memory, run records or traces, and a harness tool refuses to run (`ToolError`: "runs
+inside a Harness run"). Config the graph needs at run time goes in the
+input, the graph's defaults or `graph.with_config(...)` before wrapping (still a graph); the
+harness sets `configurable.thread_id` itself (the run's thread, else the run id).
+
+## What is automatic
+
+| | |
+|---|---|
+| Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
+| Memory pull | the memory tools are in `h.tools(...)` |
+| Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
+| Tiers and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
+| Tool hints | the context is asked for with the toolbox's names (5 or more); the graph's bound tools are not narrowed (`narrows="none"`) |
+| Grounding, judges | sampled successful runs with a text answer ([evaluation.md](../evaluation.md)) |
+| Tracing | one `invoke_agent` span per attempt, `execute_tool` per harness call, `retrieve memory`; LangChain's own instrumentation nests under it |
+
+The answer is the state's `structured_response` (a `response_format`) or the last AI message's
+text.
+
+## Approvals and pauses
+
+| Pause | With a checkpointer | Without one |
+|---|---|---|
+| a harness tool that asks (`irreversible`, a catalog `approve_when`) | LangGraph's `interrupt` inside the tool node; `resume` is `Command(resume=...)` — the graph continues in place, the model is not asked again | the run re-runs from its input as the next attempt; the journal returns the tool calls already made and the answer given (the model *is* asked again) |
+| `trellis.current().ask(...)` in a node or tool | the same | the same |
+| the graph's own `interrupt(value)` | a question (`value["question"]` or the value), resumed with the raw answer | refused: the run fails saying the graph needs a checkpointer |
+| `HumanInTheLoopMiddleware(interrupt_on=...)` | an approval of the calls it holds (the first in `tool_call`, the whole request in `payload`), answered with the middleware's own decisions | needs a checkpointer |
+
+```mermaid
+flowchart LR
+    ask["a harness tool asks,<br/>or ask(...) in a node"] --> cp{"checkpointer?"}
+    cp -- yes --> native["LangGraph interrupt()<br/>in the tool node or node"]
+    native --> inplace["resume: Command(resume=...)<br/>the graph continues in place"]
+    cp -- no --> journal["the attempt ends;<br/>the journal is the run's checkpoint"]
+    journal --> rerun["resume: the graph runs again from its input;<br/>the journal replays calls and answers"]
+```
+
+Every pause is a contracts `Interrupt` in the run store (agent-runs with `RUNS_URL`), in the
+inbox, answered the same way: `approve`, `reject` (with `answer="why"`, the reason the model
+reads), `edit` (the edited arguments), `answer`, `cancel`. The middleware's mapping is in
+[interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval).
+Gate a tool in one place: a tool the middleware covers is `side_effects="write"` or `"read"` in
+the harness, or each call is approved twice.
+
+**Which checkpointer.** A resume continues where the run paused only where the checkpointer
+holds the thread: `InMemorySaver` is one process's. When the resume may happen in another
+process — a worker, another replica behind AG-UI, a restart — use a shared, durable checkpointer
+(`langgraph-checkpoint-postgres`'s `AsyncPostgresSaver`), or none: without a checkpointer every
+resume is a re-run from the run's journal, which agent-runs keeps.
+
+## Streaming
+
+`agent.stream(...)` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`, text deltas
+(`TEXT_MESSAGE_*`, from the graph's `messages` stream: AI message chunks with text), the
+harness tool calls (`TOOL_CALL_START/ARGS/END/RESULT`), `tool_notice` for writes, and
+`RUN_FINISHED` (its `data.result`, or the interrupt). Closing the stream early cancels the run.
+
+## Durable runs, workers, schedules
+
+`agent.start(input, user=...)` queues the run (its input JSON); `h.worker([agent]).run()` or
+`python -m trellis.worker module:h` executes it; `agent.schedule(cron, input, on_behalf_of=...)`
+queues one on a cadence ([runs.md](../runs.md)). A worker saves the journal as progress after
+every side-effecting harness call, so a worker that dies repeats none of them. The graph object
+must be built the same way in every worker process (build it at import, in the module the
+worker loads).
+
+## AG-UI and A2A
+
+`agent.serve_chat(app, identity=...)` and `agent.serve_a2a(app, url)` serve the graph like any
+agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(url)` in
+`h.tools(...)`.
+
+## Evaluation
+
+`await h.evaluate(agent, dataset, [grounding(), exact_match(), llm_judge("...")])` and
+`Harness(judges=[...])` work on the graph unchanged; `llm_judge` needs `TRELLIS_JUDGE_MODEL`
+(the harness does not know a graph's model).
+
+## Limits
+
+* Harness tools are fixed when the graph is compiled: the model is offered every bound tool
+  (hints shape the context, not the schemas sent).
+* A custom state without `messages` gets no context message: read `trellis.current().context`.
+* `InMemorySaver` pauses resume in the same process only (above).
+* Code outside harness tools — your own nodes, the model calls — runs again on a re-run (no
+  checkpointer): keep side effects in harness tools.
+
+## Run it
+
+* [`examples/langgraph_agent.py`](../../examples/langgraph_agent.py) — `create_agent`, no
+  checkpointer, an approval re-run from the journal.
+* [`examples/langgraph_stategraph.py`](../../examples/langgraph_stategraph.py) — a hand-built
+  `StateGraph` with a checkpointer: a harness approval in the tool node, then the graph's own
+  `interrupt()`.
+* [`examples/langchain_hitl_middleware.py`](../../examples/langchain_hitl_middleware.py) —
+  `HumanInTheLoopMiddleware`: an edit, then a reject with a reason.
+* Tests: `tests/integration/test_langgraph.py`, `tests/integration/test_hitl_middleware.py`,
+  and against the real services `tests/live/test_live_matrix.py` (`langgraph`, `stategraph`).

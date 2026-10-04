@@ -25,6 +25,14 @@ from the key. (What a run may write in memory is the memory service's to decide,
 its relationship checks — not a property of the key's role: with memory on, every run records
 its transcript, tool calls and outcome, and a refused write is a reported warning.)
 
+**Where to start reading:** [docs/README.md](docs/README.md) — every page, and which feature to
+use when (target, run mode, surface, tools, approvals, memory, evaluation, local or agent-runs,
+what each variable turns on) — and one page per framework, each with the lines to add to an
+existing project: [LangGraph and LangChain](docs/frameworks/langgraph.md),
+[Deep Agents](docs/frameworks/deepagents.md), [OpenAI Agents SDK](docs/frameworks/openai-agents.md),
+[Claude Agent SDK](docs/frameworks/claude-agent-sdk.md), [ReAct](docs/frameworks/react.md),
+[plain functions](docs/frameworks/functions.md).
+
 ## Install
 
 The platform is not published to PyPI yet: install from source, with the sibling repositories
@@ -47,8 +55,9 @@ pip install -e ../agent-contracts -e ../bifrost-sdk -e ../agent-memory-service/s
 pip install -e '.[langgraph]'    # or any extras, below
 ```
 
-One distribution; each framework is an extra (the core imports none of them): `langgraph`,
-`deepagents` (brings `langgraph`), `openai-agents`, `claude-agent-sdk`, `agui` (`serve_chat`,
+One distribution; each framework is an extra (the core imports none of them): `langgraph`
+(LangGraph, and `langchain` for `create_agent` and its middleware), `deepagents` (brings
+`langgraph`), `openai-agents`, `claude-agent-sdk`, `agui` (`serve_chat`,
 FastAPI), `a2a` (`serve_a2a` and `a2a()` tools), `otel` (OTLP export to Langfuse or a
 collector), `all`.
 
@@ -122,6 +131,7 @@ Everything public is importable from `trellis`:
 | `await h.inbox(assignee=None) -> list[RunSummary]` | The paused runs waiting on `assignee` (`user:…`, `role:…`) or on anyone, newest first. |
 | `await h.feedback(run_id, verdict, correction=None) -> Feedback \| None` | What a person said about a run (`verdict`: `confirm`, `approve`, `reject`, `correct` or `edit`, the last two with a `correction`): a `feedback` score on its trace (Langfuse; 1.0, 0.5 for `edit`, 0.0 for `correct`/`reject`) and — memory on — the run's `human` feedback in the memory service, returned as stored (`None` with memory off). It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
 | `await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None, concurrency=4, limit=None, user=None) -> EvalReport` | Run the agent on every item of a dataset — a Langfuse dataset's name, or `[{"input", "expected"?, "metadata"?}]` / `EvalItem`s — through the normal pipeline, `concurrency` at a time, score each answer with `evaluators` onto its run's trace, and make each run an item of the Langfuse experiment `run_name` (the dataset run link on Langfuse v3, the `langfuse.experiment.*` span attributes on v4). A failing or pausing item is reported (`error`, `interrupted`), never fatal. The `EvalReport` has every item in order and each evaluator's mean, count and failures ([docs/evaluation.md](docs/evaluation.md)). |
+| `EvalItem`, `EvalCase`, `EvalScore`, `EvalReport`, `EvalResult`, `Evaluator` | The evaluation types: a dataset item; what an evaluator is given (input, output, expected, run, memory context); what it returns (`EvalScore(name, value, comment=None)`); the report and each item's result; an `Evaluator` is any `async (EvalCase) -> EvalScore \| None` ([docs/evaluation.md](docs/evaluation.md)). |
 | `grounding()`, `exact_match()`, `contains()`, `llm_judge(criteria, *, name=None)` | The built-in evaluators: grounding against the run's memory context (`/v1/verify`), against `expected`, and a judge model (`TRELLIS_JUDGE_MODEL` through Bifrost with `TRELLIS_JUDGE_VIRTUAL_KEY`). An evaluator is any `async (EvalCase) -> EvalScore \| None`. |
 | `await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed (`wait=None`: return at once): the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`); `tenant` only for a platform key. Needs `MEMORY_URL`. |
 | `tool(fn, *, name=None, description=None, side_effects="write")` / `@tool` / `@tool(...)` | A Python function (sync or async) as a tool: the schema from its signature (pydantic validates the arguments), the description from its docstring's first paragraph, `side_effects` `"read"`, `"write"` (default) or `"irreversible"`. It stays callable as the function. A bare function in `tools=[...]` is `tool(fn)`. |
@@ -136,7 +146,7 @@ Everything public is importable from `trellis`:
 |---|---|
 | `await run(input, *, user, thread=None, tenant=None) -> Result` | Run to the end or the first pause. `tenant` only for a platform key (one with no tenant of its own). |
 | `stream(...) -> AsyncIterator[RunEvent]` | The run's events (contracts `RunEvent`s) up to `RUN_FINISHED`. Closing it early cancels the run. |
-| `await start(...) -> RunHandle` | Queue the run for a worker (its input must be JSON); `await handle.status()` is the `RunRecord`, `await handle.result(timeout=None)` waits for a pause or an ending and returns a `Result`. |
+| `await start(...) -> RunHandle` | Queue the run for a worker (its input must be JSON). The `RunHandle`: `run_id`, `await handle.status()` (the `RunRecord`) and `await handle.result(timeout=None)`, which waits for a pause or an ending and returns a `Result`. |
 | `await resume(interrupt_id, decision, *, answer=None, reviewer) -> Result` | Answer the pause (`decision`, a string or contracts `InterruptDecision`: `answer`, `approve`, `reject`, `edit` with the edited arguments as `answer`, `cancel`). A run started in process continues here; a queued run goes back to the queue (`QUEUED`). |
 | `await schedule(cron, input, *, on_behalf_of, tz="UTC", tenant=None) -> Schedule` | Queue a run on a cadence (cron, or `hourly`/`daily`/`weekly`/`weekdays`/`manual`), acting for `on_behalf_of`. The same agent, person, cadence and input are one schedule. |
 | `serve_chat(app, *, path="/agui", identity=None)` | AG-UI routes on a FastAPI app (run, reconnect/replay, artifacts); `identity(request) -> user` (sync or async), else every caller is `anonymous` ([docs/surfaces.md](docs/surfaces.md)). |
@@ -187,6 +197,18 @@ Teams bring their own model objects pointed at Bifrost's OpenAI-compatible endpo
 (`ChatOpenAI(base_url=BIFROST_URL)`, `OpenAIChatCompletionsModel(AsyncOpenAI(base_url=...))`);
 the harness does not wrap models.
 
+Each target has a page — how to add the harness to an existing project, what is automatic,
+approvals, streaming, durable runs, surfaces, evaluation and limits:
+[docs/frameworks/langgraph.md](docs/frameworks/langgraph.md) (`create_agent`, a hand-built
+`StateGraph`, checkpointers, `HumanInTheLoopMiddleware`),
+[docs/frameworks/deepagents.md](docs/frameworks/deepagents.md) (sub-agents, planning,
+`interrupt_on`, its built-in tools), [docs/frameworks/openai-agents.md](docs/frameworks/openai-agents.md)
+(handoffs, `needs_approval`), [docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md)
+(the MCP server, `allowed_tools`, Claude Code's built-in tools),
+[docs/frameworks/react.md](docs/frameworks/react.md) and
+[docs/frameworks/functions.md](docs/frameworks/functions.md). The framework's own entry point
+(`graph.ainvoke`, `Runner.run`, `query`) is not intercepted: call `agent.run`/`stream`/`resume`.
+
 ## Observability and evaluation
 
 Langfuse is the eval system of record — scores, datasets and dataset runs, annotation queues,
@@ -210,11 +232,23 @@ also [docs/observability.md](docs/observability.md).
 Each runs with no services (scripted models, runs in process) and uses the real ones when
 `BIFROST_URL` / `MEMORY_URL` / `RUNS_URL` are set: `make examples`.
 
-`langgraph_agent.py`, `deepagents_agent.py`, `openai_agents_agent.py`,
-`claude_agent_sdk_agent.py`, `react_agent.py`, `cowork.py` (start → worker → ask with a diff →
-inbox → resume), `schedule.py`, `serve_chat.py` (AG-UI and A2A on one FastAPI app),
-`evaluate_offline.py` (a dataset scored by exact match, contains and a judge; the report),
-`online_judges.py` (judges on live runs, in the background).
+| Example | Shows |
+|---|---|
+| `langgraph_agent.py` | `create_agent` with `h.tools`, no checkpointer: an approval re-run from the journal |
+| `langgraph_stategraph.py` | a hand-built `StateGraph` with a checkpointer: a harness approval in the tool node, then the graph's own `interrupt()`, both resumed in place |
+| `langchain_hitl_middleware.py` | LangChain's `HumanInTheLoopMiddleware`: an edit, then a reject with a reason |
+| `deepagents_agent.py` | Deep Agents with `TodoListMiddleware`: a plan, an approval resumed in place |
+| `openai_agents_agent.py` | harness tools added to an OpenAI Agents `Agent` per run, an approval |
+| `openai_agents_handoff.py` | a handoff to a specialist built with `h.tools(framework="openai-agents")` |
+| `claude_agent_sdk_agent.py` | `ClaudeAgentOptions` with a harness tool (a scripted CLI offline) |
+| `react_agent.py` | `ReAct` with a tool and a structured answer |
+| `cowork.py` | start → worker → ask with a diff → inbox → resume → worker |
+| `schedule.py` | a schedule a worker runs (memory on: the person's context) |
+| `serve_chat.py` | AG-UI and A2A on one FastAPI app |
+| `a2a_agents.py` | an agent served over A2A and consumed by another as a tool; the remote question answered |
+| `memory_features.py` | a document the next context cites, `agent.memory`, a person's feedback (memory on) |
+| `evaluate_offline.py` | a dataset scored by exact match, contains and a judge; the report |
+| `online_judges.py` | judges on live runs, in the background |
 
 ## Development
 
