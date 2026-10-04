@@ -54,9 +54,10 @@ its backend; they are independent of the memory service and can be used beside i
 
 As for any graph ([langgraph.md](langgraph.md)): a harness tool that asks pauses inside the
 tool node (in place with a checkpointer, by re-run without), `stream` yields the run's events,
-`start`/workers/`schedule` run it durably — with a checkpointer every worker can reach (or
-none) — `serve_chat`/`serve_a2a` serve it, and `h.evaluate`/judges score it (`llm_judge` needs
-`TRELLIS_JUDGE_MODEL`).
+`start`/workers/`schedule` run it durably (an `interrupt_on` pause resumed by another worker
+needs a checkpointer every worker can reach; a harness approval resumed there is answered from
+the journal — [which checkpointer](langgraph.md#approvals-and-pauses)), `serve_chat`/`serve_a2a`
+serve it, and `h.evaluate`/judges score it (`llm_judge` needs `TRELLIS_JUDGE_MODEL`).
 
 ## Limits
 

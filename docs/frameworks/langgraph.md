@@ -93,11 +93,15 @@ reads), `edit` (the edited arguments), `answer`, `cancel`. The middleware's mapp
 Gate a tool in one place: a tool the middleware covers is `side_effects="write"` or `"read"` in
 the harness, or each call is approved twice.
 
-**Which checkpointer.** A resume continues where the run paused only where the checkpointer
-holds the thread: `InMemorySaver` is one process's. When the resume may happen in another
-process — a worker, another replica behind AG-UI, a restart — use a shared, durable checkpointer
-(`langgraph-checkpoint-postgres`'s `AsyncPostgresSaver`), or none: without a checkpointer every
-resume is a re-run from the run's journal, which agent-runs keeps.
+**Which checkpointer.** A pause resumes in place only where the checkpointer still holds it:
+`InMemorySaver` holds it in the process that paused, and nowhere else. Resumed elsewhere — by a
+worker, another replica behind AG-UI, after a restart — a pause of the harness's own (an
+approval, an `ask`) is answered from the run's journal instead: the graph runs again from its
+input, as without a checkpointer (the model is asked again; the calls already made replay, the
+approved one runs once). A graph's own `interrupt()` and the middleware's pause can only be
+answered by the checkpointer: resumed where it does not hold them, the run fails saying so. When
+those may be resumed in another process, give every process a shared, durable checkpointer
+(`langgraph-checkpoint-postgres`'s `AsyncPostgresSaver`).
 
 ## Streaming
 
@@ -111,7 +115,8 @@ harness tool calls (`TOOL_CALL_START/ARGS/END/RESULT`), `tool_notice` for writes
 `agent.start(input, user=...)` queues the run (its input JSON); `h.worker([agent]).run()` or
 `python -m trellis.worker module:h` executes it; `agent.schedule(cron, input, on_behalf_of=...)`
 queues one on a cadence ([runs.md](../runs.md)). A worker saves the journal as progress after
-every side-effecting harness call, so a worker that dies repeats none of them. The graph object
+every side-effecting harness call, so a worker that dies repeats none of them. The worker that
+continues a paused run is any worker: see *Which checkpointer* above. The graph object
 must be built the same way in every worker process (build it at import, in the module the
 worker loads).
 
@@ -132,7 +137,8 @@ agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(ur
 * Harness tools are fixed when the graph is compiled: the model is offered every bound tool
   (hints shape the context, not the schemas sent).
 * A custom state without `messages` gets no context message: read `trellis.current().context`.
-* `InMemorySaver` pauses resume in the same process only (above).
+* An `InMemorySaver` pause resumes in place only in the process that paused; elsewhere a
+  harness pause is a re-run from the journal and a graph's own pause fails (above).
 * Code outside harness tools — your own nodes, the model calls — runs again on a re-run (no
   checkpointer): keep side effects in harness tools.
 

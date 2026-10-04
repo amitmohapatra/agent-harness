@@ -241,7 +241,9 @@ Four functions per framework, nothing else (`adapters/base.py`):
 
 Per-run harness tools reach the adapter already converted (`tools/convert/<format>.py`). An
 adapter with fixed tools (a compiled graph) refuses `tools=` at wrap time; its tools come from
-`h.tools(...)` when the graph is built.
+`h.tools(...)` when the graph is built. How each framework looks from the outside — the lines
+to add to an existing project, which pauses resume in place, the framework's own tools and
+gates, the limits — is one page per framework under [docs/frameworks/](docs/README.md#which-target).
 
 ## Tools
 

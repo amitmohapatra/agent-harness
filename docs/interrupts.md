@@ -75,9 +75,11 @@ resume must answer the interrupt the run currently waits on.
 
 Per framework — which pauses resume in place, what the model is asked again, the frameworks'
 own gates — see the [framework pages](README.md#which-target). A checkpointed graph resumes in
-place only where its checkpointer holds the thread: with `InMemorySaver` that is the process
-that paused it, so a run that may be resumed by a worker or another replica needs a shared
-checkpointer, or none ([langgraph.md](frameworks/langgraph.md#approvals-and-pauses)).
+place only where its checkpointer still holds the pause — with `InMemorySaver`, the process
+that paused it. Resumed elsewhere (a worker, a replica), an approval or `ask` of the harness's
+is answered from the journal (a re-run, as without a checkpointer), and a graph's own
+`interrupt()` or middleware pause fails the run: those need a shared checkpointer
+([langgraph.md](frameworks/langgraph.md#approvals-and-pauses)).
 
 The journal is the run's checkpoint: the pause stores it with the run (`RunRecord.checkpoint`
 in agent-runs, cleared when the run ends), and whichever process or worker resumes the run

@@ -9,7 +9,10 @@
   run's thread (or the run id);
 * pause: with a checkpointer, ``trellis.current().ask`` *is* LangGraph's ``interrupt``, and a
   resume is ``Command(resume=...)``; without one the run is re-executed from its input and the
-  journal answers the questions already asked. LangChain's ``HumanInTheLoopMiddleware`` (Deep
+  journal answers the questions already asked. A resume where the checkpointer no longer holds
+  the pause (an ``InMemorySaver`` in another process: a worker, a replica) answers a harness
+  pause from the journal the same way (:func:`holds`); a graph's own pause cannot be answered
+  there, and the run fails saying so. LangChain's ``HumanInTheLoopMiddleware`` (Deep
   Agents' ``interrupt_on``) pauses with its own request: it is an approval of the calls it
   holds, and the harness's decision is turned into the ``{"decisions": [...]}`` it resumes
   with (:func:`hitl_response`);
@@ -141,6 +144,14 @@ class LangGraphAdapter:
 
             runtime.suspend = interrupt
         return {"configurable": {"thread_id": runtime.thread or runtime.run_id}}
+
+
+async def holds(target: Any, thread: str, native_id: str) -> bool:
+    """Whether the graph's checkpointer still holds the pause ``native_id`` on ``thread`` —
+    what a resume in place needs. An ``InMemorySaver`` holds it in the process that paused,
+    and nowhere else. (A pause with a native id is a checkpointed graph's.)"""
+    state = await target.aget_state({"configurable": {"thread_id": thread}})
+    return any(paused.id == native_id for paused in state.interrupts)
 
 
 def is_hitl(value: Any) -> bool:
