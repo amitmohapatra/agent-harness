@@ -19,7 +19,6 @@ from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.models import (
     AgentTool,
-    CatalogTool,
     DocumentInfo,
     Feedback,
     KeyInfo,
@@ -44,7 +43,6 @@ SOURCE_SYSTEM: Final = "trellis-harness"
 #: cannot be reached, the last listing is kept and asked for again after the retry interval.
 AGENT_TOOLS_TTL_SECONDS: Final = 600.0
 AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
-NOT_MODIFIED: Final = 304
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,16 +252,9 @@ class RunMemory:
         and the answer's ``ETag``. With the ``etag`` of an earlier answer the request is
         conditional (``If-None-Match``): ``None`` means nothing changed since. A service that
         sends no ``ETag`` is simply read in full each time."""
-        headers = {"If-None-Match": etag} if etag else None
-        # the SDK's transport (auth, scope headers, retries, problem errors), for the headers
-        # of the answer its catalog() does not return
-        response = await self.ctx.client.transport._perform(
-            "GET", "/v1/tools", scope=self.ctx.scope, params={"names": list(names)}, headers=headers
-        )
-        tag = response.headers.get("etag")
-        if response.status_code == NOT_MODIFIED:
-            return None, tag or etag
-        entries = [CatalogTool.model_validate(t) for t in response.json().get("tools", [])]
+        entries, tag = await self.ctx.advanced.tools.catalog_if_changed(names, etag=etag)
+        if entries is None:
+            return None, tag
         governance = {
             entry.name: Governance(risk=entry.risk, approve_when=entry.approve_when or None)
             for entry in entries
