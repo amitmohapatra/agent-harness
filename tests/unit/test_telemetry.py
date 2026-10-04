@@ -245,3 +245,24 @@ async def test_a_score_with_a_comment_carries_it() -> None:
     assert json.loads(route.calls[0].request.content)["comment"] == "13"
     assert scores.host == "https://lf.example"
     await scores.aclose()
+
+
+async def test_closing_exports_the_spans_still_queued(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The batch processor sends every few seconds: closing the harness flushes what is
+    queued, so a short script or a stopping worker does not leave its last traces behind."""
+    flushed: list[int] = []
+
+    class Provider:
+        def force_flush(self, timeout_millis: int) -> bool:
+            flushed.append(timeout_millis)
+            return True
+
+    monkeypatch.setattr(telemetry.trace, "get_tracer_provider", Provider)
+    await telemetry.flush()
+    assert flushed == [telemetry.FLUSH_TIMEOUT_MS]
+
+
+async def test_closing_without_an_exporter_flushes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The API's default (proxy) provider has nothing queued and no flush."""
+    monkeypatch.setattr(telemetry.trace, "get_tracer_provider", object)
+    await telemetry.flush()  # no error

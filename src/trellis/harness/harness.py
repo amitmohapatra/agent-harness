@@ -208,8 +208,9 @@ class Harness:
         return await scope.add_document(file, title=title, visibility=visibility, wait=wait)
 
     async def aclose(self) -> None:
-        """Finish the queued writes and close the clients."""
+        """Finish the queued writes, export the queued spans and close the clients."""
         await self.writes.aclose()
+        await telemetry.flush()
         closers = [
             c.aclose() for c in (self.gateway, self.memory, self.runs, self.scores) if c is not None
         ]
