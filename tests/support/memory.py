@@ -93,7 +93,7 @@ class FakeMemoryService:
     catalog: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: tool-hint candidates (names), in rank order; ``None``: the first available one
     candidates: list[str] | None = None
-    #: the context answers without a ``tool_candidates`` field at all
+    #: the context answers without a ``tools`` field at all
     omit_candidates: bool = False
     #: candidates for a particular task, over ``candidates``
     candidates_for: dict[str, list[str]] = field(default_factory=dict)
@@ -174,9 +174,13 @@ class FakeMemoryService:
             answer["evidence_status"] = self.evidence_status
         if available is not None:
             chosen = self._candidates("", available)
-            rendered += "\n\n## Tools\nnext: " + (chosen[0] if chosen else "-")
+            rendered += "\n\n## Tools\n" + "\n".join(
+                f"- {n} (confidence {0.9 - i / 10:.2f})" for i, n in enumerate(chosen)
+            )
             if not self.omit_candidates:
-                answer["tool_candidates"] = chosen
+                answer["tools"] = [
+                    {"name": n, "confidence": round(0.9 - i / 10, 2)} for i, n in enumerate(chosen)
+                ]
             answer["rendered"] = rendered
         answer["token_estimate"] = len(rendered) // 4
         return answer
@@ -197,11 +201,11 @@ class FakeMemoryService:
         available = call.body.get("available") or []
         chosen = self._candidates(call.body["task"], available)
         return {
-            "candidates": [{"name": n, "score": 1.0 - i / 10} for i, n in enumerate(chosen)],
-            "next": chosen[0] if chosen else None,
-            "plan": None,
-            "prefill": {},
-            "missing": [],
+            "tools": [
+                {"name": n, "confidence": round(0.9 - i / 10, 2)}
+                | ({"next": True} if i == 0 else {})
+                for i, n in enumerate(chosen)
+            ]
         }
 
     def _record_tool(self, call: Call) -> dict[str, Any]:

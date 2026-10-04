@@ -276,7 +276,8 @@ def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:
             raise ConfigurationError(f"{spec.name} needs a run with memory on (MEMORY_URL)")
         if spec.name == TOOL_SEARCH:  # among the tools this run can actually call
             hints = await runtime.tools.hints(str(args.get("task", "")))
-            return hints.model_dump(mode="json", include={"next", "plan", "prefill", "missing"})
+            # what the model reads: each tool's confidence, arguments and gaps, and the plan
+            return hints.model_dump(mode="json", exclude_defaults=True)
         return await runtime.run_memory.call_agent_tool(spec.name, args)
 
     return run

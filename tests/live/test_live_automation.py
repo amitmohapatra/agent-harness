@@ -75,7 +75,7 @@ async def test_hints_narrow_a_large_toolbox_to_the_task() -> None:
         return tool(fn, name=n, description=d, side_effects="read")
 
     async def planner(input: str, agent: Runtime) -> Any:
-        return [c.name for c in (await agent.tools.hints(input)).candidates]
+        return [t.name for t in (await agent.tools.hints(input)).tools]
 
     async with live_harness() as h:
         agent = h.wrap(

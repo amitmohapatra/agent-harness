@@ -145,7 +145,7 @@ Every run of every framework goes through `pipeline.attempt`:
 flowchart LR
   A[identity] --> B[run record<br/>agent-runs or in process]
   B --> C[toolbox<br/>local + MCP + memory pull]
-  C --> D[memory push<br/>/v1/context + tool candidates]
+  C --> D[memory push<br/>/v1/context + tools]
   D --> E[adapter<br/>prepare · invoke/stream · extract]
   E -->|paused| F[record PAUSED<br/>interrupt + journal]
   E -->|ended| G[record SUCCESS / ERROR]
@@ -183,7 +183,7 @@ sequenceDiagram
   P->>Mem: GET /v1/tools?names= (catalog tiers, approve_when)
   P->>Mem: GET /v1/agent-tools (pull tools, once per process)
   P->>Mem: POST /v1/context (memory recall: retrieve memory span)
-  Mem-->>P: rendered context, bundle_id, tool_candidates
+  Mem-->>P: rendered, bundle_id, tools [name, confidence]
   P->>FW: prepare_input(input, context), invoke(native tools)
   FW->>GW: chat completion (the team's model through Bifrost)
   FW->>Br: call erp-get_stock(sku)
@@ -251,8 +251,8 @@ background. Every call, whoever makes it, goes through `tools/bridge.call`:
 4. **record** — journaled (the tool is then offered for the rest of the run), counted, and
    with memory writes on sent to the memory service's tool records in the background.
 
-A tool called outside a harness run is refused. What the model is *offered* (the tool hints'
-candidates, the memory tools, the tools already used) is `Runtime.offers`; each adapter
+A tool called outside a harness run is refused. What the model is *offered* (the tools the
+context names, the memory tools, the tools already used) is `Runtime.offers`; each adapter
 narrows as far as its framework allows (`Adapter.narrows`: per turn, per run, or none).
 Agent Mode is never used.
 
