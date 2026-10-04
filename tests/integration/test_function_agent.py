@@ -120,7 +120,14 @@ async def test_an_approver_can_edit_or_reject(harness: Harness) -> None:
     assert paused.interrupt is not None
     rejected = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="boss")
     assert rejected.status is RunStatus.SUCCESS
-    assert "rejected" in rejected.answer
+    assert rejected.answer == "refund was not run: the approver rejected it"
+
+    paused = await agent.run("x", user="u1")
+    assert paused.interrupt is not None
+    told = await agent.resume(
+        paused.interrupt.interrupt_id, "reject", answer="over the limit", reviewer="boss"
+    )
+    assert told.answer == "refund was not run: the approver rejected it (over the limit)"
 
 
 async def test_what_is_asked_decides_how_it_is_shown_and_the_user_answers_by_default(

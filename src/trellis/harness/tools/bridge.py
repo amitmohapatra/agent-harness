@@ -24,7 +24,7 @@ from trellis.contracts import (
 )
 from trellis.harness.events import NOTICE
 from trellis.harness.journal import content_key
-from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, current
+from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import Tool
@@ -59,10 +59,12 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         resolution = await runtime.approve(tool_call, why)
         decision = answer_of(resolution)  # raises RunCancelled on CANCEL
         if resolution.decision is InterruptDecision.REJECT or decision is False:
+            reason = reason_of(resolution)
             outcome = ToolOutcome(
                 tool=tool.name,
                 status=ToolStatus.REJECTED,
-                output=f"{tool.name} was not run: the approver rejected it",
+                output=f"{tool.name} was not run: the approver rejected it"
+                + (f" ({reason})" if reason else ""),
                 error_class="ApprovalRejected",
             )
             _events(runtime, ref, tool_call, outcome)

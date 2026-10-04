@@ -33,7 +33,7 @@ from trellis.contracts import (
 )
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
-from trellis.harness.adapters.langgraph import FOREIGN
+from trellis.harness.adapters.langgraph import FOREIGN, HITL, is_hitl
 from trellis.harness.clients.runs import Conflict, LeaseLost
 from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
@@ -220,6 +220,8 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
             native_state=native.state,
         )
     value = native.value
+    if is_hitl(value):
+        return _middleware_approval(runtime, ident, native)
     question = value.get("question") if isinstance(value, dict) else None
     interrupt = Interrupt(
         interrupt_id=ident,
@@ -229,6 +231,33 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
         payload=value if isinstance(value, dict) else {"value": value},
     )
     return Pending(key=FOREIGN, interrupt=interrupt, native_id=native.native_id)
+
+
+def _middleware_approval(runtime: Runtime, ident: str, native: NativePause) -> Pending:
+    """LangChain's ``HumanInTheLoopMiddleware`` (Deep Agents' ``interrupt_on``) paused on the
+    calls it holds: an approval of the first, the whole request (every call, each one's
+    ``allowed_decisions``) in the payload; the resume answers all of them."""
+    request = json.loads(json.dumps(native.value, default=str))
+    actions = request["action_requests"]
+    first, more = actions[0], len(actions) - 1
+    question = f"Approve {first['name']}?"
+    if more:
+        question += f" (and {more} more call{'s' if more > 1 else ''})"
+    args = first.get("args")
+    interrupt = Interrupt(
+        interrupt_id=ident,
+        tenant_id=runtime.tenant,
+        run_id=runtime.run_id,
+        reason=InterruptReason.APPROVAL,
+        question=question,
+        tool_call=ToolCall(
+            tool=first["name"],
+            args=args if isinstance(args, dict) else {},
+            idempotency_key=native.native_id,
+        ),
+        payload=request,
+    )
+    return Pending(key=HITL, interrupt=interrupt, native_id=native.native_id)
 
 
 async def _paused(

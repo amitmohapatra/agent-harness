@@ -283,6 +283,13 @@ def answer_of(resolution: InterruptResolution) -> Any:
     return resolution.answer
 
 
+def reason_of(resolution: InterruptResolution) -> str | None:
+    """The reviewer's reason given with a decision (``resume(..., "reject", answer="why")``):
+    what the model is told about a rejected call."""
+    answer = resolution.answer
+    return answer.strip() if isinstance(answer, str) and answer.strip() else None
+
+
 @dataclass(frozen=True, slots=True)
 class Tools:
     """``trellis.current().tools``: call this run's tools by name, and ask for hints."""

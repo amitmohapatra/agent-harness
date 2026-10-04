@@ -29,7 +29,7 @@ from trellis.contracts import (
 from trellis.harness import pipeline
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import context_window
-from trellis.harness.adapters.langgraph import bound_tools
+from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
@@ -193,6 +193,9 @@ class Agent:
             payload=answer if edited else None,
             reviewer=reviewer,
         )
+        awaited = record.awaiting.payload
+        if chosen is not InterruptDecision.CANCEL and is_hitl(awaited):
+            hitl_response(awaited or {}, resolution)  # a decision the calls do not allow raises
         return record, resolution
 
     async def _continue(

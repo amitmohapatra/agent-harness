@@ -48,11 +48,14 @@ await agent.resume(interrupt_id, "answer", answer="ACME", reviewer="lee")
 await agent.resume(interrupt_id, "approve", reviewer="cfo")
 await agent.resume(interrupt_id, "edit", answer={"amount": 9000}, reviewer="cfo")
 await agent.resume(interrupt_id, "reject", reviewer="cfo")
+await agent.resume(interrupt_id, "reject", answer="over budget", reviewer="cfo")  # with a reason
 await agent.resume(interrupt_id, "cancel", reviewer="cfo")
 ```
 
 What `ask` returns: the answer; `True`/`False` for approve/reject; the edited value for edit;
-cancel ends the run `CANCELLED`. The interrupt id names its run, so nothing else is needed; a
+cancel ends the run `CANCELLED`. A rejected tool call is not run and the model reads that it
+was rejected — with the reviewer's reason when the reject carries one as `answer`
+(`"refund was not run: the approver rejected it (over budget)"`). The interrupt id names its run, so nothing else is needed; a
 resume must answer the interrupt the run currently waits on.
 
 ## How a run continues
@@ -61,8 +64,10 @@ resume must answer the interrupt the run currently waits on.
   `interrupt`, and the resume is `Command(resume=...)` — the graph continues in place. A
   graph's own `interrupt(value)` is surfaced as a question and resumed with the raw answer;
   without a checkpointer it cannot be resumed and the run fails saying so.
-* **OpenAI Agents `needs_approval` tools**: the SDK's own pause; the resume approves or rejects
-  on its `RunState` and continues it.
+* **LangChain `HumanInTheLoopMiddleware`, Deep Agents `interrupt_on`**: the middleware's own
+  pause (below).
+* **OpenAI Agents `needs_approval` tools**: the SDK's own pause, continued from its `RunState`
+  (below).
 * **Everything else** re-runs from the input as the next attempt, with the **journal**:
   answers already given return where their question is asked, and tool calls already made
   return their recorded outputs instead of running again. Entries are keyed by content (the
@@ -72,6 +77,48 @@ The journal is the run's checkpoint: the pause stores it with the run (`RunRecor
 in agent-runs, cleared when the run ends), and whichever process or worker resumes the run
 reads it back with the resolution, so a resume elsewhere repeats no question and no tool
 call.
+
+### Framework approvals: LangChain's middleware and OpenAI Agents' `needs_approval`
+
+A framework that asks for approval itself pauses the run the same way: `Result.interrupt` is
+an approval (`reason=APPROVAL`, `ui="approve"`, the call in `tool_call`), it is in the inbox,
+and the same five decisions answer it.
+
+**`create_agent(middleware=[HumanInTheLoopMiddleware(interrupt_on=...)])`, and Deep Agents'
+`create_deep_agent(interrupt_on=...)`** (a checkpointer is needed, as for any graph pause). The
+middleware batches the calls of one model message that need review into one request; the
+interrupt shows the first (`"Approve email?"`, `"Approve email? (and 1 more call)"`) and carries
+the whole request as its `payload` — `action_requests` (each call's `name`, `args`,
+`description`) and `review_configs` (each call's `allowed_decisions`). The resume is the
+middleware's `{"decisions": [...]}`, one per call, in order:
+
+| `resume(...)` | Decisions sent |
+|---|---|
+| `"approve"` | `approve` for every call |
+| `"edit", answer={...}` | `edit` of the first call with those arguments (the tool runs with them), `approve` for the others |
+| `"reject"` (`answer="why"`) | `reject` for every call, the reason as its `message` (the model reads it) |
+| `"answer", answer=...` | `respond` for every call: the tool does not run and the model reads the answer as its result |
+| `"answer", answer={"decisions": [...]}` | sent as it is — one decision per call, for a batch decided call by call |
+
+A decision that a call's `allowed_decisions` does not include is refused by `resume`
+(`ConfigurationError`) before anything is recorded, and the run keeps waiting. Leave the
+tools the middleware covers out of the harness's own approvals (`side_effects="write"` or
+`"read"`, no catalog `approve_when`), or the call is approved twice.
+
+**OpenAI Agents `function_tool(needs_approval=...)`.** The SDK pauses with its `RunState`,
+which the pause keeps as the run's checkpoint, and the resume continues that state. The SDK
+approves or rejects a call, with a `rejection_message` the model reads — it takes neither
+edited arguments nor an answer in place of the result (verified against `openai-agents` 0.22:
+`RunState.approve(item)`, `RunState.reject(item, rejection_message=)`), so:
+
+| `resume(...)` | On the `RunState` |
+|---|---|
+| `"approve"` | `approve(item)`: the tool runs |
+| `"reject"` (`answer="why"`) | `reject(item, rejection_message=why)` (no reason: the SDK's own message) |
+| `"answer", answer=...` | `reject(item, rejection_message=answer)`: the tool does not run and the model reads the answer |
+| `"edit", answer={...}` | `reject(item, rejection_message="A reviewer changed the arguments of this <tool> call, so it was not run. Call <tool> again with exactly these arguments: {...}")`; when the model then calls the tool with exactly those arguments, that call is approved in the same attempt and runs once — with any other arguments it asks again |
+
+Several `needs_approval` calls in one turn are asked about one at a time.
 
 A run started with `run`/`stream` continues in the process that calls `resume`; a queued run
 (`start`, a schedule) goes back to the queue and a worker continues it (`Result.status ==

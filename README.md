@@ -171,8 +171,8 @@ python -m trellis.worker app.agents:h [--concurrency N]   # SIGTERM stops it gra
 
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
-| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | no (bound at build) | leading system message, one per checkpointed thread |
-| OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
+| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | no (bound at build) | leading system message, one per checkpointed thread |
+| OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected (with the reason; an edit or an answer as the message the model reads) and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
 | Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped, re-run against the journal | in-process MCP server `trellis` (`mcp__trellis__*`, pre-allowed) | per run | appended to `system_prompt` |
 | `ReAct` | per step, and tool events | re-run against the journal | per run | per model call | appended to `system` |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |

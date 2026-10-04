@@ -60,9 +60,16 @@ whether an administrator wants its calls approved is unknown (the approver reads
 catalog that says when it needs approval could not be read"). A warning is logged once; the
 catalog is asked again every 30 s, and its answer ends the fallback.
 
-An approver may approve, reject (the model is told the call was not run), edit (the call runs
-with the edited arguments) or cancel (the run ends `CANCELLED`). Each decision is also
-`TOOL_CALL` feedback, from which the memory service learns approval suggestions.
+An approver may approve, reject (the model is told the call was not run, and why when the
+reject carries a reason: `resume(id, "reject", answer="why", ...)`), edit (the call runs with
+the edited arguments) or cancel (the run ends `CANCELLED`). Each decision is also `TOOL_CALL`
+feedback, from which the memory service learns approval suggestions.
+
+A framework's own approval gate — LangChain's `HumanInTheLoopMiddleware`, Deep Agents'
+`interrupt_on`, OpenAI Agents' `needs_approval` — pauses the run as the same approval and takes
+the same decisions ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
+Gate a tool in one place: a tool the framework gates should not also be `irreversible` or under
+an `approve_when` in the harness, or each call is approved twice.
 
 ## Every call
 

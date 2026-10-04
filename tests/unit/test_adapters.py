@@ -21,7 +21,9 @@ from trellis.contracts import (
     ConfigurationError,
     Interrupt,
     InterruptDecision,
+    InterruptReason,
     InterruptResolution,
+    ToolCall,
 )
 from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
@@ -31,8 +33,15 @@ from trellis.harness.adapters.langgraph import (
     CONTEXT_MESSAGE_ID,
     LangGraphAdapter,
     bound_tools,
+    hitl_response,
+    is_hitl,
 )
-from trellis.harness.adapters.openai_agents import OpenAIAgentsAdapter, _Continue
+from trellis.harness.adapters.openai_agents import (
+    EDITED,
+    OpenAIAgentsAdapter,
+    _arguments,
+    _Continue,
+)
 from trellis.harness.adapters.react import ReAct, ReActAdapter, ReActResult, _unfenced
 from trellis.harness.journal import Pending
 
@@ -265,6 +274,88 @@ def test_only_an_sdk_approval_resumes_from_its_run_state() -> None:
         state, "call_1", True
     )
     assert adapter.resume_input(None, ["input"], pending, reject).approve is False
+
+
+def _resolved(decision: InterruptDecision, **fields: Any) -> InterruptResolution:
+    return InterruptResolution(
+        interrupt_id="run_1.1.1", run_id="run_1", decision=decision, **fields
+    )
+
+
+def test_an_sdk_approval_maps_every_decision_to_what_the_sdk_takes() -> None:
+    adapter = OpenAIAgentsAdapter()
+    approval = Interrupt(
+        interrupt_id="run_1.1.1",
+        tenant_id="t",
+        run_id="run_1",
+        reason=InterruptReason.APPROVAL,
+        question="?",
+        tool_call=ToolCall(tool="send", args={"order": "o1"}),
+    )
+    pending = Pending(key="send", interrupt=approval, native_id="c", native_state={"s": 1})
+    edit = adapter.resume_input(
+        None, [], pending, _resolved(InterruptDecision.EDIT, payload={"order": "o2"})
+    )
+    assert (edit.approve, edit.tool, edit.edited) == (False, "send", {"order": "o2"})
+    assert edit.message == EDITED.format(tool="send", args='{"order": "o2"}')
+    answer = adapter.resume_input(
+        None, [], pending, _resolved(InterruptDecision.ANSWER, answer=[1])
+    )
+    assert (answer.approve, answer.message) == (False, "[1]")
+    said = adapter.resume_input(None, [], pending, _resolved(InterruptDecision.ANSWER, answer="x"))
+    assert said.message == "x"
+    silent = adapter.resume_input(None, [], pending, _resolved(InterruptDecision.ANSWER))
+    assert (silent.approve, silent.message) == (False, None)
+    reason = adapter.resume_input(
+        None, [], pending, _resolved(InterruptDecision.REJECT, answer=" no ")
+    )
+    assert reason.message == "no" and reason.edited is None
+    # an edit with no call to name is a plain reject
+    unnamed = _pending(native_id="c", native_state={"s": 1})
+    blind = adapter.resume_input(
+        None, [], unnamed, _resolved(InterruptDecision.EDIT, payload={"a": 1})
+    )
+    assert (blind.approve, blind.edited) == (False, None)
+
+
+def test_a_call_with_unreadable_arguments_is_not_the_edited_one() -> None:
+    assert _arguments(SimpleNamespace(arguments="{not json")) is None
+    assert _arguments(SimpleNamespace(arguments="")) == {}
+
+
+HITL_REQUEST: dict[str, Any] = {
+    "action_requests": [{"name": "a", "args": {"x": 1}}, {"name": "b", "args": {}}],
+    "review_configs": [
+        {"action_name": "a", "allowed_decisions": ["approve", "edit", "reject", "respond"]},
+        {"action_name": "b", "allowed_decisions": ["approve", "reject", "respond"]},
+    ],
+}
+
+
+def test_a_middleware_request_is_recognised_by_its_shape() -> None:
+    assert is_hitl(HITL_REQUEST)
+    assert not is_hitl({"action_requests": [], "review_configs": []})
+    assert not is_hitl({"action_requests": [{"name": "a"}]})
+    assert not is_hitl("approve?") and not is_hitl(None)
+
+
+def test_each_harness_decision_is_one_middleware_decision_per_call() -> None:
+    approve = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.APPROVE))
+    assert approve == {"decisions": [{"type": "approve"}] * 2}
+    edit = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
+    assert edit["decisions"] == [
+        {"type": "edit", "edited_action": {"name": "a", "args": {"x": 2}}},
+        {"type": "approve"},
+    ]
+    reject = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.REJECT, answer="why"))
+    assert reject["decisions"] == [{"type": "reject", "message": "why"}] * 2
+    respond = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.ANSWER, answer={"k": 1}))
+    assert respond["decisions"] == [{"type": "respond", "message": '{"k": 1}'}] * 2
+    raw = {"decisions": [{"type": "approve"}, {"type": "reject"}]}
+    assert hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload=raw)) == raw
+    only_b = {**HITL_REQUEST, "review_configs": [HITL_REQUEST["review_configs"][1]] * 2}
+    with pytest.raises(ConfigurationError, match="does not allow the decision 'edit'"):
+        hitl_response(only_b, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
 
 
 # --------------------------------------------------------------------------- ReAct
