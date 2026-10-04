@@ -1,6 +1,6 @@
-"""Online judging: every sampled successful run is scored in the background by the judges the
-harness was given — never on the request path; the scores land on each run's trace. Code that
-is not wrapped judges its own runs with ``judge()``.
+"""Way 1, wrapped — online judging: every sampled successful run is scored in the background by
+the judges the harness was given — never on the request path; the scores land on each run's
+trace. (Your own code, not wrapped, judges its runs with ``judge()``: ``blocks_evaluate.py``.)
 
     .venv/bin/python examples/online_judges.py
 
@@ -16,7 +16,7 @@ import os
 from _offline import answering_model
 
 from trellis import Harness, ReAct, Settings
-from trellis.harness.evals import EvalCase, EvalScore, EvalServices, judge, llm_judge
+from trellis.harness.evals import EvalCase, EvalScore, llm_judge
 
 
 async def concise(case: EvalCase) -> EvalScore:
@@ -35,12 +35,6 @@ async def main() -> None:
         result = await agent.run("What is the capital of Japan?", user="ada")
         print(result.status.value, result.answer)  # returned before any judge ran
         await h.writes.drain()  # the judges ran in the background writes queue
-
-    # Not wrapped: your own code judges its run, on the run's trace (or its own: trace_id=)
-    async with EvalServices.from_env() as services:
-        case = EvalCase(input="What is the capital of Japan?", output="Tokyo", run_id="run_mine")
-        scores, failed = await judge(case, [concise], services=services, sample=1.0)
-        print([(s.name, s.value) for s in scores], failed)
 
 
 if __name__ == "__main__":

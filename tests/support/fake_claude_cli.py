@@ -17,7 +17,7 @@ import os
 import sys
 from typing import Any
 
-SERVER = "trellis"
+SERVER = os.environ.get("FAKE_CLAUDE_SERVER", "trellis")
 
 
 def send(message: dict[str, Any]) -> None:
@@ -80,6 +80,21 @@ class Cli:
             self.mcp_ready = True
         return self.mcp("tools/call", {"name": name, "arguments": args})
 
+    def permission(self, name: str, args: dict[str, Any], tool_id: str) -> dict[str, Any]:
+        """What the SDK's ``can_use_tool`` says about a call (allowed when it is not asked)."""
+        allowed = (argument("--allowedTools") or "").split(",")
+        if argument("--permission-prompt-tool") != "stdio" or name in allowed:
+            return {"behavior": "allow"}
+        return self.control(
+            {
+                "subtype": "can_use_tool",
+                "tool_name": name,
+                "input": args,
+                "permission_suggestions": None,
+                "tool_use_id": tool_id,
+            }
+        )
+
     def turn(self, prompt: Any) -> None:
         script = json.loads(os.environ.get("FAKE_CLAUDE_SCRIPT", '[{"text": "ok"}]'))
         record = os.environ.get("FAKE_CLAUDE_RECORD")
@@ -98,22 +113,16 @@ class Cli:
         for step, item in enumerate(script):
             if "tool" in item:
                 tool_id = f"toolu_{step}"
-                send(
-                    assistant(
-                        [
-                            {
-                                "type": "tool_use",
-                                "id": tool_id,
-                                "name": f"mcp__{SERVER}__{item['tool']}",
-                                "input": item.get("args", {}),
-                            }
-                        ]
-                    )
-                )
-                result = self.call_tool(item["tool"], item.get("args", {}))
-                content = (result.get("result") or {}).get("content") or [
-                    {"type": "text", "text": json.dumps(result.get("error"))}
-                ]
+                name, args = f"mcp__{SERVER}__{item['tool']}", item.get("args", {})
+                send(assistant([{"type": "tool_use", "id": tool_id, "name": name, "input": args}]))
+                permission = self.permission(name, args, tool_id)
+                if permission.get("behavior", "allow") == "allow":
+                    result = self.call_tool(item["tool"], permission.get("updatedInput", args))
+                    content = (result.get("result") or {}).get("content") or [
+                        {"type": "text", "text": json.dumps(result.get("error"))}
+                    ]
+                else:
+                    content = [{"type": "text", "text": permission.get("message", "denied")}]
                 read = "".join(c.get("text", "") for c in content if isinstance(c, dict))
                 send(
                     {
@@ -128,6 +137,8 @@ class Cli:
                         "session_id": "fake",
                     }
                 )
+                if permission.get("interrupt"):
+                    break
             else:
                 last = item["text"].replace("{last}", read)
                 send(assistant([{"type": "text", "text": last}]))
