@@ -148,8 +148,7 @@ def _segments(key: str) -> tuple[str, ...]:
 
 
 def _stringify(value: Any) -> str:
-    if isinstance(value, str):
-        return value
+    """A value that is not text, as text (``_scalar`` handles text itself)."""
     if isinstance(value, bytes):
         return f"<{len(value)} bytes>"
     try:

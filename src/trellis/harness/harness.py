@@ -227,6 +227,7 @@ class Harness:
         return self._key.tenant_id if self._key is not None else None
 
     async def writes_memory(self) -> bool:
+        """Whether runs record their transcript, tool calls and outcome: memory is on."""
         return self.memory is not None
 
     # ------------------------------------------------------------------ used by agents

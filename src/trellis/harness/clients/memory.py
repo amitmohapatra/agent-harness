@@ -28,9 +28,9 @@ from trellis.memory.models import (
 CONTEXT_TOKEN_BUDGET: Final = 2000
 #: Pull tools a read-only key gets: the ones that change nothing.
 READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
-#: The pull tool that chooses among the run's own tools (which the harness passes).
+#: The pull tool that chooses among the run's own tools: the harness answers it with
+#: ``Tools.hints``, which passes the run's toolbox.
 TOOL_SEARCH: Final = "tool_search"
-#: Key roles that may read memory but not change it (``GET /v1/keys/self``).
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
 
@@ -102,12 +102,9 @@ class RunMemory:
             self.memory.listed = [_agent_tool(t) for t in await self.ctx.agent_tools()]
         return list(self.memory.listed)
 
-    async def call_agent_tool(
-        self, name: str, args: dict[str, object], *, toolbox: Sequence[str] | None = None
-    ) -> object:
-        """One memory tool, in this run's scope; ``toolbox`` is what ``tool_search`` chooses
-        among (the run's own tools)."""
-        return await self.ctx.call_agent_tool(name, args, toolbox=toolbox)
+    async def call_agent_tool(self, name: str, args: dict[str, object]) -> object:
+        """One memory tool, in this run's scope."""
+        return await self.ctx.call_agent_tool(name, args)
 
     async def tool_hints(self, task: str, available: Sequence[str]) -> Any:
         return await self.ctx.tool_hints(task, available=list(available))
