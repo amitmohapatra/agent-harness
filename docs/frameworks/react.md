@@ -24,7 +24,7 @@ def temperature(city: str) -> float:
 h = Harness()
 target = ReAct(
     system="You give weather advice. Use the tool, then answer as JSON.",
-    model="openrouter/openai/gpt-4.1-nano",  # a Bifrost model name (needs BIFROST_URL)
+    model="provider/model",  # a Bifrost model name (needs BIFROST_URL)
     output=Forecast,  # optional: the answer parsed into it
 )
 agent = h.wrap(target, id="weather", tools=[temperature])
