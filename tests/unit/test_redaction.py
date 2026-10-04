@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from trellis.contracts import TelemetryRedactor
-from trellis.harness.redaction import DEFAULT, MAX_VALUE_CHARS, REDACTED, redact_attributes
+from trellis.harness.redaction import (
+    DEFAULT,
+    MAX_DEPTH,
+    MAX_VALUE_CHARS,
+    REDACTED,
+    TOO_DEEP,
+    redact_attributes,
+)
 
 
 def test_it_is_the_contracts_redactor() -> None:
@@ -81,3 +88,32 @@ def test_names_are_sensitive_by_their_words_not_their_substrings() -> None:
         "tokenizer": "bpe",
         "monkey": "business",
     }
+
+
+def test_a_value_that_contains_itself_is_cut_not_a_crash() -> None:
+    """A redactor never raises: a self-referencing list or dict stops at MAX_DEPTH."""
+    loop: list[object] = ["x"]
+    loop.append(loop)
+    cyclic: dict[str, object] = {"name": "run"}
+    cyclic["self"] = cyclic
+
+    attributes = redact_attributes({"items": loop})
+    payload = DEFAULT.redact_input(cyclic)
+
+    nested = attributes["items"]
+    for _ in range(MAX_DEPTH):
+        assert nested[0] == "x"
+        nested = nested[1]
+    assert nested == TOO_DEEP
+    inner = payload
+    for _ in range(MAX_DEPTH):
+        assert inner["name"] == "run"
+        inner = inner["self"]
+    assert inner == TOO_DEEP
+
+
+def test_ordinary_nesting_is_untouched_by_the_depth_limit() -> None:
+    deep: object = "leaf"
+    for _ in range(MAX_DEPTH - 1):
+        deep = [deep]
+    assert DEFAULT.redact_output({"v": deep}) == {"v": deep}

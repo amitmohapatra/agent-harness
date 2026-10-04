@@ -26,7 +26,7 @@ from trellis.memory.models import (
 
 #: Prompt budget for the pushed context, in tokens.
 CONTEXT_TOKEN_BUDGET: Final = 2000
-#: Pull tools a read-only key gets: the ones that change nothing.
+#: The pull tools that change nothing: listed with side_effects "read", the rest "write".
 READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 #: The pull tool that chooses among the run's own tools: the harness answers it with
 #: ``Tools.hints``, which passes the run's toolbox.
