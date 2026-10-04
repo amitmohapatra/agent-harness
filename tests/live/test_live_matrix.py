@@ -68,7 +68,6 @@ from trellis.contracts import (
     RunStatus,
 )
 from trellis.harness import telemetry
-from trellis.harness import worker as worker_module
 from trellis.harness.evals import exact_match, grounding, llm_judge
 from trellis.harness.governance import catalog as governance_catalog
 from trellis.harness.surfaces.agui.sse import decode
@@ -586,11 +585,7 @@ async def test_a_deep_agents_sub_agent_call_waits_in_agent_runs(tmp_path: Path) 
 
 # --------------------------------------------------------------------------- workers
 @pytest.mark.timeout(TIMEOUT_SECONDS)
-async def test_workers_claim_pause_resume_and_survive_a_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # a short lease, so the run a crashed worker held is queued again within the test
-    monkeypatch.setattr(worker_module, "LEASE_SECONDS", 6.0)
+async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) -> None:
     case = Case(live_harness(), "worker", tmp_path)
     charged: list[str] = []
     crashed = asyncio.Event()
@@ -621,6 +616,8 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(
         assert (await stored(h, handle.run_id)).status is RunStatus.QUEUED
 
         first = h.worker([agent], concurrency=1)
+        # a short lease, so the run the crashed worker held is queued again within the test
+        first.loop.lease_seconds = 6
         working = asyncio.create_task(first.run())
         await asyncio.wait_for(crashed.wait(), 60)
         # the charge was saved as the run's progress before the crash

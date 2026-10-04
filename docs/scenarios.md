@@ -79,10 +79,10 @@ outside a tool (and the model calls) run again on the re-run.
 |---|---|
 | An answer in the request that asked (an API handler, a script) | `await agent.run(input, user=...)` |
 | Text and tool events as they happen (your own UI) | `agent.stream(input, user=...)`, or `serve_chat` for an AG-UI client |
-| A run that outlives this process: long work, approvals that take days, many workers | `await agent.start(...)`, `h.worker([...]).run()` (or `python -m trellis.worker module:h`), and `RUNS_URL` |
+| A run that outlives this process: long work, approvals that take days, many workers | `await agent.start(...)`, `h.worker([...]).run()` (or `python -m trellis.harness.worker module:h`), and `RUNS_URL` |
 | A run on a cadence, acting for someone | `await agent.schedule(cron, input, on_behalf_of=...)` — idempotent, so it is safe in deployment code |
 | Development and tests | leave `RUNS_URL` unset: runs, the queue and schedules live in the process (`LocalRuns`) and nothing survives a restart |
-| Workers in production: deploys, scaling, stop signals | `python -m trellis.worker module:h --concurrency N` (or `TRELLIS_WORKER_CONCURRENCY`; default the CPU count, 1–8); `SIGTERM` lets held runs finish for 25 s, then releases them for another worker — give the container ~45 s ([runs.md](runs.md#workers)) |
+| Workers in production: deploys, scaling, stop signals | `python -m trellis.harness.worker module:h --concurrency N` (or `TRELLIS_WORKER_CONCURRENCY`; default the CPU count, 1–8); `SIGTERM` lets held runs finish for 25 s, then releases them for another worker — give the container ~45 s ([runs.md](runs.md#workers)) |
 | Memory writes that survive an outage and a restart | `TRELLIS_SPOOL_DIR` on a volume that outlives the process: what could not be delivered is replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 
 A run started with `run`/`stream` resumes in the process that calls `resume`; one started with

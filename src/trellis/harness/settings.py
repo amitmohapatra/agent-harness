@@ -42,7 +42,7 @@ class Settings(BaseModel):
     #: A directory memory writes this process could not deliver are kept in, replayed at
     #: the next start (``writes.py``); unset: they are logged and counted, then lost.
     spool_dir: str | None = None
-    #: Runs a worker executes at once (``h.worker``, ``python -m trellis.worker``); unset:
+    #: Runs a worker executes at once (``h.worker``, ``python -m trellis.harness.worker``); unset:
     #: the machine's CPU count, between 1 and 8.
     worker_concurrency: int | None = Field(default=None, ge=1)
     #: The share of successful runs whose answer is checked against the context it was given

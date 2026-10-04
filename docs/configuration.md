@@ -19,7 +19,7 @@ what is read.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no OTLP export |
 | `OTEL_EXPORTER_OTLP_HEADERS` | no OTLP headers; no Langfuse scores API |
 | `TRELLIS_SPOOL_DIR` | memory writes this process cannot deliver are logged, counted and lost (set: kept in `<dir>/trellis-writes.jsonl` and replayed at the next start — [memory.md](memory.md#background-writes-what-is-guaranteed)) |
-| `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.worker` and `concurrency=` on `h.worker` win over it) |
+| `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.harness.worker` and `concurrency=` on `h.worker` win over it) |
 | `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the judge's calls go through `BIFROST_VIRTUAL_KEY`, on the agents' budget. Set it to a **separate virtual key** so evaluation spend is budgeted, limited and reported on its own |
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |

@@ -49,7 +49,7 @@ own (built-in tools, sub-agents, handoffs) — each page says.
 | the answer in the request that asked (an API handler, a script) | `await agent.run(input, user=...)` | — |
 | text and tool events as they happen (your own UI) | `agent.stream(input, user=...)` | — |
 | a chat UI that speaks AG-UI | `agent.serve_chat(app, identity=...)` | `[agui]` |
-| a run that outlives the request: long work, approvals that take days, many workers | `await agent.start(...)` + `h.worker([...]).run()` or `python -m trellis.worker module:h` | `RUNS_URL` (else in process) |
+| a run that outlives the request: long work, approvals that take days, many workers | `await agent.start(...)` + `h.worker([...]).run()` or `python -m trellis.harness.worker module:h` | `RUNS_URL` (else in process) |
 | a run on a cadence, acting for someone | `await agent.schedule(cron, input, on_behalf_of=...)` + a worker | `RUNS_URL` (its ticker fires it) |
 | another agent (any vendor) calling yours | `agent.serve_a2a(app, url)` | `[a2a]` |
 

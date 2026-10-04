@@ -1,5 +1,6 @@
-"""``python -m trellis.worker module:attribute [--concurrency N]`` — run a worker for every agent
-a Harness wraps (the attribute names the ``Harness``; importing the module wraps the agents).
+"""``python -m trellis.harness.worker module:attribute [--concurrency N]`` — run a worker for
+every agent a Harness wraps (the attribute names the ``Harness``; importing the module wraps
+the agents).
 
 SIGTERM and SIGINT stop it gracefully: no new claims, the runs it holds finish (or, past the
 grace period, are released for another worker), the memory writes drain, and it exits ``0``.
@@ -9,15 +10,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import importlib
 import logging
-import signal
 import sys
 
 from trellis.harness.harness import Harness
 
-USAGE = "python -m trellis.worker module:harness_attribute [--concurrency N]"
+USAGE = "python -m trellis.harness.worker module:harness_attribute [--concurrency N]"
 
 
 def load(target: str) -> Harness:
@@ -35,23 +34,14 @@ def load(target: str) -> Harness:
 async def serve(harness: Harness, *, concurrency: int | None = None) -> None:
     """Work until SIGTERM/SIGINT (or cancellation), then close the harness."""
     worker = harness.worker(list(harness.agents.values()), concurrency=concurrency)
-    loop = asyncio.get_running_loop()
-    handled: list[signal.Signals] = []
-    for stop in (signal.SIGTERM, signal.SIGINT):
-        # not on the main thread, or no signals here (Windows): Ctrl-C stays KeyboardInterrupt
-        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
-            loop.add_signal_handler(stop, worker.stop)
-            handled.append(stop)
     try:
-        await worker.run()
+        await worker.serve()
     finally:
-        for stop in handled:
-            loop.remove_signal_handler(stop)
         await harness.aclose()
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m trellis.worker", usage=USAGE)
+    parser = argparse.ArgumentParser(prog="python -m trellis.harness.worker", usage=USAGE)
     parser.add_argument("target", help="module:attribute naming the Harness")
     parser.add_argument(
         "--concurrency",

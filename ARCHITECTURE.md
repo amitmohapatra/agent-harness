@@ -26,7 +26,7 @@ flowchart LR
   bifrost --> models["Model providers"]
   harness -- "context · records · feedback" --> memory["Memory service"]
   harness -- "runs · queue · inbox" --> runs["agent-runs"]
-  worker["Workers<br/>python -m trellis.worker"] -- "claim · heartbeat" --> runs
+  worker["Workers<br/>python -m trellis.harness.worker"] -- "claim · heartbeat" --> runs
   harness -- "traces · scores" --> otel["Langfuse or an<br/>OTel collector"]
 ```
 
@@ -51,7 +51,6 @@ process (`runs.LocalRuns`), no `OTEL_EXPORTER_OTLP_ENDPOINT` means no export
 src/trellis/
   __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory /
                        .runs)
-  worker.py            python -m trellis.worker module:harness
   harness/
     harness.py         Harness: settings → clients, writes, evaluation services; the key (tenant,
                        kept fresh); governance per tenant; wrap / tools / worker / inbox /
@@ -76,7 +75,9 @@ src/trellis/
     runs.py            RunStore (the part of trellis.runs.RunsClient the harness calls, with its
                        signatures) and LocalRuns (the same store in process, when RUNS_URL is
                        unset)
-    worker.py          Worker: claim, lease, heartbeat
+    worker/            Worker: trellis.runs.Worker (claim, lease, heartbeat, graceful stop)
+                       running wrapped agents, the background writes around it; __main__:
+                       python -m trellis.harness.worker module:harness
     adapters/          detect(target) and one adapter per framework (base, langgraph,
                        openai_agents, claude, react, function)
     governance/        the run / announce / ask decision, usable without Harness: decision
@@ -108,7 +109,7 @@ import FastAPI or the A2A SDK.
 ```mermaid
 flowchart TB
   api["trellis (public API, lazy)"] --> harness["harness.Harness"]
-  cli["trellis.worker (CLI)"] --> harness
+  cli["trellis.harness.worker (CLI)"] --> harness
   harness --> agent["agent.Agent · RunHandle"]
   harness --> workerm["worker.Worker"]
   harness --> writes["writes.Writes"]
@@ -119,6 +120,7 @@ flowchart TB
   evals --> telemetry
   evals --> bifrost
   workerm --> agent
+  workerm --> sdk
   agent --> pipeline["pipeline.attempt"]
   agent --> surfaces
   subgraph surfaces["surfaces"]
@@ -153,7 +155,7 @@ flowchart TB
     memory["memory.Memory · RunMemory"]
   end
   runs["runs.RunStore<br/>(RunsClient · LocalRuns)"]
-  sdk["trellis.runs (SDK)<br/>RunsClient · errors · webhooks.sign"]
+  sdk["trellis.runs (SDK)<br/>RunsClient · Worker · errors · webhooks.sign"]
   toolbox --> bifrost
   agent --> memory
   agent --> runs
@@ -346,7 +348,7 @@ sequenceDiagram
   actor App as Application
   participant Agent as Harness h · Agent
   participant AR as agent-runs
-  participant Wk as Worker (h.worker / python -m trellis.worker)
+  participant Wk as Worker (h.worker / python -m trellis.harness.worker)
   participant P as pipeline.attempt + bridge
   participant Mem as Memory service
   actor CFO as Approver
@@ -541,19 +543,24 @@ The guarantee is in [docs/memory.md](docs/memory.md#background-writes-what-is-gu
 
 ## Stopping a worker
 
-`python -m trellis.worker` turns `SIGTERM`/`SIGINT` into `Worker.stop()`:
+`python -m trellis.harness.worker` serves the worker: `trellis.runs.Worker.serve()` turns
+`SIGTERM`/`SIGINT` into `stop()`, and the harness worker drains the writes when the loop ends:
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant OS as Orchestrator
-  participant CLI as python -m trellis.worker
-  participant Wk as Worker
+  participant CLI as python -m trellis.harness.worker
+  participant HW as harness Worker
+  participant Wk as trellis.runs.Worker
   participant R as Runs it holds
   participant AR as agent-runs
   participant W as Writes
-  OS->>CLI: SIGTERM
-  CLI->>Wk: stop()
+  CLI->>HW: serve()
+  HW->>W: start()
+  HW->>Wk: serve()
+  OS->>Wk: SIGTERM
+  Wk->>Wk: stop()
   Wk--xAR: no more claims
   par within GRACE_SECONDS (25 s)
     R->>AR: finish / pause (as usual)
@@ -562,7 +569,9 @@ sequenceDiagram
     Wk->>R: cancel(RELEASED): nothing written
     Note over AR: its lease lapses → QUEUED, next attempt
   end
-  CLI->>W: aclose(): drain ≤ DRAIN_SECONDS, then spool or count the rest
+  Wk-->>HW: the loop ended
+  HW->>W: drain ≤ DRAIN_SECONDS
+  CLI->>W: h.aclose(): spool or count the rest
   CLI-->>OS: exit 0
 ```
 

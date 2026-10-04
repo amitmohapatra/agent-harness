@@ -13,7 +13,7 @@ import pytest
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.runs import LocalRuns
-from trellis.worker import load, main
+from trellis.harness.worker.__main__ import load, main
 
 
 async def approve_then_finish(input: dict[str, str], agent: Runtime) -> str:

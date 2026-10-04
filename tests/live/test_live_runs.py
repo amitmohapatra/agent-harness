@@ -164,10 +164,12 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
 # --------------------------------------------------------------------------- worker processes
 @contextmanager
 def worker_process(suffix: str, ledger: Path) -> Iterator[subprocess.Popen[bytes]]:
-    """``python -m trellis.worker tests.live.worker_app:h`` with this session's agents."""
+    """``python -m trellis.harness.worker tests.live.worker_app:h`` with this session's agents."""
     env = {**os.environ, "TRELLIS_LIVE_SUFFIX": suffix, "TRELLIS_LIVE_LEDGER": str(ledger)}
     process = subprocess.Popen(
-        [sys.executable, "-m", "trellis.worker", "tests.live.worker_app:h"], cwd=ROOT, env=env
+        [sys.executable, "-m", "trellis.harness.worker", "tests.live.worker_app:h"],
+        cwd=ROOT,
+        env=env,
     )
     try:
         yield process

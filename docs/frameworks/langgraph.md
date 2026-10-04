@@ -113,7 +113,7 @@ harness tool calls (`TOOL_CALL_START/ARGS/END/RESULT`), `tool_notice` for writes
 ## Durable runs, workers, schedules
 
 `agent.start(input, user=...)` queues the run (its input JSON); `h.worker([agent]).run()` or
-`python -m trellis.worker module:h` executes it; `agent.schedule(cron, input, on_behalf_of=...)`
+`python -m trellis.harness.worker module:h` executes it; `agent.schedule(cron, input, on_behalf_of=...)`
 queues one on a cadence ([runs.md](../runs.md)). A worker saves the journal as progress after
 every side-effecting harness call, so a worker that dies repeats none of them. The worker that
 continues a paused run is any worker: see *Which checkpointer* above. The graph object

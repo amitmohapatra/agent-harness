@@ -110,7 +110,7 @@ class Harness:
             RunsClient(s.runs_url, api_key=s.api_key) if s.runs_url else LocalRuns()
         )
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
-        #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
+        #: every agent wrapped here, by id (what ``python -m trellis.harness.worker`` serves)
         self.agents: dict[str, Agent] = {}
         #: the sources of each :meth:`tools` call, by the number its LangChain tools carry in
         #: their metadata: a LangGraph agent's toolbox is the sources of the calls its graph's

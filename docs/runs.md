@@ -3,7 +3,7 @@
 This page is Way 1, wrapped: the harness records every run of an agent it wraps, and gives
 you the inbox, schedules and workers. A team that keeps its own framework (LangGraph, OpenAI
 Agents, the Claude Agent SDK, plain code) uses agent-runs directly, with the same calls:
-`trellis.runs.RunsClient` (pip `trellis-runs`;
+`trellis.runs.RunsClient`, and `trellis.runs.Worker` for its own workers (pip `trellis-runs`;
 [its README](https://github.com/amitmohapatra/agent-runs/blob/main/sdk/python/README.md)).
 
 Every run has a record (contracts `RunRecord`): in agent-runs when `RUNS_URL` is set
@@ -29,10 +29,17 @@ where it cannot, and so does its answer.
 ## Workers
 
 ```python
-await h.worker([agent_a, agent_b]).run()               # until stopped; CPU count runs at a time
-python -m trellis.worker app.agents:h                  # every agent the Harness `h` wraps
-python -m trellis.worker app.agents:h --concurrency 8
+await h.worker([agent_a, agent_b]).run()                  # until stopped; CPU count runs at a time
+python -m trellis.harness.worker app.agents:h             # every agent the Harness `h` wraps
+python -m trellis.harness.worker app.agents:h --concurrency 8
 ```
+
+The claim loop is agent-runs' SDK's, `trellis.runs.Worker`; the harness's worker
+(`trellis.harness.worker`) runs it with your wrapped agents: each claimed run is its agent's
+next attempt, and the harness's background writes start before the first claim and drain when
+the loop ends. A team on its own framework runs the same loop with its own handler,
+`Worker(RunsClient(), handle, ["triage"]).serve()` (its
+[README](https://github.com/amitmohapatra/agent-runs/blob/main/sdk/python/README.md#the-worker)).
 
 `h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
 at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and
@@ -43,14 +50,17 @@ of idle workers does not ask in step), and asks at once again after it got work.
 `False` when nothing was queued. A claim that fails is logged and counts as no work; a run that
 breaks the harness itself is logged and the worker goes on.
 
-**Stopping.** `worker.stop()` — what `python -m trellis.worker` calls on `SIGTERM` or `SIGINT` —
-stops claiming and lets the runs the worker holds finish, for up to 25 s (`GRACE_SECONDS`). A run
-still going then is *released*: stopped without writing anything, so its lease lapses and
-agent-runs queues it again as its next attempt for another worker (the journal replays what its
-last checkpoint holds — its progress, below: every tool call with side effects it completed). A second signal releases the runs at once. Then the memory write queue
-drains (at most 10 s; what is left is spooled or counted lost — [memory.md](memory.md)) and the
-process exits `0`. Give the container at least 40 s to stop (e.g. a termination grace period of
-45 s). Cancelling `worker.run()` instead cancels the runs it holds: they end `CANCELLED`.
+**Stopping.** `worker.stop()` — what `await worker.serve()` and so
+`python -m trellis.harness.worker` call on `SIGTERM` or `SIGINT` — stops claiming and lets the
+runs the worker holds finish, for up to 25 s (`trellis.runs`' `GRACE_SECONDS`). A run still
+going then is *released* (cancelled with `trellis.runs.RELEASED`): stopped without writing
+anything, so its lease lapses and agent-runs queues it again as its next attempt for another
+worker (the journal replays what its last checkpoint holds — its progress, below: every tool
+call with side effects it completed). A second signal releases the runs at once. Then the
+memory write queue drains (at most 10 s; what is left is spooled or counted lost —
+[memory.md](memory.md)) and the process exits `0`. Give the container at least 40 s to stop
+(e.g. a termination grace period of 45 s). Cancelling `worker.run()` instead cancels the runs
+it holds: they end `CANCELLED`.
 
 A worker runs any target. Build it the same way in every worker process (at import, in the
 module the worker loads); a LangGraph graph's own `interrupt()` (or HITL middleware) pause needs a

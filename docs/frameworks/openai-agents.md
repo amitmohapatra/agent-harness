@@ -89,7 +89,7 @@ also ask for it.
 
 ## Durable runs, workers, schedules, AG-UI, A2A, evaluation
 
-The same as every target: `start` + `h.worker`/`python -m trellis.worker` (progress saved after
+The same as every target: `start` + `h.worker`/`python -m trellis.harness.worker` (progress saved after
 each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` as a tool,
 `h.evaluate` and online judges (`llm_judge` needs `TRELLIS_JUDGE_MODEL`). See
 [runs.md](../runs.md), [surfaces.md](../surfaces.md), [evaluation.md](../evaluation.md).
