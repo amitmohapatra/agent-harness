@@ -233,8 +233,13 @@ The memory service in the tests is an in-process fake (`tests/support/memory.py`
 real SDK, and every request the harness sends it and every answer it gives is checked against
 the memory service's committed `docs/openapi.json` (a test with a mismatch fails);
 `tests/contract/test_openapi.py` drives every call once and does the same for the runs client
-against agent-runs' `docs/openapi.json` — both read from the sibling checkouts (CI checks out
-`main` of each), or from `TRELLIS_MEMORY_OPENAPI` / `TRELLIS_RUNS_OPENAPI`.
+against agent-runs' `docs/openapi.json`; `tests/contract/test_runs_wire.py` checks what real
+runs (approvals, artifacts, failures, a worker's progress, schedules) send agent-runs and that
+its schemas and enums are the contracts' models; `tests/contract/test_types.py` that every
+result, event, record and error handed back is the contracts type. The documents are read from
+the sibling checkouts (CI checks out `main` of each), or from `TRELLIS_MEMORY_OPENAPI` /
+`TRELLIS_RUNS_OPENAPI`; an agent-runs checkout without its document fails the tests rather
+than skipping them.
 
 Docs: [ARCHITECTURE.md](ARCHITECTURE.md) (diagrams: system context, components, a run, a
 pause through agent-runs, an A2A call, run states), [docs/scenarios.md](docs/scenarios.md)
