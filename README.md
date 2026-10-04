@@ -349,6 +349,11 @@ unreachable; see `tests/live/conftest.py` for what it registers in the gateway f
 every model in it is planned, everything else is real — each framework against both services
 (memory pushed and pulled, approvals in agent-runs, the records read back), then workers,
 schedules, AG-UI, A2A, documents, feedback and evaluation with memory on.
+`tests/live/test_live_pluggable.py` is Way 2 against the same two services, with no `h.wrap`
+anywhere: a plain LangGraph graph using memory, governance (an administrator's rule, LangGraph's
+`interrupt`), a durable pause in agent-runs answered from the inbox, signed webhooks, a schedule
+run by `trellis.runs.Worker`, evaluation and `remote()`. `tests/live/test_live_mixed.py` puts a
+wrapped agent and a plain graph under one rule, one inbox and one memory.
 
 The memory service in the tests is an in-process fake (`tests/support/memory.py`) behind the
 real SDK, and every request the harness sends it and every answer it gives is checked against
