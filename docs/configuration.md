@@ -14,7 +14,7 @@ what is read.
 | `BIFROST_URL` | no MCP tools, no `ReAct` model names |
 | `BIFROST_VIRTUAL_KEY` | gateway calls without a key (the gateway's own policy decides); no memory model key registered |
 | `TRELLIS_API_KEY` | only allowed without `MEMORY_URL`: both services refuse a call without a key, so `Harness()` refuses `MEMORY_URL` (and `RUNS_URL`) without it (`ConfigurationError`), rather than a `401` at the first run |
-| `MEMORY_URL` | memory off: no context, no memory tools, no records, no catalog (tiers are the tools' own) |
+| `MEMORY_URL` | memory off: no context, no memory tools, no records, no catalog (the tools' own risks decide) |
 | `RUNS_URL` | runs, the queue and schedules kept in process (needs `MEMORY_URL`: agent-runs accepts the memory service's keys, and the tenant comes from there) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no OTLP export |
 | `OTEL_EXPORTER_OTLP_HEADERS` | no OTLP headers; no Langfuse scores API |

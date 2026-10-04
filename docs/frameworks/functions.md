@@ -33,7 +33,7 @@ result = await agent.run({"order": "o-7", "amount": 40, "question": "Refund o-7"
 |---|---|
 | `agent.context` | the pushed memory context (also a leading system message when the input is a message list) |
 | `agent.memory` | the memory SDK's verbs in the run's scope (`search`, `remember`, `history`, documents…; needs `MEMORY_URL`) |
-| `await agent.tools.call(name, **args)` | any tool of the run — yours, MCP, memory — through the bridge (tiers, approvals, journal, records) |
+| `await agent.tools.call(name, **args)` | any tool of the run — yours, MCP, memory — through the bridge (governance, approvals, journal, records) |
 | `await agent.tools.hints(task)` | the tools that fit a task, from the memory service |
 | `await agent.ask(question, ...)` | a pause for a person ([interrupts.md](../interrupts.md)); returns the answer on resume |
 | `agent.log(message, **fields)` | a log line and a `log` event on the stream |

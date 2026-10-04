@@ -4,10 +4,10 @@ and attaches all of it to agents with :meth:`Harness.wrap`.
 
 Nothing about an agent is configured beyond ``h.wrap(target, id=...)``: memory is on when the
 deployment has a memory service, the MCP tools are the ones the Bifrost virtual key allows,
-risk tiers and approval rules come from the tools and the catalog, and who the deployment is
-(its tenant) comes from ``TRELLIS_API_KEY`` itself — asked of the memory service, remembered
-for the process (asked again every :data:`KEY_TTL_SECONDS`, the last answer kept while the
-service is down).
+whether a call runs, is announced or asks is governance's (:meth:`Harness.governance`: the
+tools' risks and the catalog's rules), and who the deployment is (its tenant) comes from
+``TRELLIS_API_KEY`` itself — asked of the memory service, remembered for the process (asked
+again every :data:`KEY_TTL_SECONDS`, the last answer kept while the service is down).
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import replace
 from typing import Any, Final, Literal
 
 from trellis.contracts import ConfigurationError, FeedbackVerdict, ToolSpec
@@ -28,12 +27,14 @@ from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs, RunSummary
 from trellis.harness.evals import EvalReport, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.fresh import Fresh
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.identity import Identity
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.sources import as_source
-from trellis.harness.tools.toolbox import Published, Toolbox
+from trellis.harness.tools.toolbox import Toolbox
 from trellis.harness.worker import Worker
 from trellis.harness.writes import Writes
 from trellis.memory.errors import (
@@ -109,8 +110,9 @@ class Harness:
         self.scores = telemetry.Scores.of(s)
         #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
         self.agents: dict[str, Agent] = {}
-        #: the sources of each :meth:`tools` call, by the toolbox number its tools carry: a
-        #: LangGraph agent's toolbox is the sources of the calls its graph's tools came from
+        #: the sources of each :meth:`tools` call, by the number its LangChain tools carry in
+        #: their metadata: a LangGraph agent's toolbox is the sources of the calls its graph's
+        #: tools came from
         self._built: dict[int, list[Source]] = {}
         self._key = Fresh(
             self._whoami,
@@ -122,7 +124,8 @@ class Harness:
         self._registered: set[tuple[str, str]] = set()
         #: the memory service said it takes no model keys: none is registered again
         self._model_keys_off = False
-        self._published: dict[str, Published] = {}
+        #: governance per tenant (:meth:`governance`)
+        self._governance: dict[str, Governance] = {}
         telemetry.configure(s)
 
     # ------------------------------------------------------------------ attaching
@@ -144,13 +147,12 @@ class Harness:
         wrapping it: LangChain tools (LangGraph, Deep Agents), ``FunctionTool``\\ s (OpenAI
         Agents), or one in-process MCP server (Claude). It holds ``sources``, the MCP tools
         the virtual key allows and — memory on — the memory service's agent tools. Every call
-        is still the harness's: policy, approval, record."""
+        is still the harness's: governance, approval, record."""
         mine = [as_source(s) for s in sources]
         tenant = await self.tenant()
         number = len(self._built)
         self._built[number] = mine
-        # each tool names this call: its calls read the toolbox's governance as it is then
-        tools = [replace(t, toolbox=number) for t in await self.resolve(mine, tenant=tenant)]
+        tools = await self.resolve(mine, tenant=tenant)
         if self.memory is not None:
             scope = self.memory.scoped(tenant)
             tools.extend(await self.memory_tools(scope))
@@ -322,10 +324,6 @@ class Harness:
             raise ConfigurationError(f"TRELLIS_API_KEY speaks for {own!r}, not {requested!r}")
         return own
 
-    def built(self, number: int) -> list[Source]:
-        """The sources of the :meth:`tools` call ``number``."""
-        return self._built[number]
-
     def built_for(self, tools: Sequence[Any]) -> list[Source]:
         """The sources of the :meth:`tools` calls that ``tools`` (a graph's bound tools) came
         from — each graph has its own toolbox, so two graphs may each have a ``search``."""
@@ -347,20 +345,34 @@ class Harness:
         return self.memory is not None
 
     # ------------------------------------------------------------------ used by agents
+    def governance(self, tenant: str) -> Governance:
+        """Governance in ``tenant``, one per tenant: the memory service's tool catalog in its
+        scope (memory on; publishes go through the background writes), or the tools' own
+        risks only."""
+        found = self._governance.get(tenant)
+        if found is None:
+            found = self._governance[tenant] = self._governed(tenant)
+        return found
+
+    def _governed(self, tenant: str) -> Governance:
+        if self.memory is None:
+            return Governance(tenant=tenant)
+        scope = self.memory.scoped(tenant)
+        writes = self.writes
+
+        async def submit(entries: list[dict[str, object]], send: Callable[[], Any]) -> None:
+            record = scope.record("publish_catalog", entries=entries)
+            await writes.submit("memory.tool_catalog", send, record=record)
+
+        return Governance(MemoryCatalog(scope.ctx), submit=submit, tenant=tenant)
+
     def toolbox(self, sources: Sequence[Source], *, tenant: str) -> Toolbox:
-        """A toolbox of ``sources`` and the MCP tools in ``tenant``, tiered by the catalog and
-        kept fresh (``tools/toolbox.py``)."""
-        catalog = self.memory.scoped(tenant) if self.memory is not None else None
-        return Toolbox(
-            sources,
-            gateway=self.gateway,
-            catalog=catalog,
-            writes=self.writes,
-            published=self._published.setdefault(tenant, Published()),
-        )
+        """A toolbox of ``sources`` and the MCP tools in ``tenant``, published to its catalog
+        and kept fresh (``tools/toolbox.py``)."""
+        return Toolbox(sources, gateway=self.gateway, governance=self.governance(tenant))
 
     async def resolve(self, sources: Sequence[Source], *, tenant: str) -> list[Tool]:
-        """The toolbox once: ``sources`` and the MCP tools, tiered by the catalog."""
+        """The toolbox once: ``sources`` and the MCP tools."""
         return await self.toolbox(sources, tenant=tenant).tools()
 
     def _replay(self, record: dict[str, Any]) -> Callable[[], Awaitable[object]] | None:

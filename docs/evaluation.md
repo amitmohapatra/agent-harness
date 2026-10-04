@@ -118,7 +118,7 @@ await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None,
   `GET /api/public/dataset-items?datasetName=&page=&limit=50`, page by page; archived items are
   left out). A name with Langfuse not configured, or one Langfuse does not have, is a
   `ConfigurationError`.
-* **Each item** runs through the normal pipeline — memory push and pull, the toolbox, risk tiers
+* **Each item** runs through the normal pipeline — memory push and pull, the toolbox, governance
   and approvals, records, traces — acting for `user` (default `trellis-evaluate`; memory is
   scoped to it, so give an evaluation its own user when its writes should stay apart), as an
   item of a Langfuse experiment (below). Then the evaluators score the answer and each score

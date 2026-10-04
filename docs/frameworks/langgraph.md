@@ -43,7 +43,7 @@ result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="
 every MCP tool the Bifrost virtual key allows, and — memory on — the memory tools
 (`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`,
 `tool_search`). Tools that are not the harness's (a `@langchain_core.tools.tool` of your own)
-keep working; they are not tiered, journaled or recorded. `h.wrap(graph, tools=...)` is refused
+keep working; they are not governed, journaled or recorded. `h.wrap(graph, tools=...)` is refused
 for a compiled graph: pass the tools to the graph instead.
 
 **`graph.invoke` itself is not intercepted.** The harness runs the graph through

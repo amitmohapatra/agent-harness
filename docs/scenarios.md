@@ -28,14 +28,15 @@ existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.
 | The tool is | Use | Notes |
 |---|---|---|
 | A Python function in this process | `tools=[fn]` or `@tool(side_effects=...)` | Schema from the signature, description from the docstring. Declare `side_effects`: `read` runs, `write` (default) runs and is announced, `irreversible` asks a person. |
-| An HTTP API with an OpenAPI 3 document | `openapi(spec, only=[...])` | One tool per `operationId`; the method decides the tier (GET read, POST/PUT/PATCH write, DELETE irreversible). |
+| An HTTP API with an OpenAPI 3 document | `openapi(spec, only=[...])` | One tool per `operationId`; the method decides the side effects (GET read, POST/PUT/PATCH write, DELETE irreversible). |
 | Another agent | `a2a(url)` | One `write` tool; its questions become this run's questions. |
-| Shared by many agents, owned by a platform team, budgeted | an MCP server registered in Bifrost, allowed on the agent's virtual key | Nothing in code: the toolbox is what the key allows, tiered by the server's annotations and the catalog. Many read-only Code Mode servers become Code Mode meta-tools. |
+| Shared by many agents, owned by a platform team, budgeted | an MCP server registered in Bifrost, allowed on the agent's virtual key | Nothing in code: the toolbox is what the key allows, governed by the server's annotations and the catalog. Many read-only Code Mode servers become Code Mode meta-tools. |
 | Needed when the agent is built (a compiled graph; any framework's agent built before wrapping) | `await h.tools(*sources, framework=...)` | The same toolbox in the framework's own type; every call still goes through the bridge. |
 
 Approvals by tool: make the tool `irreversible` (or let its MCP server say `destructiveHint`).
 Approvals by call: an administrator's `approve_when` rule in the memory service's tool catalog
-(`amount > 10000`) asks exactly when it holds — no code change, and it replaces the tier.
+(`amount > 10000`) asks exactly when it holds — no code change, and it replaces what the risk
+decides ([governance.md](governance.md)).
 
 ## Memory: reading and writing
 

@@ -1,10 +1,12 @@
-"""Every harness tool call, whichever framework makes it: replay, policy, execution, record.
+"""Every harness tool call, whichever framework makes it: replay, governance, execution,
+record.
 
 1. **replay** — a call the journal already has (a resumed run re-planning the same step)
    returns its recorded output and runs nothing;
-2. **policy** — the risk tier, from the tool's governance as the catalog says at the time of
-   the call (``Agent.governing``): ``auto`` runs, ``notify`` is announced on the run's stream,
-   ``ask`` pauses the run for approval (an approver may edit the arguments, or reject);
+2. **governance** — the run's tenant's :class:`~trellis.harness.governance.Governance` decides,
+   by the tool's name, as the catalog says at the time of the call: ``run`` runs, ``announce``
+   is announced on the run's stream, ``ask`` pauses the run for approval (an approver may edit
+   the arguments, or reject);
 3. **execution** — inside a span, with ``TOOL_CALL_*`` events around it;
 4. **record** — journaled for a later resume (and, in a worker, saved as the run's progress
    checkpoint: at once after a call with side effects), counted, and (memory on) sent to the
@@ -30,7 +32,6 @@ from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, cu
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import Tool
-from trellis.harness.tools.policy import Tier, tier
 
 #: How much of a tool result rides on the event stream.
 PREVIEW_CHARS: Final = 2000
@@ -56,13 +57,13 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         _events(runtime, ref, tool_call, ToolOutcome(tool=tool.name, output=output, cached=True))
         return ToolOutcome(tool=tool.name, output=output, cached=True)
 
-    # the tier and rule as the catalog says now (a graph's tools were built before)
-    governing = await runtime.agent.governing(runtime, tool)
-    chosen, why = tier(governing, args)
-    if chosen is Tier.ASK:
-        resolution = await runtime.approve(tool_call, why)
-        decision = answer_of(resolution)  # raises RunCancelled on CANCEL
-        if resolution.decision is InterruptDecision.REJECT or decision is False:
+    # governance as the catalog says now, by name (a graph's tools were built before)
+    governance = runtime.agent.harness.governance(runtime.tenant)
+    decision = await governance.check(tool.name, args, side_effects=tool.spec.side_effects)
+    if decision.asks:
+        resolution = await runtime.approve(tool_call, decision.question)
+        answer = answer_of(resolution)  # raises RunCancelled on CANCEL
+        if resolution.decision is InterruptDecision.REJECT or answer is False:
             reason = reason_of(resolution)
             outcome = ToolOutcome(
                 tool=tool.name,
@@ -73,20 +74,19 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
             )
             _events(runtime, ref, tool_call, outcome)
             return outcome
-        if resolution.decision is InterruptDecision.EDIT and isinstance(decision, dict):
-            args = decision
+        if resolution.decision is InterruptDecision.EDIT and isinstance(answer, dict):
+            args = answer
             tool_call = tool_call.model_copy(update={"args": args})
-    elif chosen is Tier.NOTIFY:
-        runtime.events.custom(
-            NOTICE, tool=tool.name, args=args, side_effects=governing.side_effects
-        )
+    elif decision.announces:
+        runtime.events.custom(NOTICE, tool=tool.name, args=args, side_effects=decision.risk)
 
     runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool.name)
     runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)
     runtime.used_code_mode |= tool.code_mode
     runtime.used.add(tool.name)
     started = time.perf_counter()
-    with tool_span(tool.name, ref, args, source=tool.spec.source, tier=chosen.value) as span:
+    action = decision.action.value
+    with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
         try:
             outcome = ToolOutcome(tool=tool.name, output=await tool.run(args))
         except (Paused, RunCancelled):
@@ -103,7 +103,7 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
     if outcome.ok:
         runtime.replay.record_call(key, outcome.output, tool=tool.name)
         # a call with side effects is saved at once: a crash after it does not repeat it
-        await runtime.progress(now=chosen is not Tier.AUTO)
+        await runtime.progress(now=not decision.runs)
     runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=tool.name)
     runtime.events.tool(
         RunEventType.TOOL_CALL_RESULT,

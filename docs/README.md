@@ -12,7 +12,8 @@ covers, and which feature to use when.
 | **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic, approvals, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
 | [scenarios.md](scenarios.md) | which to use when, in more detail: targets, tools, memory, pauses, runs, surfaces, observability, evaluation |
 | [configuration.md](configuration.md) | the environment, `Settings`, and who the key says the deployment is |
-| [tools.md](tools.md) | the toolbox, risk tiers, `approve_when`, tool hints, Code Mode, `h.tools` |
+| [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
+| [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed; automatic in `h.wrap`, or `Governance` and `governed` in your own code |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts |
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, schedules, the inbox, the agent-runs wire |
@@ -35,7 +36,7 @@ covers, and which feature to use when.
 | a model and tools, no framework | `ReAct(system=..., model=...)` | [react.md](frameworks/react.md) |
 | code that decides itself (a workflow, a router, glue) | `async def fn(input, agent)` | [functions.md](frameworks/functions.md) |
 
-Every target gets the same harness: memory push and pull, tiers and approvals, records,
+Every target gets the same harness: memory push and pull, governance and approvals, records,
 grounding, judges, traces, durable runs and both surfaces. What differs is how a pause resumes
 (in place for a checkpointed graph and the OpenAI SDK's own approvals; a re-run against the
 journal otherwise), how far the tool schemas are narrowed, and what the framework does on its
@@ -77,7 +78,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 
 | The tool is | Use | Governed by |
 |---|---|---|
-| a Python function in this process | `@tool(side_effects=...)`, or a bare function in `tools=[...]` | its declared tier, overridden by the catalog |
+| a Python function in this process | `@tool(side_effects=...)`, or a bare function in `tools=[...]` | its declared side effects, overridden by the catalog |
 | an HTTP API with an OpenAPI document | `openapi(spec, only=[...])` | the method (GET read … DELETE irreversible), and the catalog |
 | another agent | `a2a(url)` | `write`, and the catalog |
 | shared across agents, owned by a platform team | an MCP server in Bifrost, allowed on the agent's virtual key — nothing in code | the server's annotations, and the catalog |
@@ -91,6 +92,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | every call of a tool approved | `side_effects="irreversible"` (or the MCP server's `destructiveHint`) |
 | some calls approved, decided by an administrator without a deploy | the catalog's `approve_when` (`amount > 10000`) |
 | the framework's own gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`) | keep it: it becomes the same approval — gate each tool in one place |
+| the same decisions for tools of an agent you do not wrap | `Governance.from_env(...)` with `check` or `governed(fn, gov, on_ask=...)` ([governance.md](governance.md#way-2-from-your-own-code)) |
 | a question, a choice, a table or diff to review | `trellis.current().ask(...)` (or a graph's own `interrupt()`) |
 | someone else to answer, by a deadline | `ask(..., assignee="role:…", deadline=..., escalate_to=...)` and `h.inbox(...)` |
 | to answer | `agent.resume(id, "approve" \| "reject" \| "edit" \| "answer" \| "cancel", answer=..., reviewer=...)` |
@@ -120,7 +122,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 
 | Variable | Turns on |
 |---|---|
-| `MEMORY_URL` (+ `TRELLIS_API_KEY`) | memory: push, pull tools, records, the tool catalog (tiers, `approve_when`), grounding, documents, feedback in memory |
+| `MEMORY_URL` (+ `TRELLIS_API_KEY`) | memory: push, pull tools, records, the tool catalog (risks, `approve_when`), grounding, documents, feedback in memory |
 | `RUNS_URL` | agent-runs: durable runs, workers across processes, the ticker's schedules and deadlines, run artifacts |
 | `BIFROST_URL` (+ `BIFROST_VIRTUAL_KEY`) | MCP tools (what the key allows), Code Mode, `ReAct` and `llm_judge` model names, the memory model key |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `_HEADERS` | trace export; with Langfuse's credentials, its scores API and datasets |

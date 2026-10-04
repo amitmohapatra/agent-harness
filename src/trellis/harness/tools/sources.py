@@ -5,7 +5,7 @@ loaded automatically (``tools.toolbox``).
 
 Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A local
 function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
-the tool catalog may override either (``tools.policy``).
+the tool catalog may override either (``trellis.harness.governance``).
 """
 
 from __future__ import annotations

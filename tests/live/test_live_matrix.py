@@ -28,6 +28,7 @@ import asyncio
 import json
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -68,6 +69,7 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness import worker as worker_module
+from trellis.harness.governance import catalog as governance_catalog
 from trellis.harness.surfaces.agui.sse import decode
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.sources import FunctionTool
@@ -520,10 +522,11 @@ async def test_a_hand_built_graphs_own_interrupt_pauses_in_agent_runs(tmp_path: 
 @pytest.mark.timeout(TIMEOUT_SECONDS)
 @pytest.mark.parametrize("framework", ["langgraph", "deepagents"])
 async def test_a_catalog_rule_set_after_the_graph_was_built_decides_its_calls(
-    framework: str, tmp_path: Path
+    framework: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A compiled graph holds the tools it was built with; an administrator's rule set in the
-    catalog afterwards still decides whether a call waits."""
+    catalog afterwards still decides whether a call waits, once the rules governance read
+    while building it are older than their TTL."""
     async with live_harness() as h:
         case = Case(h, framework, tmp_path)
         built = await build(case, [(case.email, {"to": "ops", "body": "A-1 is low"})])
@@ -534,6 +537,8 @@ async def test_a_catalog_rule_set_after_the_graph_was_built_decides_its_calls(
         await scope.advanced.tools.put_catalog(
             [{"name": case.email, "side_effects": "write", "approve_when": rule}]
         )
+        ttl = governance_catalog.GOVERNANCE_TTL_SECONDS
+        monkeypatch.setattr(governance_catalog, "_now", lambda: time.monotonic() + ttl + 1)
         paused = await agent.run(QUESTION, user=case.user, thread=case.thread)
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
         assert rule in paused.interrupt.question and case.ledger == []

@@ -303,7 +303,7 @@ def agent_span(run: RunTrace, task: str) -> Iterator[trace.Span]:
 
 @contextmanager
 def tool_span(
-    name: str, call_id: str, args: Any, *, source: str, tier: str
+    name: str, call_id: str, args: Any, *, source: str, action: str
 ) -> Iterator[trace.Span]:
     with _tracer.start_as_current_span(f"execute_tool {name}") as current:
         if current.is_recording():
@@ -315,7 +315,7 @@ def tool_span(
                 "gen_ai.tool.call.arguments": _text(args),
                 "langfuse.observation.type": "tool",
                 "trellis.tool.source": source,
-                "trellis.tool.tier": tier,
+                "trellis.governance.action": action,
             }
             current.set_attributes(redact_attributes(attributes))
             _experimented(current)

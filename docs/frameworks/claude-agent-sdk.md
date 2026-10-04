@@ -43,7 +43,7 @@ that server's config (add it to `mcp_servers` as `"trellis"` and its tools to `a
 ## Claude Code's built-in tools
 
 `Read`, `Write`, `Edit`, `Bash`, `WebFetch` and the rest are the CLI's own. The harness does not
-see them: they are not tiered, approved, journaled or recorded, and on a re-run after a pause
+see them: they are not governed, approved, journaled or recorded, and on a re-run after a pause
 they run again. Their permissions are the SDK's — `allowed_tools`, `disallowed_tools`,
 `permission_mode`, `can_use_tool`. Put anything with side effects that must happen once, or be
 approved, behind a harness tool, and keep the built-ins to what is safe to repeat (or turn them

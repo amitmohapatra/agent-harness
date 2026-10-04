@@ -3,8 +3,9 @@
 ## The toolbox
 
 An agent's tools, per agent and tenant, in `tools/toolbox.py` — their definitions listed again
-after `TOOLS_TTL_SECONDS` (300), their governance (the catalog) read again after
-`GOVERNANCE_TTL_SECONDS` (30; see below):
+after `TOOLS_TTL_SECONDS` (300). Whether a call runs, is announced or asks is not the tools':
+[governance](governance.md) decides it at each call, from the side effects below and the tool
+catalog.
 
 | Where from | Tools | Side effects |
 |---|---|---|
@@ -17,69 +18,20 @@ after `TOOLS_TTL_SECONDS` (300), their governance (the catalog) read again after
 `tools=` takes only what runs in this process; which MCP tools an agent has is decided where
 its virtual key is configured, in the gateway. Tool names must be unique across the toolbox.
 
-With memory on, the tool catalog (`GET /v1/tools?names=`) is read for every tool — every 30 s,
-conditionally (`If-None-Match` with the last answer's `ETag`: a `304` keeps what was read; a
-service that sends no `ETag` is read in full) — and every tool is published to it in the
-background, once per content: MCP tools with their annotations (never a `side_effects` of the
-harness's making, so an administrator's stays), local, OpenAPI and A2A tools with their declared
-side effects. A content counts as published once the service stored it: a publish that failed
-is sent again at the next listing. Concurrent runs that find the toolbox stale share one read.
-
-## Tiers and `approve_when`
-
-The catalog's `risk` — what the memory service decided from the annotations it was sent and
-what an administrator set — overrides the tool's own side effects. Then:
-
-| Side effects | Tier |
-|---|---|
-| `read` | runs |
-| `write` | runs, announced as a `CUSTOM` `tool_notice` event |
-| `irreversible` | pauses the run for approval (`InterruptReason.APPROVAL`, the call attached) |
-
-The catalog's `approve_when` for a tool — an administrator's rule, or an approval suggestion
-someone accepted (`POST /v1/tools/approval-suggestions/{id}/accept` in the memory service) —
-replaces the tier: the call asks exactly when the expression holds on its arguments.
-
-```text
-amount > 10000 and currency in ["EUR", "USD"]
-shape == "amount:num:1e4"
-```
-
-The expression language is the memory service's own (`trellis.memory.approval`, which writes
-and validates these rules and which the harness evaluates them with — one implementation, not
-two): comparisons, `and`/`or`/`not`, `in`, literals, lists, dotted argument paths, and `shape`
-(the call's argument shape, which approval decisions are pooled by). A rule that does not
-parse, or cannot be evaluated on a call, asks: the policy fails closed. When it does not hold
-the call runs (announced unless the tool only reads). With memory off there is no catalog: the
-tiers are the tools' own.
-
-**A catalog that cannot be read** (the memory service down, slow, refusing) does not fail the
-run. Governance read in the last 300 s still stands; past that, or with none read, each tool
-keeps its own tier — except that every tool that does more than read asks for approval, since
-whether an administrator wants its calls approved is unknown (the approver reads "… the tool
-catalog that says when it needs approval could not be read"). A warning is logged once; the
-catalog is asked again every 30 s, and its answer ends the fallback.
-
-An approver may approve, reject (the model is told the call was not run, and why when the
-reject carries a reason: `resume(id, "reject", answer="why", ...)`), edit (the call runs with
-the edited arguments) or cancel (the run ends `CANCELLED`). Each decision is also `TOOL_CALL`
-feedback, from which the memory service learns approval suggestions.
-
-A framework's own approval gate — LangChain's `HumanInTheLoopMiddleware`, Deep Agents'
-`interrupt_on`, OpenAI Agents' `needs_approval` — pauses the run as the same approval and takes
-the same decisions ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
-Gate a tool in one place: a tool the framework gates should not also be `irreversible` or under
-an `approve_when` in the harness, or each call is approved twice. A framework's own tools —
-Deep Agents' file tools, Claude Code's built-ins, your own `function_tool`s — are not harness
-tools: no tier, journal or record ([framework pages](README.md#which-target)).
+With memory on, every tool is published to the memory service's tool catalog, through
+governance, in the background and once per content: MCP tools with their annotations, local,
+OpenAPI and A2A tools with their declared side effects. An administrator sets `approve_when` on
+them there ([governance.md](governance.md)). Concurrent runs that find the toolbox stale share
+one listing.
 
 ## Every call
 
 The bridge (`tools/bridge.py`) handles every harness tool call whichever framework makes it:
-journal replay, tier, execution in an `execute_tool` span between `TOOL_CALL_START/ARGS/END/
-RESULT` events (results previewed up to 2000 characters), then the record. A tool that raises
-becomes an error result the model reads (`"<tool> failed: ..."`); a pause is never swallowed.
-A harness tool called outside a run is refused.
+journal replay, governance (run, announce, or pause for approval:
+[governance.md](governance.md#way-1-inside-hwrap)), execution in an `execute_tool` span between
+`TOOL_CALL_START/ARGS/END/RESULT` events (results previewed up to 2000 characters), then the
+record. A tool that raises becomes an error result the model reads (`"<tool> failed: ..."`); a
+pause is never swallowed. A harness tool called outside a run is refused.
 
 ## Tool hints: what the model is offered
 
@@ -107,7 +59,8 @@ or the service names no tools, every tool is offered.
 ## Code Mode
 
 The Code Mode servers of the gateway (`is_code_mode_client`: a script sees only those) whose
-every allowed tool is `read` and carries no `approve_when` go to Code Mode when there are at
+every allowed tool only reads — as governance says now: the catalog's risk over the tool's own,
+and no `approve_when` — go to Code Mode when there are at
 least 3 of them or 20 tools between them: the agent gets Bifrost's meta-tools
 (`listToolFiles`, `readToolFile`, `getToolDocs`, `executeToolCode`) scoped to those servers
 and writes one Starlark script (`server.tool(param=value)`, `print(...)`) instead of many
@@ -121,7 +74,7 @@ gateway running tools itself) is never used.
 
 A compiled LangGraph graph (and Deep Agents) binds its tools when it is built, so `wrap(tools=)`
 is refused for it. Build it with the toolbox instead — every call still goes through the
-bridge, under the tiers of the run that makes it:
+bridge, governed for the run that makes it:
 
 ```python
 graph = create_agent(model, tools=await h.tools(stock, framework="langgraph"))
@@ -135,10 +88,9 @@ in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow i
 `mcp__trellis__<tool>`, in `allowed_tools`). A LangGraph agent's tool hints are asked for among
 these tools.
 
-The tools are built once, but governed at each call: a call reads the tier and `approve_when`
-the catalog has *then* — the run's toolbox, or that `h.tools` call's own toolbox, kept fresh the
-same way — so an administrator's rule reaches a graph compiled before it was set, within the
-30 s the catalog is cached.
+The tools are built once, but governed at each call: governance looks the call up by its tool's
+name in the catalog as it is *then*, so an administrator's rule reaches a graph compiled before
+it was set, within the 30 s the rules are kept ([governance.md](governance.md#way-1-inside-hwrap)).
 
 ## Inside a run
 

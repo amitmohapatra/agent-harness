@@ -132,7 +132,7 @@ async def test_the_collector_sends_only_genai_spans_to_langfuse_with_the_callers
         framework="react",
     )  # fmt: skip
     with telemetry.agent_span(run, "what is in stock?"):
-        with telemetry.tool_span("stock", "c1", {"sku": "a"}, source="local", tier="auto"):
+        with telemetry.tool_span("stock", "c1", {"sku": "a"}, source="local", action="run"):
             pass
         with tracer.start_as_current_span("GET /inventory"):  # an HTTP span: Datadog's only
             pass

@@ -33,7 +33,7 @@ flowchart LR
 | Neighbour | What the harness uses it for | Endpoints (module) |
 |---|---|---|
 | Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s model calls, the MCP log of Code Mode scripts | `POST /mcp` (`tools/list`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs` (`clients/bifrost.py`, through `bifrost-sdk`) |
-| Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, through `trellis-memory`) |
+| Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, and the tool catalog's `/v1/tools`, `/v1/tools/catalog` and approval feedback in `governance/catalog.py`, through `trellis-memory`) |
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`clients/runs.py`) |
 | Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`surfaces/agui`) |
 | Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)`: `SendStreamingMessage`, `CancelTask` (`surfaces/a2a`) |
@@ -53,7 +53,8 @@ src/trellis/
   worker.py            python -m trellis.worker module:harness
   harness/
     harness.py         Harness: settings → clients, writes, scores; the key (tenant, kept fresh);
-                       wrap / tools / worker / inbox / feedback / add_document
+                       governance per tenant; wrap / tools / worker / inbox / feedback /
+                       add_document
     agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
     pipeline.py        one attempt of one run (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
@@ -71,18 +72,24 @@ src/trellis/
     worker.py          Worker: claim, lease, heartbeat
     adapters/          detect(target) and one adapter per framework (base, langgraph,
                        openai_agents, claude, react, function)
-    tools/             base (Tool), sources (tool, a2a, openapi), toolbox (MCP tools, catalog
-                       tiers and approve_when, Code Mode, publishing), policy (tiers,
-                       conditions), bridge (every call), convert/ (one module per native format)
+    governance/        the run / announce / ask decision, usable without Harness: decision
+                       (Action, Decision, decide), catalog (Rule, the catalog kept fresh, failing
+                       closed, publishing), Governance (check, rules, publish, decided,
+                       from_env) and governed
+    tools/             base (Tool), sources (tool, a2a, openapi), toolbox (MCP tools, their
+                       side effects, Code Mode, publishing), bridge (every call: governance,
+                       then pause / announce / run), convert/ (one module per native format)
     clients/           bifrost, memory, runs — the only modules that call those services
     surfaces/          agui (serve_chat), a2a (serve_a2a, the a2a() client)
 ```
 
-Each service has exactly one client module; nothing else in the harness calls it. The core
-imports no framework: an adapter imports its framework the first time a target of its type is
-wrapped, and `tests/contract` checks that `import trellis` and `Harness()` load none — and that
-what the clients send, and what the test doubles of the memory service and agent-runs answer,
-match those services' committed OpenAPI documents.
+Each service has exactly one client module; nothing else in the harness calls it — except the
+tool catalog, which `governance/catalog.py` reads and writes through the memory SDK itself, so
+governance works without a `Harness`. The core imports no framework: an adapter imports its
+framework the first time a target of its type is wrapped, and `tests/contract` checks that
+`import trellis` and `Harness()` load none — and that what the clients send, and what the test
+doubles of the memory service and agent-runs answer, match those services' committed OpenAPI
+documents.
 
 ### Components
 
@@ -124,9 +131,11 @@ flowchart TB
   adapters --> convert["tools.convert<br/>(langchain · openai_agents · claude · openai_chat)"]
   convert --> bridge["tools.bridge.call"]
   runtime --> bridge
-  bridge --> policy["tools.policy.tier"]
+  bridge --> governance["governance.Governance<br/>(check · decide · the catalog,<br/>through trellis.memory)"]
   bridge --> journal
-  agent --> toolbox["tools.toolbox.resolve"]
+  harness --> governance
+  agent --> toolbox["tools.toolbox.Toolbox"]
+  toolbox --> governance
   toolbox --> sources["tools.sources<br/>(tool · a2a · openapi)"]
   sources --> a2a
   subgraph clients["clients (one per service)"]
@@ -135,7 +144,6 @@ flowchart TB
     runs["runs.HttpRuns · LocalRuns"]
   end
   toolbox --> bifrost
-  toolbox --> memory
   agent --> memory
   agent --> runs
   pipeline --> runs
@@ -193,14 +201,14 @@ sequenceDiagram
   Agent->>Runs: started(RunStart) → RUNNING
   Agent->>P: attempt(agent, identity, input)
   P->>GW: MCP tools/list with the virtual key (definitions, kept 300 s)
-  P->>Mem: GET /v1/tools?names= + If-None-Match (tiers, approve_when, every 30 s)
+  P->>Mem: GET /v1/tools?names= + If-None-Match (governance: risks, approve_when, every 30 s)
   P->>Mem: GET /v1/agent-tools (pull tools, kept 10 min)
   P->>Mem: POST /v1/context (memory recall: retrieve memory span)
   Mem-->>P: rendered, bundle_id, tools [name, confidence]
   P->>FW: prepare_input(input, context), invoke(native tools)
   FW->>GW: chat completion (the team's model through Bifrost)
   FW->>Br: call erp-get_stock(sku)
-  Br->>Br: replay? tier: read → runs (write → tool_notice, irreversible → ask)
+  Br->>Br: replay? governance.check: read → run (write → announce, irreversible → ask)
   Br->>GW: POST /v1/mcp/tool/execute (execute_tool span)
   GW-->>Br: result
   Br-)W: memory.record_tool
@@ -247,30 +255,37 @@ gates, the limits — is one page per framework under [docs/frameworks/](docs/RE
 
 ## Tools
 
-The toolbox (`tools/toolbox.py`, one `Toolbox` per agent and tenant) keeps two things fresh on
-two clocks: the definitions — the local sources and every MCP tool the Bifrost virtual key
-allows — listed again after `TOOLS_TTL_SECONDS` (300), and the governance — the catalog's word on
-each tool (`risk`, `approve_when`) — read again after `GOVERNANCE_TTL_SECONDS` (30) with the last
-answer's `ETag` (`If-None-Match`; a `304` keeps what was read), so an administrator's new rule
-reaches running agents within half a minute. One refresh at a time: concurrent runs that find
-the toolbox stale share one read. Code Mode is chosen for the read-only Code Mode servers when
-there are enough of them, and every tool is published to the catalog in the background (and
-published again at the next listing if that failed). A catalog that cannot be read leaves each
-tool its own tier, except that every tool that does more than read asks for approval
-(`policy.CATALOG_UNREAD`) until it can (governance read in the last 300 s still stands); the
-warning is logged once. Every call, whoever makes it, goes through `tools/bridge.call`:
+The toolbox (`tools/toolbox.py`, one `Toolbox` per agent and tenant) keeps the definitions — the
+local sources and every MCP tool the Bifrost virtual key allows — fresh: listed again after
+`TOOLS_TTL_SECONDS` (300), one listing at a time (concurrent runs that find it stale share one).
+A new listing is published to the catalog through governance, in the background (and published
+again at the next listing if that failed). Code Mode is chosen for the Code Mode servers whose
+tools all only read as governance says now, when there are enough of them.
+
+Governance (`governance/`, one `Governance` per tenant: `Harness.governance`) is the only place a
+call's action is decided ([docs/governance.md](docs/governance.md)). It reads the catalog's word
+on each tool it is asked about (`risk`, `approve_when`) again after `GOVERNANCE_TTL_SECONDS` (30)
+with the last answer's `ETag` (`If-None-Match`; a `304` keeps what was read), so an
+administrator's new rule reaches running agents within half a minute; a tool asked about for the
+first time is read at once, and concurrent calls share one read. A catalog that cannot be read
+leaves each tool its own risk, except that every tool that does more than read asks for approval
+(`catalog.CATALOG_UNREAD`) until it can (rules read in the last 300 s still stand); the warning
+is logged once. Governance never sees the run (`Runtime`): the same `Governance` checks the
+tools of code that does not use `h.wrap` (`Governance.from_env`, `governed`).
+
+Every call, whoever makes it, goes through `tools/bridge.call`:
 
 1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
    recorded output is returned and nothing runs;
-2. **policy** — the tier from the tool's side effects (annotations → declaration → the
-   catalog's `risk`), as the governance stands at the time of the call (`Agent.governing`: the
-   run's toolbox, or — for a tool `h.tools` built into a target, e.g. an OpenAI Agents handoff's
-   — the toolbox of that `h.tools` call, so a rule set after a graph was compiled still
-   applies): `read` runs, `write` runs and is announced (`tool_notice` event),
-   `irreversible` asks for approval. The catalog's `approve_when` replaces the tier: it asks
-   exactly when the expression holds, evaluated by `trellis.memory.approval` — the memory
-   service's own implementation, which also writes and validates the rules (a rule that cannot
-   be read or evaluated asks);
+2. **governance** — `Harness.governance(tenant).check(tool, args, side_effects=...)`, by the
+   tool's name, as the catalog says at the time of the call (so a rule set after a graph was
+   compiled, or on a tool an OpenAI Agents handoff carries, still applies): `read` runs,
+   `write` runs and is announced (`tool_notice` event), `irreversible` asks for approval. The
+   catalog's `approve_when` replaces that: it asks exactly when the expression holds, evaluated
+   by `trellis.memory.approval` — the memory service's own implementation, which also writes
+   and validates the rules (a rule that cannot be read or evaluated asks). The bridge acts on
+   the decision: it pauses the run (`Runtime.approve` with the decision's question), announces
+   the call, or runs it;
 3. **execution** — in an `execute_tool` span, between `TOOL_CALL_*` events; a failure is an
    error result the model reads, a pause propagates;
 4. **record** — journaled (the tool is then offered for the rest of the run), counted, and

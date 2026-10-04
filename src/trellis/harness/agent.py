@@ -84,8 +84,6 @@ class Agent:
             self.sources = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
         self._toolboxes: dict[str, Toolbox] = {}
-        #: the toolboxes of the ``h.tools`` calls its tools came from, per tenant and call
-        self._built: dict[tuple[str, int], Toolbox] = {}
 
     # ------------------------------------------------------------------ running
     async def run(
@@ -290,25 +288,6 @@ class Agent:
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return tools
-
-    async def governing(self, runtime: Runtime, tool: Tool) -> Tool:
-        """``tool`` with its tier and approval rule as the catalog says now: the run's own
-        toolbox has it, or — a tool built into the target by ``h.tools`` that the run's toolbox
-        does not hold (an OpenAI Agents handoff's, a Claude server's) — the toolbox of the call
-        that built it. A tool from neither is governed as it is."""
-        found = runtime.toolbox.get(tool.name)
-        if found is not None and found.spec.source == tool.spec.source:
-            return found
-        if tool.toolbox is None:
-            return tool
-        key = (runtime.tenant, tool.toolbox)
-        box = self._built.get(key)
-        if box is None:
-            box = self._built[key] = self.harness.toolbox(
-                self.harness.built(tool.toolbox), tenant=runtime.tenant
-            )
-        current = {t.name: t for t in await box.tools()}
-        return current.get(tool.name, tool)
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """The memory context for this run, in the runtime — with the tools section once the

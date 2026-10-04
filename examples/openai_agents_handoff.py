@@ -1,6 +1,6 @@
 """OpenAI Agents SDK handoffs: ``wrap(tools=...)`` adds harness tools to the agent you wrap; a
 specialist reached by a handoff gets its harness tools when it is built, from
-``h.tools(..., framework="openai-agents")``. Every call is still the harness's — tiers,
+``h.tools(..., framework="openai-agents")``. Every call is still the harness's — governance,
 approvals, the journal, the record — and a resume re-runs the whole conversation, handoff
 included, against the run's journal.
 

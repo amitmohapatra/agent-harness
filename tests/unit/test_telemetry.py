@@ -75,7 +75,7 @@ def test_tool_and_model_spans_follow_the_genai_conventions(spans) -> None:
         "call_1",
         {"sku": "a", "api_key": "sk-abcdefghijklmnop"},
         source="mcp",
-        tier="auto",
+        action="run",
     ) as span:
         telemetry.output(span, {"units": 3}, key="gen_ai.tool.call.result")
     with telemetry.model_span("openai/gpt-4.1-nano", [{"role": "user", "content": "hi"}]) as span:

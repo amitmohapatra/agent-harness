@@ -33,7 +33,7 @@ if result.interrupt:  # create_po asks a person
 
 `tools=[...]` on `wrap` are added next to the agent's own `tools` for each run (with the MCP
 tools the virtual key allows and, memory on, the memory tools). Your own `function_tool`s keep
-working and are left untouched; they are not tiered, journaled or recorded by the harness.
+working and are left untouched; they are not governed, journaled or recorded by the harness.
 
 **Handoffs.** `wrap(tools=...)` reaches the agent you wrap. A specialist reached by a handoff
 gets harness tools when it is built:

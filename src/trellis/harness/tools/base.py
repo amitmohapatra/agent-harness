@@ -1,10 +1,9 @@
-"""A tool as the harness holds it: what it is (a contracts ``ToolSpec``), how to run it, and
-when a person must approve a call.
+"""A tool as the harness holds it: what it is (a contracts ``ToolSpec``) and how to run it.
 
 Every source — a local function, an MCP tool the Bifrost virtual key allows, an A2A agent, an
 OpenAPI operation, the memory service's agent tools — resolves to :class:`Tool`\\ s. The native
 converters (``tools.convert``) wrap a ``Tool`` in the framework's own tool type, and every
-call goes through the bridge (policy, approval, journal, recording) before ``run``.
+call goes through the bridge (governance, approval, journal, recording) before ``run``.
 """
 
 from __future__ import annotations
@@ -29,11 +28,6 @@ class Tool:
     run: Runner = field(repr=False)
     #: Bifrost Code Mode meta-tool: its nested calls are recorded from the gateway's log.
     code_mode: bool = False
-    #: the catalog's ``approve_when`` expression: a call asks exactly when it holds
-    approve_when: str | None = None
-    #: which ``Harness.tools`` call built it into an agent: a call reads that toolbox's
-    #: governance as it is then, not as it was when the agent was built
-    toolbox: int | None = None
 
     @property
     def name(self) -> str:
