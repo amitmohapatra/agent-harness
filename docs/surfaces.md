@@ -4,7 +4,8 @@ Two ways in, one way out. `serve_chat` puts an agent in front of a person's chat
 server-sent events); `serve_a2a` publishes it to other agents (A2A JSON-RPC); `a2a(url)` makes
 another agent one of this agent's tools. Each surface runs the agent through the same pipeline
 as `agent.run`: the run record, memory, tools, approvals and traces are the same whichever way
-a run came in. Both need an extra: `[agui]` (FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
+a run came in — and whichever framework the agent is built with
+([framework pages](README.md#which-target)). Both need an extra: `[agui]` (FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
 
 ## AG-UI: `agent.serve_chat(app, *, path="/agui", identity=None)`
 

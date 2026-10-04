@@ -252,3 +252,56 @@ async def test_two_graphs_may_each_have_a_tool_of_the_same_name(harness: Harness
     assert (await price_agent.run("a?", user="u1")).answer == "$3"
     assert executed == ["stock:a", "price:a"]
     assert stock_agent.sources != price_agent.sources
+
+
+# --------------------------------------------------------------------------- another process
+def elsewhere(harness: Harness) -> Harness:
+    """Another process on the same run store: a worker, a replica (its own InMemorySaver)."""
+    other = Harness()
+    other.runs = harness.runs
+    return other
+
+
+async def test_a_lost_checkpoint_answers_a_harness_approval_from_the_journal(
+    harness: Harness,
+) -> None:
+    """Paused with an InMemorySaver, resumed by another process: the pause is not in its
+    checkpointer, so the graph runs again from its input and the journal holds the approval —
+    the call runs once, not asked about again."""
+    turns = [("order", {"sku": "A", "qty": 2}), "ordered"]
+    first = harness.wrap(
+        await agent_graph(
+            harness, ScriptedChatModel(turns=list(turns)), checkpointer=InMemorySaver()
+        ),
+        id="buyer",
+    )
+    paused = await first.run("order 2 A", user="u1", thread="t-lost")
+    assert paused.interrupt is not None and executed == []
+    other = elsewhere(harness)
+    second = other.wrap(
+        await agent_graph(
+            other, ScriptedChatModel(turns=list(turns)), checkpointer=InMemorySaver()
+        ),
+        id="buyer",
+    )
+    done = await second.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
+    assert done.status is RunStatus.SUCCESS and done.answer == "ordered", done
+    assert executed == ["order:A:2"]
+
+
+async def test_a_lost_checkpoint_fails_a_graphs_own_pause(harness: Harness) -> None:
+    def titled() -> Any:
+        graph = StateGraph(Draft)
+        graph.add_node("ask", own_question)
+        graph.add_edge(START, "ask")
+        graph.add_edge("ask", END)
+        return graph.compile(checkpointer=InMemorySaver())
+
+    paused = await harness.wrap(titled(), id="titler").run({"topic": "x"}, user="u1", thread="t3")
+    assert paused.interrupt is not None
+    other = elsewhere(harness)
+    failed = await other.wrap(titled(), id="titler").resume(
+        paused.interrupt.interrupt_id, "answer", answer="Tides", reviewer="u1"
+    )
+    assert failed.status is RunStatus.ERROR and failed.error is not None
+    assert "no longer holds the pause" in failed.error.message

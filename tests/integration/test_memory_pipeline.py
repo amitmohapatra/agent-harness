@@ -11,9 +11,13 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from agents import Agent as OpenAIAgent
+from langchain.agents import create_agent
 
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.models import ScriptedChat
+from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import telemetry
@@ -594,3 +598,74 @@ async def test_a_document_is_staged_then_ready_or_failed_with_its_error(
     assert getattr(failed, "last_error", None) == "the file could not be parsed"  # an extra
     staged = await memory_harness.add_document(b"later", user="u", wait=None)
     assert staged.status == "STAGED"
+
+
+async def test_an_approval_rule_set_after_a_graph_was_built_governs_its_calls(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A compiled graph holds the tools ``h.tools`` built it with; the rule an administrator
+    sets afterwards still decides its calls (the run's toolbox is read fresh, not the build's)."""
+    paid: list[int] = []
+
+    @tool(side_effects="write")
+    def pay(amount: int) -> str:
+        """Pay an invoice."""
+        paid.append(amount)
+        return f"paid {amount}"
+
+    model = ScriptedChatModel(turns=[("pay", {"amount": 500}), "paid"])
+    graph = create_agent(model, tools=await memory_harness.tools(pay, framework="langgraph"))
+    memory_service.catalog = {"pay": {"side_effects": "write", "approve_when": "amount > 100"}}
+    agent = memory_harness.wrap(graph, id="graph-payer")
+    paused = await agent.run("pay the invoice", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
+    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paid == []
+
+
+async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """An OpenAI Agents specialist reached by a handoff carries tools ``h.tools`` built: the
+    run's toolbox does not hold them, and their calls read the toolbox of that call."""
+    paid: list[int] = []
+
+    @tool(side_effects="write")
+    def pay(amount: int) -> str:
+        """Pay an invoice."""
+        paid.append(amount)
+        return f"paid {amount}"
+
+    class Model(ScriptedModel):
+        """Call ids of its own, as two real models' would be."""
+
+        def __init__(self, prefix: str, turns: list[Any]) -> None:
+            super().__init__(turns)
+            self.prefix = prefix
+
+        def _next(self, input: Any, system: str | None) -> list[Any]:
+            items = super()._next(input, system)
+            for item in items:
+                if hasattr(item, "call_id"):
+                    item.call_id = self.prefix + item.call_id
+            return items
+
+    billing = OpenAIAgent(
+        name="billing",
+        model=Model("b", [("pay", {"amount": 500}), ("pay", {"amount": 500}), "paid"]),
+        tools=await memory_harness.tools(pay, framework="openai-agents"),
+    )
+    triage = OpenAIAgent(
+        name="triage",
+        model=Model("t", [("transfer_to_billing", {}), ("transfer_to_billing", {})]),
+        handoffs=[billing],
+    )
+    memory_service.catalog = {"pay": {"side_effects": "write", "approve_when": "amount > 100"}}
+    agent = memory_harness.wrap(triage, id="triage")
+    paused = await agent.run("pay the invoice", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
+    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paid == []
+    # the re-run hands off again; the approved call runs once
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
+    assert done.status is RunStatus.SUCCESS and done.answer == "paid" and paid == [500]

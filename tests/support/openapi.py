@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import httpx
+import pytest
 from jsonschema import Draft202012Validator
 
 ROOT: Final = Path(__file__).resolve().parents[2]
@@ -95,8 +96,12 @@ class OpenAPI:
         content = spec.get("content") or {}
         if not response.content or media not in ("application/json", "application/problem+json"):
             return []
-        if media not in content:
-            return [f"{where}: answers {media}, documented {sorted(content)}"]
+        if media not in content:  # "*/*": any media (an artifact's bytes, as they were stored)
+            return (
+                []
+                if "*/*" in content
+                else [f"{where}: answers {media}, documented {sorted(content)}"]
+            )
         return self._check(where, content[media].get("schema", {}), response.json())
 
     def _check(self, where: str, schema: dict[str, Any], instance: Any) -> list[str]:
@@ -106,3 +111,14 @@ class OpenAPI:
             f"{where}: {'/'.join(map(str, e.absolute_path)) or '(body)'}: {e.message[:300]}"
             for e in validator.iter_errors(instance)
         ]
+
+
+def runs_contract() -> OpenAPI:
+    """agent-runs' document, its query parameters checked. Without an agent-runs checkout next
+    to this repository the test is skipped; a checkout without the document fails it (CI checks
+    agent-runs out, so its contract tests always run there)."""
+    if not RUNS_OPENAPI.exists():
+        if RUNS_OPENAPI.parent.parent.is_dir():
+            pytest.fail(f"agent-runs is checked out but commits no {RUNS_OPENAPI}")
+        pytest.skip(f"agent-runs is not checked out next to this repository ({RUNS_OPENAPI})")
+    return OpenAPI.load(RUNS_OPENAPI, strict_query=True)

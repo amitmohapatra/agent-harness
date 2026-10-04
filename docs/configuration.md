@@ -71,4 +71,5 @@ went wrong.
   logged once per process and not asked again.
 
 Everything else — limits, timeouts, the tool-hint threshold, lease length — is a named
-constant next to the code that uses it.
+constant next to the code that uses it. What each variable turns on, in one table:
+[docs/README.md](README.md#what-each-environment-variable-turns-on).

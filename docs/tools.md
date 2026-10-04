@@ -69,7 +69,9 @@ A framework's own approval gate — LangChain's `HumanInTheLoopMiddleware`, Deep
 `interrupt_on`, OpenAI Agents' `needs_approval` — pauses the run as the same approval and takes
 the same decisions ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
 Gate a tool in one place: a tool the framework gates should not also be `irreversible` or under
-an `approve_when` in the harness, or each call is approved twice.
+an `approve_when` in the harness, or each call is approved twice. A framework's own tools —
+Deep Agents' file tools, Claude Code's built-ins, your own `function_tool`s — are not harness
+tools: no tier, journal or record ([framework pages](README.md#which-target)).
 
 ## Every call
 
@@ -127,10 +129,16 @@ agent = h.wrap(graph, id="stock")
 ```
 
 The result holds `stock`, the MCP tools the virtual key allows and (memory on) the memory
-tools. `framework="openai-agents"` returns `FunctionTool`s; `framework="claude-agent-sdk"`
-returns one in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its
-tools, `mcp__trellis__<tool>`, in `allowed_tools`). A LangGraph agent's tool hints are asked
-for among these tools.
+tools. `framework="openai-agents"` returns `FunctionTool`s (for an agent reached by a handoff,
+whose tools `wrap(tools=)` does not reach); `framework="claude-agent-sdk"` returns one
+in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its tools,
+`mcp__trellis__<tool>`, in `allowed_tools`). A LangGraph agent's tool hints are asked for among
+these tools.
+
+The tools are built once, but governed at each call: a call reads the tier and `approve_when`
+the catalog has *then* — the run's toolbox, or that `h.tools` call's own toolbox, kept fresh the
+same way — so an administrator's rule reaches a graph compiled before it was set, within the
+30 s the catalog is cached.
 
 ## Inside a run
 
