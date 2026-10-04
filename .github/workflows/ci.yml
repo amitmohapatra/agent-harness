@@ -8,9 +8,13 @@ on:
 jobs:
   gates:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-harness
     steps:
       # The platform is unpublished: the harness resolves its siblings by path (pyproject
-      # [tool.uv.sources]), so they are checked out next to it.
+      # [tool.uv.sources] ../agent-contracts, ../bifrost-sdk,
+      # ../agent-memory-service/sdk/python), so they are checked out next to it.
       - uses: actions/checkout@v4
         with:
           path: agent-harness
@@ -26,26 +30,24 @@ jobs:
         with:
           repository: amitmohapatra/agent-memory-service
           path: agent-memory-service
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: agent-harness/uv.lock
       - name: Install
-        working-directory: agent-harness
-        run: uv sync
+        run: uv sync --all-extras
       - name: Lint
-        working-directory: agent-harness
         run: make lint
       - name: Typecheck
-        working-directory: agent-harness
-        run: make typecheck
+        # pyright reads trellis.contracts / trellis.memory through the links `make typings` makes
+        run: make typings typecheck
       - name: Tests
-        working-directory: agent-harness
+        # every test except the benchmark and the live ones (they need running services)
         run: make test
       - name: Examples
-        working-directory: agent-harness
         run: make examples
       - name: Overhead benchmark
-        working-directory: agent-harness
         # fails when the harness's own overhead doubles against benchmark-results.json
         run: make bench
       - uses: actions/upload-artifact@v4
@@ -53,3 +55,4 @@ jobs:
         with:
           name: benchmark
           path: agent-harness/build/benchmark-results.json
+          if-no-files-found: ignore

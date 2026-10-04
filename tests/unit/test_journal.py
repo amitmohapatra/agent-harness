@@ -38,3 +38,9 @@ def test_an_answer_is_filed_under_the_pending_question_and_survives_a_round_trip
 
 def test_a_run_without_a_checkpoint_has_an_empty_journal() -> None:
     assert Journal.of(None) == Journal()
+
+
+def test_an_answer_with_no_open_question_files_nothing() -> None:
+    journal = Journal()
+    journal.answered(resolution("blue"))
+    assert journal.answers == {} and journal.pending is None

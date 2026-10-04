@@ -278,3 +278,184 @@ def test_the_hub_forgets_finished_runs_first(monkeypatch: pytest.MonkeyPatch) ->
     runs.open("new", "u")
     assert runs.get("done") is None
     assert runs.get("live") is live
+
+
+def test_every_harness_event_has_its_agui_members() -> None:
+    context = _context()
+
+    def one(kind: RunEventType, **fields: Any) -> AGUIEvent:
+        found = translate(RunEvent.of(context, kind, 0, **fields))
+        assert found is not None
+        return found
+
+    assert one(RunEventType.RUN_STARTED).type is AGUIEventType.RUN_STARTED
+    assert one(RunEventType.STEP_STARTED, step="plan").step_name == "plan"
+    start = one(RunEventType.TEXT_MESSAGE_START, message_id="m1", data={})
+    assert (start.message_id, start.role, start.delta) == ("m1", "assistant", None)
+    content = one(RunEventType.TEXT_MESSAGE_CONTENT, message_id="m1", data={"delta": "hi"})
+    assert (content.delta, content.role) == ("hi", None)
+    end = one(RunEventType.TEXT_MESSAGE_END, message_id="m1")
+    assert (end.message_id, end.delta) == ("m1", None)
+    args = one(RunEventType.TOOL_CALL_ARGS, tool_call_id="c1", data={"args": {"order": "o1"}})
+    assert args.delta == '{"order": "o1"}'
+    assert one(RunEventType.TOOL_CALL_END, tool_call_id="c1").tool_call_id == "c1"
+    assert one(RunEventType.STATE_SNAPSHOT, data={"step": 2}).snapshot == {"step": 2}
+    assert one(RunEventType.STATE_SNAPSHOT, data={"snapshot": [1]}).snapshot == [1]
+    patch = [{"op": "replace", "path": "/step", "value": 3}]
+    assert one(RunEventType.STATE_DELTA, data={"delta": patch}).delta == patch
+    messages = [{"role": "user", "content": "hi"}]
+    assert one(RunEventType.MESSAGES_SNAPSHOT, data={"messages": messages}).messages == messages
+    raw = one(RunEventType.RAW, data={"event": {"x": 1}, "source": "langgraph"})
+    assert (raw.event, raw.source) == ({"x": 1}, "langgraph")
+    custom = one(RunEventType.CUSTOM, data={"name": "tool_notice", "tool": "note"})
+    assert (custom.name, custom.value) == ("tool_notice", {"tool": "note"})
+
+
+def test_endings_that_are_not_errors_or_successes() -> None:
+    context = _context()
+    cancelled = translate(RunEvent.finished(context, RunOutcome.CANCELLED, 0))
+    assert cancelled is not None and cancelled.wire()["outcome"] == {"type": "cancelled"}
+    rejected = translate(RunEvent.finished(context, RunOutcome.REJECTED, 0))
+    assert rejected is not None and rejected.type is AGUIEventType.RUN_ERROR
+    assert (rejected.message, rejected.code) == ("rejected", "REJECTED")
+
+
+def test_an_event_the_protocol_has_no_type_for_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    module = importlib.import_module("trellis.harness.surfaces.agui.translate")
+    monkeypatch.setattr(module, "CUSTOM_EVENTS", {})
+    loaded = RunEvent.of(_context(), RunEventType.CONTEXT_LOADED, 0, data={"chars": 1})
+    assert translate(loaded) is None
+
+
+def test_values_that_are_not_json_travel_as_their_text() -> None:
+    from trellis.harness.surfaces.agui.translate import _json
+    from trellis.harness.tools.convert import text_of
+
+    odd = {("a", "b"): 1}  # a key JSON cannot carry
+    assert _json(odd) == str(odd) and text_of(odd) == str(odd)
+    assert _json("as is") == "as is"
+
+
+def test_an_sse_body_skips_lines_that_are_not_events() -> None:
+    body = ': a comment\nid: 3\nevent: message\ndata: {"type": "RUN_STARTED"}\n\nretry: 10\n\n'
+    assert decode(body) == [(3, {"type": "RUN_STARTED"})]
+
+
+# --------------------------------------------------------------------------- serving edges
+
+
+def serve(identity: Any = user_of, **wrap: Any) -> tuple[Harness, httpx.AsyncClient]:
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    harness.wrap(agent_fn, id="chat", tools=[refund], **wrap).serve_chat(app, identity=identity)
+    http = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://agui", headers={"x-user": "u1"}
+    )
+    return harness, http
+
+
+async def test_without_an_identity_every_caller_is_anonymous(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING", logger="trellis.agui"):
+        harness, http = serve(identity=None)
+    assert "every request runs as user 'anonymous'" in caplog.text
+    async with http:
+        events = await post(http, body("hello", runId="run-anon"))
+        assert finished(events)["result"] == "echo hello"
+        record = await harness.runs.get("run-anon")
+        assert record is not None and record.user_id == "anonymous"
+    await harness.aclose()
+
+
+async def test_an_identity_may_be_async_and_must_name_someone() -> None:
+    async def by_token(request: Request) -> str:
+        return request.headers.get("authorization", "").removeprefix("Bearer ")
+
+    harness, http = serve(identity=by_token)
+    async with http:
+        refused = await http.post(f"{PATH}/run", json=body("hi"))
+        assert refused.status_code == 401
+        http.headers["authorization"] = "Bearer ada"
+        events = await post(http, body("hi", runId="run-ada"))
+        assert finished(events)["result"] == "echo hi"
+        record = await harness.runs.get("run-ada")
+        assert record is not None and record.user_id == "ada"
+    await harness.aclose()
+
+
+async def test_a_run_id_must_be_new_and_well_formed(client: httpx.AsyncClient) -> None:
+    await post(client, body("hello", runId="run-once"))
+    again = await client.post(f"{PATH}/run", json=body("hello", runId="run-once"))
+    assert again.status_code == 422
+    odd = await client.post(f"{PATH}/run", json=body("hello", runId="run once/../x"))
+    assert odd.status_code == 422
+
+
+async def test_without_a_user_message_the_agent_gets_the_state(client: httpx.AsyncClient) -> None:
+    payload = {
+        "threadId": "t1",
+        "messages": [{"id": "m0", "role": "assistant", "content": "earlier"}],
+        "state": "from state",
+    }
+    assert finished(await post(client, payload))["result"] == "echo from state"
+
+
+@pytest.mark.parametrize(
+    ("resume", "result"),
+    [
+        ({"payload": False}, "refund was not run: the approver rejected it"),
+        ({"payload": {"order": "o2"}}, "refunded o2"),
+        (
+            {"payload": "anything", "decision": "reject"},
+            "refund was not run: the approver rejected it",
+        ),
+    ],
+    ids=["false-rejects", "object-edits", "decision-named"],
+)
+async def test_an_approval_is_rejected_edited_or_decided_outright(
+    client: httpx.AsyncClient, resume: dict[str, Any], result: str
+) -> None:
+    entry = finished(await post(client, body("refund")))["outcome"]["interrupts"][0]
+    events = await post(client, body(resume=[{"interruptId": entry["id"], **resume}]))
+    assert finished(events)["result"] == result
+
+
+async def test_a_run_the_harness_could_not_finish_is_aborted_for_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis.harness.clients.runs import RunStoreError
+
+    harness, http = serve()
+
+    async def refused(*args: Any, **kwargs: Any) -> Any:
+        raise RunStoreError("agent-runs refused the finish")
+
+    monkeypatch.setattr(harness.runs, "finished", refused)
+    async with http:
+        last = finished(await post(http, body("hello")))
+    assert last["type"] == "RUN_ERROR" and last["code"] == "RUN_ABORTED"
+    assert last["message"] == "agent-runs refused the finish"
+    await harness.aclose()
+
+
+async def test_an_artifact_the_store_no_longer_has_is_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, http = serve()
+
+    async def gone(artifact_id: str, tenant_id: str) -> None:
+        return None
+
+    async with http:
+        paused = finished(await post(http, body("table")))
+        reference = paused["outcome"]["interrupts"][0]["metadata"]["payload_ref"]
+        monkeypatch.setattr(harness.runs, "artifact", gone)
+        route = f"{PATH}/runs/{paused['runId']}/artifacts/{reference['artifact_id']}"
+        assert (await http.get(route)).status_code == 404
+        assert (await http.get(f"{PATH}/runs/run_unknown/artifacts/art_1")).status_code == 404
+    await harness.aclose()

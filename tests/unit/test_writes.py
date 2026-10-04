@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from trellis.contracts import AgentExecutionContext, RunEvent
 from trellis.harness.events import RunEvents
 from trellis.harness.writes import Writes
@@ -54,3 +56,21 @@ def test_the_loop_shutting_down_drains_the_queue() -> None:
 
     asyncio.run(main())
     assert len(done) == 20
+
+
+async def test_a_full_queue_refuses_the_write_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trellis.harness import writes as module
+
+    monkeypatch.setattr(module, "MAX_PENDING", 1)
+    writes, seen = Writes(), []
+    events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="a"))
+    events.listen(seen.append)
+
+    async def write() -> None:
+        return None
+
+    writes.submit("first", write)
+    writes.submit("second", write, events=events)  # nothing drained yet: no room
+    assert writes.failed == 1
+    assert seen[0].data["message"] == "second: the write queue is full"
+    await writes.aclose()

@@ -1,5 +1,11 @@
 # Surfaces
 
+Two ways in, one way out. `serve_chat` puts an agent in front of a person's chat UI (AG-UI over
+server-sent events); `serve_a2a` publishes it to other agents (A2A JSON-RPC); `a2a(url)` makes
+another agent one of this agent's tools. Each surface runs the agent through the same pipeline
+as `agent.run`: the run record, memory, tools, approvals and traces are the same whichever way
+a run came in. Both need an extra: `[agui]` (FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
+
 ## AG-UI: `agent.serve_chat(app, *, path="/agui", identity=None)`
 
 | Route | |
@@ -8,32 +14,94 @@
 | `GET {path}/runs/{run_id}/events` | Reconnect: the run's events after `Last-Event-ID` (or `?after=`), then live until it finishes. Only the run's own user sees it. |
 | `GET {path}/runs/{run_id}/artifacts/{artifact_id}` | Data the interrupt the run waits on carries by reference (`payload_ref`: a large `ask` table or diff), read from agent-runs. |
 
-The run keeps going when the client disconnects. Each run's events are buffered (2048 per run,
-256 runs, least recently used dropped), so warnings from background writes after the finish
-are still there on replay. A pause arrives as `RUN_FINISHED` with an `interrupt` outcome; a
-failure as `RUN_ERROR`.
+What the agent is asked: the latest `user` message's text, or the input's `state` when there is
+none. The run keeps going when the client disconnects. Each run's events are buffered (its last 2048; past 256
+runs the least recently used finished run is dropped, never a live one), and a resumed run keeps
+counting where its first attempt stopped, so warnings from background writes after the finish
+are still there on replay. A pause arrives as `RUN_FINISHED` with an `interrupt` outcome
+(`interrupts[0]`: `id`, `reason` lower-cased, `message` the question, `toolCallId`,
+`responseSchema` = `expects`, and `payload`/`payload_ref`/`tool_call` under `metadata`); a
+failure as `RUN_ERROR`; a cancellation as `RUN_FINISHED` with a `cancelled` outcome.
+
+How a resume entry becomes a decision: `decision` wins when present; `status: "cancelled"` is
+`CANCEL`; a question is `ANSWER` with `payload`; an approval is `APPROVE` for `true`, `REJECT`
+for `false`, `EDIT` for an object (the edited arguments), and anything else is refused.
+
+| Response | When |
+|---|---|
+| `401` | `identity(request)` named nobody |
+| `404` | a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
+| `409` `BAD_RESUME: …` | a resume that cannot be read as a decision, or that the run refuses (it waits on another interrupt, it is not paused) |
+| `422` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here) |
+| `RUN_ERROR` `RUN_ABORTED` | the run ended without telling its client (the harness itself failed, e.g. agent-runs refused a write) |
+
+Harness events map one to one onto AG-UI events (the contracts already use AG-UI's names):
+text and tool-call events carry their message and call ids, `CONTEXT_LOADED` becomes a
+`CUSTOM` event named `context_loaded`, `CUSTOM` events (`tool_notice`, `log`, `warning`) keep
+their name and carry the rest as `value`, `INTERRUPT` and `RUN_ERROR` are folded into the
+finishing event, and an `ERROR`/`REJECTED`/`TIMEOUT` ending is `RUN_ERROR` with the error's
+code and message.
 
 `identity(request)` (sync or async) returns the user; the tenant is the one `TRELLIS_API_KEY`
-speaks for. Nothing
-the client sends decides who is calling. Without `identity`, every request runs as
-`anonymous` (a warning is logged at mount).
+speaks for. Nothing the client sends (`forwardedProps`, the thread...) decides who is calling.
+Without `identity`, every request runs as `anonymous` (a warning is logged at mount).
 
 ## A2A: `agent.serve_a2a(app, url, *, identity=None)`
 
 JSON-RPC at `url`'s path, the agent card at `{url}/.well-known/agent-card.json` (or the
-origin's well-known path when `url` has none). The task id is the run id, the context id the
-thread. A pause is `input-required` with the question; the next message on the task resumes it
-(the decision from a data part, from approve/reject/cancel words, or an object as an edit).
-Push notifications go only to public https addresses and are signed
-`X-Trellis-Signature: t=<unix>,v1=<hmac>` with the token the caller registered (agent-runs'
-webhook scheme; `trellis.harness.surfaces.a2a.push.verify_signature` checks it); a config
-without a token is not delivered to.
+origin's well-known path when `url` has none). The card names the agent by its id and
+describes it with the target's own `description` (or `handoff_description`, or a function's
+docstring), one JSON-RPC interface, streaming, push notifications and the trusted-identity
+extension (`https://trellis.dev/a2a/extensions/trusted-identity/v1`); no credential is ever
+part of it.
 
-Identity: `identity(context)` returns the user; by default the trusted
-`x-trellis-identity` header (JSON; its tenant must be the key's), else `anonymous`.
+The task id is the run id, the context id the thread. Task states follow the run: `QUEUED` is
+`submitted`, `RUNNING` `working` (text deltas and progress — tool calls, context, custom events
+— arrive as working updates), `PAUSED` `input-required` with the question, `SUCCESS`
+`completed` with the answer as the artifact `result`, `ERROR`/`TIMEOUT` `failed`,
+`CANCELLED` `canceled`. A task this process does not hold (a restart, another replica) is
+rebuilt from the run record when its own user asks for it.
 
-## Calling A2A agents: `a2a(url)`
+The next message on an `input-required` task resumes it, as the person it belongs to (another
+user is told "this task is not yours to answer" and the task keeps waiting). The decision comes
+from a data part `{"decision": "approve"}` when present; else the words `cancel`, `abort`,
+`stop` cancel; an approval reads `approve`/`approved`/`yes`/`ok`/`allow` and
+`reject`/`rejected`/`no`/`deny`/`denied`, or a data object as the edited arguments (its
+`payload` field when it has one); anything else answers the question (a data part's `answer`,
+or the text). An answer that cannot be read keeps the task waiting and says why. A message to
+a task that has ended, or is still working, is refused (`InvalidRequestError`), and a new task
+never takes the id of an existing run. `CancelTask` cancels a working run, or ends a paused
+one `CANCELLED`; the terminal state is sent once, whichever of the stream and the cancel gets
+there first.
 
-A remote agent is one tool. The message goes with the calling run's identity header and its
-thread as the context id. When the remote agent asks something, the calling run asks the same
-question itself (`ask`), and the answer goes back on the same remote task.
+Push notifications go only to public https addresses — no credentials or fragment in the URL,
+never `localhost` or a `.local`/`.internal`/`.localhost` name, every address the host resolves
+to public (checked at registration and again at each delivery). The body is the protocol's
+`StreamResponse`, signed `X-Trellis-Signature: t=<unix>,v1=<hmac-sha256 of "t.body">` with the
+token the caller registered (agent-runs' webhook scheme), with `X-Trellis-Event:
+a2a.task_update`, `X-Trellis-Delivery` and the token itself in `X-A2A-Notification-Token`. A
+config without a token is not delivered to; a failing receiver is tried up to 3 times (0.2 s, then
+0.4 s apart), logged, and never raised into the task. A receiver checks a delivery with
+`trellis.harness.surfaces.a2a.push.verify_signature(secret, header, body, *, now=None) -> bool`
+(signatures older than 300 s are refused).
+
+Identity: `identity(context)` returns the user; by default the trusted `x-trellis-identity`
+header — JSON `{"tenant_id": ..., "user_id": ...}`, set by the deployment's authenticating
+edge, at most 4096 characters, its tenant (when it names one) the key's — else `anonymous`
+(warned once per server). A header that is too long, not a JSON object, names another tenant
+or no user is refused.
+
+## Calling A2A agents: `a2a(url, *, name=None)`
+
+A remote agent is one tool (`write`), named after its card (or `name`; unsafe characters become
+`_`, at most 64), described by the card, taking `{"message": string}`. The message goes with
+the calling run's identity on the trusted-identity header (and the extension header) and its
+thread as the context id, so a conversation between two agents is one thread on both sides.
+The answer is the remote task's `result` artifact (several artifacts as a list), or its text.
+A remote task that ends `failed`, `rejected` or `canceled` is a tool error the calling model
+reads (`"<tool> failed: …"`), as is a remote agent that cannot be reached.
+
+When the remote agent asks something (`input-required`), the calling run asks the same question
+itself (`ask`), and the answer goes back on the same remote task. If that pauses the calling
+run, the remote task is cancelled; the resumed run calls again and the journal answers the
+question, so the remote agent gets the answer on its new task.

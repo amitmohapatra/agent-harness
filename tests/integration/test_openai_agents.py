@@ -149,3 +149,29 @@ async def test_the_hints_narrow_the_tools_each_turn_and_the_teams_own_stay(
     memory_tools = ["memory_search", "memory_remember", "tool_search"]
     assert model.tools[0] == ["eta", "t2", *memory_tools]
     assert model.tools[1] == ["eta", "t2", "t4", *memory_tools]  # tool_search offered t4
+
+
+async def test_two_sdk_approvals_in_one_turn_are_answered_one_at_a_time(
+    harness: Harness,
+) -> None:
+    shipped: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def send(order: str) -> str:
+        shipped.append(order)
+        return f"sent {order}"
+
+    model = ScriptedModel([[("send", {"order": "a"}), ("send", {"order": "b"})], "both sent"])
+    agent = harness.wrap(Agent(name="s", model=model, tools=[send]), id="sender")
+    first = await agent.run("send a and b", user="u1")
+    assert first.interrupt is not None and first.interrupt.tool_call is not None
+    assert first.interrupt.tool_call.args == {"order": "a"}
+    # approving the first leaves the second waiting: the run pauses on it next
+    second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert second.status is RunStatus.PAUSED and second.interrupt is not None
+    assert second.interrupt.tool_call is not None
+    assert second.interrupt.tool_call.args == {"order": "b"}
+    assert shipped == ["a"]
+    done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "both sent"
+    assert shipped == ["a", "b"]

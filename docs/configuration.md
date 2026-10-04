@@ -17,6 +17,22 @@ what is read.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no OTLP export |
 | `OTEL_EXPORTER_OTLP_HEADERS` | no OTLP headers; no Langfuse scores API |
 
+`Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
+embedding (`Settings` is frozen and refuses unknown fields; `Settings.from_env(environ)` reads a
+mapping instead of `os.environ`, and blank values count as unset):
+
+| Field | Variable |
+|---|---|
+| `bifrost_url` | `BIFROST_URL` |
+| `bifrost_virtual_key` | `BIFROST_VIRTUAL_KEY` |
+| `api_key` | `TRELLIS_API_KEY` |
+| `memory_url` | `MEMORY_URL` |
+| `runs_url` | `RUNS_URL` |
+| `otlp_endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| `otlp_headers` | `OTEL_EXPORTER_OTLP_HEADERS`, parsed as the OTel spec writes it (`k1=v1,k2=v2`, values URL-decoded, keys lower-cased) |
+
+`RUNS_URL` without `MEMORY_URL` is refused when the `Harness` is built (`ConfigurationError`).
+
 ## Who the deployment is
 
 Not configured: the memory service says it about `TRELLIS_API_KEY`

@@ -41,7 +41,14 @@ person's feedback days later, lands on it without anything stored.
 
 ### Counters
 
-`trellis.runs` (by outcome), `trellis.tool_calls` (by status), `trellis.writes.failed`.
+| Counter | Attributes | Counted when |
+|---|---|---|
+| `trellis.runs` | `agent`, `outcome` (`success`, `error`, `interrupt`, `cancelled`) | an attempt ends |
+| `trellis.tool_calls` | `tool`, `status` (`ok`, `error`) | the bridge executed a call (a replayed or rejected call is not counted) |
+| `trellis.writes.failed` | `write` (the background write's label, e.g. `memory.transcript`) | a background write failed or the write queue was full |
+
+They go wherever the application's OTel meter provider sends them (the harness installs a
+tracer provider only).
 
 ## Export
 
@@ -87,8 +94,12 @@ are configured in Langfuse. Whether the *harness* got slower is `make bench`
 
 Every span attribute passes `trellis.harness.redaction`: names that look like secrets
 (`api_key`, `password`, `token`...) and values that look like credentials (bearer tokens,
-JWTs, `sk-...`) become `[redacted]`, e-mail addresses are masked, long values are cut at 2000
-characters.
+JWTs, `sk-...`, long key-like blobs) become `[redacted]`, e-mail addresses are masked, long
+values are cut at 2000 characters. Names are matched by their words, not substrings
+(`gen_ai.usage.input_tokens` and `tokenizer` stay; `refresh-token` and `X-Api-Key` go), and a
+number is never treated as a credential. Mappings and lists are redacted recursively, bytes
+become `<n bytes>`, anything else its JSON or its text. The redactor is the contracts
+`TelemetryRedactor`; it never raises into a run.
 
 ## Events
 

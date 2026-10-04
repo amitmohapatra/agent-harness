@@ -158,3 +158,90 @@ async def test_a_score_is_posted_on_the_runs_trace_idempotently() -> None:
         "dataType": "NUMERIC",
     }
     await scores.aclose()
+
+
+@pytest.fixture
+def installed(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """The global tracer provider, as configure() sees and sets it (never really set: a
+    process gets one, and an exporter must not try the network)."""
+    from opentelemetry import trace
+
+    providers: list[object] = []
+    monkeypatch.setattr(trace, "get_tracer_provider", trace.ProxyTracerProvider)
+    monkeypatch.setattr(trace, "set_tracer_provider", providers.append)
+    return providers
+
+
+def test_an_otlp_endpoint_installs_one_exporter_to_its_traces_url(installed: list[object]) -> None:
+    settings = Settings(
+        otlp_endpoint="http://collector:4318/", otlp_headers={"authorization": "Basic x"}
+    )
+    assert telemetry.configure(settings) is True
+    [provider] = installed
+    assert isinstance(provider, TracerProvider)
+    [processor] = provider._active_span_processor._span_processors  # type: ignore[attr-defined]
+    exporter = processor.span_exporter  # type: ignore[attr-defined]
+    assert exporter._endpoint == "http://collector:4318/v1/traces"
+    assert exporter._headers == {"authorization": "Basic x"}
+    assert provider.resource.attributes["service.name"] == "trellis-harness"
+    provider.shutdown()
+
+
+def test_an_application_provider_is_kept(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from opentelemetry import trace
+
+    own = TracerProvider()
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
+    with caplog.at_level("INFO", logger="trellis.telemetry"):
+        assert telemetry.configure(Settings(otlp_endpoint="http://c:4318")) is False
+    assert "already installed; keeping it" in caplog.text
+
+
+def test_otlp_without_the_extra_installed_says_how_to_get_it(
+    installed: list[object], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http.trace_exporter", None)
+    with caplog.at_level("WARNING", logger="trellis.telemetry"):
+        assert telemetry.configure(Settings(otlp_endpoint="http://c:4318")) is False
+    assert "pip install 'trellis-harness[otel]'" in caplog.text
+    assert installed == []
+
+
+def test_counters_count_what_happened(monkeypatch: pytest.MonkeyPatch) -> None:
+    added: list[tuple[str, int, dict[str, str]]] = []
+
+    class Counter:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def add(self, amount: int, attributes: dict[str, str]) -> None:
+            added.append((self.name, amount, attributes))
+
+    for name in ("_runs", "_tools", "_writes"):
+        monkeypatch.setattr(telemetry, name, Counter(name))
+    telemetry.metrics.run_finished("support", "success")
+    telemetry.metrics.tool_called("refund", "ok")
+    telemetry.metrics.write_failed("memory.transcript")
+    assert added == [
+        ("_runs", 1, {"agent": "support", "outcome": "success"}),
+        ("_tools", 1, {"tool": "refund", "status": "ok"}),
+        ("_writes", 1, {"write": "memory.transcript"}),
+    ]
+
+
+@respx.mock
+async def test_a_score_with_a_comment_carries_it() -> None:
+    route = respx.post("https://lf.example/api/public/scores").mock(
+        return_value=httpx.Response(200, json={"id": "k"})
+    )
+    scores = Scores("https://lf.example/", "Basic eHg6eXk=")
+    await scores.post(
+        "run_1", "feedback", 0.0, data_type="NUMERIC", key="run_1:feedback", comment="13"
+    )
+    assert json.loads(route.calls[0].request.content)["comment"] == "13"
+    assert scores.host == "https://lf.example"
+    await scores.aclose()

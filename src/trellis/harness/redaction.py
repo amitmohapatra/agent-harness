@@ -18,6 +18,11 @@ from typing import Any
 REDACTED = "[redacted]"
 #: Longest string value kept; the rest is cut and says how much was cut.
 MAX_VALUE_CHARS = 2000
+#: Nesting deeper than this is cut to a marker: a value that contains itself would
+#: otherwise recurse until RecursionError, and a redactor must not raise.
+MAX_DEPTH = 32
+#: What a cut-off nested value becomes.
+TOO_DEEP = "[nested too deep]"
 
 #: Words that make an attribute name sensitive. Matched against the *segments* of a key
 #: (``api_key`` -> ``api``/``key``), never as raw substrings: substring matching redacts
@@ -105,29 +110,33 @@ class Redactor:
     def _sensitive_key(key: str) -> bool:
         return _sensitive(key)
 
-    def _scalar(self, value: Any) -> Any:
+    def _scalar(self, value: Any, depth: int = 0) -> Any:
         if isinstance(value, bool | int | float):
             return value
         if isinstance(value, list | tuple):
+            if depth >= MAX_DEPTH:
+                return TOO_DEEP
             # OpenTelemetry accepts homogeneous scalar sequences; keeping them as sequences
             # (rather than a JSON string) is what lets a backend filter on them.
-            return [self._scalar(v) for v in value]
+            return [self._scalar(v, depth + 1) for v in value]
         text = value if isinstance(value, str) else _stringify(value)
         if any(p.match(text) for p in _VALUE_PATTERNS):
             return REDACTED
         return _truncate(_EMAIL.sub("[email]", text), MAX_VALUE_CHARS)
 
-    def _payload(self, value: Any) -> Any:
+    def _payload(self, value: Any, depth: int = 0) -> Any:
         if value is None:
             return None
+        if isinstance(value, Mapping | list | tuple) and depth >= MAX_DEPTH:
+            return TOO_DEEP
         if isinstance(value, Mapping):
             return {
-                k: (REDACTED if self._sensitive_key(str(k)) else self._payload(v))
+                k: (REDACTED if self._sensitive_key(str(k)) else self._payload(v, depth + 1))
                 for k, v in value.items()
             }
         if isinstance(value, list | tuple):
-            return [self._payload(v) for v in value]
-        return self._scalar(value)
+            return [self._payload(v, depth + 1) for v in value]
+        return self._scalar(value, depth)
 
 
 _SEGMENT = re.compile(r"[^a-z0-9]+")
@@ -148,8 +157,7 @@ def _segments(key: str) -> tuple[str, ...]:
 
 
 def _stringify(value: Any) -> str:
-    if isinstance(value, str):
-        return value
+    """A value that is not text, as text (``_scalar`` handles text itself)."""
     if isinstance(value, bytes):
         return f"<{len(value)} bytes>"
     try:

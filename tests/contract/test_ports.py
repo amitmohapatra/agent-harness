@@ -7,6 +7,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import pytest
+
 import trellis
 from trellis.contracts import TelemetryRedactor
 from trellis.harness.redaction import Redactor
@@ -33,6 +35,9 @@ def test_the_public_api_is_the_documented_one() -> None:
     ]
     for name in trellis.__all__:
         assert getattr(trellis, name) is not None
+    assert dir(trellis) == trellis.__all__
+    with pytest.raises(AttributeError, match="no attribute 'Missing'"):
+        trellis.Missing  # noqa: B018
 
 
 def test_importing_trellis_loads_no_framework_and_contracts_stay_cheap() -> None:

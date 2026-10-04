@@ -95,7 +95,7 @@ class Runtime:
     used_code_mode: bool = False
     #: the worker holding the run's lease, when a worker runs it
     worker_id: str | None = None
-    #: the memory service may be written in this run (its key is not read-only)
+    #: the run's transcript, tool calls and outcome are recorded in the memory service
     writes_memory: bool = False
     started_at: datetime | None = None
     _asked: int = 0
