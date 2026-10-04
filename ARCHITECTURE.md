@@ -4,6 +4,57 @@ The harness is an attach layer. It owns no control flow: a framework runs the ag
 harness sits around one run of it — identity, the run record, memory in and out, the tools the
 agent may call and who must approve them, the pause, the recording, the trace.
 
+## Two ways
+
+Trellis is used in two ways ([README](README.md#two-ways-to-use-trellis)), and both reach the
+same services through the same clients. **Way 1, wrapped:** `h.wrap(agent)`, and the harness's
+pipeline calls every block around each run of the framework. **Way 2, pluggable blocks:** the
+team's own code runs the framework and calls the blocks it wants itself. The blocks are the
+same objects in both: the harness builds its run store on `trellis.runs.RunsClient`, its memory
+calls on `trellis.memory`, and checks every tool call with the same `Governance` a team imports.
+
+```mermaid
+flowchart LR
+  subgraph way1["Way 1: wrapped"]
+    wrap["h.wrap(agent) · agent.run"] --> pipeline["harness pipeline<br/>(memory push · bridge · pause · records)"]
+    pipeline --> fw1["your framework<br/>(called by the adapter)"]
+  end
+  subgraph way2["Way 2: pluggable blocks"]
+    team["your code"] --> fw2["your framework<br/>(called by you)"]
+  end
+  subgraph blocks["the blocks"]
+    memsdk["trellis.memory<br/>MemoryClient"]
+    runsdk["trellis.runs<br/>RunsClient · Worker · webhooks"]
+    gov["trellis.harness.governance<br/>Governance · governed"]
+    evals["trellis.harness.evals<br/>evaluate · judge"]
+    remote["trellis.harness.a2a<br/>remote"]
+    contracts["trellis.contracts<br/>the records"]
+  end
+  pipeline --> memsdk
+  pipeline --> runsdk
+  pipeline --> gov
+  pipeline --> evals
+  pipeline --> remote
+  team --> memsdk
+  team --> runsdk
+  team --> gov
+  team --> evals
+  team --> remote
+  memsdk --> memory["Memory service"]
+  gov --> memory
+  evals --> memory
+  runsdk --> runs["agent-runs"]
+  evals --> lf["Langfuse"]
+  remote --> peer["A2A agents"]
+```
+
+Every block takes and returns `trellis.contracts` records, which is why a run paused either way
+is one `RunRecord` in one inbox. What only Way 1 has is the pipeline itself: the journal that
+lets a resumed run repeat no side effect, the background writes with their spool, the toolbox
+(MCP tools, Code Mode, tool hints), and the AG-UI and A2A servers, which serve a run through
+it. The rest of this document is the harness, Way 1; the blocks' pages are
+[docs/blocks/](docs/README.md#way-2-pluggable-blocks-your-framework-our-pieces).
+
 ## System context
 
 What a process that imports `trellis` talks to. Every arrow out of the harness is one client
