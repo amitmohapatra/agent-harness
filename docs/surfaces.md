@@ -29,11 +29,29 @@ for `false`, `EDIT` for an object (the edited arguments), and anything else is r
 
 | Response | When |
 |---|---|
-| `401` | `identity(request)` named nobody |
-| `404` | a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
-| `409` `BAD_RESUME: …` | a resume that cannot be read as a decision, or that the run refuses (it waits on another interrupt, it is not paused) |
-| `422` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here) |
+| `401` `AUTHENTICATION` | `identity(request)` named nobody |
+| `404` `NOT_FOUND` | a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
+| `409` `CONFLICT` (`detail` `BAD_RESUME: …`) | a resume that cannot be read as a decision (an approval answered with neither `true`, `false` nor arguments), or that the run refuses (it waits on another interrupt, it is not paused) |
+| `422` `VALIDATION` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here) |
+| `422` (FastAPI's validation error) | a body that is not a `RunAgentInput`: a `decision` outside `answer`/`approve`/`reject`/`edit`/`cancel` (any case), a message `role` outside AG-UI's (`developer`, `system`, `assistant`, `user`, `tool`, `activity`, `reasoning`) |
 | `RUN_ERROR` `RUN_ABORTED` | the run ended without telling its client (the harness itself failed, e.g. agent-runs refused a write) |
+
+Every refusal of the surface's own is an RFC 9457 problem document (`application/problem+json`:
+`type`, `title`, `status`, `detail`, `instance`, `code`, `retryable`), the platform's shape.
+
+**OpenAPI.** The routes are in the app's OpenAPI document under the tag `agui`: both streams as
+`text/event-stream` (each `data:` an AG-UI event, each `id:` its number), the artifact as the
+media type it was stored with, every refusal with the problem schema, and `RunAgentInput`,
+`Resume` (its `decision` the contracts `InterruptDecision`) and `Role` as schemas. An app that
+has not named itself (FastAPI's default title) is titled `"<agent id> agent"`, with a
+description and the harness's version.
+
+**Several replicas.** A run's events are buffered in the process that serves it (`hub.py`), so a
+reconnect (`GET …/events`) must reach that replica: route a thread's requests — keyed by the
+`threadId`, or the session cookie — to one replica (sticky sessions at the load balancer). A
+resume may land anywhere (it reads the run from agent-runs), and so may an artifact read; a
+reconnect that lands elsewhere is a `404`, after which the client can read the run's outcome
+from agent-runs or start the next turn.
 
 Harness events map one to one onto AG-UI events (the contracts already use AG-UI's names):
 text and tool-call events carry their message and call ids, `CONTEXT_LOADED` becomes a
@@ -84,6 +102,14 @@ config without a token is not delivered to; a failing receiver is tried up to 3 
 0.4 s apart), logged, and never raised into the task. A receiver checks a delivery with
 `trellis.harness.surfaces.a2a.push.verify_signature(secret, header, body, *, now=None) -> bool`
 (signatures older than 300 s are refused).
+
+**OpenAPI.** The A2A SDK serves its routes as plain Starlette routes, which FastAPI leaves out of
+the app's OpenAPI document; on a FastAPI app the surface describes both under the tag `a2a` —
+`GET {path}/.well-known/agent-card.json` (the `AgentCard`) and `POST {path}` (a JSON-RPC 2.0
+request whose `method` is one of the protocol's: `SendMessage`, `SendStreamingMessage`,
+`GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask`, the push-notification config methods,
+`GetExtendedAgentCard`; answered with a JSON-RPC response, or server-sent events for the
+streaming ones). The SDK's routes still answer every request; the descriptions never do.
 
 Identity: `identity(context)` returns the user; by default the trusted `x-trellis-identity`
 header — JSON `{"tenant_id": ..., "user_id": ...}`, set by the deployment's authenticating
