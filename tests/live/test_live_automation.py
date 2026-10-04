@@ -15,7 +15,6 @@ from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import memory_scope
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
-from trellis.harness import agent as agent_module
 
 pytestmark = [pytest.mark.live, needs_memory]
 
@@ -117,17 +116,14 @@ async def test_a_large_table_is_a_run_artifact_served_back() -> None:
         assert done.answer == "fine"
 
 
-async def test_a_sampled_answer_is_verified_against_its_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", 1.0)
+async def test_a_sampled_answer_is_verified_against_its_context() -> None:
     suffix = uuid.uuid4().hex[:8]
     user = f"live-user-{suffix}"
 
     async def answer(input: str, agent: Runtime) -> str:
         return f"Your warehouse is in Berlin ({suffix})."
 
-    async with live_harness() as h:
+    async with live_harness(grounding_sample=1.0) as h:
         agent = h.wrap(answer, id=f"live-grounded-{suffix}")
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         await scope.remember(f"The warehouse of {user} is in Berlin.", visibility="USER")

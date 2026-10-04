@@ -39,7 +39,7 @@ breaks the harness itself is logged and the worker goes on.
 stops claiming and lets the runs the worker holds finish, for up to 25 s (`GRACE_SECONDS`). A run
 still going then is *released*: stopped without writing anything, so its lease lapses and
 agent-runs queues it again as its next attempt for another worker (the journal replays what its
-last pause checkpointed). A second signal releases the runs at once. Then the memory write queue
+last checkpoint holds — its progress, below: every tool call with side effects it completed). A second signal releases the runs at once. Then the memory write queue
 drains (at most 10 s; what is left is spooled or counted lost — [memory.md](memory.md)) and the
 process exits `0`. Give the container at least 40 s to stop (e.g. a termination grace period of
 45 s). Cancelling `worker.run()` instead cancels the runs it holds: they end `CANCELLED`.
@@ -51,6 +51,23 @@ over a run another worker has since claimed; a heartbeat refused (`409`) stops t
 writing. A lapsed lease sends the run back to the queue as its next attempt. A paused run
 carries its journal as the run's checkpoint, so the worker that claims it after a resume — any
 worker — repeats no question and no tool call made before the pause.
+
+**Progress checkpoints: a worker that dies repeats no side effect.** While a worker runs it,
+the run also saves its journal — the tool calls completed and their outputs, the answers it
+was given, and `ReAct`'s model steps — as the run's checkpoint on a heartbeat
+(`POST /v1/runs/{id}/heartbeat {worker_id, lease_seconds, checkpoint}`, which only the lease
+holder may send): at once after every completed call that does more than read (a `write` or
+`irreversible` tool, or one under a catalog rule), and after reads and model steps at most every
+20 s (`PROGRESS_SECONDS`). When the worker dies — killed, out of memory, its machine gone — the
+lease lapses, agent-runs queues the run again with that checkpoint, and the next attempt
+replays the recorded calls instead of running them again: a payment made before the crash is
+not made twice. What the attempt was doing *during* the crash — a call that had started but
+not been recorded — runs again, so a tool that must never run twice still needs idempotency
+of its own (a key derived from its arguments, which the service it calls deduplicates on).
+A checkpoint over 1 MiB (agent-runs' bound) is not sent and a save that fails is a `warning`
+event and a log line — the run goes on, and the next save tries again; a save refused with
+`409` (the lease is gone) stops the run without writing anything more. Runs started in process
+(`run`, `stream`) save no progress: nobody resumes them after their process died.
 
 ## Schedules
 
@@ -75,7 +92,7 @@ subscriptions (`POST /v1/webhooks`), not a harness setting.
 
 `X-Api-Key: TRELLIS_API_KEY` on every call, `X-Trellis-Tenant` naming the run's tenant.
 `POST /v1/runs` (`RunStart` + `queue`), `POST /v1/runs/claim` (`{run, lease}` or `204`),
-`POST /v1/runs/{id}/heartbeat`, `POST /v1/runs/{id}/pause?worker_id=` (an `Interrupt` and the
+`POST /v1/runs/{id}/heartbeat` (with the progress `checkpoint` when there is one), `POST /v1/runs/{id}/pause?worker_id=` (an `Interrupt` and the
 checkpoint), `POST /v1/runs/{id}/resume` (an `InterruptResolution`),
 `POST /v1/runs/{id}/finish?worker_id=`, `POST /v1/runs/{id}/artifacts?worker_id=&checksum=`
 (an `ask` payload, → `ArtifactRef`), `GET /v1/artifacts/{id}`, `GET /v1/runs/{id}`,

@@ -21,6 +21,12 @@ def test_the_redactor_is_the_contracts_redactor() -> None:
 def test_the_public_api_is_the_documented_one() -> None:
     assert trellis.__all__ == [
         "Agent",
+        "EvalCase",
+        "EvalItem",
+        "EvalReport",
+        "EvalResult",
+        "EvalScore",
+        "Evaluator",
         "Harness",
         "ReAct",
         "Result",
@@ -29,7 +35,11 @@ def test_the_public_api_is_the_documented_one() -> None:
         "Runtime",
         "Settings",
         "a2a",
+        "contains",
         "current",
+        "exact_match",
+        "grounding",
+        "llm_judge",
         "openapi",
         "tool",
     ]

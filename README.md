@@ -103,6 +103,10 @@ The environment, and nothing else ([`.env.example`](.env.example)):
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | OTLP traces: Langfuse's endpoint, or a collector ([deploy/otel-collector.yaml](deploy/otel-collector.yaml)) |
 | `TRELLIS_SPOOL_DIR` | where memory writes this process could not deliver are kept and replayed from at the next start |
 | `TRELLIS_WORKER_CONCURRENCY` | runs a worker executes at once (default: the CPU count, 1 to 8) |
+| `TRELLIS_GROUNDING_SAMPLE` | the share of successful runs (0 to 1, by run id) checked against their memory context (default 0.1) |
+| `TRELLIS_JUDGE_MODEL` | the Bifrost model `llm_judge` asks — a different, stronger model than the agent's (unset: the judged agent's own model, logged) |
+| `TRELLIS_JUDGE_VIRTUAL_KEY` | the virtual key the judge's calls go through, so evaluation has its own budget (unset: `BIFROST_VIRTUAL_KEY`) |
+| `TRELLIS_JUDGE_SAMPLE` | the share of successful runs the online judges score (0 to 1, by run id; unset: 0.1 with judges) |
 
 ## The API
 
@@ -110,18 +114,20 @@ Everything public is importable from `trellis`:
 
 | Name | What it is |
 |---|---|
-| `Harness(config=None)` | Reads the environment; `config=Settings(...)` instead of it. `async with` (or `await h.aclose()`) drains the background writes and closes the clients. `h.agents` is every agent it wraps, by id. |
-| `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=, spool_dir=, worker_concurrency=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
+| `Harness(config=None, *, judges=())` | Reads the environment; `config=Settings(...)` instead of it. `judges` are online evaluators that score a sampled share of successful runs in the background ([docs/evaluation.md](docs/evaluation.md)). `async with` (or `await h.aclose()`) drains the background writes and closes the clients. `h.agents` is every agent it wraps, by id. |
+| `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=, spool_dir=, worker_concurrency=, grounding_sample=, judge_model=, judge_virtual_key=, judge_sample=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
 | `h.wrap(target, *, id, tools=()) -> Agent` | Attach the harness. The framework is detected from the target's type. `tools` are the agent's own, run in this process: functions, `a2a(url)`, `openapi(spec)`. |
 | `await h.tools(*sources, framework=...)` | The toolbox as the framework's own tools, for an agent built with them before wrapping (a compiled LangGraph graph binds its tools): LangChain tools (`"langgraph"`), `FunctionTool`s (`"openai-agents"`), one in-process MCP server (`"claude-agent-sdk"`). It holds `sources`, the MCP tools and the memory tools. |
 | `h.worker(agents, *, concurrency=None)` | Claims queued runs of these agents and executes them, `concurrency` at a time (default `TRELLIS_WORKER_CONCURRENCY`, else the CPU count from 1 to 8): `await worker.run()` (until `worker.stop()`: the runs held finish, or are released after a grace period) or `await worker.run_once()`. |
 | `await h.inbox(assignee=None) -> list[RunSummary]` | The paused runs waiting on `assignee` (`user:…`, `role:…`) or on anyone, newest first. |
 | `await h.feedback(run_id, verdict, correction=None) -> Feedback \| None` | What a person said about a run (`verdict`: `confirm`, `approve`, `reject`, `correct` or `edit`, the last two with a `correction`): a `feedback` score on its trace (Langfuse; 1.0, 0.5 for `edit`, 0.0 for `correct`/`reject`) and — memory on — the run's `human` feedback in the memory service, returned as stored (`None` with memory off). It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
+| `await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None, concurrency=4, limit=None, user=None) -> EvalReport` | Run the agent on every item of a dataset — a Langfuse dataset's name, or `[{"input", "expected"?, "metadata"?}]` / `EvalItem`s — through the normal pipeline, `concurrency` at a time, score each answer with `evaluators` onto its run's trace, and make each run an item of the Langfuse experiment `run_name` (the dataset run link on Langfuse v3, the `langfuse.experiment.*` span attributes on v4). A failing or pausing item is reported (`error`, `interrupted`), never fatal. The `EvalReport` has every item in order and each evaluator's mean, count and failures ([docs/evaluation.md](docs/evaluation.md)). |
+| `grounding()`, `exact_match()`, `contains()`, `llm_judge(criteria, *, name=None)` | The built-in evaluators: grounding against the run's memory context (`/v1/verify`), against `expected`, and a judge model (`TRELLIS_JUDGE_MODEL` through Bifrost with `TRELLIS_JUDGE_VIRTUAL_KEY`). An evaluator is any `async (EvalCase) -> EvalScore \| None`. |
 | `await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed (`wait=None`: return at once): the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`); `tenant` only for a platform key. Needs `MEMORY_URL`. |
 | `tool(fn, *, name=None, description=None, side_effects="write")` / `@tool` / `@tool(...)` | A Python function (sync or async) as a tool: the schema from its signature (pydantic validates the arguments), the description from its docstring's first paragraph, `side_effects` `"read"`, `"write"` (default) or `"irreversible"`. It stays callable as the function. A bare function in `tools=[...]` is `tool(fn)`. |
 | `a2a(url, *, name=None)` | A remote A2A agent (its card at `{url}/.well-known/agent-card.json`) as one `write` tool, `{"message": string}` in, its answer out; `name` overrides the card's. |
 | `openapi(spec, *, only=None, base_url=None, headers=None)` | The operations of an OpenAPI 3 document (a URL or the parsed document) as tools, one per `operationId` (`only` keeps those named); `base_url` when the document names no server; `headers` on every request. |
-| `ReAct(system, model, output=None, max_steps=12)` | A tool-calling loop over chat completions, for teams with no framework: `model` is a Bifrost model name (needs `BIFROST_URL`) or any object with `async complete(messages, **body)`; `output` a pydantic model for a structured answer. |
+| `ReAct(system, model, output=None, max_steps=12, *, max_result_chars=20000, max_repeats=3)` | A tool-calling loop over chat completions, for teams with no framework: `model` is a Bifrost model name (needs `BIFROST_URL`) or any object with `async complete(messages, **body)`; `output` a pydantic model for a structured answer. Arguments that are not JSON or do not fit the tool's schema are an error the model reads (the tool does not run); a result longer than `max_result_chars` is cut with a marker (the whole of it kept as a run artifact); the same call in `max_repeats` consecutive steps stops the run; a resume replays the model steps already taken. |
 | `current() -> Runtime \| None` | Inside a tool or a node: the run it executes in. |
 
 `Agent` — what `wrap` returns:
@@ -164,17 +170,17 @@ python -m trellis.worker app.agents:h [--concurrency N]   # SIGTERM stops it gra
 | **Tool hints** | From 5 tools on, the context is asked for with the run's tool names and comes back with the tools that fit the task (each with a 0–1 confidence); the model is offered the memory tools, those and every tool the run already used — per model call for `ReAct` and OpenAI Agents, per run for Claude; a `tool_search` call offers what it finds. |
 | **Code Mode** | The Code Mode servers whose tools all only read, from 3 servers or 20 tools, become Bifrost's Code Mode meta-tools (one script instead of many calls); their nested calls are recorded from the gateway's log. |
 | **Outcome** | From how the run ended (`SUCCESS` confirm, `ERROR` reject) as the run's `system` feedback, applied as it arrives; the judge's verdict outranks it, and so does a person's once the tenant administrator approves it. |
-| **Grounding** | On a sampled 10 % of successful runs, the answer is checked against the context it was given (`/v1/verify` with its `bundle_id`); the score goes on the run's trace. |
+| **Grounding** | On a sampled share of successful runs (`TRELLIS_GROUNDING_SAMPLE`, 10 % by default), the answer is checked against the context it was given (`/v1/verify` with its `bundle_id`); the score goes on the run's trace. |
 | **Traces** | OTel GenAI spans (`invoke_agent`, `execute_tool`, `chat`) with Langfuse's trace attributes (agent, user, session = thread, run, tenant); every attempt of a run in one trace. |
 
 ## Frameworks
 
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
-| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | no (bound at build) | leading system message, one per checkpointed thread |
-| OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
+| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | no (bound at build) | leading system message, one per checkpointed thread |
+| OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected (with the reason; an edit or an answer as the message the model reads) and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
 | Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped, re-run against the journal | in-process MCP server `trellis` (`mcp__trellis__*`, pre-allowed) | per run | appended to `system_prompt` |
-| `ReAct` | per step, and tool events | re-run against the journal | per run | per model call | appended to `system` |
+| `ReAct` | per step, and tool events | re-run against the journal, model steps included (no repeated model call) | per run | per model call | appended to `system` |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |
 
 Teams bring their own model objects pointed at Bifrost's OpenAI-compatible endpoint
@@ -183,10 +189,21 @@ the harness does not wrap models.
 
 ## Observability and evaluation
 
-Langfuse is the eval system of record — LLM-as-judge evaluators, annotation queues, datasets,
-experiments, dashboards — per agent and per request through the trace attributes. The harness
-emits the traces, the grounding score and people's feedback; it builds no evaluator of its
-own. See [docs/observability.md](docs/observability.md).
+Langfuse is the eval system of record — scores, datasets and dataset runs, annotation queues,
+dashboards — per agent and per request through the trace attributes. The harness emits the
+traces, the grounding score and people's feedback, and makes both kinds of evaluation one call
+([docs/evaluation.md](docs/evaluation.md)):
+
+```python
+report = await h.evaluate(agent, "support-golden", [grounding(), llm_judge("Cites the policy.")])
+print(report)  # offline: a Langfuse dataset (or a list), every answer scored, runs linked
+
+h = Harness(judges=[llm_judge("Polite and correct.")])  # online: sampled runs, in the background
+```
+
+The judge's model and virtual key are configuration (`TRELLIS_JUDGE_MODEL`,
+`TRELLIS_JUDGE_VIRTUAL_KEY`): pick a stronger model than the agent's, on its own budget. See
+also [docs/observability.md](docs/observability.md).
 
 ## Examples
 
@@ -195,7 +212,9 @@ Each runs with no services (scripted models, runs in process) and uses the real 
 
 `langgraph_agent.py`, `deepagents_agent.py`, `openai_agents_agent.py`,
 `claude_agent_sdk_agent.py`, `react_agent.py`, `cowork.py` (start → worker → ask with a diff →
-inbox → resume), `schedule.py`, `serve_chat.py` (AG-UI and A2A on one FastAPI app).
+inbox → resume), `schedule.py`, `serve_chat.py` (AG-UI and A2A on one FastAPI app),
+`evaluate_offline.py` (a dataset scored by exact match, contains and a judge; the report),
+`online_judges.py` (judges on live runs, in the background).
 
 ## Development
 

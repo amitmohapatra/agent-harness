@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from trellis import Settings
 from trellis.harness.settings import parse_headers
 
@@ -21,8 +24,15 @@ def test_every_variable_is_read_from_the_environment() -> None:
             "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Basic%20cGs6c2s=,x-langfuse-host=http://lf",
             "TRELLIS_SPOOL_DIR": "/var/spool/trellis",
             "TRELLIS_WORKER_CONCURRENCY": "6",
+            "TRELLIS_GROUNDING_SAMPLE": "0.25",
+            "TRELLIS_JUDGE_MODEL": "judges/strong",
+            "TRELLIS_JUDGE_VIRTUAL_KEY": "eval-vk",
+            "TRELLIS_JUDGE_SAMPLE": "0.5",
         }
     )
+    assert settings.grounding_sample == 0.25
+    assert (settings.judge_model, settings.judge_virtual_key) == ("judges/strong", "eval-vk")
+    assert settings.judge_sample == 0.5
     assert settings.api_key == "tk"
     assert settings.spool_dir == "/var/spool/trellis" and settings.worker_concurrency == 6
     assert settings.runs_url == "http://runs"
@@ -35,6 +45,17 @@ def test_every_variable_is_read_from_the_environment() -> None:
 def test_nothing_set_means_nothing_configured() -> None:
     settings = Settings.from_env({"MEMORY_URL": "  "})
     assert settings == Settings()
+
+
+def test_the_grounding_sample_is_a_share_of_runs() -> None:
+    assert Settings.from_env({}).grounding_sample == 0.1
+    assert Settings.from_env({"TRELLIS_GROUNDING_SAMPLE": "0"}).grounding_sample == 0.0
+    for bad in ("1.5", "-0.1", "often"):
+        with pytest.raises(ValidationError, match="grounding_sample"):
+            Settings.from_env({"TRELLIS_GROUNDING_SAMPLE": bad})
+        with pytest.raises(ValidationError, match="judge_sample"):
+            Settings.from_env({"TRELLIS_JUDGE_SAMPLE": bad})
+    assert Settings.from_env({}).judge_sample is None  # the harness decides: 0.1 with judges
 
 
 def test_otlp_headers_parse_like_the_otel_spec() -> None:

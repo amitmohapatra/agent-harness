@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from trellis.contracts import (
     ToolCall,
     ToolError,
 )
+from trellis.harness.clients.runs import LeaseLost
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
@@ -41,6 +43,13 @@ log = logging.getLogger("trellis.run")
 #: A table or diff larger than this (compact JSON) travels by reference: stored as a run
 #: artifact in agent-runs (``payload_ref``), not inside the question.
 INLINE_PAYLOAD_BYTES: Final = 16 * 1024
+
+#: The most a progress checkpoint may be, as compact JSON (agent-runs' ``MAX_CHECKPOINT_BYTES``:
+#: a larger one is refused with ``413``, so it is not sent).
+MAX_CHECKPOINT_BYTES: Final = 1024 * 1024
+#: How often the journal is saved as progress after calls that only read (or model steps);
+#: after a side-effecting call it is saved at once.
+PROGRESS_SECONDS: Final = 20.0
 
 _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=None)
 
@@ -93,13 +102,19 @@ class Runtime:
     pending: Pending | None = None
     #: a Code Mode script ran: its nested calls are read back from the gateway's log
     used_code_mode: bool = False
-    #: the worker holding the run's lease, when a worker runs it
+    #: the worker holding the run's lease, when a worker runs it, and that lease's length
+    #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None
+    lease_seconds: float | None = None
+    #: the lease was lost while saving progress: the run stops and writes nothing more
+    lease_lost: bool = False
     #: the run's transcript, tool calls and outcome are recorded in the memory service
     writes_memory: bool = False
     started_at: datetime | None = None
     _asked: int = 0
     _steps: int = 0
+    _saved_at: float | None = None
+    _too_large: bool = False
 
     # ------------------------------------------------------------------ identity
     @property
@@ -158,6 +173,43 @@ class Runtime:
     def next_step(self) -> int:
         self._steps += 1
         return self._steps
+
+    # ------------------------------------------------------------------ progress
+    async def progress(self, *, now: bool) -> None:
+        """Save the journal as the run's progress checkpoint, on a heartbeat of the worker's
+        lease (a worker's run only: nobody resumes an in-process run after its process died).
+        ``now`` after a side-effecting call — the attempt after a crash replays it instead of
+        running it again; otherwise at most every :data:`PROGRESS_SECONDS`. A checkpoint over
+        :data:`MAX_CHECKPOINT_BYTES` is not sent and a refused save is a warning (the run goes
+        on; the next save tries again); a lost lease stops the run (:class:`LeaseLost`)."""
+        if self.worker_id is None or self.lease_seconds is None:
+            return
+        clock = time.monotonic()
+        if not now and self._saved_at is not None and clock - self._saved_at < PROGRESS_SECONDS:
+            return
+        checkpoint = self.replay.journal.dump()
+        size = len(json.dumps(checkpoint, default=str, separators=(",", ":")).encode())
+        if size > MAX_CHECKPOINT_BYTES:
+            if not self._too_large:
+                self._too_large = True
+                self._unsaved(f"its journal ({size} bytes) is too large to save as progress")
+            return
+        try:
+            await self.agent.harness.runs.heartbeat(
+                self.run_id, self.worker_id, self.lease_seconds, checkpoint=checkpoint
+            )
+        except LeaseLost:
+            self.lease_lost = True
+            raise
+        except Exception as exc:
+            self._unsaved(f"{type(exc).__name__}: {exc}")
+            return
+        self._saved_at = clock
+
+    def _unsaved(self, why: str) -> None:
+        message = f"progress of run {self.run_id} not saved: {why}"
+        log.warning("%s", message)
+        self.events.warning("progress_unsaved", message)
 
     # ------------------------------------------------------------------ pausing
     async def ask(
@@ -281,6 +333,13 @@ def answer_of(resolution: InterruptResolution) -> Any:
     if decision is InterruptDecision.EDIT:
         return resolution.payload
     return resolution.answer
+
+
+def reason_of(resolution: InterruptResolution) -> str | None:
+    """The reviewer's reason given with a decision (``resume(..., "reject", answer="why")``):
+    what the model is told about a rejected call."""
+    answer = resolution.answer
+    return answer.strip() if isinstance(answer, str) and answer.strip() else None
 
 
 @dataclass(frozen=True, slots=True)

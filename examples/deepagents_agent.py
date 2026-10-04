@@ -1,6 +1,7 @@
 """Deep Agents: ``create_deep_agent`` returns a compiled graph, so it is wrapped like any
 LangGraph graph. With a checkpointer the approval *is* a LangGraph interrupt, and the resume
-continues the graph where it stopped.
+continues the graph where it stopped. Planning (``write_todos``) is opt-in in Deep Agents:
+``TodoListMiddleware`` adds it.
 
     .venv/bin/python examples/deepagents_agent.py
 """
@@ -11,6 +12,7 @@ import asyncio
 
 from _offline import langchain_model
 from deepagents import create_deep_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 
 from trellis import Harness, tool
@@ -35,6 +37,7 @@ async def main() -> None:
             model=model,
             tools=await h.tools(refund, framework="langgraph"),
             system_prompt="You process refund requests. Plan, then refund.",
+            middleware=[TodoListMiddleware()],
             checkpointer=InMemorySaver(),
         )
         agent = h.wrap(graph, id="refunds")
@@ -44,6 +47,8 @@ async def main() -> None:
             print("asks:", result.interrupt.question)
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="lead")
         print(result.status.value, result.answer)
+        state = await graph.aget_state({"configurable": {"thread_id": "ticket-7"}})
+        print("plan:", [todo["content"] for todo in state.values.get("todos", [])])
 
 
 if __name__ == "__main__":

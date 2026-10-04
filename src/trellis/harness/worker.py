@@ -2,7 +2,8 @@
 
 A claimed run is leased to this worker; a heartbeat extends the lease while the run
 executes, and a worker that dies lets the lease lapse, after which agent-runs queues the
-run again (the next attempt, which the journal makes idempotent). Schedules and resumed
+run again (the next attempt, which the journal makes idempotent: the run saves it as its
+progress checkpoint on a heartbeat after every side-effecting call). Schedules and resumed
 durable runs arrive the same way: as queued runs.
 
 An idle worker asks again after a growing pause (exponential, jittered, at most
@@ -176,7 +177,9 @@ class Worker:
     async def _execute(self, record: RunRecord) -> None:
         """Run it while the lease holds; a lost lease stops it without writing anything."""
         execution = asyncio.create_task(
-            self.agents[record.agent_id]._claimed(record, self.worker_id)
+            self.agents[record.agent_id]._claimed(
+                record, self.worker_id, lease_seconds=LEASE_SECONDS
+            )
         )
         self._held[record.run_id] = execution
         heartbeat = asyncio.create_task(self._heartbeat(record.run_id, execution))
@@ -185,6 +188,8 @@ class Worker:
         except asyncio.CancelledError:
             if not execution.cancelled():
                 raise
+        except LeaseLost:
+            log.warning("lease on %s lost while saving progress: stopped it", record.run_id)
         except Exception:
             log.exception("run %s failed in the worker", record.run_id)
         finally:

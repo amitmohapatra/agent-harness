@@ -25,7 +25,8 @@ failure as `RUN_ERROR`; a cancellation as `RUN_FINISHED` with a `cancelled` outc
 
 How a resume entry becomes a decision: `decision` wins when present; `status: "cancelled"` is
 `CANCEL`; a question is `ANSWER` with `payload`; an approval is `APPROVE` for `true`, `REJECT`
-for `false`, `EDIT` for an object (the edited arguments), and anything else is refused.
+for `false`, `EDIT` for an object (the edited arguments), and anything else is refused. With
+`decision: "reject"`, a text `payload` is the reviewer's reason, which the model reads.
 
 | Response | When |
 |---|---|

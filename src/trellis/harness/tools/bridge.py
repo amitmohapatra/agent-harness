@@ -5,8 +5,9 @@
 2. **policy** — the risk tier: ``auto`` runs, ``notify`` is announced on the run's stream,
    ``ask`` pauses the run for approval (an approver may edit the arguments, or reject);
 3. **execution** — inside a span, with ``TOOL_CALL_*`` events around it;
-4. **record** — journaled for a later resume, counted, and (memory on) sent to the memory
-   service's tool records in the background.
+4. **record** — journaled for a later resume (and, in a worker, saved as the run's progress
+   checkpoint: at once after a call with side effects), counted, and (memory on) sent to the
+   memory service's tool records in the background.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from trellis.contracts import (
 )
 from trellis.harness.events import NOTICE
 from trellis.harness.journal import content_key
-from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, current
+from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import Tool
@@ -59,10 +60,12 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         resolution = await runtime.approve(tool_call, why)
         decision = answer_of(resolution)  # raises RunCancelled on CANCEL
         if resolution.decision is InterruptDecision.REJECT or decision is False:
+            reason = reason_of(resolution)
             outcome = ToolOutcome(
                 tool=tool.name,
                 status=ToolStatus.REJECTED,
-                output=f"{tool.name} was not run: the approver rejected it",
+                output=f"{tool.name} was not run: the approver rejected it"
+                + (f" ({reason})" if reason else ""),
                 error_class="ApprovalRejected",
             )
             _events(runtime, ref, tool_call, outcome)
@@ -94,6 +97,8 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     if outcome.ok:
         runtime.replay.record_call(key, outcome.output, tool=tool.name)
+        # a call with side effects is saved at once: a crash after it does not repeat it
+        await runtime.progress(now=chosen is not Tier.AUTO)
     runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=tool.name)
     runtime.events.tool(
         RunEventType.TOOL_CALL_RESULT,

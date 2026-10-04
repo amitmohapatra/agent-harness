@@ -411,8 +411,8 @@ async def test_without_a_user_message_the_agent_gets_the_state(client: httpx.Asy
         ({"payload": False}, "refund was not run: the approver rejected it"),
         ({"payload": {"order": "o2"}}, "refunded o2"),
         (
-            {"payload": "anything", "decision": "reject"},
-            "refund was not run: the approver rejected it",
+            {"payload": "too much", "decision": "reject"},
+            "refund was not run: the approver rejected it (too much)",
         ),
     ],
     ids=["false-rejects", "object-edits", "decision-named"],

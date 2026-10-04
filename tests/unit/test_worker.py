@@ -84,7 +84,7 @@ async def test_a_run_that_breaks_the_harness_is_logged_and_the_worker_goes_on(
     agent = harness.wrap(echo, id="echo")
     handle = await agent.start("x", user="u")
 
-    async def broken(record: RunRecord, worker_id: str) -> Any:
+    async def broken(record: RunRecord, worker_id: str, **lease: Any) -> Any:
         raise RuntimeError("the run store refused the finish")
 
     monkeypatch.setattr(agent, "_claimed", broken)
@@ -172,7 +172,7 @@ async def test_a_worker_stopped_as_its_run_finishes_still_stops(
     assert claimed is not None and claimed.run_id == record.run_id
     outer: list[asyncio.Task[Any]] = []
 
-    async def finishing(record: RunRecord, worker_id: str) -> str:
+    async def finishing(record: RunRecord, worker_id: str, **lease: Any) -> str:
         asyncio.get_running_loop().call_soon(outer[0].cancel)
         return "finished"
 

@@ -16,7 +16,6 @@ from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import agent as agent_module
 from trellis.harness import telemetry
 from trellis.harness.clients.memory import Memory
 from trellis.memory.models import ToolHints
@@ -431,14 +430,13 @@ async def test_the_catalog_decides_tiers_and_approvals(
 # --------------------------------------------------------------------------- grounding
 @respx.mock
 async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
-    memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+    memory_service: FakeMemoryService,
 ) -> None:
-    monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", 1.0)
     scores = respx.post("https://lf.test/api/public/scores").mock(
         return_value=httpx.Response(200, json={"id": "x"})
     )
     otlp = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": "https://lf.test"}
-    async with harness_with(memory_service, otlp_headers=otlp) as h:
+    async with harness_with(memory_service, otlp_headers=otlp, grounding_sample=1.0) as h:
 
         async def fn(input: str, agent: Runtime) -> str:
             return "you prefer email"
@@ -461,16 +459,13 @@ async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
     assert context.body["query"] == "contact?"
 
 
-async def test_an_unsampled_run_is_not_verified(
-    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", 0.0)
-
+async def test_an_unsampled_run_is_not_verified(memory_service: FakeMemoryService) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return "answer"
 
-    await memory_harness.wrap(fn, id="n").run("q", user="u")
-    await memory_harness.writes.drain()
+    async with harness_with(memory_service, grounding_sample=0.0) as h:
+        await h.wrap(fn, id="n").run("q", user="u")
+        await h.writes.drain()
     assert memory_service.named("verify") == []
 
 

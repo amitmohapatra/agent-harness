@@ -29,8 +29,9 @@ from trellis.contracts import (
 from trellis.harness import pipeline
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import context_window
-from trellis.harness.adapters.langgraph import bound_tools
+from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.clients.memory import RunMemory, context_budget
+from trellis.harness.evals import EvalCase, Evaluator, name_of, scored
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
@@ -46,9 +47,6 @@ if TYPE_CHECKING:
 
 #: From this many tools, the tool hints are asked for and narrow what the model is offered.
 TOOL_HINTS_MIN: Final = 5
-#: The share of successful runs whose answer is checked against the context it was given
-#: (``/v1/verify``); chosen by the run id, so a run is either always or never sampled.
-GROUNDING_SAMPLE: Final = 0.1
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
 #: What the model is told when memory has nothing for the question (``evidence_status``
@@ -193,6 +191,9 @@ class Agent:
             payload=answer if edited else None,
             reviewer=reviewer,
         )
+        awaited = record.awaiting.payload
+        if chosen is not InterruptDecision.CANCEL and is_hitl(awaited):
+            hitl_response(awaited or {}, resolution)  # a decision the calls do not allow raises
         return record, resolution
 
     async def _continue(
@@ -230,8 +231,11 @@ class Agent:
             streaming=listener is not None,
         )
 
-    async def _claimed(self, record: RunRecord, worker_id: str) -> Result:
-        """A worker's run: fresh from the queue, or continuing after a resolution."""
+    async def _claimed(
+        self, record: RunRecord, worker_id: str, *, lease_seconds: float | None = None
+    ) -> Result:
+        """A worker's run: fresh from the queue, continuing after a resolution, or after a
+        worker died (its checkpoint is the progress it saved)."""
         return await pipeline.attempt(
             self,
             self._identity_of(record),
@@ -240,6 +244,7 @@ class Agent:
             journal=Journal.of(record.checkpoint),
             resolution=record.last_resolution,
             worker_id=worker_id,
+            lease_seconds=lease_seconds,
         )
 
     async def _events(
@@ -380,7 +385,7 @@ class Agent:
             or pushed is None
             or not isinstance(answer, str)
             or not answer
-            or not sampled(runtime.run_id, GROUNDING_SAMPLE)
+            or not sampled(runtime.run_id, self.harness.settings.grounding_sample)
         ):
             return
         bundle_id, run_id = pushed.bundle_id, runtime.run_id
@@ -391,6 +396,35 @@ class Agent:
                 await self.harness.score(run_id, "grounding", score, key=f"{run_id}:grounding")
 
         await self.harness.writes.submit("memory.verify", work, events=runtime.events)
+
+    async def judged(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
+        """On a sampled run (``TRELLIS_JUDGE_SAMPLE``), each of the harness's online judges in
+        the background — never on the request path — its score on the run's trace. A judge
+        that fails is a warning."""
+        judges = self.harness.judges
+        rate = self.harness.judge_sample
+        if not judges or not isinstance(answer, str) or not answer:
+            return
+        if not sampled(f"{runtime.run_id}:judges", rate):
+            return
+        case = EvalCase(
+            input=runtime.task,
+            output=answer,
+            run_id=runtime.run_id,
+            bundle_id=pushed.bundle_id if pushed is not None else None,
+            context=runtime.context,
+            agent=self,
+        )
+        harness, events = self.harness, runtime.events
+        for judge in judges:
+            name = name_of(judge)
+
+            async def work(judge: Evaluator = judge, name: str = name) -> None:
+                _, failed = await scored(harness, case, [judge])
+                if failed:
+                    events.warning("judge_failed", f"judge {name}: {failed[name]}")
+
+            await harness.writes.submit(f"judge.{name}", work, events=events)
 
     async def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway

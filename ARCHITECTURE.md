@@ -37,7 +37,7 @@ flowchart LR
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`clients/runs.py`) |
 | Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`surfaces/agui`) |
 | Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)`: `SendStreamingMessage`, `CancelTask` (`surfaces/a2a`) |
-| Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces; grounding and feedback scores | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores` (`telemetry.py`) |
+| Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces (an evaluated run's spans with Langfuse's experiment attributes); grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
 
 
 Unset variables remove a box: no `BIFROST_URL` means no MCP tools and no `ReAct` model names,
@@ -63,8 +63,10 @@ src/trellis/
     fresh.py           a value read from a service, kept for a TTL, the last one through outages
     identity.py        tenant / user / thread / agent / run → memory scope, contracts context
     result.py          Result
+    evals.py           evaluators (grounding, exact_match, contains, llm_judge), h.evaluate, online judges
     settings.py        the environment
-    telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; Langfuse scores
+    telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; the Langfuse
+                       client (scores, datasets, dataset runs)
     redaction.py       what may leave the process
     worker.py          Worker: claim, lease, heartbeat
     adapters/          detect(target) and one adapter per framework (base, langgraph,
@@ -95,7 +97,10 @@ flowchart TB
   harness --> agent["agent.Agent · RunHandle"]
   harness --> workerm["worker.Worker"]
   harness --> writes["writes.Writes"]
-  harness --> telemetry["telemetry<br/>(spans, counters, Scores)"]
+  harness --> telemetry["telemetry<br/>(spans, counters, Langfuse)"]
+  harness --> evals["evals<br/>(evaluate, evaluators)"]
+  evals --> pipeline
+  evals --> telemetry
   workerm --> agent
   agent --> pipeline["pipeline.attempt"]
   agent --> surfaces
@@ -209,7 +214,7 @@ sequenceDiagram
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
   W-)Mem: POST /v1/feedback (system: confirm)
-  W-)Mem: POST /v1/verify (sampled 10 %) → grounding score
+  W-)Mem: POST /v1/verify (sampled: TRELLIS_GROUNDING_SAMPLE) → grounding score
   W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
   Agent->>Runs: get(run_id)
@@ -286,8 +291,9 @@ continues:
   recorded outputs (keyed by content, consumed in order — a re-planned call nobody approved is
   asked about again, never matched to another approval).
 
-The journal is the run's checkpoint: `runs.paused(interrupt, checkpoint=journal)` stores it
-with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
+The journal is the run's checkpoint: a worker saves it as progress on a heartbeat after every
+call with side effects (`runs.heartbeat(..., checkpoint=journal)`: a worker that dies repeats
+none of them), `runs.paused(interrupt, checkpoint=journal)` stores it with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
 clears it when the run ends), and the attempt that resumes the run — in this process or in a
 worker elsewhere — files `last_resolution` under the pending question and replays the rest.
 
@@ -319,6 +325,7 @@ sequenceDiagram
   loop every 20 s while it runs
     Wk->>AR: POST /v1/runs/{id}/heartbeat (409 → LeaseLost: stop, write nothing)
   end
+  P->>AR: after a write tool: POST /v1/runs/{id}/heartbeat (checkpoint = journal, the progress)
   P->>P: refund is irreversible → Runtime.approve → Paused
   P->>AR: POST /v1/runs/{id}/pause?worker_id= (Interrupt + checkpoint = journal)
   AR-->>P: PAUSED
@@ -374,6 +381,71 @@ sequenceDiagram
     X-->>C: FAILED
     C-->>P: ToolError: the calling model reads "greeter failed: ..."
   end
+```
+
+## Evaluation
+
+`evals.py`: an evaluator is any `async (EvalCase) -> EvalScore | None`; the built-ins are
+`grounding()` (the memory service's `/v1/verify`), `exact_match()`, `contains()` and
+`llm_judge(criteria)`, whose model and virtual key are the deployment's
+(`TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`: `Harness.judge_gateway`). Every score goes
+on the run's trace through `Harness.score` ([docs/evaluation.md](docs/evaluation.md)).
+
+### Offline: `h.evaluate` over a Langfuse dataset
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Dev as Developer / CI
+  participant H as Harness h.evaluate
+  participant LF as Langfuse
+  participant P as pipeline.attempt (per item)
+  participant Mem as Memory service
+  participant GW as Bifrost (judge key)
+  participant W as Writes (background)
+
+  Dev->>H: await h.evaluate(agent, "support-golden", [grounding(), llm_judge(...)])
+  H->>LF: GET /api/public/v2/datasets/support-golden
+  loop every page
+    H->>LF: GET /api/public/dataset-items?datasetName=&page=&limit=50
+  end
+  par concurrency items at a time
+    H->>LF: POST /api/public/dataset-run-items {runName, datasetItemId, traceId} → datasetRunId (v3)
+    H->>P: attempt(...) inside telemetry.experiment: every span gets langfuse.experiment.* (v4)
+    P->>Mem: POST /v1/context (bundle_id)
+    P-->>H: Result (SUCCESS · PAUSED → cancelled, interrupted · ERROR)
+    H->>Mem: grounding: POST /v1/verify {bundle_id, answer}
+    H->>GW: llm_judge: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL, temperature 0)
+    GW-->>H: {"score", "reasoning"} (malformed → asked once more)
+    H->>LF: POST /api/public/scores (each score, on the run's trace)
+  end
+  H->>W: drain, then export the spans
+  H-->>Dev: EvalReport (items in dataset order, summary per evaluator)
+```
+
+### Online: judges on sampled runs
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User as Application / user
+  participant P as pipeline.attempt
+  participant Runs as Runs
+  participant W as Writes (background)
+  participant J as judges (Harness(judges=[...]))
+  participant GW as Bifrost (judge key)
+  participant LF as Langfuse
+
+  User->>P: await agent.run(question, user=)
+  P->>Runs: finished(SUCCESS, answer)
+  P->>P: sampled(run_id, TRELLIS_JUDGE_SAMPLE)?
+  P-)W: submit judge.<name> (one per judge)
+  P-->>User: Result(SUCCESS, answer): nothing waits for the judges
+  W->>J: judge(EvalCase(question, answer, context, run_id))
+  J->>GW: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL)
+  GW-->>J: {"score", "reasoning"}
+  J->>LF: POST /api/public/scores on the run's trace (and a score span)
+  Note over W,J: a judge that fails is a warning event and a log line, never a failed run
 ```
 
 ## Run states

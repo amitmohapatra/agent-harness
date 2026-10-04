@@ -175,3 +175,98 @@ async def test_two_sdk_approvals_in_one_turn_are_answered_one_at_a_time(
     done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "both sent"
     assert shipped == ["a", "b"]
+
+
+async def test_a_rejected_sdk_approval_tells_the_model_the_reason(harness: Harness) -> None:
+    @function_tool(needs_approval=True)
+    def send(order: str) -> str:
+        raise AssertionError("must not run")
+
+    model = ScriptedModel([("send", {"order": "o9"}), "not sent"])
+    agent = harness.wrap(Agent(name="s", model=model, tools=[send]), id="sender")
+    paused = await agent.run("send o9", user="u1")
+    assert paused.interrupt is not None
+    await agent.resume(paused.interrupt.interrupt_id, "reject", answer="on hold", reviewer="u1")
+    output = model.inputs[-1][-1]
+    assert output["type"] == "function_call_output" and output["output"] == "on hold"
+
+
+async def test_an_answered_sdk_approval_is_what_the_model_reads_instead(harness: Harness) -> None:
+    @function_tool(needs_approval=True)
+    def lookup(order: str) -> str:
+        raise AssertionError("must not run")
+
+    model = ScriptedModel([("lookup", {"order": "o9"}), "it ships monday"])
+    agent = harness.wrap(Agent(name="s", model=model, tools=[lookup]), id="looker")
+    paused = await agent.run("when does o9 ship?", user="u1")
+    assert paused.interrupt is not None
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "answer", answer="ships monday", reviewer="u1"
+    )
+    assert done.answer == "it ships monday"
+    assert model.inputs[-1][-1]["output"] == "ships monday"
+
+
+async def test_an_edited_sdk_approval_runs_the_edited_call_once(harness: Harness) -> None:
+    shipped: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def send(order: str) -> str:
+        shipped.append(order)
+        return f"sent {order}"
+
+    # the model reads the reviewer's arguments and calls again with them: that call runs
+    # without asking again
+    model = ScriptedModel([("send", {"order": "o9"}), ("send", {"order": "o10"}), "sent o10"])
+    agent = harness.wrap(Agent(name="s", model=model, tools=[send]), id="sender")
+    paused = await agent.run("send o9", user="u1")
+    assert paused.interrupt is not None
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "edit", answer={"order": "o10"}, reviewer="u1"
+    )
+    assert done.status is RunStatus.SUCCESS and done.answer == "sent o10"
+    assert shipped == ["o10"]
+    told = model.inputs[1][-1]["output"]
+    assert '{"order": "o10"}' in told and "send" in told
+
+
+async def test_an_edited_call_the_model_changes_again_asks_again(harness: Harness) -> None:
+    shipped: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def send(order: str) -> str:
+        shipped.append(order)
+        return f"sent {order}"
+
+    model = ScriptedModel([("send", {"order": "o9"}), ("send", {"order": "o11"}), "sent"])
+    agent = harness.wrap(Agent(name="s", model=model, tools=[send]), id="sender")
+    paused = await agent.run("send o9", user="u1")
+    assert paused.interrupt is not None
+    again = await agent.resume(
+        paused.interrupt.interrupt_id, "edit", answer={"order": "o10"}, reviewer="u1"
+    )
+    assert again.status is RunStatus.PAUSED and again.interrupt is not None
+    assert again.interrupt.tool_call is not None
+    assert again.interrupt.tool_call.args == {"order": "o11"} and shipped == []
+
+
+async def test_an_edited_sdk_approval_streams_the_continued_run(harness: Harness) -> None:
+    shipped: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def send(order: str) -> str:
+        shipped.append(order)
+        return f"sent {order}"
+
+    model = ScriptedModel([("send", {"order": "o9"}), ("send", {"order": "o10"}), "sent o10"])
+    agent = harness.wrap(Agent(name="s", model=model, tools=[send]), id="sender")
+    paused = [e async for e in agent.stream("send o9", user="u1")][-1]
+    interrupt = paused.data["interrupt"]
+    record, resolution = await agent._resolution(
+        interrupt["interrupt_id"], "edit", {"order": "o10"}, "u1"
+    )
+    events: list[Any] = []
+    result = await agent._continue(record, resolution, listener=events.append)
+    assert result.answer == "sent o10" and shipped == ["o10"]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert "".join(deltas) == "sent o10"

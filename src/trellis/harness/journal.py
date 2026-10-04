@@ -100,10 +100,12 @@ class Replay:
         self._seen[f"c:{key}"] = index + 1
         return True, recorded[index]
 
-    def record_call(self, key: str, output: Any, *, tool: str) -> None:
+    def record_call(self, key: str, output: Any, *, tool: str | None = None) -> None:
+        """Record what this occurrence of ``key`` produced: a tool's output (``tool`` names
+        it, and it stays offered after a pause), or a model step of a loop the harness runs."""
         self.journal.calls.setdefault(key, []).append(output)
         self._seen[f"c:{key}"] += 1
-        if tool not in self.journal.used:
+        if tool is not None and tool not in self.journal.used:
             self.journal.used.append(tool)
 
     def record_answer(self, key: str, resolution: InterruptResolution) -> None:

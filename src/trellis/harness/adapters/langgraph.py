@@ -9,17 +9,21 @@
   run's thread (or the run id);
 * pause: with a checkpointer, ``trellis.current().ask`` *is* LangGraph's ``interrupt``, and a
   resume is ``Command(resume=...)``; without one the run is re-executed from its input and the
-  journal answers the questions already asked;
+  journal answers the questions already asked. LangChain's ``HumanInTheLoopMiddleware`` (Deep
+  Agents' ``interrupt_on``) pauses with its own request: it is an approval of the calls it
+  holds, and the harness's decision is turned into the ``{"decisions": [...]}`` it resumes
+  with (:func:`hitl_response`);
 * tools: fixed when the graph is compiled, so harness tools come from ``h.tools(...)`` at
   build time.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar, Final
 
-from trellis.contracts import ConfigurationError, InterruptResolution
+from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution
 from trellis.harness.adapters.base import (
     Extracted,
     Invocation,
@@ -29,10 +33,12 @@ from trellis.harness.adapters.base import (
     ToolFormat,
 )
 from trellis.harness.journal import Pending
-from trellis.harness.runtime import MARKER, answer_of
+from trellis.harness.runtime import MARKER, answer_of, reason_of
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"
+#: The journal key of a ``HumanInTheLoopMiddleware`` pause (Deep Agents' ``interrupt_on``).
+HITL: Final = "langchain_hitl"
 #: The id of the memory context message: one per thread, replaced every turn.
 CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
 
@@ -119,9 +125,12 @@ class LangGraphAdapter:
             return native_input
         from langgraph.types import Command
 
-        value = (
-            answer_of(resolution) if pending.key == FOREIGN else resolution.model_dump(mode="json")
-        )
+        if pending.key == HITL:
+            value: Any = hitl_response(pending.interrupt.payload or {}, resolution)
+        elif pending.key == FOREIGN:
+            value = answer_of(resolution)
+        else:
+            value = resolution.model_dump(mode="json")
         return Command(resume={pending.native_id: value})
 
     @staticmethod
@@ -132,6 +141,63 @@ class LangGraphAdapter:
 
             runtime.suspend = interrupt
         return {"configurable": {"thread_id": runtime.thread or runtime.run_id}}
+
+
+def is_hitl(value: Any) -> bool:
+    """Whether an interrupt's value is a ``HumanInTheLoopMiddleware`` request (its
+    ``action_requests`` and their ``review_configs``)."""
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("action_requests"), list)
+        and bool(value["action_requests"])
+        and isinstance(value.get("review_configs"), list)
+    )
+
+
+def hitl_response(request: dict[str, Any], resolution: InterruptResolution) -> dict[str, Any]:
+    """The ``{"decisions": [...]}`` a ``HumanInTheLoopMiddleware`` pause resumes with — one
+    decision per call it holds, in order — for a harness decision:
+
+    * ``approve`` approves every call;
+    * ``edit`` runs the first call (the one the interrupt shows) with the edited arguments and
+      approves the others;
+    * ``reject`` rejects every call, with the reviewer's reason (``answer=``) as the message the
+      model reads;
+    * ``answer`` responds for every call with the answer (the tool does not run).
+
+    An answer (or edit) that already is ``{"decisions": [...]}`` is sent as it is. A decision a
+    call's ``allowed_decisions`` does not include raises ``ConfigurationError``."""
+    raw = resolution.payload if resolution.decision is InterruptDecision.EDIT else resolution.answer
+    if isinstance(raw, dict) and isinstance(raw.get("decisions"), list):
+        return raw
+    actions: list[dict[str, Any]] = request["action_requests"]
+    configs: list[dict[str, Any]] = request["review_configs"]
+    decisions = [_decision(resolution, action, first=n == 0) for n, action in enumerate(actions)]
+    for action, config, decision in zip(actions, configs, decisions, strict=False):
+        allowed = config.get("allowed_decisions") or []
+        if decision["type"] not in allowed:
+            raise ConfigurationError(
+                f"{action.get('name')} does not allow the decision {decision['type']!r} "
+                f"(allowed: {', '.join(allowed)})"
+            )
+    return {"decisions": decisions}
+
+
+def _decision(resolution: InterruptResolution, action: dict[str, Any], *, first: bool) -> Any:
+    decision = resolution.decision
+    if decision is InterruptDecision.REJECT:
+        reason = reason_of(resolution)
+        return {"type": "reject", "message": reason} if reason else {"type": "reject"}
+    if decision is InterruptDecision.EDIT and first:
+        return {
+            "type": "edit",
+            "edited_action": {"name": action["name"], "args": resolution.payload},
+        }
+    if decision is InterruptDecision.ANSWER:
+        answer = resolution.answer
+        message = answer if isinstance(answer, str) else json.dumps(answer, default=str)
+        return {"type": "respond", "message": message}
+    return {"type": "approve"}
 
 
 def bound_tools(target: Any) -> list[Any]:

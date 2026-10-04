@@ -104,8 +104,8 @@ precedence **human > judge > system**:
 * **system** — the harness, when the run ends: `SUCCESS` → `confirm`, `ERROR` → `reject` (a
   cancelled run says nothing about the agent). Never "no exception = success" on its own: the
   judge and people outrank it.
-* **judge** — on a sampled 10 % of successful runs with a text answer (`GROUNDING_SAMPLE`,
-  chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
+* **judge** — on a sampled share of successful runs with a text answer
+  (`TRELLIS_GROUNDING_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim is no verdict and no score.

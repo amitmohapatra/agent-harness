@@ -11,11 +11,12 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-Turn = str | tuple[str, dict[str, Any]]
+Turn = str | tuple[str, dict[str, Any]] | list[tuple[str, dict[str, Any]]]
 
 
 class ScriptedChatModel(BaseChatModel):
-    """Each call answers with the next turn: text, or ``(tool, args)`` for a tool call."""
+    """Each call answers with the next turn: text, ``(tool, args)`` for a tool call, or a list
+    of them for several calls in one message."""
 
     turns: list[Turn]
     seen: list[list[BaseMessage]] = Field(default_factory=list)
@@ -39,9 +40,12 @@ class ScriptedChatModel(BaseChatModel):
         if isinstance(turn, str):
             message = AIMessage(content=turn)
         else:
-            name, args = turn
+            calls = turn if isinstance(turn, list) else [turn]
             message = AIMessage(
                 content="",
-                tool_calls=[{"name": name, "args": args, "id": f"call_{len(self.seen)}"}],
+                tool_calls=[
+                    {"name": name, "args": args, "id": f"call_{len(self.seen)}_{n}"}
+                    for n, (name, args) in enumerate(calls)
+                ],
             )
         return ChatResult(generations=[ChatGeneration(message=message)])

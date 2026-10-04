@@ -13,6 +13,7 @@ diagrams of a run, a pause and an A2A call, run states).
 | [interrupts.md](interrupts.md) | `ask`, approvals, `resume`, the journal, artifacts |
 | [runs.md](runs.md) | run records, `start` and the worker, schedules, the inbox |
 | [surfaces.md](surfaces.md) | `serve_chat` (AG-UI) and `serve_a2a` |
-| [observability.md](observability.md) | OTel GenAI spans, Langfuse, scores, the collector, evals |
+| [observability.md](observability.md) | OTel GenAI spans, Langfuse, scores, the collector |
+| [evaluation.md](evaluation.md) | offline (`h.evaluate` over a dataset) and online (`judges=`) evaluation, the evaluators, the judge's model and budget |
 
 `docs/agents/` holds notes for coding agents working on this repo.
