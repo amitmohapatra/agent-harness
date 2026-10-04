@@ -13,7 +13,8 @@ from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness import runtime as runtime_module
-from trellis.harness.clients.runs import LeaseLost, LocalRuns, RunStoreError
+from trellis.harness.runs import LocalRuns
+from trellis.runs import Lease, LeaseLostError, PayloadTooLargeError
 
 paid: list[int] = []
 looked: list[str] = []
@@ -51,10 +52,10 @@ def lapse(store: LocalRuns, run_id: str) -> None:
 
 async def crash_once(store: LocalRuns, agent: Any, handle: Any) -> None:
     worker = agent.harness.worker([agent])
-    record = await store.claim(worker.worker_id, [agent.id], 60)
-    assert record is not None
+    claimed = await store.claim(worker.worker_id, [agent.id])
+    assert claimed is not None
     with pytest.raises(Crash):
-        await agent._claimed(record, worker.worker_id, lease_seconds=60)
+        await agent._claimed(claimed.run, worker.worker_id, lease_seconds=60)
     lapse(store, handle.run_id)
 
 
@@ -118,9 +119,9 @@ async def test_reads_are_saved_at_most_every_progress_interval(
     assert isinstance(store, LocalRuns)
     original = store.heartbeat
 
-    async def heartbeat(run_id: str, worker_id: str, lease: float, **kw: Any) -> None:
+    async def heartbeat(run_id: str, worker_id: str, **kw: Any) -> Lease:
         saved.append(kw.get("checkpoint"))
-        await original(run_id, worker_id, lease, **kw)
+        return await original(run_id, worker_id, **kw)
 
     monkeypatch.setattr(store, "heartbeat", heartbeat)
 
@@ -168,7 +169,7 @@ async def test_a_progress_checkpoint_too_large_or_refused_is_a_warning(
 
         async def refused(*args: Any, **kwargs: Any) -> None:
             if "checkpoint" in kwargs:
-                raise RunStoreError("413 PAYLOAD_TOO_LARGE")
+                raise PayloadTooLargeError("413 PAYLOAD_TOO_LARGE", status=413)
 
         monkeypatch.setattr(h.runs, "heartbeat", refused)
         agent = h.wrap(billing, id="billing", tools=[pay])
@@ -182,7 +183,7 @@ async def test_a_lease_lost_while_saving_progress_stops_the_run(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def lost(*args: Any, **kwargs: Any) -> None:
-        raise LeaseLost("w no longer holds the run")
+        raise LeaseLostError("w no longer holds the run", code="LEASE_LOST", status=409)
 
     monkeypatch.setattr(harness.runs, "heartbeat", lost)
 

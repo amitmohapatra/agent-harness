@@ -26,10 +26,10 @@ from trellis.contracts import (
     ToolCall,
     ToolError,
 )
-from trellis.harness.clients.runs import LeaseLost
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
+from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -105,7 +105,7 @@ class Runtime:
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None
-    lease_seconds: float | None = None
+    lease_seconds: int | None = None
     #: the lease was lost while saving progress: the run stops and writes nothing more
     lease_lost: bool = False
     #: the run's transcript, tool calls and outcome are recorded in the memory service
@@ -181,7 +181,7 @@ class Runtime:
         ``now`` after a side-effecting call — the attempt after a crash replays it instead of
         running it again; otherwise at most every :data:`PROGRESS_SECONDS`. A checkpoint over
         :data:`MAX_CHECKPOINT_BYTES` is not sent and a refused save is a warning (the run goes
-        on; the next save tries again); a lost lease stops the run (:class:`LeaseLost`)."""
+        on; the next save tries again); a lost lease stops the run (``LeaseLostError``)."""
         if self.worker_id is None or self.lease_seconds is None:
             return
         clock = time.monotonic()
@@ -196,9 +196,13 @@ class Runtime:
             return
         try:
             await self.agent.harness.runs.heartbeat(
-                self.run_id, self.worker_id, self.lease_seconds, checkpoint=checkpoint
+                self.run_id,
+                self.worker_id,
+                lease_seconds=self.lease_seconds,
+                checkpoint=checkpoint,
+                tenant=self.tenant,
             )
-        except LeaseLost:
+        except LeaseLostError:
             self.lease_lost = True
             raise
         except Exception as exc:
@@ -259,12 +263,13 @@ class Runtime:
         )
         return answer_of(resolution)
 
-    async def approve(self, call: ToolCall, reason: str) -> InterruptResolution:
-        """Ask for approval of a tool call (the bridge's pause)."""
+    async def approve(self, call: ToolCall, question: str) -> InterruptResolution:
+        """Ask for approval of a tool call (the bridge's pause): ``question`` is governance's
+        (``Decision.question``)."""
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,
-            question=f"Approve {call.tool}? {reason}",
+            question=question,
             ui="approve",
             tool_call=call,
         )
@@ -286,8 +291,8 @@ class Runtime:
             if len(data) <= INLINE_PAYLOAD_BYTES:
                 fields["payload"] = payload
             else:
-                fields["payload_ref"] = await self.agent.harness.runs.put_artifact(
-                    self.run_id, data, worker_id=self.worker_id
+                fields["payload_ref"] = await self.agent.harness.runs.artifacts.upload(
+                    self.run_id, data, worker_id=self.worker_id, tenant=self.tenant
                 )
         interrupt = Interrupt(
             interrupt_id=ident, tenant_id=self.tenant, run_id=self.run_id, **fields

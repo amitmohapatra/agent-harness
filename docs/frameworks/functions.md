@@ -2,7 +2,10 @@
 
 Code that decides itself what happens — a workflow, a router, glue between agents, a step with
 no model — is a target as it is: `async def fn(input, agent) -> answer`. `agent` is the run's
-`Runtime` (the same object `trellis.current()` returns). Nothing else to install.
+`Runtime` (the same object `trellis.current()` returns). Nothing else to install. This is
+Way 1: the harness runs the function. Plain code that calls the blocks itself, unwrapped, is
+Way 2 ([docs/README.md](../README.md#way-2-pluggable-blocks-your-framework-our-pieces);
+[blocks/runs.md](../blocks/runs.md) has a `Worker` with a handler of your own).
 
 ```python
 from trellis import Harness, Runtime, tool
@@ -33,7 +36,7 @@ result = await agent.run({"order": "o-7", "amount": 40, "question": "Refund o-7"
 |---|---|
 | `agent.context` | the pushed memory context (also a leading system message when the input is a message list) |
 | `agent.memory` | the memory SDK's verbs in the run's scope (`search`, `remember`, `history`, documents…; needs `MEMORY_URL`) |
-| `await agent.tools.call(name, **args)` | any tool of the run — yours, MCP, memory — through the bridge (tiers, approvals, journal, records) |
+| `await agent.tools.call(name, **args)` | any tool of the run — yours, MCP, memory — through the bridge (governance, approvals, journal, records) |
 | `await agent.tools.hints(task)` | the tools that fit a task, from the memory service |
 | `await agent.ask(question, ...)` | a pause for a person ([interrupts.md](../interrupts.md)); returns the answer on resume |
 | `agent.log(message, **fields)` | a log line and a `log` event on the stream |
@@ -55,7 +58,9 @@ the bridge runs once), and code outside them runs again on each attempt.
 `stream` yields the tool events and `RUN_FINISHED` (a function has no text deltas). `start` +
 workers (the input must be JSON), `schedule`, `serve_chat`, `serve_a2a` and `h.evaluate` work as
 for every target; `llm_judge` needs `TRELLIS_JUDGE_MODEL`. An object with an `async __call__`
-is a target too.
+is a target too. Wrapping a function is also how code on its own framework gets the AG-UI and
+A2A servers, which serve wrapped agents only: wrap the function that calls your graph or runner
+([surfaces.md](../surfaces.md#surfaces)).
 
 ## Run it
 

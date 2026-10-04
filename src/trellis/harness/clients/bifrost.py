@@ -2,7 +2,7 @@
 execution log, and chat completions for the ``ReAct`` target.
 
 Agent Mode (the gateway running tools itself) is never used: every call comes back to the
-harness so policy and approval sit in front of it.
+harness so governance and approval sit in front of it.
 """
 
 from __future__ import annotations

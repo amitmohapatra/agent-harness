@@ -19,8 +19,9 @@ from tests.live.conftest import (
     needs_memory,
 )
 from tests.live.support import StubLangfuse, memory_scope
-from trellis import Runtime, contains, grounding, llm_judge
+from trellis import Runtime
 from trellis.harness import telemetry
+from trellis.harness.evals import contains, grounding, llm_judge
 
 pytestmark = [pytest.mark.live, needs_memory]
 

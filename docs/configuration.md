@@ -14,13 +14,13 @@ what is read.
 | `BIFROST_URL` | no MCP tools, no `ReAct` model names |
 | `BIFROST_VIRTUAL_KEY` | gateway calls without a key (the gateway's own policy decides); no memory model key registered |
 | `TRELLIS_API_KEY` | only allowed without `MEMORY_URL`: both services refuse a call without a key, so `Harness()` refuses `MEMORY_URL` (and `RUNS_URL`) without it (`ConfigurationError`), rather than a `401` at the first run |
-| `MEMORY_URL` | memory off: no context, no memory tools, no records, no catalog (tiers are the tools' own) |
+| `MEMORY_URL` | memory off: no context, no memory tools, no records, no catalog (the tools' own risks decide) |
 | `RUNS_URL` | runs, the queue and schedules kept in process (needs `MEMORY_URL`: agent-runs accepts the memory service's keys, and the tenant comes from there) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no OTLP export |
 | `OTEL_EXPORTER_OTLP_HEADERS` | no OTLP headers; no Langfuse scores API |
 | `TRELLIS_SPOOL_DIR` | memory writes this process cannot deliver are logged, counted and lost (set: kept in `<dir>/trellis-writes.jsonl` and replayed at the next start — [memory.md](memory.md#background-writes-what-is-guaranteed)) |
-| `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.worker` and `concurrency=` on `h.worker` win over it) |
-| `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
+| `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.harness.worker` and `concurrency=` on `h.worker` win over it) |
+| `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the judge's calls go through `BIFROST_VIRTUAL_KEY`, on the agents' budget. Set it to a **separate virtual key** so evaluation spend is budgeted, limited and reported on its own |
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |
 | `TRELLIS_GROUNDING_SAMPLE` | 0.1: a tenth of the successful runs with a text answer (and memory on) are checked against the context they were given (`/v1/verify`, a score on the trace — [observability.md](observability.md#scores)); `0` turns it off, `1` checks every run. A number from 0 to 1, else `Settings` refuses it (`ValidationError`); the run id decides, so a run is either always or never sampled |

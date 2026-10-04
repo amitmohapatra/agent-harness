@@ -4,12 +4,63 @@ The harness is an attach layer. It owns no control flow: a framework runs the ag
 harness sits around one run of it — identity, the run record, memory in and out, the tools the
 agent may call and who must approve them, the pause, the recording, the trace.
 
+## Two ways
+
+Trellis is used in two ways ([README](README.md#two-ways-to-use-trellis)), and both reach the
+same services through the same clients. **Way 1, wrapped:** `h.wrap(agent)`, and the harness's
+pipeline calls every block around each run of the framework. **Way 2, pluggable blocks:** the
+team's own code runs the framework and calls the blocks it wants itself. The blocks are the
+same objects in both: the harness builds its run store on `trellis.runs.RunsClient`, its memory
+calls on `trellis.memory`, and checks every tool call with the same `Governance` a team imports.
+
+```mermaid
+flowchart LR
+  subgraph way1["Way 1: wrapped"]
+    wrap["h.wrap(agent) · agent.run"] --> pipeline["harness pipeline<br/>(memory push · bridge · pause · records)"]
+    pipeline --> fw1["your framework<br/>(called by the adapter)"]
+  end
+  subgraph way2["Way 2: pluggable blocks"]
+    team["your code"] --> fw2["your framework<br/>(called by you)"]
+  end
+  subgraph blocks["the blocks"]
+    memsdk["trellis.memory<br/>MemoryClient"]
+    runsdk["trellis.runs<br/>RunsClient · Worker · webhooks"]
+    gov["trellis.harness.governance<br/>Governance · governed"]
+    evals["trellis.harness.evals<br/>evaluate · judge"]
+    remote["trellis.harness.a2a<br/>remote"]
+    contracts["trellis.contracts<br/>the records"]
+  end
+  pipeline --> memsdk
+  pipeline --> runsdk
+  pipeline --> gov
+  pipeline --> evals
+  pipeline --> remote
+  team --> memsdk
+  team --> runsdk
+  team --> gov
+  team --> evals
+  team --> remote
+  memsdk --> memory["Memory service"]
+  gov --> memory
+  evals --> memory
+  runsdk --> runs["agent-runs"]
+  evals --> lf["Langfuse"]
+  remote --> peer["A2A agents"]
+```
+
+Every block takes and returns `trellis.contracts` records, which is why a run paused either way
+is one `RunRecord` in one inbox. What only Way 1 has is the pipeline itself: the journal that
+lets a resumed run repeat no side effect, the background writes with their spool, the toolbox
+(MCP tools, Code Mode, tool hints), and the AG-UI and A2A servers, which serve a run through
+it. The rest of this document is the harness, Way 1; the blocks' pages are
+[docs/blocks/](docs/README.md#way-2-pluggable-blocks-your-framework-our-pieces).
+
 ## System context
 
 What a process that imports `trellis` talks to. Every arrow out of the harness is one client
-module (`clients/bifrost.py`, `clients/memory.py`, `clients/runs.py`) or one surface
-(`surfaces/agui`, `surfaces/a2a`); the OTLP exporter and the Langfuse scores API are
-`telemetry.py`.
+module (`clients/bifrost.py`, `clients/memory.py`, and `runs.py`, whose store is the agent-runs
+SDK's `trellis.runs.RunsClient`) or one protocol package (`agui`, `a2a`); the OTLP
+exporter and the Langfuse scores API are `telemetry.py`.
 
 ```mermaid
 flowchart LR
@@ -26,34 +77,35 @@ flowchart LR
   bifrost --> models["Model providers"]
   harness -- "context · records · feedback" --> memory["Memory service"]
   harness -- "runs · queue · inbox" --> runs["agent-runs"]
-  worker["Workers<br/>python -m trellis.worker"] -- "claim · heartbeat" --> runs
+  worker["Workers<br/>python -m trellis.harness.worker"] -- "claim · heartbeat" --> runs
   harness -- "traces · scores" --> otel["Langfuse or an<br/>OTel collector"]
 ```
 
 | Neighbour | What the harness uses it for | Endpoints (module) |
 |---|---|---|
 | Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s model calls, the MCP log of Code Mode scripts | `POST /mcp` (`tools/list`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs` (`clients/bifrost.py`, through `bifrost-sdk`) |
-| Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, through `trellis-memory`) |
-| agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`clients/runs.py`) |
-| Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`surfaces/agui`) |
-| Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)`: `SendStreamingMessage`, `CancelTask` (`surfaces/a2a`) |
+| Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, the tool catalog's `/v1/tools`, `/v1/tools/catalog` and approval feedback in `governance/catalog.py`, and `/v1/verify` in `evals.grounding_score`, through `trellis-memory`) |
+| agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`runs.py`, through `trellis.runs.RunsClient`) |
+| Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`agui`) |
+| Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)` and `remote(url)`: `SendStreamingMessage`, `CancelTask` (`a2a`) |
 | Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces (an evaluated run's spans with Langfuse's experiment attributes); grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
 
 
 Unset variables remove a box: no `BIFROST_URL` means no MCP tools and no `ReAct` model names,
 no `MEMORY_URL` means no memory, no `RUNS_URL` keeps runs, the queue and schedules in this
-process (`LocalRuns`), no `OTEL_EXPORTER_OTLP_ENDPOINT` means no export
+process (`runs.LocalRuns`), no `OTEL_EXPORTER_OTLP_ENDPOINT` means no export
 ([docs/configuration.md](docs/configuration.md)).
 
 ## Modules
 
 ```
 src/trellis/
-  __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory)
-  worker.py            python -m trellis.worker module:harness
+  __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory /
+                       .runs)
   harness/
-    harness.py         Harness: settings → clients, writes, scores; the key (tenant, kept fresh);
-                       wrap / tools / worker / inbox / feedback / add_document
+    harness.py         Harness: settings → clients, writes, evaluation services; the key (tenant,
+                       kept fresh); governance per tenant; wrap / tools / worker / inbox /
+                       feedback / add_document / evaluate / score
     agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
     pipeline.py        one attempt of one run (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
@@ -63,53 +115,71 @@ src/trellis/
     fresh.py           a value read from a service, kept for a TTL, the last one through outages
     identity.py        tenant / user / thread / agent / run → memory scope, contracts context
     result.py          Result
-    evals.py           evaluators (grounding, exact_match, contains, llm_judge), h.evaluate, online judges
+    evals.py           evaluation, usable without Harness: EvalServices (Langfuse, the judge;
+                       from_env), evaluate (a wrapped Agent or any async callable), judge
+                       (on-line, from any code), the evaluators (grounding with grounding_score,
+                       exact_match, contains, llm_judge)
     settings.py        the environment
     telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; the Langfuse
                        client (scores, datasets, dataset runs)
     redaction.py       what may leave the process
-    worker.py          Worker: claim, lease, heartbeat
+    runs.py            RunStore (the part of trellis.runs.RunsClient the harness calls, with its
+                       signatures) and LocalRuns (the same store in process, when RUNS_URL is
+                       unset)
+    worker/            Worker: trellis.runs.Worker (claim, lease, heartbeat, graceful stop)
+                       running wrapped agents, the background writes around it; __main__:
+                       python -m trellis.harness.worker module:harness
     adapters/          detect(target) and one adapter per framework (base, langgraph,
                        openai_agents, claude, react, function)
-    tools/             base (Tool), sources (tool, a2a, openapi), toolbox (MCP tools, catalog
-                       tiers and approve_when, Code Mode, publishing), policy (tiers,
-                       conditions), bridge (every call), convert/ (one module per native format)
-    clients/           bifrost, memory, runs — the only modules that call those services
-    surfaces/          agui (serve_chat), a2a (serve_a2a, the a2a() client)
+    governance/        the run / announce / ask decision, usable without Harness: decision
+                       (Action, Decision, decide), catalog (Rule, the catalog kept fresh, failing
+                       closed, publishing), Governance (check, rules, publish, decided,
+                       from_env) and governed
+    tools/             base (Tool), sources (tool, a2a, openapi), toolbox (MCP tools, their
+                       side effects, Code Mode, publishing), bridge (every call: governance,
+                       then pause / announce / run), convert/ (one module per native format)
+    clients/           bifrost, memory — the only modules that call those services
+    agui/              serve_chat: mount, the Hub (buffered events), translate, sse
+    a2a/               A2A both ways: client (remote() → RemoteAgent, usable from any code;
+                       the a2a() tool is built on it), server (serve_a2a: mount, the card),
+                       executor, tasks, identity, push, translate
 ```
 
-Each service has exactly one client module; nothing else in the harness calls it. The core
-imports no framework: an adapter imports its framework the first time a target of its type is
-wrapped, and `tests/contract` checks that `import trellis` and `Harness()` load none — and that
-what the clients send, and what the test doubles of the memory service and agent-runs answer,
-match those services' committed OpenAPI documents.
+Each service has exactly one client module; nothing else in the harness calls it (agent-runs'
+is the SDK's `RunsClient`, which `runs.py` types as the `RunStore`) — except the tool catalog, which `governance/catalog.py` reads and writes through the memory SDK itself, and
+the grounding check, which `evals.grounding_score` asks through the memory SDK's
+`MemoryContext`, so governance and evaluation work without a `Harness`. The core imports no framework: an adapter imports its
+framework the first time a target of its type is wrapped, and `tests/contract` checks that
+`import trellis` and `Harness()` load none — and that what the clients send, and what the test
+doubles of the memory service and agent-runs answer, match those services' committed OpenAPI
+documents.
 
 ### Components
 
 How the modules depend on each other (an arrow reads "uses"). The adapters and the tool
-converters are the only modules that import a framework; the surfaces are the only ones that
-import FastAPI or the A2A SDK.
+converters are the only modules that import a framework; `agui` and `a2a` are the only ones
+that import FastAPI or the A2A SDK.
 
 ```mermaid
 flowchart TB
   api["trellis (public API, lazy)"] --> harness["harness.Harness"]
-  cli["trellis.worker (CLI)"] --> harness
+  cli["trellis.harness.worker (CLI)"] --> harness
   harness --> agent["agent.Agent · RunHandle"]
   harness --> workerm["worker.Worker"]
   harness --> writes["writes.Writes"]
   harness --> telemetry["telemetry<br/>(spans, counters, Langfuse)"]
-  harness --> evals["evals<br/>(evaluate, evaluators)"]
+  harness --> evals["evals<br/>(EvalServices · evaluate · judge<br/>evaluators · grounding_score)"]
+  agent --> evals
   evals --> pipeline
   evals --> telemetry
+  evals --> bifrost
   workerm --> agent
+  workerm --> sdk
   agent --> pipeline["pipeline.attempt"]
-  agent --> surfaces
-  subgraph surfaces["surfaces"]
-    agui["agui: mount · Hub · translate · sse"]
-    a2a["a2a: mount · RunExecutor · RunTaskStore<br/>PushNotifier · HeaderIdentity · client"]
-  end
+  agent --> agui["agui<br/>(mount · Hub · translate · sse)"]
+  agent --> a2aserver["a2a.server<br/>(mount · RunExecutor · RunTaskStore<br/>PushNotifier · HeaderIdentity)"]
   agui --> pipeline
-  a2a --> pipeline
+  a2aserver --> pipeline
   pipeline --> runtime["runtime.Runtime · ask"]
   pipeline --> journal["journal.Journal · Replay"]
   pipeline --> events["events.RunEvents"]
@@ -124,22 +194,28 @@ flowchart TB
   adapters --> convert["tools.convert<br/>(langchain · openai_agents · claude · openai_chat)"]
   convert --> bridge["tools.bridge.call"]
   runtime --> bridge
-  bridge --> policy["tools.policy.tier"]
+  bridge --> governance["governance.Governance<br/>(check · decide · the catalog,<br/>through trellis.memory)"]
   bridge --> journal
-  agent --> toolbox["tools.toolbox.resolve"]
+  harness --> governance
+  agent --> toolbox["tools.toolbox.Toolbox"]
+  toolbox --> governance
   toolbox --> sources["tools.sources<br/>(tool · a2a · openapi)"]
-  sources --> a2a
+  sources --> a2aclient["a2a.client<br/>(remote · RemoteAgent)"]
+  a2aclient --> runtime
   subgraph clients["clients (one per service)"]
     bifrost["bifrost.Gateway"]
     memory["memory.Memory · RunMemory"]
-    runs["runs.HttpRuns · LocalRuns"]
   end
+  runs["runs.RunStore<br/>(RunsClient · LocalRuns)"]
+  sdk["trellis.runs (SDK)<br/>RunsClient · Worker · errors · webhooks.sign"]
   toolbox --> bifrost
-  toolbox --> memory
   agent --> memory
   agent --> runs
   pipeline --> runs
   harness --> clients
+  harness --> runs
+  runs --> sdk
+  a2aserver --> sdk
   telemetry --> redaction["redaction.Redactor"]
   pipeline --> telemetry
   bridge --> telemetry
@@ -179,7 +255,7 @@ sequenceDiagram
   autonumber
   actor User as Application / user
   participant Agent as Harness h · Agent (h.wrap)
-  participant Runs as Runs (agent-runs or LocalRuns)
+  participant Runs as RunStore (RunsClient or LocalRuns)
   participant P as pipeline.attempt
   participant Mem as Memory service
   participant FW as Adapter + framework
@@ -190,17 +266,17 @@ sequenceDiagram
 
   User->>Agent: await agent.run(input, user=, thread=)
   Agent->>Mem: GET /v1/keys/self (tenant, kept 10 min, the last answer while memory is down)
-  Agent->>Runs: started(RunStart) → RUNNING
+  Agent->>Runs: start(RunStart) → RUNNING
   Agent->>P: attempt(agent, identity, input)
   P->>GW: MCP tools/list with the virtual key (definitions, kept 300 s)
-  P->>Mem: GET /v1/tools?names= + If-None-Match (tiers, approve_when, every 30 s)
+  P->>Mem: GET /v1/tools?names= + If-None-Match (governance: risks, approve_when, every 30 s)
   P->>Mem: GET /v1/agent-tools (pull tools, kept 10 min)
   P->>Mem: POST /v1/context (memory recall: retrieve memory span)
   Mem-->>P: rendered, bundle_id, tools [name, confidence]
   P->>FW: prepare_input(input, context), invoke(native tools)
   FW->>GW: chat completion (the team's model through Bifrost)
   FW->>Br: call erp-get_stock(sku)
-  Br->>Br: replay? tier: read → runs (write → tool_notice, irreversible → ask)
+  Br->>Br: replay? governance.check: read → run (write → announce, irreversible → ask)
   Br->>GW: POST /v1/mcp/tool/execute (execute_tool span)
   GW-->>Br: result
   Br-)W: memory.record_tool
@@ -209,7 +285,7 @@ sequenceDiagram
   Br->>Mem: POST /v1/agent-tools/memory_remember (memory write, in the run's scope)
   Br-->>FW: stored
   FW-->>P: output → extract(answer, transcript)
-  P->>Runs: finished(SUCCESS, output)
+  P->>Runs: finish(SUCCESS, output, tenant=)
   P-->>User: Result(SUCCESS, answer)
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
@@ -217,7 +293,7 @@ sequenceDiagram
   W-)Mem: POST /v1/verify (sampled: TRELLIS_GROUNDING_SAMPLE) → grounding score
   W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
-  Agent->>Runs: get(run_id)
+  Agent->>Runs: get(run_id, tenant=)
   Agent->>Mem: POST /v1/feedback (human, review pending)
   Agent->>LF: score feedback (POST /api/public/scores and a score span)
 ```
@@ -247,30 +323,37 @@ gates, the limits — is one page per framework under [docs/frameworks/](docs/RE
 
 ## Tools
 
-The toolbox (`tools/toolbox.py`, one `Toolbox` per agent and tenant) keeps two things fresh on
-two clocks: the definitions — the local sources and every MCP tool the Bifrost virtual key
-allows — listed again after `TOOLS_TTL_SECONDS` (300), and the governance — the catalog's word on
-each tool (`risk`, `approve_when`) — read again after `GOVERNANCE_TTL_SECONDS` (30) with the last
-answer's `ETag` (`If-None-Match`; a `304` keeps what was read), so an administrator's new rule
-reaches running agents within half a minute. One refresh at a time: concurrent runs that find
-the toolbox stale share one read. Code Mode is chosen for the read-only Code Mode servers when
-there are enough of them, and every tool is published to the catalog in the background (and
-published again at the next listing if that failed). A catalog that cannot be read leaves each
-tool its own tier, except that every tool that does more than read asks for approval
-(`policy.CATALOG_UNREAD`) until it can (governance read in the last 300 s still stands); the
-warning is logged once. Every call, whoever makes it, goes through `tools/bridge.call`:
+The toolbox (`tools/toolbox.py`, one `Toolbox` per agent and tenant) keeps the definitions — the
+local sources and every MCP tool the Bifrost virtual key allows — fresh: listed again after
+`TOOLS_TTL_SECONDS` (300), one listing at a time (concurrent runs that find it stale share one).
+A new listing is published to the catalog through governance, in the background (and published
+again at the next listing if that failed). Code Mode is chosen for the Code Mode servers whose
+tools all only read as governance says now, when there are enough of them.
+
+Governance (`governance/`, one `Governance` per tenant: `Harness.governance`) is the only place a
+call's action is decided ([docs/governance.md](docs/governance.md)). It reads the catalog's word
+on each tool it is asked about (`risk`, `approve_when`) again after `GOVERNANCE_TTL_SECONDS` (30)
+with the last answer's `ETag` (`If-None-Match`; a `304` keeps what was read), so an
+administrator's new rule reaches running agents within half a minute; a tool asked about for the
+first time is read at once, and concurrent calls share one read. A catalog that cannot be read
+leaves each tool its own risk, except that every tool that does more than read asks for approval
+(`catalog.CATALOG_UNREAD`) until it can (rules read in the last 300 s still stand); the warning
+is logged once. Governance never sees the run (`Runtime`): the same `Governance` checks the
+tools of code that does not use `h.wrap` (`Governance.from_env`, `governed`).
+
+Every call, whoever makes it, goes through `tools/bridge.call`:
 
 1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
    recorded output is returned and nothing runs;
-2. **policy** — the tier from the tool's side effects (annotations → declaration → the
-   catalog's `risk`), as the governance stands at the time of the call (`Agent.governing`: the
-   run's toolbox, or — for a tool `h.tools` built into a target, e.g. an OpenAI Agents handoff's
-   — the toolbox of that `h.tools` call, so a rule set after a graph was compiled still
-   applies): `read` runs, `write` runs and is announced (`tool_notice` event),
-   `irreversible` asks for approval. The catalog's `approve_when` replaces the tier: it asks
-   exactly when the expression holds, evaluated by `trellis.memory.approval` — the memory
-   service's own implementation, which also writes and validates the rules (a rule that cannot
-   be read or evaluated asks);
+2. **governance** — `Harness.governance(tenant).check(tool, args, side_effects=...)`, by the
+   tool's name, as the catalog says at the time of the call (so a rule set after a graph was
+   compiled, or on a tool an OpenAI Agents handoff carries, still applies): `read` runs,
+   `write` runs and is announced (`tool_notice` event), `irreversible` asks for approval. The
+   catalog's `approve_when` replaces that: it asks exactly when the expression holds, evaluated
+   by `trellis.memory.approval` — the memory service's own implementation, which also writes
+   and validates the rules (a rule that cannot be read or evaluated asks). The bridge acts on
+   the decision: it pauses the run (`Runtime.approve` with the decision's question), announces
+   the call, or runs it;
 3. **execution** — in an `execute_tool` span, between `TOOL_CALL_*` events; a failure is an
    error result the model reads, a pause propagates;
 4. **record** — journaled (the tool is then offered for the rest of the run), counted, and
@@ -298,7 +381,7 @@ continues:
 
 The journal is the run's checkpoint: a worker saves it as progress on a heartbeat after every
 call with side effects (`runs.heartbeat(..., checkpoint=journal)`: a worker that dies repeats
-none of them), `runs.paused(interrupt, checkpoint=journal)` stores it with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
+none of them), `runs.pause(interrupt, checkpoint=journal)` stores it with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
 clears it when the run ends), and the attempt that resumes the run — in this process or in a
 worker elsewhere — files `last_resolution` under the pending question and replays the rest.
 
@@ -317,7 +400,7 @@ sequenceDiagram
   actor App as Application
   participant Agent as Harness h · Agent
   participant AR as agent-runs
-  participant Wk as Worker (h.worker / python -m trellis.worker)
+  participant Wk as Worker (h.worker / python -m trellis.harness.worker)
   participant P as pipeline.attempt + bridge
   participant Mem as Memory service
   actor CFO as Approver
@@ -328,7 +411,7 @@ sequenceDiagram
   AR-->>Wk: {run, lease} → RUNNING, attempt 1
   Wk->>P: agent._claimed(record, worker_id)
   loop every 20 s while it runs
-    Wk->>AR: POST /v1/runs/{id}/heartbeat (409 → LeaseLost: stop, write nothing)
+    Wk->>AR: POST /v1/runs/{id}/heartbeat (409 → LeaseLostError: stop, write nothing)
   end
   P->>AR: after a write tool: POST /v1/runs/{id}/heartbeat (checkpoint = journal, the progress)
   P->>P: refund is irreversible → Runtime.approve → Paused
@@ -356,14 +439,18 @@ started with `run`/`stream` resumes in the process that calls `resume` (no queue
 
 ## Calling a remote agent over A2A
 
-`a2a(url)` makes a remote agent one tool. The remote side is another harness's
-`serve_a2a(app, url)` (or any A2A server); the task id there is the remote run id.
+`remote(url, tenant=, user=)` (`a2a/client.py`) is the one A2A client: a `RemoteAgent` any
+code awaits with a message; a remote question goes to its `on_input`, or is raised as
+`InputRequired` and answered with `reply(task_id, answer)`. `a2a(url)` makes a remote agent one
+tool: the card read once, then each call a `RemoteAgent` as the calling run, with `on_input`
+the run's `ask`. The remote side is another harness's `serve_a2a(app, url)` (or any A2A server);
+the task id there is the remote run id.
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant P as Calling run (bridge)
-  participant C as a2a(url) tool (surfaces.a2a.client)
+  participant C as a2a(url) tool (a2a.client RemoteAgent)
   participant S as Remote serve_a2a (DefaultRequestHandler)
   participant X as RunExecutor
   participant RP as Remote pipeline.attempt
@@ -379,8 +466,8 @@ sequenceDiagram
   C-->>P: the result artifact (or the text)
   alt the remote run asks something
     X-->>C: INPUT_REQUIRED + the question
-    C->>P: runtime.ask(question): the calling run pauses
-    C->>S: CancelTask (the remote task is not left waiting)
+    C->>P: on_input = runtime.ask(question): the calling run pauses
+    C->>S: CancelTask (on_input raised: the remote task is not left waiting)
     Note over P: on resume the call is made again and ask returns the answer,<br/>which is sent on the new remote task as the next message
   else the remote run fails
     X-->>C: FAILED
@@ -390,19 +477,32 @@ sequenceDiagram
 
 ## Evaluation
 
-`evals.py`: an evaluator is any `async (EvalCase) -> EvalScore | None`; the built-ins are
-`grounding()` (the memory service's `/v1/verify`), `exact_match()`, `contains()` and
-`llm_judge(criteria)`, whose model and virtual key are the deployment's
-(`TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`: `Harness.judge_gateway`). Every score goes
-on the run's trace through `Harness.score` ([docs/evaluation.md](docs/evaluation.md)).
+`evals.py` is a block usable with or without `Harness`: an evaluator is any
+`async (EvalCase) -> EvalScore | None`; the built-ins are `grounding()` (`grounding_score`: the
+memory service's `/v1/verify` in the case's memory scope — the same function the sampled check
+of a wrapped run calls), `exact_match()`, `contains()` and `llm_judge(criteria)`. What they reach
+is an `EvalServices`: Langfuse, and the judge's gateway and model — the deployment's
+(`TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`), never the code's. `EvalServices.from_env()`
+builds them for any code; a harness builds one (`h.evals`, sharing its gateway and Langfuse
+client) and each wrapped agent has its own copy (`agent.evals`), whose judge falls back to a
+`ReAct` target's model. `evaluate(target, ...)` runs a wrapped `Agent` through the pipeline
+(`h.evaluate` delegates to it) or calls any `async (input) -> answer` in a root span of its own;
+`judge(case, judges, services=)` scores one case on-line from any code, and is what a wrapped
+agent's online judges run. Every score goes on a trace through `EvalServices.score` (`h.score`
+delegates to it): the case's `trace_id`, else its run's ([docs/evaluation.md](docs/evaluation.md)).
 
 ### Offline: `h.evaluate` over a Langfuse dataset
+
+A callable target takes the same path, with one difference: instead of `pipeline.attempt`, the
+item is one call of the callable inside `telemetry.item_span` (the item's root span, in the trace
+of a run id made for the item), and only what the callable returns as an `EvalOutput` (a
+`bundle_id` and the memory scope) gives grounding something to check.
 
 ```mermaid
 sequenceDiagram
   autonumber
   actor Dev as Developer / CI
-  participant H as Harness h.evaluate
+  participant H as evaluate (h.evaluate)
   participant LF as Langfuse
   participant P as pipeline.attempt (per item)
   participant Mem as Memory service
@@ -435,18 +535,18 @@ sequenceDiagram
   autonumber
   actor User as Application / user
   participant P as pipeline.attempt
-  participant Runs as Runs
+  participant Runs as RunStore
   participant W as Writes (background)
   participant J as judges (Harness(judges=[...]))
   participant GW as Bifrost (judge key)
   participant LF as Langfuse
 
   User->>P: await agent.run(question, user=)
-  P->>Runs: finished(SUCCESS, answer)
+  P->>Runs: finish(SUCCESS, answer)
   P->>P: sampled(run_id, TRELLIS_JUDGE_SAMPLE)?
   P-)W: submit judge.<name> (one per judge)
   P-->>User: Result(SUCCESS, answer): nothing waits for the judges
-  W->>J: judge(EvalCase(question, answer, context, run_id))
+  W->>J: judge(EvalCase(question, answer, context, memory, run_id), [one judge], services=agent.evals)
   J->>GW: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL)
   GW-->>J: {"score", "reasoning"}
   J->>LF: POST /api/public/scores on the run's trace (and a score span)
@@ -466,7 +566,7 @@ stateDiagram-v2
   [*] --> QUEUED: agent.start, a schedule fires
   [*] --> RUNNING: agent.run, stream, serve_chat, serve_a2a
   QUEUED --> RUNNING: a worker claims it (lease)
-  QUEUED --> CANCELLED: finished CANCELLED in agent-runs before a claim
+  QUEUED --> CANCELLED: finish CANCELLED in agent-runs before a claim
   RUNNING --> PAUSED: ask or an approval (interrupt + journal)
   RUNNING --> QUEUED: lease lapsed (next attempt)
   RUNNING --> SUCCESS: answered
@@ -499,19 +599,24 @@ The guarantee is in [docs/memory.md](docs/memory.md#background-writes-what-is-gu
 
 ## Stopping a worker
 
-`python -m trellis.worker` turns `SIGTERM`/`SIGINT` into `Worker.stop()`:
+`python -m trellis.harness.worker` serves the worker: `trellis.runs.Worker.serve()` turns
+`SIGTERM`/`SIGINT` into `stop()`, and the harness worker drains the writes when the loop ends:
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant OS as Orchestrator
-  participant CLI as python -m trellis.worker
-  participant Wk as Worker
+  participant CLI as python -m trellis.harness.worker
+  participant HW as harness Worker
+  participant Wk as trellis.runs.Worker
   participant R as Runs it holds
   participant AR as agent-runs
   participant W as Writes
-  OS->>CLI: SIGTERM
-  CLI->>Wk: stop()
+  CLI->>HW: serve()
+  HW->>W: start()
+  HW->>Wk: serve()
+  OS->>Wk: SIGTERM
+  Wk->>Wk: stop()
   Wk--xAR: no more claims
   par within GRACE_SECONDS (25 s)
     R->>AR: finish / pause (as usual)
@@ -520,7 +625,9 @@ sequenceDiagram
     Wk->>R: cancel(RELEASED): nothing written
     Note over AR: its lease lapses → QUEUED, next attempt
   end
-  CLI->>W: aclose(): drain ≤ DRAIN_SECONDS, then spool or count the rest
+  Wk-->>HW: the loop ended
+  HW->>W: drain ≤ DRAIN_SECONDS
+  CLI->>W: h.aclose(): spool or count the rest
   CLI-->>OS: exit 0
 ```
 

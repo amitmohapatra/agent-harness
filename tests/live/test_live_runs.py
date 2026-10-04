@@ -1,4 +1,4 @@
-"""Durable runs against agent-runs and its ticker: the client's whole wire (queue, claim,
+"""Durable runs against agent-runs and its ticker: the run store's whole wire (queue, claim,
 heartbeat, lease loss, pause with a checkpoint, resume, finish, inbox, escalation), a run that
 asks twice and is continued by a different worker process each time, and a schedule the ticker
 fires for a worker."""
@@ -14,12 +14,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-import httpx
 import pytest
 
-from tests.live.conftest import RUNS_URL, live_harness, needs_memory, needs_runs
+from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import eventually, memory_scope
 from trellis import Harness
 from trellis.contracts import (
@@ -30,7 +28,7 @@ from trellis.contracts import (
     RunStatus,
     new_id,
 )
-from trellis.harness.clients.runs import LeaseLost
+from trellis.runs import LeaseLostError, RunsClient, RunSummary
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]  # the key is the memory service's
 
@@ -58,12 +56,14 @@ def start(agent_id: str, tenant: str, **fields: object) -> RunStart:
 async def test_the_runs_client_speaks_agent_runs(harness: Harness) -> None:
     runs = harness.runs
     agent_id = f"live-wire-{uuid.uuid4().hex[:8]}"
-    queued = await runs.queued(start(agent_id, await harness.tenant()))
+    tenant = await harness.tenant()
+    queued = await runs.start(start(agent_id, tenant), queue=True)
     assert queued.status is RunStatus.QUEUED
-    claimed = await runs.claim("w1", [agent_id], 30)
-    assert claimed is not None and claimed.run_id == queued.run_id
-    assert claimed.status is RunStatus.RUNNING
-    await runs.heartbeat(claimed.run_id, "w1", 30)
+    took = await runs.claim("w1", [agent_id], lease_seconds=30)
+    assert took is not None and took.run.run_id == queued.run_id
+    claimed = took.run
+    assert claimed.status is RunStatus.RUNNING and took.lease.worker_id == "w1"
+    await runs.heartbeat(claimed.run_id, "w1", lease_seconds=30, tenant=tenant)
 
     asked = Interrupt(
         interrupt_id=f"{claimed.run_id}.1.1",
@@ -73,7 +73,7 @@ async def test_the_runs_client_speaks_agent_runs(harness: Harness) -> None:
         assignee="role:live-ops",
     )
     checkpoint = {"answers": {}, "calls": {"k": ["charged"]}}
-    paused = await runs.paused(asked, checkpoint=checkpoint, worker_id="w1")
+    paused = await runs.pause(asked, checkpoint=checkpoint, worker_id="w1")
     assert paused.status is RunStatus.PAUSED and paused.checkpoint == checkpoint
     [waiting] = [r for r in await harness.inbox("role:live-ops") if r.run_id == claimed.run_id]
     assert waiting.awaiting is not None and waiting.awaiting.question == "Which size?"
@@ -85,14 +85,17 @@ async def test_the_runs_client_speaks_agent_runs(harness: Harness) -> None:
         answer="L",
         reviewer="live-reviewer",
     )
-    resumed = await runs.resumed(answer)
+    resumed = await runs.resume(answer, tenant=tenant)
     assert resumed.status is RunStatus.QUEUED and resumed.attempt == 2  # it came from the queue
-    again = await runs.claim("w2", [agent_id], 30)
-    assert again is not None and again.checkpoint == checkpoint
+    retook = await runs.claim("w2", [agent_id], lease_seconds=30)
+    assert retook is not None and retook.run.checkpoint == checkpoint
+    again = retook.run
     assert again.last_resolution is not None and again.last_resolution.answer == "L"
-    with pytest.raises(LeaseLost):  # w1 let go of it when it paused
-        await runs.heartbeat(again.run_id, "w1", 30)
-    done = await runs.finished(again.run_id, RunStatus.SUCCESS, output="ok", worker_id="w2")
+    with pytest.raises(LeaseLostError):  # w1 let go of it when it paused
+        await runs.heartbeat(again.run_id, "w1", lease_seconds=30, tenant=tenant)
+    done = await runs.finish(
+        again.run_id, RunStatus.SUCCESS, output="ok", worker_id="w2", tenant=tenant
+    )
     assert done.status is RunStatus.SUCCESS and done.checkpoint is None
 
 
@@ -101,21 +104,22 @@ async def test_a_lapsed_lease_puts_the_run_back_and_fences_the_old_worker(
 ) -> None:
     runs = harness.runs
     agent_id = f"live-lease-{uuid.uuid4().hex[:8]}"
-    queued = await runs.queued(start(agent_id, await harness.tenant()))
-    assert await runs.claim("w1", [agent_id], 5) is not None
+    tenant = await harness.tenant()
+    queued = await runs.start(start(agent_id, tenant), queue=True)
+    assert await runs.claim("w1", [agent_id], lease_seconds=5) is not None
 
     async def requeued() -> bool:
-        record = await runs.get(queued.run_id)
+        record = await runs.get(queued.run_id, tenant=tenant)
         return record is not None and record.status is RunStatus.QUEUED
 
     assert await eventually(requeued, within=SWEEP_SECONDS)
-    with pytest.raises(LeaseLost):
-        await runs.heartbeat(queued.run_id, "w1", 5)
-    taken = await runs.claim("w2", [agent_id], 30)
-    assert taken is not None and taken.attempt == 2
-    with pytest.raises(LeaseLost):
-        await runs.finished(queued.run_id, RunStatus.SUCCESS, worker_id="w1")
-    await runs.finished(queued.run_id, RunStatus.SUCCESS, worker_id="w2")
+    with pytest.raises(LeaseLostError):
+        await runs.heartbeat(queued.run_id, "w1", lease_seconds=5, tenant=tenant)
+    taken = await runs.claim("w2", [agent_id], lease_seconds=30)
+    assert taken is not None and taken.run.attempt == 2
+    with pytest.raises(LeaseLostError):
+        await runs.finish(queued.run_id, RunStatus.SUCCESS, worker_id="w1", tenant=tenant)
+    await runs.finish(queued.run_id, RunStatus.SUCCESS, worker_id="w2", tenant=tenant)
 
 
 async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harness) -> None:
@@ -123,8 +127,8 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
     agent_id = f"live-escalate-{uuid.uuid4().hex[:8]}"
     soon = datetime.now(UTC) + timedelta(seconds=1)
     tenant = await harness.tenant()
-    escalated = await runs.started(start(agent_id, tenant))
-    await runs.paused(
+    escalated = await runs.start(start(agent_id, tenant))
+    await runs.pause(
         Interrupt(
             interrupt_id=f"{escalated.run_id}.1.1",
             tenant_id=escalated.tenant_id,
@@ -135,8 +139,8 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
             escalate_to="role:live-lead",
         )
     )
-    timed_out = await runs.started(start(agent_id, tenant))
-    await runs.paused(
+    timed_out = await runs.start(start(agent_id, tenant))
+    await runs.pause(
         Interrupt(
             interrupt_id=f"{timed_out.run_id}.1.1",
             tenant_id=timed_out.tenant_id,
@@ -149,7 +153,7 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
 
     async def swept() -> bool:
         lead = await harness.inbox("role:live-lead")
-        other = await runs.get(timed_out.run_id)
+        other = await runs.get(timed_out.run_id, tenant=tenant)
         return escalated.run_id in [r.run_id for r in lead] and (
             other is not None and other.status is RunStatus.TIMEOUT
         )
@@ -160,10 +164,12 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
 # --------------------------------------------------------------------------- worker processes
 @contextmanager
 def worker_process(suffix: str, ledger: Path) -> Iterator[subprocess.Popen[bytes]]:
-    """``python -m trellis.worker tests.live.worker_app:h`` with this session's agents."""
+    """``python -m trellis.harness.worker tests.live.worker_app:h`` with this session's agents."""
     env = {**os.environ, "TRELLIS_LIVE_SUFFIX": suffix, "TRELLIS_LIVE_LEDGER": str(ledger)}
     process = subprocess.Popen(
-        [sys.executable, "-m", "trellis.worker", "tests.live.worker_app:h"], cwd=ROOT, env=env
+        [sys.executable, "-m", "trellis.harness.worker", "tests.live.worker_app:h"],
+        cwd=ROOT,
+        env=env,
     )
     try:
         yield process
@@ -238,27 +244,18 @@ async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> N
             with worker_process(suffix, tmp_path / "ledger.txt"):
 
                 async def fired() -> bool:
-                    runs = await _runs_of(h, agent.id)
-                    return any(r["status"] == "SUCCESS" for r in runs)
+                    return bool(await _succeeded(h, agent.id))
 
                 assert await eventually(fired, within=240, every=5)
-            [summary] = [r for r in await _runs_of(h, agent.id) if r["status"] == "SUCCESS"]
-            run = await h.runs.get(summary["run_id"])
+            [summary] = await _succeeded(h, agent.id)
+            run = await h.runs.get(summary.run_id, tenant=schedule.tenant_id)
             assert run is not None and run.output == "briefing for live-ada: inbox"
             assert run.metadata["schedule_id"] == schedule.schedule_id
         finally:
-            async with _client(h) as client:
-                await client.delete(f"/v1/schedules/{schedule.schedule_id}")
+            assert isinstance(h.runs, RunsClient)  # RUNS_URL is set: agent-runs' client
+            await h.runs.schedules.delete(schedule.schedule_id, tenant=schedule.tenant_id)
 
 
-def _client(h: Harness) -> httpx.AsyncClient:
-    assert RUNS_URL is not None
-    headers = {"X-Api-Key": h.settings.api_key or ""}
-    return httpx.AsyncClient(base_url=RUNS_URL, headers=headers)
-
-
-async def _runs_of(h: Harness, agent_id: str) -> list[dict[str, Any]]:
-    async with _client(h) as client:
-        response = await client.get("/v1/runs", params={"agent_id": agent_id})
-        response.raise_for_status()
-        return response.json()
+async def _succeeded(h: Harness, agent_id: str) -> list[RunSummary]:
+    listed = h.runs.iterate(agent_id=agent_id, status=RunStatus.SUCCESS, tenant=await h.tenant())
+    return [summary async for summary in listed]

@@ -7,6 +7,9 @@ This page is what is particular to Deep Agents.
 
 **Install:** `pip install 'trellis-harness[deepagents]'` (brings `[langgraph]`).
 
+This page is Way 1: the harness runs the Deep Agent. Called yourself, a Deep Agent is a
+LangGraph graph, and the Way 2 recipe applies as it is: [blocks/langgraph.md](../blocks/langgraph.md).
+
 ## Using an existing Deep Agents project
 
 ```python
@@ -40,10 +43,10 @@ result = await agent.run("Refund order o-7.", user="ada", thread="ticket-7")
 
 | Part | |
 |---|---|
-| Your tools from `h.tools` | harness tools: tiered by the catalog at each call, approvals, journal, records, spans — in the main agent and in a sub-agent alike (a sub-agent's calls happen inside the run, so they are the run's) |
+| Your tools from `h.tools` | harness tools: governed by the catalog at each call, approvals, journal, records, spans — in the main agent and in a sub-agent alike (a sub-agent's calls happen inside the run, so they are the run's) |
 | Sub-agents (`subagents=[...]`, the `task` tool) | run inside the main agent's run: one run record, one trace, one transcript (the main agent's answer). Give a sub-agent the harness tools it needs (`"tools": tools`); the default `general-purpose` sub-agent gets the main agent's tools |
 | Planning (`TodoListMiddleware`, `write_todos`) | the plan lives in the graph's state (`state["todos"]`, read with `graph.aget_state(...)` on the thread); `write_todos` is Deep Agents' own tool, not a harness tool |
-| Built-in file tools (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `delete`, `execute`) and `task` | Deep Agents' own: they work on its backend (the graph state by default) and are not tiered, journaled or recorded by the harness. Gate the ones that matter with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
+| Built-in file tools (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `delete`, `execute`) and `task` | Deep Agents' own: they work on its backend (the graph state by default) and are not governed, journaled or recorded by the harness. Gate the ones that matter with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
 | `interrupt_on={tool: True \| InterruptOnConfig}` | LangChain's `HumanInTheLoopMiddleware`: an approval of the calls it holds, answered with `approve`, `edit`, `reject` (with a reason the model reads), `answer` ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)); needs a checkpointer |
 | Memory | the context as a leading system message of the main agent (sub-agents get the `task` description, as Deep Agents gives them); the memory tools are in `h.tools(...)` for the main agent and any sub-agent you give them to |
 

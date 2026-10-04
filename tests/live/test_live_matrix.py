@@ -28,6 +28,7 @@ import asyncio
 import json
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -57,7 +58,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.live.conftest import RUNS_URL, live_harness, needs_memory, needs_runs
 from tests.live.support import StubLangfuse, eventually, memory_scope
 from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
-from trellis import Agent, Harness, ReAct, Runtime, a2a, exact_match, grounding, llm_judge, tool
+from trellis import Agent, Harness, ReAct, Runtime, a2a, tool
 from trellis.contracts import (
     InterruptReason,
     RunEvent,
@@ -67,8 +68,9 @@ from trellis.contracts import (
     RunStatus,
 )
 from trellis.harness import telemetry
-from trellis.harness import worker as worker_module
-from trellis.harness.surfaces.agui.sse import decode
+from trellis.harness.agui.sse import decode
+from trellis.harness.evals import exact_match, grounding, llm_judge
+from trellis.harness.governance import catalog as governance_catalog
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.sources import FunctionTool
 from trellis.memory import MemoryContext
@@ -520,10 +522,11 @@ async def test_a_hand_built_graphs_own_interrupt_pauses_in_agent_runs(tmp_path: 
 @pytest.mark.timeout(TIMEOUT_SECONDS)
 @pytest.mark.parametrize("framework", ["langgraph", "deepagents"])
 async def test_a_catalog_rule_set_after_the_graph_was_built_decides_its_calls(
-    framework: str, tmp_path: Path
+    framework: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A compiled graph holds the tools it was built with; an administrator's rule set in the
-    catalog afterwards still decides whether a call waits."""
+    catalog afterwards still decides whether a call waits, once the rules governance read
+    while building it are older than their TTL."""
     async with live_harness() as h:
         case = Case(h, framework, tmp_path)
         built = await build(case, [(case.email, {"to": "ops", "body": "A-1 is low"})])
@@ -534,6 +537,8 @@ async def test_a_catalog_rule_set_after_the_graph_was_built_decides_its_calls(
         await scope.advanced.tools.put_catalog(
             [{"name": case.email, "side_effects": "write", "approve_when": rule}]
         )
+        ttl = governance_catalog.GOVERNANCE_TTL_SECONDS
+        monkeypatch.setattr(governance_catalog, "_now", lambda: time.monotonic() + ttl + 1)
         paused = await agent.run(QUESTION, user=case.user, thread=case.thread)
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
         assert rule in paused.interrupt.question and case.ledger == []
@@ -580,11 +585,7 @@ async def test_a_deep_agents_sub_agent_call_waits_in_agent_runs(tmp_path: Path) 
 
 # --------------------------------------------------------------------------- workers
 @pytest.mark.timeout(TIMEOUT_SECONDS)
-async def test_workers_claim_pause_resume_and_survive_a_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # a short lease, so the run a crashed worker held is queued again within the test
-    monkeypatch.setattr(worker_module, "LEASE_SECONDS", 6.0)
+async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) -> None:
     case = Case(live_harness(), "worker", tmp_path)
     charged: list[str] = []
     crashed = asyncio.Event()
@@ -615,6 +616,8 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(
         assert (await stored(h, handle.run_id)).status is RunStatus.QUEUED
 
         first = h.worker([agent], concurrency=1)
+        # a short lease, so the run the crashed worker held is queued again within the test
+        first.loop.lease_seconds = 6
         working = asyncio.create_task(first.run())
         await asyncio.wait_for(crashed.wait(), 60)
         # the charge was saved as the run's progress before the crash
@@ -898,7 +901,8 @@ async def test_a_document_added_is_cited_by_the_next_context(tmp_path: Path) -> 
 @pytest.mark.timeout(TIMEOUT_SECONDS)
 async def test_feedback_waits_for_review_in_memory_and_is_scored() -> None:
     with StubLangfuse() as langfuse:
-        async with live_harness(**langfuse.settings()) as h:
+        # no grounding check: a sampled run's /v1/verify would add a ``judge`` record
+        async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
             case = Case(h, "feedback", Path("."))
 
             async def answer(input: str, agent: Runtime) -> str:
@@ -965,7 +969,7 @@ async def test_offline_evaluation_scores_a_langfuse_dataset(spans: InMemorySpanE
     ]
     with StubLangfuse(f"fv-golden-{suffix}", items) as langfuse:
         async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
-            h._judge_model = judge = Judge()
+            h.evals.judge_model = judge = Judge()
             agent = h.wrap(answer_from_table, id=f"fv-eval-{suffix}")
             user = f"fv-eval-{suffix}"
             scope = await memory_scope(h, user=user, agent_id=agent.id)
@@ -1022,7 +1026,7 @@ async def test_online_judges_score_every_sampled_run() -> None:
         async with live_harness(
             judge_sample=1.0, judges=[llm_judge("Answers the question.")], **langfuse.settings()
         ) as h:
-            h._judge_model = judge
+            h.evals.judge_model = judge
             agent = h.wrap(answer_from_table, id=f"fv-judged-{suffix}")
             user = f"fv-judged-{suffix}"
             scope = await memory_scope(h, user=user, agent_id=agent.id)

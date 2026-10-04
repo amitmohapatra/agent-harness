@@ -18,6 +18,7 @@ classifiers = [
 dependencies = [
   "trellis-contracts>=0.4",
   "trellis-memory>=0.4",
+  "trellis-runs>=0.3",
   "bifrost-sdk>=0.2",
   "pydantic>=2.13,<3",
   "httpx>=0.28",
@@ -62,8 +63,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# ``trellis/__init__.py`` extends ``__path__`` (pkgutil style), so trellis.contracts and
-# trellis.memory, installed from their own distributions, stay importable beside it.
+# ``trellis/__init__.py`` extends ``__path__`` (pkgutil style), so trellis.contracts,
+# trellis.memory and trellis.runs, installed from their own distributions, stay importable
+# beside it.
 packages = ["src/trellis"]
 
 [tool.uv]
@@ -73,6 +75,7 @@ default-groups = ["dev"]
 # Sibling checkouts on their ``overhaul`` branches, while the platform is unpublished.
 trellis-contracts = { path = "../agent-contracts", editable = true }
 trellis-memory = { path = "../agent-memory-service/sdk/python", editable = true }
+trellis-runs = { path = "../agent-runs/sdk/python", editable = true }
 bifrost-sdk = { path = "../bifrost-sdk", editable = true }
 
 [tool.pytest.ini_options]
@@ -105,7 +108,8 @@ known-first-party = ["trellis"]
 # Adapters import their framework on first use, never at module import.
 "src/trellis/harness/adapters/**" = ["PLC0415"]
 "src/trellis/harness/tools/convert/**" = ["PLC0415"]
-"src/trellis/harness/surfaces/**" = ["PLC0415"]
+"src/trellis/harness/a2a/**" = ["PLC0415"]
+"src/trellis/harness/agui/**" = ["PLC0415"]
 
 [tool.pyright]
 pythonVersion = "3.12"
@@ -115,6 +119,6 @@ include = ["src", "tests", "examples"]
 exclude = ["**/__pycache__", "**/.venv", ".claude"]
 typeCheckingMode = "standard"
 # ``trellis`` is a pkgutil-style package (it extends ``__path__``) and pyright does not follow
-# that for editable installs: ``make typings`` links trellis.contracts and trellis.memory
-# where pyright looks first.
+# that for editable installs: ``make typings`` links trellis.contracts, trellis.memory and
+# trellis.runs where pyright looks first.
 stubPath = "typings"

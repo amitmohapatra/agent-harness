@@ -7,6 +7,9 @@ and records (transcript, tool calls, outcome); with it off there is no context, 
 tools, no records and no catalog, and `trellis.current().memory`, `tools.hints(...)` and
 `h.add_document(...)` raise `ConfigurationError`.
 
+This page is what a wrapped agent gets (Way 1). Code on its own framework makes the same calls
+itself with the memory SDK: [blocks/memory.md](blocks/memory.md) (Way 2).
+
 ## Push
 
 Before the agent runs, `/v1/context` for the run's question — its token budget 5 % of the

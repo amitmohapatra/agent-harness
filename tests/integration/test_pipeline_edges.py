@@ -24,18 +24,21 @@ from trellis.contracts import (
     ToolSpec,
 )
 from trellis.harness import telemetry
-from trellis.harness.clients.runs import LocalRuns, RunStoreError
+from trellis.harness.runs import LocalRuns
 from trellis.harness.runtime import Paused
 from trellis.harness.tools.base import Tool
+from trellis.runs import ConflictError, LeaseLostError, RunsError
 
 
 class CancelInTheRun(LocalRuns):
     """A run store that hands a cancel to the run instead of ending it itself."""
 
-    async def resumed(self, resolution: InterruptResolution) -> RunRecord:
+    async def resume(
+        self, resolution: InterruptResolution, *, tenant: str | None = None
+    ) -> RunRecord:
         if resolution.decision is not InterruptDecision.CANCEL:
-            return await super().resumed(resolution)
-        record = self._require(resolution.run_id)
+            return await super().resume(resolution, tenant=tenant)
+        record = self._require(resolution.run_id, tenant)
         return self._move(
             record,
             RunStatus.RUNNING,
@@ -189,11 +192,11 @@ async def test_a_stream_whose_run_the_store_refuses_raises(
         return input
 
     async def refused(*args: Any, **kwargs: Any) -> Any:
-        raise RunStoreError("agent-runs refused the finish")
+        raise RunsError("agent-runs refused the finish")
 
-    monkeypatch.setattr(harness.runs, "finished", refused)
+    monkeypatch.setattr(harness.runs, "finish", refused)
     stream = harness.wrap(echo, id="echo").stream("q", user="u")
-    with pytest.raises(RunStoreError, match="refused the finish"):
+    with pytest.raises(RunsError, match="refused the finish"):
         [e async for e in stream]
 
 
@@ -220,7 +223,7 @@ async def test_a_handle_on_a_run_that_does_not_exist_says_so(harness: Harness) -
     async def echo(input: str, agent: Runtime) -> str:
         return input
 
-    handle = RunHandle(harness.wrap(echo, id="echo"), "run_missing")
+    handle = RunHandle(harness.wrap(echo, id="echo"), "run_missing", tenant="default")
     with pytest.raises(ConfigurationError, match="no run run_missing"):
         await handle.status()
 
@@ -267,11 +270,13 @@ async def test_feedback_with_memory_off_is_only_a_score(
     async def echo(input: str, agent: Runtime) -> str:
         return input
 
-    scored: list[tuple[str, str, float, str | None]] = []
-    monkeypatch.setattr(telemetry, "score_span", lambda *args: scored.append(args))
+    scored: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append((*args, kw)))
     result = await harness.wrap(echo, id="echo").run("q", user="u")
     assert await harness.feedback(result.run_id, "edit", correction={"fixed": True}) is None
-    assert scored == [(result.run_id, "feedback", 0.5, "{'fixed': True}")]
+    trace = telemetry.trace_hex(result.run_id)
+    run = {"run_id": result.run_id}
+    assert scored == [(trace, "feedback", 0.5, "{'fixed': True}", run)]
 
 
 async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
@@ -282,7 +287,7 @@ async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
     memory_service.claims = 0
     memory_service.unsupported = 0
     scored: list[Any] = []
-    monkeypatch.setattr(telemetry, "score_span", lambda *args: scored.append(args))
+    monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append(args))
     settings = Settings(memory_url="http://m", api_key="test", grounding_sample=1.0)
     async with Harness(config=settings) as h:
         h.memory = Memory("http://m", None, client=memory_service.client())
@@ -318,18 +323,17 @@ async def test_a_finish_already_recorded_is_not_a_failed_run(
     finish (an agent-runs that is not idempotent on endings): the run is read back, and
     since it already ended as written, the run is reported as it ended — not failed, not
     executed again."""
-    from trellis.harness.clients.runs import Conflict
 
     async def echo(input: str, agent: Runtime) -> str:
         return input
 
-    finished = harness.runs.finished
+    finish = harness.runs.finish
 
     async def recorded_then_refused(run_id: str, status: RunStatus, **kwargs: Any) -> RunRecord:
-        await finished(run_id, status, **kwargs)
-        raise Conflict(f"run {run_id} already ended", status=409, code="CONFLICT")
+        await finish(run_id, status, **kwargs)
+        raise ConflictError(f"run {run_id} already ended", status=409, code="CONFLICT")
 
-    monkeypatch.setattr(harness.runs, "finished", recorded_then_refused)
+    monkeypatch.setattr(harness.runs, "finish", recorded_then_refused)
     agent = harness.wrap(echo, id="echo")
     with caplog.at_level("INFO", logger="trellis.run"):
         result = await agent.run("q", user="u")
@@ -340,18 +344,16 @@ async def test_a_finish_already_recorded_is_not_a_failed_run(
 async def test_a_pause_already_recorded_is_still_the_pause(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from trellis.harness.clients.runs import Conflict
-
     async def asks(input: str, agent: Runtime) -> str:
         return await agent.ask("Go on?")
 
-    paused = harness.runs.paused
+    pause = harness.runs.pause
 
     async def recorded_then_refused(interrupt: Any, **kwargs: Any) -> RunRecord:
-        await paused(interrupt, **kwargs)
-        raise Conflict("not RUNNING", status=409, code="CONFLICT")
+        await pause(interrupt, **kwargs)
+        raise ConflictError("not RUNNING", status=409, code="CONFLICT")
 
-    monkeypatch.setattr(harness.runs, "paused", recorded_then_refused)
+    monkeypatch.setattr(harness.runs, "pause", recorded_then_refused)
     result = await harness.wrap(asks, id="asks").run("q", user="u")
     assert result.status is RunStatus.PAUSED and result.interrupt is not None
 
@@ -361,24 +363,51 @@ async def test_a_conflict_on_a_finish_that_did_not_happen_raises(
 ) -> None:
     """The store refused the ending and the run is not what was written: that is a real
     refusal, raised."""
-    from trellis.harness.clients.runs import Conflict
 
     async def echo(input: str, agent: Runtime) -> str:
         return input
 
     async def refused(run_id: str, status: RunStatus, **kwargs: Any) -> RunRecord:
-        raise Conflict("RUNNING cannot become SUCCESS", status=409, code="CONFLICT")
+        raise ConflictError("RUNNING cannot become SUCCESS", status=409, code="CONFLICT")
 
-    monkeypatch.setattr(harness.runs, "finished", refused)
-    with pytest.raises(Conflict):
+    monkeypatch.setattr(harness.runs, "finish", refused)
+    with pytest.raises(ConflictError):
         await harness.wrap(echo, id="echo").run("q", user="u")
 
-    async def gone(run_id: str) -> None:
+    async def gone(run_id: str, **kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(harness.runs, "get", gone)
-    with pytest.raises(Conflict):
+    with pytest.raises(ConflictError):
         await harness.wrap(echo, id="echo2").run("q", user="u")
+
+
+async def test_a_lost_lease_on_the_write_is_never_read_as_a_conflict(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LeaseLostError`` is not a ``ConflictError``: even when the run already is what was
+    written, a write refused for a lost lease is raised, not reconciled by a read."""
+
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    finish = harness.runs.finish
+    read: list[str] = []
+    get = harness.runs.get
+
+    async def recorded_then_lost(run_id: str, status: RunStatus, **kwargs: Any) -> RunRecord:
+        await finish(run_id, status, **kwargs)
+        raise LeaseLostError("w no longer holds the run", status=409, code="LEASE_LOST")
+
+    async def reading(run_id: str, **kwargs: Any) -> RunRecord | None:
+        read.append(run_id)
+        return await get(run_id, **kwargs)
+
+    monkeypatch.setattr(harness.runs, "finish", recorded_then_lost)
+    monkeypatch.setattr(harness.runs, "get", reading)
+    with pytest.raises(LeaseLostError):
+        await harness.wrap(echo, id="echo").run("q", user="u")
+    assert read == []
 
 
 async def test_a_failed_run_keeps_the_retryability_its_error_says(harness: Harness) -> None:

@@ -1,25 +1,24 @@
 """The serving surfaces against the real run store (and memory): AG-UI over SSE with a
-reconnect that replays, and an A2A round trip over real HTTP between two harnesses."""
+reconnect that replays, an A2A round trip over real HTTP between two harnesses, and the same
+served agent called from plain code with ``remote()``."""
 
 from __future__ import annotations
 
 import asyncio
-import socket
-import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import httpx
 import pytest
-import uvicorn
 from fastapi import FastAPI, Request
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
-from tests.live.support import memory_scope
+from tests.live.support import free_port, memory_scope, serving
 from trellis import Harness, Runtime, a2a
 from trellis.contracts import RunStatus
-from trellis.harness.surfaces.agui.sse import decode
+from trellis.harness.a2a import InputRequired, remote
+from trellis.harness.agui.sse import decode
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]
 
@@ -89,12 +88,6 @@ async def test_agui_streams_pauses_resumes_and_replays(
 
 
 # --------------------------------------------------------------------------- A2A
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 async def planner(input: Any, agent: Runtime) -> str:
     region = await agent.ask("Which region?", options=["eu", "us"])
     return f"deploying {input} to {region}"
@@ -108,16 +101,8 @@ def remote_url() -> Iterator[str]:
     harness = live_harness()
     app = FastAPI()
     harness.wrap(planner, id=f"live-planner-{uuid.uuid4().hex[:6]}").serve_a2a(app, url)
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:
-        threading.Event().wait(0.05)
-    try:
+    with serving(app, port):
         yield url
-    finally:
-        server.should_exit = True
-        thread.join(timeout=10)
 
 
 async def test_a2a_round_trip_with_a_remote_question(remote_url: str) -> None:
@@ -142,3 +127,29 @@ async def test_a2a_round_trip_with_a_remote_question(remote_url: str) -> None:
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == "deploying the shop to eu"
         await asyncio.sleep(0)
+
+
+async def test_remote_calls_the_served_agent_from_plain_code(remote_url: str) -> None:
+    async with live_harness() as h:
+        tenant = await h.tenant()
+    thread = f"live-remote-{uuid.uuid4().hex[:6]}"
+    asked: list[str] = []
+
+    async def answer(question: str) -> str:
+        asked.append(question)
+        return "us"
+
+    async with remote(
+        remote_url, tenant=tenant, user="live-ada", thread=thread, on_input=answer
+    ) as planner:
+        assert planner.card.supported_interfaces[0].url == remote_url
+        assert planner.spec.source == "a2a"
+        assert await planner("the shop") == "deploying the shop to us"
+    assert asked == ["Which region?"]
+
+    async with remote(remote_url, tenant=tenant, user="live-ada", thread=thread) as planner:
+        with pytest.raises(InputRequired) as waiting:
+            await planner("the warehouse")
+        assert waiting.value.question == "Which region?"
+        done = await planner.reply(waiting.value.task_id, "eu")
+    assert done == "deploying the warehouse to eu"

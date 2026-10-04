@@ -3,7 +3,9 @@ next to this repository): every request it sends must be an operation the servic
 with a body its schema accepts, and every answer the test doubles give must be one the service
 documents. The memory fake is checked on every exchange of every test (``tests/conftest.py``);
 here every call the harness makes is driven once, and the checker itself is shown to catch a
-mismatch. agent-runs is checked the same way when its document is there."""
+mismatch. agent-runs is checked the same way: every call of the harness's run store, through
+``trellis.runs.RunsClient`` (the SDK reads agent-runs' problem documents; its own tests show
+it)."""
 
 from __future__ import annotations
 
@@ -11,7 +13,6 @@ import json
 from typing import Any
 
 import httpx
-import pytest
 import respx
 
 from tests.support.memory import CONTRACT, ROUTES, FakeMemoryService
@@ -26,9 +27,9 @@ from trellis.contracts import (
     RunStatus,
     ScheduleSpec,
 )
-from trellis.harness.clients import runs as runs_module
 from trellis.harness.clients.memory import Memory
-from trellis.harness.clients.runs import HttpRuns
+from trellis.harness.runs import RunStore
+from trellis.runs import RunsClient
 
 
 # --------------------------------------------------------------------------- memory service
@@ -122,9 +123,7 @@ def test_the_checker_catches_a_body_the_contract_refuses() -> None:
 
 # --------------------------------------------------------------------------- agent-runs
 @respx.mock
-async def test_every_runs_call_the_harness_makes_speaks_the_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_every_runs_call_the_harness_makes_speaks_the_contract() -> None:
     contract = runs_contract()
     violations: list[str] = []
     start = RunStart(run_id="run_1", tenant_id="t", agent_id="a", thread_id="thr", user_id="u")
@@ -176,6 +175,7 @@ async def test_every_runs_call_the_harness_makes_speaks_the_contract(
             ("GET", "/v1/runs/run_1"): (200, record.model_dump(mode="json")),
             ("GET", "/v1/runs"): (200, [summary]),
             ("POST", "/v1/runs/run_1/artifacts"): (201, artifact),
+            ("GET", "/v1/artifacts/art_1"): (200, [1]),
             ("POST", "/v1/schedules"): (201, schedule),
         }
         status, body = bodies[(method, path)]
@@ -184,44 +184,23 @@ async def test_every_runs_call_the_harness_makes_speaks_the_contract(
         return response
 
     respx.route(host="runs.test").mock(side_effect=answer)
-    runs = HttpRuns("http://runs.test", "key")
-    await runs.started(start)
-    await runs.queued(start)
-    assert await runs.claim("w", ["a"], 60) is not None
-    await runs.heartbeat("run_1", "w", 60)
-    await runs.heartbeat("run_1", "w", 60, checkpoint={"calls": {"k": ["paid"]}})
-    await runs.paused(asked, checkpoint={"answers": {}}, worker_id="w")
+    runs: RunStore = RunsClient("http://runs.test", api_key="key")
+    await runs.start(start)
+    await runs.start(start, queue=True)
+    assert await runs.claim("w", ["a"], lease_seconds=60) is not None
+    await runs.heartbeat("run_1", "w", lease_seconds=60, tenant="t")
+    await runs.heartbeat("run_1", "w", checkpoint={"calls": {"k": ["paid"]}}, tenant="t")
+    await runs.pause(asked, checkpoint={"answers": {}}, worker_id="w")
     resolution = InterruptResolution(
         interrupt_id="run_1.1.1", run_id="run_1", decision=InterruptDecision.ANSWER, answer="yes"
     )
-    await runs.resumed(resolution)
-    await runs.finished("run_1", RunStatus.SUCCESS, output={"ok": True}, worker_id="w")
-    await runs.get("run_1")
-    await runs.inbox("t", "role:ops")
-    await runs.put_artifact("run_1", json.dumps([1]).encode(), worker_id="w")
-    await runs.schedule(spec)
+    await runs.resume(resolution, tenant="t")
+    await runs.finish("run_1", RunStatus.SUCCESS, output={"ok": True}, worker_id="w", tenant="t")
+    await runs.get("run_1", tenant="t")
+    waiting = runs.iterate(status=RunStatus.PAUSED, assignee="role:ops", limit=500, tenant="t")
+    assert [s.run_id async for s in waiting] == ["run_1"]
+    await runs.artifacts.upload("run_1", json.dumps([1]).encode(), worker_id="w", tenant="t")
+    assert await runs.artifacts.download("art_1", tenant="t") == b"[1]"
+    await runs.schedules.create(spec)
     await runs.aclose()
     assert violations == []
-
-
-def test_the_runs_problem_document_reads_as_the_runs_client_reads_it() -> None:
-    contract = runs_contract()
-    schemas = contract.document["components"]["schemas"]
-    assert (
-        "LEASE_LOST" in schemas["ErrorCode"]["enum"] and "CONFLICT" in schemas["ErrorCode"]["enum"]
-    )
-    problem = {
-        "type": "urn:trellis:problem:lease-lost",
-        "title": "Lease lost",
-        "status": 409,
-        "detail": "w1 no longer holds run_1",
-        "instance": "/v1/runs/run_1/finish",
-        "code": "LEASE_LOST",
-        "retryable": False,
-    }
-    request = httpx.Request("POST", "http://runs.test/v1/runs/run_1/finish")
-    response = httpx.Response(
-        409, json=problem, headers={"content-type": "application/problem+json"}, request=request
-    )
-    assert contract.response(request, response) == []
-    assert isinstance(runs_module.refusal(response), runs_module.LeaseLost)

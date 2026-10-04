@@ -5,7 +5,7 @@ loaded automatically (``tools.toolbox``).
 
 Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A local
 function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
-the tool catalog may override either (``tools.policy``).
+the tool catalog may override either (``trellis.harness.governance``).
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ class A2ASource:
         self.name = name
 
     async def resolve(self) -> list[Tool]:
-        from trellis.harness.surfaces.a2a.client import remote_agent_tool  # noqa: PLC0415
+        from trellis.harness.a2a.client import remote_agent_tool  # noqa: PLC0415
 
         return [await remote_agent_tool(self.url, name=self.name)]
 

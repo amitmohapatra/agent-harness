@@ -181,7 +181,7 @@ async def test_a_huge_result_is_cut_and_kept_whole_as_a_run_artifact(harness: Ha
     told = model.requests[1]["messages"][-1]["content"]
     assert told.startswith("x" * 100 + "\n…[cut: dump returned 500 characters, 100 are shown")
     artifact_id = told.rsplit("run artifact ", 1)[1].rstrip("]")
-    kept = await harness.runs.artifact(artifact_id, "default")
+    kept = await harness.runs.artifacts.download(artifact_id, tenant="default")
     assert kept is not None and json.loads(kept) == {"tool": "dump", "output": "x" * 500}
 
 
@@ -191,7 +191,7 @@ async def test_a_huge_result_is_still_cut_when_it_cannot_be_kept(
     async def refused(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("no artifacts here")
 
-    monkeypatch.setattr(harness.runs, "put_artifact", refused)
+    monkeypatch.setattr(harness.runs.artifacts, "upload", refused)
 
     @tool(side_effects="read")
     def dump() -> str:

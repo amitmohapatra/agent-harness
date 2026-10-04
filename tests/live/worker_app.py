@@ -1,6 +1,6 @@
 """The agents the live suite's worker processes serve, configured by the environment::
 
-    python -m trellis.worker tests.live.worker_app:h
+    python -m trellis.harness.worker tests.live.worker_app:h
 
 ``TRELLIS_LIVE_SUFFIX`` keeps one session's agents apart from another's in a shared run store;
 ``TRELLIS_LIVE_LEDGER`` is a file each side effect of ``charge`` appends a line to, so a test

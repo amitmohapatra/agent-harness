@@ -11,15 +11,10 @@ import pytest
 import respx
 
 from tests.support.memory import AGENT_TOOLS, FakeMemoryService
-from trellis.contracts import ToolCall, ToolError, ToolOutcome, ToolSpec
+from trellis.contracts import ToolCall, ToolError, ToolOutcome
 from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import (
-    READ_ONLY_TOOLS,
-    Governance,
-    Memory,
-    catalog_entry,
-)
+from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory
 from trellis.harness.identity import Identity
 
 GATEWAY = "http://gw.test"
@@ -169,10 +164,8 @@ async def test_agent_tools_are_listed_once_and_tiered_read_or_write() -> None:
     assert [item["kind"] for item in found] == ["memory", "chunk"] and found[0]["id"] == "mem_1"
 
 
-async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() -> None:
-    service = FakeMemoryService(
-        catalog={"erp-get_stock": {"risk": "read", "approve_when": "qty > 5"}}
-    )
+async def test_records_carry_idempotency() -> None:
+    service = FakeMemoryService()
     run = memory(service).bind(identity())
     await run.record_messages([("user", "hi"), ("assistant", "hello")], "run_1", 2)
     [batch] = service.named("messages")
@@ -186,43 +179,14 @@ async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() ->
         ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)
     )
     assert service.named("record_tool")[0].body["status"] == "ok"
-    found, etag = await run.catalog(["erp-get_stock", "missing"])
-    assert found == {"erp-get_stock": Governance(risk="read", approve_when="qty > 5")}
-    assert etag is not None
-    # asked again with that ETag: nothing changed, nothing sent back
-    assert await run.catalog(["erp-get_stock", "missing"], etag=etag) == (None, etag)
-    service.catalog["erp-get_stock"]["approve_when"] = "qty > 9"
-    changed, newer = await run.catalog(["erp-get_stock", "missing"], etag=etag)
-    assert changed == {"erp-get_stock": Governance(risk="read", approve_when="qty > 9")}
-    assert newer not in (None, etag)
-    service.etags = False  # a service that sends no ETag is read in full every time
-    assert (await run.catalog(["erp-get_stock"], etag=newer))[1] is None
     await run.run_feedback("confirm", source="system", key="run_1:outcome")
     [feedback] = service.named("feedback")
     assert feedback.body["target_kind"] == "run" and feedback.body["target_id"] == "run_1"
     assert feedback.body["source"] == "system" and feedback.idempotency_key == "run_1:outcome"
-    # the grounding score: the share of the answer's claims the evidence supports
-    assert await run.verify("the answer", "bnd_1") == 0.8
-    assert service.named("verify")[0].body["bundle_id"] == "bnd_1"
 
 
-async def test_catalog_entries_carry_what_the_harness_knows_and_no_more() -> None:
+async def test_the_model_key_is_registered_once_in_the_agents_scope() -> None:
     service = FakeMemoryService()
-    run = memory(service).scoped("t")
-    await run.publish_catalog(
-        [
-            catalog_entry(
-                ToolSpec(name="refund", side_effects="irreversible", source="local"), None
-            ),
-            catalog_entry(
-                ToolSpec(name="erp-get", source="mcp", server="erp", side_effects="write"),
-                {"readOnlyHint": True},
-            ),
-        ]
-    )
-    refund, mcp_tool = service.named("put_catalog")[0].body["tools"]
-    assert refund["side_effects"] == "irreversible" and "annotations" not in refund
-    assert mcp_tool["annotations"] == {"readOnlyHint": True} and "side_effects" not in mcp_tool
     await memory(service).scoped("t", "a").register_model_key("sk")
     [key] = service.named("model_key")
     assert key.body["virtual_key"] == "sk"
@@ -244,11 +208,6 @@ async def test_a_tool_result_that_is_not_json_is_returned_as_it_came() -> None:
         {"type": "text", "text": "x"}
     ]
     await gateway.aclose()
-
-
-async def test_an_answer_with_no_checkable_claim_has_no_grounding_score() -> None:
-    service = FakeMemoryService(claims=0, unsupported=0)
-    assert await memory(service).bind(identity()).verify("hello", "bnd_1") is None
 
 
 async def test_a_document_can_be_added_without_waiting_for_it() -> None:

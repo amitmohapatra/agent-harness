@@ -8,6 +8,10 @@ too, with a page of its own ([deepagents.md](deepagents.md)).
 `langchain`, which has `create_agent` and its middleware). Your model is your own LangChain chat
 model — `ChatOpenAI(base_url=BIFROST_URL, ...)` to go through Bifrost.
 
+This page is Way 1: the harness runs the graph. To keep calling the graph yourself and plug in
+the blocks (memory, governed tools asking through `interrupt`, the pause in agent-runs, a
+judge), see the Way 2 recipe: [blocks/langgraph.md](../blocks/langgraph.md).
+
 ## Using an existing LangGraph project
 
 Your graph stays as it is. Three changes:
@@ -43,7 +47,7 @@ result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="
 every MCP tool the Bifrost virtual key allows, and — memory on — the memory tools
 (`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`,
 `tool_search`). Tools that are not the harness's (a `@langchain_core.tools.tool` of your own)
-keep working; they are not tiered, journaled or recorded. `h.wrap(graph, tools=...)` is refused
+keep working; they are not governed, journaled or recorded. `h.wrap(graph, tools=...)` is refused
 for a compiled graph: pass the tools to the graph instead.
 
 **`graph.invoke` itself is not intercepted.** The harness runs the graph through
@@ -60,7 +64,7 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 | Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
 | Memory pull | the memory tools are in `h.tools(...)` |
 | Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
-| Tiers and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
+| Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
 | Tool hints | the context is asked for with the toolbox's names (5 or more); the graph's bound tools are not narrowed (`narrows="none"`) |
 | Grounding, judges | sampled successful runs with a text answer ([evaluation.md](../evaluation.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per harness call, `retrieve memory`; LangChain's own instrumentation nests under it |
@@ -113,7 +117,7 @@ harness tool calls (`TOOL_CALL_START/ARGS/END/RESULT`), `tool_notice` for writes
 ## Durable runs, workers, schedules
 
 `agent.start(input, user=...)` queues the run (its input JSON); `h.worker([agent]).run()` or
-`python -m trellis.worker module:h` executes it; `agent.schedule(cron, input, on_behalf_of=...)`
+`python -m trellis.harness.worker module:h` executes it; `agent.schedule(cron, input, on_behalf_of=...)`
 queues one on a cadence ([runs.md](../runs.md)). A worker saves the journal as progress after
 every side-effecting harness call, so a worker that dies repeats none of them. The worker that
 continues a paused run is any worker: see *Which checkpointer* above. The graph object
@@ -129,8 +133,9 @@ agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(ur
 ## Evaluation
 
 `await h.evaluate(agent, dataset, [grounding(), exact_match(), llm_judge("...")])` and
-`Harness(judges=[...])` work on the graph unchanged; `llm_judge` needs `TRELLIS_JUDGE_MODEL`
-(the harness does not know a graph's model).
+`Harness(judges=[...])` work on the graph unchanged (the evaluators come from
+`trellis.harness.evals`); `llm_judge` needs `TRELLIS_JUDGE_MODEL` (the harness does not know a
+graph's model).
 
 ## Limits
 

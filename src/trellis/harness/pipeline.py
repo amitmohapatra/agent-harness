@@ -16,7 +16,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -36,7 +36,6 @@ from trellis.contracts import (
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
-from trellis.harness.clients.runs import Conflict, LeaseLost
 from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
@@ -44,16 +43,12 @@ from trellis.harness.result import Result
 from trellis.harness.runtime import RunCancelled, Runtime, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, metrics, output
 from trellis.memory.models import PromptContext
+from trellis.runs import RELEASED, ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
 
 log = logging.getLogger("trellis.run")
-
-#: The message a worker cancels a run with when it stops before the run ends: the run is
-#: released, not cancelled — nothing is written, its lease lapses and agent-runs queues it
-#: again as its next attempt.
-RELEASED: Final = "trellis:released"
 
 
 async def attempt(
@@ -67,7 +62,7 @@ async def attempt(
     listener: Callable[[RunEvent], None] | None = None,
     streaming: bool = False,
     worker_id: str | None = None,
-    lease_seconds: float | None = None,
+    lease_seconds: int | None = None,
     observe: Callable[[PromptContext | None], None] | None = None,
 ) -> Result:
     """Run one attempt and record how it ended. The run record must already be RUNNING;
@@ -166,7 +161,11 @@ async def _concluded(
     """Record how the attempt ended: cancelled, paused, failed or answered."""
     if runtime.lease_lost:
         # another worker may hold the run now (a framework may have swallowed the error)
-        raise LeaseLost(f"{runtime.worker_id} lost the lease on {runtime.run_id}: nothing written")
+        raise LeaseLostError(
+            f"{runtime.worker_id} lost the lease on {runtime.run_id}: nothing written",
+            code="LEASE_LOST",
+            status=409,
+        )
     if cancelled:
         await _settle_cancelled(agent, runtime.identity, runtime.events, runtime.worker_id)
         return Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
@@ -332,7 +331,8 @@ async def _paused(
     await _recorded(
         agent,
         runtime.run_id,
-        lambda: agent.harness.runs.paused(
+        runtime.tenant,
+        lambda: agent.harness.runs.pause(
             interrupt, checkpoint=journal.dump(), worker_id=runtime.worker_id
         ),
         lambda r: r.awaiting is not None and r.awaiting.interrupt_id == interrupt.interrupt_id,
@@ -378,8 +378,9 @@ async def _ended(agent: Agent, runtime: Runtime, status: RunStatus, **fields: An
     await _recorded(
         agent,
         runtime.run_id,
-        lambda: agent.harness.runs.finished(
-            runtime.run_id, status, worker_id=runtime.worker_id, **fields
+        runtime.tenant,
+        lambda: agent.harness.runs.finish(
+            runtime.run_id, status, worker_id=runtime.worker_id, tenant=runtime.tenant, **fields
         ),
         lambda r: r.status is status,
     )
@@ -388,18 +389,19 @@ async def _ended(agent: Agent, runtime: Runtime, status: RunStatus, **fields: An
 async def _recorded(
     agent: Agent,
     run_id: str,
+    tenant: str,
     write: Callable[[], Awaitable[RunRecord]],
     holds: Callable[[RunRecord], bool],
 ) -> None:
     """Write the pause or the ending. The runs client retries a write whose answer was lost,
     and agent-runs answers a repeat with the stored record; a store that refuses the repeat
-    instead (``Conflict``) is read, and when the run already is what was written, it was
+    instead (``ConflictError``) is read, and when the run already is what was written, it was
     written — the run is not failed, queued again or executed again because an answer got
-    lost on the way."""
+    lost on the way. A lost lease (``LeaseLostError``, not a conflict) is never read away."""
     try:
         await write()
-    except Conflict:
-        record = await agent.harness.runs.get(run_id)
+    except ConflictError:
+        record = await agent.harness.runs.get(run_id, tenant=tenant)
         if record is None or not holds(record):
             raise
         log.info("run %s was already recorded as %s", run_id, record.status.value)
@@ -418,8 +420,10 @@ async def _settle_cancelled(
     agent: Agent, identity: Identity, events: RunEvents, worker_id: str | None
 ) -> None:
     try:
-        await agent.harness.runs.finished(identity.run_id, RunStatus.CANCELLED, worker_id=worker_id)
-    except (LeaseLost, Conflict):
+        await agent.harness.runs.finish(
+            identity.run_id, RunStatus.CANCELLED, worker_id=worker_id, tenant=identity.tenant
+        )
+    except (LeaseLostError, ConflictError):
         log.info("run %s was taken over by another worker; nothing written", identity.run_id)
     events.finished(RunOutcome.CANCELLED)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)

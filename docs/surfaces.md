@@ -4,8 +4,21 @@ Two ways in, one way out. `serve_chat` puts an agent in front of a person's chat
 server-sent events); `serve_a2a` publishes it to other agents (A2A JSON-RPC); `a2a(url)` makes
 another agent one of this agent's tools. Each surface runs the agent through the same pipeline
 as `agent.run`: the run record, memory, tools, approvals and traces are the same whichever way
-a run came in — and whichever framework the agent is built with
-([framework pages](README.md#which-target)). Both need an extra: `[agui]` (FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
+a run came in — and whichever framework the agent is built with ([framework pages](README.md#which-target)). Both need an extra: `[agui]`
+(FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
+The code is `trellis.harness.agui` (the AG-UI server) and `trellis.harness.a2a` (`server`, and
+`client`, the A2A client the `a2a(url)` tool is built on).
+
+**The servers are Way 1.** `serve_chat` and `serve_a2a` serve a *wrapped* agent: `h.wrap(x)`
+first, then `agent.serve_chat(app)` / `agent.serve_a2a(app, url)`. A server has to record the
+run's start, pause and finish, stream its events in the contracts grammar, replay its journal
+on resume and read a person's answer as a decision — that is the harness's pipeline, and an
+interface that let unwrapped code do it would be a second runtime. So a team that keeps its
+own framework and wants these servers wraps the part it serves: any async function is a target
+([frameworks/functions.md](frameworks/functions.md)), so the function that calls your graph,
+your OpenAI Agents runner or your own loop is enough. Otherwise use the protocols' own SDKs
+(AG-UI's, the A2A SDK) with the Trellis blocks inside. *Calling* another agent needs none of
+this: `remote(url, tenant=, user=)` works from any code ([blocks/a2a.md](blocks/a2a.md), Way 2).
 
 ## AG-UI: `agent.serve_chat(app, *, path="/agui", identity=None)`
 
@@ -48,9 +61,9 @@ media type it was stored with, every refusal with the problem schema, and `RunAg
 has not named itself (FastAPI's default title) is titled `"<agent id> agent"`, with a
 description and the harness's version.
 
-**Several replicas.** A run's events are buffered in the process that serves it (`hub.py`), so a
-reconnect (`GET …/events`) must reach that replica: route a thread's requests — keyed by the
-`threadId`, or the session cookie — to one replica (sticky sessions at the load balancer). A
+**Several replicas.** A run's events are buffered in the process that serves it
+(`agui/hub.py`), so a reconnect (`GET …/events`) must reach that replica: route a thread's
+requests — keyed by the `threadId`, or the session cookie — to one replica (sticky sessions at the load balancer). A
 resume may land anywhere (it reads the run from agent-runs), and so may an artifact read; a
 reconnect that lands elsewhere is a `404`, after which the client can read the run's outcome
 from agent-runs or start the next turn.
@@ -101,9 +114,11 @@ to public (checked at registration and again at each delivery). The body is the 
 token the caller registered (agent-runs' webhook scheme), with `X-Trellis-Event:
 a2a.task_update`, `X-Trellis-Delivery` and the token itself in `X-A2A-Notification-Token`. A
 config without a token is not delivered to; a failing receiver is tried up to 3 times (0.2 s, then
-0.4 s apart), logged, and never raised into the task. A receiver checks a delivery with
-`trellis.harness.surfaces.a2a.push.verify_signature(secret, header, body, *, now=None) -> bool`
-(signatures older than 300 s are refused).
+0.4 s apart), logged, and never raised into the task. The signature is agent-runs' webhook
+scheme, signed with `trellis.runs.webhooks.sign`; a receiver checks a delivery with
+`trellis.runs.webhooks.verify_signature(secret, header, body, *, now=None, tolerance=300) -> bool`
+(pip `trellis-runs`; a signature more than 300 s old or ahead is refused, a malformed header is
+`False`).
 
 **OpenAPI.** The A2A SDK serves its routes as plain Starlette routes, which FastAPI leaves out of
 the app's OpenAPI document; on a FastAPI app the surface describes both under the tag `a2a` —
@@ -122,14 +137,15 @@ or no user is refused.
 ## Calling A2A agents: `a2a(url, *, name=None)`
 
 A remote agent is one tool (`write`), named after its card (or `name`; unsafe characters become
-`_`, at most 64), described by the card, taking `{"message": string}`. The message goes with
-the calling run's identity on the trusted-identity header (and the extension header) and its
+`_`, at most 64), described by the card, taking `{"message": string}`. The card is read once;
+each call is a `RemoteAgent` ([blocks/a2a.md](blocks/a2a.md)) as the calling run.
+The message goes with the calling run's identity on the trusted-identity header (and the extension header) and its
 thread as the context id, so a conversation between two agents is one thread on both sides.
 The answer is the remote task's `result` artifact (several artifacts as a list), or its text.
 A remote task that ends `failed`, `rejected` or `canceled` is a tool error the calling model
 reads (`"<tool> failed: …"`), as is a remote agent that cannot be reached.
 
 When the remote agent asks something (`input-required`), the calling run asks the same question
-itself (`ask`), and the answer goes back on the same remote task. If that pauses the calling
-run, the remote task is cancelled; the resumed run calls again and the journal answers the
+itself (`ask` is the `RemoteAgent`'s `on_input`), and the answer goes back on the same remote
+task. If that pauses the calling run, the remote task is cancelled; the resumed run calls again and the journal answers the
 question, so the remote agent gets the answer on its new task.

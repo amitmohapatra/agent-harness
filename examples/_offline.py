@@ -1,8 +1,13 @@
-"""Models for running the examples with no services.
+"""What the examples need to run with no services.
 
 With ``BIFROST_URL`` set, the examples use a real model through Bifrost's OpenAI-compatible
 endpoint (:data:`MODEL`). Without it they use the scripted models here, which answer from a
 fixed script: the harness, the frameworks and the tools are all real; only the model is not.
+
+The Way 2 examples (``blocks_*.py``) also take their run store, memory client and judge from
+here: agent-runs' ``RunsClient`` with ``RUNS_URL``, else the harness's in-process store, which
+takes the same calls; a ``MemoryClient`` with ``MEMORY_URL``, else none (the example says it
+skips memory); the judge from the environment with ``BIFROST_URL``, else a scripted one.
 """
 
 from __future__ import annotations
@@ -12,6 +17,11 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
+
+from trellis.harness.evals import EvalServices
+from trellis.harness.runs import LocalRuns, RunStore
+from trellis.memory import MemoryClient
+from trellis.runs import RunsClient
 
 #: The model the examples use through Bifrost.
 MODEL = "openrouter/openai/gpt-4.1-nano"
@@ -180,3 +190,40 @@ class Answering:
 def answering_model(answers: dict[str, str]) -> Any:
     """A model name for Bifrost when online, else the answer table (which also judges)."""
     return MODEL if online() else Answering(answers)
+
+
+def judge_services() -> EvalServices:
+    """Langfuse and the judge the environment names; offline, the scripted judge."""
+    return EvalServices.from_env() if online() else EvalServices(judge_model=Answering({}))
+
+
+# --------------------------------------------------------------------------- Way 2 blocks
+#: What the Way 2 examples call ``runs``: agent-runs' ``RunsClient``, or offline the harness's
+#: in-process store, which takes the same calls with the same signatures. Your code types it
+#: ``RunsClient``.
+Runs = RunStore
+
+
+def runs_store() -> Runs:
+    """agent-runs' client with ``RUNS_URL``; else the harness's in-process store, which takes
+    the same calls (``start``, ``pause``, ``iterate``, ``resume``, ``finish``, ``claim``...)."""
+    return RunsClient() if os.environ.get("RUNS_URL") else LocalRuns()
+
+
+def memory_client() -> MemoryClient | None:
+    """The memory service's client with ``MEMORY_URL`` (and ``TRELLIS_API_KEY``), else none."""
+    if not os.environ.get("MEMORY_URL"):
+        print("MEMORY_URL is unset: no memory context, nothing recorded")
+        return None
+    return MemoryClient()
+
+
+def claude_cli(script: Sequence[dict[str, Any]], server: str) -> dict[str, Any]:
+    """``ClaudeAgentOptions`` arguments for the CLI: the real ``claude`` through Bifrost's
+    Anthropic route when online, else the scripted stand-in calling tools of ``server``."""
+    if online():
+        url, key = gateway()
+        origin = url.removesuffix("/v1")
+        return {"env": {"ANTHROPIC_BASE_URL": f"{origin}/anthropic", "ANTHROPIC_API_KEY": key}}
+    environment = {"FAKE_CLAUDE_SCRIPT": json.dumps(list(script)), "FAKE_CLAUDE_SERVER": server}
+    return {"cli_path": FAKE_CLAUDE_CLI, "env": environment}

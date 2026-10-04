@@ -13,12 +13,15 @@ Spans (every attribute passes the redactor first):
   ``gen_ai.request.model``, ``gen_ai.usage.input_tokens``/``output_tokens``...); a framework's
   own model calls are its instrumentation's;
 * ``retrieve memory`` — the pushed context;
-* ``score <name>`` — a grounding score or a person's feedback, in the run's trace.
+* ``score <name>`` — a grounding score, an evaluator's or a person's feedback, in the run's trace
+  (or the trace a score names: a trace the team's own tracing made).
 
-A run ``h.evaluate`` runs is an item of a Langfuse experiment: inside :func:`experiment`, every
-span above carries Langfuse's experiment attributes (``langfuse.experiment.*``), as its own SDK's
-experiment runner sets them — what Langfuse v4 builds experiments from (v3 links dataset runs
-through ``POST /api/public/dataset-run-items``, which the harness also sends).
+A run an evaluation runs (``evals.evaluate``) is an item of a Langfuse experiment: inside
+:func:`experiment`, every span above carries Langfuse's experiment attributes
+(``langfuse.experiment.*``), as its own SDK's experiment runner sets them — what Langfuse v4
+builds experiments from (v3 links dataset runs through ``POST /api/public/dataset-run-items``,
+which the harness also sends). A callable evaluated with no harness gets a root span of its own
+(:func:`item_span`) in the trace of the run id the evaluation made for it.
 
 Every attempt of a run is in one trace whose id is derived from the run id
 (:func:`trace_id_of`), so a resume in another process, a score computed later and
@@ -33,7 +36,7 @@ Scores and datasets: Langfuse takes scores through its public API, not OTLP. Whe
 headers carry Langfuse's ``Authorization: Basic`` credentials, and the endpoint is Langfuse's
 (``…/api/public/otel``) or the headers name its host (``x-langfuse-host``, which a collector
 ignores), a score is also posted to ``/api/public/scores`` on the run's trace, and
-:class:`Langfuse` reads datasets and links runs to a dataset run (``h.evaluate``). Otherwise the
+:class:`Langfuse` reads datasets and links runs to a dataset run (``evaluate``). Otherwise the
 score is only the ``score`` span, which every backend receives.
 """
 
@@ -146,9 +149,14 @@ def trace_hex(run_id: str) -> str:
 
 def _run_context(run_id: str) -> otel_context.Context:
     """A remote parent in the run's trace, so the attempt's span joins it."""
-    span_id = int.from_bytes(hashlib.sha256(f"{run_id}:root".encode()).digest()[:8], "big") or 1
+    return _parent(trace_id_of(run_id), f"{run_id}:root")
+
+
+def _parent(trace_id: int, seed: str) -> otel_context.Context:
+    """A remote parent in the trace ``trace_id``, its span id derived from ``seed``."""
+    span_id = int.from_bytes(hashlib.sha256(seed.encode()).digest()[:8], "big") or 1
     parent = trace.SpanContext(
-        trace_id=trace_id_of(run_id),
+        trace_id=trace_id,
         span_id=span_id,
         is_remote=True,
         trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
@@ -291,11 +299,35 @@ class RunTrace:
 @contextmanager
 def agent_span(run: RunTrace, task: str) -> Iterator[trace.Span]:
     """The attempt's span, in the run's trace; ``output(span, answer)`` records the answer."""
+    attributes = {**run.attributes(), "langfuse.observation.input": _text(task)}
+    with _root_span(run.run_id, run.agent_id, attributes) as current:
+        yield current
+
+
+@contextmanager
+def item_span(run_id: str, name: str, input: Any, *, user: str) -> Iterator[trace.Span]:
+    """The span of a callable an evaluation runs on one item (``evaluate(callable, ...)``), in
+    the trace of the ``run_id`` the evaluation gave it: what :func:`agent_span` is to a wrapped
+    agent's run. The callable's own spans, if it makes any, are its children."""
+    attributes = {
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": name,
+        "langfuse.observation.type": "agent",
+        "langfuse.trace.name": name,
+        "langfuse.observation.input": _text(input),
+        "user.id": user,
+        "trellis.run_id": run_id,
+    }
+    with _root_span(run_id, name, attributes) as current:
+        yield current
+
+
+@contextmanager
+def _root_span(run_id: str, name: str, attributes: dict[str, Any]) -> Iterator[trace.Span]:
     with _tracer.start_as_current_span(
-        f"invoke_agent {run.agent_id}", context=_run_context(run.run_id)
+        f"invoke_agent {name}", context=_run_context(run_id)
     ) as current:
         if current.is_recording():
-            attributes = {**run.attributes(), "langfuse.observation.input": _text(task)}
             current.set_attributes(redact_attributes(attributes))
             _experimented(current, root=True)
         yield current
@@ -303,7 +335,7 @@ def agent_span(run: RunTrace, task: str) -> Iterator[trace.Span]:
 
 @contextmanager
 def tool_span(
-    name: str, call_id: str, args: Any, *, source: str, tier: str
+    name: str, call_id: str, args: Any, *, source: str, action: str
 ) -> Iterator[trace.Span]:
     with _tracer.start_as_current_span(f"execute_tool {name}") as current:
         if current.is_recording():
@@ -315,7 +347,7 @@ def tool_span(
                 "gen_ai.tool.call.arguments": _text(args),
                 "langfuse.observation.type": "tool",
                 "trellis.tool.source": source,
-                "trellis.tool.tier": tier,
+                "trellis.governance.action": action,
             }
             current.set_attributes(redact_attributes(attributes))
             _experimented(current)
@@ -371,8 +403,11 @@ def usage(span: trace.Span, response: Mapping[str, Any]) -> None:
     span.set_attributes(redact_attributes({k: v for k, v in found.items() if v not in (None, [])}))
 
 
-def score_span(run_id: str, name: str, value: float | str, comment: str | None) -> None:
-    """A score as a span in the run's trace (what every OTLP backend receives)."""
+def score_span(
+    trace_id: str, name: str, value: float | str, comment: str | None, *, run_id: str | None = None
+) -> None:
+    """A score as a span in the trace ``trace_id`` (32 hex characters: a run's is
+    :func:`trace_hex`) — what every OTLP backend receives."""
     attributes = {
         "langfuse.observation.type": "evaluator",
         "trellis.run_id": run_id,
@@ -380,8 +415,9 @@ def score_span(run_id: str, name: str, value: float | str, comment: str | None) 
         "trellis.score.value": value,
         "trellis.score.comment": comment,
     }
+    parent = _parent(int(trace_id, 16), f"{run_id or trace_id}:root")
     with _tracer.start_as_current_span(
-        f"score {name}", context=_run_context(run_id), attributes=redact_attributes(attributes)
+        f"score {name}", context=parent, attributes=redact_attributes(attributes)
     ) as current:
         current.add_event("score", redact_attributes({"name": name, "value": value}))
         if current.is_recording():
@@ -423,7 +459,7 @@ class Langfuse:
 
     async def post(
         self,
-        run_id: str,
+        trace_id: str,
         name: str,
         value: float | str,
         *,
@@ -431,10 +467,11 @@ class Langfuse:
         comment: str | None = None,
         key: str,
     ) -> None:
-        """One score on the run's trace; ``key`` makes a retry update rather than add."""
+        """One score on the trace ``trace_id`` (32 hex characters: a run's is
+        :func:`trace_hex`); ``key`` makes a retry update rather than add."""
         body: dict[str, Any] = {
             "id": key,
-            "traceId": trace_hex(run_id),
+            "traceId": trace_id,
             "name": name,
             "value": value,
             "dataType": data_type,
@@ -502,10 +539,6 @@ class Langfuse:
 
     async def aclose(self) -> None:
         await self._client.aclose()
-
-
-#: The name the scores client had before it read datasets too.
-Scores = Langfuse
 
 
 # --------------------------------------------------------------------------- export

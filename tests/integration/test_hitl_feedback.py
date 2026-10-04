@@ -12,7 +12,7 @@ from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.contracts.ids import stable_id
 from trellis.harness.clients.memory import Memory
-from trellis.harness.clients.runs import RunStoreError
+from trellis.runs import ConflictError
 
 
 @tool(side_effects="irreversible")
@@ -99,11 +99,11 @@ async def test_a_resume_the_run_store_refuses_sends_no_feedback(
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
 
-    async def refused(resolution: Any) -> Any:
-        raise RunStoreError("run is RUNNING, not waiting on an answer")
+    async def refused(resolution: Any, **kwargs: Any) -> Any:
+        raise ConflictError("run is RUNNING, not waiting on an answer", status=409)
 
-    monkeypatch.setattr(memory_harness.runs, "resumed", refused)
-    with pytest.raises(RunStoreError):
+    monkeypatch.setattr(memory_harness.runs, "resume", refused)
+    with pytest.raises(ConflictError):
         await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
     await memory_harness.writes.drain()
     assert _decided(memory_service) == []

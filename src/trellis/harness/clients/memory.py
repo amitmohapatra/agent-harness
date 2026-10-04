@@ -1,4 +1,6 @@
-"""The memory service, as the harness uses it: every call the harness makes goes through here.
+"""The memory service, as the harness uses it: every call the harness makes goes through here,
+except the blocks usable without ``Harness`` — the tool catalog (``governance/catalog.py``) and
+the grounding check (``evals.grounding_score``) — which call the SDK's ``MemoryContext`` itself.
 
 ``Memory`` is the process's client; ``Memory.bind(identity)`` is a :class:`RunMemory`, the
 calls one run makes in its own scope. The SDK's ``MemoryContext`` it wraps (``.ctx``) is also
@@ -9,12 +11,12 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, Final
 
 from trellis.contracts import Feedback as Decision
 from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
 from trellis.harness.fresh import Fresh
+from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.models import (
@@ -23,7 +25,6 @@ from trellis.memory.models import (
     Feedback,
     KeyInfo,
     PromptContext,
-    SideEffects,
 )
 
 #: Prompt budget for the pushed context, in tokens, when the model's context window is not
@@ -43,15 +44,6 @@ SOURCE_SYSTEM: Final = "trellis-harness"
 #: cannot be reached, the last listing is kept and asked for again after the retry interval.
 AGENT_TOOLS_TTL_SECONDS: Final = 600.0
 AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
-
-
-@dataclass(frozen=True, slots=True)
-class Governance:
-    """The catalog's word on one tool: the tier it decided, and the approval rule an
-    administrator (or an accepted suggestion) set."""
-
-    risk: SideEffects
-    approve_when: str | None = None
 
 
 class Memory:
@@ -121,7 +113,7 @@ class Memory:
                 decision = Decision.model_validate(args["record"])
                 return lambda: run.feedback(decision)
             case "publish_catalog":
-                return lambda: run.publish_catalog(args["entries"])
+                return lambda: MemoryCatalog(run.ctx).publish(args["entries"])
         return None
 
     async def aclose(self) -> None:
@@ -233,34 +225,7 @@ class RunMemory:
         client may retry a failed send and the service stores and counts it once."""
         await self.ctx.feedback(record, idempotency_key=record.feedback_id)
 
-    async def verify(self, answer: str, bundle_id: str) -> float | None:
-        """The grounding score of ``answer`` against the context the run was given (the share
-        of its claims the evidence supports), or ``None`` for an answer with no checkable
-        claim. The service records the verdict as the run's ``judge`` feedback itself; this is
-        the same number, for the run's trace."""
-        report = await self.ctx.verify(answer, bundle_id=bundle_id)
-        if not report.claims:
-            return None
-        return round(1.0 - report.per_claim_hallucination_rate, 4)
-
-    # ------------------------------------------------------------------ catalog
-    async def catalog(
-        self, names: Sequence[str], *, etag: str | None = None
-    ) -> tuple[dict[str, Governance] | None, str | None]:
-        """What the catalog says about each named tool — the tier it decided, and the rule an
-        administrator (or an accepted suggestion) set; tools it does not know are absent —
-        and the answer's ``ETag``. With the ``etag`` of an earlier answer the request is
-        conditional (``If-None-Match``): ``None`` means nothing changed since. A service that
-        sends no ``ETag`` is simply read in full each time."""
-        entries, tag = await self.ctx.advanced.tools.catalog_if_changed(names, etag=etag)
-        if entries is None:
-            return None, tag
-        governance = {
-            entry.name: Governance(risk=entry.risk, approve_when=entry.approve_when or None)
-            for entry in entries
-        }
-        return governance, tag
-
+    # ------------------------------------------------------------------ documents, model key
     async def add_document(
         self,
         file: Any,
@@ -281,9 +246,6 @@ class RunMemory:
             return await self.ctx.advanced.documents.document(handle.document_id)
         return await self.ctx.advanced.documents.wait_ready(handle.document_id, max_wait=wait)
 
-    async def publish_catalog(self, entries: Sequence[dict[str, object]]) -> None:
-        await self.ctx.advanced.tools.put_catalog(list(entries))
-
     async def register_model_key(self, key: str) -> None:
         """The agent-level LLM key the service uses for this agent's memory, in an agent
         scope (the same request from every process and run, so the idempotent PUT repeats
@@ -299,24 +261,6 @@ def context_budget(window: int | None) -> int:
     if not window:
         return CONTEXT_TOKEN_BUDGET
     return max(CONTEXT_TOKEN_BUDGET, min(CONTEXT_TOKEN_MAX, int(window * CONTEXT_SHARE)))
-
-
-def catalog_entry(spec: ToolSpec, annotations: dict[str, bool] | None) -> dict[str, object]:
-    """A tool as the catalog stores it. ``side_effects`` only where the harness knows them (a
-    local tool declares them, an OpenAPI method implies them); an MCP tool sends its server's
-    annotations instead and the service derives the tier, so an administrator's stays."""
-    entry: dict[str, object] = {
-        "name": spec.name,
-        "description": spec.description,
-        "input_schema": spec.input_schema or {"type": "object"},
-        "source": spec.source,
-        "server": spec.server,
-    }
-    if spec.source != "mcp" and spec.side_effects in ("read", "write", "irreversible"):
-        entry["side_effects"] = spec.side_effects
-    if annotations:
-        entry["annotations"] = annotations
-    return entry
 
 
 def _agent_tool(tool: AgentTool) -> ToolSpec:

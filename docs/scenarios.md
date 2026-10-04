@@ -1,7 +1,9 @@
 # Which to use when
 
-The harness has one way to attach (`h.wrap(target, id=...)`) and a few choices around it. Each
-section below starts from what you are trying to do and names the call. The API itself is in
+The harness has one way to attach (`h.wrap(target, id=...)`) and a few choices around it: this
+page is Way 1. (Not wrapping, and calling the blocks from your own framework, is Way 2:
+[docs/README.md](README.md#way-2-pluggable-blocks-your-framework-our-pieces).) Each section
+below starts from what you are trying to do and names the call. The API itself is in
 the [README](../README.md); how it works is in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## What to wrap
@@ -28,14 +30,15 @@ existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.
 | The tool is | Use | Notes |
 |---|---|---|
 | A Python function in this process | `tools=[fn]` or `@tool(side_effects=...)` | Schema from the signature, description from the docstring. Declare `side_effects`: `read` runs, `write` (default) runs and is announced, `irreversible` asks a person. |
-| An HTTP API with an OpenAPI 3 document | `openapi(spec, only=[...])` | One tool per `operationId`; the method decides the tier (GET read, POST/PUT/PATCH write, DELETE irreversible). |
+| An HTTP API with an OpenAPI 3 document | `openapi(spec, only=[...])` | One tool per `operationId`; the method decides the side effects (GET read, POST/PUT/PATCH write, DELETE irreversible). |
 | Another agent | `a2a(url)` | One `write` tool; its questions become this run's questions. |
-| Shared by many agents, owned by a platform team, budgeted | an MCP server registered in Bifrost, allowed on the agent's virtual key | Nothing in code: the toolbox is what the key allows, tiered by the server's annotations and the catalog. Many read-only Code Mode servers become Code Mode meta-tools. |
+| Shared by many agents, owned by a platform team, budgeted | an MCP server registered in Bifrost, allowed on the agent's virtual key | Nothing in code: the toolbox is what the key allows, governed by the server's annotations and the catalog. Many read-only Code Mode servers become Code Mode meta-tools. |
 | Needed when the agent is built (a compiled graph; any framework's agent built before wrapping) | `await h.tools(*sources, framework=...)` | The same toolbox in the framework's own type; every call still goes through the bridge. |
 
 Approvals by tool: make the tool `irreversible` (or let its MCP server say `destructiveHint`).
 Approvals by call: an administrator's `approve_when` rule in the memory service's tool catalog
-(`amount > 10000`) asks exactly when it holds — no code change, and it replaces the tier.
+(`amount > 10000`) asks exactly when it holds — no code change, and it replaces what the risk
+decides ([governance.md](governance.md)).
 
 ## Memory: reading and writing
 
@@ -78,10 +81,10 @@ outside a tool (and the model calls) run again on the re-run.
 |---|---|
 | An answer in the request that asked (an API handler, a script) | `await agent.run(input, user=...)` |
 | Text and tool events as they happen (your own UI) | `agent.stream(input, user=...)`, or `serve_chat` for an AG-UI client |
-| A run that outlives this process: long work, approvals that take days, many workers | `await agent.start(...)`, `h.worker([...]).run()` (or `python -m trellis.worker module:h`), and `RUNS_URL` |
+| A run that outlives this process: long work, approvals that take days, many workers | `await agent.start(...)`, `h.worker([...]).run()` (or `python -m trellis.harness.worker module:h`), and `RUNS_URL` |
 | A run on a cadence, acting for someone | `await agent.schedule(cron, input, on_behalf_of=...)` — idempotent, so it is safe in deployment code |
 | Development and tests | leave `RUNS_URL` unset: runs, the queue and schedules live in the process (`LocalRuns`) and nothing survives a restart |
-| Workers in production: deploys, scaling, stop signals | `python -m trellis.worker module:h --concurrency N` (or `TRELLIS_WORKER_CONCURRENCY`; default the CPU count, 1–8); `SIGTERM` lets held runs finish for 25 s, then releases them for another worker — give the container ~45 s ([runs.md](runs.md#workers)) |
+| Workers in production: deploys, scaling, stop signals | `python -m trellis.harness.worker module:h --concurrency N` (or `TRELLIS_WORKER_CONCURRENCY`; default the CPU count, 1–8); `SIGTERM` lets held runs finish for 25 s, then releases them for another worker — give the container ~45 s ([runs.md](runs.md#workers)) |
 | Memory writes that survive an outage and a restart | `TRELLIS_SPOOL_DIR` on a volume that outlives the process: what could not be delivered is replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 
 A run started with `run`/`stream` resumes in the process that calls `resume`; one started with
@@ -120,6 +123,7 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 | Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_JUDGE_SAMPLE`) judged in the background |
 | A judge that does not grade itself, on its own budget | `TRELLIS_JUDGE_MODEL` (a stronger model than the agent's) and `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | A check of your own | any `async (EvalCase) -> EvalScore \| None` in the evaluators or judges |
+| Evaluation of an agent you do not wrap | `evaluate(any_async_callable, dataset, [...])` and `judge(case, [...], services=...)` from `trellis.harness.evals` ([blocks/evaluation.md](blocks/evaluation.md)) |
 
 Annotation queues and datasets built from traces are Langfuse's ([evaluation.md](evaluation.md));
 whether the harness itself got slower is `make bench`.

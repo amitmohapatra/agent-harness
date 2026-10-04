@@ -103,7 +103,7 @@ async def test_a_large_table_is_a_run_artifact_served_back() -> None:
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         ref = paused.interrupt.payload_ref
         assert ref is not None and paused.interrupt.payload is None
-        stored = await h.runs.artifact(ref.artifact_id, await h.tenant())
+        stored = await h.runs.artifacts.download(ref.artifact_id, tenant=await h.tenant())
         assert stored is not None and json.loads(stored) == {"table": rows}
         record = await h.runs.get(paused.run_id)
         assert record is not None and len(json.dumps(record.checkpoint)) < 16 * 1024

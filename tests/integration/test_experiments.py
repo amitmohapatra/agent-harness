@@ -1,7 +1,7 @@
 """An evaluated run is an item of a Langfuse experiment, as Langfuse's own SDK makes one: the
 dataset run linked through ``dataset-run-items`` (Langfuse v3) *and* the experiment attributes
-on the run's spans (``langfuse.experiment.*``, what Langfuse v4 reads) — checked on the spans
-an in-memory exporter receives."""
+on the run's spans (``langfuse.experiment.*``, what Langfuse v4 reads) — for a wrapped agent's
+runs and for a callable's — checked on the spans an in-memory exporter receives."""
 
 from __future__ import annotations
 
@@ -18,8 +18,9 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.models import ScriptedChat
-from trellis import EvalItem, Harness, ReAct, Settings, exact_match, tool
+from trellis import Harness, ReAct, Settings, tool
 from trellis.harness import telemetry
+from trellis.harness.evals import EvalItem, EvalServices, evaluate, exact_match
 
 LF = "https://lf.test"
 OTLP = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": LF}
@@ -181,6 +182,55 @@ async def test_a_refused_link_still_marks_the_spans_with_one_fallback_id(
     assert [r["langfuse.experiment.id"] for r in roots] == [fallback] * 2  # one per evaluation
     assert all(r["langfuse.experiment.dataset.id"] == "ds-1" for r in roots)
     assert all("langfuse.experiment.description" not in r for r in roots)
+
+
+@respx.mock
+async def test_a_callables_items_are_linked_and_on_every_span_of_their_traces(
+    spans: InMemorySpanExporter,
+) -> None:
+    linked = langfuse_dataset(
+        respx.mock, link=httpx.Response(200, json={"id": "dri-1", "datasetRunId": "dsr-1"})
+    )
+
+    async def capitals(country: str) -> str:
+        with telemetry._tracer.start_as_current_span("my framework's step"):
+            return {"France": "Paris"}.get(country, "Rome")
+
+    langfuse = telemetry.Langfuse.of(Settings(otlp_headers=OTLP))
+    async with EvalServices(langfuse=langfuse) as services:
+        report = await evaluate(
+            capitals,
+            "capitals",
+            [exact_match()],
+            services=services,
+            user="qa",
+            run_name="plain",
+            concurrency=1,
+        )
+    assert report.experiment_id == "dsr-1" and report.statuses == {"success": 2}
+    first = report.items[0]
+    assert first.trace_url == f"{LF}/trace/{telemetry.trace_hex(first.run_id or '')}"
+    assert json.loads(linked.calls[0].request.content)["metadata"] == {"agent_id": "capitals"}
+
+    found = of_run(spans, first.run_id or "")
+    root = root_of(found)
+    attributes = dict(root.attributes or {})
+    assert root.name == "invoke_agent capitals"
+    assert attributes["user.id"] == "qa" and attributes["trellis.run_id"] == first.run_id
+    assert attributes["langfuse.observation.input"] == "France"
+    assert attributes["langfuse.observation.output"] == "Paris"
+    assert experimental(root)["langfuse.experiment.item.root_observation_id"] == format(
+        root.context.span_id,  # type: ignore[union-attr]
+        "016x",
+    )
+    assert experimental(root)["langfuse.experiment.item.expected_output"] == "Paris"
+    names = {s.name for s in found if s is not root}
+    assert names == {"my framework's step", "score exact_match"}
+    score = next(s for s in found if s.name == "score exact_match")
+    assert experimental(score)["langfuse.experiment.id"] == "dsr-1"  # its own: experimental
+    step = next(s for s in found if s.name == "my framework's step")
+    assert step.parent is not None and step.parent.span_id == root.context.span_id  # type: ignore[union-attr]
+    assert experimental(step) == {}  # a framework's own span is its child, unmarked
 
 
 async def test_a_local_dataset_is_an_experiment_with_hashed_item_ids(

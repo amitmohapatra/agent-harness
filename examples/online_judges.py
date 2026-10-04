@@ -1,5 +1,6 @@
-"""Online judging: every sampled successful run is scored in the background by the judges the
-harness was given — never on the request path; the scores land on each run's trace.
+"""Way 1, wrapped — online judging: every sampled successful run is scored in the background by
+the judges the harness was given — never on the request path; the scores land on each run's
+trace. (Your own code, not wrapped, judges its runs with ``judge()``: ``blocks_evaluate.py``.)
 
     .venv/bin/python examples/online_judges.py
 
@@ -14,7 +15,8 @@ import os
 
 from _offline import answering_model
 
-from trellis import EvalCase, EvalScore, Harness, ReAct, Settings, llm_judge
+from trellis import Harness, ReAct, Settings
+from trellis.harness.evals import EvalCase, EvalScore, llm_judge
 
 
 async def concise(case: EvalCase) -> EvalScore:

@@ -1,28 +1,68 @@
 # Documentation
 
-Start with the [README](../README.md) (the API, what is automatic, the framework matrix) and
-[ARCHITECTURE.md](../ARCHITECTURE.md) (system context, components, the pipeline, sequence
-diagrams of a run, a pause and an A2A call, run states). This page is the map: what each page
-covers, and which feature to use when.
+Trellis is used in one of two ways ([README](../README.md#two-ways-to-use-trellis), with the
+decision table): **wrapped**, where the harness runs your agent and every piece is automatic,
+or as **pluggable blocks**, where your framework runs the agent and your code calls the pieces
+it wants. This page is the map: the pages of each way, and which feature to use when.
+[ARCHITECTURE.md](../ARCHITECTURE.md) has how it is built (system context, components, the
+pipeline, sequence diagrams of a run, a pause and an A2A call, run states).
 
-## Pages
+## Way 1: wrapped (the harness runs your agent)
+
+`h.wrap(agent)`, then `agent.run`. Each page says how a feature works and what the harness does
+for you.
 
 | Page | |
 |---|---|
 | **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic, approvals, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
 | [scenarios.md](scenarios.md) | which to use when, in more detail: targets, tools, memory, pauses, runs, surfaces, observability, evaluation |
 | [configuration.md](configuration.md) | the environment, `Settings`, and who the key says the deployment is |
-| [tools.md](tools.md) | the toolbox, risk tiers, `approve_when`, tool hints, Code Mode, `h.tools` |
+| [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
+| [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts |
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, schedules, the inbox, the agent-runs wire |
 | [surfaces.md](surfaces.md) | `serve_chat` (AG-UI), `serve_a2a`, and `a2a(url)` tools |
 | [observability.md](observability.md) | OTel GenAI spans, Langfuse, scores, the collector |
-| [evaluation.md](evaluation.md) | offline (`h.evaluate` over a dataset) and online (`judges=`) evaluation, the evaluators, the judge's model and budget |
+| [evaluation.md](evaluation.md) | offline (`h.evaluate` over a dataset) and online (`judges=` on sampled runs) evaluation; the evaluators, the judge's model and budget, Langfuse experiments |
+
+## Way 2: pluggable blocks (your framework, our pieces)
+
+Your framework runs the agent, untouched; your code imports a block and calls it. Each page:
+what the block is, install, setup from the environment, the API, its behaviour (errors,
+retries, tenancy), and how it relates to Way 1.
+
+| Page | Block |
+|---|---|
+| [blocks/memory.md](blocks/memory.md) | `trellis.memory`: the context into your prompt, the turn and each tool call recorded, feedback |
+| [blocks/runs.md](blocks/runs.md) | `trellis.runs`: durable runs, a pause with your framework's checkpoint, the inbox, resume, `Worker`, schedules, artifacts, webhooks and `verify_signature` |
+| [blocks/governance.md](blocks/governance.md) | `trellis.harness.governance`: `Governance.check` and `governed` on your own tools, `publish`, `decided` |
+| [blocks/evaluation.md](blocks/evaluation.md) | `trellis.harness.evals`: `evaluate` on any async function, `judge` on one run, `EvalServices.from_env` |
+| [blocks/a2a.md](blocks/a2a.md) | `trellis.harness.a2a.remote`: call any A2A agent (serving is Way 1) |
+| [blocks/contracts.md](blocks/contracts.md) | `trellis.contracts`: which records each block takes and returns, and why they are shared |
+
+**Recipes**, end to end with the framework's own pause and state: an unmodified agent with
+memory context and recording, governed tools, a durable pause in agent-runs answered from the
+inbox, and a judge.
+
+| Page | |
+|---|---|
+| [blocks/langgraph.md](blocks/langgraph.md) | a LangGraph graph: `governed` tools asking through `interrupt`, the checkpointer, `Command(resume=)`; a `Worker` continuing the graph across processes |
+| [blocks/openai-agents.md](blocks/openai-agents.md) | an OpenAI Agents `Agent`: `needs_approval` from governance, the `RunState` as the run's checkpoint |
+| [blocks/claude-agent-sdk.md](blocks/claude-agent-sdk.md) | a Claude Agent SDK `query()`: `can_use_tool` from governance, the session as the checkpoint |
+
+## Mixing both ways
+
+[blocks/mixing.md](blocks/mixing.md): wrapped agents and your own in one deployment, sharing one
+inbox, one tool catalog, one memory and one place for scores; answering each run its own way;
+calling across; moving an agent from one way to the other.
 
 `docs/agents/` holds notes for coding agents working on this repo.
 
 ## What to use when
+
+For a wrapped agent (Way 1); where code you do not wrap has its own answer, the row links its
+block page.
 
 ### Which target
 
@@ -35,7 +75,7 @@ covers, and which feature to use when.
 | a model and tools, no framework | `ReAct(system=..., model=...)` | [react.md](frameworks/react.md) |
 | code that decides itself (a workflow, a router, glue) | `async def fn(input, agent)` | [functions.md](frameworks/functions.md) |
 
-Every target gets the same harness: memory push and pull, tiers and approvals, records,
+Every target gets the same harness: memory push and pull, governance and approvals, records,
 grounding, judges, traces, durable runs and both surfaces. What differs is how a pause resumes
 (in place for a checkpointed graph and the OpenAI SDK's own approvals; a re-run against the
 journal otherwise), how far the tool schemas are narrowed, and what the framework does on its
@@ -48,7 +88,7 @@ own (built-in tools, sub-agents, handoffs) — each page says.
 | the answer in the request that asked (an API handler, a script) | `await agent.run(input, user=...)` | — |
 | text and tool events as they happen (your own UI) | `agent.stream(input, user=...)` | — |
 | a chat UI that speaks AG-UI | `agent.serve_chat(app, identity=...)` | `[agui]` |
-| a run that outlives the request: long work, approvals that take days, many workers | `await agent.start(...)` + `h.worker([...]).run()` or `python -m trellis.worker module:h` | `RUNS_URL` (else in process) |
+| a run that outlives the request: long work, approvals that take days, many workers | `await agent.start(...)` + `h.worker([...]).run()` or `python -m trellis.harness.worker module:h` | `RUNS_URL` (else in process) |
 | a run on a cadence, acting for someone | `await agent.schedule(cron, input, on_behalf_of=...)` + a worker | `RUNS_URL` (its ticker fires it) |
 | another agent (any vendor) calling yours | `agent.serve_a2a(app, url)` | `[a2a]` |
 
@@ -72,12 +112,13 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | a person in a chat UI | `serve_chat`: SSE, reconnect with `Last-Event-ID`, interrupts as resume entries |
 | another agent that should call yours | `serve_a2a`: agent card, JSON-RPC, streaming, signed push notifications |
 | your agent needs another agent | `a2a(url)` in `tools=[...]` or `h.tools(...)`: its questions become your run's |
+| code that is not wrapped (any framework) needs another agent | `remote(url, tenant=, user=)` ([blocks/a2a.md](blocks/a2a.md)) |
 
 ### Which tools
 
 | The tool is | Use | Governed by |
 |---|---|---|
-| a Python function in this process | `@tool(side_effects=...)`, or a bare function in `tools=[...]` | its declared tier, overridden by the catalog |
+| a Python function in this process | `@tool(side_effects=...)`, or a bare function in `tools=[...]` | its declared side effects, overridden by the catalog |
 | an HTTP API with an OpenAPI document | `openapi(spec, only=[...])` | the method (GET read … DELETE irreversible), and the catalog |
 | another agent | `a2a(url)` | `write`, and the catalog |
 | shared across agents, owned by a platform team | an MCP server in Bifrost, allowed on the agent's virtual key — nothing in code | the server's annotations, and the catalog |
@@ -91,6 +132,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | every call of a tool approved | `side_effects="irreversible"` (or the MCP server's `destructiveHint`) |
 | some calls approved, decided by an administrator without a deploy | the catalog's `approve_when` (`amount > 10000`) |
 | the framework's own gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`) | keep it: it becomes the same approval — gate each tool in one place |
+| the same decisions for tools of an agent you do not wrap | `Governance.from_env(...)` with `check` or `governed(...)` ([blocks/governance.md](blocks/governance.md)) |
 | a question, a choice, a table or diff to review | `trellis.current().ask(...)` (or a graph's own `interrupt()`) |
 | someone else to answer, by a deadline | `ask(..., assignee="role:…", deadline=..., escalate_to=...)` and `h.inbox(...)` |
 | to answer | `agent.resume(id, "approve" \| "reject" \| "edit" \| "answer" \| "cancel", answer=..., reviewer=...)` |
@@ -115,12 +157,13 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | an exact or partial match against an expected answer | `exact_match()`, `contains()` (offline: they need `expected`) |
 | grounding as an explicit evaluator in a report | `grounding()` |
 | quality on live traffic | `Harness(judges=[...])`, sampled by `TRELLIS_JUDGE_SAMPLE` |
+| the same for an agent you do not wrap | `evaluate(my_agent, dataset, [...])` and `judge(case, [...], services=...)` ([blocks/evaluation.md](blocks/evaluation.md)) |
 
 ### What each environment variable turns on
 
 | Variable | Turns on |
 |---|---|
-| `MEMORY_URL` (+ `TRELLIS_API_KEY`) | memory: push, pull tools, records, the tool catalog (tiers, `approve_when`), grounding, documents, feedback in memory |
+| `MEMORY_URL` (+ `TRELLIS_API_KEY`) | memory: push, pull tools, records, the tool catalog (risks, `approve_when`), grounding, documents, feedback in memory |
 | `RUNS_URL` | agent-runs: durable runs, workers across processes, the ticker's schedules and deadlines, run artifacts |
 | `BIFROST_URL` (+ `BIFROST_VIRTUAL_KEY`) | MCP tools (what the key allows), Code Mode, `ReAct` and `llm_judge` model names, the memory model key |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `_HEADERS` | trace export; with Langfuse's credentials, its scores API and datasets |

@@ -14,10 +14,10 @@ install:  ## Create the venv with every extra (uv)
 	$(UV) sync
 
 .PHONY: typings
-typings:  ## Link trellis.contracts and trellis.memory where pyright looks (see pyproject)
+typings:  ## Link trellis.contracts, trellis.memory and trellis.runs where pyright looks (see pyproject)
 	@mkdir -p typings/trellis
-	@$(PY) -c "import os, trellis.contracts as c, trellis.memory as m; \
-	[os.path.lexists(d) or os.symlink(s, d) for s, d in ((p.__path__[0], 'typings/trellis/' + os.path.basename(p.__path__[0])) for p in (c, m))]"
+	@$(PY) -c "import os, trellis.contracts as c, trellis.memory as m, trellis.runs as r; \
+	[os.path.lexists(d) or os.symlink(s, d) for s, d in ((p.__path__[0], 'typings/trellis/' + os.path.basename(p.__path__[0])) for p in (c, m, r))]"
 
 .PHONY: test
 test:  ## Every test except the benchmark and the live ones, at 100% line and branch coverage

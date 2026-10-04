@@ -14,7 +14,8 @@ jobs:
     steps:
       # The platform is unpublished: the harness resolves its siblings by path (pyproject
       # [tool.uv.sources] ../agent-contracts, ../bifrost-sdk,
-      # ../agent-memory-service/sdk/python), so they are checked out next to it, on main.
+      # ../agent-memory-service/sdk/python, ../agent-runs/sdk/python), so they are checked out
+      # next to it, on main.
       - uses: actions/checkout@v4
         with:
           path: agent-harness
@@ -30,8 +31,9 @@ jobs:
         with:
           repository: amitmohapatra/agent-memory-service
           path: agent-memory-service
-      # not a dependency: its committed docs/openapi.json is what tests/contract checks the
-      # runs client against (as agent-memory-service/docs/openapi.json is for the memory fake)
+      # trellis-runs (sdk/python) is a dependency, and its committed docs/openapi.json is what
+      # tests/contract checks the harness's run store against (as
+      # agent-memory-service/docs/openapi.json is for the memory fake)
       - uses: actions/checkout@v4
         with:
           repository: amitmohapatra/agent-runs
@@ -46,7 +48,8 @@ jobs:
       - name: Lint
         run: make lint
       - name: Typecheck
-        # pyright reads trellis.contracts / trellis.memory through the links `make typings` makes
+        # pyright reads trellis.contracts / trellis.memory / trellis.runs through the links
+        # `make typings` makes
         run: make typings typecheck
       - name: Tests
         # every test except the benchmark and the live ones (they need running services)

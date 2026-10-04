@@ -6,6 +6,7 @@ grounding check and people's feedback."""
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import telemetry
 from trellis.harness.clients.memory import Memory
+from trellis.harness.governance import catalog
 from trellis.memory.models import ToolHints
 
 
@@ -509,7 +511,7 @@ async def test_feedback_without_langfuse_is_a_score_span_and_memory_feedback(
         return "12"
 
     result = await memory_harness.wrap(fn, id="f").run("stock?", user="u")
-    assert memory_harness.scores is None
+    assert memory_harness.evals.langfuse is None
     await memory_harness.writes.drain()  # the run's own outcome is a queued write
     stored = await memory_harness.feedback(result.run_id, "confirm")
     assert [f.body["verdict"] for f in memory_service.named("feedback")][-1] == "confirm"
@@ -600,11 +602,19 @@ async def test_a_document_is_staged_then_ready_or_failed_with_its_error(
     assert staged.status == "STAGED"
 
 
+def rules_expire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The catalog's rules as read so far are older than their TTL: the next check reads it."""
+    monkeypatch.setattr(
+        catalog, "_now", lambda: time.monotonic() + catalog.GOVERNANCE_TTL_SECONDS + 1
+    )
+
+
 async def test_an_approval_rule_set_after_a_graph_was_built_governs_its_calls(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A compiled graph holds the tools ``h.tools`` built it with; the rule an administrator
-    sets afterwards still decides its calls (the run's toolbox is read fresh, not the build's)."""
+    sets afterwards still decides its calls (governance looks each call up by name, as the
+    catalog says within its TTL, not as it said when the graph was built)."""
     paid: list[int] = []
 
     @tool(side_effects="write")
@@ -616,6 +626,7 @@ async def test_an_approval_rule_set_after_a_graph_was_built_governs_its_calls(
     model = ScriptedChatModel(turns=[("pay", {"amount": 500}), "paid"])
     graph = create_agent(model, tools=await memory_harness.tools(pay, framework="langgraph"))
     memory_service.catalog = {"pay": {"side_effects": "write", "approve_when": "amount > 100"}}
+    rules_expire(monkeypatch)
     agent = memory_harness.wrap(graph, id="graph-payer")
     paused = await agent.run("pay the invoice", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
@@ -624,10 +635,11 @@ async def test_an_approval_rule_set_after_a_graph_was_built_governs_its_calls(
 
 
 async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An OpenAI Agents specialist reached by a handoff carries tools ``h.tools`` built: the
-    run's toolbox does not hold them, and their calls read the toolbox of that call."""
+    run's toolbox does not hold them, and governance looks their calls up by name all the
+    same."""
     paid: list[int] = []
 
     @tool(side_effects="write")
@@ -661,6 +673,7 @@ async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
         handoffs=[billing],
     )
     memory_service.catalog = {"pay": {"side_effects": "write", "approve_when": "amount > 100"}}
+    rules_expire(monkeypatch)
     agent = memory_harness.wrap(triage, id="triage")
     paused = await agent.run("pay the invoice", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused

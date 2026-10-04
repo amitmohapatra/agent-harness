@@ -12,8 +12,8 @@ import pytest
 
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
-from trellis.harness.clients.runs import LocalRuns
-from trellis.worker import load, main
+from trellis.harness.runs import LocalRuns
+from trellis.harness.worker.__main__ import load, main
 
 
 async def approve_then_finish(input: dict[str, str], agent: Runtime) -> str:
@@ -142,9 +142,9 @@ async def test_a_lost_lease_stops_the_run_without_writing(harness: Harness) -> N
     agent = harness.wrap(long, id="long")
     handle = await agent.start("x", user="u")
     worker = harness.worker([agent])
-    record = await harness.runs.claim(worker.worker_id, ["long"], 30)
-    assert record is not None
-    execution = asyncio.create_task(agent._claimed(record, worker.worker_id))
+    claimed = await harness.runs.claim(worker.worker_id, ["long"], lease_seconds=30)
+    assert claimed is not None
+    execution = asyncio.create_task(agent._claimed(claimed.run, worker.worker_id))
     await asyncio.sleep(0.01)
     execution.cancel()  # what the heartbeat does on a lost lease
     with contextlib.suppress(asyncio.CancelledError):

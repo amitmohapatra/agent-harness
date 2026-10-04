@@ -2,7 +2,8 @@
 
 For a team with no agent framework: `ReAct(system, model)` is a tool-calling loop over chat
 completions — native tool messages, structured output, a `chat` span per model call. Nothing
-else to install.
+else to install. `ReAct` exists to be wrapped (Way 1); a team with a loop of its own that wants
+only some pieces uses the blocks instead ([docs/README.md](../README.md#way-2-pluggable-blocks-your-framework-our-pieces)).
 
 ```python
 from pydantic import BaseModel

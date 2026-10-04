@@ -1,8 +1,15 @@
 # Runs, workers, schedules
 
-Every run has a record (contracts `RunRecord`): in agent-runs when `RUNS_URL` is set, in
-process otherwise (`LocalRuns`, same behaviour, nothing survives a restart). Both are in
-`trellis/harness/clients/runs.py`.
+This page is Way 1, wrapped: the harness records every run of an agent it wraps, and gives
+you the inbox, schedules and workers. A team that keeps its own framework uses agent-runs
+directly, with `trellis.runs.RunsClient` and `trellis.runs.Worker`:
+[blocks/runs.md](blocks/runs.md) (Way 2).
+
+Every run has a record (contracts `RunRecord`): in agent-runs when `RUNS_URL` is set
+(`h.runs` is a `trellis.runs.RunsClient`), in process otherwise (`h.runs` is a `LocalRuns`:
+same behaviour, nothing survives a restart). Both are the harness's `RunStore`
+(`trellis/harness/runs.py`): the part of `RunsClient` the harness calls, with the same
+signatures.
 
 | Call | Record |
 |---|---|
@@ -21,10 +28,15 @@ where it cannot, and so does its answer.
 ## Workers
 
 ```python
-await h.worker([agent_a, agent_b]).run()               # until stopped; CPU count runs at a time
-python -m trellis.worker app.agents:h                  # every agent the Harness `h` wraps
-python -m trellis.worker app.agents:h --concurrency 8
+await h.worker([agent_a, agent_b]).run()                  # until stopped; CPU count runs at a time
+python -m trellis.harness.worker app.agents:h             # every agent the Harness `h` wraps
+python -m trellis.harness.worker app.agents:h --concurrency 8
 ```
+
+The claim loop is agent-runs' SDK's, `trellis.runs.Worker`; the harness's worker
+(`trellis.harness.worker`) runs it with your wrapped agents: each claimed run is its agent's
+next attempt, and the harness's background writes start before the first claim and drain when
+the loop ends. The same loop with a handler of your own: [blocks/runs.md](blocks/runs.md#workers).
 
 `h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
 at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and
@@ -35,14 +47,17 @@ of idle workers does not ask in step), and asks at once again after it got work.
 `False` when nothing was queued. A claim that fails is logged and counts as no work; a run that
 breaks the harness itself is logged and the worker goes on.
 
-**Stopping.** `worker.stop()` — what `python -m trellis.worker` calls on `SIGTERM` or `SIGINT` —
-stops claiming and lets the runs the worker holds finish, for up to 25 s (`GRACE_SECONDS`). A run
-still going then is *released*: stopped without writing anything, so its lease lapses and
-agent-runs queues it again as its next attempt for another worker (the journal replays what its
-last checkpoint holds — its progress, below: every tool call with side effects it completed). A second signal releases the runs at once. Then the memory write queue
-drains (at most 10 s; what is left is spooled or counted lost — [memory.md](memory.md)) and the
-process exits `0`. Give the container at least 40 s to stop (e.g. a termination grace period of
-45 s). Cancelling `worker.run()` instead cancels the runs it holds: they end `CANCELLED`.
+**Stopping.** `worker.stop()` — what `await worker.serve()` and so
+`python -m trellis.harness.worker` call on `SIGTERM` or `SIGINT` — stops claiming and lets the
+runs the worker holds finish, for up to 25 s (`trellis.runs`' `GRACE_SECONDS`). A run still
+going then is *released* (cancelled with `trellis.runs.RELEASED`): stopped without writing
+anything, so its lease lapses and agent-runs queues it again as its next attempt for another
+worker (the journal replays what its last checkpoint holds — its progress, below: every tool
+call with side effects it completed). A second signal releases the runs at once. Then the
+memory write queue drains (at most 10 s; what is left is spooled or counted lost —
+[memory.md](memory.md)) and the process exits `0`. Give the container at least 40 s to stop
+(e.g. a termination grace period of 45 s). Cancelling `worker.run()` instead cancels the runs
+it holds: they end `CANCELLED`.
 
 A worker runs any target. Build it the same way in every worker process (at import, in the
 module the worker loads); a LangGraph graph's own `interrupt()` (or HITL middleware) pause needs a
@@ -77,33 +92,48 @@ event and a log line — the run goes on, and the next save tries again; a save 
 
 ## Schedules
 
-One `POST /v1/schedules`: agent-runs upserts on `(tenant, agent, on_behalf_of, cadence,
-sha256 of the canonical input)`, so scheduling the same thing again (a redeploy) answers the
-schedule that exists, unchanged. The cadence is a cron expression or one of `hourly`, `daily`,
-`weekly`, `weekdays`, `manual`. Pause and resume a schedule in agent-runs:
-`PATCH /v1/schedules/{id} {"enabled": false | true}`. In process, a due schedule fires when a
-worker asks for work; in agent-runs its ticker queues the run.
+`agent.schedule` is one `runs.schedules.create(spec)` (`POST /v1/schedules`): agent-runs upserts
+on `(tenant, agent, on_behalf_of, cadence, sha256 of the canonical input)`, so scheduling the
+same thing again (a redeploy) answers the schedule that exists, unchanged. The cadence is a cron
+expression or one of `hourly`, `daily`, `weekly`, `weekdays`, `manual`. Pause and resume a
+schedule with `RunsClient`: `await runs.schedules.update(schedule_id,
+ScheduleUpdate(enabled=False))` (or `True`). In process, a due schedule fires when a worker asks
+for work; in agent-runs its ticker queues the run.
 
 ## The inbox
 
 `await h.inbox("role:procurement")` — the paused runs waiting on that assignee (or, with no
-argument, on anyone in the tenant), newest first, as `RunSummary` (`run_id`, `agent_id`,
-`status`, `awaiting` — the interrupt —, `assignee`, `deadline`, `updated_at`). An `ask` with
-no `assignee` waits on the run's user (`user:<user>`). Answer one with `agent.resume`.
+argument, on anyone in the tenant), newest first, as `trellis.runs.RunSummary` (`run_id`,
+`agent_id`, `status`, `awaiting` — the interrupt —, `assignee`, `deadline`, `updated_at`). An
+`ask` with no `assignee` waits on the run's user (`user:<user>`). Answer one with
+`agent.resume`. It is `runs.iterate(status=PAUSED, assignee=..., tenant=..., max_pages=10)`
+with pages of 500 (`INBOX_LIMIT`, `INBOX_MAX_PAGES`): past 5000 runs it returns the newest and
+logs a warning.
 
 Notifications (a run paused, escalated or finished) are agent-runs' tenant webhook
-subscriptions (`POST /v1/webhooks`), not a harness setting.
+subscriptions (`RunsClient.webhooks.create`, `POST /v1/webhooks`), not a harness setting; a
+receiver checks each delivery with `trellis.runs.webhooks.verify_signature`
+([blocks/runs.md](blocks/runs.md#webhooks)).
 
-## agent-runs wire (0.2)
+## agent-runs wire
 
-`X-Api-Key: TRELLIS_API_KEY` on every call, `X-Trellis-Tenant` naming the run's tenant.
-`POST /v1/runs` (`RunStart` + `queue`), `POST /v1/runs/claim` (`{run, lease}` or `204`),
-`POST /v1/runs/{id}/heartbeat` (with the progress `checkpoint` when there is one), `POST /v1/runs/{id}/pause?worker_id=` (an `Interrupt` and the
-checkpoint), `POST /v1/runs/{id}/resume` (an `InterruptResolution`),
-`POST /v1/runs/{id}/finish?worker_id=`, `POST /v1/runs/{id}/artifacts?worker_id=&checksum=`
-(an `ask` payload, → `ArtifactRef`), `GET /v1/artifacts/{id}`, `GET /v1/runs/{id}`,
-`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=` (summaries, page by page),
-`POST /v1/schedules` (`ScheduleSpec`).
+`RunsClient` sends `X-API-Key: TRELLIS_API_KEY` on every call. The harness calls, by operation
+id: `runs.start` (`POST /v1/runs`, `RunStart` + `queue`), `runs.claim`
+(`POST /v1/runs/claim` → `Claimed{run, lease}` or `204`), `runs.heartbeat`
+(`POST /v1/runs/{id}/heartbeat`, with the progress `checkpoint` when there is one → `Lease`),
+`runs.pause` (`POST /v1/runs/{id}/pause?worker_id=`, an `Interrupt` and the checkpoint),
+`runs.resume` (`POST /v1/runs/{id}/resume`, an `InterruptResolution`), `runs.finish`
+(`POST /v1/runs/{id}/finish?worker_id=`), `runs.get` (`GET /v1/runs/{id}`), `runs.list`
+page by page (`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=`, the inbox),
+`artifacts.upload` (`POST /v1/runs/{id}/artifacts?worker_id=&checksum=`, an `ask` payload →
+`ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`) and `schedules.create`
+(`POST /v1/schedules`, `ScheduleSpec`).
+
+**The tenant is explicit.** A call whose body names the tenant (a start, a pause, a schedule)
+sends it as `X-Trellis-Tenant`; every other call the harness makes passes `tenant=` — the run's
+own, from its record or its runtime — so a platform key (which has no tenant of its own) works
+on every call, and nothing is remembered between calls. `h.inbox`, `h.feedback` and
+`agent.resume` take `tenant=` for a platform key, like `agent.run`.
 
 Every call is retried when it fails on the way — a transport error (a refused connection, a
 timeout), `429`, `502`, `503` or `504` — up to 3 times, after the `Retry-After` agent-runs sent
@@ -113,18 +143,17 @@ idempotent on its id, a pause or finish repeated by the same worker with the sam
 answers the stored record, an artifact is stored once per checksum, a schedule is upserted. A
 claim whose answer was lost leaves that run leased to this worker unworked until the lease
 lapses (60 s), when agent-runs queues it again — late, never lost or run twice at once. A
-pause or finish the store refuses as a conflict is read back once: when the run already is
-what was written (the first attempt landed, its answer did not), the run goes on as recorded —
-it is not failed, queued again or executed again.
+pause or finish the store refuses as a conflict (`ConflictError`) is read back once: when the
+run already is what was written (the first attempt landed, its answer did not), the run goes on
+as recorded — it is not failed, queued again or executed again.
 
-A refusal raises `RunStoreError` — with the problem's `code`, the `status` and `retryable`, so a
-run that fails on it keeps whether it may be retried — read from agent-runs' problem document
-(RFC 9457) by its `code`: `LEASE_LOST` is `LeaseLost` (the worker no longer holds the run: it
-stops and writes nothing more), `CONFLICT` is `Conflict` (a run id taken, an answer to another
-interrupt, an illegal transition), `NOT_FOUND` is `NotFound`; an answer without a code is read
-by its status (`409` `Conflict`, `404` `NotFound`). A heartbeat refused with `409`, whatever its
-code, is `LeaseLost`. A call that still fails after its retries raises `RunStoreError` with
-`retryable` true.
-
-The inbox follows agent-runs' `Link: <…>; rel="next"` cursor page by page (500 runs a page), up
-to 10 pages; past that it returns the newest 5000 and logs a warning.
+A refusal raises the SDK's errors (`trellis.runs`), read from agent-runs' problem document
+(RFC 9457) by its `code`: every one is a `RunsError` with the problem's `code`, the `status` and
+`retryable` (so a run that fails on it keeps whether it may be retried). `LEASE_LOST` is
+`LeaseLostError` — the worker no longer holds the run: it stops and writes nothing more — and is
+**not** a `ConflictError`, so the conflict read-back above never swallows a lost lease;
+`CONFLICT` is `ConflictError` (a run id taken, an answer to another interrupt, an illegal
+transition); `NOT_FOUND` is `NotFoundError` (a read by id answers `None` instead). A heartbeat
+refused with `409`, whatever its code, is `LeaseLostError`. A call that still fails after its
+retries raises `DependencyUnavailableError`, `retryable` true. `LocalRuns` raises the same
+classes.

@@ -8,6 +8,11 @@ your agent that also carries the harness tools; your agent object is never chang
 through Bifrost. `agents.set_tracing_disabled(True)` keeps the SDK's own tracing (which goes to
 OpenAI) off; the harness traces through OpenTelemetry.
 
+This page is Way 1: the harness runs the agent. To keep calling `Runner.run` yourself and plug
+in the blocks (memory, `needs_approval` from governance, the `RunState` as the run's
+checkpoint in agent-runs, a judge), see the Way 2 recipe:
+[blocks/openai-agents.md](../blocks/openai-agents.md).
+
 ## Using an existing OpenAI Agents project
 
 ```python
@@ -33,7 +38,7 @@ if result.interrupt:  # create_po asks a person
 
 `tools=[...]` on `wrap` are added next to the agent's own `tools` for each run (with the MCP
 tools the virtual key allows and, memory on, the memory tools). Your own `function_tool`s keep
-working and are left untouched; they are not tiered, journaled or recorded by the harness.
+working and are left untouched; they are not governed, journaled or recorded by the harness.
 
 **Handoffs.** `wrap(tools=...)` reaches the agent you wrap. A specialist reached by a handoff
 gets harness tools when it is built:
@@ -89,7 +94,7 @@ also ask for it.
 
 ## Durable runs, workers, schedules, AG-UI, A2A, evaluation
 
-The same as every target: `start` + `h.worker`/`python -m trellis.worker` (progress saved after
+The same as every target: `start` + `h.worker`/`python -m trellis.harness.worker` (progress saved after
 each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` as a tool,
 `h.evaluate` and online judges (`llm_judge` needs `TRELLIS_JUDGE_MODEL`). See
 [runs.md](../runs.md), [surfaces.md](../surfaces.md), [evaluation.md](../evaluation.md).
