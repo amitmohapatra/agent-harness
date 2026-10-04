@@ -5,7 +5,8 @@ Point ``ClaudeAgentOptions(cli_path=...)`` here and the real Claude Agent SDK dr
 control handshake, the prompt, and tool calls into the SDK's in-process MCP servers (the
 ``mcp_message`` control requests the real CLI sends). What the "model" does is scripted in
 ``FAKE_CLAUDE_SCRIPT`` (JSON): ``{"tool": "<server tool name>", "args": {...}}`` calls a tool of
-the ``trellis`` server, ``{"text": "..."}`` answers. ``FAKE_CLAUDE_RECORD`` names a file the CLI
+the ``trellis`` server, ``{"text": "..."}`` answers (``{last}`` in it is the text of the last
+tool result, so an answer shows what the "model" read). ``FAKE_CLAUDE_RECORD`` names a file the CLI
 writes what it was started with (system prompt, allowed tools, prompt) to.
 """
 
@@ -93,7 +94,7 @@ class Cli:
                     },
                     handle,
                 )
-        last = ""
+        last = read = ""
         for step, item in enumerate(script):
             if "tool" in item:
                 tool_id = f"toolu_{step}"
@@ -113,6 +114,7 @@ class Cli:
                 content = (result.get("result") or {}).get("content") or [
                     {"type": "text", "text": json.dumps(result.get("error"))}
                 ]
+                read = "".join(c.get("text", "") for c in content if isinstance(c, dict))
                 send(
                     {
                         "type": "user",
@@ -127,7 +129,7 @@ class Cli:
                     }
                 )
             else:
-                last = item["text"]
+                last = item["text"].replace("{last}", read)
                 send(assistant([{"type": "text", "text": last}]))
         send(
             {

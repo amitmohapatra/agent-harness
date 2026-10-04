@@ -6,13 +6,8 @@ suite against its API definitions)."""
 
 from __future__ import annotations
 
-import json
-import threading
 import uuid
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -23,7 +18,7 @@ from tests.live.conftest import (
     needs_gateway,
     needs_memory,
 )
-from tests.live.support import memory_scope
+from tests.live.support import StubLangfuse, memory_scope
 from trellis import Runtime, contains, grounding, llm_judge
 from trellis.harness import telemetry
 
@@ -32,51 +27,6 @@ pytestmark = [pytest.mark.live, needs_memory]
 #: Each test waits on the memory service (the SDK's live timeout, 60 s) and, for the judge, on
 #: a model: well above both.
 TIMEOUT_SECONDS = 240
-
-
-class StubLangfuse:
-    """A local Langfuse: one dataset, and every POST recorded."""
-
-    def __init__(self, dataset: str, items: list[dict[str, Any]]) -> None:
-        self.received: list[tuple[str, Any]] = []
-        stub = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                url = urlparse(self.path)
-                if url.path == f"/api/public/v2/datasets/{dataset}":
-                    self._answer({"id": "ds-live", "name": dataset})
-                elif url.path == "/api/public/dataset-items":
-                    assert parse_qs(url.query)["datasetName"] == [dataset]
-                    meta = {"page": 1, "limit": 50, "totalItems": len(items), "totalPages": 1}
-                    self._answer({"data": items, "meta": meta})
-                else:
-                    self._answer({"message": "not found"}, status=404)
-
-            def do_POST(self) -> None:
-                body = self.rfile.read(int(self.headers.get("content-length", 0)))
-                stub.received.append((self.path, json.loads(body)))
-                self._answer({"id": "ok"})
-
-            def _answer(self, body: Any, status: int = 200) -> None:
-                self.send_response(status)
-                self.send_header("content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(body).encode())
-
-            def log_message(self, format: str, *args: Any) -> None:
-                return None
-
-        self.server = HTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def posted(self, path: str) -> list[Any]:
-        return [body for p, body in self.received if p == path]
-
-    def settings(self) -> dict[str, Any]:
-        """Langfuse reached through the OTLP headers (no exporter: spans stay in process)."""
-        headers = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": self.url}
-        return {"otlp_endpoint": None, "otlp_headers": headers}
 
 
 @pytest.fixture
@@ -100,10 +50,8 @@ def langfuse() -> Iterator[StubLangfuse]:
             },
         ],
     )
-    thread = threading.Thread(target=stub.server.serve_forever, daemon=True)
-    thread.start()
-    yield stub
-    stub.server.shutdown()
+    with stub:
+        yield stub
 
 
 async def answer(question: str, agent: Runtime) -> str:
@@ -119,8 +67,10 @@ async def test_a_langfuse_dataset_is_graded_for_grounding_by_the_memory_service(
     async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
         agent = h.wrap(answer, id=f"live-eval-{suffix}")
         scope = await memory_scope(h, user=user, agent_id=agent.id)
+        # unique per run: the memory SDK's default idempotency key leaves the user out, so the
+        # same content for another user in the tenant would be refused as a reused key
         await scope.remember(
-            "The Berlin office reorders steel from Acme Steel, supplier id SUP-40.",
+            f"The Berlin office reorders steel from Acme Steel, supplier id SUP-40 ({suffix}).",
             visibility="USER",
         )
         report = await h.evaluate(

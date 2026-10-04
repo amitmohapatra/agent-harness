@@ -228,6 +228,10 @@ make test-live   # opt-in tests against BIFROST_URL / MEMORY_URL / RUNS_URL / TR
 
 `make test-live` reads the deployment environment and skips whatever is unset or
 unreachable; see `tests/live/conftest.py` for what it registers in the gateway for the session.
+`tests/live/test_live_matrix.py` needs only the memory service and agent-runs (with its ticker):
+every model in it is planned, everything else is real — each framework against both services
+(memory pushed and pulled, approvals in agent-runs, the records read back), then workers,
+schedules, AG-UI, A2A, documents, feedback and evaluation with memory on.
 
 The memory service in the tests is an in-process fake (`tests/support/memory.py`) behind the
 real SDK, and every request the harness sends it and every answer it gives is checked against
