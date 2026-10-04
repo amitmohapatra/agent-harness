@@ -21,16 +21,28 @@ where it cannot, and so does its answer.
 ## Workers
 
 ```python
-await h.worker([agent_a, agent_b]).run()     # until cancelled; 4 runs at a time
-python -m trellis.worker app.agents:h        # every agent the Harness `h` wraps
+await h.worker([agent_a, agent_b]).run()               # until stopped; CPU count runs at a time
+python -m trellis.worker app.agents:h                  # every agent the Harness `h` wraps
+python -m trellis.worker app.agents:h --concurrency 8
 ```
 
-`h.worker(agents, *, concurrency=4)` needs at least one agent. `await worker.run()` claims
-and executes until cancelled, `concurrency` runs at a time, asking again every second when
-the queue is empty; cancelling it cancels the runs it holds (they end `CANCELLED`) and drains
-the background writes. `await worker.run_once()` claims one run and executes it to its end or
-pause, and returns `False` when nothing was queued. A claim that fails is logged and counts as
-no work; a run that breaks the harness itself is logged and the worker goes on.
+`h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
+at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and
+8. `await worker.run()` claims and executes until stopped: an idle worker asks again after
+0.5 s, doubling the pause while the queue stays empty up to 10 s (half of it random, so a fleet
+of idle workers does not ask in step), and asks at once again after it got work.
+`await worker.run_once()` claims one run and executes it to its end or pause, and returns
+`False` when nothing was queued. A claim that fails is logged and counts as no work; a run that
+breaks the harness itself is logged and the worker goes on.
+
+**Stopping.** `worker.stop()` — what `python -m trellis.worker` calls on `SIGTERM` or `SIGINT` —
+stops claiming and lets the runs the worker holds finish, for up to 25 s (`GRACE_SECONDS`). A run
+still going then is *released*: stopped without writing anything, so its lease lapses and
+agent-runs queues it again as its next attempt for another worker (the journal replays what its
+last pause checkpointed). A second signal releases the runs at once. Then the memory write queue
+drains (at most 10 s; what is left is spooled or counted lost — [memory.md](memory.md)) and the
+process exits `0`. Give the container at least 40 s to stop (e.g. a termination grace period of
+45 s). Cancelling `worker.run()` instead cancels the runs it holds: they end `CANCELLED`.
 
 A worker claims a queued run under a 60 s lease and heartbeats it every 20 s (a failed
 heartbeat is logged and retried at the next beat). It names itself

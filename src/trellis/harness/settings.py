@@ -2,8 +2,9 @@
 
 Everything that is a design decision — limits, timeouts, prompts, sample rates — is a named
 constant next to the code that uses it. A setting here says *where* a service is, *whether* it
-exists in this deployment, and the credentials it is reached with. Who the deployment is (its
-tenant, whether it may write memory) is not configured: the memory service says so about
+exists in this deployment, the credentials it is reached with, and the two facts only the host
+knows: where undelivered writes may be kept on disk, and how many runs a worker process takes
+at once. Who the deployment is (its tenant) is not configured: the memory service says so about
 ``TRELLIS_API_KEY`` (``GET /v1/keys/self``).
 """
 
@@ -36,6 +37,12 @@ class Settings(BaseModel):
     otlp_endpoint: str | None = None
     #: OTLP headers (``OTEL_EXPORTER_OTLP_HEADERS``, parsed).
     otlp_headers: dict[str, str] = Field(default_factory=dict)
+    #: A directory memory writes this process could not deliver are kept in, replayed at
+    #: the next start (``writes.py``); unset: they are logged and counted, then lost.
+    spool_dir: str | None = None
+    #: Runs a worker executes at once (``h.worker``, ``python -m trellis.worker``); unset:
+    #: the machine's CPU count, between 1 and 8.
+    worker_concurrency: int | None = Field(default=None, ge=1)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -53,6 +60,8 @@ class Settings(BaseModel):
             runs_url=get("RUNS_URL"),
             otlp_endpoint=get("OTEL_EXPORTER_OTLP_ENDPOINT"),
             otlp_headers=parse_headers(get("OTEL_EXPORTER_OTLP_HEADERS") or ""),
+            spool_dir=get("TRELLIS_SPOOL_DIR"),
+            worker_concurrency=get("TRELLIS_WORKER_CONCURRENCY"),  # type: ignore[arg-type]
         )
 
 

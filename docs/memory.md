@@ -58,6 +58,30 @@ In the background, after each attempt — whether it succeeded, paused or failed
   Mode's nested calls from Bifrost's log;
 * approve/reject/edit decisions as `TOOL_CALL` feedback.
 
+## Background writes: what is guaranteed
+
+Every write above is queued and the run moves on (`writes.py`); four writers drain the queue.
+
+* A write that fails is tried again — 3 attempts in all, full-jitter backoff from 0.5 s — when
+  the failure may pass (the service unavailable, a timeout, a dropped connection); a refusal the
+  same request would get again (a `4xx` the SDK marks not retryable) is not repeated.
+* A full queue (10 000 writes) holds the run that writes, for up to 5 s, rather than dropping
+  the write after the run was told it would happen.
+* A write still undelivered — its attempts spent, a queue that stayed full, the process
+  stopping with it queued (shutdown drains for at most 10 s) — is logged and counted
+  (`trellis.writes.undelivered`). With `TRELLIS_SPOOL_DIR` set, a write that is data (a
+  transcript, a tool record, the run's outcome, a decision, catalog entries) is appended to
+  `<dir>/trellis-writes.jsonl` and replayed — the file claimed by renaming it, then removed —
+  the next time a harness with the same directory starts writing (a worker at its start, any
+  other process at its first write). The service stores a replayed write that had in fact
+  landed once (every write carries its idempotency key or message id). Without the directory,
+  or for a write that is not data (the sampled grounding check, the model key, Code Mode
+  calls read back from the gateway), it is lost: counted (`trellis.writes.failed`) and, during a
+  run, a `warning` event.
+
+So: delivered at least once while the process lives or, with a spool directory on a volume that
+outlives the process, after its next start; never silently dropped.
+
 ## Documents
 
 `h.add_document(file, user=..., thread=None, title=None, visibility=None, wait=60)` uploads a

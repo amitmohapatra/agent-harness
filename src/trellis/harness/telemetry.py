@@ -68,6 +68,10 @@ _tools = _meter.create_counter("trellis.tool_calls", description="tool calls, by
 _writes = _meter.create_counter(
     "trellis.writes.failed", description="background writes that failed"
 )
+_undelivered = _meter.create_counter(
+    "trellis.writes.undelivered",
+    description="background writes given up by this process, by outcome (spooled or lost)",
+)
 
 
 class _Metrics:
@@ -84,6 +88,10 @@ class _Metrics:
     @staticmethod
     def write_failed(label: str) -> None:
         _writes.add(1, {"write": label})
+
+    @staticmethod
+    def write_undelivered(label: str, outcome: str) -> None:
+        _undelivered.add(1, {"write": label, "outcome": outcome})
 
 
 metrics = _Metrics()

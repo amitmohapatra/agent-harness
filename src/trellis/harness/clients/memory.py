@@ -8,10 +8,11 @@ what tools and nodes get as ``trellis.current().memory``.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
+from trellis.contracts import Feedback as Decision
 from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
@@ -72,6 +73,28 @@ class Memory:
         scope = {"tenant_id": tenant} | ({"agent_id": agent_id} if agent_id else {})
         return RunMemory(self, self.client.bind(**scope))
 
+    def replay(self, record: Mapping[str, Any]) -> Callable[[], Awaitable[object]] | None:
+        """The write a spooled record describes (:meth:`RunMemory.record`), in its scope;
+        ``None`` for a record of no write this client replays."""
+        run = RunMemory(self, self.client.bind(**record["scope"]))
+        args = record["args"]
+        match record["op"]:
+            case "record_messages":
+                messages = [(role, content) for role, content in args["messages"]]
+                return lambda: run.record_messages(messages, args["run_id"], args["attempt"])
+            case "record_tool":
+                call = ToolCall.model_validate(args["call"])
+                outcome = ToolOutcome.model_validate(args["outcome"])
+                return lambda: run.record_tool(call, outcome)
+            case "run_feedback":
+                return lambda: run.run_feedback(**args)
+            case "feedback":
+                decision = Decision.model_validate(args["record"])
+                return lambda: run.feedback(decision)
+            case "publish_catalog":
+                return lambda: run.publish_catalog(args["entries"])
+        return None
+
     async def aclose(self) -> None:
         await self.client.aclose()
 
@@ -84,6 +107,12 @@ class RunMemory:
     def __init__(self, memory: Memory, ctx: MemoryContext) -> None:
         self.memory = memory
         self.ctx = ctx
+
+    def record(self, op: str, **args: Any) -> dict[str, Any]:
+        """A write of this scope as data — the method (``op``) and its arguments as JSON — so
+        the write spool can keep it and :meth:`Memory.replay` run it after a restart."""
+        scope = self.ctx.scope.model_dump(mode="json", exclude_none=True)
+        return {"op": op, "scope": scope, "args": args}
 
     # ------------------------------------------------------------------ push
     async def context(

@@ -16,6 +16,8 @@ what is read.
 | `RUNS_URL` | runs, the queue and schedules kept in process (needs `MEMORY_URL`: agent-runs accepts the memory service's keys, and the tenant comes from there) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no OTLP export |
 | `OTEL_EXPORTER_OTLP_HEADERS` | no OTLP headers; no Langfuse scores API |
+| `TRELLIS_SPOOL_DIR` | memory writes this process cannot deliver are logged, counted and lost (set: kept in `<dir>/trellis-writes.jsonl` and replayed at the next start — [memory.md](memory.md#background-writes-what-is-guaranteed)) |
+| `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.worker` and `concurrency=` on `h.worker` win over it) |
 
 `Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
 embedding (`Settings` is frozen and refuses unknown fields; `Settings.from_env(environ)` reads a
@@ -30,6 +32,8 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `runs_url` | `RUNS_URL` |
 | `otlp_endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | `otlp_headers` | `OTEL_EXPORTER_OTLP_HEADERS`, parsed as the OTel spec writes it (`k1=v1,k2=v2`, values URL-decoded, keys lower-cased) |
+| `spool_dir` | `TRELLIS_SPOOL_DIR` |
+| `worker_concurrency` | `TRELLIS_WORKER_CONCURRENCY` (at least 1) |
 
 `RUNS_URL` without `MEMORY_URL` is refused when the `Harness` is built (`ConfigurationError`).
 

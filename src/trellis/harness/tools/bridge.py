@@ -103,7 +103,7 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         output=_preview(outcome.output),
     )
     metrics.tool_called(tool.name, outcome.status.value)
-    runtime.agent.record_tool(runtime, tool_call, outcome)
+    await runtime.agent.record_tool(runtime, tool_call, outcome)
     return outcome
 
 

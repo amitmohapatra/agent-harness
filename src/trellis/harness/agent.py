@@ -210,7 +210,11 @@ class Agent:
         resumed = await runs.resumed(resolution)
         run_memory = await self.run_memory(identity)
         if feedback is not None and run_memory is not None and await self.harness.writes_memory():
-            self.harness.writes.submit("memory.feedback", lambda: run_memory.feedback(feedback))
+            await self.harness.writes.submit(
+                "memory.feedback",
+                lambda: run_memory.feedback(feedback),
+                record=run_memory.record("feedback", record=feedback.model_dump(mode="json")),
+            )
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
@@ -309,43 +313,58 @@ class Agent:
         )
         return pushed
 
-    def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
+    async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
         if memory is not None and runtime.writes_memory and call.tool not in _pull(self):
-            self.harness.writes.submit(
+            await self.harness.writes.submit(
                 "memory.record_tool",
                 lambda: memory.record_tool(call, outcome),
                 events=runtime.events,
+                record=memory.record(
+                    "record_tool",
+                    call=call.model_dump(mode="json"),
+                    outcome=outcome.model_dump(mode="json"),
+                ),
             )
 
-    def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
+    async def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
         """The attempt's transcript, whether the run succeeded, paused or failed."""
         memory = runtime.run_memory
         if memory is not None and runtime.writes_memory and messages:
             run_id, attempt = runtime.run_id, runtime.attempt
-            self.harness.writes.submit(
+            await self.harness.writes.submit(
                 "memory.transcript",
                 lambda: memory.record_messages(messages, run_id, attempt),
                 events=runtime.events,
+                record=memory.record(
+                    "record_messages",
+                    messages=[list(m) for m in messages],
+                    run_id=run_id,
+                    attempt=attempt,
+                ),
             )
 
-    def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
+    async def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
         its outcome (the judge's and a person's override it in the memory service)."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
         if memory is None or not runtime.writes_memory or verdict is None:
             return
-        run_id = runtime.run_id
-        self.harness.writes.submit(
+        feedback = {
+            "verdict": verdict,
+            "source": "system",
+            "comment": note,
+            "key": f"{runtime.run_id}:outcome",
+        }
+        await self.harness.writes.submit(
             "memory.outcome",
-            lambda: memory.run_feedback(
-                verdict, source="system", comment=note, key=f"{run_id}:outcome"
-            ),
+            lambda: memory.run_feedback(**feedback),
             events=runtime.events,
+            record=memory.record("run_feedback", **feedback),
         )
 
-    def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
+    async def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
         """On a sampled run, the answer checked against the context it was given (the memory
         service's ``/v1/verify``, which records it as the run's ``judge`` feedback), and the
         score put on the run's trace."""
@@ -365,9 +384,9 @@ class Agent:
             if score is not None:
                 await self.harness.score(run_id, "grounding", score, key=f"{run_id}:grounding")
 
-        self.harness.writes.submit("memory.verify", work, events=runtime.events)
+        await self.harness.writes.submit("memory.verify", work, events=runtime.events)
 
-    def imported_code_mode_calls(self, runtime: Runtime) -> None:
+    async def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway
         if memory is None or gateway is None or not runtime.writes_memory:
             return
@@ -389,7 +408,7 @@ class Agent:
                 )
                 await memory.record_tool(call, outcome)
 
-        self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
+        await self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
 
     # ------------------------------------------------------------------ internals
     async def _opened(

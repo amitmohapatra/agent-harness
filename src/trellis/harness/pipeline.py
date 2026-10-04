@@ -15,7 +15,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel
 
@@ -47,6 +47,11 @@ if TYPE_CHECKING:
     from trellis.harness.agent import Agent
 
 log = logging.getLogger("trellis.run")
+
+#: The message a worker cancels a run with when it stops before the run ends: the run is
+#: released, not cancelled — nothing is written, its lease lapses and agent-runs queues it
+#: again as its next attempt.
+RELEASED: Final = "trellis:released"
 
 
 async def attempt(
@@ -119,9 +124,11 @@ async def attempt(
             output(span, jsonable(extracted.answer))
     except RunCancelled:
         cancelled = True
-    except asyncio.CancelledError:
-        # the caller went away (a closed stream, a lost lease): the run ends here
-        await _settle_cancelled(agent, identity, events, worker_id)
+    except asyncio.CancelledError as exc:
+        # the caller went away (a closed stream, a lost lease): the run ends here — unless
+        # its worker is stopping and released it for another worker to run again
+        if RELEASED not in exc.args:
+            await _settle_cancelled(agent, identity, events, worker_id)
         raise
     except Exception as exc:
         # a framework may wrap or swallow the pause: the runtime is what says it paused
@@ -244,7 +251,7 @@ async def _paused(
     runtime.events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
     runtime.events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)
-    agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
+    await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
     return Result(run_id=runtime.run_id, status=RunStatus.PAUSED, interrupt=interrupt)
 
 
@@ -257,8 +264,8 @@ async def _failed(
     runtime.events.emit(RunEventType.RUN_ERROR, error=error)
     runtime.events.finished(RunOutcome.ERROR, error=error)
     metrics.run_finished(runtime.agent_id, RunOutcome.ERROR.value)
-    agent.recorded_run(runtime, _transcript(runtime, extracted))
-    agent.recorded_outcome(runtime, RunStatus.ERROR, error.message)
+    await agent.recorded_run(runtime, _transcript(runtime, extracted))
+    await agent.recorded_outcome(runtime, RunStatus.ERROR, error.message)
     return Result(run_id=runtime.run_id, status=RunStatus.ERROR, error=error)
 
 
@@ -269,11 +276,11 @@ async def _succeeded(
     await _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer))
     runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer))
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
-    agent.recorded_run(runtime, _transcript(runtime, extracted))
-    agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
-    agent.grounded(runtime, answer, pushed)
+    await agent.recorded_run(runtime, _transcript(runtime, extracted))
+    await agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
+    await agent.grounded(runtime, answer, pushed)
     if runtime.used_code_mode:
-        agent.imported_code_mode_calls(runtime)
+        await agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)
 
 

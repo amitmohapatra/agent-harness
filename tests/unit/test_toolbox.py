@@ -59,6 +59,9 @@ class Catalog:
         self.asked.append(list(names))
         return {n: e for n, e in self.entries.items() if n in names}
 
+    def record(self, op: str, **args: Any) -> dict[str, Any]:
+        return {"op": op, "scope": {}, "args": args}
+
     async def publish_catalog(self, entries: list[dict[str, Any]]) -> None:
         self.published.append(list(entries))
 

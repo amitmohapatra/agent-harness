@@ -396,10 +396,41 @@ Every attempt (each `RUNNING` stretch) is one `invoke_agent` span in the run's o
 ## Background writes
 
 `writes.Writes`: a bounded queue (`MAX_PENDING` 10 000) drained by `WRITERS` (4) tasks. A
-failed write is logged, counted (`trellis.writes.failed`) and emitted as a `warning` event to
-the run's listeners. When the event loop shuts down it cancels the workers, and a cancelled
-worker finishes the queue first (the write it was cut off in included; writes are idempotent),
-within `DRAIN_SECONDS` (10). `await h.aclose()` drains explicitly.
+write whose failure may pass is tried again (`WRITE_ATTEMPTS` 3, full-jitter backoff); a full
+queue makes the writer wait (`SUBMIT_WAIT_SECONDS` 5) instead of dropping the write. A write
+given up is logged, counted and emitted as a `warning` event to the run's listeners — or, with
+`TRELLIS_SPOOL_DIR`, appended to a JSONL spool that the next process replays. When the event loop
+shuts down it cancels the workers, and a cancelled worker finishes the queue first (the write it
+was cut off in included; writes are idempotent), within `DRAIN_SECONDS` (10); what is left is
+spooled or counted lost (`trellis.writes.undelivered`). `await h.aclose()` drains explicitly.
+The guarantee is in [docs/memory.md](docs/memory.md#background-writes-what-is-guaranteed).
+
+## Stopping a worker
+
+`python -m trellis.worker` turns `SIGTERM`/`SIGINT` into `Worker.stop()`:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant OS as Orchestrator
+  participant CLI as python -m trellis.worker
+  participant Wk as Worker
+  participant R as Runs it holds
+  participant AR as agent-runs
+  participant W as Writes
+  OS->>CLI: SIGTERM
+  CLI->>Wk: stop()
+  Wk--xAR: no more claims
+  par within GRACE_SECONDS (25 s)
+    R->>AR: finish / pause (as usual)
+  end
+  alt a run is still going
+    Wk->>R: cancel(RELEASED): nothing written
+    Note over AR: its lease lapses → QUEUED, next attempt
+  end
+  CLI->>W: aclose(): drain ≤ DRAIN_SECONDS, then spool or count the rest
+  CLI-->>OS: exit 0
+```
 
 ## Telemetry
 

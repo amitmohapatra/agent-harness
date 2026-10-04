@@ -59,7 +59,7 @@ async def resolve(
         raise ConfigurationError(f"two tools are named {', '.join(twice)}")
     entries = await catalog.catalog(names) if catalog is not None and names else {}
     if catalog is not None:
-        _publish(catalog, local, defs, writes, published)
+        await _publish(catalog, local, defs, writes, published)
     tools = [_governed(t, entries.get(t.name)) for t in local]
     if gateway is not None:
         tools.extend(_mcp(gateway, defs, entries))
@@ -122,7 +122,7 @@ def _scriptable(defs: list[ToolDef], tools: dict[str, Tool]) -> set[str]:
     return servers if large else set()
 
 
-def _publish(
+async def _publish(
     catalog: RunMemory,
     local: list[Tool],
     defs: list[ToolDef],
@@ -146,7 +146,11 @@ def _publish(
     if not fresh:
         return
     published.update(_digest(e) for e in fresh)
-    writes.submit("memory.tool_catalog", lambda: catalog.publish_catalog(fresh))
+    await writes.submit(
+        "memory.tool_catalog",
+        lambda: catalog.publish_catalog(fresh),
+        record=catalog.record("publish_catalog", entries=fresh),
+    )
 
 
 def _digest(entry: dict[str, Any]) -> str:

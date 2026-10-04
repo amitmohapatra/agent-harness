@@ -11,7 +11,7 @@ risk tiers and approval rules come from the tools and the catalog, and who the d
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, Literal
 
 from trellis.contracts import ConfigurationError, FeedbackVerdict, ToolSpec
@@ -27,7 +27,7 @@ from trellis.harness.settings import Settings
 from trellis.harness.tools import toolbox
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.sources import as_source
-from trellis.harness.worker import WORKER_CONCURRENCY, Worker
+from trellis.harness.worker import Worker
 from trellis.harness.writes import Writes
 from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
 
@@ -61,7 +61,7 @@ class Harness:
         self.gateway = Gateway(s.bifrost_url, s.bifrost_virtual_key) if s.bifrost_url else None
         self.memory = Memory(s.memory_url, s.api_key) if s.memory_url else None
         self.runs: Runs = HttpRuns(s.runs_url, s.api_key) if s.runs_url else LocalRuns()
-        self.writes = Writes()
+        self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         self.scores = telemetry.Scores.of(s)
         #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
         self.agents: dict[str, Agent] = {}
@@ -107,8 +107,9 @@ class Harness:
                 tool.metadata = {**(tool.metadata or {}), TOOLBOX: number}
         return native
 
-    def worker(self, agents: Sequence[Agent], *, concurrency: int = WORKER_CONCURRENCY) -> Worker:
-        """A worker that claims these agents' queued runs and executes them."""
+    def worker(self, agents: Sequence[Agent], *, concurrency: int | None = None) -> Worker:
+        """A worker that claims these agents' queued runs and executes them, ``concurrency``
+        at a time (else ``TRELLIS_WORKER_CONCURRENCY``, else the CPU count from 1 to 8)."""
         return Worker(self, agents, concurrency=concurrency)
 
     async def inbox(self, assignee: str | None = None) -> list[RunSummary]:
@@ -242,6 +243,10 @@ class Harness:
             published=self._published.setdefault(tenant, set()),
         )
 
+    def _replay(self, record: dict[str, Any]) -> Callable[[], Awaitable[object]] | None:
+        """A memory write an earlier process spooled, as a write again (memory on)."""
+        return self.memory.replay(record) if self.memory is not None else None
+
     async def memory_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
         return [Tool(spec, _memory_call(spec)) for spec in await run_memory.agent_tools()]
@@ -255,7 +260,7 @@ class Harness:
             return
         self._registered.add(scope)
         agent_memory = memory.scoped(identity.tenant, identity.agent_id)
-        self.writes.submit("memory.model_key", lambda: agent_memory.register_model_key(key))
+        await self.writes.submit("memory.model_key", lambda: agent_memory.register_model_key(key))
 
     async def score(
         self, run_id: str, name: str, value: float, *, key: str, comment: str | None = None
