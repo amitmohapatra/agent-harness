@@ -4,7 +4,8 @@ Everything that is a design decision — limits, timeouts, prompts — is a name
 the code that uses it. A setting here says *where* a service is, *whether* it exists in this
 deployment, the credentials it is reached with, the facts only the host knows (where
 undelivered writes may be kept on disk, how many runs a worker process takes at once), and how
-much of the traffic is checked — a cost the deployment chooses (the grounding sample). Who the
+much of the traffic is checked, and by which model — costs the deployment chooses (the
+grounding and judge samples, the judge's model and virtual key). Who the
 deployment is (its tenant) is not configured: the memory service says so about
 ``TRELLIS_API_KEY`` (``GET /v1/keys/self``).
 """
@@ -48,6 +49,16 @@ class Settings(BaseModel):
     #: (the memory service's ``/v1/verify``), 0 to 1; chosen by the run id, so a run is either
     #: always or never sampled.
     grounding_sample: float = Field(default=0.1, ge=0.0, le=1.0)
+    #: The model ``llm_judge`` asks, a Bifrost model name (through ``BIFROST_URL``); unset: the
+    #: judged agent's own model (a ``ReAct``'s), logged once — a different, stronger model
+    #: than the agent's avoids a model grading itself.
+    judge_model: str | None = None
+    #: The virtual key the judge's calls go through (its own budget and limits); unset:
+    #: ``BIFROST_VIRTUAL_KEY``.
+    judge_virtual_key: str | None = None
+    #: The share of successful runs the online judges (``Harness(judges=[...])``) score, 0 to
+    #: 1, chosen by the run id; unset: 0.1 when there are judges.
+    judge_sample: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -67,6 +78,9 @@ class Settings(BaseModel):
             otlp_headers=parse_headers(get("OTEL_EXPORTER_OTLP_HEADERS") or ""),
             spool_dir=get("TRELLIS_SPOOL_DIR"),
             worker_concurrency=get("TRELLIS_WORKER_CONCURRENCY"),  # type: ignore[arg-type]
+            judge_model=get("TRELLIS_JUDGE_MODEL"),
+            judge_virtual_key=get("TRELLIS_JUDGE_VIRTUAL_KEY"),
+            judge_sample=get("TRELLIS_JUDGE_SAMPLE"),  # type: ignore[arg-type]
             **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]
         )
 

@@ -3,7 +3,8 @@
 identity → (the run record, written by the caller) → tools → memory push (with the tool
 hints that narrow what the model is offered) → the adapter → the outcome recorded (paused
 with its journal as the run's checkpoint, finished with its answer or error) → background
-writes (transcript, the run's ``system`` outcome, the sampled grounding check). The adapter is
+writes (transcript, the run's ``system`` outcome, the sampled grounding check, the sampled
+online judges). The adapter is
 the only part that knows the framework. Each attempt is one ``invoke_agent`` span in the run's
 trace.
 """
@@ -66,10 +67,12 @@ async def attempt(
     streaming: bool = False,
     worker_id: str | None = None,
     lease_seconds: float | None = None,
+    observe: Callable[[PromptContext | None], None] | None = None,
 ) -> Result:
     """Run one attempt and record how it ended. The run record must already be RUNNING;
     ``worker_id`` names the worker holding its lease (the store fences its writes), and
-    ``lease_seconds`` its length (progress checkpoints extend it)."""
+    ``lease_seconds`` its length (progress checkpoints extend it). ``observe`` is told the memory
+    context the run was given (an offline evaluation's evaluators read it)."""
     journal = journal or Journal()
     pending = journal.pending
     replay = _replay(journal, resolution)
@@ -111,6 +114,8 @@ async def attempt(
             tools = await agent.tools_for(runtime)
             runtime.toolbox = {t.name: t for t in tools}
             pushed = await agent.push(runtime)
+            if observe is not None:
+                observe(pushed)
             native_input = agent.adapter.prepare_input(agent.target, input, runtime.context)
             if pending is not None and resolution is not None:
                 native_input = agent.adapter.resume_input(
@@ -330,6 +335,7 @@ async def _succeeded(
     await agent.recorded_run(runtime, _transcript(runtime, extracted))
     await agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
     await agent.grounded(runtime, answer, pushed)
+    await agent.judged(runtime, answer, pushed)
     if runtime.used_code_mode:
         await agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)

@@ -31,6 +31,7 @@ from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.clients.memory import RunMemory, context_budget
+from trellis.harness.evals import EvalCase, Evaluator, name_of, scored
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
@@ -395,6 +396,35 @@ class Agent:
                 await self.harness.score(run_id, "grounding", score, key=f"{run_id}:grounding")
 
         await self.harness.writes.submit("memory.verify", work, events=runtime.events)
+
+    async def judged(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
+        """On a sampled run (``TRELLIS_JUDGE_SAMPLE``), each of the harness's online judges in
+        the background — never on the request path — its score on the run's trace. A judge
+        that fails is a warning."""
+        judges = self.harness.judges
+        rate = self.harness.judge_sample
+        if not judges or not isinstance(answer, str) or not answer:
+            return
+        if not sampled(f"{runtime.run_id}:judges", rate):
+            return
+        case = EvalCase(
+            input=runtime.task,
+            output=answer,
+            run_id=runtime.run_id,
+            bundle_id=pushed.bundle_id if pushed is not None else None,
+            context=runtime.context,
+            agent=self,
+        )
+        harness, events = self.harness, runtime.events
+        for judge in judges:
+            name = name_of(judge)
+
+            async def work(judge: Evaluator = judge, name: str = name) -> None:
+                _, failed = await scored(harness, case, [judge])
+                if failed:
+                    events.warning("judge_failed", f"judge {name}: {failed[name]}")
+
+            await harness.writes.submit(f"judge.{name}", work, events=events)
 
     async def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway

@@ -24,10 +24,11 @@ exporter — Langfuse's endpoint, or a collector (``deploy/otel-collector.yaml``
 every span to Datadog and the GenAI spans to Langfuse. An application that configured OTel
 itself keeps its provider.
 
-Scores: Langfuse takes scores through its public API, not OTLP. When the OTLP headers carry
-Langfuse's ``Authorization: Basic`` credentials, and the endpoint is Langfuse's
+Scores and datasets: Langfuse takes scores through its public API, not OTLP. When the OTLP
+headers carry Langfuse's ``Authorization: Basic`` credentials, and the endpoint is Langfuse's
 (``…/api/public/otel``) or the headers name its host (``x-langfuse-host``, which a collector
-ignores), a score is also posted to ``/api/public/scores`` on the run's trace. Otherwise the
+ignores), a score is also posted to ``/api/public/scores`` on the run's trace, and
+:class:`Langfuse` reads datasets and links runs to a dataset run (``h.evaluate``). Otherwise the
 score is only the ``score`` span, which every backend receives.
 """
 
@@ -40,12 +41,14 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Final, Literal
+from urllib.parse import quote
 
 import httpx
 from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
 from opentelemetry import trace
 
+from trellis.contracts import ConfigurationError
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.redaction import redact_attributes
 from trellis.harness.settings import Settings
@@ -60,6 +63,13 @@ LANGFUSE_OTLP_PATH: Final = "/api/public/otel"
 #: The OTLP header that names Langfuse's host when traces go through a collector.
 LANGFUSE_HOST_HEADER: Final = "x-langfuse-host"
 LANGFUSE_SCORES_PATH: Final = "/api/public/scores"
+#: A dataset by name, its items page by page, and a run's trace linked to a dataset run
+#: (Langfuse's public API: ``fern/apis/server/definition`` in its repository).
+LANGFUSE_DATASET_PATH: Final = "/api/public/v2/datasets/{name}"
+LANGFUSE_ITEMS_PATH: Final = "/api/public/dataset-items"
+LANGFUSE_RUN_ITEMS_PATH: Final = "/api/public/dataset-run-items"
+#: Dataset items one page asks for (Langfuse's default page size).
+LANGFUSE_PAGE: Final = 50
 SCORES_TIMEOUT_SECONDS: Final = 10.0
 
 _tracer = trace.get_tracer(TRACER_NAME)
@@ -259,11 +269,12 @@ def _text(value: Any) -> str:
 
 # --------------------------------------------------------------------------- scores
 
-ScoreType = Literal["NUMERIC", "CATEGORICAL"]
+ScoreType = Literal["NUMERIC", "BOOLEAN", "CATEGORICAL"]
 
 
-class Scores:
-    """Langfuse's public scores API, reached with the OTLP exporter's own credentials."""
+class Langfuse:
+    """Langfuse's public API as far as the harness uses it — scores on a run's trace, datasets
+    and dataset runs — reached with the OTLP exporter's own credentials."""
 
     def __init__(self, host: str, authorization: str, *, client: httpx.AsyncClient | None = None):
         self.host = host.rstrip("/")
@@ -274,7 +285,7 @@ class Scores:
         )
 
     @classmethod
-    def of(cls, settings: Settings) -> Scores | None:
+    def of(cls, settings: Settings) -> Langfuse | None:
         """The scores API the OTLP settings reach, or ``None`` (scores stay spans)."""
         authorization = settings.otlp_headers.get("authorization", "")
         if not authorization.lower().startswith("basic "):
@@ -308,8 +319,56 @@ class Scores:
         response = await self._client.post(LANGFUSE_SCORES_PATH, json=body)
         response.raise_for_status()
 
+    async def dataset_items(self, name: str) -> list[dict[str, Any]]:
+        """The active items of the dataset ``name``, in Langfuse's order, every page of them.
+        A dataset Langfuse does not have is a ``ConfigurationError``."""
+        found = await self._client.get(LANGFUSE_DATASET_PATH.format(name=quote(name, safe="")))
+        if found.status_code == httpx.codes.NOT_FOUND:
+            raise ConfigurationError(f"Langfuse has no dataset {name!r}")
+        found.raise_for_status()
+        items: list[dict[str, Any]] = []
+        page, pages = 1, 1
+        while page <= pages:
+            response = await self._client.get(
+                LANGFUSE_ITEMS_PATH,
+                params={"datasetName": name, "page": page, "limit": LANGFUSE_PAGE},
+            )
+            response.raise_for_status()
+            body = response.json()
+            items.extend(i for i in body["data"] if i.get("status", "ACTIVE") == "ACTIVE")
+            pages = int((body.get("meta") or {}).get("totalPages") or 0)
+            page += 1
+        return items
+
+    async def link(
+        self,
+        run_id: str,
+        *,
+        run_name: str,
+        item_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Link the run's trace to the dataset run ``run_name`` as the result of the dataset
+        item ``item_id`` (the dataset run is created by its first item)."""
+        body = {
+            "runName": run_name,
+            "datasetItemId": item_id,
+            "traceId": trace_hex(run_id),
+            "metadata": metadata,
+        }
+        response = await self._client.post(LANGFUSE_RUN_ITEMS_PATH, json=body)
+        response.raise_for_status()
+
+    def trace_url(self, run_id: str) -> str:
+        """Where Langfuse shows the run's trace (its ``/trace/{id}`` page finds the project)."""
+        return f"{self.host}/trace/{trace_hex(run_id)}"
+
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+#: The name the scores client had before it read datasets too.
+Scores = Langfuse
 
 
 # --------------------------------------------------------------------------- export

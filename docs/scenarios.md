@@ -105,5 +105,14 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 | Your own OpenTelemetry setup | nothing: the harness uses the API, and an installed provider is kept |
 | A run to debug locally | `agent.stream(...)` events, and `trellis.current().log(...)` lines (also `log` events) |
 
-Evaluation (LLM-as-judge, datasets, experiments, annotation queues) is configured in Langfuse
-on the traces the harness emits; whether the harness itself got slower is `make bench`.
+## Evaluating it
+
+| You want | Use |
+|---|---|
+| A score for every item of a test set, before shipping | `await h.evaluate(agent, "dataset-name" or [items], [exact_match(), llm_judge("...")])`: each item through the real pipeline, scores on the traces, a Langfuse dataset run, an `EvalReport` |
+| Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_JUDGE_SAMPLE`) judged in the background |
+| A judge that does not grade itself, on its own budget | `TRELLIS_JUDGE_MODEL` (a stronger model than the agent's) and `TRELLIS_JUDGE_VIRTUAL_KEY` |
+| A check of your own | any `async (EvalCase) -> EvalScore \| None` in the evaluators or judges |
+
+Annotation queues and datasets built from traces are Langfuse's ([evaluation.md](evaluation.md));
+whether the harness itself got slower is `make bench`.

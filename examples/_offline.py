@@ -147,3 +147,36 @@ class ScriptedChat:
 def react_model(turns: Sequence[Turn]) -> Any:
     """A model name for Bifrost when online, else the script."""
     return MODEL if online() else ScriptedChat(turns)
+
+
+# --------------------------------------------------------------------------- evaluation
+class Answering:
+    """A chat-completions endpoint that answers each question from a table, and — asked by the
+    evaluation judge (``llm_judge``) — grades an answer 1 when it contains the expected one
+    (with nothing expected: when it is an answer at all), else 0, as the strict JSON the judge
+    asks for."""
+
+    def __init__(self, answers: dict[str, str]) -> None:
+        self.answers = answers
+
+    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+        if "strict evaluator" in str(messages[0].get("content")):
+            content = self._grade(str(messages[-1]["content"]))
+        else:
+            question = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+            content = self.answers.get(question, "I don't know.")
+        return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+    @staticmethod
+    def _grade(prompt: str) -> str:
+        sections = dict(part.split("\n", 1) for part in prompt.split("## ")[1:])
+        expected = sections.get("Expected answer", "").strip().casefold()
+        graded = sections.get("Answer to grade", "").strip().casefold()
+        good = expected in graded if expected else graded not in ("", "i don't know.")
+        reasoning = "names the expected answer" if good else "does not name the expected answer"
+        return json.dumps({"score": 1.0 if good else 0.0, "reasoning": reasoning})
+
+
+def answering_model(answers: dict[str, str]) -> Any:
+    """A model name for Bifrost when online, else the answer table (which also judges)."""
+    return MODEL if online() else Answering(answers)
