@@ -23,6 +23,8 @@ TASK = "Restock SKU A-1 if it is low"
 APPROVALS = 5
 
 
+# longer than the suite's 120 s: the learning job is waited for up to 120 s after the runs it learns from
+@pytest.mark.timeout(300)
 async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None:
     suffix = uuid.uuid4().hex[:8]
     lookup_name, reorder_name = f"lookup_{suffix}", f"reorder_{suffix}"
