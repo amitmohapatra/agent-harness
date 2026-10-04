@@ -111,6 +111,9 @@ class FakeMemoryService:
     failures: dict[str, int | str] = field(default_factory=dict)
     #: the ``Retry-After`` (seconds) a 429 or 503 carries
     retry_after: str = "0"
+    #: whether model keys can be registered (the service's credential encryption is
+    #: configured); without, ``PUT /v1/agents/model-key`` answers what the service does
+    model_keys: bool = True
     #: feedback by id, each stored once however often it is sent
     stored_feedback: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: uploaded documents by id, with the scope they were uploaded in
@@ -154,23 +157,37 @@ class FakeMemoryService:
                     path=matched.groupdict(),
                     query=request.url.params,
                 )
-                if name in self.fail or self.fail_times.get(name, 0) > 0:
-                    if name in self.fail_times:
-                        self.fail_times[name] -= 1
-                    return problem(503, request.url.path, retry_after=self.retry_after)
-                failure = self.failures.get(name)
-                if failure == "timeout":
-                    raise httpx.ReadTimeout(f"{name} timed out", request=request)
-                if failure == "malformed":
-                    return httpx.Response(200, content=b"<html>proxy error</html>")
-                if isinstance(failure, int):
-                    return problem(failure, request.url.path, retry_after=self.retry_after)
+                refused = self._refusal(name, request)
+                if refused is not None:
+                    return refused
                 self.calls.append(call)
                 answer = getattr(self, f"_{name}")(call)
                 if name == "catalog" and self.etags:
                     return _conditional(request, answer)
                 return httpx.Response(200, json=answer)
         return problem(404, request.url.path)
+
+    def _refusal(self, name: str, request: httpx.Request) -> httpx.Response | None:
+        """How the call fails, when a test said it does (``None``: it is answered)."""
+        if name in self.fail or self.fail_times.get(name, 0) > 0:
+            if name in self.fail_times:
+                self.fail_times[name] -= 1
+            return problem(503, request.url.path, retry_after=self.retry_after)
+        failure = self.failures.get(name)
+        if failure == "timeout":
+            raise httpx.ReadTimeout(f"{name} timed out", request=request)
+        if failure == "malformed":
+            return httpx.Response(200, content=b"<html>proxy error</html>")
+        if isinstance(failure, int):
+            return problem(failure, request.url.path, retry_after=self.retry_after)
+        if name == "model_key" and not self.model_keys:
+            return problem(
+                503,
+                request.url.path,
+                detail="Agent credential encryption is not configured",
+                retry_after=self.retry_after,
+            )
+        return None
 
     def _key(self, call: Call) -> dict[str, Any]:
         return {
@@ -351,14 +368,16 @@ PROBLEMS: Final[dict[int, tuple[str, bool]]] = {
 }
 
 
-def problem(status: int, instance: str, *, retry_after: str = "0") -> httpx.Response:
+def problem(
+    status: int, instance: str, *, detail: str | None = None, retry_after: str = "0"
+) -> httpx.Response:
     """An RFC 9457 problem document as the memory service writes it."""
     code, retryable = PROBLEMS.get(status, ("INTERNAL", False))
     body: dict[str, Any] = {
         "type": f"urn:trellis:problem:{code.lower().replace('_', '-')}",
         "title": code.replace("_", " ").capitalize(),
         "status": status,
-        "detail": f"{code.lower()} (the fake memory service)",
+        "detail": detail or f"{code.lower()} (the fake memory service)",
         "instance": instance,
         "code": code,
         "retryable": retryable,

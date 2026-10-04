@@ -9,7 +9,10 @@ tools, no records and no catalog, and `trellis.current().memory`, `tools.hints(.
 
 ## Push
 
-Before the agent runs, `/v1/context` for the run's question (budget 2000 tokens), answered in
+Before the agent runs, `/v1/context` for the run's question — its token budget 5 % of the
+model's context window when the target says it (a `context_window` or `max_input_tokens`
+attribute on the target or its `model`, or a LangChain model's `profile`), between 2000 and
+8000, else 2000 — answered in
 the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, tools?}`, items cited
 by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
 message (see the README's matrix) and is `trellis.current().context`; the `bundle_id` is what
@@ -117,4 +120,7 @@ precedence **human > judge > system**:
 
 `BIFROST_VIRTUAL_KEY` is registered for each agent (tenant, agent) once per process, in the
 background, idempotently: the memory service's own LLM work for the agent (extraction,
-summaries, procedures, the grounding judge) runs on the agent's own key and budget.
+summaries, procedures, the grounding judge) runs on the agent's own key and budget. A memory
+service that takes no model keys (`PUT /v1/agents/model-key` answers that its credential
+encryption is not configured) is logged once per process, at `INFO`, and not asked again — no
+failed-write warning for it; the service then uses the tenant's or the operator's key.

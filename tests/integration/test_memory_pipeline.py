@@ -41,7 +41,7 @@ def many(n: int) -> list[Any]:
 
 
 def harness_with(service: FakeMemoryService, **settings: Any) -> Harness:
-    h = Harness(config=Settings(memory_url="http://m", **settings))
+    h = Harness(config=Settings(memory_url="http://m", api_key="test", **settings))
     h.memory = Memory("http://m", None, client=service.client())
     return h
 
@@ -311,6 +311,68 @@ async def test_the_virtual_key_is_registered_as_the_model_key_once_per_agent(
     assert key.body["virtual_key"] == "sk-bf-agent"
     assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:keyed:")
     assert key.scope["agent_id"] == "keyed" and "user_id" not in key.scope
+
+
+async def test_a_service_that_takes_no_model_keys_is_told_once(
+    memory_service: FakeMemoryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Credential encryption off in the memory service: the registration is logged once per
+    process and never asked again, and no failed write is reported for it."""
+    memory_service.model_keys = False
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "ok"
+
+    async with harness_with(memory_service, bifrost_virtual_key="sk-bf-agent") as h:
+        with caplog.at_level("INFO", logger="trellis.harness"):
+            await h.wrap(fn, id="a").run("x", user="u")
+            await h.wrap(fn, id="b").run("x", user="u")  # both asked before either answer
+            await h.writes.drain()
+            await h.wrap(fn, id="c").run("x", user="u")  # after the answer: not asked
+            await h.writes.drain()
+        assert h.writes.failed == 0
+    assert caplog.text.count("takes no model keys") == 1
+    assert memory_service.named("model_key") == []  # refused each time it was asked: once
+
+
+async def test_a_model_key_registration_that_fails_otherwise_is_a_failed_write(
+    memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trellis.harness import writes as writes_module
+
+    monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.0)
+    memory_service.fail.add("model_key")
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "ok"
+
+    async with harness_with(memory_service, bifrost_virtual_key="sk-bf-agent") as h:
+        await h.wrap(fn, id="a").run("x", user="u")
+        await h.writes.drain()
+        assert h.writes.failed == 1 and not h._model_keys_off
+
+
+def test_a_memory_service_needs_the_api_key() -> None:
+    with pytest.raises(ConfigurationError, match="need TRELLIS_API_KEY"):
+        Harness(config=Settings(memory_url="http://m"))
+    with pytest.raises(ConfigurationError, match="need TRELLIS_API_KEY"):
+        Harness(config=Settings(memory_url="http://m", runs_url="http://r"))
+
+
+async def test_the_context_budget_follows_the_models_window(
+    memory_service: FakeMemoryService,
+) -> None:
+    class Model:
+        context_window = 128_000
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "ok"
+
+    fn.model = Model()  # type: ignore[attr-defined]
+    async with harness_with(memory_service) as h:
+        await h.wrap(fn, id="windowed").run("q", user="u")
+    [asked] = memory_service.named("context")
+    assert asked.body["token_budget"] == 6400  # 5 % of the window
 
 
 # --------------------------------------------------------------------------- the catalog

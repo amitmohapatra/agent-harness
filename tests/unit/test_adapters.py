@@ -311,3 +311,20 @@ def test_react_extracts_the_assistant_text_as_its_transcript() -> None:
     assert ReActAdapter().extract(ReAct(system="s", model="m"), result).transcript == [
         ("assistant", "done")
     ]
+
+
+def test_the_context_window_is_read_where_a_target_says_it() -> None:
+    from types import SimpleNamespace
+
+    from trellis.harness.adapters.base import context_window
+    from trellis.harness.clients.memory import context_budget
+
+    assert context_window(SimpleNamespace(context_window=200_000)) == 200_000
+    assert context_window(SimpleNamespace(model=SimpleNamespace(max_input_tokens=32_000))) == 32_000
+    profiled = SimpleNamespace(model=SimpleNamespace(profile={"max_input_tokens": 1_000_000}))
+    assert context_window(profiled) == 1_000_000
+    assert context_window(SimpleNamespace(model="gpt-x", context_window=True)) is None
+    assert context_window(object()) is None
+    assert context_budget(None) == 2000
+    assert context_budget(8_000) == 2000  # never less than the default
+    assert context_budget(1_000_000) == 8000  # never more than the cap

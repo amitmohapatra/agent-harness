@@ -28,8 +28,9 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline
 from trellis.harness.adapters import detect
+from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import bound_tools
-from trellis.harness.clients.memory import RunMemory
+from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
@@ -73,6 +74,8 @@ class Agent:
         self.target = target
         self.id = safe_id(id)
         self.adapter = detect(target)
+        #: the pushed context's token budget: a share of the model's window when it is known
+        self.context_budget = context_budget(context_window(target))
         if tools and self.adapter.fixed_tools:
             raise ConfigurationError(
                 f"a {self.adapter.name} target binds its tools when it is built: pass "
@@ -296,6 +299,7 @@ class Agent:
                     runtime.task,
                     tools=own if hinted else None,
                     window=not self.adapter.keeps_conversation(self.target),
+                    budget=self.context_budget,
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
@@ -305,7 +309,7 @@ class Agent:
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
         if hinted and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
-        status = getattr(pushed, "evidence_status", "COMPLETE")
+        status = pushed.evidence_status
         note = ABSTAIN_NOTES.get(status)
         rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
         runtime.context = rendered or None

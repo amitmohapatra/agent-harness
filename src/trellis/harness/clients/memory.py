@@ -27,8 +27,12 @@ from trellis.memory.models import (
     SideEffects,
 )
 
-#: Prompt budget for the pushed context, in tokens.
+#: Prompt budget for the pushed context, in tokens, when the model's context window is not
+#: known; with it known, :data:`CONTEXT_SHARE` of the window, between that and
+#: :data:`CONTEXT_TOKEN_MAX`.
 CONTEXT_TOKEN_BUDGET: Final = 2000
+CONTEXT_SHARE: Final = 0.05
+CONTEXT_TOKEN_MAX: Final = 8000
 #: The pull tools that change nothing: listed with side_effects "read", the rest "write".
 READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 #: The pull tool that chooses among the run's own tools: the harness answers it with
@@ -143,14 +147,17 @@ class RunMemory:
 
     # ------------------------------------------------------------------ push
     async def context(
-        self, query: str, *, tools: Sequence[str] | None, window: bool
+        self,
+        query: str,
+        *,
+        tools: Sequence[str] | None,
+        window: bool,
+        budget: int = CONTEXT_TOKEN_BUDGET,
     ) -> PromptContext:
-        """What the prompt gets, and the tools that fit the task (``tools``, when
-        ``tools`` are given). ``window=False`` when the framework keeps the thread's messages
-        itself: the service then leaves the recent conversation out."""
-        return await self.ctx.context(
-            query, token_budget=CONTEXT_TOKEN_BUDGET, tools=tools, window=window
-        )
+        """What the prompt gets (at most ``budget`` tokens), and the tools that fit the task
+        (``tools``, when ``tools`` are given). ``window=False`` when the framework keeps the
+        thread's messages itself: the service then leaves the recent conversation out."""
+        return await self.ctx.context(query, token_budget=budget, tools=tools, window=window)
 
     # ------------------------------------------------------------------ pull
     async def agent_tools(self) -> list[ToolSpec]:
@@ -293,6 +300,14 @@ class RunMemory:
         agent = self.ctx.scope.agent_id
         digest = hashlib.blake2b(key.encode(), digest_size=8).hexdigest()
         await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent}:{digest}")
+
+
+def context_budget(window: int | None) -> int:
+    """The pushed context's token budget for a model reading ``window`` tokens (``None``: not
+    known)."""
+    if not window:
+        return CONTEXT_TOKEN_BUDGET
+    return max(CONTEXT_TOKEN_BUDGET, min(CONTEXT_TOKEN_MAX, int(window * CONTEXT_SHARE)))
 
 
 def catalog_entry(spec: ToolSpec, annotations: dict[str, bool] | None) -> dict[str, object]:

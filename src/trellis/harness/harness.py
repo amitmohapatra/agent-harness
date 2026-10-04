@@ -13,6 +13,7 @@ service is down).
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, Literal
 
@@ -32,8 +33,14 @@ from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Published, Toolbox
 from trellis.harness.worker import Worker
 from trellis.harness.writes import Writes
-from trellis.memory.errors import AuthenticationError, AuthorizationError
+from trellis.memory.errors import (
+    AuthenticationError,
+    AuthorizationError,
+    DependencyUnavailableError,
+)
 from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
+
+log = logging.getLogger("trellis.harness")
 
 Framework = Literal["langgraph", "openai-agents", "claude-agent-sdk"]
 #: The native tool format each framework's agents are built with.
@@ -51,6 +58,9 @@ LOCAL_TENANT: Final = "default"
 #: retry interval).
 KEY_TTL_SECONDS: Final = 600.0
 KEY_RETRY_SECONDS: Final = 30.0
+#: What the memory service says when it takes no model keys (``ProviderNotConfigured``: its
+#: credential encryption is not configured), answered as DEPENDENCY_UNAVAILABLE.
+NOT_CONFIGURED: Final = "not configured"
 #: How a person's verdict reads as a Langfuse score.
 VERDICT_SCORES: Final = {"confirm": 1.0, "approve": 1.0, "edit": 0.5, "correct": 0.0, "reject": 0.0}
 
@@ -66,6 +76,11 @@ class Harness:
             raise ConfigurationError(
                 "RUNS_URL needs MEMORY_URL: agent-runs accepts the keys the memory service "
                 "issues, and the harness learns its tenant from there"
+            )
+        if s.memory_url and not s.api_key:
+            raise ConfigurationError(
+                "MEMORY_URL (and RUNS_URL) need TRELLIS_API_KEY: both services refuse a call "
+                "without a key (a development memory service takes one of its trusted_dev keys)"
             )
         self.gateway = Gateway(s.bifrost_url, s.bifrost_virtual_key) if s.bifrost_url else None
         self.memory = Memory(s.memory_url, s.api_key) if s.memory_url else None
@@ -85,6 +100,8 @@ class Harness:
             fatal=(ConfigurationError,),
         )
         self._registered: set[tuple[str, str]] = set()
+        #: the memory service said it takes no model keys: none is registered again
+        self._model_keys_off = False
         self._published: dict[str, Published] = {}
         telemetry.configure(s)
 
@@ -258,7 +275,9 @@ class Harness:
         return self._key.value.tenant_id if self._key.value is not None else None
 
     async def writes_memory(self) -> bool:
-        """Whether runs record their transcript, tool calls and outcome: memory is on."""
+        """Whether runs record their transcript, tool calls and outcome: memory is on. What
+        a run may write is the memory service's to decide, per scope (its relationship checks,
+        not the key's role): a write it refuses is a reported warning, never a failed run."""
         return self.memory is not None
 
     # ------------------------------------------------------------------ used by agents
@@ -288,14 +307,31 @@ class Harness:
 
     async def registered(self, memory: Memory, identity: Identity) -> None:
         """Register ``BIFROST_VIRTUAL_KEY`` as the agent's memory model key, once per process
-        and agent (idempotent in the service)."""
+        and agent (idempotent in the service). A memory service that takes no model keys (its
+        credential encryption is not configured) is told so once per process, in the log, and
+        not asked again."""
         key = self.settings.bifrost_virtual_key
         scope = (identity.tenant, identity.agent_id)
-        if key is None or scope in self._registered or not await self.writes_memory():
+        if key is None or self._model_keys_off or scope in self._registered:
             return
         self._registered.add(scope)
         agent_memory = memory.scoped(identity.tenant, identity.agent_id)
-        await self.writes.submit("memory.model_key", lambda: agent_memory.register_model_key(key))
+
+        async def register() -> None:
+            try:
+                await agent_memory.register_model_key(key)
+            except DependencyUnavailableError as exc:
+                if NOT_CONFIGURED not in str(exc):
+                    raise
+                if not self._model_keys_off:
+                    self._model_keys_off = True
+                    log.info(
+                        "the memory service takes no model keys (%s): its LLM work for these "
+                        "agents runs on the tenant's or the operator's key",
+                        exc,
+                    )
+
+        await self.writes.submit("memory.model_key", register)
 
     async def score(
         self, run_id: str, name: str, value: float, *, key: str, comment: str | None = None
