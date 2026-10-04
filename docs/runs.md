@@ -9,7 +9,14 @@ process otherwise (`LocalRuns`, same behaviour, nothing survives a restart). Bot
 | `agent.run` / `agent.stream` | `RUNNING` (recorded in process), then `PAUSED` or an ending |
 | `agent.start` | `QUEUED`; `RunHandle.result()` waits for a pause or an ending |
 | `agent.resume` | the next attempt: `RUNNING` for an in-process run, `QUEUED` again for one that came from the queue; `CANCELLED` on cancel |
-| `agent.schedule(cron, input, on_behalf_of=, tz=)` | a `Schedule`; each fire queues a run acting for `on_behalf_of` |
+| `agent.schedule(cron, input, on_behalf_of=, tz=, tenant=)` | a `Schedule`; each fire queues a run acting for `on_behalf_of` |
+
+`start` returns a `RunHandle`: `run_id`, `await handle.status()` (the `RunRecord`; a run the
+store does not have raises `ConfigurationError`) and `await handle.result(timeout=None)`, which
+reads the run every 0.5 s until it pauses or ends and returns a `Result` (`asyncio.timeout`
+raises `TimeoutError` past `timeout`). A queued run's input must be JSON (`start` refuses
+anything else); a run started in process records its input as JSON where it can and as text
+where it cannot, and so does its answer.
 
 ## Workers
 
@@ -18,7 +25,15 @@ await h.worker([agent_a, agent_b]).run()     # until cancelled; 4 runs at a time
 python -m trellis.worker app.agents:h        # every agent the Harness `h` wraps
 ```
 
-A worker claims a queued run under a 60 s lease and heartbeats it every 20 s. It names itself
+`h.worker(agents, *, concurrency=4)` needs at least one agent. `await worker.run()` claims
+and executes until cancelled, `concurrency` runs at a time, asking again every second when
+the queue is empty; cancelling it cancels the runs it holds (they end `CANCELLED`) and drains
+the background writes. `await worker.run_once()` claims one run and executes it to its end or
+pause, and returns `False` when nothing was queued. A claim that fails is logged and counts as
+no work; a run that breaks the harness itself is logged and the worker goes on.
+
+A worker claims a queued run under a 60 s lease and heartbeats it every 20 s (a failed
+heartbeat is logged and retried at the next beat). It names itself
 on the pause, the finish and an artifact upload, so a worker whose lease lapsed cannot write
 over a run another worker has since claimed; a heartbeat refused (`409`) stops the run without
 writing. A lapsed lease sends the run back to the queue as its next attempt. A paused run

@@ -50,7 +50,7 @@ The environment, and nothing else ([`.env.example`](.env.example)):
 | `BIFROST_URL` | Bifrost's `/v1` base: the MCP tools, `ReAct` model names |
 | `BIFROST_VIRTUAL_KEY` | the agent's virtual key: its models, its MCP tools, its budget — and, registered automatically, the key the memory service's LLM work for the agent is billed to |
 | `TRELLIS_API_KEY` | the one Trellis key, for the memory service and agent-runs; its tenant and role are asked of the memory service (`GET /v1/keys/self`) |
-| `MEMORY_URL` | the memory service; memory is on exactly when it is set (read-only when the key's role is) |
+| `MEMORY_URL` | the memory service; memory is on exactly when it is set |
 | `RUNS_URL` | agent-runs; unset keeps runs, the queue and schedules in process |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | OTLP traces: Langfuse's endpoint, or a collector ([deploy/otel-collector.yaml](deploy/otel-collector.yaml)) |
 
@@ -60,17 +60,18 @@ Everything public is importable from `trellis`:
 
 | Name | What it is |
 |---|---|
-| `Harness(config=None)` | Reads the environment; `config=Settings(...)` instead of it. `async with` closes it. |
+| `Harness(config=None)` | Reads the environment; `config=Settings(...)` instead of it. `async with` (or `await h.aclose()`) drains the background writes and closes the clients. `h.agents` is every agent it wraps, by id. |
+| `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
 | `h.wrap(target, *, id, tools=()) -> Agent` | Attach the harness. The framework is detected from the target's type. `tools` are the agent's own, run in this process: functions, `a2a(url)`, `openapi(spec)`. |
 | `await h.tools(*sources, framework=...)` | The toolbox as the framework's own tools, for an agent built with them before wrapping (a compiled LangGraph graph binds its tools): LangChain tools (`"langgraph"`), `FunctionTool`s (`"openai-agents"`), one in-process MCP server (`"claude-agent-sdk"`). It holds `sources`, the MCP tools and the memory tools. |
 | `h.worker(agents, *, concurrency=4)` | Claims queued runs of these agents and executes them: `await worker.run()` (until cancelled) or `await worker.run_once()`. |
 | `await h.inbox(assignee=None) -> list[RunSummary]` | The paused runs waiting on `assignee` (`user:…`, `role:…`) or on anyone, newest first. |
-| `await h.feedback(run_id, verdict, correction=None) -> Feedback \| None` | What a person said about a run: a score on its trace (Langfuse) and the run's `human` feedback in the memory service, returned as stored. It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
-| `await h.add_document(file, *, user, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed: the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`). |
-| `tool(fn)` / `@tool(name=, description=, side_effects=)` | A Python function as a tool (`side_effects`: `"read"`, `"write"` (default), `"irreversible"`). A bare function in `tools=[...]` is `tool(fn)`. |
-| `a2a(url, *, name=None)` | A remote A2A agent as one tool. |
-| `openapi(spec, *, only=None, base_url=None, headers=None)` | The operations of an OpenAPI 3 document as tools. |
-| `ReAct(system, model, output=None, max_steps=12)` | A tool-calling loop over chat completions, for teams with no framework. |
+| `await h.feedback(run_id, verdict, correction=None) -> Feedback \| None` | What a person said about a run (`verdict`: `confirm`, `approve`, `reject`, `correct` or `edit`, the last two with a `correction`): a `feedback` score on its trace (Langfuse; 1.0, 0.5 for `edit`, 0.0 for `correct`/`reject`) and — memory on — the run's `human` feedback in the memory service, returned as stored (`None` with memory off). It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
+| `await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed (`wait=None`: return at once): the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`); `tenant` only for a platform key. Needs `MEMORY_URL`. |
+| `tool(fn, *, name=None, description=None, side_effects="write")` / `@tool` / `@tool(...)` | A Python function (sync or async) as a tool: the schema from its signature (pydantic validates the arguments), the description from its docstring's first paragraph, `side_effects` `"read"`, `"write"` (default) or `"irreversible"`. It stays callable as the function. A bare function in `tools=[...]` is `tool(fn)`. |
+| `a2a(url, *, name=None)` | A remote A2A agent (its card at `{url}/.well-known/agent-card.json`) as one `write` tool, `{"message": string}` in, its answer out; `name` overrides the card's. |
+| `openapi(spec, *, only=None, base_url=None, headers=None)` | The operations of an OpenAPI 3 document (a URL or the parsed document) as tools, one per `operationId` (`only` keeps those named); `base_url` when the document names no server; `headers` on every request. |
+| `ReAct(system, model, output=None, max_steps=12)` | A tool-calling loop over chat completions, for teams with no framework: `model` is a Bifrost model name (needs `BIFROST_URL`) or any object with `async complete(messages, **body)`; `output` a pydantic model for a structured answer. |
 | `current() -> Runtime \| None` | Inside a tool or a node: the run it executes in. |
 
 `Agent` — what `wrap` returns:
@@ -79,17 +80,19 @@ Everything public is importable from `trellis`:
 |---|---|
 | `await run(input, *, user, thread=None, tenant=None) -> Result` | Run to the end or the first pause. `tenant` only for a platform key (one with no tenant of its own). |
 | `stream(...) -> AsyncIterator[RunEvent]` | The run's events (contracts `RunEvent`s) up to `RUN_FINISHED`. Closing it early cancels the run. |
-| `await start(...) -> RunHandle` | Queue the run for a worker; `handle.status()`, `await handle.result(timeout=)`. |
-| `await resume(interrupt_id, decision, *, answer=None, reviewer) -> Result` | Answer the pause (`answer`, `approve`, `reject`, `edit` with the edited arguments as `answer`, `cancel`). A run started in process continues here; a queued run goes back to the queue. |
-| `await schedule(cron, input, *, on_behalf_of, tz="UTC") -> Schedule` | Queue a run on a cadence, acting for `on_behalf_of`. The same agent, person, cadence and input are one schedule. |
-| `serve_chat(app, *, path="/agui", identity=None)` | AG-UI routes on a FastAPI app (run, reconnect/replay, artifacts). |
-| `serve_a2a(app, url, *, identity=None)` | The agent card and A2A JSON-RPC routes at `url`. |
+| `await start(...) -> RunHandle` | Queue the run for a worker (its input must be JSON); `await handle.status()` is the `RunRecord`, `await handle.result(timeout=None)` waits for a pause or an ending and returns a `Result`. |
+| `await resume(interrupt_id, decision, *, answer=None, reviewer) -> Result` | Answer the pause (`decision`, a string or contracts `InterruptDecision`: `answer`, `approve`, `reject`, `edit` with the edited arguments as `answer`, `cancel`). A run started in process continues here; a queued run goes back to the queue (`QUEUED`). |
+| `await schedule(cron, input, *, on_behalf_of, tz="UTC", tenant=None) -> Schedule` | Queue a run on a cadence (cron, or `hourly`/`daily`/`weekly`/`weekdays`/`manual`), acting for `on_behalf_of`. The same agent, person, cadence and input are one schedule. |
+| `serve_chat(app, *, path="/agui", identity=None)` | AG-UI routes on a FastAPI app (run, reconnect/replay, artifacts); `identity(request) -> user` (sync or async), else every caller is `anonymous` ([docs/surfaces.md](docs/surfaces.md)). |
+| `serve_a2a(app, url, *, identity=None)` | The agent card and A2A JSON-RPC routes at `url`; `identity(call_context) -> user`, else the trusted `x-trellis-identity` header ([docs/surfaces.md](docs/surfaces.md)). |
 
-`Runtime` — `trellis.current()` inside a tool or a node, and the second argument of a function
-target: `run_id`, `agent_id`, `user`, `thread`, `tenant`, `context` (the pushed memory
-context), `memory` (the memory SDK's verbs in the run's scope), `tools.call(name, **args)`,
-`tools.hints(task)`, `await ask(question, *, expects, table, diff, options, assignee, deadline,
-escalate_to)` (pauses the run; returns the answer on resume) and `log(message, **fields)`.
+`Runtime` — `trellis.current()` inside a tool or a node (`None` outside a run), and the second
+argument of a function target: `run_id`, `agent_id`, `user`, `thread`, `tenant`, `attempt`,
+`task` (the question), `context` (the pushed memory context), `memory` (the memory SDK's
+verbs in the run's scope; needs `MEMORY_URL`), `await tools.call(name, **args)`,
+`await tools.hints(task)`, `await ask(question, *, expects, table, diff, options, assignee,
+deadline, escalate_to)` (pauses the run; returns the answer on resume —
+[docs/interrupts.md](docs/interrupts.md)) and `log(message, **fields)`.
 
 `Result`: `run_id`, `status` (`SUCCESS`, `PAUSED`, `ERROR`, `QUEUED`, `CANCELLED`), `answer`,
 `interrupt`, `error`. `RunSummary`: `run_id`, `agent_id`, `status`, `awaiting`, `assignee`,
@@ -157,4 +160,6 @@ make test-live   # opt-in tests against BIFROST_URL / MEMORY_URL / RUNS_URL / TR
 `make test-live` reads the deployment environment and skips whatever is unset or
 unreachable; see `tests/live/conftest.py` for what it registers in the gateway for the session.
 
-Docs: [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/README.md).
+Docs: [ARCHITECTURE.md](ARCHITECTURE.md) (diagrams: system context, components, a run, a
+pause through agent-runs, an A2A call, run states), [docs/scenarios.md](docs/scenarios.md)
+(which to use when) and [docs/](docs/README.md).

@@ -24,7 +24,13 @@ resume, the call returns the answer. What the person is shown follows from what 
 
 The question is the run's user's to answer (`assignee="user:<user>"`) unless `assignee` names
 someone else (`user:…`, `role:…`); it is in their inbox (`h.inbox(assignee)`). `escalate_to`
-needs a `deadline`; agent-runs escalates or times out the run when it passes.
+needs a `deadline`: when it passes, agent-runs hands the question to `escalate_to` (once), or
+ends the run `TIMEOUT` when nobody is named. Runs kept in process (no `RUNS_URL`) do neither.
+
+The whole signature: `await trellis.current().ask(question, *, expects=None, table=None,
+diff=None, options=None, assignee=None, deadline=None, escalate_to=None)`. The same question
+asked again in one run (same text, same kind, same options) is the same entry in the journal:
+a re-run gets the answer it was given, in order.
 
 A payload up to 16 KiB of JSON travels in the interrupt. A larger one is stored as a run
 artifact in agent-runs (`POST /v1/runs/{id}/artifacts`, up to 50 MiB, kept 7 days after the

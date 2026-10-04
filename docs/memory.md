@@ -2,8 +2,10 @@
 
 Memory is on exactly when `MEMORY_URL` is set; there is nothing to configure per agent. Every
 call the harness makes to the memory service is in `trellis/harness/clients/memory.py`, in the
-run's scope (tenant, user, agent, run, thread). A key whose role is read-only reads and records
-nothing.
+run's scope (tenant, user, agent, run, thread). With memory on, every run reads (push, pull)
+and records (transcript, tool calls, outcome); with it off there is no context, no memory
+tools, no records and no catalog, and `trellis.current().memory`, `tools.hints(...)` and
+`h.add_document(...)` raise `ConfigurationError`.
 
 ## Push
 
