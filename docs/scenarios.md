@@ -65,10 +65,12 @@ Where the answer comes from does not matter to the run: `await agent.resume(inte
 decision, answer=..., reviewer=...)` in code, a `resume` entry from the chat UI, or the next
 A2A message on the task.
 
-How the run continues: a LangGraph graph with a checkpointer resumes where it stopped; every
-other target runs again from its input, and the journal returns the answers and tool outputs
-it already has. Keep side effects in harness tools: a call through the bridge runs once, but
-code outside a tool (and the model calls) run again on the re-run.
+How the run continues: a LangGraph graph with a checkpointer resumes where it stopped (where
+that checkpointer still holds the pause — an `InMemorySaver` only in the process that paused),
+and an OpenAI Agents `needs_approval` pause continues the SDK's saved run; every other pause
+runs the target again from its input, and the journal returns the answers and tool outputs it
+already has. Keep side effects in harness tools: a call through the bridge runs once, but code
+outside a tool (and the model calls) run again on the re-run.
 
 ## Running it
 
