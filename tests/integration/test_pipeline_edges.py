@@ -310,3 +310,73 @@ async def test_the_toolbox_for_openai_agents_is_function_tools(harness: Harness)
     [native] = await harness.tools(lookup, framework="openai-agents")
     assert isinstance(native, FunctionTool) and native.name == "lookup"
     assert harness.built_for([native]) == []  # only LangGraph tools name their toolbox
+
+
+async def test_a_finish_already_recorded_is_not_a_failed_run(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The finish reached the store, its answer did not, and the store refuses the retried
+    finish (an agent-runs that is not idempotent on endings): the run is read back, and
+    since it already ended as written, the run is reported as it ended — not failed, not
+    executed again."""
+    from trellis.harness.clients.runs import Conflict
+
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    finished = harness.runs.finished
+
+    async def recorded_then_refused(run_id: str, status: RunStatus, **kwargs: Any) -> RunRecord:
+        await finished(run_id, status, **kwargs)
+        raise Conflict(f"run {run_id} already ended", status=409, code="CONFLICT")
+
+    monkeypatch.setattr(harness.runs, "finished", recorded_then_refused)
+    agent = harness.wrap(echo, id="echo")
+    with caplog.at_level("INFO", logger="trellis.run"):
+        result = await agent.run("q", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "q"
+    assert "already recorded as SUCCESS" in caplog.text
+
+
+async def test_a_pause_already_recorded_is_still_the_pause(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trellis.harness.clients.runs import Conflict
+
+    async def asks(input: str, agent: Runtime) -> str:
+        return await agent.ask("Go on?")
+
+    paused = harness.runs.paused
+
+    async def recorded_then_refused(interrupt: Any, **kwargs: Any) -> RunRecord:
+        await paused(interrupt, **kwargs)
+        raise Conflict("not RUNNING", status=409, code="CONFLICT")
+
+    monkeypatch.setattr(harness.runs, "paused", recorded_then_refused)
+    result = await harness.wrap(asks, id="asks").run("q", user="u")
+    assert result.status is RunStatus.PAUSED and result.interrupt is not None
+
+
+async def test_a_conflict_on_a_finish_that_did_not_happen_raises(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store refused the ending and the run is not what was written: that is a real
+    refusal, raised."""
+    from trellis.harness.clients.runs import Conflict
+
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    async def refused(run_id: str, status: RunStatus, **kwargs: Any) -> RunRecord:
+        raise Conflict("RUNNING cannot become SUCCESS", status=409, code="CONFLICT")
+
+    monkeypatch.setattr(harness.runs, "finished", refused)
+    with pytest.raises(Conflict):
+        await harness.wrap(echo, id="echo").run("q", user="u")
+
+    async def gone(run_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(harness.runs, "get", gone)
+    with pytest.raises(Conflict):
+        await harness.wrap(echo, id="echo2").run("q", user="u")

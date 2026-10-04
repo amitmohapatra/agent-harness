@@ -67,6 +67,27 @@ subscriptions (`POST /v1/webhooks`), not a harness setting.
 checkpoint), `POST /v1/runs/{id}/resume` (an `InterruptResolution`),
 `POST /v1/runs/{id}/finish?worker_id=`, `POST /v1/runs/{id}/artifacts?worker_id=&checksum=`
 (an `ask` payload, → `ArtifactRef`), `GET /v1/artifacts/{id}`, `GET /v1/runs/{id}`,
-`GET /v1/runs?status=PAUSED&assignee=` (summaries), `POST /v1/schedules` (`ScheduleSpec`). A
-refused or unreachable write raises `RunStoreError` (`LeaseLost` for a lease that is no longer
-the worker's).
+`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=` (summaries, page by page),
+`POST /v1/schedules` (`ScheduleSpec`).
+
+Every call is retried when it fails on the way — a transport error (a refused connection, a
+timeout), `429`, `502`, `503` or `504` — up to 3 times, after the `Retry-After` agent-runs sent
+(at most 30 s) or else with exponential backoff and full jitter (a random wait under a ceiling
+of 0.25 s, doubled for each retry, at most 5 s). Every call is safe to repeat: a run start is
+idempotent on its id, a pause or finish repeated by the same worker with the same status
+answers the stored record, an artifact is stored once per checksum, a schedule is upserted. A
+pause or finish the store refuses as a conflict is read back once: when the run already is
+what was written (the first attempt landed, its answer did not), the run goes on as recorded —
+it is not failed, queued again or executed again.
+
+A refusal raises `RunStoreError` — with the problem's `code`, the `status` and `retryable`, so a
+run that fails on it keeps whether it may be retried — read from agent-runs' problem document
+(RFC 9457) by its `code`: `LEASE_LOST` is `LeaseLost` (the worker no longer holds the run: it
+stops and writes nothing more), `CONFLICT` is `Conflict` (a run id taken, an answer to another
+interrupt, an illegal transition), `NOT_FOUND` is `NotFound`; an answer without a code is read
+by its status (`409` `Conflict`, `404` `NotFound`). A heartbeat refused with `409`, whatever its
+code, is `LeaseLost`. A call that still fails after its retries raises `RunStoreError` with
+`retryable` true.
+
+The inbox follows agent-runs' `Link: <…>; rel="next"` cursor page by page (500 runs a page), up
+to 10 pages; past that it returns the newest 5000 and logs a warning.

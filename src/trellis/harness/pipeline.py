@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -27,13 +27,14 @@ from trellis.contracts import (
     RunEvent,
     RunEventType,
     RunOutcome,
+    RunRecord,
     RunStatus,
     ToolCall,
 )
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
 from trellis.harness.adapters.langgraph import FOREIGN
-from trellis.harness.clients.runs import LeaseLost
+from trellis.harness.clients.runs import Conflict, LeaseLost
 from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
@@ -232,8 +233,13 @@ async def _paused(
 ) -> Result:
     journal.pending = pending
     interrupt = pending.interrupt
-    await agent.harness.runs.paused(
-        interrupt, checkpoint=journal.dump(), worker_id=runtime.worker_id
+    await _recorded(
+        agent,
+        runtime.run_id,
+        lambda: agent.harness.runs.paused(
+            interrupt, checkpoint=journal.dump(), worker_id=runtime.worker_id
+        ),
+        lambda r: r.awaiting is not None and r.awaiting.interrupt_id == interrupt.interrupt_id,
     )
     runtime.events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
     runtime.events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
@@ -247,9 +253,7 @@ async def _failed(
 ) -> Result:
     error = AgentError.of(exc, source=agent.adapter.name)
     log.warning("run %s failed: %s", runtime.run_id, error.message, exc_info=exc)
-    await agent.harness.runs.finished(
-        runtime.run_id, RunStatus.ERROR, error=error, worker_id=runtime.worker_id
-    )
+    await _ended(agent, runtime, RunStatus.ERROR, error=error)
     runtime.events.emit(RunEventType.RUN_ERROR, error=error)
     runtime.events.finished(RunOutcome.ERROR, error=error)
     metrics.run_finished(runtime.agent_id, RunOutcome.ERROR.value)
@@ -262,9 +266,7 @@ async def _succeeded(
     agent: Agent, runtime: Runtime, extracted: Extracted, pushed: PromptContext | None
 ) -> Result:
     answer = extracted.answer
-    await agent.harness.runs.finished(
-        runtime.run_id, RunStatus.SUCCESS, output=jsonable(answer), worker_id=runtime.worker_id
-    )
+    await _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer))
     runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer))
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
     agent.recorded_run(runtime, _transcript(runtime, extracted))
@@ -273,6 +275,37 @@ async def _succeeded(
     if runtime.used_code_mode:
         agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)
+
+
+async def _ended(agent: Agent, runtime: Runtime, status: RunStatus, **fields: Any) -> None:
+    await _recorded(
+        agent,
+        runtime.run_id,
+        lambda: agent.harness.runs.finished(
+            runtime.run_id, status, worker_id=runtime.worker_id, **fields
+        ),
+        lambda r: r.status is status,
+    )
+
+
+async def _recorded(
+    agent: Agent,
+    run_id: str,
+    write: Callable[[], Awaitable[RunRecord]],
+    holds: Callable[[RunRecord], bool],
+) -> None:
+    """Write the pause or the ending. The runs client retries a write whose answer was lost,
+    and agent-runs answers a repeat with the stored record; a store that refuses the repeat
+    instead (``Conflict``) is read, and when the run already is what was written, it was
+    written — the run is not failed, queued again or executed again because an answer got
+    lost on the way."""
+    try:
+        await write()
+    except Conflict:
+        record = await agent.harness.runs.get(run_id)
+        if record is None or not holds(record):
+            raise
+        log.info("run %s was already recorded as %s", run_id, record.status.value)
 
 
 def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[tuple[str, str]]:
@@ -289,7 +322,7 @@ async def _settle_cancelled(
 ) -> None:
     try:
         await agent.harness.runs.finished(identity.run_id, RunStatus.CANCELLED, worker_id=worker_id)
-    except LeaseLost:
+    except (LeaseLost, Conflict):
         log.info("run %s was taken over by another worker; nothing written", identity.run_id)
     events.finished(RunOutcome.CANCELLED)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
