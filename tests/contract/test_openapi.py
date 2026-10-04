@@ -195,6 +195,7 @@ async def test_every_runs_call_the_harness_makes_speaks_the_contract(
     await runs.queued(start)
     assert await runs.claim("w", ["a"], 60) is not None
     await runs.heartbeat("run_1", "w", 60)
+    await runs.heartbeat("run_1", "w", 60, checkpoint={"calls": {"k": ["paid"]}})
     await runs.paused(asked, checkpoint={"answers": {}}, worker_id="w")
     resolution = InterruptResolution(
         interrupt_id="run_1.1.1", run_id="run_1", decision=InterruptDecision.ANSWER, answer="yes"

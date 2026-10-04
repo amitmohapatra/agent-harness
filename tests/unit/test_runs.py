@@ -107,8 +107,13 @@ async def test_queued_runs_are_claimed_once_by_agent_and_leases_expire() -> None
         await runs.heartbeat("run_b", "w2", 30)
     lapsed = await runs.claim("w1", ["a"], -1)  # a lease already over
     assert lapsed is not None
+    await runs.heartbeat("run_a", "w1", -1, checkpoint={"calls": {"k": ["done"]}})
     again = await runs.claim("w3", ["a"], 30)
     assert again is not None and again.run_id == "run_a" and again.attempt == 2
+    assert again.checkpoint == {"calls": {"k": ["done"]}}  # progress survives the lapse
+    await runs.heartbeat("run_a", "w3", 30)  # no checkpoint: the one there is kept
+    kept = await runs.get("run_a")
+    assert kept is not None and kept.checkpoint == {"calls": {"k": ["done"]}}
 
 
 async def test_a_resumed_durable_run_goes_back_to_the_queue() -> None:
@@ -198,6 +203,7 @@ async def test_the_http_store_speaks_the_agent_runs_wire() -> None:
     heartbeat = respx.post(f"{base}/v1/runs/run_1/heartbeat").mock(
         side_effect=[
             httpx.Response(200, json={}),
+            httpx.Response(200, json={}),
             httpx.Response(409, json={"detail": "lease lost"}),
         ]
     )
@@ -242,9 +248,16 @@ async def test_the_http_store_speaks_the_agent_runs_wire() -> None:
     }
     assert await runs.claim("w", ["a"], 30) is None
     await runs.heartbeat("run_1", "w", 30)
+    assert json.loads(heartbeat.calls[0].request.content) == {"worker_id": "w", "lease_seconds": 30}
+    await runs.heartbeat("run_1", "w", 30, checkpoint={"calls": {"k": ["paid"]}})
+    assert json.loads(heartbeat.calls[1].request.content) == {
+        "worker_id": "w",
+        "lease_seconds": 30,
+        "checkpoint": {"calls": {"k": ["paid"]}},
+    }
     with pytest.raises(LeaseLost):
         await runs.heartbeat("run_1", "w", 30)
-    assert heartbeat.call_count == 2
+    assert heartbeat.call_count == 3
 
     paused = await runs.paused(interrupt(), checkpoint=checkpoint, worker_id="w")
     assert pause.calls[0].request.url.params["worker_id"] == "w"

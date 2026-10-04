@@ -65,9 +65,11 @@ async def attempt(
     listener: Callable[[RunEvent], None] | None = None,
     streaming: bool = False,
     worker_id: str | None = None,
+    lease_seconds: float | None = None,
 ) -> Result:
     """Run one attempt and record how it ended. The run record must already be RUNNING;
-    ``worker_id`` names the worker holding its lease (the store fences its writes)."""
+    ``worker_id`` names the worker holding its lease (the store fences its writes), and
+    ``lease_seconds`` its length (progress checkpoints extend it)."""
     journal = journal or Journal()
     pending = journal.pending
     replay = _replay(journal, resolution)
@@ -82,6 +84,7 @@ async def attempt(
         replay=replay,
         attempt=number,
         worker_id=worker_id,
+        lease_seconds=lease_seconds,
         run_memory=await agent.run_memory(identity),
         writes_memory=await agent.harness.writes_memory(),
         used=set(journal.used),
@@ -136,9 +139,28 @@ async def attempt(
             error = exc
     finally:
         _current.reset(token)
+    return await _concluded(
+        agent, runtime, journal, extracted, pushed=pushed, error=error, cancelled=cancelled
+    )
+
+
+async def _concluded(
+    agent: Agent,
+    runtime: Runtime,
+    journal: Journal,
+    extracted: Extracted | None,
+    *,
+    pushed: PromptContext | None,
+    error: Exception | None,
+    cancelled: bool,
+) -> Result:
+    """Record how the attempt ended: cancelled, paused, failed or answered."""
+    if runtime.lease_lost:
+        # another worker may hold the run now (a framework may have swallowed the error)
+        raise LeaseLost(f"{runtime.worker_id} lost the lease on {runtime.run_id}: nothing written")
     if cancelled:
-        await _settle_cancelled(agent, identity, events, worker_id)
-        return Result(run_id=identity.run_id, status=RunStatus.CANCELLED)
+        await _settle_cancelled(agent, runtime.identity, runtime.events, runtime.worker_id)
+        return Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
     paused = _pause(runtime, extracted, error)
     if paused is not None:
         return await _paused(agent, runtime, journal, paused, extracted)

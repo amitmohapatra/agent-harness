@@ -230,8 +230,11 @@ class Agent:
             streaming=listener is not None,
         )
 
-    async def _claimed(self, record: RunRecord, worker_id: str) -> Result:
-        """A worker's run: fresh from the queue, or continuing after a resolution."""
+    async def _claimed(
+        self, record: RunRecord, worker_id: str, *, lease_seconds: float | None = None
+    ) -> Result:
+        """A worker's run: fresh from the queue, continuing after a resolution, or after a
+        worker died (its checkpoint is the progress it saved)."""
         return await pipeline.attempt(
             self,
             self._identity_of(record),
@@ -240,6 +243,7 @@ class Agent:
             journal=Journal.of(record.checkpoint),
             resolution=record.last_resolution,
             worker_id=worker_id,
+            lease_seconds=lease_seconds,
         )
 
     async def _events(

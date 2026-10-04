@@ -9,10 +9,12 @@ is unset. Both behave the same way:
   and the finish so a worker whose lease lapsed cannot write over another's run.
 
 A pause also carries the run's checkpoint — its :class:`~trellis.harness.journal.Journal`, what
-a re-run needs — which the store returns as ``RunRecord.checkpoint`` on every read and claim
-until the run ends, so whichever worker resumes the run repeats no question and no side
-effect. Data too large for a question (an ``ask`` table or diff) is a run artifact, stored
-beside the run and referenced from its interrupt (``payload_ref``). Writes raise when the store
+a re-run needs — and so may a heartbeat (progress: the journal after a side-effecting call, so
+the attempt after a worker crash replays it), which the store returns as
+``RunRecord.checkpoint`` on every read and claim until the run ends, so whichever worker
+resumes the run repeats no question and no side effect. Data too large for a question (an
+``ask`` table or diff) is a run artifact, stored beside the run and referenced from its
+interrupt (``payload_ref``). Writes raise when the store
 refuses or cannot be reached: a pause that was not recorded cannot be resumed, so it is not
 reported.
 
@@ -175,7 +177,14 @@ class Runs(Protocol):
     async def claim(
         self, worker_id: str, agent_ids: Sequence[str], lease_seconds: float
     ) -> RunRecord | None: ...
-    async def heartbeat(self, run_id: str, worker_id: str, lease_seconds: float) -> None: ...
+    async def heartbeat(
+        self,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: float,
+        *,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> None: ...
     async def schedule(self, spec: ScheduleSpec) -> Schedule: ...
     async def put_artifact(
         self, run_id: str, data: bytes, *, worker_id: str | None = None
@@ -305,12 +314,21 @@ class HttpRuns:
             return None
         return self._record(self._body(response)["run"])
 
-    async def heartbeat(self, run_id: str, worker_id: str, lease_seconds: float) -> None:
+    async def heartbeat(
+        self,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: float,
+        *,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> None:
+        """Extend the lease; with ``checkpoint``, also save it as the run's progress (it
+        replaces the run's checkpoint; without, the one there is kept)."""
+        body: dict[str, Any] = {"worker_id": worker_id, "lease_seconds": lease_seconds}
+        if checkpoint is not None:
+            body["checkpoint"] = checkpoint
         response = await self._call(
-            "POST",
-            f"/v1/runs/{run_id}/heartbeat",
-            self._tenants.get(run_id),
-            json={"worker_id": worker_id, "lease_seconds": lease_seconds},
+            "POST", f"/v1/runs/{run_id}/heartbeat", self._tenants.get(run_id), json=body
         )
         if response.status_code == CONFLICT:
             # whatever its code: this worker does not hold a running lease on the run
@@ -586,9 +604,18 @@ class LocalRuns:
                     return self._move(record, RunStatus.RUNNING)
             return None
 
-    async def heartbeat(self, run_id: str, worker_id: str, lease_seconds: float) -> None:
-        self._fenced(run_id, worker_id)
+    async def heartbeat(
+        self,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: float,
+        *,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> None:
+        record = self._fenced(run_id, worker_id)
         self._leases[run_id] = (worker_id, datetime.now(UTC) + timedelta(seconds=lease_seconds))
+        if checkpoint is not None:
+            self._move(record, record.status, checkpoint=checkpoint)
 
     async def schedule(self, spec: ScheduleSpec) -> Schedule:
         identity = schedule_identity(spec)

@@ -286,8 +286,9 @@ continues:
   recorded outputs (keyed by content, consumed in order — a re-planned call nobody approved is
   asked about again, never matched to another approval).
 
-The journal is the run's checkpoint: `runs.paused(interrupt, checkpoint=journal)` stores it
-with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
+The journal is the run's checkpoint: a worker saves it as progress on a heartbeat after every
+call with side effects (`runs.heartbeat(..., checkpoint=journal)`: a worker that dies repeats
+none of them), `runs.paused(interrupt, checkpoint=journal)` stores it with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
 clears it when the run ends), and the attempt that resumes the run — in this process or in a
 worker elsewhere — files `last_resolution` under the pending question and replays the rest.
 
@@ -319,6 +320,7 @@ sequenceDiagram
   loop every 20 s while it runs
     Wk->>AR: POST /v1/runs/{id}/heartbeat (409 → LeaseLost: stop, write nothing)
   end
+  P->>AR: after a write tool: POST /v1/runs/{id}/heartbeat (checkpoint = journal, the progress)
   P->>P: refund is irreversible → Runtime.approve → Paused
   P->>AR: POST /v1/runs/{id}/pause?worker_id= (Interrupt + checkpoint = journal)
   AR-->>P: PAUSED
