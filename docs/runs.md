@@ -85,9 +85,11 @@ checkpoint), `POST /v1/runs/{id}/resume` (an `InterruptResolution`),
 Every call is retried when it fails on the way — a transport error (a refused connection, a
 timeout), `429`, `502`, `503` or `504` — up to 3 times, after the `Retry-After` agent-runs sent
 (at most 30 s) or else with exponential backoff and full jitter (a random wait under a ceiling
-of 0.25 s, doubled for each retry, at most 5 s). Every call is safe to repeat: a run start is
+of 0.25 s, doubled for each retry, at most 5 s). Every write is safe to repeat: a run start is
 idempotent on its id, a pause or finish repeated by the same worker with the same status
 answers the stored record, an artifact is stored once per checksum, a schedule is upserted. A
+claim whose answer was lost leaves that run leased to this worker unworked until the lease
+lapses (60 s), when agent-runs queues it again — late, never lost or run twice at once. A
 pause or finish the store refuses as a conflict is read back once: when the run already is
 what was written (the first attempt landed, its answer did not), the run goes on as recorded —
 it is not failed, queued again or executed again.

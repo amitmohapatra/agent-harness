@@ -19,9 +19,11 @@ reported.
 Every call to agent-runs is retried — up to :data:`RETRIES` times, with exponential backoff and
 full jitter, or after the ``Retry-After`` the service sent (at most
 :data:`RETRY_AFTER_MAX_SECONDS`) — when it failed on the way: a transport error, ``429``,
-``502``, ``503``, ``504``. That is safe for every call: starting a run is idempotent on its id,
+``502``, ``503``, ``504``. That is safe for every write: starting a run is idempotent on its id,
 a repeated pause or finish from the same worker with the same status answers the stored record,
-a repeated artifact is the same artifact, a repeated schedule is the one that exists. A refusal
+a repeated artifact is the same artifact, a repeated schedule is the one that exists; a claim
+whose answer was lost leaves its run leased and unworked until the lease lapses and agent-runs
+queues it again. A refusal
 is read from the service's problem document (RFC 9457) by its ``code``: ``LEASE_LOST`` is
 :class:`LeaseLost`, ``CONFLICT`` :class:`Conflict`, ``NOT_FOUND`` :class:`NotFound`.
 """
