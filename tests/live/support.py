@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Final
 from urllib.parse import parse_qs, urlparse
+
+import uvicorn
 
 from trellis import Harness
 from trellis.memory import MemoryContext
@@ -104,3 +108,29 @@ class StubLangfuse:
         """Langfuse reached through the OTLP headers (no exporter: spans stay in process)."""
         headers = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": self.url}
         return {"otlp_endpoint": None, "otlp_headers": headers}
+
+    def environ(self) -> dict[str, str]:
+        """The same, as the environment a deployment sets (``EvalServices.from_env``)."""
+        headers = f"authorization=Basic%20cGs6c2s%3D,x-langfuse-host={self.url}"
+        return {"OTEL_EXPORTER_OTLP_HEADERS": headers}
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextmanager
+def serving(app: Any, port: int) -> Iterator[None]:
+    """``app`` served by uvicorn on ``port`` (a real socket) in a thread, until the block ends."""
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started:
+        threading.Event().wait(0.05)
+    try:
+        yield
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

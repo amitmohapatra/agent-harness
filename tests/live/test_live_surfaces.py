@@ -5,19 +5,16 @@ served agent called from plain code with ``remote()``."""
 from __future__ import annotations
 
 import asyncio
-import socket
-import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import httpx
 import pytest
-import uvicorn
 from fastapi import FastAPI, Request
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
-from tests.live.support import memory_scope
+from tests.live.support import free_port, memory_scope, serving
 from trellis import Harness, Runtime, a2a
 from trellis.contracts import RunStatus
 from trellis.harness.a2a import InputRequired, remote
@@ -91,12 +88,6 @@ async def test_agui_streams_pauses_resumes_and_replays(
 
 
 # --------------------------------------------------------------------------- A2A
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 async def planner(input: Any, agent: Runtime) -> str:
     region = await agent.ask("Which region?", options=["eu", "us"])
     return f"deploying {input} to {region}"
@@ -110,16 +101,8 @@ def remote_url() -> Iterator[str]:
     harness = live_harness()
     app = FastAPI()
     harness.wrap(planner, id=f"live-planner-{uuid.uuid4().hex[:6]}").serve_a2a(app, url)
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:
-        threading.Event().wait(0.05)
-    try:
+    with serving(app, port):
         yield url
-    finally:
-        server.should_exit = True
-        thread.join(timeout=10)
 
 
 async def test_a2a_round_trip_with_a_remote_question(remote_url: str) -> None:
