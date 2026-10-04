@@ -103,6 +103,7 @@ The environment, and nothing else ([`.env.example`](.env.example)):
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | OTLP traces: Langfuse's endpoint, or a collector ([deploy/otel-collector.yaml](deploy/otel-collector.yaml)) |
 | `TRELLIS_SPOOL_DIR` | where memory writes this process could not deliver are kept and replayed from at the next start |
 | `TRELLIS_WORKER_CONCURRENCY` | runs a worker executes at once (default: the CPU count, 1 to 8) |
+| `TRELLIS_GROUNDING_SAMPLE` | the share of successful runs (0 to 1, by run id) checked against their memory context (default 0.1) |
 
 ## The API
 
@@ -111,7 +112,7 @@ Everything public is importable from `trellis`:
 | Name | What it is |
 |---|---|
 | `Harness(config=None)` | Reads the environment; `config=Settings(...)` instead of it. `async with` (or `await h.aclose()`) drains the background writes and closes the clients. `h.agents` is every agent it wraps, by id. |
-| `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=, spool_dir=, worker_concurrency=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
+| `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=, spool_dir=, worker_concurrency=, grounding_sample=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
 | `h.wrap(target, *, id, tools=()) -> Agent` | Attach the harness. The framework is detected from the target's type. `tools` are the agent's own, run in this process: functions, `a2a(url)`, `openapi(spec)`. |
 | `await h.tools(*sources, framework=...)` | The toolbox as the framework's own tools, for an agent built with them before wrapping (a compiled LangGraph graph binds its tools): LangChain tools (`"langgraph"`), `FunctionTool`s (`"openai-agents"`), one in-process MCP server (`"claude-agent-sdk"`). It holds `sources`, the MCP tools and the memory tools. |
 | `h.worker(agents, *, concurrency=None)` | Claims queued runs of these agents and executes them, `concurrency` at a time (default `TRELLIS_WORKER_CONCURRENCY`, else the CPU count from 1 to 8): `await worker.run()` (until `worker.stop()`: the runs held finish, or are released after a grace period) or `await worker.run_once()`. |
@@ -164,7 +165,7 @@ python -m trellis.worker app.agents:h [--concurrency N]   # SIGTERM stops it gra
 | **Tool hints** | From 5 tools on, the context is asked for with the run's tool names and comes back with the tools that fit the task (each with a 0–1 confidence); the model is offered the memory tools, those and every tool the run already used — per model call for `ReAct` and OpenAI Agents, per run for Claude; a `tool_search` call offers what it finds. |
 | **Code Mode** | The Code Mode servers whose tools all only read, from 3 servers or 20 tools, become Bifrost's Code Mode meta-tools (one script instead of many calls); their nested calls are recorded from the gateway's log. |
 | **Outcome** | From how the run ended (`SUCCESS` confirm, `ERROR` reject) as the run's `system` feedback, applied as it arrives; the judge's verdict outranks it, and so does a person's once the tenant administrator approves it. |
-| **Grounding** | On a sampled 10 % of successful runs, the answer is checked against the context it was given (`/v1/verify` with its `bundle_id`); the score goes on the run's trace. |
+| **Grounding** | On a sampled share of successful runs (`TRELLIS_GROUNDING_SAMPLE`, 10 % by default), the answer is checked against the context it was given (`/v1/verify` with its `bundle_id`); the score goes on the run's trace. |
 | **Traces** | OTel GenAI spans (`invoke_agent`, `execute_tool`, `chat`) with Langfuse's trace attributes (agent, user, session = thread, run, tenant); every attempt of a run in one trace. |
 
 ## Frameworks

@@ -209,7 +209,7 @@ sequenceDiagram
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
   W-)Mem: POST /v1/feedback (system: confirm)
-  W-)Mem: POST /v1/verify (sampled 10 %) → grounding score
+  W-)Mem: POST /v1/verify (sampled: TRELLIS_GROUNDING_SAMPLE) → grounding score
   W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
   Agent->>Runs: get(run_id)

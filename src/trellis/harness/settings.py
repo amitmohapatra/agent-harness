@@ -1,10 +1,11 @@
 """The deployment facts the harness reads, and nothing else (every one is in ``.env.example``).
 
-Everything that is a design decision — limits, timeouts, prompts, sample rates — is a named
-constant next to the code that uses it. A setting here says *where* a service is, *whether* it
-exists in this deployment, the credentials it is reached with, and the two facts only the host
-knows: where undelivered writes may be kept on disk, and how many runs a worker process takes
-at once. Who the deployment is (its tenant) is not configured: the memory service says so about
+Everything that is a design decision — limits, timeouts, prompts — is a named constant next to
+the code that uses it. A setting here says *where* a service is, *whether* it exists in this
+deployment, the credentials it is reached with, the facts only the host knows (where
+undelivered writes may be kept on disk, how many runs a worker process takes at once), and how
+much of the traffic is checked — a cost the deployment chooses (the grounding sample). Who the
+deployment is (its tenant) is not configured: the memory service says so about
 ``TRELLIS_API_KEY`` (``GET /v1/keys/self``).
 """
 
@@ -43,6 +44,10 @@ class Settings(BaseModel):
     #: Runs a worker executes at once (``h.worker``, ``python -m trellis.worker``); unset:
     #: the machine's CPU count, between 1 and 8.
     worker_concurrency: int | None = Field(default=None, ge=1)
+    #: The share of successful runs whose answer is checked against the context it was given
+    #: (the memory service's ``/v1/verify``), 0 to 1; chosen by the run id, so a run is either
+    #: always or never sampled.
+    grounding_sample: float = Field(default=0.1, ge=0.0, le=1.0)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -62,7 +67,13 @@ class Settings(BaseModel):
             otlp_headers=parse_headers(get("OTEL_EXPORTER_OTLP_HEADERS") or ""),
             spool_dir=get("TRELLIS_SPOOL_DIR"),
             worker_concurrency=get("TRELLIS_WORKER_CONCURRENCY"),  # type: ignore[arg-type]
+            **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]
         )
+
+
+def _given(**values: str | None) -> dict[str, str]:
+    """The variables that are set: an unset one keeps its field's default."""
+    return {name: value for name, value in values.items() if value is not None}
 
 
 def parse_headers(text: str) -> dict[str, str]:

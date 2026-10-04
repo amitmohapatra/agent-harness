@@ -23,7 +23,6 @@ from trellis.contracts import (
     RunStatus,
     ToolSpec,
 )
-from trellis.harness import agent as agent_module
 from trellis.harness import telemetry
 from trellis.harness.clients.runs import LocalRuns, RunStoreError
 from trellis.harness.runtime import Paused
@@ -280,12 +279,12 @@ async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
 ) -> None:
     from trellis.harness.clients.memory import Memory
 
-    monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", 1.0)
     memory_service.claims = 0
     memory_service.unsupported = 0
     scored: list[Any] = []
     monkeypatch.setattr(telemetry, "score_span", lambda *args: scored.append(args))
-    async with Harness(config=Settings(memory_url="http://m", api_key="test")) as h:
+    settings = Settings(memory_url="http://m", api_key="test", grounding_sample=1.0)
+    async with Harness(config=settings) as h:
         h.memory = Memory("http://m", None, client=memory_service.client())
 
         async def fn(input: str, agent: Runtime) -> str:

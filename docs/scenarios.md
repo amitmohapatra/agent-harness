@@ -41,7 +41,7 @@ Approvals by call: an administrator's `approve_when` rule in the memory service'
 | Your own code to read or write memory (a node, a tool, a function target) | `trellis.current().memory` — the memory SDK's verbs, already scoped to the run's tenant, user, agent, run and thread |
 | A file the user's runs should cite | `await h.add_document(file, user=..., thread=None)` |
 | A person's verdict on a run (thumbs up/down, a correction) | `await h.feedback(run_id, verdict, correction=None)` — a Langfuse score now, memory's `human` feedback once the tenant administrator approves it |
-| The run's outcome to teach memory | nothing: `SUCCESS`/`ERROR` are the run's `system` feedback; a sampled 10 % are checked for grounding |
+| The run's outcome to teach memory | nothing: `SUCCESS`/`ERROR` are the run's `system` feedback; a sampled share (`TRELLIS_GROUNDING_SAMPLE`, 10 % by default) is checked for grounding |
 | No memory at all (tests, a stateless tool agent) | leave `MEMORY_URL` unset |
 
 ## Pausing for a person

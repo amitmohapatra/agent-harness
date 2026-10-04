@@ -46,9 +46,6 @@ if TYPE_CHECKING:
 
 #: From this many tools, the tool hints are asked for and narrow what the model is offered.
 TOOL_HINTS_MIN: Final = 5
-#: The share of successful runs whose answer is checked against the context it was given
-#: (``/v1/verify``); chosen by the run id, so a run is either always or never sampled.
-GROUNDING_SAMPLE: Final = 0.1
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
 #: What the model is told when memory has nothing for the question (``evidence_status``
@@ -383,7 +380,7 @@ class Agent:
             or pushed is None
             or not isinstance(answer, str)
             or not answer
-            or not sampled(runtime.run_id, GROUNDING_SAMPLE)
+            or not sampled(runtime.run_id, self.harness.settings.grounding_sample)
         ):
             return
         bundle_id, run_id = pushed.bundle_id, runtime.run_id

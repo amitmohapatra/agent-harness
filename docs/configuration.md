@@ -18,6 +18,7 @@ what is read.
 | `OTEL_EXPORTER_OTLP_HEADERS` | no OTLP headers; no Langfuse scores API |
 | `TRELLIS_SPOOL_DIR` | memory writes this process cannot deliver are logged, counted and lost (set: kept in `<dir>/trellis-writes.jsonl` and replayed at the next start — [memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.worker` and `concurrency=` on `h.worker` win over it) |
+| `TRELLIS_GROUNDING_SAMPLE` | 0.1: a tenth of the successful runs with a text answer (and memory on) are checked against the context they were given (`/v1/verify`, a score on the trace — [observability.md](observability.md#scores)); `0` turns it off, `1` checks every run. A number from 0 to 1, else `Settings` refuses it (`ValidationError`); the run id decides, so a run is either always or never sampled |
 
 `Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
 embedding (`Settings` is frozen and refuses unknown fields; `Settings.from_env(environ)` reads a
@@ -34,6 +35,7 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `otlp_headers` | `OTEL_EXPORTER_OTLP_HEADERS`, parsed as the OTel spec writes it (`k1=v1,k2=v2`, values URL-decoded, keys lower-cased) |
 | `spool_dir` | `TRELLIS_SPOOL_DIR` |
 | `worker_concurrency` | `TRELLIS_WORKER_CONCURRENCY` (at least 1) |
+| `grounding_sample` | `TRELLIS_GROUNDING_SAMPLE` (0 to 1, default 0.1) |
 
 `RUNS_URL` without `MEMORY_URL`, and `MEMORY_URL` without `TRELLIS_API_KEY`, are refused when the
 `Harness` is built (`ConfigurationError`). The names are the platform's: agent-runs reads the
@@ -60,5 +62,5 @@ went wrong.
   memory service that takes no model keys (its credential encryption is not configured) is
   logged once per process and not asked again.
 
-Everything else — limits, timeouts, the tool-hint threshold, the grounding sample, lease
-length — is a named constant next to the code that uses it.
+Everything else — limits, timeouts, the tool-hint threshold, lease length — is a named
+constant next to the code that uses it.
