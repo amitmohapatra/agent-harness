@@ -103,3 +103,20 @@ async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: 
     assert [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT] == [
         "hello there"
     ]
+
+
+async def test_mcp_servers_the_team_configured_as_a_file_or_json_stay(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """``mcp_servers`` may be a path or a JSON string (the CLI's ``--mcp-config``): the harness
+    adds its server beside the team's, never in place of them."""
+    erp = {"type": "stdio", "command": "erp-mcp", "args": []}
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"erp": erp}}))
+    script = [{"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
+    for configured in (config, str(config), json.dumps({"mcpServers": {"erp": erp}})):
+        target = options(tmp_path, script, mcp_servers=configured)
+        agent = harness.wrap(target, id=f"mcp-{len(harness.agents)}", tools=[tool(refund.fn)])
+        assert (await agent.run("refund o9", user="u1")).answer == "done"
+        servers = json.loads(started_with(tmp_path)["mcp_config"])["mcpServers"]
+        assert servers["erp"] == erp and servers["trellis"]["type"] == "sdk"

@@ -27,7 +27,12 @@ from trellis.contracts import (
 )
 from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
-from trellis.harness.adapters.claude import ClaudeAdapter, ClaudeRunError, _with_context
+from trellis.harness.adapters.claude import (
+    ClaudeAdapter,
+    ClaudeRunError,
+    _with_context,
+    configured_servers,
+)
 from trellis.harness.adapters.function import FunctionAdapter
 from trellis.harness.adapters.langgraph import (
     CONTEXT_MESSAGE_ID,
@@ -419,3 +424,11 @@ def test_the_context_window_is_read_where_a_target_says_it() -> None:
     assert context_budget(None) == 2000
     assert context_budget(8_000) == 2000  # never less than the default
     assert context_budget(1_000_000) == 8000  # never more than the cap
+
+
+def test_mcp_servers_given_as_text_or_a_file_are_read() -> None:
+    assert configured_servers({"a": {"type": "stdio"}}) == {"a": {"type": "stdio"}}
+    assert configured_servers(None) == {} and configured_servers("") == {}
+    assert configured_servers('{"mcpServers": {"b": {"type": "http"}}}') == {"b": {"type": "http"}}
+    with pytest.raises(ConfigurationError, match="no mcpServers"):
+        configured_servers('{"servers": {}}')
