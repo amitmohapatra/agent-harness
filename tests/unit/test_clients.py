@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -158,12 +159,14 @@ async def test_agent_tools_are_listed_once_and_tiered_read_or_write() -> None:
     again = await mem.bind(identity()).agent_tools()
     assert [t.name for t in listed] == [t["name"] for t in AGENT_TOOLS] == [t.name for t in again]
     assert {t.name for t in listed if t.side_effects == "read"} <= READ_ONLY_TOOLS
-    assert {t.name for t in listed if t.side_effects == "write"} == {"memory_remember"}
+    writes = {"memory_remember", "memory_update", "memory_forget", "profile_edit"}
+    assert {t.name for t in listed if t.side_effects == "write"} == writes
+    search = next(t for t in listed if t.name == "memory_search")
+    assert (search.input_schema or {})["required"] == ["query"]  # the service's own schema
     assert len(service.named("agent_tools")) == 1
     # the SDK returns the tool's result itself
-    assert await mem.bind(identity()).call_agent_tool("memory_search", {"query": "x"}) == [
-        "memory_search ok"
-    ]
+    found: Any = await mem.bind(identity()).call_agent_tool("memory_search", {"query": "x"})
+    assert [item["kind"] for item in found] == ["memory", "chunk"] and found[0]["id"] == "mem_1"
 
 
 async def test_records_carry_idempotency_and_the_catalog_says_what_it_knows() -> None:
@@ -251,7 +254,7 @@ async def test_an_answer_with_no_checkable_claim_has_no_grounding_score() -> Non
 async def test_a_document_can_be_added_without_waiting_for_it() -> None:
     service = FakeMemoryService()
     info = await memory(service).for_user("t", "u").add_document(b"text", wait=None)
-    assert info.status == "READY"
+    assert info.status == "STAGED"  # its parse job has not run yet
     assert [c.name for c in service.named("document")] == ["document"]  # read once, not polled
 
 

@@ -12,7 +12,7 @@ import httpx
 import pytest
 import respx
 
-from tests.support.memory import FakeMemoryService
+from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
@@ -134,7 +134,7 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     assert context.body["tools"] == {"available": [f"t{i}" for i in range(6)], "k": 8}
     assert "## Tools" in model.requests[0]["messages"][0]["content"]  # confidence/args/missing
     offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
-    memory_tools = ["memory_search", "memory_remember", "tool_search"]
+    memory_tools = MEMORY_TOOLS
     # the candidates and the memory tools, never all six
     assert offered[0] == ["t1", "t3", *memory_tools]
     assert offered[1] == ["t1", "t3", *memory_tools]
@@ -152,7 +152,7 @@ async def test_without_candidates_every_tool_is_offered(
     await memory_harness.wrap(ReAct(system="s", model=model), id="n", tools=many(6)).run(
         "x", user="u"
     )
-    assert len(model.requests[0]["tools"]) == 9  # six of the agent's own, three of memory's
+    assert len(model.requests[0]["tools"]) == 6 + len(MEMORY_TOOLS)  # all the agent's, memory's
 
 
 async def test_tool_search_answers_among_the_runs_tools_and_offers_them(
@@ -165,8 +165,27 @@ async def test_tool_search_answers_among_the_runs_tools_and_offers_them(
 
     agent = memory_harness.wrap(fn, id="h", tools=many(6))
     result = await agent.run("x", user="u")
-    # what the model reads: the choice, its confidence, and nothing empty
-    assert result.answer == {"tools": [{"name": "t4", "confidence": 0.9, "next": True}]}
+    # what the model reads: the choice, its confidence, how it has done, the arguments found
+    # and missing, the plan — and nothing empty
+    assert result.answer == {
+        "tools": [
+            {
+                "name": "t4",
+                "confidence": 0.9,
+                "next": True,
+                "success_rate": 0.8,
+                "args": {"sku": "SKU-1"},
+                "missing": [{"arg": "qty", "question": "How many?"}],
+            }
+        ],
+        "plan": {
+            "id": "proc_1",
+            "title": "reorder",
+            "steps": ["t4"],
+            "success_rate": 0.75,
+            "runs": 4,
+        },
+    }
     assert memory_service.named("tool_hints")[-1].body["available"] == [f"t{i}" for i in range(6)]
     assert memory_service.named("call_agent_tool") == []  # answered by the harness
 
@@ -192,7 +211,7 @@ async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     result = await agent.run("how do I like to be contacted?", user="u1")
     assert result.answer == "email"
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
-    assert offered == ["memory_search", "memory_remember", "tool_search"]
+    assert offered == MEMORY_TOOLS
     [call] = memory_service.named("call_agent_tool")
     assert call.path["name"] == "memory_search" and call.body["args"] == {"query": "preferences"}
     await memory_harness.writes.drain()
@@ -513,7 +532,7 @@ async def test_runtime_memory_is_the_sdk_in_the_runs_scope(memory_harness: Harne
         return str(remembered)
 
     result = await memory_harness.wrap(fn, id="direct").run("x", user="u")
-    assert result.status is RunStatus.SUCCESS and "memory_search ok" in result.answer
+    assert result.status is RunStatus.SUCCESS and "the user prefers email" in result.answer
 
 
 @pytest.mark.parametrize(
@@ -522,11 +541,10 @@ async def test_runtime_memory_is_the_sdk_in_the_runs_scope(memory_harness: Harne
         ("INSUFFICIENT", "say you do not know it; do not guess"),
         ("INCOMPLETE", "Say what you do not know rather than fill the gap"),
         ("COMPLETE", None),
-        (None, None),  # an older server that does not say
     ],
 )
 async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
-    memory_harness: Harness, memory_service: FakeMemoryService, status: str | None, note: str | None
+    memory_harness: Harness, memory_service: FakeMemoryService, status: str, note: str | None
 ) -> None:
     """Abstention: memory with no evidence for the question must turn into "I don't know",
     not a confident guess; the harness says so to the model with the context."""
@@ -541,7 +559,7 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     else:
         assert note in system
     [loaded] = [e for e in events if e.type is RunEventType.CONTEXT_LOADED]
-    assert loaded.data["evidence_status"] == (status or "COMPLETE")
+    assert loaded.data["evidence_status"] == status
 
 
 async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(
@@ -557,3 +575,27 @@ async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexe
     [upload] = memory_service.named("add_document")
     assert upload.scope["tenant_id"] == "acme" and upload.scope["user_id"] == "u"
     assert memory_service.documents[info.document_id]["thread_id"] == "thr_1"
+
+
+async def test_a_document_is_staged_then_ready_or_failed_with_its_error(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``add_document`` waits through STAGED (the parse job queued or running) and returns the
+    document as it ended: READY, or FAILED with the parse error for the caller to act on."""
+    import asyncio as aio
+
+    real_sleep = aio.sleep
+
+    async def no_wait(seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("trellis.memory.advanced.asyncio.sleep", no_wait)
+    memory_service.document_reads_staged = 3
+    ready = await memory_harness.add_document(b"returns: 30 days", user="u")
+    assert ready.status == "READY" and len(memory_service.named("document")) == 4
+    memory_service.document_outcome = "FAILED"
+    failed = await memory_harness.add_document(b"\x00garbage", user="u")
+    assert failed.status == "FAILED"
+    assert getattr(failed, "last_error", None) == "the file could not be parsed"  # an extra
+    staged = await memory_harness.add_document(b"later", user="u", wait=None)
+    assert staged.status == "STAGED"

@@ -380,3 +380,23 @@ async def test_a_conflict_on_a_finish_that_did_not_happen_raises(
     monkeypatch.setattr(harness.runs, "get", gone)
     with pytest.raises(Conflict):
         await harness.wrap(echo, id="echo2").run("q", user="u")
+
+
+async def test_a_failed_run_keeps_the_retryability_its_error_says(harness: Harness) -> None:
+    """The harness hands the exception to AgentError.of as it is (no retryable= of its own),
+    so an SDK error that says it may pass — or may not — is recorded so (contracts X6)."""
+    from trellis.memory.errors import DependencyUnavailableError, ValidationError
+
+    async def flaky(input: str, agent: Runtime) -> str:
+        if input == "down":
+            raise DependencyUnavailableError("memory is restarting", retryable=True)
+        raise ValidationError("bad request", retryable=False)
+
+    agent = harness.wrap(flaky, id="flaky")
+    down = await agent.run("down", user="u")
+    assert down.status is RunStatus.ERROR and down.error is not None
+    assert down.error.retryable is True and down.error.source == "function"
+    refused = await agent.run("bad", user="u")
+    assert refused.error is not None and refused.error.retryable is False
+    record = await harness.runs.get(down.run_id)
+    assert record is not None and record.error is not None and record.error.retryable is True

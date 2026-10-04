@@ -210,6 +210,13 @@ make test-live   # opt-in tests against BIFROST_URL / MEMORY_URL / RUNS_URL / TR
 `make test-live` reads the deployment environment and skips whatever is unset or
 unreachable; see `tests/live/conftest.py` for what it registers in the gateway for the session.
 
+The memory service in the tests is an in-process fake (`tests/support/memory.py`) behind the
+real SDK, and every request the harness sends it and every answer it gives is checked against
+the memory service's committed `docs/openapi.json` (a test with a mismatch fails);
+`tests/contract/test_openapi.py` drives every call once and does the same for the runs client
+against agent-runs' `docs/openapi.json` — both read from the sibling checkouts (CI checks out
+`main` of each), or from `TRELLIS_MEMORY_OPENAPI` / `TRELLIS_RUNS_OPENAPI`.
+
 Docs: [ARCHITECTURE.md](ARCHITECTURE.md) (diagrams: system context, components, a run, a
 pause through agent-runs, an A2A call, run states), [docs/scenarios.md](docs/scenarios.md)
 (which to use when) and [docs/](docs/README.md).

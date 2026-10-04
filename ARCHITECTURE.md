@@ -78,7 +78,9 @@ src/trellis/
 
 Each service has exactly one client module; nothing else in the harness calls it. The core
 imports no framework: an adapter imports its framework the first time a target of its type is
-wrapped, and `tests/contract` checks that `import trellis` and `Harness()` load none.
+wrapped, and `tests/contract` checks that `import trellis` and `Harness()` load none — and that
+what the clients send, and what the test doubles of the memory service and agent-runs answer,
+match those services' committed OpenAPI documents.
 
 ### Components
 
