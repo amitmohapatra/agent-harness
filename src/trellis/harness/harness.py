@@ -17,19 +17,19 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Final, Literal
 
-from trellis.contracts import ConfigurationError, FeedbackVerdict, ToolSpec
+from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
-from trellis.harness.clients.runs import HttpRuns, LocalRuns, Runs, RunSummary
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.identity import Identity
+from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
 from trellis.harness.tools.base import Source, Tool
@@ -43,6 +43,7 @@ from trellis.memory.errors import (
     DependencyUnavailableError,
 )
 from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
+from trellis.runs import RunsClient, RunSummary
 
 log = logging.getLogger("trellis.harness")
 
@@ -69,6 +70,10 @@ NOT_CONFIGURED: Final = "not configured"
 VERDICT_SCORES: Final = {"confirm": 1.0, "approve": 1.0, "edit": 0.5, "correct": 0.0, "reject": 0.0}
 #: The share of successful runs online judges score when ``TRELLIS_JUDGE_SAMPLE`` is unset.
 JUDGE_SAMPLE: Final = 0.1
+#: Paused runs one inbox page asks for (agent-runs' page limit), and the pages one inbox read
+#: follows at most: past that the newest are returned and a warning is logged.
+INBOX_LIMIT: Final = 500
+INBOX_MAX_PAGES: Final = 10
 
 
 class Harness:
@@ -101,7 +106,9 @@ class Harness:
             s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
         )
         self.memory = Memory(s.memory_url, s.api_key) if s.memory_url else None
-        self.runs: Runs = HttpRuns(s.runs_url, s.api_key) if s.runs_url else LocalRuns()
+        self.runs: RunStore = (
+            RunsClient(s.runs_url, api_key=s.api_key) if s.runs_url else LocalRuns()
+        )
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: every agent wrapped here, by id (what ``python -m trellis.worker`` serves)
         self.agents: dict[str, Agent] = {}
@@ -162,21 +169,47 @@ class Harness:
         at a time (else ``TRELLIS_WORKER_CONCURRENCY``, else the CPU count from 1 to 8)."""
         return Worker(self, agents, concurrency=concurrency)
 
-    async def inbox(self, assignee: str | None = None) -> list[RunSummary]:
+    async def inbox(
+        self, assignee: str | None = None, *, tenant: str | None = None
+    ) -> list[RunSummary]:
         """The paused runs waiting on a person — ``assignee`` (``user:…``, ``role:…``), or
-        everyone in the tenant — newest first. Answer one with ``agent.resume``."""
-        return list(await self.runs.inbox(await self.tenant(), assignee))
+        everyone in the tenant — newest first, at most :data:`INBOX_MAX_PAGES` pages of
+        :data:`INBOX_LIMIT` (a warning says when there may be more). Answer one with
+        ``agent.resume``. ``tenant`` is named by a platform key only."""
+        waiting = [
+            summary
+            async for summary in self.runs.iterate(
+                status=RunStatus.PAUSED,
+                assignee=assignee,
+                limit=INBOX_LIMIT,
+                tenant=await self.tenant(tenant),
+                max_pages=INBOX_MAX_PAGES,
+            )
+        ]
+        if len(waiting) >= INBOX_LIMIT * INBOX_MAX_PAGES:
+            log.warning(
+                "the inbox of %s holds at least %d paused runs: the newest are returned",
+                assignee or "the tenant",
+                len(waiting),
+            )
+        return waiting
 
     async def feedback(
-        self, run_id: str, verdict: FeedbackVerdict | str, correction: Any = None
+        self,
+        run_id: str,
+        verdict: FeedbackVerdict | str,
+        correction: Any = None,
+        *,
+        tenant: str | None = None,
     ) -> Feedback | None:
         """What a person said about a run: a score on its trace (Langfuse, when the OTLP
         settings reach it; a ``score`` span otherwise) and — memory on — the run's ``human``
         feedback. The memory service stores it pending (``review.state``) until the tenant
         administrator approves it, and only then does it outrank the judge's and the run's
-        own; the stored record is returned (None with memory off)."""
+        own; the stored record is returned (None with memory off). ``tenant`` is the run's,
+        named by a platform key only."""
         chosen = FeedbackVerdict(verdict)
-        record = await self.runs.get(run_id)
+        record = await self.runs.get(run_id, tenant=await self.tenant(tenant))
         if record is None:
             raise ConfigurationError(f"no run {run_id}")
         stored: Feedback | None = None

@@ -201,18 +201,13 @@ class _Surface:
         self, body: RunAgentInput, answer: Resume, user: str, tenant: str
     ) -> tuple[RunBuffer, int]:
         agent = self.agent
-        record = await agent.harness.runs.get(run_of(answer.interrupt_id))
-        if (
-            record is None
-            or record.tenant_id != tenant
-            or record.thread_id != body.thread_id
-            or record.awaiting is None
-        ):
+        record = await agent.harness.runs.get(run_of(answer.interrupt_id), tenant=tenant)
+        if record is None or record.thread_id != body.thread_id or record.awaiting is None:
             raise HTTPException(404, "no such interrupt for this thread")
         try:
             decision = _decision(answer, record.awaiting.reason)
             record, resolution = await agent._resolution(
-                answer.interrupt_id, decision, answer.payload, user
+                answer.interrupt_id, decision, answer.payload, user, tenant=tenant
             )
         except (ConfigurationError, ValueError) as exc:
             raise HTTPException(409, f"{BAD_RESUME}: {exc}") from exc
@@ -230,18 +225,17 @@ class _Surface:
         await self.user(request)
         agent = self.agent
         tenant = await agent.harness.tenant()
-        record = await agent.harness.runs.get(run_id)
+        record = await agent.harness.runs.get(run_id, tenant=tenant)
         awaiting = record.awaiting if record is not None else None
         ref = awaiting.payload_ref if awaiting is not None else None
         if (
             record is None
-            or record.tenant_id != tenant
             or record.agent_id != agent.id
             or ref is None
             or ref.artifact_id != artifact_id
         ):
             raise HTTPException(404, f"no artifact {artifact_id}")
-        data = await agent.harness.runs.artifact(artifact_id, tenant)
+        data = await agent.harness.runs.artifacts.download(artifact_id, tenant=tenant)
         if data is None:
             raise HTTPException(404, f"no artifact {artifact_id}")
         return Response(data, media_type=ref.mime_type or "application/octet-stream")

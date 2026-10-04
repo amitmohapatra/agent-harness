@@ -273,8 +273,8 @@ async def _bounded(runtime: Runtime, tool: str, text: str, limit: int) -> str:
     kept = ""
     try:
         data = json.dumps({"tool": tool, "output": text}).encode()
-        ref = await runtime.agent.harness.runs.put_artifact(
-            runtime.run_id, data, worker_id=runtime.worker_id
+        ref = await runtime.agent.harness.runs.artifacts.upload(
+            runtime.run_id, data, worker_id=runtime.worker_id, tenant=runtime.tenant
         )
         kept = f"; the full result is run artifact {ref.artifact_id}"
     except Exception as exc:  # the cut result still goes to the model

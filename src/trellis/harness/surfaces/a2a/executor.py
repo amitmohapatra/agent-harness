@@ -66,7 +66,7 @@ class RunExecutor(AgentExecutor):
         self._settled: OrderedDict[str, None] = OrderedDict()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        await self.agent.harness.key()  # the tenant an identity header is checked against
+        tenant = await self.agent.harness.tenant()  # what an identity header is checked against
         user = self._user(context)
         task = context.current_task
         task_id = str(context.task_id or "")
@@ -75,7 +75,7 @@ class RunExecutor(AgentExecutor):
         )
         state = task.status.state if task is not None else None
         if state == TaskState.TASK_STATE_INPUT_REQUIRED:
-            await self._resume(context, event_queue, user, task_id, context_id)
+            await self._resume(context, event_queue, user, task_id, context_id, tenant=tenant)
             return
         if state in TERMINAL_STATES:
             raise InvalidRequestError(
@@ -83,7 +83,7 @@ class RunExecutor(AgentExecutor):
             )
         if state == TaskState.TASK_STATE_WORKING:
             raise InvalidRequestError(message="this task is still working; wait, or cancel it")
-        if task is None and await self.agent.harness.runs.get(task_id) is not None:
+        if task is None and await self.agent.harness.runs.get(task_id, tenant=tenant) is not None:
             # a task this caller cannot see (another user's): never a second run on its id
             raise InvalidRequestError(message=f"no task {task_id}")
         self.tasks.opening(task_id)
@@ -98,7 +98,7 @@ class RunExecutor(AgentExecutor):
         payload = _payload(context.message)
         agent = self.agent
         identity = await agent._opened(
-            payload, user=user, thread=context_id, tenant=None, run_id=task_id
+            payload, user=user, thread=context_id, tenant=tenant, run_id=task_id
         )
         await self._stream(
             event_queue,
@@ -120,9 +120,10 @@ class RunExecutor(AgentExecutor):
         if running is not None:
             running.cancel()
         else:
-            record = await self.agent.harness.runs.get(task_id)
+            tenant = await self.agent.harness.tenant()
+            record = await self.agent.harness.runs.get(task_id, tenant=tenant)
             if record is not None and record.status is RunStatus.PAUSED:
-                await self.agent.harness.runs.finished(task_id, RunStatus.CANCELLED)
+                await self.agent.harness.runs.finish(task_id, RunStatus.CANCELLED, tenant=tenant)
         await self._cancelled(event_queue, task_id, context_id)
 
     # ------------------------------------------------------------------ answering a pause
@@ -133,8 +134,10 @@ class RunExecutor(AgentExecutor):
         user: str,
         task_id: str,
         context_id: str,
+        *,
+        tenant: str,
     ) -> None:
-        record = await self.agent.harness.runs.get(task_id)
+        record = await self.agent.harness.runs.get(task_id, tenant=tenant)
         if record is None or record.user_id != user or record.awaiting is None:
             await self._ask_again(
                 event_queue, task_id, context_id, "this task is not yours to answer"
@@ -144,7 +147,7 @@ class RunExecutor(AgentExecutor):
         try:
             decision, answer = _decision(interrupt.reason, context.message)
             record, resolution = await self.agent._resolution(
-                interrupt.interrupt_id, decision, answer, reviewer=user
+                interrupt.interrupt_id, decision, answer, reviewer=user, tenant=tenant
             )
         except (ValueError, ConfigurationError) as exc:
             await self._ask_again(event_queue, task_id, context_id, str(exc), interrupt.question)

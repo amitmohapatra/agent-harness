@@ -57,7 +57,7 @@ from trellis.contracts import (
     ToolError,
 )
 from trellis.harness.agent import Agent
-from trellis.harness.clients.runs import LocalRuns
+from trellis.harness.runs import LocalRuns
 from trellis.harness.surfaces.a2a import agent_card, push
 from trellis.harness.surfaces.a2a import client as a2a_client
 from trellis.harness.surfaces.a2a import executor as executor_module
@@ -74,9 +74,7 @@ from trellis.harness.surfaces.a2a.push import (
     PushNotifier,
     TargetRefused,
     check_addresses,
-    sign,
     validate_url,
-    verify_signature,
 )
 from trellis.harness.surfaces.a2a.tasks import RunTaskStore, task_from_run
 from trellis.harness.surfaces.a2a.translate import (
@@ -86,8 +84,14 @@ from trellis.harness.surfaces.a2a.translate import (
     value_part,
     values,
 )
+from trellis.runs.webhooks import verify_signature
 
 TENANT = "default"
+
+
+async def tenant() -> str:
+    """The tenant a task store reads runs in (a harness's ``tenant``)."""
+    return TENANT
 
 
 def call_context(user: str | None = "u1", raw: str | None = None) -> ServerCallContext:
@@ -164,18 +168,6 @@ async def test_the_card_describes_what_the_target_says_about_itself() -> None:
 
 
 # --------------------------------------------------------------------------- push
-
-
-def test_a_signature_is_checked_for_its_secret_its_body_and_its_age() -> None:
-    body = b'{"task": 1}'
-    signed = sign("tok", 1_000, body)
-    assert verify_signature("tok", signed, body, now=1_100)
-    assert not verify_signature("other", signed, body, now=1_100)
-    assert not verify_signature("tok", signed, b"{}", now=1_100)
-    assert not verify_signature("tok", signed, body, now=1_000 + 301)  # too old
-    assert not verify_signature("tok", None, body)
-    assert not verify_signature("tok", "t=soon,v1=abc", body)
-    assert not verify_signature("tok", "t=1000", body)
 
 
 def test_a_push_url_is_normalised_and_checked_without_resolving_it() -> None:
@@ -307,7 +299,7 @@ def test_a_finished_run_carries_its_result_as_the_tasks_artifact() -> None:
 
 async def test_the_task_store_lists_and_deletes_what_it_holds() -> None:
     runs = LocalRuns()
-    store = RunTaskStore(runs, agent_id="greeter", user_of=lambda context: "u1")
+    store = RunTaskStore(runs, agent_id="greeter", user_of=lambda context: "u1", tenant=tenant)
     context = ServerCallContext()
     task = Task(id="t1", context_id="c1", status=TaskStatus(state=TaskState.TASK_STATE_WORKING))
     await store.save(task, context)
@@ -319,11 +311,11 @@ async def test_the_task_store_lists_and_deletes_what_it_holds() -> None:
 
 async def test_a_task_being_opened_or_of_another_agent_is_not_rebuilt() -> None:
     runs = LocalRuns()
-    await runs.started(
+    await runs.start(
         RunStart(run_id="run_x", tenant_id=TENANT, agent_id="other", user_id="u1", input="hi")
     )
-    await runs.finished("run_x", RunStatus.SUCCESS, output="done")
-    store = RunTaskStore(runs, agent_id="greeter", user_of=lambda context: "u1")
+    await runs.finish("run_x", RunStatus.SUCCESS, output="done")
+    store = RunTaskStore(runs, agent_id="greeter", user_of=lambda context: "u1", tenant=tenant)
     assert await store.get("run_x", ServerCallContext()) is None  # another agent's run
     store.opening("run_y")
     assert await store.get("run_y", ServerCallContext()) is None
@@ -425,10 +417,8 @@ async def executor() -> AsyncIterator[tuple[RunExecutor, Agent]]:
     await harness.key()  # what execute() asks first: the tenant the header is checked against
     agent = harness.wrap(waiter, id="waiter")
     resolve = HeaderIdentity(harness)
-    yield (
-        RunExecutor(agent, resolve, RunTaskStore(harness.runs, agent_id="waiter", user_of=resolve)),
-        agent,
-    )
+    tasks = RunTaskStore(harness.runs, agent_id="waiter", user_of=resolve, tenant=harness.tenant)
+    yield RunExecutor(agent, resolve, tasks), agent
     await harness.aclose()
 
 
@@ -475,7 +465,7 @@ async def test_a_new_task_never_takes_the_id_of_an_existing_run(
     executor: tuple[RunExecutor, Agent],
 ) -> None:
     run, agent = executor
-    await agent.harness.runs.started(
+    await agent.harness.runs.start(
         RunStart(run_id="run_taken", tenant_id=TENANT, agent_id="waiter", user_id="eve")
     )
     with pytest.raises(InvalidRequestError, match="no task run_taken"):

@@ -130,8 +130,8 @@ class Agent:
         except (TypeError, ValueError) as exc:
             raise ConfigurationError("a queued run's input must be JSON") from exc
         start = await self._start(input, user=user, thread=thread, tenant=tenant)
-        await self.harness.runs.queued(start)
-        return RunHandle(self, start.run_id)
+        await self.harness.runs.start(start, queue=True)
+        return RunHandle(self, start.run_id, tenant=start.tenant_id)
 
     async def resume(
         self,
@@ -140,11 +140,15 @@ class Agent:
         *,
         answer: Any = None,
         reviewer: str,
+        tenant: str | None = None,
     ) -> Result:
         """Answer the interrupt a run is paused on. A run started in process continues here;
         a run that came from the queue goes back to it (``QUEUED``) and a worker continues it.
-        ``answer`` is the answer to a question, or the edited arguments of an ``EDIT``."""
-        record, resolution = await self._resolution(interrupt_id, decision, answer, reviewer)
+        ``answer`` is the answer to a question, or the edited arguments of an ``EDIT``;
+        ``tenant`` is the run's, named by a platform key only."""
+        record, resolution = await self._resolution(
+            interrupt_id, decision, answer, reviewer, tenant=await self.harness.tenant(tenant)
+        )
         return await self._continue(record, resolution)
 
     async def schedule(
@@ -159,7 +163,8 @@ class Agent:
         """Queue a run of this agent on ``cron`` (evaluated in ``tz``), acting for
         ``on_behalf_of``. Workers run them. Idempotent: the same agent, person, cadence and
         input are one schedule (agent-runs answers the existing one), so a redeploy adds none.
-        Pause or resume it in agent-runs (``PATCH /v1/schedules/{id} {"enabled": …}``)."""
+        Pause or resume it with ``trellis.runs.RunsClient``: ``schedules.update(id,
+        ScheduleUpdate(enabled=…))``."""
         spec = ScheduleSpec(
             tenant_id=await self.harness.tenant(tenant),
             agent_id=self.id,
@@ -169,7 +174,7 @@ class Agent:
             on_behalf_of=on_behalf_of,
             input=input,
         )
-        return await self.harness.runs.schedule(spec)
+        return await self.harness.runs.schedules.create(spec)
 
     # ------------------------------------------------------------------ surfaces
     def serve_chat(self, app: Any, *, path: str = "/agui", identity: Any = None) -> None:
@@ -186,10 +191,16 @@ class Agent:
 
     # ------------------------------------------------------------------ used by surfaces
     async def _resolution(
-        self, interrupt_id: str, decision: InterruptDecision | str, answer: Any, reviewer: str
+        self,
+        interrupt_id: str,
+        decision: InterruptDecision | str,
+        answer: Any,
+        reviewer: str,
+        *,
+        tenant: str,
     ) -> tuple[RunRecord, InterruptResolution]:
         run_id = run_of(interrupt_id)
-        record = await self.harness.runs.get(run_id)
+        record = await self.harness.runs.get(run_id, tenant=tenant)
         if record is None or record.agent_id != self.id:
             raise ConfigurationError(f"no run {run_id} of agent {self.id}")
         if record.status is not RunStatus.PAUSED or record.awaiting is None:
@@ -226,7 +237,7 @@ class Agent:
         # The run store first: a decision is feedback only once it took effect. A resume
         # the store refuses (answered already, a stale interrupt) raises here, before
         # anything is sent, so approval patterns never learn from a decision that never was.
-        resumed = await runs.resumed(resolution)
+        resumed = await runs.resume(resolution, tenant=record.tenant_id)
         run_memory = await self.run_memory(identity)
         if feedback is not None and run_memory is not None and await self.harness.writes_memory():
             await self.harness.writes.submit(
@@ -249,7 +260,7 @@ class Agent:
         )
 
     async def _claimed(
-        self, record: RunRecord, worker_id: str, *, lease_seconds: float | None = None
+        self, record: RunRecord, worker_id: str, *, lease_seconds: int | None = None
     ) -> Result:
         """A worker's run: fresh from the queue, continuing after a resolution, or after a
         worker died (its checkpoint is the progress it saved)."""
@@ -483,7 +494,7 @@ class Agent:
         start = await self._start(
             input, user=user, thread=thread, tenant=tenant, run_id=run_id, record_input=True
         )
-        await self.harness.runs.started(start)
+        await self.harness.runs.start(start)
         return self._identity_of(RunRecord.from_start(start))
 
     async def _start(
@@ -537,12 +548,13 @@ def _pull(agent: Agent) -> frozenset[str]:
 class RunHandle:
     """A queued run: its id, where it is, and a way to wait for it."""
 
-    def __init__(self, agent: Agent, run_id: str) -> None:
+    def __init__(self, agent: Agent, run_id: str, *, tenant: str) -> None:
         self.agent = agent
         self.run_id = run_id
+        self.tenant = tenant
 
     async def status(self) -> RunRecord:
-        record = await self.agent.harness.runs.get(self.run_id)
+        record = await self.agent.harness.runs.get(self.run_id, tenant=self.tenant)
         if record is None:
             raise ConfigurationError(f"no run {self.run_id}")
         return record

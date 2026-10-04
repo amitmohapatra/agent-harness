@@ -3,9 +3,12 @@ committed OpenAPI document — driven by real runs, not hand-made bodies: runs t
 approval, ask with a table large enough to travel as an artifact, fail, are queued for a worker
 that saves its progress and resumes them, and a schedule. The store behind the wire is
 ``LocalRuns`` (the same behaviour as agent-runs), so every answer is a real state transition;
-every request and every answer is checked against the document. And agent-runs' schemas are
-the contracts' models: what it answers parses into ``RunRecord``, ``Schedule``, ``Interrupt``,
-``ArtifactRef``…, and the enums agree."""
+every request and every answer is checked against the document. The harness's client is
+``trellis.runs.RunsClient``, which keeps no tenant between calls: the service here acts as a
+platform key's would, knowing a run's tenant only from the ``X-Trellis-Tenant`` each call that
+names a run (and each listing) sends, so a call that forgot its ``tenant=`` is a violation. And
+agent-runs' schemas are the contracts' models: what it answers parses into ``RunRecord``,
+``Schedule``, ``Interrupt``, ``ArtifactRef``…, and the enums agree."""
 
 from __future__ import annotations
 
@@ -13,7 +16,6 @@ import enum
 import json
 import re
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -36,17 +38,13 @@ from trellis.contracts import (
     Schedule,
     ScheduleSpec,
 )
-from trellis.harness.clients.runs import (
-    Conflict,
-    HttpRuns,
-    LeaseLost,
-    LocalRuns,
-    NotFound,
-    RunStoreError,
-    RunSummary,
-)
+from trellis.harness.runs import LocalRuns
+from trellis.memory.models import KeyInfo
+from trellis.runs import Lease, NotFoundError, RunsClient, RunsError, RunSummary
 
 TENANT = "default"
+#: the header a call names its tenant with (a platform key's only way to)
+TENANT_HEADER = "X-Trellis-Tenant"
 
 
 # --------------------------------------------------------------------------- the schemas
@@ -92,128 +90,156 @@ def test_agent_runs_enums_are_the_contracts_enums(name: str) -> None:
 
 # --------------------------------------------------------------------------- the wire
 class RunsService:
-    """agent-runs' routes over ``LocalRuns``, checking every exchange against the document."""
+    """agent-runs' routes over ``LocalRuns``, checking every exchange against the document, and
+    that every call naming a run (and every listing) names the run's tenant."""
 
     def __init__(self, contract: OpenAPI) -> None:
         self.contract = contract
         self.store = LocalRuns()
         self.violations: list[str] = []
         self.seen: list[tuple[str, str]] = []
+        #: the tenant each call named
+        self.tenants: set[str | None] = set()
 
-    def client(self) -> HttpRuns:
+    def client(self) -> RunsClient:
         transport = httpx.MockTransport(self.handle)
         client = httpx.AsyncClient(transport=transport, base_url="http://runs.test")
-        return HttpRuns("http://runs.test", "key", client=client)
+        return RunsClient("http://runs.test", api_key="key", http_client=client)
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         self.violations.extend(self.contract.request(request))
+        self.tenants.add(request.headers.get(TENANT_HEADER))
         try:
-            status, body = await self._answer(request)
-        except RunStoreError as exc:  # LocalRuns' refusal, as agent-runs words it
-            status, body = _problem(request, exc)
-        response = _response(request, status, body)
+            status, body, headers = await self._answer(request)
+        except RunsError as exc:  # LocalRuns' refusal, as agent-runs words it
+            status, body, headers = *_problem(request, exc), {}
+        response = _response(request, status, body, headers)
         self.violations.extend(self.contract.response(request, response))
         self.seen.append((request.method, _template(request.url.path)))
         return response
 
-    async def _answer(self, request: httpx.Request) -> tuple[int, Any]:
+    def _tenant(self, request: httpx.Request) -> str | None:
+        """The tenant the call names; a call that names none is a violation."""
+        tenant = request.headers.get(TENANT_HEADER)
+        if tenant is None:
+            self.violations.append(f"{request.method} {request.url.path}: no {TENANT_HEADER}")
+        return tenant
+
+    async def _answer(self, request: httpx.Request) -> tuple[int, Any, dict[str, str]]:
         path = request.url.path
         body = json.loads(request.content) if request.content else None
         if path.startswith("/v1/runs/") and path != "/v1/runs/claim":
             run_id, _, action = path.removeprefix("/v1/runs/").partition("/")
-            return await self._run(request, run_id, action, body)
+            status, answer = await self._run(request, run_id, action, body)
+            return status, answer, {}
         return await self._collection(request, body)
 
-    async def _collection(self, request: httpx.Request, body: Any) -> tuple[int, Any]:
+    async def _collection(
+        self, request: httpx.Request, body: Any
+    ) -> tuple[int, Any, dict[str, str]]:
         method, path, store = request.method, request.url.path, self.store
         if (method, path) == ("POST", "/v1/runs"):
             start = RunStart.model_validate({k: v for k, v in body.items() if k != "queue"})
-            made = await (store.queued if body["queue"] else store.started)(start)
-            return 201, made.model_dump(mode="json")
+            made = await store.start(start, queue=body["queue"])
+            return 201, made.model_dump(mode="json"), {}
         if (method, path) == ("GET", "/v1/runs"):
-            summaries = await store.inbox(TENANT, request.url.params.get("assignee"))
-            return 200, [s.model_dump(mode="json") for s in summaries]
+            return self._page(request, await self._listed(request))
         if (method, path) == ("POST", "/v1/runs/claim"):
-            claimed = await store.claim(body["worker_id"], body["agent_ids"], body["lease_seconds"])
+            claimed = await store.claim(
+                body["worker_id"], body["agent_ids"], lease_seconds=body["lease_seconds"]
+            )
             if claimed is None:
-                return 204, None
-            return 200, {"run": claimed.model_dump(mode="json"), "lease": _lease(claimed, body)}
+                return 204, None, {}
+            return 200, claimed.model_dump(mode="json"), {}
         if (method, path) == ("POST", "/v1/schedules"):
-            made = await store.schedule(ScheduleSpec.model_validate(body))
-            return 201, made.model_dump(mode="json")
+            made = await store.schedules.create(ScheduleSpec.model_validate(body))
+            return 201, made.model_dump(mode="json"), {}
         artifact_id = path.removeprefix("/v1/artifacts/")
-        data = await store.artifact(artifact_id, TENANT)
+        data = await store.artifacts.download(artifact_id, tenant=self._tenant(request))
         if data is None:
-            raise NotFound(f"no artifact {artifact_id}")
-        return 200, data
+            raise NotFoundError(f"no artifact {artifact_id}", code="NOT_FOUND", status=404)
+        return 200, data, {}
+
+    async def _listed(self, request: httpx.Request) -> list[RunSummary]:
+        params = request.url.params
+        status = params.get("status")
+        listed = self.store.iterate(
+            status=RunStatus(status) if status else None,
+            assignee=params.get("assignee"),
+            tenant=self._tenant(request),
+        )
+        return [summary async for summary in listed]
+
+    @staticmethod
+    def _page(request: httpx.Request, rows: list[RunSummary]) -> tuple[int, Any, dict[str, str]]:
+        """One page of ``rows`` from the request's ``cursor``, linking the next."""
+        limit = int(request.url.params["limit"])
+        offset = int(request.url.params.get("cursor", "0"))
+        page = rows[offset : offset + limit]
+        more = offset + limit < len(rows)
+        link = {"link": f'</v1/runs?cursor={offset + limit}>; rel="next"'} if more else {}
+        return 200, [r.model_dump(mode="json") for r in page], link
 
     async def _run(
         self, request: httpx.Request, run_id: str, action: str, body: Any
     ) -> tuple[int, Any]:
         store, worker = self.store, request.url.params.get("worker_id")
+        tenant = self._tenant(request)
         if action == "":
-            record = await store.get(run_id)
+            record = await store.get(run_id, tenant=tenant)
             if record is None:
-                raise NotFound(f"no run {run_id}")
+                raise NotFoundError(f"no run {run_id}", code="NOT_FOUND", status=404)
             return 200, record.model_dump(mode="json")
         if action == "pause":
             asked = Interrupt.model_validate(body["interrupt"])
-            paused = await store.paused(asked, checkpoint=body["checkpoint"], worker_id=worker)
+            paused = await store.pause(asked, checkpoint=body["checkpoint"], worker_id=worker)
             return 200, paused.model_dump(mode="json")
         if action == "resume":
-            resumed = await store.resumed(InterruptResolution.model_validate(body))
+            resolution = InterruptResolution.model_validate(body)
+            resumed = await store.resume(resolution, tenant=tenant)
             return 200, resumed.model_dump(mode="json")
         if action == "finish":
             error = AgentError.model_validate(body["error"]) if body.get("error") else None
             status = RunStatus(body["status"])
-            done = await store.finished(
-                run_id, status, output=body["output"], error=error, worker_id=worker
+            done = await store.finish(
+                run_id, status, output=body["output"], error=error, worker_id=worker, tenant=tenant
             )
             return 200, done.model_dump(mode="json")
         if action == "heartbeat":
-            checkpoint = body.get("checkpoint")
-            await store.heartbeat(
-                run_id, body["worker_id"], body["lease_seconds"], checkpoint=checkpoint
+            lease: Lease = await store.heartbeat(
+                run_id,
+                body["worker_id"],
+                lease_seconds=body["lease_seconds"],
+                checkpoint=body.get("checkpoint"),
+                tenant=tenant,
             )
-            record = await store.get(run_id)
-            assert record is not None
-            return 200, _lease(record, body)
+            return 200, lease.model_dump(mode="json")
         assert action == "artifacts", action
-        ref = await store.put_artifact(run_id, request.content, worker_id=worker)
+        ref = await store.artifacts.upload(
+            run_id,
+            request.content,
+            mime_type=request.headers["content-type"],
+            worker_id=worker,
+            tenant=tenant,
+        )
         return 201, ref.model_dump(mode="json")
 
 
-#: the problem code of each refusal of LocalRuns, and its status
-PROBLEMS: dict[type[RunStoreError], tuple[str, int]] = {
-    LeaseLost: ("LEASE_LOST", 409),
-    Conflict: ("CONFLICT", 409),
-    NotFound: ("NOT_FOUND", 404),
-}
-
-
-def _problem(request: httpx.Request, exc: RunStoreError) -> tuple[int, dict[str, Any]]:
-    code, status = PROBLEMS[type(exc)]
-    return status, {
-        "type": f"urn:trellis:problem:{code.lower().replace('_', '-')}",
-        "title": code.replace("_", " ").capitalize(),
-        "status": status,
-        "detail": str(exc),
+def _problem(request: httpx.Request, exc: RunsError) -> tuple[int, dict[str, Any]]:
+    return exc.status, {
+        "type": f"urn:trellis:problem:{exc.code.lower().replace('_', '-')}",
+        "title": exc.code.replace("_", " ").capitalize(),
+        "status": exc.status,
+        "detail": exc.message,
         "instance": request.url.path,
-        "code": code,
+        "code": exc.code,
         "retryable": False,
     }
 
 
-def _lease(record: RunRecord, body: dict[str, Any]) -> dict[str, Any]:
-    until = datetime.now(UTC) + timedelta(seconds=body["lease_seconds"])
-    return {
-        "run_id": record.run_id,
-        "worker_id": body["worker_id"],
-        "expires_at": until.isoformat(),
-    }
-
-
-def _response(request: httpx.Request, status: int, body: Any) -> httpx.Response:
+def _response(
+    request: httpx.Request, status: int, body: Any, headers: dict[str, str]
+) -> httpx.Response:
     if body is None:
         return httpx.Response(status, request=request)
     if isinstance(body, bytes):
@@ -222,7 +248,10 @@ def _response(request: httpx.Request, status: int, body: Any) -> httpx.Response:
         )
     media = "application/problem+json" if status >= 400 else "application/json"
     return httpx.Response(
-        status, content=json.dumps(body), headers={"content-type": media}, request=request
+        status,
+        content=json.dumps(body),
+        headers={"content-type": media, **headers},
+        request=request,
     )
 
 
@@ -284,7 +313,8 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
     reviewing = h.wrap(reviewer, id="reviewer")
     asked = await reviewing.run("review", user="ada")
     assert asked.interrupt is not None and asked.interrupt.payload_ref is not None
-    assert await h.runs.artifact(asked.interrupt.payload_ref.artifact_id, TENANT) is not None
+    ref = asked.interrupt.payload_ref
+    assert await h.runs.artifacts.download(ref.artifact_id, tenant=TENANT) is not None
     [waiting] = await h.inbox("role:ops")
     assert waiting.awaiting == asked.interrupt
     cancelled = await reviewing.resume(asked.interrupt.interrupt_id, "cancel", reviewer="ada")
@@ -292,7 +322,7 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
 
     failed = await h.wrap(failing, id="failing").run("x", user="ada")
     assert failed.error is not None and failed.error.retryable  # a timeout may pass
-    record = await h.runs.get(failed.run_id)
+    record = await h.runs.get(failed.run_id, tenant=TENANT)
     assert record is not None and record.error == failed.error
 
     queued = h.wrap(billing, id="billing", tools=[charge])
@@ -307,7 +337,7 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
     assert (await handle.result(timeout=5)).answer == "charged o-3; L"
     schedule = await queued.schedule("daily", {"order": "o-4"}, on_behalf_of="ada")
     assert schedule.cadence == "daily"
-    assert await h.runs.get("run_missing") is None
+    assert await h.runs.get("run_missing", tenant=TENANT) is None
 
     assert service.violations == [], "\n".join(service.violations)
     assert {
@@ -323,3 +353,64 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
         ("POST", "/v1/runs/{id}/heartbeat"),
         ("POST", "/v1/schedules"),
     } <= set(service.seen)
+
+
+async def test_the_inbox_reads_every_page_and_says_when_it_stops(
+    wired: tuple[Harness, RunsService],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from trellis.harness import harness as harness_module
+
+    h, service = wired
+
+    async def asking(input: str, agent: Runtime) -> Any:
+        return await agent.ask(f"ok {input}?", assignee="role:ops")
+
+    agent = h.wrap(asking, id="asking")
+    for n in range(3):
+        await agent.run(str(n), user="ada")
+    monkeypatch.setattr(harness_module, "INBOX_LIMIT", 1)
+    assert len(await h.inbox("role:ops")) == 3  # three pages of one, newest first
+    listings = [c for c in service.seen if c == ("GET", "/v1/runs")]
+    assert len(listings) == 3
+    monkeypatch.setattr(harness_module, "INBOX_MAX_PAGES", 2)
+    with caplog.at_level("WARNING", logger="trellis.harness"):
+        assert len(await h.inbox("role:ops")) == 2
+    assert "holds at least 2 paused runs" in caplog.text
+    assert await h.inbox("role:nobody") == []
+    assert service.violations == [], "\n".join(service.violations)
+
+
+async def test_a_platform_keys_runs_name_their_tenant_on_every_call(
+    wired: tuple[Harness, RunsService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A platform key has no tenant of its own: nothing remembers one between calls, so
+    every call carries the tenant the caller named, from the run's record or runtime."""
+    h, service = wired
+
+    async def platform() -> KeyInfo:
+        return KeyInfo(key_id="k", tenant_id=None, principal="platform", role="service")
+
+    monkeypatch.setattr(h, "key", platform)
+    approving = h.wrap(approver, id="approver", tools=[refund])
+    paused = await approving.run("o-1", user="ada", tenant="acme")
+    assert paused.interrupt is not None
+    [waiting] = await h.inbox(tenant="acme")
+    assert waiting.run_id == paused.run_id
+    answer = paused.interrupt.interrupt_id
+    assert (await approving.resume(answer, "approve", reviewer="cfo", tenant="acme")).answer
+    await h.feedback(paused.run_id, "confirm", tenant="acme")
+
+    reviewing = h.wrap(reviewer, id="reviewer")
+    queued = h.wrap(billing, id="billing", tools=[charge])
+    asked = await reviewing.run("review", user="ada", tenant="acme")
+    assert asked.interrupt is not None and asked.interrupt.payload_ref is not None
+    handle = await queued.start({"order": "o-5"}, user="ada", tenant="acme")
+    assert await h.worker([queued], concurrency=1).run_once()
+    first = await handle.result(timeout=5)
+    assert first.interrupt is not None
+    await queued.schedule("daily", {"order": "o-6"}, on_behalf_of="ada", tenant="acme")
+    assert service.violations == [], "\n".join(service.violations)
+    assert service.tenants <= {"acme", None}  # a claim names none: the key's own queue
+    assert "acme" in service.tenants

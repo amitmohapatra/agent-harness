@@ -428,14 +428,14 @@ async def test_an_approval_is_rejected_edited_or_decided_outright(
 async def test_a_run_the_harness_could_not_finish_is_aborted_for_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from trellis.harness.clients.runs import RunStoreError
+    from trellis.runs import RunsError
 
     harness, http = serve()
 
     async def refused(*args: Any, **kwargs: Any) -> Any:
-        raise RunStoreError("agent-runs refused the finish")
+        raise RunsError("agent-runs refused the finish")
 
-    monkeypatch.setattr(harness.runs, "finished", refused)
+    monkeypatch.setattr(harness.runs, "finish", refused)
     async with http:
         last = finished(await post(http, body("hello")))
     assert last["type"] == "RUN_ERROR" and last["code"] == "RUN_ABORTED"
@@ -448,13 +448,13 @@ async def test_an_artifact_the_store_no_longer_has_is_not_found(
 ) -> None:
     harness, http = serve()
 
-    async def gone(artifact_id: str, tenant_id: str) -> None:
+    async def gone(artifact_id: str, *, tenant: str | None = None) -> None:
         return None
 
     async with http:
         paused = finished(await post(http, body("table")))
         reference = paused["outcome"]["interrupts"][0]["metadata"]["payload_ref"]
-        monkeypatch.setattr(harness.runs, "artifact", gone)
+        monkeypatch.setattr(harness.runs.artifacts, "download", gone)
         route = f"{PATH}/runs/{paused['runId']}/artifacts/{reference['artifact_id']}"
         assert (await http.get(route)).status_code == 404
         assert (await http.get(f"{PATH}/runs/run_unknown/artifacts/art_1")).status_code == 404

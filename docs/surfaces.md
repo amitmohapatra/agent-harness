@@ -101,9 +101,11 @@ to public (checked at registration and again at each delivery). The body is the 
 token the caller registered (agent-runs' webhook scheme), with `X-Trellis-Event:
 a2a.task_update`, `X-Trellis-Delivery` and the token itself in `X-A2A-Notification-Token`. A
 config without a token is not delivered to; a failing receiver is tried up to 3 times (0.2 s, then
-0.4 s apart), logged, and never raised into the task. A receiver checks a delivery with
-`trellis.harness.surfaces.a2a.push.verify_signature(secret, header, body, *, now=None) -> bool`
-(signatures older than 300 s are refused).
+0.4 s apart), logged, and never raised into the task. The signature is agent-runs' webhook
+scheme, signed with `trellis.runs.webhooks.sign`; a receiver checks a delivery with
+`trellis.runs.webhooks.verify_signature(secret, header, body, *, now=None, tolerance=300) -> bool`
+(pip `trellis-runs`; a signature more than 300 s old or ahead is refused, a malformed header is
+`False`).
 
 **OpenAPI.** The A2A SDK serves its routes as plain Starlette routes, which FastAPI leaves out of
 the app's OpenAPI document; on a FastAPI app the surface describes both under the tag `a2a` —

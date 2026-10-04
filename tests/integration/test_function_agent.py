@@ -258,7 +258,7 @@ async def test_a_resume_without_the_journal_still_answers_the_right_question(
     paused = await agent.run("x", user="u1")
     assert paused.interrupt is not None
     record, resolution = await agent._resolution(
-        paused.interrupt.interrupt_id, "answer", "blue", "u1"
+        paused.interrupt.interrupt_id, "answer", "blue", "u1", tenant="default"
     )
     forgetful = record.model_copy(update={"metadata": {}})
     done = await agent._continue(forgetful, resolution)

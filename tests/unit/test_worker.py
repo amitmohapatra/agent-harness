@@ -17,7 +17,8 @@ import pytest
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunRecord, RunStatus
 from trellis.harness import worker as worker_module
-from trellis.harness.clients.runs import LocalRuns
+from trellis.harness.runs import LocalRuns
+from trellis.runs import Claimed
 from trellis.worker import main, serve
 
 
@@ -43,11 +44,11 @@ async def test_an_idle_worker_keeps_asking_for_work(
     idled = asyncio.Event()
     claim = harness.runs.claim
 
-    async def counting(worker_id: str, agent_ids: Any, lease: float) -> RunRecord | None:
+    async def counting(worker_id: str, agent_ids: Any, **lease: Any) -> Claimed | None:
         asked.append(worker_id)
         if len(asked) == 3:
             idled.set()
-        return await claim(worker_id, agent_ids, lease)
+        return await claim(worker_id, agent_ids, **lease)
 
     monkeypatch.setattr(harness.runs, "claim", counting)
     task = asyncio.create_task(harness.worker([agent]).run())
@@ -65,7 +66,7 @@ async def test_a_failed_claim_is_logged_and_means_no_work(
     async def echo(input: str, agent: Runtime) -> str:
         return input
 
-    async def unreachable(*args: Any) -> None:
+    async def unreachable(*args: Any, **kwargs: Any) -> None:
         raise ConnectionError("agent-runs is down")
 
     worker = harness.worker([harness.wrap(echo, id="echo")])
@@ -102,7 +103,7 @@ async def test_a_failed_heartbeat_is_logged_and_the_run_continues(
         await beat.wait()
         return "done"
 
-    async def flaky(run_id: str, worker_id: str, lease: float) -> None:
+    async def flaky(run_id: str, worker_id: str, **lease: Any) -> None:
         beat.set()
         raise ConnectionError("blip")
 
@@ -166,10 +167,11 @@ async def test_a_worker_stopped_as_its_run_finishes_still_stops(
         return input
 
     agent = harness.wrap(echo, id="echo")
-    record = await harness.runs.queued(await agent._start("x", user="u", thread=None, tenant=None))
+    started = await agent._start("x", user="u", thread=None, tenant=None)
+    record = await harness.runs.start(started, queue=True)
     worker = harness.worker([agent])
-    claimed = await harness.runs.claim(worker.worker_id, ["echo"], 60)
-    assert claimed is not None and claimed.run_id == record.run_id
+    claimed = await harness.runs.claim(worker.worker_id, ["echo"])
+    assert claimed is not None and claimed.run.run_id == record.run_id
     outer: list[asyncio.Task[Any]] = []
 
     async def finishing(record: RunRecord, worker_id: str, **lease: Any) -> str:
@@ -177,7 +179,7 @@ async def test_a_worker_stopped_as_its_run_finishes_still_stops(
         return "finished"
 
     monkeypatch.setattr(agent, "_claimed", finishing)
-    execute = asyncio.create_task(worker._execute(claimed))
+    execute = asyncio.create_task(worker._execute(claimed.run))
     outer.append(execute)
     with pytest.raises(asyncio.CancelledError):
         await execute

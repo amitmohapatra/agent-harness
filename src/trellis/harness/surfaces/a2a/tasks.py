@@ -8,6 +8,7 @@ transitions are written here: the pipeline records the run.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Final
 
 from a2a.server.context import ServerCallContext
@@ -23,7 +24,7 @@ from a2a.types import (
 )
 
 from trellis.contracts import RunRecord, RunStatus
-from trellis.harness.clients.runs import Runs
+from trellis.harness.runs import RunStore
 from trellis.harness.surfaces.a2a.identity import IdentityRefused, UserResolver
 from trellis.harness.surfaces.a2a.translate import RESULT_ARTIFACT, asked, value_part
 
@@ -56,9 +57,18 @@ def owner(user_of: UserResolver) -> UserResolver:
 
 
 class RunTaskStore(TaskStore):
-    def __init__(self, runs: Runs, *, agent_id: str, user_of: UserResolver) -> None:
+    def __init__(
+        self,
+        runs: RunStore,
+        *,
+        agent_id: str,
+        user_of: UserResolver,
+        tenant: Callable[[], Awaitable[str]],
+    ) -> None:
         self._runs = runs
         self._agent_id = agent_id
+        #: the tenant the runs are read in (the harness's: ``Harness.tenant``)
+        self._tenant = tenant
         self._owner = owner(user_of)
         self._store = InMemoryTaskStore(owner_resolver=self._owner)
         #: tasks this process is creating: their run is being opened, not rebuilt
@@ -77,7 +87,7 @@ class RunTaskStore(TaskStore):
         found = await self._store.get(task_id, context)
         if found is not None or task_id in self._opening:
             return found
-        record = await self._runs.get(task_id)
+        record = await self._runs.get(task_id, tenant=await self._tenant())
         if (
             record is None
             or record.agent_id != self._agent_id

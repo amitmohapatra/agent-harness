@@ -28,9 +28,8 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final
 
 from trellis.contracts import ConfigurationError, RunRecord
-from trellis.harness.clients.runs import LeaseLost
-from trellis.harness.pipeline import RELEASED
 from trellis.harness.writes import DRAIN_SECONDS
+from trellis.runs import RELEASED, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -41,7 +40,7 @@ log = logging.getLogger("trellis.worker")
 #: The most runs one worker executes at once by default (the CPU count, at most this).
 MAX_DEFAULT_CONCURRENCY: Final = 8
 #: How long a claim is leased; the heartbeat renews it at a third of that.
-LEASE_SECONDS: Final = 60.0
+LEASE_SECONDS: Final = 60
 #: An idle worker's first pause before asking for work again; doubled while the queue stays
 #: empty, up to :data:`IDLE_MAX_SECONDS` (equal jitter: half of it fixed, half random).
 IDLE_SECONDS: Final = 0.5
@@ -169,10 +168,13 @@ class Worker:
 
     async def _claim(self) -> RunRecord | None:
         try:
-            return await self.harness.runs.claim(self.worker_id, list(self.agents), LEASE_SECONDS)
+            claimed = await self.harness.runs.claim(
+                self.worker_id, list(self.agents), lease_seconds=LEASE_SECONDS
+            )
         except Exception as exc:
             log.warning("claim failed: %s", exc)
             return None
+        return claimed.run if claimed is not None else None
 
     async def _execute(self, record: RunRecord) -> None:
         """Run it while the lease holds; a lost lease stops it without writing anything."""
@@ -182,13 +184,13 @@ class Worker:
             )
         )
         self._held[record.run_id] = execution
-        heartbeat = asyncio.create_task(self._heartbeat(record.run_id, execution))
+        heartbeat = asyncio.create_task(self._heartbeat(record, execution))
         try:
             await execution
         except asyncio.CancelledError:
             if not execution.cancelled():
                 raise
-        except LeaseLost:
+        except LeaseLostError:
             log.warning("lease on %s lost while saving progress: stopped it", record.run_id)
         except Exception:
             log.exception("run %s failed in the worker", record.run_id)
@@ -198,12 +200,18 @@ class Worker:
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
 
-    async def _heartbeat(self, run_id: str, execution: asyncio.Task[object]) -> None:
+    async def _heartbeat(self, record: RunRecord, execution: asyncio.Task[object]) -> None:
+        run_id = record.run_id
         while True:
             await asyncio.sleep(LEASE_SECONDS / 3)
             try:
-                await self.harness.runs.heartbeat(run_id, self.worker_id, LEASE_SECONDS)
-            except LeaseLost:
+                await self.harness.runs.heartbeat(
+                    run_id,
+                    self.worker_id,
+                    lease_seconds=LEASE_SECONDS,
+                    tenant=record.tenant_id,
+                )
+            except LeaseLostError:
                 log.warning("lease on %s lost: stopping it", run_id)
                 execution.cancel()
                 return

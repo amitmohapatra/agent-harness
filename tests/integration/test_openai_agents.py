@@ -263,7 +263,7 @@ async def test_an_edited_sdk_approval_streams_the_continued_run(harness: Harness
     paused = [e async for e in agent.stream("send o9", user="u1")][-1]
     interrupt = paused.data["interrupt"]
     record, resolution = await agent._resolution(
-        interrupt["interrupt_id"], "edit", {"order": "o10"}, "u1"
+        interrupt["interrupt_id"], "edit", {"order": "o10"}, "u1", tenant="default"
     )
     events: list[Any] = []
     result = await agent._continue(record, resolution, listener=events.append)

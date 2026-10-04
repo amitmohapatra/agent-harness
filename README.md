@@ -130,8 +130,8 @@ modules — `trellis.harness.governance` ([docs/governance.md](docs/governance.m
 | `h.wrap(target, *, id, tools=()) -> Agent` | Attach the harness. The framework is detected from the target's type. `tools` are the agent's own, run in this process: functions, `a2a(url)`, `openapi(spec)`. |
 | `await h.tools(*sources, framework=...)` | The toolbox as the framework's own tools, for an agent built with them before wrapping (a compiled LangGraph graph binds its tools): LangChain tools (`"langgraph"`), `FunctionTool`s (`"openai-agents"`), one in-process MCP server (`"claude-agent-sdk"`). It holds `sources`, the MCP tools and the memory tools. |
 | `h.worker(agents, *, concurrency=None)` | Claims queued runs of these agents and executes them, `concurrency` at a time (default `TRELLIS_WORKER_CONCURRENCY`, else the CPU count from 1 to 8): `await worker.run()` (until `worker.stop()`: the runs held finish, or are released after a grace period) or `await worker.run_once()`. |
-| `await h.inbox(assignee=None) -> list[RunSummary]` | The paused runs waiting on `assignee` (`user:…`, `role:…`) or on anyone, newest first. |
-| `await h.feedback(run_id, verdict, correction=None) -> Feedback \| None` | What a person said about a run (`verdict`: `confirm`, `approve`, `reject`, `correct` or `edit`, the last two with a `correction`): a `feedback` score on its trace (Langfuse; 1.0, 0.5 for `edit`, 0.0 for `correct`/`reject`) and — memory on — the run's `human` feedback in the memory service, returned as stored (`None` with memory off). It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
+| `await h.inbox(assignee=None, *, tenant=None) -> list[RunSummary]` | The paused runs waiting on `assignee` (`user:…`, `role:…`) or on anyone, newest first, as `trellis.runs.RunSummary` (pip `trellis-runs`, the agent-runs SDK). `tenant` only for a platform key. |
+| `await h.feedback(run_id, verdict, correction=None, *, tenant=None) -> Feedback \| None` | What a person said about a run (`verdict`: `confirm`, `approve`, `reject`, `correct` or `edit`, the last two with a `correction`): a `feedback` score on its trace (Langfuse; 1.0, 0.5 for `edit`, 0.0 for `correct`/`reject`) and — memory on — the run's `human` feedback in the memory service, returned as stored (`None` with memory off). It waits for the tenant administrator (`review.state == "pending"`) before it changes what memory learned. |
 | `await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None, concurrency=4, limit=None, user=None) -> EvalReport` | Run the agent on every item of a dataset — a Langfuse dataset's name, or `[{"input", "expected"?, "metadata"?}]` / `EvalItem`s — through the normal pipeline, `concurrency` at a time, score each answer with `evaluators` onto its run's trace, and make each run an item of the Langfuse experiment `run_name` (the dataset run link on Langfuse v3, the `langfuse.experiment.*` span attributes on v4). A failing or pausing item is reported (`error`, `interrupted`), never fatal. The `EvalReport` has every item in order and each evaluator's mean, count and failures. The evaluation names (the evaluators, `EvalItem`, `EvalReport`...) are imported from `trellis.harness.evals`, which also evaluates and judges code that is not wrapped (below, and [docs/evaluation.md](docs/evaluation.md)). |
 | `await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None, wait=60) -> DocumentInfo` | Add a file (bytes, a path, or `(filename, bytes, media_type)`) to a user's document memory (or one thread's), waiting until it is indexed (`wait=None`: return at once): the user's next context cites it. `visibility` widens it (`WORKSPACE`, `TENANT`); `tenant` only for a platform key. Needs `MEMORY_URL`. |
 | `tool(fn, *, name=None, description=None, side_effects="write")` / `@tool` / `@tool(...)` | A Python function (sync or async) as a tool: the schema from its signature (pydantic validates the arguments), the description from its docstring's first paragraph, `side_effects` `"read"`, `"write"` (default) or `"irreversible"`. It stays callable as the function. A bare function in `tools=[...]` is `tool(fn)`. |
@@ -147,7 +147,7 @@ modules — `trellis.harness.governance` ([docs/governance.md](docs/governance.m
 | `await run(input, *, user, thread=None, tenant=None) -> Result` | Run to the end or the first pause. `tenant` only for a platform key (one with no tenant of its own). |
 | `stream(...) -> AsyncIterator[RunEvent]` | The run's events (contracts `RunEvent`s) up to `RUN_FINISHED`. Closing it early cancels the run. |
 | `await start(...) -> RunHandle` | Queue the run for a worker (its input must be JSON). The `RunHandle`: `run_id`, `await handle.status()` (the `RunRecord`) and `await handle.result(timeout=None)`, which waits for a pause or an ending and returns a `Result`. |
-| `await resume(interrupt_id, decision, *, answer=None, reviewer) -> Result` | Answer the pause (`decision`, a string or contracts `InterruptDecision`: `answer`, `approve`, `reject`, `edit` with the edited arguments as `answer`, `cancel`). A run started in process continues here; a queued run goes back to the queue (`QUEUED`). |
+| `await resume(interrupt_id, decision, *, answer=None, reviewer, tenant=None) -> Result` | Answer the pause (`decision`, a string or contracts `InterruptDecision`: `answer`, `approve`, `reject`, `edit` with the edited arguments as `answer`, `cancel`). A run started in process continues here; a queued run goes back to the queue (`QUEUED`). `tenant` only for a platform key. |
 | `await schedule(cron, input, *, on_behalf_of, tz="UTC", tenant=None) -> Schedule` | Queue a run on a cadence (cron, or `hourly`/`daily`/`weekly`/`weekdays`/`manual`), acting for `on_behalf_of`. The same agent, person, cadence and input are one schedule. |
 | `serve_chat(app, *, path="/agui", identity=None)` | AG-UI routes on a FastAPI app (run, reconnect/replay, artifacts); `identity(request) -> user` (sync or async), else every caller is `anonymous` ([docs/surfaces.md](docs/surfaces.md)). |
 | `serve_a2a(app, url, *, identity=None)` | The agent card and A2A JSON-RPC routes at `url`; `identity(call_context) -> user`, else the trusted `x-trellis-identity` header ([docs/surfaces.md](docs/surfaces.md)). |
@@ -161,8 +161,10 @@ deadline, escalate_to)` (pauses the run; returns the answer on resume —
 [docs/interrupts.md](docs/interrupts.md)) and `log(message, **fields)`.
 
 `Result`: `run_id`, `status` (`SUCCESS`, `PAUSED`, `ERROR`, `QUEUED`, `CANCELLED`), `answer`,
-`interrupt`, `error`. `RunSummary`: `run_id`, `agent_id`, `status`, `awaiting`, `assignee`,
-`deadline`, `updated_at`.
+`interrupt`, `error`. `trellis.runs.RunSummary`: `run_id`, `agent_id`, `status`, `awaiting`,
+`assignee`, `deadline`, `updated_at`. `h.runs` is the run store: agent-runs' client
+(`trellis.runs.RunsClient`) with `RUNS_URL`, else the in-process `LocalRuns`; code on its own
+framework uses `RunsClient` directly ([docs/runs.md](docs/runs.md)).
 
 Run a worker for every agent a module's harness wraps:
 
@@ -283,9 +285,10 @@ schedules, AG-UI, A2A, documents, feedback and evaluation with memory on.
 The memory service in the tests is an in-process fake (`tests/support/memory.py`) behind the
 real SDK, and every request the harness sends it and every answer it gives is checked against
 the memory service's committed `docs/openapi.json` (a test with a mismatch fails);
-`tests/contract/test_openapi.py` drives every call once and does the same for the runs client
-against agent-runs' `docs/openapi.json`; `tests/contract/test_runs_wire.py` checks what real
-runs (approvals, artifacts, failures, a worker's progress, schedules) send agent-runs and that
+`tests/contract/test_openapi.py` drives every call once and does the same for every call of
+the run store (`trellis.runs.RunsClient`) against agent-runs' `docs/openapi.json`;
+`tests/contract/test_runs_wire.py` checks what real runs (approvals, artifacts, failures, a
+worker's progress, schedules, a platform key's tenant on every call) send agent-runs and that
 its schemas and enums are the contracts' models; `tests/contract/test_types.py` that every
 result, event, record and error handed back is the contracts type. The documents are read from
 the sibling checkouts (CI checks out `main` of each), or from `TRELLIS_MEMORY_OPENAPI` /

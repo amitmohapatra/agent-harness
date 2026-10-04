@@ -7,9 +7,9 @@ agent may call and who must approve them, the pause, the recording, the trace.
 ## System context
 
 What a process that imports `trellis` talks to. Every arrow out of the harness is one client
-module (`clients/bifrost.py`, `clients/memory.py`, `clients/runs.py`) or one surface
-(`surfaces/agui`, `surfaces/a2a`); the OTLP exporter and the Langfuse scores API are
-`telemetry.py`.
+module (`clients/bifrost.py`, `clients/memory.py`, and `runs.py`, whose store is the agent-runs
+SDK's `trellis.runs.RunsClient`) or one surface (`surfaces/agui`, `surfaces/a2a`); the OTLP
+exporter and the Langfuse scores API are `telemetry.py`.
 
 ```mermaid
 flowchart LR
@@ -34,7 +34,7 @@ flowchart LR
 |---|---|---|
 | Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s model calls, the MCP log of Code Mode scripts | `POST /mcp` (`tools/list`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs` (`clients/bifrost.py`, through `bifrost-sdk`) |
 | Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, the tool catalog's `/v1/tools`, `/v1/tools/catalog` and approval feedback in `governance/catalog.py`, and `/v1/verify` in `evals.grounding_score`, through `trellis-memory`) |
-| agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`clients/runs.py`) |
+| agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`runs.py`, through `trellis.runs.RunsClient`) |
 | Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`surfaces/agui`) |
 | Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)`: `SendStreamingMessage`, `CancelTask` (`surfaces/a2a`) |
 | Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces (an evaluated run's spans with Langfuse's experiment attributes); grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
@@ -42,14 +42,15 @@ flowchart LR
 
 Unset variables remove a box: no `BIFROST_URL` means no MCP tools and no `ReAct` model names,
 no `MEMORY_URL` means no memory, no `RUNS_URL` keeps runs, the queue and schedules in this
-process (`LocalRuns`), no `OTEL_EXPORTER_OTLP_ENDPOINT` means no export
+process (`runs.LocalRuns`), no `OTEL_EXPORTER_OTLP_ENDPOINT` means no export
 ([docs/configuration.md](docs/configuration.md)).
 
 ## Modules
 
 ```
 src/trellis/
-  __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory)
+  __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory /
+                       .runs)
   worker.py            python -m trellis.worker module:harness
   harness/
     harness.py         Harness: settings → clients, writes, evaluation services; the key (tenant,
@@ -72,6 +73,9 @@ src/trellis/
     telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; the Langfuse
                        client (scores, datasets, dataset runs)
     redaction.py       what may leave the process
+    runs.py            RunStore (the part of trellis.runs.RunsClient the harness calls, with its
+                       signatures) and LocalRuns (the same store in process, when RUNS_URL is
+                       unset)
     worker.py          Worker: claim, lease, heartbeat
     adapters/          detect(target) and one adapter per framework (base, langgraph,
                        openai_agents, claude, react, function)
@@ -82,12 +86,12 @@ src/trellis/
     tools/             base (Tool), sources (tool, a2a, openapi), toolbox (MCP tools, their
                        side effects, Code Mode, publishing), bridge (every call: governance,
                        then pause / announce / run), convert/ (one module per native format)
-    clients/           bifrost, memory, runs — the only modules that call those services
+    clients/           bifrost, memory — the only modules that call those services
     surfaces/          agui (serve_chat), a2a (serve_a2a, the a2a() client)
 ```
 
-Each service has exactly one client module; nothing else in the harness calls it — except the
-tool catalog, which `governance/catalog.py` reads and writes through the memory SDK itself, and
+Each service has exactly one client module; nothing else in the harness calls it (agent-runs'
+is the SDK's `RunsClient`, which `runs.py` types as the `RunStore`) — except the tool catalog, which `governance/catalog.py` reads and writes through the memory SDK itself, and
 the grounding check, which `evals.grounding_score` asks through the memory SDK's
 `MemoryContext`, so governance and evaluation work without a `Harness`. The core imports no framework: an adapter imports its
 framework the first time a target of its type is wrapped, and `tests/contract` checks that
@@ -147,13 +151,17 @@ flowchart TB
   subgraph clients["clients (one per service)"]
     bifrost["bifrost.Gateway"]
     memory["memory.Memory · RunMemory"]
-    runs["runs.HttpRuns · LocalRuns"]
   end
+  runs["runs.RunStore<br/>(RunsClient · LocalRuns)"]
+  sdk["trellis.runs (SDK)<br/>RunsClient · errors · webhooks.sign"]
   toolbox --> bifrost
   agent --> memory
   agent --> runs
   pipeline --> runs
   harness --> clients
+  harness --> runs
+  runs --> sdk
+  a2a --> sdk
   telemetry --> redaction["redaction.Redactor"]
   pipeline --> telemetry
   bridge --> telemetry
@@ -193,7 +201,7 @@ sequenceDiagram
   autonumber
   actor User as Application / user
   participant Agent as Harness h · Agent (h.wrap)
-  participant Runs as Runs (agent-runs or LocalRuns)
+  participant Runs as RunStore (RunsClient or LocalRuns)
   participant P as pipeline.attempt
   participant Mem as Memory service
   participant FW as Adapter + framework
@@ -204,7 +212,7 @@ sequenceDiagram
 
   User->>Agent: await agent.run(input, user=, thread=)
   Agent->>Mem: GET /v1/keys/self (tenant, kept 10 min, the last answer while memory is down)
-  Agent->>Runs: started(RunStart) → RUNNING
+  Agent->>Runs: start(RunStart) → RUNNING
   Agent->>P: attempt(agent, identity, input)
   P->>GW: MCP tools/list with the virtual key (definitions, kept 300 s)
   P->>Mem: GET /v1/tools?names= + If-None-Match (governance: risks, approve_when, every 30 s)
@@ -223,7 +231,7 @@ sequenceDiagram
   Br->>Mem: POST /v1/agent-tools/memory_remember (memory write, in the run's scope)
   Br-->>FW: stored
   FW-->>P: output → extract(answer, transcript)
-  P->>Runs: finished(SUCCESS, output)
+  P->>Runs: finish(SUCCESS, output, tenant=)
   P-->>User: Result(SUCCESS, answer)
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
@@ -231,7 +239,7 @@ sequenceDiagram
   W-)Mem: POST /v1/verify (sampled: TRELLIS_GROUNDING_SAMPLE) → grounding score
   W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
-  Agent->>Runs: get(run_id)
+  Agent->>Runs: get(run_id, tenant=)
   Agent->>Mem: POST /v1/feedback (human, review pending)
   Agent->>LF: score feedback (POST /api/public/scores and a score span)
 ```
@@ -319,7 +327,7 @@ continues:
 
 The journal is the run's checkpoint: a worker saves it as progress on a heartbeat after every
 call with side effects (`runs.heartbeat(..., checkpoint=journal)`: a worker that dies repeats
-none of them), `runs.paused(interrupt, checkpoint=journal)` stores it with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
+none of them), `runs.pause(interrupt, checkpoint=journal)` stores it with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
 clears it when the run ends), and the attempt that resumes the run — in this process or in a
 worker elsewhere — files `last_resolution` under the pending question and replays the rest.
 
@@ -349,7 +357,7 @@ sequenceDiagram
   AR-->>Wk: {run, lease} → RUNNING, attempt 1
   Wk->>P: agent._claimed(record, worker_id)
   loop every 20 s while it runs
-    Wk->>AR: POST /v1/runs/{id}/heartbeat (409 → LeaseLost: stop, write nothing)
+    Wk->>AR: POST /v1/runs/{id}/heartbeat (409 → LeaseLostError: stop, write nothing)
   end
   P->>AR: after a write tool: POST /v1/runs/{id}/heartbeat (checkpoint = journal, the progress)
   P->>P: refund is irreversible → Runtime.approve → Paused
@@ -469,14 +477,14 @@ sequenceDiagram
   autonumber
   actor User as Application / user
   participant P as pipeline.attempt
-  participant Runs as Runs
+  participant Runs as RunStore
   participant W as Writes (background)
   participant J as judges (Harness(judges=[...]))
   participant GW as Bifrost (judge key)
   participant LF as Langfuse
 
   User->>P: await agent.run(question, user=)
-  P->>Runs: finished(SUCCESS, answer)
+  P->>Runs: finish(SUCCESS, answer)
   P->>P: sampled(run_id, TRELLIS_JUDGE_SAMPLE)?
   P-)W: submit judge.<name> (one per judge)
   P-->>User: Result(SUCCESS, answer): nothing waits for the judges
@@ -500,7 +508,7 @@ stateDiagram-v2
   [*] --> QUEUED: agent.start, a schedule fires
   [*] --> RUNNING: agent.run, stream, serve_chat, serve_a2a
   QUEUED --> RUNNING: a worker claims it (lease)
-  QUEUED --> CANCELLED: finished CANCELLED in agent-runs before a claim
+  QUEUED --> CANCELLED: finish CANCELLED in agent-runs before a claim
   RUNNING --> PAUSED: ask or an approval (interrupt + journal)
   RUNNING --> QUEUED: lease lapsed (next attempt)
   RUNNING --> SUCCESS: answered

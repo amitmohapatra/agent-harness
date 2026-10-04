@@ -6,21 +6,20 @@ credentials or fragment, never a local name or a non-public address, every resol
 re-checked at delivery — both when it is registered (the SDK's ``push_url_validator``) and when
 it is used. The body is the protocol's ``StreamResponse``; ``X-Trellis-Signature:
 t=<unix>,v1=<hmac-sha256("t.body")>`` signs it with the token the caller registered — the
-scheme agent-runs' webhooks use, which a receiver checks with :func:`verify_signature`. A
-config without a token cannot be signed and is not delivered to. A failing receiver is logged,
+scheme agent-runs' webhooks use, signed by ``trellis.runs.webhooks.sign``, which a receiver
+checks with ``trellis.runs.webhooks.verify_signature``. A config without a token cannot be
+signed and is not delivered to. A failing receiver is logged,
 never raised into the task.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hmac
 import ipaddress
 import json
 import logging
 import socket
 import time
-from hashlib import sha256
 from typing import Final
 from urllib.parse import urlsplit, urlunsplit
 
@@ -30,40 +29,17 @@ from a2a.server.tasks.push_notification_sender import PushNotificationEvent
 from a2a.utils.proto_utils import to_stream_response
 from google.protobuf.json_format import MessageToDict
 
+from trellis.runs.webhooks import DELIVERY_HEADER, EVENT_HEADER, SIGNATURE_HEADER, sign
+
 log = logging.getLogger("trellis.a2a.push")
 
 EVENT_NAME: Final = "a2a.task_update"
-SIGNATURE_HEADER: Final = "X-Trellis-Signature"
-EVENT_HEADER: Final = "X-Trellis-Event"
-DELIVERY_HEADER: Final = "X-Trellis-Delivery"
-#: How old a signature a receiver accepts.
-SIGNATURE_TOLERANCE_SECONDS: Final = 300
 #: A2A's own header for the token a caller registered.
 TOKEN_HEADER: Final = "X-A2A-Notification-Token"
 URL_MAX_CHARS: Final = 2048
 LOCAL_SUFFIXES: Final = (".localhost", ".local", ".internal")
 ATTEMPTS: Final = 3
 TIMEOUT_SECONDS: Final = 10.0
-
-
-def sign(secret: str, timestamp: int, body: bytes) -> str:
-    digest = hmac.new(secret.encode(), f"{timestamp}.".encode() + body, sha256).hexdigest()
-    return f"t={timestamp},v1={digest}"
-
-
-def verify_signature(
-    secret: str, header: str | None, body: bytes, *, now: int | None = None
-) -> bool:
-    """Whether ``header`` signs ``body`` with ``secret`` and is recent (a receiver's check)."""
-    parts = dict(p.split("=", 1) for p in (header or "").split(",") if "=" in p)
-    stamp, digest = parts.get("t", ""), parts.get("v1", "")
-    if not stamp.isdigit() or not digest:
-        return False
-    current = int(time.time()) if now is None else now
-    if abs(current - int(stamp)) > SIGNATURE_TOLERANCE_SECONDS:
-        return False
-    expected = sign(secret, int(stamp), body).partition(",v1=")[2]
-    return hmac.compare_digest(expected, digest)
 
 
 class TargetRefused(ValueError):

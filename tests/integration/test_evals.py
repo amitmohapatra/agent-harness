@@ -137,17 +137,17 @@ async def test_a_failing_item_a_pausing_item_and_a_failing_evaluator_stop_nothin
 async def test_an_item_the_harness_cannot_even_start_is_an_error(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from trellis.harness.clients.runs import RunStoreError
+    from trellis.runs import DependencyUnavailableError
 
     async def refused(*args: Any, **kwargs: Any) -> Any:
-        raise RunStoreError("agent-runs is down")
+        raise DependencyUnavailableError("agent-runs is down", status=503)
 
-    monkeypatch.setattr(harness.runs, "started", refused)
+    monkeypatch.setattr(harness.runs, "start", refused)
     agent = harness.wrap(capital, id="capitals")
     report = await harness.evaluate(agent, [{"input": "France"}], [exact_match()])
     [item] = report.items
     assert item.status == "error" and item.run_id is None
-    assert item.error == "RunStoreError: agent-runs is down"
+    assert item.error == "DependencyUnavailableError: agent-runs is down"
 
 
 async def test_a_cancelled_run_is_reported_cancelled(harness: Harness) -> None:

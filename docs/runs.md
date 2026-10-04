@@ -1,8 +1,16 @@
 # Runs, workers, schedules
 
-Every run has a record (contracts `RunRecord`): in agent-runs when `RUNS_URL` is set, in
-process otherwise (`LocalRuns`, same behaviour, nothing survives a restart). Both are in
-`trellis/harness/clients/runs.py`.
+This page is Way 1, wrapped: the harness records every run of an agent it wraps, and gives
+you the inbox, schedules and workers. A team that keeps its own framework (LangGraph, OpenAI
+Agents, the Claude Agent SDK, plain code) uses agent-runs directly, with the same calls:
+`trellis.runs.RunsClient` (pip `trellis-runs`;
+[its README](https://github.com/amitmohapatra/agent-runs/blob/main/sdk/python/README.md)).
+
+Every run has a record (contracts `RunRecord`): in agent-runs when `RUNS_URL` is set
+(`h.runs` is a `trellis.runs.RunsClient`), in process otherwise (`h.runs` is a `LocalRuns`:
+same behaviour, nothing survives a restart). Both are the harness's `RunStore`
+(`trellis/harness/runs.py`): the part of `RunsClient` the harness calls, with the same
+signatures.
 
 | Call | Record |
 |---|---|
@@ -77,33 +85,47 @@ event and a log line — the run goes on, and the next save tries again; a save 
 
 ## Schedules
 
-One `POST /v1/schedules`: agent-runs upserts on `(tenant, agent, on_behalf_of, cadence,
-sha256 of the canonical input)`, so scheduling the same thing again (a redeploy) answers the
-schedule that exists, unchanged. The cadence is a cron expression or one of `hourly`, `daily`,
-`weekly`, `weekdays`, `manual`. Pause and resume a schedule in agent-runs:
-`PATCH /v1/schedules/{id} {"enabled": false | true}`. In process, a due schedule fires when a
-worker asks for work; in agent-runs its ticker queues the run.
+`agent.schedule` is one `runs.schedules.create(spec)` (`POST /v1/schedules`): agent-runs upserts
+on `(tenant, agent, on_behalf_of, cadence, sha256 of the canonical input)`, so scheduling the
+same thing again (a redeploy) answers the schedule that exists, unchanged. The cadence is a cron
+expression or one of `hourly`, `daily`, `weekly`, `weekdays`, `manual`. Pause and resume a
+schedule with `RunsClient`: `await runs.schedules.update(schedule_id,
+ScheduleUpdate(enabled=False))` (or `True`). In process, a due schedule fires when a worker asks
+for work; in agent-runs its ticker queues the run.
 
 ## The inbox
 
 `await h.inbox("role:procurement")` — the paused runs waiting on that assignee (or, with no
-argument, on anyone in the tenant), newest first, as `RunSummary` (`run_id`, `agent_id`,
-`status`, `awaiting` — the interrupt —, `assignee`, `deadline`, `updated_at`). An `ask` with
-no `assignee` waits on the run's user (`user:<user>`). Answer one with `agent.resume`.
+argument, on anyone in the tenant), newest first, as `trellis.runs.RunSummary` (`run_id`,
+`agent_id`, `status`, `awaiting` — the interrupt —, `assignee`, `deadline`, `updated_at`). An
+`ask` with no `assignee` waits on the run's user (`user:<user>`). Answer one with
+`agent.resume`. It is `runs.iterate(status=PAUSED, assignee=..., tenant=..., max_pages=10)`
+with pages of 500 (`INBOX_LIMIT`, `INBOX_MAX_PAGES`): past 5000 runs it returns the newest and
+logs a warning.
 
 Notifications (a run paused, escalated or finished) are agent-runs' tenant webhook
-subscriptions (`POST /v1/webhooks`), not a harness setting.
+subscriptions (`RunsClient.webhooks.create`, `POST /v1/webhooks`), not a harness setting; a
+receiver checks each delivery with `trellis.runs.webhooks.verify_signature`.
 
-## agent-runs wire (0.2)
+## agent-runs wire
 
-`X-Api-Key: TRELLIS_API_KEY` on every call, `X-Trellis-Tenant` naming the run's tenant.
-`POST /v1/runs` (`RunStart` + `queue`), `POST /v1/runs/claim` (`{run, lease}` or `204`),
-`POST /v1/runs/{id}/heartbeat` (with the progress `checkpoint` when there is one), `POST /v1/runs/{id}/pause?worker_id=` (an `Interrupt` and the
-checkpoint), `POST /v1/runs/{id}/resume` (an `InterruptResolution`),
-`POST /v1/runs/{id}/finish?worker_id=`, `POST /v1/runs/{id}/artifacts?worker_id=&checksum=`
-(an `ask` payload, → `ArtifactRef`), `GET /v1/artifacts/{id}`, `GET /v1/runs/{id}`,
-`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=` (summaries, page by page),
-`POST /v1/schedules` (`ScheduleSpec`).
+`RunsClient` sends `X-API-Key: TRELLIS_API_KEY` on every call. The harness calls, by operation
+id: `runs.start` (`POST /v1/runs`, `RunStart` + `queue`), `runs.claim`
+(`POST /v1/runs/claim` → `Claimed{run, lease}` or `204`), `runs.heartbeat`
+(`POST /v1/runs/{id}/heartbeat`, with the progress `checkpoint` when there is one → `Lease`),
+`runs.pause` (`POST /v1/runs/{id}/pause?worker_id=`, an `Interrupt` and the checkpoint),
+`runs.resume` (`POST /v1/runs/{id}/resume`, an `InterruptResolution`), `runs.finish`
+(`POST /v1/runs/{id}/finish?worker_id=`), `runs.get` (`GET /v1/runs/{id}`), `runs.list`
+page by page (`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=`, the inbox),
+`artifacts.upload` (`POST /v1/runs/{id}/artifacts?worker_id=&checksum=`, an `ask` payload →
+`ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`) and `schedules.create`
+(`POST /v1/schedules`, `ScheduleSpec`).
+
+**The tenant is explicit.** A call whose body names the tenant (a start, a pause, a schedule)
+sends it as `X-Trellis-Tenant`; every other call the harness makes passes `tenant=` — the run's
+own, from its record or its runtime — so a platform key (which has no tenant of its own) works
+on every call, and nothing is remembered between calls. `h.inbox`, `h.feedback` and
+`agent.resume` take `tenant=` for a platform key, like `agent.run`.
 
 Every call is retried when it fails on the way — a transport error (a refused connection, a
 timeout), `429`, `502`, `503` or `504` — up to 3 times, after the `Retry-After` agent-runs sent
@@ -113,18 +135,17 @@ idempotent on its id, a pause or finish repeated by the same worker with the sam
 answers the stored record, an artifact is stored once per checksum, a schedule is upserted. A
 claim whose answer was lost leaves that run leased to this worker unworked until the lease
 lapses (60 s), when agent-runs queues it again — late, never lost or run twice at once. A
-pause or finish the store refuses as a conflict is read back once: when the run already is
-what was written (the first attempt landed, its answer did not), the run goes on as recorded —
-it is not failed, queued again or executed again.
+pause or finish the store refuses as a conflict (`ConflictError`) is read back once: when the
+run already is what was written (the first attempt landed, its answer did not), the run goes on
+as recorded — it is not failed, queued again or executed again.
 
-A refusal raises `RunStoreError` — with the problem's `code`, the `status` and `retryable`, so a
-run that fails on it keeps whether it may be retried — read from agent-runs' problem document
-(RFC 9457) by its `code`: `LEASE_LOST` is `LeaseLost` (the worker no longer holds the run: it
-stops and writes nothing more), `CONFLICT` is `Conflict` (a run id taken, an answer to another
-interrupt, an illegal transition), `NOT_FOUND` is `NotFound`; an answer without a code is read
-by its status (`409` `Conflict`, `404` `NotFound`). A heartbeat refused with `409`, whatever its
-code, is `LeaseLost`. A call that still fails after its retries raises `RunStoreError` with
-`retryable` true.
-
-The inbox follows agent-runs' `Link: <…>; rel="next"` cursor page by page (500 runs a page), up
-to 10 pages; past that it returns the newest 5000 and logs a warning.
+A refusal raises the SDK's errors (`trellis.runs`), read from agent-runs' problem document
+(RFC 9457) by its `code`: every one is a `RunsError` with the problem's `code`, the `status` and
+`retryable` (so a run that fails on it keeps whether it may be retried). `LEASE_LOST` is
+`LeaseLostError` — the worker no longer holds the run: it stops and writes nothing more — and is
+**not** a `ConflictError`, so the conflict read-back above never swallows a lost lease;
+`CONFLICT` is `ConflictError` (a run id taken, an answer to another interrupt, an illegal
+transition); `NOT_FOUND` is `NotFoundError` (a read by id answers `None` instead). A heartbeat
+refused with `409`, whatever its code, is `LeaseLostError`. A call that still fails after its
+retries raises `DependencyUnavailableError`, `retryable` true. `LocalRuns` raises the same
+classes.

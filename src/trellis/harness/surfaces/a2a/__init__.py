@@ -74,7 +74,9 @@ def mount(app: Any, agent: Agent, *, url: str, identity: UserResolver | None = N
     configs = InMemoryPushNotificationConfigStore(owner_resolver=owner(user_of))
     notifier = PushNotifier(configs)
     card = agent_card(agent, url)
-    tasks = RunTaskStore(agent.harness.runs, agent_id=agent.id, user_of=user_of)
+    tasks = RunTaskStore(
+        agent.harness.runs, agent_id=agent.id, user_of=user_of, tenant=agent.harness.tenant
+    )
     handler = DefaultRequestHandler(
         agent_executor=RunExecutor(agent, user_of, tasks),
         task_store=tasks,
