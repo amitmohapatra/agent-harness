@@ -655,6 +655,37 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(
         assert [m.content for m in await thread.history()][-1] == done.answer
 
 
+@pytest.mark.timeout(TIMEOUT_SECONDS)
+async def test_a_queued_graph_paused_in_one_worker_is_continued_by_another(
+    tmp_path: Path,
+) -> None:
+    """Two worker processes, each with the graph and its own InMemorySaver: the approval asked
+    in the first is answered from the run's journal in the second (its checkpointer does not
+    hold the pause), and the call runs once."""
+    async with live_harness() as first, live_harness() as second:
+        case = Case(first, "langgraph", tmp_path)
+        plan = [(case.reorder, {"sku": "A-1", "qty": 20})]
+
+        async def worker_agent(h: Harness) -> Agent:
+            model = PlannedChatModel(plan=plan)
+            tools = await h.tools(*case.tools(), framework="langgraph")
+            graph = create_agent(model, tools=tools, checkpointer=InMemorySaver())
+            return h.wrap(graph, id=case.agent_id)
+
+        here, there = await worker_agent(first), await worker_agent(second)
+        handle = await here.start(QUESTION, user=case.user, thread=case.thread)
+        assert await first.worker([here], concurrency=1).run_once()
+        paused = await handle.result(timeout=30)
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        queued = await here.resume(paused.interrupt.interrupt_id, "approve", reviewer="fv-lead")
+        assert queued.status is RunStatus.QUEUED
+        assert await second.worker([there], concurrency=1).run_once()
+        done = await handle.result(timeout=30)
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert done.answer == "Done. ordered 20 x A-1" and case.ledger == ["reorder:A-1:20"]
+        assert (await stored(first, handle.run_id)).attempt == 2
+
+
 # longer than the others: the ticker fires the schedule within the next two minutes
 @pytest.mark.timeout(420)
 async def test_a_schedule_fires_through_the_ticker_to_a_worker(tmp_path: Path) -> None:
