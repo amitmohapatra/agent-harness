@@ -2,7 +2,8 @@
 
 1. **replay** — a call the journal already has (a resumed run re-planning the same step)
    returns its recorded output and runs nothing;
-2. **policy** — the risk tier: ``auto`` runs, ``notify`` is announced on the run's stream,
+2. **policy** — the risk tier, from the tool's governance as the catalog says at the time of
+   the call (``Agent.governing``): ``auto`` runs, ``notify`` is announced on the run's stream,
    ``ask`` pauses the run for approval (an approver may edit the arguments, or reject);
 3. **execution** — inside a span, with ``TOOL_CALL_*`` events around it;
 4. **record** — journaled for a later resume (and, in a worker, saved as the run's progress
@@ -55,7 +56,9 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         _events(runtime, ref, tool_call, ToolOutcome(tool=tool.name, output=output, cached=True))
         return ToolOutcome(tool=tool.name, output=output, cached=True)
 
-    chosen, why = tier(tool, args)
+    # the tier and rule as the catalog says now (a graph's tools were built before)
+    governing = await runtime.agent.governing(runtime, tool)
+    chosen, why = tier(governing, args)
     if chosen is Tier.ASK:
         resolution = await runtime.approve(tool_call, why)
         decision = answer_of(resolution)  # raises RunCancelled on CANCEL
@@ -74,7 +77,9 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
             args = decision
             tool_call = tool_call.model_copy(update={"args": args})
     elif chosen is Tier.NOTIFY:
-        runtime.events.custom(NOTICE, tool=tool.name, args=args, side_effects=tool.side_effects)
+        runtime.events.custom(
+            NOTICE, tool=tool.name, args=args, side_effects=governing.side_effects
+        )
 
     runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool.name)
     runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)

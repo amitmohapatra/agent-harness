@@ -127,10 +127,16 @@ agent = h.wrap(graph, id="stock")
 ```
 
 The result holds `stock`, the MCP tools the virtual key allows and (memory on) the memory
-tools. `framework="openai-agents"` returns `FunctionTool`s; `framework="claude-agent-sdk"`
-returns one in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its
-tools, `mcp__trellis__<tool>`, in `allowed_tools`). A LangGraph agent's tool hints are asked
-for among these tools.
+tools. `framework="openai-agents"` returns `FunctionTool`s (for an agent reached by a handoff,
+whose tools `wrap(tools=)` does not reach); `framework="claude-agent-sdk"` returns one
+in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its tools,
+`mcp__trellis__<tool>`, in `allowed_tools`). A LangGraph agent's tool hints are asked for among
+these tools.
+
+The tools are built once, but governed at each call: a call reads the tier and `approve_when`
+the catalog has *then* — the run's toolbox, or that `h.tools` call's own toolbox, kept fresh the
+same way — so an administrator's rule reaches a graph compiled before it was set, within the
+30 s the catalog is cached.
 
 ## Inside a run
 

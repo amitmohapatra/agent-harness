@@ -261,7 +261,10 @@ warning is logged once. Every call, whoever makes it, goes through `tools/bridge
 1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
    recorded output is returned and nothing runs;
 2. **policy** — the tier from the tool's side effects (annotations → declaration → the
-   catalog's `risk`): `read` runs, `write` runs and is announced (`tool_notice` event),
+   catalog's `risk`), as the governance stands at the time of the call (`Agent.governing`: the
+   run's toolbox, or — for a tool `h.tools` built into a target, e.g. an OpenAI Agents handoff's
+   — the toolbox of that `h.tools` call, so a rule set after a graph was compiled still
+   applies): `read` runs, `write` runs and is announced (`tool_notice` event),
    `irreversible` asks for approval. The catalog's `approve_when` replaces the tier: it asks
    exactly when the expression holds, evaluated by `trellis.memory.approval` — the memory
    service's own implementation, which also writes and validates the rules (a rule that cannot
