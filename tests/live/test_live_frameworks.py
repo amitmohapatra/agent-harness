@@ -51,14 +51,16 @@ def stock(sku: str) -> int:
     return {"A-1": 42, "B-2": 0}.get(sku.upper(), 0)
 
 
-def chat_model() -> ChatOpenAI:
-    """A model through Bifrost, with its own HTTP client: langchain-openai otherwise shares
-    one per process, bound to the event loop of the test that made it."""
+async def chat_model(h: Harness) -> ChatOpenAI:
+    """A model through Bifrost with the harness's virtual key and ``h.model_headers()`` (the
+    gateway adds none of the key's MCP tools), with its own HTTP client: langchain-openai
+    otherwise shares one per process, bound to the event loop of the test that made it."""
     return ChatOpenAI(
         base_url=BIFROST_URL,
-        api_key="unused",  # type: ignore[arg-type]
+        api_key=h.settings.bifrost_virtual_key,  # type: ignore[arg-type]
         model=MODEL,
         max_tokens=2048,  # type: ignore[call-arg]
+        default_headers=await h.model_headers(),
         http_async_client=httpx.AsyncClient(timeout=120),
     )
 
@@ -68,17 +70,22 @@ Build = Callable[[Harness, str, Path], Awaitable[tuple[Any, list[Any]]]]
 
 async def langgraph(h: Harness, wiki: str, tmp: Path) -> tuple[Any, list[Any]]:
     tools = await h.tools(stock, framework="langgraph")  # + the key's MCP tool + memory tools
-    return create_agent(chat_model(), tools=tools, system_prompt=SYSTEM), []
+    return create_agent(await chat_model(h), tools=tools, system_prompt=SYSTEM), []
 
 
 async def deep_agent(h: Harness, wiki: str, tmp: Path) -> tuple[Any, list[Any]]:
     tools = await h.tools(stock, framework="langgraph")
-    return create_deep_agent(model=chat_model(), tools=tools, system_prompt=SYSTEM), []
+    return create_deep_agent(model=await chat_model(h), tools=tools, system_prompt=SYSTEM), []
 
 
 async def openai_agents(h: Harness, wiki: str, tmp: Path) -> tuple[Any, list[Any]]:
     model = OpenAIChatCompletionsModel(
-        model=MODEL, openai_client=AsyncOpenAI(base_url=BIFROST_URL, api_key="unused")
+        model=MODEL,
+        openai_client=AsyncOpenAI(
+            base_url=BIFROST_URL,
+            api_key=h.settings.bifrost_virtual_key,
+            default_headers=await h.model_headers(),
+        ),
     )
     return OpenAIAgent(name="stock", instructions=SYSTEM, model=model), [stock]
 
