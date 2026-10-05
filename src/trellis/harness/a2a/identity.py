@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 from a2a.server.context import ServerCallContext
 
+from trellis.harness.identity import IDENTITY_HEADER
+
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
 
@@ -26,8 +28,6 @@ EXTENSION_DESCRIPTION: Final = (
     "The caller's tenant and user as trusted platform context, set by the deployment's "
     "authenticated edge and never read from the message."
 )
-#: Lower case: the SDK hands the executor lower-cased request headers.
-IDENTITY_HEADER: Final = "x-trellis-identity"
 #: A header longer than this is refused rather than parsed.
 HEADER_MAX_CHARS: Final = 4096
 #: The user a call without any identity runs as (with a warning, once per server).
@@ -76,12 +76,6 @@ class HeaderIdentity:
         if not user:
             raise IdentityRefused("the platform identity header names no user")
         return str(user)
-
-
-def identity_headers(tenant: str, user: str) -> dict[str, str]:
-    """The outbound trusted identity, for a call this process makes to another agent."""
-    fields = {"tenant_id": tenant, "user_id": user}
-    return {IDENTITY_HEADER: json.dumps(fields, separators=(",", ":"), sort_keys=True)}
 
 
 def header(context: ServerCallContext, name: str) -> str:

@@ -1,12 +1,22 @@
-"""Who a run is for: tenant, user, thread, agent and run — derived once, used everywhere."""
+"""Who a run is for: tenant, user, thread, agent and run — derived once, used everywhere.
+
+What leaves the process for a run says who it is for in one trusted header,
+:data:`IDENTITY_HEADER` (:func:`identity_headers`): the calls a run makes to other agents
+(A2A), and its MCP tool calls through the gateway, which forwards it to the MCP servers whose
+``allowed_extra_headers`` name it.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
 
 from trellis.contracts import AgentExecutionContext
+
+#: The trusted identity header (lower case: the A2A SDK hands a server lower-cased headers).
+IDENTITY_HEADER: Final = "x-trellis-identity"
 
 
 class Identity(BaseModel):
@@ -44,3 +54,9 @@ class Identity(BaseModel):
             thread_id=self.thread,
             workspace_id=self.workspace,
         )
+
+
+def identity_headers(tenant: str, user: str) -> dict[str, str]:
+    """The outbound trusted identity, for a call this process makes for a run."""
+    fields = {"tenant_id": tenant, "user_id": user}
+    return {IDENTITY_HEADER: json.dumps(fields, separators=(",", ":"), sort_keys=True)}

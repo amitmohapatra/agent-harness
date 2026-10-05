@@ -38,8 +38,9 @@ from a2a.types import (
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, TransportProtocol
 
 from trellis.contracts import ToolError, ToolSpec
-from trellis.harness.a2a.identity import EXTENSION_URI, identity_headers
+from trellis.harness.a2a.identity import EXTENSION_URI
 from trellis.harness.a2a.translate import TERMINAL_STATES, value_part, values
+from trellis.harness.identity import identity_headers
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import Tool
 

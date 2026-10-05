@@ -26,7 +26,7 @@ from trellis import Harness, Runtime, Settings, a2a
 from trellis.contracts import RunStatus, ToolError
 from trellis.harness.a2a import InputRequired, RemoteAgent, remote
 from trellis.harness.a2a import client as a2a_client
-from trellis.harness.a2a.identity import IDENTITY_HEADER
+from trellis.harness.identity import IDENTITY_HEADER
 from trellis.harness.runs import LocalRuns
 
 
