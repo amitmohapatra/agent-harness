@@ -29,7 +29,8 @@ one listing.
 The bridge (`tools/bridge.py`) handles every harness tool call whichever framework makes it:
 journal replay, governance (run, announce, or pause for approval:
 [governance.md](governance.md#way-1-inside-hwrap)), execution in an `execute_tool` span between
-`TOOL_CALL_START/ARGS/END/RESULT` events (results previewed up to 2000 characters), then the
+`TOOL_CALL_START/ARGS/END/RESULT` events (arguments and results redacted —
+[observability.md](observability.md#redaction) — and results previewed up to 2000 characters), then the
 record. A tool that raises becomes an error result the model reads (`"<tool> failed: ..."`); a
 pause is never swallowed. A harness tool called outside a run is refused.
 

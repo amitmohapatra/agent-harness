@@ -146,7 +146,7 @@ class Runtime:
         return Tools(self)
 
     def log(self, message: str, **fields: Any) -> None:
-        """A line in the run's log and on its event stream."""
+        """A line in the run's log and on its event stream (its fields redacted there)."""
         log.info("%s", message, extra={"run_id": self.run_id, **fields})
         self.events.custom(LOG, message=message, **fields)
 

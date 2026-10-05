@@ -2,6 +2,12 @@
 
 Nothing is built when nobody listens (``run()`` without a stream costs a length check per
 event). Delivery is synchronous and non-blocking: a listener is a callable that enqueues.
+
+The stream leaves the process (AG-UI, A2A task updates and push notifications), so what tools
+were called with and returned, and the data of custom events, pass the redactor here, once,
+for every listener (``redaction.py``); a tool's output is then cut to a preview. The model and
+the tool itself get the values as they are. The answer and the pause are not redacted: they
+are what the user asked for and what the person answering needs.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from trellis.contracts import (
     RunEventType,
     RunOutcome,
 )
+from trellis.harness.redaction import DEFAULT as REDACTOR
 
 Listener = Callable[[RunEvent], None]
 
@@ -26,6 +33,8 @@ WARNING: Final = "warning"
 NOTICE: Final = "tool_notice"
 #: The ``CUSTOM`` event name of ``trellis.current().log(...)``.
 LOG: Final = "log"
+#: How much of a tool result rides on the event stream.
+PREVIEW_CHARS: Final = 2000
 
 
 class RunEvents:
@@ -58,10 +67,17 @@ class RunEvents:
         self.emit(type, message_id=message_id, data=data)
 
     def tool(self, type: RunEventType, tool_call_id: str, **data: Any) -> None:
-        self.emit(type, tool_call_id=tool_call_id, data=data)
+        """A step of a tool call: its ``args`` and ``output`` redacted, the output a preview."""
+        if not self._listeners:
+            return
+        redacted = REDACTOR.redact_input(data)
+        if "output" in redacted:
+            redacted["output"] = _preview(redacted["output"])
+        self.emit(type, tool_call_id=tool_call_id, data=redacted)
 
     def custom(self, name: str, **data: Any) -> None:
-        self.emit(RunEventType.CUSTOM, data={"name": name, **data})
+        if self._listeners:
+            self.emit(RunEventType.CUSTOM, data={"name": name, **REDACTOR.redact_input(data)})
 
     def warning(self, code: str, message: str) -> None:
         self.custom(WARNING, code=code, message=message)
@@ -77,3 +93,12 @@ class RunEvents:
         if interrupt is not None:
             data["interrupt"] = interrupt.awaiting()
         self.emit(RunEventType.RUN_FINISHED, outcome=outcome, error=error, data=data)
+
+
+def _preview(output: Any) -> Any:
+    if output is None or isinstance(output, bool | int | float):
+        return output
+    text = output if isinstance(output, str) else repr(output)
+    if isinstance(output, dict | list) and len(text) <= PREVIEW_CHARS:
+        return output
+    return text if len(text) <= PREVIEW_CHARS else text[:PREVIEW_CHARS] + "…"

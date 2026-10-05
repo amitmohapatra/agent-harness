@@ -44,6 +44,7 @@ from trellis.harness.evals import (
 )
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
+from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, run_of
 from trellis.harness.telemetry import output, retrieval_span
@@ -358,6 +359,7 @@ class Agent:
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
         if memory is not None and runtime.writes_memory and call.tool not in _pull(self):
+            call, outcome = _redacted(call, outcome)
             await self.harness.writes.submit(
                 "memory.record_tool",
                 lambda: memory.record_tool(call, outcome),
@@ -478,7 +480,7 @@ class Agent:
                     latency_ms=entry.latency_ms,
                     error_class="MCPToolError" if entry.error else None,
                 )
-                await memory.record_tool(call, outcome)
+                await memory.record_tool(*_redacted(call, outcome))
 
         await self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
 
@@ -540,6 +542,16 @@ class Agent:
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
+
+
+def _redacted(call: ToolCall, outcome: ToolOutcome) -> tuple[ToolCall, ToolOutcome]:
+    """A tool call as the memory service's tool records get it: its arguments and output
+    redacted (``redaction.py``), as everything leaving the process is; the model and the tool
+    had them as they are."""
+    return (
+        call.model_copy(update={"args": REDACTOR.redact_input(call.args)}),
+        outcome.model_copy(update={"output": REDACTOR.redact_output(outcome.output)}),
+    )
 
 
 def _pull(agent: Agent) -> frozenset[str]:

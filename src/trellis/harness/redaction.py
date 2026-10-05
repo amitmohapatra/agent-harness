@@ -1,4 +1,5 @@
-"""What may leave the process: span attributes, and events a webhook or a peer agent receives.
+"""What may leave the process: span attributes, the run's events (AG-UI, A2A task updates and
+push notifications: ``events.py``), and the tool records sent to the memory service.
 
 The rules are deliberately boring: drop anything whose *name* looks like a secret, drop
 anything whose value looks like a credential, mask e-mail addresses, and cut long values. A
@@ -81,7 +82,8 @@ _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 
 class Redactor:
-    """The contracts ``TelemetryRedactor`` every span and outbound event goes through."""
+    """The contracts ``TelemetryRedactor`` every span, outbound event and memory tool record
+    goes through."""
 
     __slots__ = ()
 

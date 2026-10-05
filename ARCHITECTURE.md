@@ -217,6 +217,8 @@ flowchart TB
   runs --> sdk
   a2aserver --> sdk
   telemetry --> redaction["redaction.Redactor"]
+  events --> redaction
+  agent --> redaction
   pipeline --> telemetry
   bridge --> telemetry
 ```
@@ -640,6 +642,8 @@ The OTel API only: an `invoke_agent` span per attempt in a trace whose id derive
 id (every attempt, score and piece of feedback of a run in one trace), `execute_tool`,
 `chat` (the `ReAct` model calls) and `retrieve memory` spans with GenAI attributes and
 Langfuse's trace attributes, `score` spans; counters `trellis.runs`, `trellis.tool_calls`,
-`trellis.writes.failed`. Attributes pass the redactor and are built only for a recording span.
+`trellis.writes.failed`. Attributes pass the redactor and are built only for a recording span;
+so do a tool call's arguments and output on the event stream (`events.py`: AG-UI, A2A, push)
+and in the memory service's tool records (`Agent.record_tool`), once each.
 `OTEL_EXPORTER_OTLP_ENDPOINT` installs an SDK provider with one OTLP exporter unless the
 application installed one. See [docs/observability.md](docs/observability.md).

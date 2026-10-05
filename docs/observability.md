@@ -102,7 +102,17 @@ datasets built from traces are configured in Langfuse. Whether the *harness* got
 
 ## Redaction
 
-Every span attribute passes `trellis.harness.redaction`: names that look like secrets
+Everything a run sends out of the process passes `trellis.harness.redaction`, once, where it
+leaves: every span attribute; on the run's event stream (`agent.stream`, and so `serve_chat`'s
+AG-UI events, `serve_a2a`'s task updates and its push notifications), each tool call's
+arguments and output and the data of `CUSTOM` events (`tool_notice`, `log`, `warning`); and the
+tool calls recorded in the memory service (the arguments, the output, and the spooled copy of a
+write that waits for the service). The tool and the model get the values as they are, and so
+does what the run needs to continue: the journal and the interrupt kept in agent-runs. Two
+things on the stream are not redacted: the answer (text deltas, the result) — what the user
+asked for — and the pause (`INTERRUPT`, the interrupt in `RUN_FINISHED`) — the question, its
+payload and the tool call to approve, which the person answering needs to see, as the inbox
+shows them. The rules are the same everywhere and need no setting: names that look like secrets
 (`api_key`, `password`, `token`...) and values that look like credentials (bearer tokens,
 JWTs, `sk-...`, long key-like blobs) become `[redacted]`, e-mail addresses are masked, long
 values are cut at 2000 characters. Names are matched by their words, not substrings

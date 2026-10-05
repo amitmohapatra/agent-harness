@@ -63,7 +63,8 @@ In the background, after each attempt — whether it succeeded, paused or failed
   a message it has already seen once. A run started with no thread — a scheduled run — is its
   own thread (`thread = run_id`);
 * every harness tool call (not the memory tools, which the service logs itself), and Code
-  Mode's nested calls from Bifrost's log;
+  Mode's nested calls from Bifrost's log — their arguments and outputs redacted
+  ([observability.md](observability.md#redaction));
 * approve/reject/edit decisions as `TOOL_CALL` feedback.
 
 ## Background writes: what is guaranteed
