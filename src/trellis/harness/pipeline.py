@@ -69,12 +69,21 @@ class Budget:
 
     @classmethod
     def of(
-        cls, *, timeout: float | None, worked: float = 0.0, deadline: datetime | None
+        cls,
+        *,
+        timeout: float | None,
+        worked: float = 0.0,
+        deadline: datetime | None,
+        remaining: float | None = None,
     ) -> Budget | None:
         """The tighter of the working-time limit (``timeout`` less the seconds ``worked``
-        in earlier attempts) and the ``deadline``; ``None`` when the run has neither."""
+        in earlier attempts; or what a worker's lease says is ``remaining``: the run's limit
+        or the service's, the lesser) and the ``deadline``; ``None`` when there is neither."""
         found: list[Budget] = []
-        if timeout is not None:
+        if remaining is not None:
+            limit = "its time limit" if timeout is None else f"its time limit of {timeout:g}s"
+            found.append(cls(remaining, _timed_out("run_timeout", f"the run worked past {limit}")))
+        elif timeout is not None:
             message = f"the run worked past its time limit of {timeout:g}s"
             found.append(cls(timeout - worked, _timed_out("run_timeout", message)))
         if deadline is not None:
@@ -536,7 +545,7 @@ async def _settle_cancelled(
             identity.run_id, RunStatus.CANCELLED, worker_id=worker_id, tenant=identity.tenant
         )
     except (LeaseLostError, ConflictError):
-        log.info("run %s was taken over by another worker; nothing written", identity.run_id)
+        log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)
     if reason is not None:
         log.info("run %s was cancelled: %s", identity.run_id, reason)
         events.finished(RunOutcome.CANCELLED, reason=reason)

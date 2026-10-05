@@ -189,20 +189,23 @@ class Agent:
     async def cancel(
         self, run_id: str, *, reason: str | None = None, tenant: str | None = None
     ) -> RunRecord:
-        """Cancel a run, whatever it is doing: one running in this process stops at once and
-        ends ``CANCELLED`` with ``reason``; a queued or paused one is ``CANCELLED`` in the run
-        store; one a worker elsewhere runs is stopped by that worker. The run's record is
-        returned. ``tenant`` is the run's, named by a platform key only."""
+        """Cancel a run, whatever it is doing, keeping ``reason`` with it: a queued or paused
+        run is ``CANCELLED`` at once; one running in this process stops now and ends
+        ``CANCELLED``; one a worker elsewhere runs is stopped by that worker at its next
+        heartbeat (agent-runs). A run that already ended raises ``ConflictError``. The run's
+        record is returned. ``tenant`` is the run's, named by a platform key only."""
         tenant = await self.harness.tenant(tenant)
+        record = await self.harness.runs.cancel(run_id, reason=reason, tenant=tenant)
         runtime = self.running.get(run_id)
-        if runtime is None or runtime.tenant != tenant or runtime.running_in is None:
-            raise ConfigurationError(f"no run {run_id} of agent {self.id} runs in this process")
+        if runtime is None:
+            return record
         runtime.cancelled = reason or "cancelled"
+        assert runtime.running_in is not None
         runtime.running_in.cancel()
         await asyncio.wait({runtime.running_in})
-        record = await self.harness.runs.get(run_id, tenant=tenant)
-        assert record is not None
-        return record
+        found = await self.harness.runs.get(run_id, tenant=tenant)
+        assert found is not None
+        return found
 
     async def resume(
         self,
@@ -366,10 +369,16 @@ class Agent:
         )
 
     async def _claimed(
-        self, record: RunRecord, worker_id: str, *, lease_seconds: int | None = None
+        self,
+        record: RunRecord,
+        worker_id: str,
+        *,
+        lease_seconds: int | None = None,
+        remaining: float | None = None,
     ) -> Result:
         """A worker's run: fresh from the queue, continuing after a resolution, or after a
-        worker died (its checkpoint is the progress it saved)."""
+        worker died (its checkpoint is the progress it saved). ``remaining`` is the working
+        time agent-runs says the run has left (its lease's)."""
         artifacts = self.harness.runs.artifacts
         return await pipeline.attempt(
             self,
@@ -380,7 +389,7 @@ class Agent:
             resolution=record.last_resolution,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
-            budget=_budget(record),
+            budget=_budget(record, remaining),
             started_on=record.agent_version,
         )
 
@@ -664,11 +673,15 @@ class Agent:
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
 
 
-def _budget(record: RunRecord) -> pipeline.Budget | None:
+def _budget(record: RunRecord, remaining: float | None = None) -> pipeline.Budget | None:
     """What is left of a run's time, from its record: the working-time limit less the time
-    it already worked (agent-runs keeps it across attempts, a crash included), the deadline."""
+    it already worked (agent-runs keeps it across attempts, a crash included) — or what its
+    lease says is ``remaining`` — and the deadline."""
     return pipeline.Budget.of(
-        timeout=record.timeout_seconds, worked=record.worked_seconds, deadline=record.deadline
+        timeout=record.timeout_seconds,
+        worked=record.worked_seconds,
+        deadline=record.deadline,
+        remaining=remaining,
     )
 
 
@@ -703,7 +716,7 @@ class RunHandle:
         return record
 
     async def cancel(self, *, reason: str | None = None) -> RunRecord:
-        """Cancel the run (``Agent.cancel``)."""
+        """Cancel the run, whatever it is doing (``Agent.cancel``)."""
         return await self.agent.cancel(self.run_id, reason=reason, tenant=self.tenant)
 
     async def result(self, *, timeout: float | None = None) -> Result:  # noqa: ASYNC109

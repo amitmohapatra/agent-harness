@@ -172,6 +172,11 @@ async def test_every_runs_call_the_harness_makes_speaks_the_contract() -> None:
                 200,
                 record.model_copy(update={"status": RunStatus.SUCCESS}).model_dump(mode="json"),
             ),
+            ("POST", "/v1/runs/run_1/release"): (200, record.model_dump(mode="json")),
+            ("POST", "/v1/runs/run_1/cancel"): (
+                200,
+                record.model_copy(update={"status": RunStatus.CANCELLED}).model_dump(mode="json"),
+            ),
             ("GET", "/v1/runs/run_1"): (200, record.model_dump(mode="json")),
             ("GET", "/v1/runs"): (200, [summary]),
             ("POST", "/v1/runs/run_1/artifacts"): (201, artifact),
@@ -185,7 +190,8 @@ async def test_every_runs_call_the_harness_makes_speaks_the_contract() -> None:
 
     respx.route(host="runs.test").mock(side_effect=answer)
     runs: RunStore = RunsClient("http://runs.test", api_key="key")
-    await runs.start(start)
+    timed = start.model_copy(update={"timeout_seconds": 60, "agent_version": "2026.10"})
+    await runs.start(timed)
     await runs.start(start, queue=True)
     assert await runs.claim("w", ["a"], lease_seconds=60) is not None
     await runs.heartbeat("run_1", "w", lease_seconds=60, tenant="t")
@@ -196,6 +202,8 @@ async def test_every_runs_call_the_harness_makes_speaks_the_contract() -> None:
     )
     await runs.resume(resolution, tenant="t")
     await runs.finish("run_1", RunStatus.SUCCESS, output={"ok": True}, worker_id="w", tenant="t")
+    await runs.release("run_1", "w", checkpoint={"calls": {}}, tenant="t")
+    await runs.cancel("run_1", reason="a duplicate", tenant="t")
     await runs.get("run_1", tenant="t")
     waiting = runs.iterate(status=RunStatus.PAUSED, assignee="role:ops", limit=500, tenant="t")
     assert [s.run_id async for s in waiting] == ["run_1"]

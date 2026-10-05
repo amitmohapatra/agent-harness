@@ -15,8 +15,9 @@ import pytest
 
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import ConfigurationError, RunEventType, RunOutcome, RunStatus
+from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness.runs import LocalRuns
+from trellis.runs import ConflictError, NotFoundError
 
 
 class Crash(BaseException):
@@ -235,7 +236,42 @@ async def test_a_cancelled_queued_run_ends_cancelled_and_its_caller_too(
         await running
 
 
-async def test_a_run_not_in_this_process_cannot_be_cancelled_here(harness: Harness) -> None:
-    agent = harness.wrap(slow, id="slow")
-    with pytest.raises(ConfigurationError, match="no run run_x of agent slow runs in this"):
-        await agent.cancel("run_x")
+async def test_a_waiting_run_is_cancelled_at_once_and_an_ended_one_is_not(
+    harness: Harness,
+) -> None:
+    async def asks(input: str, agent: Runtime) -> str:
+        return await agent.ask("Go on?")
+
+    agent = harness.wrap(asks, id="asks")
+    paused = await agent.run("x", user="u")
+    assert (await agent.cancel(paused.run_id)).status is RunStatus.CANCELLED
+    handle = await agent.start("x", user="u")
+    assert (await handle.cancel(reason="not needed")).status is RunStatus.CANCELLED
+    assert not await harness.worker([agent]).run_once()  # nothing left to claim
+    with pytest.raises(ConflictError, match="already ended CANCELLED"):
+        await agent.cancel(paused.run_id)
+    with pytest.raises(NotFoundError):
+        await agent.cancel("run_elsewhere")
+
+
+async def test_a_run_cancelled_elsewhere_is_stopped_by_its_worker(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trellis.runs import worker as claim_loop
+
+    monkeypatch.setattr(claim_loop, "_sleep", lambda seconds: asyncio.sleep(0.01))
+    started = asyncio.Event()
+
+    async def waits(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    agent = harness.wrap(waits, id="waits")
+    handle = await agent.start("x", user="u", timeout=60)
+    working = asyncio.create_task(harness.worker([agent]).run_once())
+    await started.wait()
+    # another process cancels it: only agent-runs (here, the store) is told
+    await harness.runs.cancel(handle.run_id, reason="dup", tenant=handle.tenant)
+    assert await asyncio.wait_for(working, 5)
+    assert (await handle.status()).status is RunStatus.CANCELLED

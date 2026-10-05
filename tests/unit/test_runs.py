@@ -253,3 +253,42 @@ async def test_a_runs_working_time_grows_each_time_it_stops_running() -> None:
     await asyncio.sleep(0.02)
     done = await runs.finish("run_1", RunStatus.SUCCESS, tenant="t")
     assert 0.04 <= done.worked_seconds < paused.worked_seconds + 0.05
+
+
+async def test_a_cancel_stops_a_held_run_through_its_worker() -> None:
+    runs = LocalRuns()
+    await runs.start(start(), queue=True)
+    claimed = await runs.claim("w", ["a"], lease_seconds=30)
+    assert claimed is not None and not claimed.lease.cancel_requested
+    asked = await runs.cancel("run_1", reason="dup", tenant="t")
+    assert asked.status is RunStatus.RUNNING  # its worker stops it
+    assert (await runs.cancel("run_1", reason="dup")).status is RunStatus.RUNNING  # a retry
+    lease = await runs.heartbeat("run_1", "w", lease_seconds=300, checkpoint={"calls": {}})
+    assert lease.cancel_requested and lease.expires_at == claimed.lease.expires_at  # not extended
+    released = await runs.release("run_1", "w", checkpoint={"calls": {"k": [1]}})
+    assert released.status is RunStatus.CANCELLED  # released after the cancel: it ends
+    with pytest.raises(ConflictError, match="already ended CANCELLED"):
+        await runs.cancel("run_1")
+
+    await runs.start(start("run_2"), queue=True)
+    await runs.claim("w", ["a"], lease_seconds=-1)  # its worker dies
+    await runs.cancel("run_2")
+    assert await runs.claim("w2", ["a"]) is None  # the lapsed lease cancels it, not a retry
+    lapsed = await runs.get("run_2")
+    assert lapsed is not None and lapsed.status is RunStatus.CANCELLED
+
+
+async def test_a_released_run_goes_back_on_the_queue_with_its_progress() -> None:
+    runs = LocalRuns()
+    timed = start().model_copy(update={"timeout_seconds": 60})
+    await runs.start(timed, queue=True)
+    claimed = await runs.claim("w", ["a"])
+    assert claimed is not None and claimed.lease.remaining_seconds == 60
+    released = await runs.release("run_1", "w", checkpoint={"calls": {"k": [1]}}, tenant="t")
+    assert released.status is RunStatus.QUEUED and released.attempt == 2
+    again = await runs.claim("w2", ["a"])
+    assert again is not None and again.run.checkpoint == {"calls": {"k": [1]}}
+    assert again.lease.remaining_seconds is not None and again.lease.remaining_seconds < 60
+    await runs.release("run_1", "w2")  # no progress to save: the one there is kept
+    kept = await runs.get("run_1")
+    assert kept is not None and kept.checkpoint == {"calls": {"k": [1]}}

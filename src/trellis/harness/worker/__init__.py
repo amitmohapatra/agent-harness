@@ -1,14 +1,15 @@
 """The worker: ``trellis.runs.Worker`` running wrapped agents.
 
 The claim loop is agent-runs' SDK's (``trellis.runs.Worker``): it claims queued runs of the
-agents, keeps their leases with heartbeats (a lost lease cancels the run, which writes nothing),
-backs off while the queue is empty, runs ``concurrency`` at a time, and on a stop lets the runs
-it holds finish for a grace period before it releases the rest (cancelled with
-``trellis.runs.RELEASED``: nothing written, the lease lapses and another worker runs them
-again). This module hands it each claimed run's agent (``Agent._claimed``: the next attempt,
-with the run's checkpoint as its journal) and, around the loop, the harness's background
-writes: started before the first claim (it replays what an earlier process spooled), drained
-when the loop ends.
+agents, keeps their leases with heartbeats (a lost lease cancels the run, which writes nothing;
+a heartbeat that says the run was cancelled cancels it too, and it ends ``CANCELLED``), backs
+off while the queue is empty, runs ``concurrency`` at a time, and on a stop lets the runs it
+holds finish for a grace period before it releases the rest (cancelled with
+``trellis.runs.RELEASED``: nothing written, and the run goes back on the queue for another
+worker at once). This module hands it each claimed run's agent (``Agent._claimed``: the next
+attempt, with the run's checkpoint as its journal and the working time its lease says is
+left) and, around the loop, the harness's background writes: started before the first claim
+(it replays what an earlier process spooled), drained when the loop ends.
 
     h.worker([agent]).run()                         # in your own process
     python -m trellis.harness.worker app.main:h     # every agent wrapped by that Harness
@@ -80,7 +81,12 @@ class Worker:
     async def _execute(self, job: Job) -> Result:
         """The claimed run's next attempt, as the worker holding its lease."""
         agent = self.agents[job.record.agent_id]
-        return await agent._claimed(job.record, job.worker_id, lease_seconds=job.lease_seconds)
+        return await agent._claimed(
+            job.record,
+            job.worker_id,
+            lease_seconds=job.lease_seconds,
+            remaining=job.remaining_seconds,
+        )
 
     async def _writing(self, loop: Awaitable[None]) -> None:
         self.harness.writes.start()  # replays what an earlier process could not deliver

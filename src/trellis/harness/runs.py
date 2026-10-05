@@ -9,7 +9,12 @@ interchangeable. Both behave the same way:
   again when it ever came from the queue, ``RUNNING`` for the process that resumes it — and
   a ``CANCEL`` ends it;
 * a worker claims a queued run under a lease, heartbeats it, and names itself on the pause
-  and the finish so a worker whose lease lapsed cannot write over another's run.
+  and the finish so a worker whose lease lapsed cannot write over another's run; each lease
+  says the working time the run has left; a stopping worker releases the runs it holds back
+  to the queue;
+* a cancel ends a queued or paused run (or one kept in its caller's process) at once, and asks
+  the worker holding a running one to stop: its heartbeats say ``cancel_requested``, and the
+  run is cancelled when its lease runs out.
 
 A pause also carries the run's checkpoint — its :class:`~trellis.harness.journal.Journal`, what
 a re-run needs — and so may a heartbeat (progress: the journal after a side-effecting call, so
@@ -95,7 +100,7 @@ class RunSchedules(Protocol):
 class RunStore(Protocol):
     """The run store the harness drives: ``trellis.runs.RunsClient`` and :class:`LocalRuns`
     both are one. (The worker loop, ``trellis.runs.Worker``, needs its ``WorkerStore`` part:
-    ``claim``, ``heartbeat``, ``pause`` and ``finish``.)"""
+    ``claim``, ``heartbeat``, ``release``, ``pause`` and ``finish``.)"""
 
     async def start(self, start: RunStart, *, queue: bool = ...) -> RunRecord: ...
 
@@ -117,6 +122,19 @@ class RunStore(Protocol):
         checkpoint: dict[str, Any] | None = ...,
         tenant: str | None = ...,
     ) -> Lease: ...
+
+    async def release(
+        self,
+        run_id: str,
+        worker_id: str,
+        *,
+        checkpoint: dict[str, Any] | None = ...,
+        tenant: str | None = ...,
+    ) -> RunRecord: ...
+
+    async def cancel(
+        self, run_id: str, *, reason: str | None = ..., tenant: str | None = ...
+    ) -> RunRecord: ...
 
     async def pause(
         self,
@@ -184,6 +202,8 @@ class LocalRuns:
         self._leases: dict[str, tuple[str, datetime]] = {}
         #: when each running run last started running
         self._running_since: dict[str, datetime] = {}
+        #: the running runs a worker holds that were asked to stop, and why
+        self._cancelling: dict[str, str | None] = {}
         self._schedules: dict[str, Schedule] = {}
         #: artifact id -> (tenant, bytes)
         self._artifacts: dict[str, tuple[str, bytes]] = {}
@@ -241,10 +261,40 @@ class LocalRuns:
         tenant: str | None = None,
     ) -> Lease:
         record = self._fenced(run_id, worker_id, tenant)
-        lease = self._lease(run_id, worker_id, lease_seconds)
         if checkpoint is not None:
-            self._move(record, record.status, checkpoint=checkpoint)
-        return lease
+            record = self._move(record, record.status, checkpoint=checkpoint)
+        if run_id in self._cancelling:  # asked to stop: the lease is not extended
+            return self._leased(record, worker_id, self._leases[run_id][1])
+        return self._lease(run_id, worker_id, lease_seconds)
+
+    async def release(
+        self,
+        run_id: str,
+        worker_id: str,
+        *,
+        checkpoint: dict[str, Any] | None = None,
+        tenant: str | None = None,
+    ) -> RunRecord:
+        record = self._fenced(run_id, worker_id, tenant)
+        del self._leases[run_id]
+        if checkpoint is not None:
+            record = self._move(record, record.status, checkpoint=checkpoint)
+        return self._requeued(record)
+
+    async def cancel(
+        self, run_id: str, *, reason: str | None = None, tenant: str | None = None
+    ) -> RunRecord:
+        record = self._require(run_id, tenant)
+        if run_id in self._cancelling:
+            return record
+        if record.final:
+            raise _conflict(f"run {run_id} already ended {record.status.value}")
+        if record.status is RunStatus.RUNNING and run_id in self._leases:
+            self._cancelling[run_id] = reason  # its worker stops it
+            return record
+        if run_id in self._queue:
+            self._queue.remove(run_id)
+        return self._move(record, RunStatus.CANCELLED)
 
     async def pause(
         self,
@@ -354,7 +404,22 @@ class LocalRuns:
     def _lease(self, run_id: str, worker_id: str, lease_seconds: int) -> Lease:
         until = datetime.now(UTC) + timedelta(seconds=lease_seconds)
         self._leases[run_id] = (worker_id, until)
-        return Lease(run_id=run_id, worker_id=worker_id, expires_at=until)
+        return self._leased(self._runs[run_id], worker_id, until)
+
+    def _leased(self, record: RunRecord, worker_id: str, until: datetime) -> Lease:
+        """The lease as agent-runs answers it: the working time left, a cancel asked for."""
+        remaining = None
+        if record.timeout_seconds is not None:
+            since = self._running_since.get(record.run_id)
+            stretch = (datetime.now(UTC) - since).total_seconds() if since is not None else 0.0
+            remaining = record.timeout_seconds - record.worked_seconds - stretch
+        return Lease(
+            run_id=record.run_id,
+            worker_id=worker_id,
+            expires_at=until,
+            remaining_seconds=remaining,
+            cancel_requested=record.run_id in self._cancelling,
+        )
 
     def _enqueue(self, run_id: str) -> None:
         self._queue.append(run_id)
@@ -365,6 +430,7 @@ class LocalRuns:
             raise _conflict(f"run {record.run_id}: {record.status} cannot become {status}")
         if status.final:  # an ending clears what the run waited on and would resume from
             changes.update(awaiting=None, checkpoint=None)
+            self._cancelling.pop(record.run_id, None)
         moment = datetime.now(UTC)
         since = self._running_since.pop(record.run_id, None)
         if since is not None and status is not RunStatus.RUNNING:  # it stops working
@@ -381,9 +447,16 @@ class LocalRuns:
         for run_id, (_, until) in list(self._leases.items()):
             if until < now:
                 del self._leases[run_id]
-                record = self._runs[run_id]
-                self._move(record, RunStatus.QUEUED, attempt=record.attempt + 1)
-                self._enqueue(run_id)
+                self._requeued(self._runs[run_id])
+
+    def _requeued(self, record: RunRecord) -> RunRecord:
+        """A running run nobody holds any more back on the queue as its next attempt — or,
+        asked to stop, ``CANCELLED``."""
+        if record.run_id in self._cancelling:
+            return self._move(record, RunStatus.CANCELLED)
+        moved = self._move(record, RunStatus.QUEUED, attempt=record.attempt + 1)
+        self._enqueue(record.run_id)
+        return moved
 
     def _fire_due(self, now: datetime) -> None:
         for schedule in list(self._schedules.values()):
