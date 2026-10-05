@@ -23,6 +23,7 @@ from trellis.harness.sandbox.docker import (
     IDLE,
     OUTPUT_BYTES,
     PIDS_LIMIT,
+    SNAPSHOT,
     WORKDIR,
     WRAPPER,
     Container,
@@ -190,7 +191,7 @@ async def test_a_snapshot_makes_the_sandbox_again_and_delete_removes_both() -> N
         box = await made(docker, SandboxSpec(files={"a.txt": "A"}))
         await box.write("b.txt", b"B")
         snapshot = await provider.snapshot(REF)
-        assert docker.images[snapshot] == REF.labels
+        assert docker.images[snapshot] == {**REF.labels, SNAPSHOT: NAME}
         del docker.containers[NAME]  # lost
         kept = REF.model_copy(update={"snapshot": snapshot})
         again = await provider.create(kept, SandboxSpec(files={"a.txt": "not again"}))
@@ -198,7 +199,10 @@ async def test_a_snapshot_makes_the_sandbox_again_and_delete_removes_both() -> N
         assert await again.read("a.txt") == b"A" and await again.read("b.txt") == b"B"
         await provider.delete(kept)
         assert NAME not in docker.containers and snapshot not in docker.images
-        assert DEFAULT_IMAGE in docker.images  # only its own images
+        docker.images["team/app:1"] = {RUN: "run_1"}  # an image of the same run, not a snapshot
+        await provider.delete(SandboxRef(provider="docker", id="unlabelled"))
+        await provider.delete(kept)
+        assert sorted(docker.images) == [DEFAULT_IMAGE, "team/app:1"]  # only its own snapshots
         await provider.delete(kept)  # gone already: nothing to do
         with pytest.raises(SandboxLost, match="its snapshot are gone"):
             await provider.create(kept, SandboxSpec())

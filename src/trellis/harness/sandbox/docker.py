@@ -44,6 +44,8 @@ DOCKER_SOCKET: Final = "/var/run/docker.sock"
 API_VERSION: Final = "v1.43"
 #: The image of a sandbox whose spec and provider name none (``SANDBOX_IMAGE`` names another).
 DEFAULT_IMAGE: Final = "python:3.12-slim"
+#: The label of a snapshot's image: the sandbox it was taken of (what ``delete`` removes by).
+SNAPSHOT: Final = "trellis.snapshot_of"
 #: Where a command runs, and what a relative path is relative to.
 WORKDIR: Final = "/workspace"
 #: The most processes a sandbox may have at once.
@@ -110,7 +112,8 @@ class DockerSandbox:
             gone = await client.delete(f"/containers/{ref.id}", params={"force": "true"})
             if gone.status_code != 404:
                 _checked(gone, ref)
-            images = await client.get("/images/json", params={"filters": _filter(ref.labels)})
+            snapshots = {"filters": _filter({SNAPSHOT: ref.id})}  # its own images, none other
+            images = await client.get("/images/json", params=snapshots)
             for image in _checked(images, ref).json():
                 removed = await client.delete(f"/images/{image['Id']}", params={"force": "true"})
                 if removed.status_code != 404:
@@ -138,7 +141,8 @@ class DockerSandbox:
     async def snapshot(self, ref: SandboxRef) -> str:
         params = {"container": ref.id, "repo": "trellis-snapshot", "tag": ref.id}
         async with self._client() as client:
-            committed = await client.post("/commit", params=params, json={"Labels": ref.labels})
+            labels = {**ref.labels, SNAPSHOT: ref.id}
+            committed = await client.post("/commit", params=params, json={"Labels": labels})
             return str(_checked(committed, ref).json()["Id"])
 
     def _config(self, ref: SandboxRef, spec: SandboxSpec) -> dict[str, Any]:
