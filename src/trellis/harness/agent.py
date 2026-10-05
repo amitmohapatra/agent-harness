@@ -29,7 +29,7 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import pipeline, skills
+from trellis.harness import pipeline, sandbox, skills
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
@@ -211,8 +211,10 @@ class Agent:
         ``tenant`` is the run's, named by a platform key only."""
         tenant = await self.harness.tenant(tenant)
         runs = self.harness.runs
-        record = await runs.cancel(run_id, reason=reason, tenant=tenant)
         runtime = self.running.get(run_id)
+        # read first: its ending clears the checkpoint, which names the run's sandbox
+        held = await runs.get(run_id, tenant=tenant) if runtime is None else None
+        record = await runs.cancel(run_id, reason=reason, tenant=tenant)
         if runtime is not None:
             runtime.cancelled = reason or "cancelled"
             assert runtime.running_in is not None
@@ -221,6 +223,9 @@ class Agent:
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
+        elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
+            journal = await Journal.read(held.checkpoint, runs.artifacts, tenant=tenant)
+            await sandbox.ended(self, journal, run_id)
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
 
@@ -380,6 +385,7 @@ class Agent:
                 reason=reason_of(resolution),
                 tenant=record.tenant_id,
             )
+            await sandbox.ended(self, journal, record.run_id)
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
