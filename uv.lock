@@ -105,7 +105,7 @@ wheels = [
 
 [[package]]
 name = "bifrost-sdk"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "../bifrost-sdk" }
 dependencies = [
     { name = "httpx" },
@@ -115,6 +115,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
+    { name = "mcp", marker = "extra == 'dev'", specifier = ">=2.2" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },

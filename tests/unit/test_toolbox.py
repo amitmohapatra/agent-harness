@@ -41,19 +41,44 @@ class Def:
 
 
 class Gateway:
-    def __init__(self, defs: list[Def]) -> None:
+    def __init__(
+        self,
+        defs: list[Def],
+        *,
+        bundles: dict[str, list[Def]] | None = None,
+        auto: dict[str, frozenset[str]] | None = None,
+        refuses: bool = False,
+    ) -> None:
         self.defs = defs
+        #: each Virtual MCP's tools, by slug
+        self.bundles = bundles or {}
+        #: each client's tools_to_auto_execute, unless the management API ``refuses``
+        self.auto = auto or {}
+        self.refuses = refuses
         self.executed: list[tuple[str, dict[str, Any], tuple[str, ...]]] = []
+        self.through: list[str | None] = []
         self.listed = 0
 
-    async def tools(self) -> list[Def]:
+    async def tools(self, slug: str | None = None) -> list[Def]:
         self.listed += 1
-        return self.defs
+        return self.defs if slug is None else self.bundles[slug]
+
+    async def auto_executed(self) -> dict[str, frozenset[str]]:
+        if self.refuses:
+            raise PermissionError("admin auth closes /api to a virtual key")
+        return self.auto
 
     async def execute(
-        self, name: str, args: dict[str, Any], *, clients: Any, parent_request_id: Any = None
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        clients: Any,
+        slug: str | None = None,
+        parent_request_id: Any = None,
     ) -> Any:
         self.executed.append((name, args, tuple(clients)))
+        self.through.append(slug)
         return {"ok": name}
 
 
@@ -67,21 +92,32 @@ def governance(catalog: FakeCatalog | None, writes: Writes) -> Governance:
 
 
 def box(
-    defs: list[Def], catalog: FakeCatalog | None = None, sources: list[Any] | None = None
+    defs: list[Def],
+    catalog: FakeCatalog | None = None,
+    sources: list[Any] | None = None,
+    *,
+    gateway: Gateway | None = None,
+    mcp: list[str] | None = None,
 ) -> tuple[Toolbox, Gateway, Writes]:
-    gateway, writes = Gateway(defs), Writes()
+    gateway, writes = gateway or Gateway(defs), Writes()
     made = Toolbox(
         sources or [],
         gateway=gateway,  # type: ignore[arg-type]
         governance=governance(catalog, writes),
+        mcp=mcp,
     )
     return made, gateway, writes
 
 
 async def resolved(
-    defs: list[Def], catalog: FakeCatalog | None = None, sources: list[Any] | None = None
+    defs: list[Def],
+    catalog: FakeCatalog | None = None,
+    sources: list[Any] | None = None,
+    *,
+    gateway: Gateway | None = None,
+    mcp: list[str] | None = None,
 ) -> tuple[dict[str, Any], Gateway, Writes]:
-    made, gateway, writes = box(defs, catalog, sources)
+    made, gateway, writes = box(defs, catalog, sources, gateway=gateway, mcp=mcp)
     tools = await made.tools()
     await writes.drain()
     return {t.name: t for t in tools}, gateway, writes
@@ -159,8 +195,48 @@ async def test_three_read_only_servers_go_to_code_mode_scoped_to_them_others_sta
     ]
     tools, gateway, _ = await resolved(defs)
     assert "erp-create_po" in tools and not tools["erp-create_po"].code_mode
-    await tools["executeToolCode"].run({"code": "print(1)"})
+    await tools["execute_tool_code"].run({"code": "print(1)"})  # the harness's name...
+    # ...run as the gateway's meta-tool
     assert gateway.executed == [("executeToolCode", {"code": "print(1)"}, ("a", "b", "c"))]
+
+
+async def test_through_virtual_mcps_each_tool_runs_through_its_bundle_and_none_by_script() -> None:
+    reads = [Def(f"{s}-x", s) for s in "abc"]  # read-only Code Mode servers: Code Mode, else
+    gateway = Gateway(
+        [],
+        bundles={"finance": [*reads, Def("erp-pay", "erp")], "audit": [reads[0], Def("d-y", "d")]},
+    )
+    tools, _, _ = await resolved([], gateway=gateway, mcp=["finance", "audit"])
+    assert list(tools) == ["a-x", "b-x", "c-x", "erp-pay", "d-y"]  # a-x once, through finance
+    assert not any(t.code_mode for t in tools.values())
+    await tools["a-x"].run({})
+    await tools["d-y"].run({})
+    assert gateway.through == ["finance", "audit"]
+
+
+async def test_no_virtual_mcp_named_is_no_mcp_tool() -> None:
+    tools, gateway, _ = await resolved([Def("erp-pay", "erp")], mcp=[])
+    assert tools == {} and gateway.listed == 0
+
+
+async def test_a_tool_the_gateway_would_run_itself_is_not_offered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    defs = [Def("erp-get", "erp"), Def("erp-pay", "erp"), Def("crm-a", "crm"), Def("crm-b", "crm")]
+    auto = {"erp": frozenset({"pay"}), "crm": frozenset({"*"})}
+    tools, _, _ = await resolved(defs, gateway=Gateway(defs, auto=auto))
+    assert list(tools) == ["erp-get"]
+    assert "erp-pay is not offered" in caplog.text and "tools_to_auto_execute" in caplog.text
+
+
+async def test_agent_mode_lists_that_cannot_be_read_leave_every_tool(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="trellis.tools")
+    defs = [Def("erp-get", "erp")]
+    tools, _, _ = await resolved(defs, gateway=Gateway(defs, refuses=True))
+    assert list(tools) == ["erp-get"]
+    assert "were not checked" in caplog.text
 
 
 @pytest.mark.parametrize(
