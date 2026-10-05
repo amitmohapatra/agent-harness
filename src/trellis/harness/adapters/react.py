@@ -42,7 +42,7 @@ from trellis.harness.runtime import Runtime
 from trellis.harness.telemetry import model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import Tool, arguments_problem
 from trellis.harness.tools.convert import openai_chat, text_of
 
 log = logging.getLogger("trellis.run")
@@ -53,16 +53,6 @@ MAX_STEPS: Final = 12
 MAX_RESULT_CHARS: Final = 20_000
 #: Consecutive model steps making the same call with the same arguments that stop the run.
 MAX_REPEATS: Final = 3
-#: A JSON schema ``type`` and the Python values that are one (a bool is not a number).
-JSON_TYPES: Final[dict[str, tuple[type, ...]]] = {
-    "string": (str,),
-    "integer": (int,),
-    "number": (int, float),
-    "boolean": (bool,),
-    "array": (list,),
-    "object": (dict,),
-    "null": (type(None),),
-}
 
 
 class ChatModel(Protocol):
@@ -238,31 +228,8 @@ def _arguments(tool: Tool, raw: Any) -> tuple[dict[str, Any] | None, str]:
             return None, f"its arguments are not valid JSON ({exc})"
     if not isinstance(args, dict):
         return None, "its arguments must be a JSON object"
-    problem = _schema_problem(tool.spec.input_schema or {}, args)
+    problem = arguments_problem(tool.spec.input_schema or {}, args)
     return (None, problem) if problem else (args, "")
-
-
-def _schema_problem(schema: dict[str, Any], args: dict[str, Any]) -> str | None:
-    """A light check of the tool's JSON schema — required fields, the basic types of the
-    declared ones, unknown fields where none are allowed; the tool itself validates the rest
-    (a local tool through pydantic)."""
-    missing = [name for name in schema.get("required") or [] if name not in args]
-    if missing:
-        return f"missing required argument(s): {', '.join(missing)}"
-    properties: dict[str, Any] = schema.get("properties") or {}
-    if schema.get("additionalProperties") is False:
-        unknown = [name for name in args if name not in properties]
-        if unknown:
-            return f"unknown argument(s): {', '.join(unknown)}"
-    for name, value in args.items():
-        expected = (properties.get(name) or {}).get("type")
-        allowed = JSON_TYPES.get(expected) if isinstance(expected, str) else None
-        if allowed is None:
-            continue
-        wrong_bool = isinstance(value, bool) and expected != "boolean"
-        if wrong_bool or not isinstance(value, allowed):
-            return f"{name} must be of type {expected}"
-    return None
 
 
 async def _bounded(runtime: Runtime, tool: str, text: str, limit: int) -> str:

@@ -38,9 +38,17 @@ from trellis.contracts import (
     Schedule,
     ScheduleSpec,
 )
+from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
 from trellis.harness.runs import LocalRuns
 from trellis.memory.models import KeyInfo
-from trellis.runs import Lease, NotFoundError, RunsClient, RunsError, RunSummary
+from trellis.runs import (
+    Lease,
+    NotFoundError,
+    PayloadTooLargeError,
+    RunsClient,
+    RunsError,
+    RunSummary,
+)
 
 TENANT = "default"
 #: the header a call names its tenant with (a platform key's only way to)
@@ -190,6 +198,8 @@ class RunsService:
             if record is None:
                 raise NotFoundError(f"no run {run_id}", code="NOT_FOUND", status=404)
             return 200, record.model_dump(mode="json")
+        if action in ("pause", "heartbeat"):
+            _bounded(body.get("checkpoint"))
         if action == "pause":
             asked = Interrupt.model_validate(body["interrupt"])
             paused = await store.pause(asked, checkpoint=body["checkpoint"], worker_id=worker)
@@ -223,6 +233,15 @@ class RunsService:
             tenant=tenant,
         )
         return 201, ref.model_dump(mode="json")
+
+
+def _bounded(checkpoint: dict[str, Any] | None) -> None:
+    """agent-runs' ``bounded_checkpoint``: a checkpoint over 1 MiB of compact JSON is ``413``."""
+    size = len(json.dumps(checkpoint, separators=(",", ":"), ensure_ascii=False).encode())
+    if size > MAX_CHECKPOINT_BYTES:
+        raise PayloadTooLargeError(
+            f"checkpoint is {size} bytes", code="PAYLOAD_TOO_LARGE", status=413
+        )
 
 
 def _problem(request: httpx.Request, exc: RunsError) -> tuple[int, dict[str, Any]]:
@@ -353,6 +372,38 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
         ("POST", "/v1/runs/{id}/heartbeat"),
         ("POST", "/v1/schedules"),
     } <= set(service.seen)
+
+
+@tool(side_effects="write")
+def export(order: str) -> str:
+    """Export an order's history."""
+    return "x" * (MAX_CHECKPOINT_BYTES + 1)  # a journal larger than a checkpoint may be
+
+
+async def test_a_journal_larger_than_a_checkpoint_travels_as_a_run_artifact(
+    wired: tuple[Harness, RunsService],
+) -> None:
+    h, service = wired
+
+    async def exporting(input: dict[str, Any], agent: Runtime) -> Any:
+        history = await agent.tools.call("export", order=input["order"])
+        size = await agent.ask("Which size?", options=["S", "L"])
+        return f"{len(history)}; {size}"
+
+    queued = h.wrap(exporting, id="exporting", tools=[export])
+    handle = await queued.start({"order": "o-7"}, user="ada")
+    worker = h.worker([queued], concurrency=1)
+    assert await worker.run_once()  # saved as progress, then paused: both by reference
+    first = await handle.result(timeout=5)
+    assert first.interrupt is not None
+    record = await h.runs.get(handle.run_id, tenant=TENANT)
+    assert record is not None and record.checkpoint is not None
+    assert set(record.checkpoint) == {JOURNAL_REF}
+    await queued.resume(first.interrupt.interrupt_id, "answer", answer="S", reviewer="ada")
+    assert await worker.run_once()
+    assert (await handle.result(timeout=5)).answer == f"{MAX_CHECKPOINT_BYTES + 1}; S"
+    assert service.violations == [], "\n".join(service.violations)
+    assert ("GET", "/v1/artifacts/{id}") in service.seen
 
 
 async def test_the_inbox_reads_every_page_and_says_when_it_stops(

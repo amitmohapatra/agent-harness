@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from trellis.contracts import TelemetryRedactor
 from trellis.harness.redaction import (
     DEFAULT,
@@ -37,6 +39,15 @@ def test_long_values_are_cut_and_payloads_redacted_recursively() -> None:
     assert DEFAULT.redact_input({"user": {"password": "p", "name": "n"}}) == {
         "user": {"password": REDACTED, "name": "n"}
     }
+
+
+def test_a_value_of_a_megabyte_is_redacted_in_linear_time() -> None:
+    """A tool's output can be large: masking e-mail addresses must not be quadratic in it."""
+    started = time.perf_counter()
+    out = DEFAULT.redact_output("x" * (1024 * 1024) + " write to ada.l+x@mail.example.com")
+    assert time.perf_counter() - started < 1.0
+    assert isinstance(out, str) and out.startswith("x" * MAX_VALUE_CHARS + "...[truncated")
+    assert DEFAULT.redact_output("x" * 3000 + "@example.com")[:10] == "[email]"
 
 
 def test_outbound_payloads_are_redacted_like_inbound_ones() -> None:

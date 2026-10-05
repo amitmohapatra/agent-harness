@@ -7,16 +7,17 @@ record.
    by the tool's name, as the catalog says at the time of the call: ``run`` runs, ``announce``
    is announced on the run's stream, ``ask`` pauses the run for approval (an approver may edit
    the arguments, or reject);
-3. **execution** — inside a span, with ``TOOL_CALL_*`` events around it;
+3. **execution** — inside a span, with ``TOOL_CALL_*`` events around it (the stream gets the
+   arguments and the output redacted; the tool and the model get them as they are);
 4. **record** — journaled for a later resume (and, in a worker, saved as the run's progress
-   checkpoint: at once after a call with side effects), counted, and (memory on) sent to the
-   memory service's tool records in the background.
+   checkpoint: at once after a call with side effects), counted, and (memory on) sent,
+   redacted, to the memory service's tool records in the background.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any, Final
+from typing import Any
 
 from trellis.contracts import (
     InterruptDecision,
@@ -32,9 +33,6 @@ from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, cu
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import Tool
-
-#: How much of a tool result rides on the event stream.
-PREVIEW_CHARS: Final = 2000
 
 
 async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) -> ToolOutcome:
@@ -110,7 +108,7 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         ref,
         tool=tool.name,
         status=outcome.status.value,
-        output=_preview(outcome.output),
+        output=outcome.output,
     )
     metrics.tool_called(tool.name, outcome.status.value)
     await runtime.agent.record_tool(runtime, tool_call, outcome)
@@ -128,14 +126,5 @@ def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) ->
         tool=call.tool,
         status=outcome.status.value,
         cached=outcome.cached,
-        output=_preview(outcome.output),
+        output=outcome.output,
     )
-
-
-def _preview(output: Any) -> Any:
-    if output is None or isinstance(output, bool | int | float):
-        return output
-    text = output if isinstance(output, str) else repr(output)
-    if isinstance(output, dict | list) and len(text) <= PREVIEW_CHARS:
-        return output
-    return text if len(text) <= PREVIEW_CHARS else text[:PREVIEW_CHARS] + "…"

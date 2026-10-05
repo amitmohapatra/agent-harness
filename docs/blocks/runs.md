@@ -89,7 +89,9 @@ async with RunsClient() as runs:
 
 * `pause(interrupt, *, checkpoint=None, worker_id=None)`: the `checkpoint` is any JSON your
   framework needs to continue (a thread id, a serialized `RunState`, a session id), up to
-  1 MiB. Every read returns it as `RunRecord.checkpoint` until the run ends.
+  1 MiB (`413` past it: upload larger state with `artifacts.upload` and keep its
+  `ArtifactRef` in the checkpoint, as the harness does with a large journal). Every read
+  returns it as `RunRecord.checkpoint` until the run ends.
 * `resume(resolution)`: the decision is `ANSWER` (with `answer`), `APPROVE`, `REJECT`, `EDIT`
   (with the edited arguments as `payload`) or `CANCEL` (the run ends `CANCELLED`). A run that
   was never queued is `RUNNING` again, for the process that resumes it; a queued one goes back
@@ -99,6 +101,10 @@ async with RunsClient() as runs:
   (`may_act_as=["user:lead"]`) answers only as one of them, a run assigned to that person or
   to nobody, never a group's; anything else raises `AuthorizationError` saying why
   ([the rule](https://github.com/amitmohapatra/agent-runs/blob/main/README.md#who-may-answer-a-paused-run)).
+  An answer that does not fit the question (its `expects`, else its `options`) is refused
+  (`ValidationError`, `422`, saying why); `trellis.runs.answers.answer_problem(interrupt,
+  resolution)` is that check, to run before sending. A tool call's edited arguments are yours
+  to check against the tool's schema: the interrupt does not carry it.
 * `deadline` and `escalate_to` on the `Interrupt`: when the deadline passes, agent-runs' ticker
   hands the question to `escalate_to` once, or ends the run `TIMEOUT`.
 * Something too large for the question (a table, a diff) is an artifact:

@@ -6,12 +6,14 @@ import asyncio
 import dataclasses
 import functools
 import json
+import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import (
     ConfigurationError,
+    Interrupt,
     InterruptDecision,
     InterruptResolution,
     RunEvent,
@@ -44,16 +46,20 @@ from trellis.harness.evals import (
 )
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
+from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, run_of
 from trellis.harness.telemetry import output, retrieval_span
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
+from trellis.runs.answers import answer_problem
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
+
+log = logging.getLogger("trellis.run")
 
 #: From this many tools, the tool hints are asked for and narrow what the model is offered.
 TOOL_HINTS_MIN: Final = 5
@@ -219,10 +225,41 @@ class Agent:
             payload=answer if edited else None,
             reviewer=reviewer,
         )
+        problem = answer_problem(record.awaiting, resolution) or await self._edit_problem(
+            record.awaiting, resolution, tenant=tenant
+        )
+        if problem:
+            raise ConfigurationError(f"not an answer to {interrupt_id}: {problem}")
         awaited = record.awaiting.payload
         if chosen is not InterruptDecision.CANCEL and is_hitl(awaited):
             hitl_response(awaited or {}, resolution)  # a decision the calls do not allow raises
         return record, resolution
+
+    async def _edit_problem(
+        self, awaiting: Interrupt, resolution: InterruptResolution, *, tenant: str
+    ) -> str | None:
+        """Why the edited arguments of a tool call do not fit the tool's input schema
+        (``arguments_problem``). Only for a tool the agent's toolbox lists now: one it cannot
+        list (an MCP server that is down) is left to the call, where the tool checks its own
+        arguments when it runs; a call LangChain's middleware holds is the middleware's
+        (``hitl_response``)."""
+        call = awaiting.tool_call
+        if (
+            resolution.decision is not InterruptDecision.EDIT
+            or call is None
+            or is_hitl(awaiting.payload)
+        ):
+            return None
+        try:
+            tools = await self._toolbox(tenant).tools()
+        except Exception as exc:
+            log.info("the edit of %s is not checked: no toolbox (%s)", call.tool, exc)
+            return None
+        found = next((t for t in tools if t.name == call.tool), None)
+        if found is None:
+            return None
+        problem = arguments_problem(found.spec.input_schema or {}, resolution.payload or {})
+        return f"the edited arguments do not fit {call.tool}: {problem}" if problem else None
 
     async def _continue(
         self,
@@ -234,6 +271,8 @@ class Agent:
         assert record.awaiting is not None
         identity = self._identity_of(record)
         feedback = resolution.to_feedback(record.awaiting, identity.context())
+        # read before the resume: a journal that cannot be read leaves the run waiting
+        journal = await Journal.read(record.checkpoint, runs.artifacts, tenant=record.tenant_id)
         # The run store first: a decision is feedback only once it took effect. A resume
         # the store refuses (answered already, a stale interrupt) raises here, before
         # anything is sent, so approval patterns never learn from a decision that never was.
@@ -253,7 +292,7 @@ class Agent:
             identity,
             record.input,
             number=resumed.attempt,
-            journal=Journal.of(record.checkpoint),
+            journal=journal,
             resolution=resolution,
             listener=listener,
             streaming=listener is not None,
@@ -264,12 +303,13 @@ class Agent:
     ) -> Result:
         """A worker's run: fresh from the queue, continuing after a resolution, or after a
         worker died (its checkpoint is the progress it saved)."""
+        artifacts = self.harness.runs.artifacts
         return await pipeline.attempt(
             self,
             self._identity_of(record),
             record.input,
             number=record.attempt,
-            journal=Journal.of(record.checkpoint),
+            journal=await Journal.read(record.checkpoint, artifacts, tenant=record.tenant_id),
             resolution=record.last_resolution,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
@@ -304,18 +344,19 @@ class Agent:
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them."""
-        box = self._toolboxes.get(runtime.tenant)
-        if box is None:
-            box = self._toolboxes[runtime.tenant] = self.harness.toolbox(
-                self.sources, tenant=runtime.tenant
-            )
-        tools = await box.tools()
+        tools = await self._toolbox(runtime.tenant).tools()
         if runtime.run_memory is not None and not self.adapter.fixed_tools:
             try:
                 tools.extend(await self.harness.memory_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return tools
+
+    def _toolbox(self, tenant: str) -> Toolbox:
+        box = self._toolboxes.get(tenant)
+        if box is None:
+            box = self._toolboxes[tenant] = self.harness.toolbox(self.sources, tenant=tenant)
+        return box
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """The memory context for this run, in the runtime — with the tools section once the
@@ -355,6 +396,7 @@ class Agent:
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
         if memory is not None and runtime.writes_memory and call.tool not in _pull(self):
+            call, outcome = _redacted(call, outcome)
             await self.harness.writes.submit(
                 "memory.record_tool",
                 lambda: memory.record_tool(call, outcome),
@@ -475,7 +517,7 @@ class Agent:
                     latency_ms=entry.latency_ms,
                     error_class="MCPToolError" if entry.error else None,
                 )
-                await memory.record_tool(call, outcome)
+                await memory.record_tool(*_redacted(call, outcome))
 
         await self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
 
@@ -537,6 +579,16 @@ class Agent:
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
+
+
+def _redacted(call: ToolCall, outcome: ToolOutcome) -> tuple[ToolCall, ToolOutcome]:
+    """A tool call as the memory service's tool records get it: its arguments and output
+    redacted (``redaction.py``), as everything leaving the process is; the model and the tool
+    had them as they are."""
+    return (
+        call.model_copy(update={"args": REDACTOR.redact_input(call.args)}),
+        outcome.model_copy(update={"output": REDACTOR.redact_output(outcome.output)}),
+    )
 
 
 def _pull(agent: Agent) -> frozenset[str]:
