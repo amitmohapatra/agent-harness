@@ -115,6 +115,9 @@ src/trellis/
     journal.py         what a re-run needs: answers and tool outputs, keyed by content (and
                        the journals of the sub-agents' runs working inside its calls)
     subagents.py       agent.as_tool(): a wrapped agent as a tool, each call a child run
+    sandbox/           sandbox(): the run's own sandbox as three tools, its life the run's
+                       (made, recorded, attached, paused, deleted, reaped); base (the
+                       provider-neutral interface), docker (DockerSandbox: the Engine API)
     events.py          a run's RunEvent stream (built only when someone listens)
     writes.py          background writes: retries, backpressure, the spool, auto-drain
     fresh.py           a value read from a service, kept for a TTL, the last one through outages
