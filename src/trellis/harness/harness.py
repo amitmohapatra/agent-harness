@@ -17,7 +17,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Final, Literal
 
-from bifrost_sdk._client import NO_GATEWAY_TOOLS
+from bifrost_sdk import NO_GATEWAY_TOOLS
 
 from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
 from trellis.harness import telemetry
