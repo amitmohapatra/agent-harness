@@ -6,12 +6,14 @@ import asyncio
 import dataclasses
 import functools
 import json
+import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import (
     ConfigurationError,
+    Interrupt,
     InterruptDecision,
     InterruptResolution,
     RunEvent,
@@ -48,13 +50,16 @@ from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, run_of
 from trellis.harness.telemetry import output, retrieval_span
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
+from trellis.runs.answers import answer_problem
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
+
+log = logging.getLogger("trellis.run")
 
 #: From this many tools, the tool hints are asked for and narrow what the model is offered.
 TOOL_HINTS_MIN: Final = 5
@@ -220,10 +225,41 @@ class Agent:
             payload=answer if edited else None,
             reviewer=reviewer,
         )
+        problem = answer_problem(record.awaiting, resolution) or await self._edit_problem(
+            record.awaiting, resolution, tenant=tenant
+        )
+        if problem:
+            raise ConfigurationError(f"not an answer to {interrupt_id}: {problem}")
         awaited = record.awaiting.payload
         if chosen is not InterruptDecision.CANCEL and is_hitl(awaited):
             hitl_response(awaited or {}, resolution)  # a decision the calls do not allow raises
         return record, resolution
+
+    async def _edit_problem(
+        self, awaiting: Interrupt, resolution: InterruptResolution, *, tenant: str
+    ) -> str | None:
+        """Why the edited arguments of a tool call do not fit the tool's input schema
+        (``arguments_problem``). Only for a tool the agent's toolbox lists now: one it cannot
+        list (an MCP server that is down) is left to the call, where the tool checks its own
+        arguments when it runs; a call LangChain's middleware holds is the middleware's
+        (``hitl_response``)."""
+        call = awaiting.tool_call
+        if (
+            resolution.decision is not InterruptDecision.EDIT
+            or call is None
+            or is_hitl(awaiting.payload)
+        ):
+            return None
+        try:
+            tools = await self._toolbox(tenant).tools()
+        except Exception as exc:
+            log.info("the edit of %s is not checked: no toolbox (%s)", call.tool, exc)
+            return None
+        found = next((t for t in tools if t.name == call.tool), None)
+        if found is None:
+            return None
+        problem = arguments_problem(found.spec.input_schema or {}, resolution.payload or {})
+        return f"the edited arguments do not fit {call.tool}: {problem}" if problem else None
 
     async def _continue(
         self,
@@ -308,18 +344,19 @@ class Agent:
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them."""
-        box = self._toolboxes.get(runtime.tenant)
-        if box is None:
-            box = self._toolboxes[runtime.tenant] = self.harness.toolbox(
-                self.sources, tenant=runtime.tenant
-            )
-        tools = await box.tools()
+        tools = await self._toolbox(runtime.tenant).tools()
         if runtime.run_memory is not None and not self.adapter.fixed_tools:
             try:
                 tools.extend(await self.harness.memory_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return tools
+
+    def _toolbox(self, tenant: str) -> Toolbox:
+        box = self._toolboxes.get(tenant)
+        if box is None:
+            box = self._toolboxes[tenant] = self.harness.toolbox(self.sources, tenant=tenant)
+        return box
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """The memory context for this run, in the runtime — with the tools section once the

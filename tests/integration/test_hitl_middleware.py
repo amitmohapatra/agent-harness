@@ -129,6 +129,21 @@ async def test_raw_decisions_still_pass_through(harness: Harness) -> None:
     assert sent == [{"to": "ada", "body": "hi"}]
 
 
+async def test_an_edit_in_the_middlewares_own_words_is_the_middlewares_to_check(
+    harness: Harness,
+) -> None:
+    """The harness checks a reviewer's edited arguments against the tool's schema, but not the
+    middleware's ``{"decisions": [...]}``: those go to the middleware as they are."""
+    model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "sent"])
+    agent = await mailer(harness, model)
+    paused = await agent.run("email ada", user="u1", thread="t1")
+    assert paused.interrupt is not None
+    edited = {"name": "email", "args": {"to": "bob", "body": "hello"}}
+    raw = {"decisions": [{"type": "edit", "edited_action": edited}]}
+    await agent.resume(paused.interrupt.interrupt_id, "edit", answer=raw, reviewer="l")
+    assert sent == [{"to": "bob", "body": "hello"}]
+
+
 async def test_a_decision_the_tool_does_not_allow_is_refused_before_resuming(
     harness: Harness,
 ) -> None:

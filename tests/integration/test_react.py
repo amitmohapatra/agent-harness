@@ -148,7 +148,7 @@ async def test_arguments_that_do_not_fit_the_schema_do_not_run_the_tool(
 
 
 def test_the_schema_check_knows_the_basic_json_types() -> None:
-    from trellis.harness.adapters.react import _schema_problem
+    from trellis.harness.tools.base import arguments_problem
 
     schema = {
         "properties": {
@@ -160,12 +160,12 @@ def test_the_schema_check_knows_the_basic_json_types() -> None:
             "odd": {"type": "decimal"},
         }
     }
-    assert _schema_problem(schema, {"n": 1, "x": 1.5, "flag": True, "any": [1]}) is None
-    assert _schema_problem(schema, {"either": None, "odd": "1.0", "extra": 1}) is None
-    assert _schema_problem(schema, {"n": True}) == "n must be of type integer"
-    assert _schema_problem(schema, {"x": "1"}) == "x must be of type number"
-    assert _schema_problem(schema, {"flag": 1}) == "flag must be of type boolean"
-    assert _schema_problem({}, {"a": 1}) is None
+    assert arguments_problem(schema, {"n": 1, "x": 1.5, "flag": True, "any": [1]}) is None
+    assert arguments_problem(schema, {"either": None, "odd": "1.0", "extra": 1}) is None
+    assert arguments_problem(schema, {"n": True}) == "n must be of type integer"
+    assert arguments_problem(schema, {"x": "1"}) == "x must be of type number"
+    assert arguments_problem(schema, {"flag": 1}) == "flag must be of type boolean"
+    assert arguments_problem({}, {"a": 1}) is None
 
 
 async def test_a_huge_result_is_cut_and_kept_whole_as_a_run_artifact(harness: Harness) -> None:

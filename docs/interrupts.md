@@ -28,7 +28,9 @@ needs a `deadline`: when it passes, agent-runs hands the question to `escalate_t
 ends the run `TIMEOUT` when nobody is named. Runs kept in process (no `RUNS_URL`) do neither.
 
 The whole signature: `await trellis.current().ask(question, *, expects=None, table=None,
-diff=None, options=None, assignee=None, deadline=None, escalate_to=None)`. The same question
+diff=None, options=None, assignee=None, deadline=None, escalate_to=None)`. An `expects` that is
+not a JSON Schema is refused where it is asked (`ConfigurationError: cannot ask 'How many?':
+expects is not a valid JSON Schema: …`), not when someone answers. The same question
 asked again in one run (same text, same kind, same options) is the same entry in the journal:
 a re-run gets the answer it was given, in order.
 
@@ -57,6 +59,26 @@ cancel ends the run `CANCELLED`. A rejected tool call is not run and the model r
 was rejected — with the reviewer's reason when the reject carries one as `answer`
 (`"refund was not run: the approver rejected it (over budget)"`). The interrupt id names its run, so nothing else is needed; a
 resume must answer the interrupt the run currently waits on.
+
+**Answers are checked.** Before anything is sent or recorded, `resume` refuses an answer that
+does not fit its question, with a `ConfigurationError` saying why, and the run keeps waiting:
+
+* an `answer` must fit `expects` (JSON Schema) — `not an answer to <id>: the answer does not
+  fit what was asked: 'five' is not of type 'integer'` — and, with no `expects`, be one of the
+  `options` when there are some (`the answer 'M' is not one of the options ['S', 'L']`);
+* an `edit` of a question (a review) must fit `expects` the same way;
+* an `edit` of a tool call must fit the tool's input schema — its required arguments, the
+  basic types of the declared ones, no unknown ones where the schema allows none (`the edited
+  arguments do not fit refund: amount must be of type number`) — when the agent's toolbox lists
+  the tool at that moment. A tool it cannot list then (an MCP tool whose server is down) is
+  left to the call: the tool checks its arguments when it runs, and a failure is a result the
+  model reads.
+
+`approve`, `reject` and `cancel` carry nothing to check. The check is the one agent-runs makes
+(`trellis.runs.answers`), so a run kept in process (no `RUNS_URL`) is checked the same way.
+`serve_chat` answers a refused resume `409` (`BAD_RESUME: …`), and `serve_a2a` keeps the task
+`input-required` with the reason. The edits a framework's own approval takes are the
+framework's to check (below).
 
 **Who may answer.** With agent-runs, the harness's key decides. The application's key (it may
 act for anyone, the default) or an admin key answers any run, and `reviewer` is recorded as
@@ -123,7 +145,9 @@ middleware's `{"decisions": [...]}`, one per call, in order:
 | `"answer", answer={"decisions": [...]}` | sent as it is — one decision per call, for a batch decided call by call |
 
 A decision that a call's `allowed_decisions` does not include is refused by `resume`
-(`ConfigurationError`) before anything is recorded, and the run keeps waiting. Leave the
+(`ConfigurationError`) before anything is recorded, and the run keeps waiting. An edit's
+arguments go to the middleware as given (it and the tool check them), as do decisions sent as
+`{"decisions": [...]}`. Leave the
 tools the middleware covers out of the harness's own approvals (`side_effects="write"` or
 `"read"`, no catalog `approve_when`), or the call is approved twice.
 

@@ -130,13 +130,17 @@ async def test_an_approver_can_edit_or_reject(harness: Harness) -> None:
     assert told.answer == "refund was not run: the approver rejected it (over the limit)"
 
 
+#: what a reviewer of a rewrite answers: the text they accept (an edit corrects it)
+REWRITE = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+
+
 async def test_what_is_asked_decides_how_it_is_shown_and_the_user_answers_by_default(
     harness: Harness,
 ) -> None:
     async def reviewer(input: str, agent: Runtime) -> Any:
         rows = await agent.ask("Check these lines", table=[{"sku": "a", "qty": 2}])
         text = await agent.ask(
-            "Accept the rewrite?", diff=("old text", "new text"), expects={"type": "string"}
+            "Accept the rewrite?", diff=("old text", "new text"), expects=REWRITE
         )
         plain = await agent.ask("Anything else?")
         return [rows, text, plain]

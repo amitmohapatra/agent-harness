@@ -56,7 +56,7 @@ application's key unless every person's runs are assigned to that person.
 |---|---|
 | `401` `AUTHENTICATION` | `identity(request)` named nobody |
 | `404` `NOT_FOUND` | a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
-| `409` `CONFLICT` (`detail` `BAD_RESUME: …`) | a resume that cannot be read as a decision (an approval answered with neither `true`, `false` nor arguments), or that the run refuses (it waits on another interrupt, it is not paused) |
+| `409` `CONFLICT` (`detail` `BAD_RESUME: …`) | a resume that cannot be read as a decision (an approval answered with neither `true`, `false` nor arguments), or that the run refuses (it waits on another interrupt, it is not paused), or an answer that does not fit the question or the tool ([interrupts.md](interrupts.md#answering)) |
 | `422` `VALIDATION` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here) |
 | `422` (FastAPI's validation error) | a body that is not a `RunAgentInput`: a `decision` outside `answer`/`approve`/`reject`/`edit`/`cancel` (any case), a message `role` outside AG-UI's (`developer`, `system`, `assistant`, `user`, `tool`, `activity`, `reasoning`) |
 | `RUN_ERROR` `RUN_ABORTED` | the run ended without telling its client (the harness itself failed, e.g. agent-runs refused a write) |
@@ -112,7 +112,8 @@ from a data part `{"decision": "approve"}` when present; else the words `cancel`
 `stop` cancel; an approval reads `approve`/`approved`/`yes`/`ok`/`allow` and
 `reject`/`rejected`/`no`/`deny`/`denied`, or a data object as the edited arguments (its
 `payload` field when it has one); anything else answers the question (a data part's `answer`,
-or the text). An answer that cannot be read keeps the task waiting and says why. A message to
+or the text). An answer that cannot be read, or that does not fit the question or the tool
+([interrupts.md](interrupts.md#answering)), keeps the task waiting and says why. A message to
 a task that has ended, or is still working, is refused (`InvalidRequestError`), and a new task
 never takes the id of an existing run. `CancelTask` cancels a working run, or ends a paused
 one `CANCELLED`; the terminal state is sent once, whichever of the stream and the cancel gets

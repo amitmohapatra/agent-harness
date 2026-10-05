@@ -30,6 +30,7 @@ from trellis.harness.events import LOG, RunEvents
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
 from trellis.runs import LeaseLostError
+from trellis.runs.answers import schema_problem
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -229,7 +230,11 @@ class Runtime:
         What the person sees follows from what is asked: ``options`` a choice, ``table`` a
         table, ``diff=(before, after)`` a diff, otherwise a form (``expects`` its schema). A
         table or diff with ``expects`` is a review. It is the run's user's to answer unless
-        ``assignee`` names someone else (``user:…``, ``role:…``)."""
+        ``assignee`` names someone else (``user:…``, ``role:…``). An ``expects`` that is not a
+        JSON Schema is refused here (``ConfigurationError``, saying why); an answer must fit
+        it (``Agent.resume``)."""
+        if problem := schema_problem(expects):
+            raise ConfigurationError(f"cannot ask {question!r}: {problem}")
         ui = "choice" if options else "diff" if diff else "table" if table is not None else "form"
         reason = (
             InterruptReason.CHOICE
