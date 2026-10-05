@@ -50,8 +50,8 @@ tools = [transfer, openapi(spec_url, timeout=10), a2a(planner_url, timeout=300)]
 | Source | Its own limit |
 |---|---|
 | `@tool(timeout=)` / `tool(fn, timeout=)` | none unless you give one |
-| `openapi(spec, timeout=)` | 30 s (`OPENAPI_TIMEOUT_SECONDS`); also the document's fetch |
-| `a2a(url, timeout=)` | 120 s (`trellis.harness.a2a.client.TIMEOUT_SECONDS`), the whole exchange |
+| `openapi(spec, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool); also the document's fetch |
+| `a2a(url, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too; `remote()` the same), the whole exchange |
 | an MCP tool (Bifrost) | none of its own: the request waits what is left of the run's time (else the Bifrost SDK's 60 s) |
 | `governed(fn, gov, timeout=)` (Way 2) | none unless you give one |
 

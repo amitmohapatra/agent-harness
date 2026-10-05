@@ -47,6 +47,9 @@ JSON_TYPES: Final[dict[str, tuple[type, ...]]] = {
 #: than read runs once.
 READ_RETRIES: Final = 2
 RETRY_BACKOFF_SECONDS: Final = 0.5
+#: How long one call of a remote tool may take unless its ``timeout=`` says: an OpenAPI
+#: operation (and the fetch of its document) and an A2A exchange (``remote()`` too) alike.
+REMOTE_TIMEOUT_SECONDS: Final = 120.0
 
 
 @dataclass(frozen=True, slots=True)
