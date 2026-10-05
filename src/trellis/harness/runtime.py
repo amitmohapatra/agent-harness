@@ -358,15 +358,18 @@ class Runtime:
         )
         return answer_of(resolution)
 
-    async def approve(self, call: ToolCall, question: str) -> InterruptResolution:
+    async def approve(
+        self, call: ToolCall, question: str, *, assignee: str | None = None
+    ) -> InterruptResolution:
         """Ask for approval of a tool call (the bridge's pause): ``question`` is governance's
-        (``Decision.question``)."""
+        (``Decision.question``), ``assignee`` whose it is (a hook's ``Ask``; else anyone's)."""
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,
             question=question,
             ui="approve",
             tool_call=call,
+            assignee=assignee,
         )
 
     async def interrupt(

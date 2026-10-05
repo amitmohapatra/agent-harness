@@ -66,6 +66,7 @@ prepends to every model call — a model name only ([gateway.md](../gateway.md#p
 | Slow models | a model call takes at most `model_timeout` (and what is left of the run's `timeout=`/`deadline=`), the gateway's own retries inside it; past it the run fails with a `ModelError` that may be retried (a queued run is queued again; its journaled steps are not asked again) — [reliability.md](../reliability.md#model-timeouts) |
 | Stored prompt | with `prompt=`: resolved once (kept fresh), its version pinned at the run's first model call and journaled, so every call of the run — a resume included — selects the same version; each `chat` span says which (`trellis.prompt.*`) |
 | Skills | with `h.wrap(..., skills=[...])`: their names and descriptions appended to `system` with the memory context, `load_skill` and `read_skill_file` in every request's `tools` ([gateway.md](../gateway.md#skills)) |
+| Hooks | `before_model`/`after_model` around every model call of the loop (a `before_model` call is the call sent), the tool and run hooks as for every target ([hooks.md](../hooks.md)) |
 | Records, grounding, judges, tracing | as for every target; `chat` spans carry the model, usage and finish reasons |
 
 ## Approvals, streaming, durable runs, surfaces, evaluation

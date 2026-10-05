@@ -30,6 +30,7 @@ from trellis.contracts import (
     InterruptReason,
     InterruptResolution,
     ToolCall,
+    ToolOutcome,
     ToolSpec,
     stable_id,
 )
@@ -44,6 +45,7 @@ from trellis.harness.governance.catalog import (
     entry,
 )
 from trellis.harness.governance.decision import Action, Decision, decide
+from trellis.harness.hooks import Chain, Deny, Hooks, denied
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
 from trellis.harness.tools.base import Tool, execute, invoked
@@ -63,6 +65,15 @@ class Rejected(Exception):
     def __init__(self, decision: Decision) -> None:
         super().__init__(f"{decision.tool} was not run: the approver rejected it")
         self.decision = decision
+
+
+class Denied(Exception):
+    """The call was not run: a ``before_tool`` hook denied it (``outcome``: what the model
+    reads)."""
+
+    def __init__(self, outcome: ToolOutcome) -> None:
+        super().__init__(str(outcome.output))
+        self.outcome = outcome
 
 
 class Governance:
@@ -227,6 +238,7 @@ def governed(
     timeout: float | None = None,
     on_ask: Callable[[Decision], Any],
     on_announce: Callable[[Decision], Any] | None = None,
+    hooks: Sequence[Hooks] = (),
 ) -> Callable[..., Awaitable[Any]]:
     """``fn`` (sync or async) as an async callable whose every call — with keyword arguments,
     the tool's arguments — is checked first. A call that asks runs ``on_ask(decision)`` (sync
@@ -237,16 +249,30 @@ def governed(
     It runs as a harness tool call does: at most ``timeout`` seconds (a sync ``fn`` in a
     worker thread), tried again after an error that may pass when it only reads; out of time
     it raises :class:`~trellis.harness.tools.base.ToolTimeout`, whose message is what the
-    model should read (for a call that does more than read: that it may have taken effect)."""
+    model should read (for a call that does more than read: that it may have taken effect).
+
+    ``hooks`` (``trellis.harness.hooks``) run around each call as around a harness tool call:
+    ``before_tool`` first — a ``Deny`` raises :class:`Denied`, a ``Rewrite`` changes the
+    arguments governance checks and the call gets, an ``Ask`` asks (``on_ask``) whatever
+    governance says —, ``on_error("tool", ...)`` when it fails, ``after_tool`` on its outcome
+    (the call returns that outcome's output)."""
     tool = Tool(
         ToolSpec(name=name or fn.__name__, side_effects=side_effects),
         lambda args: invoked(fn, **args),
         timeout=timeout,
     )
 
+    chain = Chain(hooks)
+
     @functools.wraps(fn)
     async def call(**args: Any) -> Any:
+        hooked, verdict = await chain.tool(ToolCall(tool=tool.name, args=args))
+        if isinstance(verdict, Deny):
+            raise Denied(denied(hooked, verdict))
+        args = hooked.args
         decision = await governance.check(tool.name, args, side_effects=side_effects)
+        if verdict is not None:
+            decision = decision.asking(verdict.question)
         if decision.asks:
             answer = await _settled(on_ask(decision))
             if answer is False:
@@ -262,6 +288,9 @@ def governed(
             await _settled(on_announce(decision))
         outcome, error = await execute(tool, args, reads=decision.risk == "read")
         if error is not None:
+            await chain.failed("tool", error)
+        outcome = await chain.done(hooked.model_copy(update={"args": args}), outcome)
+        if error is not None and not outcome.ok:
             raise error
         return outcome.output
 
@@ -273,4 +302,4 @@ async def _settled(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 
-__all__ = ["Action", "Decision", "Governance", "Rejected", "governed"]
+__all__ = ["Action", "Decision", "Denied", "Governance", "Rejected", "governed"]

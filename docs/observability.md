@@ -121,6 +121,11 @@ number is never treated as a credential. Mappings and lists are redacted recursi
 become `<n bytes>`, anything else its JSON or its text. The redactor is the contracts
 `TelemetryRedactor`; it never raises into a run.
 
+Redaction of your own — a domain's identifiers, what the model itself must not read — is a
+hook: `after_tool` returns the outcome masked (what the model reads, the journal and memory
+keep), `before_model` the messages masked ([hooks.md](hooks.md),
+[`examples/hooks.py`](../examples/hooks.py)).
+
 ## Events
 
 `agent.stream` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`,

@@ -33,6 +33,7 @@ from trellis.harness.features import Feature
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
+from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
@@ -102,7 +103,9 @@ class Harness:
     agent-runs off (runs kept in this process) even where the environment names them.
 
     ``judges`` are the online evaluators every sampled successful run is scored by
-    (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background."""
+    (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
+    (``trellis.harness.hooks.Hooks``) run around every run, model call and tool call of every
+    agent it wraps, before each agent's own."""
 
     def __init__(
         self,
@@ -113,6 +116,7 @@ class Harness:
         gateway: Gateway | Literal[False] | None = None,
         governance: Governance | None = None,
         judges: Sequence[Evaluator] = (),
+        hooks: Sequence[Hooks] = (),
     ) -> None:
         self.settings = config or Settings.from_env()
         s = self.settings
@@ -139,6 +143,8 @@ class Harness:
         self.evals = EvalServices.of(s, gateway=self.gateway)
         #: the online judges, and the share of runs they score
         self.judges: list[Evaluator] = list(judges)
+        #: the hooks of every agent wrapped here
+        self.hooks: list[Hooks] = list(hooks)
         self.judge_sample = (
             s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
         )
@@ -182,6 +188,7 @@ class Harness:
         skills: Sequence[str] = (),
         timeout: float | None = None,
         without: Collection[Feature] = (),
+        hooks: Sequence[Hooks] = (),
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
@@ -196,7 +203,8 @@ class Harness:
         on every entry — ``serve_chat``, ``serve_a2a``, ``h.evaluate``, scheduled runs too.
         ``without`` turns parts of what the harness does off for every run of the agent
         (``trellis.harness.features``: ``memory``, ``judges``, ``mcp``...); everything
-        configured is on otherwise."""
+        configured is on otherwise. ``hooks`` run around its runs, model calls and tool calls,
+        after the harness's (``trellis.harness.hooks``)."""
         agent = Agent(
             self,
             target,
@@ -207,6 +215,7 @@ class Harness:
             skills=skills,
             timeout=timeout,
             without=without,
+            hooks=hooks,
         )
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")

@@ -45,6 +45,7 @@ from trellis.harness.evals import (
     sampled,
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
+from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.redaction import DEFAULT as REDACTOR
@@ -101,6 +102,7 @@ class Agent:
         skills: Sequence[str] = (),
         timeout: float | None = None,
         without: Collection[Feature] = (),
+        hooks: Sequence[Hooks] = (),
     ):
         if timeout is not None and timeout <= 0:
             raise ConfigurationError(f"{id}: a timeout is a number of seconds over 0")
@@ -114,6 +116,8 @@ class Agent:
         self.timeout = timeout
         #: what the harness does not do for any of its runs (``h.wrap(without=)``)
         self.without = features(without)
+        #: the hooks around its runs, model calls and tool calls: the harness's, then its own
+        self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))

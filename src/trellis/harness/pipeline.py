@@ -180,20 +180,14 @@ async def attempt(
     try:
         with agent_span(_traced(runtime), runtime.task) as span:
             async with clock:
-                tools = await agent.tools_for(runtime)
-                runtime.toolbox = {t.name: t for t in tools}
-                pushed = await agent.push(runtime)
-                if observe is not None:
-                    observe(pushed)
-                if unresumable is not None:
-                    raise unresumable
-                extracted = await _invoked(
+                extracted, pushed = await _worked(
                     agent,
                     runtime,
-                    tools,
                     input,
                     pending=pending,
                     resolution=resolution,
+                    unresumable=unresumable,
+                    observe=observe,
                     streaming=listener is not None,
                 )
             output(span, jsonable(extracted.answer))
@@ -218,9 +212,44 @@ async def attempt(
         _current.reset(tokens[0])
         agent.running.pop(identity.run_id, None)
     timed_out = budget.error if budget is not None and clock.expired() else None
-    return await _concluded(
+    result = await _concluded(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
+    await agent.hooks.ended(runtime, result)
+    return result
+
+
+async def _worked(
+    agent: Agent,
+    runtime: Runtime,
+    input: Any,
+    *,
+    pending: Pending | None,
+    resolution: InterruptResolution | None,
+    unresumable: ConfigurationError | None,
+    observe: Callable[[PromptContext | None], None] | None,
+    streaming: bool,
+) -> tuple[Extracted, PromptContext | None]:
+    """The attempt's work: its tools and what is pushed into its input, then — its hooks told
+    it starts — the framework; what it produced, and the memory context it was given."""
+    tools = await agent.tools_for(runtime)
+    runtime.toolbox = {t.name: t for t in tools}
+    pushed = await agent.push(runtime)
+    if observe is not None:
+        observe(pushed)
+    if unresumable is not None:
+        raise unresumable
+    await agent.hooks.started(runtime)
+    extracted = await _invoked(
+        agent,
+        runtime,
+        tools,
+        input,
+        pending=pending,
+        resolution=resolution,
+        streaming=streaming,
+    )
+    return extracted, pushed
 
 
 def _traced(runtime: Runtime) -> RunTrace:
@@ -264,6 +293,7 @@ async def _concluded(
         return Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
     if timed_out is not None:
         log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)
+        await agent.hooks.failed("run", TimeoutError(timed_out.message))
         return await _failed(agent, runtime, timed_out, extracted, status=RunStatus.TIMEOUT)
     paused = _pause(runtime, extracted, error)
     if paused is not None:
@@ -271,6 +301,7 @@ async def _concluded(
     if error is not None:
         failure = AgentError.of(error, source=agent.adapter.name)
         log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
+        await agent.hooks.failed("run", error)
         return await _failed(agent, runtime, failure, extracted)
     assert extracted is not None
     return await _succeeded(agent, runtime, extracted, pushed)
