@@ -357,3 +357,39 @@ async def test_a_childs_spans_are_in_its_parents_trace_under_the_call(
     attributes = dict(research.attributes or {})
     assert attributes["trellis.parent_run_id"] == result.run_id
     assert "langfuse.trace.name" not in attributes
+
+
+@pytest.mark.parametrize("framework", ["langgraph", "openai_agents", "function"])
+async def test_any_framework_calls_a_child_and_answers_its_question(
+    harness: Harness, framework: str
+) -> None:
+    async def asks(input: str, agent: Runtime) -> str:
+        """Ask which colour, then paint."""
+        colour = await agent.ask("Which colour?", options=["red", "blue"])
+        return f"painted {input} {colour}"
+
+    child = harness.wrap(asks, id="painter")
+    call = ("painter", {"message": "the door"})
+    if framework == "langgraph":
+        model = ScriptedChatModel(turns=[call, call, "done"])
+        tools = await harness.tools(child.as_tool(), framework="langgraph")
+        parent = harness.wrap(create_agent(model, tools=tools), id="graph-parent")
+    elif framework == "openai_agents":
+        sdk = OpenAIAgent(name="p", model=ScriptedModel([call, call, "done"]))
+        parent = harness.wrap(sdk, id="sdk-parent", tools=[child.as_tool()])
+    else:
+
+        async def delegates(input: str, agent: Runtime) -> Any:
+            return await agent.tools.call("painter", message="the door")
+
+        parent = harness.wrap(delegates, id="fn-parent", tools=[child.as_tool()])
+    paused = await parent.run("paint", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.question == "Which colour?"
+    result = await parent.resume(
+        paused.interrupt.interrupt_id, "answer", answer="blue", reviewer="r"
+    )
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer in ("done", "painted the door blue")
+    [kid] = await children(harness, paused.run_id)
+    assert kid.status is RunStatus.SUCCESS and kid.output == "painted the door blue"

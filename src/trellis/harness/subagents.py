@@ -134,8 +134,11 @@ class SubAgent:
         while result.status is RunStatus.PAUSED:
             assert result.interrupt is not None
             asked = result.interrupt
-            named = {"agent_id": child.id, "run_id": asked.run_id}
-            named["interrupt_id"] = asked.interrupt_id
+            named = {
+                "agent_id": child.id,
+                "run_id": asked.run_id,
+                "interrupt_id": asked.interrupt_id,
+            }
             answered = await parent.interrupt(
                 content_key("subagent", asked.run_id, asked.interrupt_id),
                 payload={**(asked.payload or {}), SUBAGENT: named},
