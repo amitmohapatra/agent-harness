@@ -17,7 +17,8 @@ the attempt after a worker crash replays it), which the store returns as
 ``RunRecord.checkpoint`` on every read and claim until the run ends, so whichever worker
 resumes the run repeats no question and no side effect. Data too large for a question (an
 ``ask`` table or diff) is a run artifact, stored beside the run and referenced from its
-interrupt (``payload_ref``).
+interrupt (``payload_ref``); so is a journal too large for a checkpoint, referenced from the
+checkpoint (``Journal.checkpoint``).
 
 The tenant is explicit: a call whose body names it (a start, a pause, a schedule) carries it
 there, and every other call takes ``tenant=`` (the run's own, from its record or its runtime).

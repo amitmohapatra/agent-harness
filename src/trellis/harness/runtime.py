@@ -44,9 +44,6 @@ log = logging.getLogger("trellis.run")
 #: artifact in agent-runs (``payload_ref``), not inside the question.
 INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 
-#: The most a progress checkpoint may be, as compact JSON (agent-runs' ``MAX_CHECKPOINT_BYTES``:
-#: a larger one is refused with ``413``, so it is not sent).
-MAX_CHECKPOINT_BYTES: Final = 1024 * 1024
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
@@ -114,7 +111,6 @@ class Runtime:
     _asked: int = 0
     _steps: int = 0
     _saved_at: float | None = None
-    _too_large: bool = False
 
     # ------------------------------------------------------------------ identity
     @property
@@ -179,23 +175,21 @@ class Runtime:
         """Save the journal as the run's progress checkpoint, on a heartbeat of the worker's
         lease (a worker's run only: nobody resumes an in-process run after its process died).
         ``now`` after a side-effecting call — the attempt after a crash replays it instead of
-        running it again; otherwise at most every :data:`PROGRESS_SECONDS`. A checkpoint over
-        :data:`MAX_CHECKPOINT_BYTES` is not sent and a refused save is a warning (the run goes
-        on; the next save tries again); a lost lease stops the run (``LeaseLostError``)."""
+        running it again; otherwise at most every :data:`PROGRESS_SECONDS`. A journal too large
+        for a checkpoint travels as a run artifact (``Journal.checkpoint``). A refused save is a
+        warning (the run goes on; the next save tries again); a lost lease stops the run
+        (``LeaseLostError``)."""
         if self.worker_id is None or self.lease_seconds is None:
             return
         clock = time.monotonic()
         if not now and self._saved_at is not None and clock - self._saved_at < PROGRESS_SECONDS:
             return
-        checkpoint = self.replay.journal.dump()
-        size = len(json.dumps(checkpoint, default=str, separators=(",", ":")).encode())
-        if size > MAX_CHECKPOINT_BYTES:
-            if not self._too_large:
-                self._too_large = True
-                self._unsaved(f"its journal ({size} bytes) is too large to save as progress")
-            return
+        runs = self.agent.harness.runs
         try:
-            await self.agent.harness.runs.heartbeat(
+            checkpoint = await self.replay.journal.checkpoint(
+                runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
+            )
+            await runs.heartbeat(
                 self.run_id,
                 self.worker_id,
                 lease_seconds=self.lease_seconds,

@@ -234,6 +234,8 @@ class Agent:
         assert record.awaiting is not None
         identity = self._identity_of(record)
         feedback = resolution.to_feedback(record.awaiting, identity.context())
+        # read before the resume: a journal that cannot be read leaves the run waiting
+        journal = await Journal.read(record.checkpoint, runs.artifacts, tenant=record.tenant_id)
         # The run store first: a decision is feedback only once it took effect. A resume
         # the store refuses (answered already, a stale interrupt) raises here, before
         # anything is sent, so approval patterns never learn from a decision that never was.
@@ -253,7 +255,7 @@ class Agent:
             identity,
             record.input,
             number=resumed.attempt,
-            journal=Journal.of(record.checkpoint),
+            journal=journal,
             resolution=resolution,
             listener=listener,
             streaming=listener is not None,
@@ -264,12 +266,13 @@ class Agent:
     ) -> Result:
         """A worker's run: fresh from the queue, continuing after a resolution, or after a
         worker died (its checkpoint is the progress it saved)."""
+        artifacts = self.harness.runs.artifacts
         return await pipeline.attempt(
             self,
             self._identity_of(record),
             record.input,
             number=record.attempt,
-            journal=Journal.of(record.checkpoint),
+            journal=await Journal.read(record.checkpoint, artifacts, tenant=record.tenant_id),
             resolution=record.last_resolution,
             worker_id=worker_id,
             lease_seconds=lease_seconds,

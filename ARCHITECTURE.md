@@ -384,6 +384,9 @@ call with side effects (`runs.heartbeat(..., checkpoint=journal)`: a worker that
 none of them), `runs.pause(interrupt, checkpoint=journal)` stores it with the pause, agent-runs returns it as `RunRecord.checkpoint` on every read and claim (and
 clears it when the run ends), and the attempt that resumes the run — in this process or in a
 worker elsewhere — files `last_resolution` under the pending question and replays the rest.
+A journal over agent-runs' 1 MiB checkpoint bound is uploaded as a run artifact and the
+checkpoint is `{"journal_ref": ArtifactRef}` (`Journal.checkpoint`); `Journal.read` downloads it
+back before the attempt.
 
 A run started in process (`run`/`stream`) continues in the process that resumes it; a run that
 came from the queue (`start`, a schedule) goes back to it and a worker continues it. Approve,

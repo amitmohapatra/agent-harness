@@ -328,12 +328,18 @@ async def _paused(
 ) -> Result:
     journal.pending = pending
     interrupt = pending.interrupt
+    checkpoint = await journal.checkpoint(
+        agent.harness.runs.artifacts,
+        runtime.run_id,
+        worker_id=runtime.worker_id,
+        tenant=runtime.tenant,
+    )
     await _recorded(
         agent,
         runtime.run_id,
         runtime.tenant,
         lambda: agent.harness.runs.pause(
-            interrupt, checkpoint=journal.dump(), worker_id=runtime.worker_id
+            interrupt, checkpoint=checkpoint, worker_id=runtime.worker_id
         ),
         lambda r: r.awaiting is not None and r.awaiting.interrupt_id == interrupt.interrupt_id,
     )

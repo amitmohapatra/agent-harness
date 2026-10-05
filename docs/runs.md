@@ -85,10 +85,21 @@ replays the recorded calls instead of running them again: a payment made before 
 not made twice. What the attempt was doing *during* the crash — a call that had started but
 not been recorded — runs again, so a tool that must never run twice still needs idempotency
 of its own (a key derived from its arguments, which the service it calls deduplicates on).
-A checkpoint over 1 MiB (agent-runs' bound) is not sent and a save that fails is a `warning`
-event and a log line — the run goes on, and the next save tries again; a save refused with
-`409` (the lease is gone) stops the run without writing anything more. Runs started in process
-(`run`, `stream`) save no progress: nobody resumes them after their process died.
+A save that fails is a `warning` event and a log line — the run goes on, and the next save
+tries again; a save refused with `409` (the lease is gone) stops the run without writing
+anything more. Runs started in process (`run`, `stream`) save no progress: nobody resumes them
+after their process died.
+
+**A journal larger than a checkpoint.** agent-runs keeps at most 1 MiB of compact JSON as a
+run's checkpoint (a larger one is refused with `413`); a run whose tools returned more than
+that still saves its progress and its pause. The journal is then uploaded as a run artifact
+(`POST /v1/runs/{id}/artifacts`, as a large `ask` table is) and the checkpoint holds only its
+reference, `{"journal_ref": <ArtifactRef>}`; the attempt that continues the run — after a
+crash, or after a resume in any process — reads the journal back from it. Nothing to
+configure. Each such save is one more artifact of the run, kept with its others (deleted 7 days
+after the run ends). A resume reads the journal before it answers the run, so a journal that
+cannot be read leaves the run waiting. With no `RUNS_URL` the store is this process's memory:
+it bounds nothing, and the same reference is kept there with the run.
 
 ## Schedules
 
@@ -132,8 +143,8 @@ id: `runs.start` (`POST /v1/runs`, `RunStart` + `queue`), `runs.claim`
 `runs.resume` (`POST /v1/runs/{id}/resume`, an `InterruptResolution`), `runs.finish`
 (`POST /v1/runs/{id}/finish?worker_id=`), `runs.get` (`GET /v1/runs/{id}`), `runs.list`
 page by page (`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=`, the inbox),
-`artifacts.upload` (`POST /v1/runs/{id}/artifacts?worker_id=&checksum=`, an `ask` payload →
-`ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`) and `schedules.create`
+`artifacts.upload` (`POST /v1/runs/{id}/artifacts?worker_id=&checksum=`, an `ask` payload or
+a journal larger than a checkpoint → `ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`) and `schedules.create`
 (`POST /v1/schedules`, `ScheduleSpec`).
 
 **The tenant is explicit.** A call whose body names the tenant (a start, a pause, a schedule)

@@ -89,7 +89,9 @@ async with RunsClient() as runs:
 
 * `pause(interrupt, *, checkpoint=None, worker_id=None)`: the `checkpoint` is any JSON your
   framework needs to continue (a thread id, a serialized `RunState`, a session id), up to
-  1 MiB. Every read returns it as `RunRecord.checkpoint` until the run ends.
+  1 MiB (`413` past it: upload larger state with `artifacts.upload` and keep its
+  `ArtifactRef` in the checkpoint, as the harness does with a large journal). Every read
+  returns it as `RunRecord.checkpoint` until the run ends.
 * `resume(resolution)`: the decision is `ANSWER` (with `answer`), `APPROVE`, `REJECT`, `EDIT`
   (with the edited arguments as `payload`) or `CANCEL` (the run ends `CANCELLED`). A run that
   was never queued is `RUNNING` again, for the process that resumes it; a queued one goes back

@@ -1,9 +1,11 @@
 """A worker that dies mid-run: the journal saved as a progress checkpoint on the heartbeat
 after each side-effecting tool call means the next attempt replays those calls instead of
-running them again."""
+running them again — a journal larger than a checkpoint may be too, stored as a run artifact
+the checkpoint names."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,13 +13,16 @@ import pytest
 
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import RunStatus
-from trellis.harness import runtime as runtime_module
+from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
+from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Lease, LeaseLostError, PayloadTooLargeError
 
 paid: list[int] = []
 looked: list[str] = []
+exported: list[int] = []
+#: a tool output larger than a checkpoint may be
+REPORT = "x" * (MAX_CHECKPOINT_BYTES + 1)
 
 
 @tool(side_effects="write")
@@ -34,14 +39,47 @@ def balance(account: str) -> int:
     return 100
 
 
+@tool(side_effects="write")
+def export(rows: int) -> str:
+    """Export a report."""
+    exported.append(rows)
+    return REPORT
+
+
 class Crash(BaseException):
     """The worker process dies: nothing is written, the lease lapses."""
+
+
+class Bounded(LocalRuns):
+    """The run store refusing a checkpoint over agent-runs' bound, as agent-runs does."""
+
+    async def heartbeat(
+        self, run_id: str, worker_id: str, *, checkpoint: dict[str, Any] | None = None, **kw: Any
+    ) -> Lease:
+        bounded(checkpoint)
+        return await super().heartbeat(run_id, worker_id, checkpoint=checkpoint, **kw)
+
+    async def pause(
+        self,
+        interrupt: Interrupt,
+        *,
+        checkpoint: dict[str, Any] | None = None,
+        worker_id: str | None = None,
+    ) -> RunRecord:
+        bounded(checkpoint)
+        return await super().pause(interrupt, checkpoint=checkpoint, worker_id=worker_id)
+
+
+def bounded(checkpoint: dict[str, Any] | None) -> None:
+    if len(json.dumps(checkpoint, separators=(",", ":"))) > MAX_CHECKPOINT_BYTES:
+        raise PayloadTooLargeError("checkpoint too large", code="PAYLOAD_TOO_LARGE", status=413)
 
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
     paid.clear()
     looked.clear()
+    exported.clear()
 
 
 def lapse(store: LocalRuns, run_id: str) -> None:
@@ -148,23 +186,13 @@ async def test_an_in_process_run_saves_no_progress(harness: Harness) -> None:
     assert result.status is RunStatus.SUCCESS and paid == [1]
 
 
-async def test_a_progress_checkpoint_too_large_or_refused_is_a_warning(
+async def test_a_refused_progress_save_is_a_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(runtime_module, "MAX_CHECKPOINT_BYTES", 10)
-
     async def billing(input: str, agent: Runtime) -> str:
         await agent.tools.call("pay", amount=1)
         return await agent.tools.call("pay", amount=2)
 
-    async with Harness(config=Settings()) as h:
-        agent = h.wrap(billing, id="billing", tools=[pay])
-        handle = await agent.start("x", user="u")
-        assert await h.worker([agent]).run_once()
-        assert (await handle.result(timeout=5)).answer == "paid 2"
-    assert caplog.text.count("too large to save as progress") == 1  # said once per run
-
-    monkeypatch.setattr(runtime_module, "MAX_CHECKPOINT_BYTES", 1024 * 1024)
     async with Harness(config=Settings()) as h:
 
         async def refused(*args: Any, **kwargs: Any) -> None:
@@ -196,3 +224,68 @@ async def test_a_lease_lost_while_saving_progress_stops_the_run(
     assert await harness.worker([agent]).run_once()
     assert paid == [1]  # nothing after the lost lease
     assert (await handle.status()).status is RunStatus.RUNNING  # nothing written
+
+
+async def reporter(input: str, agent: Runtime) -> str:
+    report = await agent.tools.call("export", rows=3)
+    sent = await agent.ask("Send it?", options=["yes", "no"])
+    return f"{len(report)} {sent}"
+
+
+async def test_a_journal_larger_than_a_checkpoint_survives_a_crash() -> None:
+    crashes = [Crash()]
+
+    async def exporting(input: str, agent: Runtime) -> int:
+        report = await agent.tools.call("export", rows=3)
+        if crashes:
+            raise crashes.pop()
+        return len(report)
+
+    async with Harness(config=Settings()) as h:
+        store = h.runs = Bounded()
+        agent = h.wrap(exporting, id="exporting", tools=[export])
+        handle = await agent.start("x", user="u")
+        await crash_once(store, agent, handle)
+        record = await handle.status()
+        assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+        assert await h.worker([agent]).run_once()
+        done = await handle.result(timeout=5)
+    assert done.answer == len(REPORT) and exported == [3]  # replayed, not exported again
+
+
+async def test_a_journal_larger_than_a_checkpoint_survives_a_pause() -> None:
+    async with Harness(config=Settings()) as h:
+        h.runs = Bounded()
+        agent = h.wrap(reporter, id="reporter", tools=[export])
+        handle = await agent.start("x", user="u")
+        worker = h.worker([agent])
+        assert await worker.run_once()
+        paused = await handle.result(timeout=5)
+        assert paused.interrupt is not None
+        record = await handle.status()
+        assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+        await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+        assert await worker.run_once()
+        done = await handle.result(timeout=5)
+    assert done.answer == f"{len(REPORT)} yes" and exported == [3]
+
+    async with Harness(config=Settings()) as h:  # a run resumed in its own process
+        h.runs = Bounded()
+        agent = h.wrap(reporter, id="reporter", tools=[export])
+        asked = await agent.run("x", user="u")
+        assert asked.interrupt is not None
+        done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="no", reviewer="u")
+    assert done.answer == f"{len(REPORT)} no" and exported == [3, 3]
+
+
+async def test_a_journal_whose_artifact_is_gone_leaves_the_run_waiting(harness: Harness) -> None:
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    agent = harness.wrap(reporter, id="reporter", tools=[export])
+    paused = await agent.run("x", user="u")
+    assert paused.interrupt is not None
+    store._artifacts.clear()
+    with pytest.raises(HarnessError, match="is gone"):
+        await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    record = await store.get(paused.run_id)
+    assert record is not None and record.status is RunStatus.PAUSED

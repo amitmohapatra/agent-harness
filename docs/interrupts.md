@@ -95,7 +95,9 @@ The journal is the run's checkpoint: the pause stores it with the run (`RunRecor
 in agent-runs, cleared when the run ends), and whichever process or worker resumes the run
 reads it back with the resolution, so a resume elsewhere repeats no question and no tool
 call. A worker also saves it as progress after every call with side effects, so a worker that
-dies mid-run repeats none either ([runs.md](runs.md#workers)). `ReAct` journals its model
+dies mid-run repeats none either ([runs.md](runs.md#workers)). A journal over agent-runs'
+1 MiB checkpoint bound (tools that returned a lot) is stored as a run artifact the checkpoint
+names, and read back the same way. `ReAct` journals its model
 steps too: a resume replays the steps before the pause instead of asking the model again.
 
 ### Framework approvals: LangChain's middleware and OpenAI Agents' `needs_approval`
