@@ -1,11 +1,11 @@
 # Configuration
 
-The harness reads the environment and nothing else — no YAML, no keyword arguments on
-`Harness()` besides `config=Settings(...)` (the same fields, for tests and embedding) and the
-online judges (`judges=[...]`: code that says *what* to judge; which model judges, through which
-key and how often is the environment's), no per-agent options on `wrap` beyond the agent's id,
-its own local tools and its version. Unset means "not in
-this deployment". Every variable, with a one-line description, is in
+The harness reads the environment and nothing else — no YAML. `Harness()` takes, besides
+`config=Settings(...)` (the same fields, for tests and embedding), only what code knows: the
+blocks you pass instead of the environment's (`runs=`, `memory=`, `gateway=`, `governance=`; a
+block `False` is off: [docs/README.md](README.md#composition-a-harness-is-the-blocks-you-give-it)),
+the online judges (`judges=[...]`: code that says *what* to judge; which model judges, through
+which key and how often is the environment's). Unset means "not in this deployment". Every variable, with a one-line description, is in
 [`.env.example`](../.env.example); `tests/unit/test_settings.py` checks the file lists exactly
 what is read.
 

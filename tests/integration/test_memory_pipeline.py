@@ -22,7 +22,6 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import telemetry
-from trellis.harness.clients.memory import Memory
 from trellis.harness.governance import catalog
 from trellis.memory.models import ToolHints
 
@@ -46,9 +45,7 @@ def many(n: int) -> list[Any]:
 
 
 def harness_with(service: FakeMemoryService, **settings: Any) -> Harness:
-    h = Harness(config=Settings(memory_url="http://m", api_key="test", **settings))
-    h.memory = Memory("http://m", None, client=service.client())
-    return h
+    return Harness(config=Settings(**settings), memory=service.client())
 
 
 # --------------------------------------------------------------------------- who we are

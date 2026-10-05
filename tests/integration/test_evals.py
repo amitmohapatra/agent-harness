@@ -18,7 +18,6 @@ from tests.support.memory import FakeMemoryService
 from trellis import Harness, ReAct, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import telemetry
-from trellis.harness.clients.memory import Memory
 from trellis.harness.evals import (
     EvalCase,
     EvalItem,
@@ -63,13 +62,8 @@ class JudgeOrAnswer:
 
 
 def langfuse_harness(service: FakeMemoryService | None = None, **settings: Any) -> Harness:
-    config = {"otlp_headers": OTLP, **settings}
-    if service is not None:
-        config.update(memory_url="http://m", api_key="test")
-    h = Harness(config=Settings(**config))
-    if service is not None:
-        h.memory = Memory("http://m", None, client=service.client())
-    return h
+    config = Settings(**{"otlp_headers": OTLP, **settings})
+    return Harness(config=config, memory=service.client() if service is not None else None)
 
 
 async def capital(input: str, agent: Runtime) -> str:

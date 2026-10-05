@@ -60,11 +60,8 @@ async def test_another_process_resumes_from_the_checkpoint_alone() -> None:
         return f"{receipt}; {size}; {ship}"
 
     store = LocalRuns()
-    processes = [Harness(config=Settings()) for _ in range(3)]
-    agents = []
-    for h in processes:
-        h.runs = store
-        agents.append(h.wrap(billing, id="billing", tools=[charge]))
+    processes = [Harness(config=Settings(), runs=store) for _ in range(3)]
+    agents = [h.wrap(billing, id="billing", tools=[charge]) for h in processes]
     try:
         handle = await agents[0].start("order 7", user="u")
         assert await processes[0].worker([agents[0]]).run_once()

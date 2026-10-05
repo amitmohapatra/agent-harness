@@ -520,9 +520,8 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
     monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.0)
     service = FakeMemoryService()
     service.fail.add("put_catalog")  # unavailable: the write is kept in the spool
-    settings = Settings(memory_url="http://memory.test", api_key="test", spool_dir=str(tmp_path))
-    async with Harness(config=settings) as h:
-        h.memory = Memory("http://memory.test", None, client=service.client())
+    settings = Settings(spool_dir=str(tmp_path))
+    async with Harness(config=settings, memory=service.client()) as h:
         governance = h.governance("acme")
         assert isinstance(governance.catalog, MemoryCatalog)
         assert governance.catalog.ctx.scope.tenant_id == "acme"
@@ -535,7 +534,7 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
         {"tenant_id": "acme", "custom_metadata": {}},
     )
     service.fail.clear()
-    replay = Memory("http://memory.test", None, client=service.client()).replay
+    replay = Memory(service.client()).replay
     writes = Writes(spool=tmp_path, replay=replay)
     writes.start()  # the next start replays the spooled publish
     await writes.drain()

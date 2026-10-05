@@ -247,8 +247,8 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash() -> None:
             raise crashes.pop()
         return len(report)
 
-    async with Harness(config=Settings()) as h:
-        store = h.runs = Bounded()
+    store = Bounded()
+    async with Harness(config=Settings(), runs=store) as h:
         agent = h.wrap(exporting, id="exporting", tools=[export])
         handle = await agent.start("x", user="u")
         await crash_once(store, agent, handle)
@@ -260,8 +260,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash() -> None:
 
 
 async def test_a_journal_larger_than_a_checkpoint_survives_a_pause() -> None:
-    async with Harness(config=Settings()) as h:
-        h.runs = Bounded()
+    async with Harness(config=Settings(), runs=Bounded()) as h:
         agent = h.wrap(reporter, id="reporter", tools=[export])
         handle = await agent.start("x", user="u")
         worker = h.worker([agent])
@@ -275,8 +274,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_pause() -> None:
         done = await handle.result(timeout=5)
     assert done.answer == f"{len(REPORT)} yes" and exported == [3]
 
-    async with Harness(config=Settings()) as h:  # a run resumed in its own process
-        h.runs = Bounded()
+    async with Harness(config=Settings(), runs=Bounded()) as h:  # resumed in its own process
         agent = h.wrap(reporter, id="reporter", tools=[export])
         asked = await agent.run("x", user="u")
         assert asked.interrupt is not None

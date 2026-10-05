@@ -1,6 +1,7 @@
-"""``Harness``: the one object an application constructs. It reads the deployment from the
-environment, owns the clients (Bifrost, memory, runs), the background writes and the scores,
-and attaches all of it to agents with :meth:`Harness.wrap`.
+"""``Harness``: the one object an application constructs. It is the blocks it is given — the
+run store, the memory client, the Bifrost gateway, governance — each built from the environment
+when it is not given (or left off: ``memory=False``), with the background writes and the
+scores, and attaches all of it to agents with :meth:`Harness.wrap`.
 
 Nothing about an agent is configured beyond ``h.wrap(target, id=...)``: memory is on when the
 deployment has a memory service, the MCP tools are the ones the Bifrost virtual key allows,
@@ -15,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, TypeVar
 
 from bifrost_sdk import NO_GATEWAY_TOOLS
 
@@ -41,6 +42,7 @@ from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.harness.worker import Worker
 from trellis.harness.writes import Writes
+from trellis.memory import MemoryClient
 from trellis.memory.errors import (
     AuthenticationError,
     AuthorizationError,
@@ -50,6 +52,8 @@ from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
 from trellis.runs import RunsClient, RunSummary
 
 log = logging.getLogger("trellis.harness")
+
+_Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient)
 
 Framework = Literal["langgraph", "deepagents", "openai_agents", "claude_agent_sdk"]
 #: The native tool format each framework's agents are built with, by the framework's adapter
@@ -83,25 +87,51 @@ INBOX_MAX_PAGES: Final = 10
 
 
 class Harness:
-    """``Harness()`` reads the environment (``.env.example`` lists every variable);
-    ``Harness(config=Settings(...))`` is the same without it. ``judges`` are the online
-    evaluators every sampled successful run is scored by (``TRELLIS_JUDGE_SAMPLE``: by default
-    0.1 of the runs), in the background."""
+    """The blocks it is given, the rest from the environment: ``Harness()`` reads it
+    (``.env.example`` lists every variable); ``Harness(config=Settings(...))`` is the same
+    without it.
 
-    def __init__(self, config: Settings | None = None, *, judges: Sequence[Evaluator] = ()) -> None:
+    ``runs`` (a :class:`~trellis.harness.runs.RunStore`: ``trellis.runs.RunsClient``,
+    ``LocalRuns``), ``memory`` (a ``trellis.memory.MemoryClient``), ``gateway`` (a
+    ``trellis.harness.clients.bifrost.Gateway``) and ``governance`` (a
+    :class:`~trellis.harness.governance.Governance`, for every tenant) are the blocks Way 2 uses
+    on their own: given, each is used as it is (and closed by its owner, not here); not given,
+    each is built from the environment (``RUNS_URL``, ``MEMORY_URL``, ``BIFROST_URL``; governance
+    from the memory service's catalog per tenant); ``False`` leaves memory, the gateway or
+    agent-runs off (runs kept in this process) even where the environment names them.
+
+    ``judges`` are the online evaluators every sampled successful run is scored by
+    (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background."""
+
+    def __init__(
+        self,
+        config: Settings | None = None,
+        *,
+        runs: RunStore | Literal[False] | None = None,
+        memory: MemoryClient | Literal[False] | None = None,
+        gateway: Gateway | Literal[False] | None = None,
+        governance: Governance | None = None,
+        judges: Sequence[Evaluator] = (),
+    ) -> None:
         self.settings = config or Settings.from_env()
         s = self.settings
-        if s.runs_url and not s.memory_url:
+        builds_runs = runs is None and s.runs_url is not None
+        builds_memory = memory is None and s.memory_url is not None
+        if builds_runs and not (builds_memory or memory):
             raise ConfigurationError(
                 "RUNS_URL needs MEMORY_URL: agent-runs accepts the keys the memory service "
                 "issues, and the harness learns its tenant from there"
             )
-        if s.memory_url and not s.api_key:
+        if (builds_runs or builds_memory) and not s.api_key:
             raise ConfigurationError(
                 "MEMORY_URL (and RUNS_URL) need TRELLIS_API_KEY: both services refuse a call "
                 "without a key (a development memory service takes one of its trusted_dev keys)"
             )
-        self.gateway = Gateway(s.bifrost_url, s.bifrost_virtual_key) if s.bifrost_url else None
+        #: the clients built here from the environment, closed by :meth:`aclose`
+        self._made: list[Any] = []
+        if gateway is None and s.bifrost_url:
+            gateway = self._making(Gateway(s.bifrost_url, s.bifrost_virtual_key))
+        self.gateway: Gateway | None = gateway or None
         #: what evaluation reaches: Langfuse (scores, datasets, dataset runs) and the judge —
         #: the gateway, with the judge's own virtual key when it has one (its budget apart from
         #: the agents'); each agent's are ``agent.evals``
@@ -111,10 +141,12 @@ class Harness:
         self.judge_sample = (
             s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
         )
-        self.memory = Memory(s.memory_url, s.api_key) if s.memory_url else None
-        self.runs: RunStore = (
-            RunsClient(s.runs_url, api_key=s.api_key) if s.runs_url else LocalRuns()
-        )
+        if builds_memory:
+            memory = self._making(MemoryClient(s.memory_url, api_key=s.api_key))
+        self.memory = Memory(memory) if memory else None
+        if builds_runs:
+            runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
+        self.runs: RunStore = runs or LocalRuns()
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: every agent wrapped here, by id (what ``python -m trellis.harness.worker`` serves)
         self.agents: dict[str, Agent] = {}
@@ -132,8 +164,9 @@ class Harness:
         self._registered: set[tuple[str, str]] = set()
         #: the memory service said it takes no model keys: none is registered again
         self._model_keys_off = False
-        #: governance per tenant (:meth:`governance`)
+        #: governance per tenant (:meth:`governance`), or the one given for every tenant
         self._governance: dict[str, Governance] = {}
+        self._given_governance = governance
         telemetry.configure(s)
 
     # ------------------------------------------------------------------ attaching
@@ -360,12 +393,13 @@ class Harness:
         return headers
 
     async def aclose(self) -> None:
-        """Finish the queued writes, export the queued spans and close the clients."""
+        """Finish the queued writes, export the queued spans and close the clients built here
+        (the blocks given are their owner's to close)."""
         await self.writes.aclose()
         await telemetry.flush()
         judge = self.evals.judge_gateway
         judge = judge if judge is not self.gateway else None
-        clients = (self.gateway, judge, self.memory, self.runs, self.evals.langfuse)
+        clients = (*self._made, judge, self.evals.langfuse)
         closers = [c.aclose() for c in clients if c is not None]
         await asyncio.gather(*closers)
 
@@ -438,6 +472,11 @@ class Harness:
         platform key)."""
         return self._key.value.tenant_id if self._key.value is not None else None
 
+    def _making(self, client: _Made) -> _Made:
+        """``client``, built here from the environment: :meth:`aclose` closes it."""
+        self._made.append(client)
+        return client
+
     async def writes_memory(self) -> bool:
         """Whether runs record their transcript, tool calls and outcome: memory is on. What
         a run may write is the memory service's to decide, per scope (its relationship checks,
@@ -446,9 +485,11 @@ class Harness:
 
     # ------------------------------------------------------------------ used by agents
     def governance(self, tenant: str) -> Governance:
-        """Governance in ``tenant``, one per tenant: the memory service's tool catalog in its
-        scope (memory on; publishes go through the background writes), or the tools' own
-        risks only."""
+        """Governance in ``tenant``: the one given (``Harness(governance=)``), else one per
+        tenant — the memory service's tool catalog in its scope (memory on; publishes go
+        through the background writes), or the tools' own risks only."""
+        if self._given_governance is not None:
+            return self._given_governance
         found = self._governance.get(tenant)
         if found is None:
             found = self._governance[tenant] = self._governed(tenant)

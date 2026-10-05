@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -24,6 +24,7 @@ from trellis.contracts import (
     ToolSpec,
 )
 from trellis.harness import telemetry
+from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.runs import LocalRuns
 from trellis.harness.runtime import Paused
 from trellis.harness.tools.base import Tool
@@ -52,8 +53,7 @@ async def test_a_cancel_that_reaches_the_run_ends_it_cancelled() -> None:
     async def asks(input: str, agent: Runtime) -> str:
         return await agent.ask("Go on?")
 
-    async with Harness(config=Settings()) as h:
-        h.runs = CancelInTheRun()
+    async with Harness(config=Settings(), runs=CancelInTheRun()) as h:
         agent = h.wrap(asks, id="asks")
         paused = await agent.run("q", user="u")
         assert paused.interrupt is not None
@@ -139,15 +139,16 @@ class LoggingGateway:
 
 
 async def test_the_calls_a_script_made_are_recorded_from_the_gateways_log(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_service: FakeMemoryService,
 ) -> None:
     async def scripted(input: str, agent: Runtime) -> str:
         return await agent.tools.call("executeToolCode", code="print(wiki.search(q='x'))")
 
     gateway = LoggingGateway()
-    memory_harness.gateway = gateway  # type: ignore[assignment]
-    result = await memory_harness.wrap(scripted, id="coder", tools=[Script()]).run("q", user="u")
-    await memory_harness.writes.drain()
+    given = cast("Gateway", gateway)
+    async with Harness(config=Settings(), memory=memory_service.client(), gateway=given) as h:
+        result = await h.wrap(scripted, id="coder", tools=[Script()]).run("q", user="u")
+        await h.writes.drain()
     assert result.answer == "printed" and gateway.asked == [result.run_id]
     recorded = {c.body["tool"]: c.body for c in memory_service.named("record_tool")}
     assert recorded["wiki-search"]["status"] == "ok"
@@ -282,15 +283,13 @@ async def test_feedback_with_memory_off_is_only_a_score(
 async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
     memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from trellis.harness.clients.memory import Memory
 
     memory_service.claims = 0
     memory_service.unsupported = 0
     scored: list[Any] = []
     monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append(args))
-    settings = Settings(memory_url="http://m", api_key="test", grounding_sample=1.0)
-    async with Harness(config=settings) as h:
-        h.memory = Memory("http://m", None, client=memory_service.client())
+    settings = Settings(grounding_sample=1.0)
+    async with Harness(config=settings, memory=memory_service.client()) as h:
 
         async def fn(input: str, agent: Runtime) -> str:
             return "hello"

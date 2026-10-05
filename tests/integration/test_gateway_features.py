@@ -41,9 +41,8 @@ def fake() -> FakeGateway:
 
 @pytest.fixture
 async def h(fake: FakeGateway) -> AsyncIterator[Harness]:
-    async with Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key="vk")) as made:
-        await made.gateway.aclose()  # type: ignore[union-attr]
-        made.gateway = fake.gateway()
+    settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
+    async with Harness(config=settings, gateway=fake.gateway()) as made:
         yield made
 
 
@@ -216,9 +215,7 @@ async def test_a_skill_the_gateway_cannot_give_is_a_warning_and_the_run_goes_on(
     assert answer.startswith(SECTION) and "- sql: Reviews SQL." in answer
     assert "no skill 'ghost' in this run (its skills: sql)" in answer
     fake.down = ("/api/skills",)  # unreachable: a run that never read a skill has none
-    async with Harness(config=Settings(bifrost_url=URL)) as other:
-        await other.gateway.aclose()  # type: ignore[union-attr]
-        other.gateway = fake.gateway()
+    async with Harness(config=Settings(bifrost_url=URL), gateway=fake.gateway()) as other:
         found = [
             e async for e in other.wrap(analyst, id="a2", skills=["sql"]).stream("r", user="u")
         ]

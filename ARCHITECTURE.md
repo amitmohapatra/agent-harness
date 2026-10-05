@@ -103,11 +103,14 @@ src/trellis/
   __init__.py          the public API (lazy; extends __path__ for trellis.contracts / .memory /
                        .runs)
   harness/
-    harness.py         Harness: settings → clients, writes, evaluation services; the key (tenant,
+    harness.py         Harness: the blocks given (runs, memory, gateway, governance), the rest
+                       built from the settings; writes, evaluation services; the key (tenant,
                        kept fresh); governance per tenant; wrap / tools / worker / inbox /
                        feedback / add_document / evaluate / score
-    agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
-    pipeline.py        one attempt of one run (the fixed pipeline below)
+    agent.py           Agent: run, stream, start, execute (a claimed run), resume, schedule,
+                       serve_*; RunHandle
+    pipeline.py        one attempt of one run, from its record — the one way every entry
+                       starts one (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
     journal.py         what a re-run needs: answers and tool outputs, keyed by content (and
                        the journals of the sub-agents' runs working inside its calls)

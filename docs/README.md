@@ -55,6 +55,37 @@ inbox, and a judge.
 | [blocks/openai-agents.md](blocks/openai-agents.md) | an OpenAI Agents `Agent`: `needs_approval` from governance, the `RunState` as the run's checkpoint |
 | [blocks/claude-agent-sdk.md](blocks/claude-agent-sdk.md) | a Claude Agent SDK `query()`: `can_use_tool` from governance, the session as the checkpoint |
 
+## Composition: a Harness is the blocks you give it
+
+The two ways are one set of blocks — the run store, the memory client, the Bifrost gateway,
+governance — composed differently.
+
+| You want | Write | What you get |
+|---|---|---|
+| everything, from the deployment (Way 1) | `Harness()` | each block built from its environment variable (`RUNS_URL`, `MEMORY_URL`, `BIFROST_URL`; governance from the catalog per tenant), each off when its variable is unset |
+| some blocks of your own, the rest from the deployment | `Harness(runs=RunsClient(...), governance=Governance(...))` | the blocks you pass, used as they are (and yours to close); the others built from the environment |
+| a block off although the deployment names it | `Harness(memory=False)` (`gateway=False`, `runs=False`: runs kept in this process) | that block off for every agent of this harness |
+| your own scheduler or worker | `await agent.execute(job)` for each run it claims (`trellis.runs.Worker(runs, agent.execute, [agent.id])`, or a loop of yours around `runs.claim`) | the run's next attempt with its journal, governance, memory and limits ([runs.md](runs.md#workers)) |
+| `ReAct` (or any target) with your blocks | `Harness(<your blocks>).wrap(ReAct(...))` | one loop and one path: the same `ReAct` as Way 1, on your blocks |
+| the blocks without the harness (Way 2) | import the block and call it ([the blocks](#way-2-pluggable-blocks-your-framework-our-pieces)) | your framework runs the agent; your code calls each block where it chooses |
+
+```python
+from trellis import Harness, ReAct
+from trellis.harness.governance import Governance
+from trellis.runs import RunsClient
+
+runs = RunsClient()  # RUNS_URL, TRELLIS_API_KEY
+h = Harness(runs=runs, memory=False, governance=Governance())
+agent = h.wrap(ReAct(system="You handle refunds.", model="provider/model"), id="refunds")
+```
+
+`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, judges=())`:
+`runs` a `RunStore` (`trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or
+your own with the same calls), `memory` a `trellis.memory.MemoryClient`, `gateway` a
+`trellis.harness.clients.bifrost.Gateway(url, virtual_key)`, `governance` a `Governance` (used
+for every tenant). Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
+(its own run store, its own scheduler loop, governance, no memory).
+
 ## Mixing both ways
 
 [blocks/mixing.md](blocks/mixing.md): wrapped agents and your own in one deployment, sharing one

@@ -293,8 +293,7 @@ def _template(path: str) -> str:
 @pytest.fixture
 async def wired() -> AsyncIterator[tuple[Harness, RunsService]]:
     service = RunsService(runs_contract())
-    async with Harness() as h:
-        h.runs = service.client()
+    async with Harness(runs=service.client()) as h:
         yield h, service
 
 

@@ -190,7 +190,7 @@ The wrapped API is importable from `trellis`. The blocks are imported from their
 
 | Name | What it is |
 |---|---|
-| `Harness(config=None, *, judges=())` | Reads the environment; `config=Settings(...)` instead of it. `judges` are online evaluators that score a sampled share of successful runs in the background ([docs/evaluation.md](docs/evaluation.md)). `async with` (or `await h.aclose()`) drains the background writes and closes the clients. `h.agents` is every agent it wraps, by id. |
+| `Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, judges=())` | The blocks it is given, the rest from the environment (`config=Settings(...)` instead of it): `runs` a run store (`trellis.runs.RunsClient`, `LocalRuns`), `memory` a `trellis.memory.MemoryClient`, `gateway` a `trellis.harness.clients.bifrost.Gateway`, `governance` a `Governance` — each used as it is (and closed by you); `False` leaves memory, the gateway or agent-runs off whatever the environment names ([docs/README.md](docs/README.md#composition-a-harness-is-the-blocks-you-give-it)). `judges` are online evaluators that score a sampled share of successful runs in the background ([docs/evaluation.md](docs/evaluation.md)). `async with` (or `await h.aclose()`) drains the background writes and closes the clients. `h.agents` is every agent it wraps, by id. |
 | `Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=, otlp_headers=, spool_dir=, worker_concurrency=, agent_version=, grounding_sample=, judge_model=, judge_virtual_key=, judge_sample=)` | The deployment as fields (every one optional); `Settings.from_env()` is what `Harness()` reads ([docs/configuration.md](docs/configuration.md)). |
 | `h.wrap(target, *, id, tools=(), version=None, mcp=None, skills=(), timeout=None) -> Agent` | Attach the harness. The framework is detected from the target's type. `tools` are the agent's own, run in this process: functions, `a2a(url)`, `openapi(spec)`. `mcp`: the gateway's Virtual MCPs (by slug) whose tools are the agent's MCP tools (else every tool its virtual key allows); `skills`: skills of the gateway's Skills Repository (`"name"`, `"name@version"`), disclosed in the context and read with two tools ([docs/gateway.md](docs/gateway.md)). `version` is the agent's code version (else `TRELLIS_AGENT_VERSION`): recorded with each run it starts and on its spans; a run resumed on another version goes on with a warning naming both. `timeout`: the most working time of each of its runs, in seconds, however it starts (`run`, `stream`, `start`, chat, A2A, `h.evaluate`, a schedule), unless the run names its own ([docs/reliability.md](docs/reliability.md#run-time-limit-and-deadline)). |
 | `await h.tools(*sources, framework=..., mcp=None)` | The toolbox as the framework's own tools, for an agent built with them before wrapping (a compiled LangGraph graph binds its tools): LangChain tools (`"langgraph"`, `"deepagents"`), `FunctionTool`s (`"openai_agents"`), one in-process MCP server (`"claude_agent_sdk"`). It holds `sources` (`skills(...)` among them), the MCP tools (`mcp=`: those of these Virtual MCPs) and the memory tools. |
@@ -234,9 +234,9 @@ deadline, escalate_to)` (pauses the run; returns the answer on resume —
 
 `Result`: `run_id`, `status` (`SUCCESS`, `PAUSED`, `ERROR`, `TIMEOUT`, `QUEUED`, `CANCELLED`), `answer`,
 `interrupt`, `error`. `trellis.runs.RunSummary`: `run_id`, `agent_id`, `status`, `awaiting`,
-`assignee`, `deadline`, `updated_at`. `h.runs` is the run store: agent-runs' client
-(`trellis.runs.RunsClient`) with `RUNS_URL`, else the in-process `LocalRuns`
-([docs/runs.md](docs/runs.md)).
+`assignee`, `deadline`, `updated_at`. `h.runs` is the run store: the one given
+(`Harness(runs=)`), else agent-runs' client (`trellis.runs.RunsClient`) with `RUNS_URL`, else the
+in-process `LocalRuns` ([docs/runs.md](docs/runs.md)).
 
 Run a worker for every agent a module's harness wraps:
 
@@ -331,6 +331,7 @@ Way 1, wrapped:
 | `openai_agents_handoff.py` | a handoff to a specialist built with `h.tools(framework="openai_agents")` |
 | `claude_agent_sdk_agent.py` | `ClaudeAgentOptions` with a harness tool (a scripted CLI offline) |
 | `react_agent.py` | `ReAct` with a tool and a structured answer |
+| `react_with_blocks.py` | `ReAct` on blocks of your own: your run store, your scheduler loop (`agent.execute`), your governance, memory off |
 | `react_subagents.py` | `agent.as_tool()`: a `ReAct` planner delegating to two agents at once, one asking a person through the planner |
 | `cowork.py` | start → worker → ask with a diff → inbox → resume → worker |
 | `schedule.py` | a schedule a worker runs (memory on: the person's context) |

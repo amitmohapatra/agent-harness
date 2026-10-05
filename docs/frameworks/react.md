@@ -2,8 +2,13 @@
 
 For a team with no agent framework: `ReAct(system, model)` is a tool-calling loop over chat
 completions — native tool messages, structured output, a `chat` span per model call. Nothing
-else to install. `ReAct` exists to be wrapped (Way 1); a team with a loop of its own that wants
-only some pieces uses the blocks instead ([docs/README.md](../README.md#way-2-pluggable-blocks-your-framework-our-pieces)).
+else to install. `ReAct` runs wrapped, with the blocks of the harness that wraps it — the
+deployment's (`Harness()`), or your own: `Harness(runs=..., governance=..., memory=False)
+.wrap(ReAct(...))`, its queued runs continued by your own scheduler with `agent.execute(job)`
+([composition](../README.md#composition-a-harness-is-the-blocks-you-give-it),
+[`examples/react_with_blocks.py`](../../examples/react_with_blocks.py)). A team with a loop of
+its own that wants only some pieces uses the blocks instead
+([docs/README.md](../README.md#way-2-pluggable-blocks-your-framework-our-pieces)).
 
 ```python
 from pydantic import BaseModel
@@ -75,6 +80,8 @@ says so once — set a stronger model).
 ## Run it
 
 * [`examples/react_agent.py`](../../examples/react_agent.py) — a tool, then a structured answer.
+* [`examples/react_with_blocks.py`](../../examples/react_with_blocks.py) — your run store, your
+  scheduler loop, your governance, memory off.
 * [`examples/react_subagents.py`](../../examples/react_subagents.py) — two sub-agents at once,
   one asking a person.
 * Tests: `tests/integration/test_react.py`, `test_react_parallel.py`, `test_react_context.py`,

@@ -147,7 +147,7 @@ def identity() -> Identity:
 
 
 def memory(service: FakeMemoryService) -> Memory:
-    return Memory("http://mem", None, client=service.client())
+    return Memory(service.client())
 
 
 async def test_the_key_says_who_the_deployment_is() -> None:
@@ -257,7 +257,7 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
     )
 
     service = FakeMemoryService()
-    memory = Memory("http://memory.test", "key", client=service.client())
+    memory = Memory(service.client())
     scope = Identity(tenant="acme", user="ada", agent_id="a", run_id="run_1", thread="thr")
     run = memory.bind(scope)
     call, outcome = ToolCall(tool="erp-get", args={"sku": "1"}), ToolOutcome(tool="erp-get")
@@ -304,4 +304,4 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
     assert all(c.scope.get("tenant_id") == "acme" for c in service.calls)
     assert service.named("messages")[0].body["messages"][0]["source_message_id"] == "run_1:user:0"
     assert memory.replay({"op": "unknown", "scope": {}, "args": {}}) is None
-    await memory.aclose()
+    await memory.client.aclose()
