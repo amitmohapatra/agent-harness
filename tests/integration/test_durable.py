@@ -153,7 +153,7 @@ async def test_a_lost_lease_stops_the_run_without_writing(harness: Harness) -> N
     execution.cancel()  # what the heartbeat does on a lost lease
     with contextlib.suppress(asyncio.CancelledError):
         await execution
-    assert (await handle.status()).status is RunStatus.CANCELLED
+    assert (await handle.status()).status is RunStatus.RUNNING  # nothing written
 
 
 def test_the_worker_cli_loads_a_harness_by_module_path(

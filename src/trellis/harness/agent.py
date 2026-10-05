@@ -471,9 +471,7 @@ class Agent:
             record.input,
             journal=await Journal.read(record.checkpoint, artifacts, tenant=record.tenant_id),
             resolution=record.last_resolution,
-            worker_id=job.worker_id,
-            lease_seconds=job.lease_seconds,
-            remaining=job.remaining_seconds,
+            job=job,
         )
 
     async def _events(

@@ -65,8 +65,8 @@ class Worker:
         self.loop.stop()
 
     async def run(self) -> None:
-        """Claim and execute until stopped (or cancelled: the runs held are then cancelled
-        and end ``CANCELLED``)."""
+        """Claim and execute until stopped (or cancelled: the runs held then stop, writing
+        nothing — their leases lapse, and agent-runs queues them again)."""
         await self._writing(self.loop.run())
 
     async def serve(self) -> None:

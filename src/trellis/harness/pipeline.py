@@ -56,7 +56,7 @@ from trellis.harness.result import Result
 from trellis.harness.runtime import RunCancelled, Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, metrics, output
 from trellis.memory.models import PromptContext
-from trellis.runs import RELEASED, ConflictError, LeaseLostError
+from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -128,21 +128,22 @@ async def attempt(
     journal: Journal | None = None,
     resolution: InterruptResolution | None = None,
     listener: Callable[[RunEvent], None] | None = None,
-    worker_id: str | None = None,
-    lease_seconds: int | None = None,
+    job: Job | None = None,
     remaining: float | None = None,
     observe: Callable[[PromptContext | None], None] | None = None,
     parent: Runtime | None = None,
 ) -> Result:
     """Run the next attempt of the run ``record`` is (already RUNNING), on ``input`` (its
     record's, or — a run started in this process — the object it was started with), and
-    record how it ended. ``listener`` hears its events, the text as it streams. ``worker_id``
-    names the worker holding its lease (the store fences its writes), ``lease_seconds`` its
-    length (progress checkpoints extend it), and ``remaining`` the working time the lease says
-    the run has left. ``observe`` is told the memory context the run was given (an offline
+    record how it ended. ``listener`` hears its events, the text as it streams. ``job`` is the
+    worker's claim of the run: the worker holding its lease (the store fences its writes), the
+    lease's length (progress checkpoints extend it) and the working time it says is left (else
+    ``remaining``). ``observe`` is told the memory context the run was given (an offline
     evaluation's evaluators read it). ``parent`` is the run in whose tool call this one works
     (a sub-agent's run: its progress is the parent's, its spans in the parent's trace)."""
     identity, without = Identity.of(record), run_without(record)
+    if job is not None:
+        remaining = job.remaining_seconds
     budget = _budget(agent, record, remaining)
     journal = journal or Journal()
     unresumable = await _unheld(agent, identity, journal, resolution)
@@ -156,8 +157,8 @@ async def attempt(
         events=events,
         replay=_replay(journal, resolution),
         attempt=record.attempt,
-        worker_id=worker_id,
-        lease_seconds=lease_seconds,
+        worker_id=None if job is None else job.worker_id,
+        lease_seconds=None if job is None else job.lease_seconds,
         run_memory=await agent.run_memory(identity, without),
         without=without,
         used=set(journal.used),
@@ -197,11 +198,12 @@ async def attempt(
         task = asyncio.current_task()
         assert task is not None
         # ``agent.cancel`` ends the run CANCELLED with its reason, and its task goes on;
-        # otherwise the caller went away (a closed stream, a lost lease): the run ends here —
-        # unless its worker is stopping and released it for another worker to run again
+        # otherwise the caller went away (a closed stream): the run ends here. A worker's run
+        # is the worker's to end — CANCELLED here only when someone asked (its heartbeat said
+        # so); stopped for its lease, its working time or a release, the worker ends it
         if runtime.cancelled is None or task.uncancel():
-            if RELEASED not in exc.args:
-                await _settle_cancelled(agent, identity, events, worker_id)
+            if job is None or (job.cancel_requested and RELEASED not in exc.args):
+                await _settle_cancelled(agent, identity, events, runtime.worker_id)
             raise
     except Exception as exc:
         # a framework may wrap or swallow the pause: the runtime is what says it paused
