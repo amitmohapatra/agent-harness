@@ -110,6 +110,13 @@ argument, on anyone in the tenant), newest first, as `trellis.runs.RunSummary` (
 with pages of 500 (`INBOX_LIMIT`, `INBOX_MAX_PAGES`): past 5000 runs it returns the newest and
 logs a warning.
 
+The assignee is a filter, not a lock: every key of the tenant reads every inbox. Answering is
+checked in agent-runs: the application's key (it may act for anyone, the default) or an admin
+key answers any run, and its `reviewer` is taken as given; a key restricted to listed people
+answers only as one of them, a run assigned to that person or to nobody, never a group's run
+(`AuthorizationError` otherwise). See [interrupts.md](interrupts.md#answering) and
+[agent-runs' rule](https://github.com/amitmohapatra/agent-runs/blob/main/README.md#who-may-answer-a-paused-run).
+
 Notifications (a run paused, escalated or finished) are agent-runs' tenant webhook
 subscriptions (`RunsClient.webhooks.create`, `POST /v1/webhooks`), not a harness setting; a
 receiver checks each delivery with `trellis.runs.webhooks.verify_signature`

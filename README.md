@@ -153,6 +153,11 @@ asyncio.run(main())
 Swap `answer` for your LangGraph graph, OpenAI Agents `Agent`, `ClaudeAgentOptions` or a
 `ReAct` and keep the rest; `make examples` runs one of each with no services.
 
+For a real deployment, [docs/onboarding.md](docs/onboarding.md) is the path from running
+services to a configured application: the operator creates the tenant, its admin issues the
+application's key, the environment is set, and (optionally) people get keys of their own for an
+approvals UI.
+
 ## Configuration
 
 The environment, and nothing else ([`.env.example`](.env.example)):

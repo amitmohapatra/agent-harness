@@ -58,6 +58,16 @@ was rejected — with the reviewer's reason when the reject carries one as `answ
 (`"refund was not run: the approver rejected it (over budget)"`). The interrupt id names its run, so nothing else is needed; a
 resume must answer the interrupt the run currently waits on.
 
+**Who may answer.** With agent-runs, the harness's key decides. The application's key (it may
+act for anyone, the default) or an admin key answers any run, and `reviewer` is recorded as
+given: the application vouches for it. A key restricted to listed people
+(`may_act_as=["user:priya"]`) answers only as one of them (`reviewer="priya"` is `user:priya`)
+and only a run assigned to that person or to nobody; never a run assigned to a group
+(`role:…`), which the application's key answers. A refusal raises
+`trellis.runs.AuthorizationError` saying why, before anything changes. The rule is
+[agent-runs' "Who may answer a paused run"](https://github.com/amitmohapatra/agent-runs/blob/main/README.md#who-may-answer-a-paused-run); setting up such keys is
+[onboarding.md](onboarding.md#4-optional-a-key-per-person-for-an-approvals-ui).
+
 ## How a run continues
 
 * **LangGraph with a checkpointer** (Deep Agents with one included): `ask` is LangGraph's

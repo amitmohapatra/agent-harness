@@ -93,7 +93,12 @@ async with RunsClient() as runs:
 * `resume(resolution)`: the decision is `ANSWER` (with `answer`), `APPROVE`, `REJECT`, `EDIT`
   (with the edited arguments as `payload`) or `CANCEL` (the run ends `CANCELLED`). A run that
   was never queued is `RUNNING` again, for the process that resumes it; a queued one goes back
-  to the queue for any worker. The answer is `RunRecord.last_resolution`.
+  to the queue for any worker. The answer is `RunRecord.last_resolution`. Who may answer is
+  the key's: the application's key (it may act for anyone, the default) or an admin key
+  answers any run and names its `reviewer`; a key restricted to listed people
+  (`may_act_as=["user:lead"]`) answers only as one of them, a run assigned to that person or
+  to nobody, never a group's; anything else raises `AuthorizationError` saying why
+  ([the rule](https://github.com/amitmohapatra/agent-runs/blob/main/README.md#who-may-answer-a-paused-run)).
 * `deadline` and `escalate_to` on the `Interrupt`: when the deadline passes, agent-runs' ticker
   hands the question to `escalate_to` once, or ends the run `TIMEOUT`.
 * Something too large for the question (a table, a diff) is an artifact:

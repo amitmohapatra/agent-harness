@@ -15,6 +15,7 @@ for you.
 | Page | |
 |---|---|
 | **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic, approvals, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
+| [onboarding.md](onboarding.md) | getting started: onboard a tenant (the platform key, the admin key, the application's key), the environment, and a key per person for an approvals UI |
 | [scenarios.md](scenarios.md) | which to use when, in more detail: targets, tools, memory, pauses, runs, surfaces, observability, evaluation |
 | [configuration.md](configuration.md) | the environment, `Settings`, and who the key says the deployment is |
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |

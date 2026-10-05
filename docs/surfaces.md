@@ -42,6 +42,14 @@ How a resume entry becomes a decision: `decision` wins when present; `status: "c
 for `false`, `EDIT` for an object (the edited arguments), and anything else is refused. With
 `decision: "reject"`, a text `payload` is the reviewer's reason, which the model reads.
 
+The reviewer is the authenticated user (`identity`), and agent-runs records it as given when
+the harness holds the application's key (it may act for anyone, the default). A harness whose
+key is restricted to listed people answers only as one of them, a run assigned to that person
+or to nobody: any other resume is refused by agent-runs, the stream ends with a `RUN_ERROR`
+carrying the refusal, and the run stays paused ([interrupts.md](interrupts.md#answering)).
+Under `serve_a2a` the same refusal fails the task (the run stays paused). Serve with the
+application's key unless every person's runs are assigned to that person.
+
 | Response | When |
 |---|---|
 | `401` `AUTHENTICATION` | `identity(request)` named nobody |
