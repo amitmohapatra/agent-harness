@@ -465,6 +465,20 @@ async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
     assert context.body["query"] == "contact?"
 
 
+async def test_a_structured_answer_is_verified_as_its_json(
+    memory_service: FakeMemoryService,
+) -> None:
+    async with harness_with(memory_service, grounding_sample=1.0) as h:
+
+        async def fn(input: str, agent: Runtime) -> dict[str, str]:
+            return {"contact": "email"}
+
+        await h.wrap(fn, id="judged").run("contact?", user="u")
+        await h.writes.drain()
+    [verified] = memory_service.named("verify")
+    assert verified.body["answer"] == '{"contact": "email"}'
+
+
 async def test_an_unsampled_run_is_not_verified(memory_service: FakeMemoryService) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return "answer"

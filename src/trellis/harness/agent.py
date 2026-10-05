@@ -587,22 +587,22 @@ class Agent:
         )
 
     async def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
-        """On a sampled run, the answer checked against the context it was given (the memory
-        service's ``/v1/verify``, which records it as the run's ``judge`` feedback), and the
-        score put on the run's trace."""
+        """On a sampled run, the answer (:func:`graded`) checked against the context it was
+        given (the memory service's ``/v1/verify``, which records it as the run's ``judge``
+        feedback), and the score put on the run's trace."""
         memory = runtime.run_memory
+        text = graded(answer)
         if (
             memory is None
             or pushed is None
-            or not isinstance(answer, str)
-            or not answer
+            or not text
             or not sampled(runtime.run_id, self.harness.settings.grounding_sample)
         ):
             return
         bundle_id, run_id, traced = pushed.bundle_id, runtime.run_id, runtime.trace_run
 
         async def work() -> None:
-            score = await grounding_score(memory.ctx, answer, bundle_id)
+            score = await grounding_score(memory.ctx, text, bundle_id)
             if score is not None:
                 key = f"{run_id}:grounding"
                 await self.harness.score(run_id, "grounding", score, key=key, trace=traced)
@@ -612,17 +612,19 @@ class Agent:
     async def judged(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
         """On a sampled run (``TRELLIS_JUDGE_SAMPLE``), each of the harness's online judges in
         the background — never on the request path — as ``judge(case, [it], services=self.evals)``,
-        its score on the run's trace. A judge that fails is a warning."""
+        its score on the run's trace; the case's output is the answer as :func:`graded`. A judge
+        that fails is a warning."""
         judges = self.harness.judges
         rate = self.harness.judge_sample
-        if not judges or not isinstance(answer, str) or not answer:
+        text = graded(answer)
+        if not judges or not text:
             return
         if not sampled(f"{runtime.run_id}:judges", rate):
             return
         memory = runtime.run_memory
         case = EvalCase(
             input=runtime.task,
-            output=answer,
+            output=text,
             run_id=runtime.run_id,
             trace_id=trace_hex(runtime.trace_run),
             bundle_id=pushed.bundle_id if pushed is not None else None,
@@ -742,6 +744,14 @@ class Agent:
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
+
+
+def graded(answer: Any) -> str:
+    """An answer as the grounding check and the online judges grade it: its text, or — a
+    structured answer (a pydantic model, a dict, a list) — its JSON; empty for no answer."""
+    if answer is None or isinstance(answer, str):
+        return answer or ""
+    return json.dumps(pipeline.jsonable(answer), default=str)
 
 
 def _budget(record: RunRecord, remaining: float | None = None) -> pipeline.Budget | None:

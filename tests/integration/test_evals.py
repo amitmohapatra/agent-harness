@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from pydantic import BaseModel
 
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, ReAct, Runtime, Settings
@@ -682,6 +683,26 @@ async def test_online_judges_score_sampled_runs_in_the_background(
     assert result.status is RunStatus.SUCCESS and len(model.judged) == judged
     trace, run = telemetry.trace_hex(result.run_id), {"run_id": result.run_id}
     assert scored == ([(trace, "helpful", 0.8, "good", run)] if judged else [])
+
+
+async def test_online_judges_grade_a_structured_answer_as_its_json() -> None:
+    class Capital(BaseModel):
+        country: str
+        city: str
+
+    async def structured(input: str, agent: Runtime) -> Capital:
+        return Capital(country=input, city="Paris")
+
+    graded: list[Any] = []
+
+    async def seen(case: EvalCase) -> EvalScore | None:
+        graded.append(case.output)
+        return None
+
+    async with Harness(config=Settings(judge_sample=1.0), judges=[seen]) as h:
+        await h.wrap(structured, id="s").run("France", user="u")
+        await h.writes.drain()
+    assert graded == ['{"country": "France", "city": "Paris"}']
 
 
 async def test_judges_default_to_a_tenth_of_runs_and_none_without_judges() -> None:
