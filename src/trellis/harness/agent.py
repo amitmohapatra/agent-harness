@@ -298,6 +298,11 @@ class Agent:
             raise ConfigurationError(f"no run {run_id} of agent {self.id}")
         if record.status is not RunStatus.PAUSED or record.awaiting is None:
             raise ConfigurationError(f"run {run_id} is {record.status.value}, not paused")
+        if record.parent_run_id is not None:
+            raise ConfigurationError(
+                f"run {run_id} is a sub-agent's run: answer the question its parent run "
+                f"{record.parent_run_id} waits on"
+            )
         if record.awaiting.interrupt_id != interrupt_id:
             raise ConfigurationError(
                 f"run {run_id} waits on {record.awaiting.interrupt_id}, not {interrupt_id}"

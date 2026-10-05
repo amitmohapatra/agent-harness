@@ -32,6 +32,7 @@ from trellis.harness.identity import Identity
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
+from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
@@ -182,7 +183,9 @@ class Harness:
         """The paused runs waiting on a person — ``assignee`` (``user:…``, ``role:…``), or
         everyone in the tenant — newest first, at most :data:`INBOX_MAX_PAGES` pages of
         :data:`INBOX_LIMIT` (a warning says when there may be more). Answer one with
-        ``agent.resume``. ``tenant`` is named by a platform key only."""
+        ``agent.resume``. A sub-agent's question is listed once, on its parent's run (which
+        is answered); its own paused run is left out. ``tenant`` is named by a platform key
+        only."""
         waiting = [
             summary
             async for summary in self.runs.iterate(
@@ -199,7 +202,9 @@ class Harness:
                 assignee or "the tenant",
                 len(waiting),
             )
-        return waiting
+        asked = [asked_by(s.awaiting) for s in waiting if s.awaiting is not None]
+        children = {named["run_id"] for named in asked if named is not None}
+        return [s for s in waiting if s.run_id not in children]
 
     async def feedback(
         self,

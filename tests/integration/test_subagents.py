@@ -24,7 +24,7 @@ from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, tool
-from trellis.contracts import RunRecord, RunStatus
+from trellis.contracts import ConfigurationError, RunRecord, RunStatus
 from trellis.harness import telemetry
 from trellis.harness.runs import LocalRuns
 from trellis.harness.subagents import SUBAGENT
@@ -193,6 +193,10 @@ async def test_a_child_that_asks_pauses_its_parent_and_the_answer_reaches_it(
             "interrupt_id": kid.awaiting.interrupt_id,
         }
     }
+    # the person sees the question once, on the parent; the child is answered through it
+    assert [s.run_id for s in await memory_harness.inbox("user:ada")] == [paused.run_id]
+    with pytest.raises(ConfigurationError, match="is a sub-agent's run: answer the question"):
+        await child.resume(kid.awaiting.interrupt_id, "answer", answer="dry", reviewer="ed")
     approval = await parent.resume(question.interrupt_id, "answer", answer="dry", reviewer="ed")
     assert approval.status is RunStatus.PAUSED and approval.interrupt is not None
     assert approval.interrupt.tool_call is not None

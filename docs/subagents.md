@@ -105,7 +105,9 @@ entry), its fields the child's (`question`, `options`, `expects`, `tool_call`, `
 `interrupt_id`). `parent.resume(interrupt_id, ...)` answers it: the parent's next attempt hands
 the answer to the child, which continues, and then the parent. A decision about a tool call is
 fed back on the child's run, where the call was made. Two children paused at once are asked one
-after the other.
+after the other. The child's run is paused too (it keeps its journal there), but `h.inbox`
+lists the question once, on the parent, and answering the child's run directly is refused
+(`ConfigurationError` naming its parent).
 
 **Re-runs.** When the parent runs again — after a pause, or a crash — its call finds the child by
 its id:
@@ -145,6 +147,8 @@ too. So does answering a child's question with `cancel` on the parent.
   waited for.
 * A child's events (its text, its own tool calls) are on its own run's stream, not the
   parent's; the parent's stream shows the call and its result.
+* agent-runs' own listings (`runs.iterate(status=PAUSED)`, an inbox built on them outside
+  `h.inbox`) show a paused child next to its parent: answer the parent's.
 * A checkpointed LangGraph child runs on the conversation's LangGraph thread, which its other
   runs share.
 * The edited arguments of a child's tool call are checked when the child's tool runs, not when
