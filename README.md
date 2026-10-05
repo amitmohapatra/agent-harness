@@ -267,7 +267,7 @@ python -m trellis.harness.worker app.agents:h [--concurrency N]   # SIGTERM stop
 |---|---|---|---|---|---|
 | LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | no (bound at build) | leading system message, one per checkpointed thread |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected (with the reason; an edit or an answer as the message the model reads) and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
-| Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped, re-run against the journal | in-process MCP server `trellis` (`mcp__trellis__*`, pre-allowed) | per run | appended to `system_prompt` |
+| Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through `can_use_tool` | per run | appended to `system_prompt` |
 | `ReAct` | per step, and tool events | re-run against the journal, model steps included (no repeated model call) | per run | per model call | appended to `system` |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |
 
@@ -284,7 +284,7 @@ approvals, streaming, durable runs, surfaces, evaluation and limits:
 [docs/frameworks/deepagents.md](docs/frameworks/deepagents.md) (sub-agents, planning,
 `interrupt_on`, its built-in tools), [docs/frameworks/openai-agents.md](docs/frameworks/openai-agents.md)
 (handoffs, `needs_approval`), [docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md)
-(the MCP server, `allowed_tools`, Claude Code's built-in tools),
+(the MCP server, Claude Code's built-in tools governed through `can_use_tool`, the session resumed),
 [docs/frameworks/react.md](docs/frameworks/react.md) and
 [docs/frameworks/functions.md](docs/frameworks/functions.md). The framework's own entry point
 (`graph.ainvoke`, `Runner.run`, `query`) is not intercepted: call `agent.run`/`stream`/`resume`.

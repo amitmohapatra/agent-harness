@@ -41,6 +41,7 @@ from trellis.contracts import (
     ToolCall,
     ToolError,
     ToolOutcome,
+    ToolSpec,
     ToolStatus,
 )
 from trellis.harness.events import NOTICE
@@ -75,6 +76,23 @@ async def call(
     step = runtime.next_step() if step is None else step
     async with runtime.replay.exclusive(key):
         return await _called(runtime, tool, args, key=key, step=step, call_id=call_id)
+
+
+async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutcome:
+    """A call its framework runs itself (Claude Code's built-in tools, through its permission
+    callback), decided as a harness call is — the run's ``before_tool`` hooks, then governance,
+    and a person when it asks — but not run, journaled or recorded here: the call to let
+    through (its arguments rewritten or edited, perhaps), or the outcome of one that is not
+    (denied, rejected). A pause propagates."""
+    runtime = current()
+    assert runtime is not None  # a framework asks inside the run it works for
+    key = content_key("call", spec.name, args)
+    call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
+    call, verdict = await _hooked(runtime, call, key)
+    if isinstance(verdict, Deny):
+        return denied(call, verdict)
+    _, call, rejected = await _decided(runtime, spec, call, verdict)
+    return call if rejected is None else rejected
 
 
 async def _called(
@@ -118,7 +136,7 @@ async def _called(
         refused = denied(tool_call, verdict)
         _events(runtime, ref, tool_call, refused)
         return refused
-    decision, tool_call, rejected = await _decided(runtime, tool, tool_call, verdict)
+    decision, tool_call, rejected = await _decided(runtime, tool.spec, tool_call, verdict)
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
         return rejected
@@ -197,14 +215,14 @@ async def _hooked(runtime: Runtime, call: ToolCall, key: str) -> tuple[ToolCall,
 
 
 async def _decided(
-    runtime: Runtime, tool: Tool, call: ToolCall, asked: Ask | None
+    runtime: Runtime, spec: ToolSpec, call: ToolCall, asked: Ask | None
 ) -> tuple[Decision, ToolCall, ToolOutcome | None]:
     """Governance's decision, as the catalog says now, by name (a graph's tools were built
     before) — asking a person whenever a hook ``asked`` — and what came of it: the call (with
     an approver's edited arguments), announced when it is to be, or the outcome of a call the
     approver rejected."""
     governance = runtime.agent.harness.governance(runtime.tenant)
-    decision = await governance.check(tool.name, call.args, side_effects=tool.spec.side_effects)
+    decision = await governance.check(spec.name, call.args, side_effects=spec.side_effects)
     if asked is not None:
         decision = decision.asking(asked.question)
     if decision.asks:
@@ -214,9 +232,9 @@ async def _decided(
         if resolution.decision is InterruptDecision.REJECT or answer is False:
             reason = reason_of(resolution)
             rejected = ToolOutcome(
-                tool=tool.name,
+                tool=spec.name,
                 status=ToolStatus.REJECTED,
-                output=f"{tool.name} was not run: the approver rejected it"
+                output=f"{spec.name} was not run: the approver rejected it"
                 + (f" ({reason})" if reason else ""),
                 error_class="ApprovalRejected",
             )
@@ -224,7 +242,7 @@ async def _decided(
         if resolution.decision is InterruptDecision.EDIT and isinstance(answer, dict):
             call = call.model_copy(update={"args": answer})
     elif decision.announces:
-        runtime.events.custom(NOTICE, tool=tool.name, args=call.args, side_effects=decision.risk)
+        runtime.events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
 
 

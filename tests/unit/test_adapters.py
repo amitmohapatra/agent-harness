@@ -3,6 +3,7 @@ from it, and what a resume continues with — the shapes the integration tests d
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,7 +49,7 @@ from trellis.harness.adapters.openai_agents import (
     _Continue,
 )
 from trellis.harness.adapters.react import ReAct, ReActAdapter, ReActResult, _unfenced
-from trellis.harness.journal import Pending
+from trellis.harness.journal import Journal, Pending
 
 # --------------------------------------------------------------------------- the query
 
@@ -187,14 +188,18 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
             yield message
 
     monkeypatch.setattr(claude_agent_sdk, "query", query)
-    run = Invocation(runtime=SimpleNamespace(pending=None), tools=[])  # type: ignore[arg-type]
+    replay = SimpleNamespace(journal=Journal())
+    run = Invocation(runtime=SimpleNamespace(pending=None, replay=replay), tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
     native = adapter.prepare_input(None, "go", None)
     options = ClaudeAgentOptions(system_prompt="Mine.")
     items = [i async for i in adapter.stream(options, native, run)]
     assert items[:-1] == ["done"]
     assert isinstance(items[-1], Output) and items[-1].value == messages
-    assert seen == [options]  # no context and no harness tools: the options as they were
+    # no context and no harness tools: the options as they were, the permission check added
+    [sent] = seen
+    assert sent.can_use_tool is not None and sent.resume is None
+    assert dataclasses.replace(sent, can_use_tool=None) == options
 
 
 # --------------------------------------------------------------------------- LangGraph

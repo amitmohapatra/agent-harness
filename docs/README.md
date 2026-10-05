@@ -176,7 +176,8 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | another agent this harness wraps (a sub-agent) | `agent.as_tool()` in `tools=[...]` or `h.tools(...)` ([subagents.md](subagents.md)) | `read` when every tool it declares reads, else `write`; and the catalog |
 | shared across agents, owned by a platform team | an MCP server in Bifrost, allowed on the agent's virtual key — nothing in code | the server's annotations, and the catalog |
 | the agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write |
-| a framework's own tool (`function_tool`, Deep Agents' file tools, Claude's `Bash`) | as the framework does | the framework's permissions, not the harness's |
+| a framework's own tool (`function_tool`, Deep Agents' file tools) | as the framework does | the framework's permissions, not the harness's |
+| Claude Code's built-in tools (`Bash`, `Write`, `Read`...) | as the CLI does | governance by risk (`Bash` asks, writes announced, reads run) and your hooks, through the SDK's permission callback; then your own `can_use_tool` |
 
 ### Approvals and pauses
 
