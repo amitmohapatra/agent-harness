@@ -17,14 +17,18 @@ suggestions from.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Final, Literal
 
 from trellis.contracts import (
+    AgentError,
     AgentExecutionContext,
     ConfigurationError,
+    ErrorCategory,
     Interrupt,
     InterruptDecision,
     InterruptReason,
@@ -46,6 +50,7 @@ from trellis.harness.governance.catalog import (
 from trellis.harness.governance.decision import Action, Decision, decide
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
+from trellis.harness.tools.base import ToolTimeout, invoked, retried, retries_of, timed_out
 from trellis.memory import MemoryClient
 
 #: How a publish is sent: given the entries and the send itself, run it — the harness queues it
@@ -223,6 +228,7 @@ def governed(
     *,
     name: str | None = None,
     side_effects: str = "write",
+    timeout: float | None = None,
     on_ask: Callable[[Decision], Any],
     on_announce: Callable[[Decision], Any] | None = None,
 ) -> Callable[..., Awaitable[Any]]:
@@ -230,8 +236,14 @@ def governed(
     the tool's arguments — is checked first. A call that asks runs ``on_ask(decision)`` (sync
     or async): ``True`` runs it, ``False`` raises :class:`Rejected`, a dict runs it with
     those (edited) arguments, and an exception (LangGraph's ``interrupt``) propagates. A call
-    that is announced runs ``on_announce(decision)`` first, when given."""
+    that is announced runs ``on_announce(decision)`` first, when given.
+
+    It runs as a harness tool call does: at most ``timeout`` seconds (a sync ``fn`` in a
+    worker thread), tried again after an error that may pass when it only reads; out of time
+    it raises :class:`~trellis.harness.tools.base.ToolTimeout`, whose message is what the
+    model should read (for a call that does more than read: that it may have taken effect)."""
     tool = name or fn.__name__
+    spec = ToolSpec(name=tool, side_effects=side_effects)
 
     @functools.wraps(fn)
     async def call(**args: Any) -> Any:
@@ -249,7 +261,19 @@ def governed(
                 )
         elif decision.announces and on_announce is not None:
             await _settled(on_announce(decision))
-        return await _settled(fn(**args))
+        reads = decision.risk == "read"
+        began = time.monotonic()
+        try:
+            async with asyncio.timeout(timeout):
+                return await retried(
+                    lambda: invoked(fn, **args), retries=retries_of(spec, reads=reads)
+                )
+        except Exception as exc:
+            if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
+                raise
+            took = time.monotonic() - began
+            text = timed_out(tool, took=took, limit=timeout, unknown=not reads)
+            raise ToolTimeout(text, unknown=not reads) from exc
 
     call.__name__ = tool
     return call

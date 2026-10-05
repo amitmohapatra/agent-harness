@@ -9,8 +9,9 @@ If ``on_input`` raises instead (a run that pauses to ask a person), the remote t
 and the exception goes on.
 
 The harness's ``a2a(url)`` tool is a ``RemoteAgent`` per call (:func:`remote_agent_tool`): the
-calling run's identity and thread, and ``on_input`` the run's own ``ask`` — the remote question
-becomes this run's pause, and a resumed run calls again with the journal answering it.
+calling run's identity and thread, ``on_input`` the run's own ``ask`` — the remote question
+becomes this run's pause, and a resumed run calls again with the journal answering it — and the
+call's idempotency key as the id of the message that opens the task.
 """
 
 from __future__ import annotations
@@ -156,9 +157,11 @@ class RemoteAgent:
         await self._connected()
         return self
 
-    async def __call__(self, message: Any) -> Any:
-        """Send ``message`` (text, or a JSON value as a data part) as a new task; its answer."""
-        return await self._exchange(message, None)
+    async def __call__(self, message: Any, *, message_id: str | None = None) -> Any:
+        """Send ``message`` (text, or a JSON value as a data part) as a new task; its answer.
+        ``message_id`` names the message (a fresh id otherwise): the same id again is the same
+        message, to a server that deduplicates."""
+        return await self._exchange(message, None, message_id)
 
     async def reply(self, task_id: str, answer: Any) -> Any:
         """Answer the question :class:`InputRequired` reported; the task's answer."""
@@ -196,10 +199,15 @@ class RemoteAgent:
             ).create(self._card)
         return self._client
 
-    async def _exchange(self, value: Any, task_id: str | None) -> Any:
+    async def _exchange(
+        self, value: Any, task_id: str | None, message_id: str | None = None
+    ) -> Any:
         client = await self._connected()
         context = ClientCallContext(service_parameters=self.headers)
-        reply = await _send(client, _message(value, self.thread, task_id), context)
+        message = _message(value, self.thread, task_id)
+        if message_id is not None:
+            message.message_id = message_id
+        reply = await _send(client, message, context)
         while reply.state == TaskState.TASK_STATE_INPUT_REQUIRED:
             question = reply.question or f"{self.card.name} is waiting for an answer"
             if self.on_input is None:
@@ -233,10 +241,18 @@ def _spec(card: AgentCard, name: str | None) -> ToolSpec:
     )
 
 
-async def remote_agent_tool(url: str, *, name: str | None = None) -> Tool:
+async def remote_agent_tool(
+    url: str,
+    *,
+    name: str | None = None,
+    timeout: float | None = None,  # noqa: ASYNC109 - the tool's, for each of its calls
+) -> Tool:
     """The ``a2a(url)`` tool: the card read once, then each call a :class:`RemoteAgent` as the
-    calling run (its tenant, user and thread; ``on_input`` its ``ask``)."""
-    async with _http(TIMEOUT_SECONDS) as http:
+    calling run (its tenant, user and thread; ``on_input`` its ``ask``; the call's idempotency
+    key the opening message's id), taking at most ``timeout`` (:data:`TIMEOUT_SECONDS` when
+    ``None``)."""
+    seconds = TIMEOUT_SECONDS if timeout is None else timeout
+    async with _http(seconds) as http:
         card = await _read_card(http, url.rstrip("/"), {})
 
     async def run(args: dict[str, Any]) -> Any:
@@ -249,11 +265,13 @@ async def remote_agent_tool(url: str, *, name: str | None = None) -> Tool:
             user=runtime.user,
             thread=runtime.thread or runtime.run_id,
             on_input=runtime.ask,
+            timeout=seconds,
             card=card,
         ) as agent:
-            return await agent(str(args.get("message") or ""))
+            text = str(args.get("message") or "")
+            return await agent(text, message_id=runtime.idempotency_key)
 
-    return Tool(_spec(card, name), run)
+    return Tool(_spec(card, name), run, timeout=seconds)
 
 
 async def _read_card(http: httpx.AsyncClient, url: str, headers: Mapping[str, str]) -> AgentCard:

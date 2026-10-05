@@ -8,6 +8,12 @@ its arguments) and consumed in order, so the n-th identical call gets the n-th r
 result, and a re-planned call the person never saw is asked about again rather than matched
 to someone else's approval.
 
+A call that does more than read is marked *started* before it runs (and the journal saved), so
+the attempt after a crash knows which call was running when the worker died: it was neither
+finished nor recorded, and whether it took effect is not known (``tools/bridge.py``). A call
+whose outcome is not an output — it timed out, its effect is unknown — is recorded as that
+outcome (:data:`OUTCOME`), so a re-run tells the model the same thing and runs nothing.
+
 The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
 no question and no side effect. A journal larger than a checkpoint may be is stored as a run
@@ -33,6 +39,9 @@ if TYPE_CHECKING:
 #: checkpoint holds only its reference, under :data:`JOURNAL_REF`.
 MAX_CHECKPOINT_BYTES: Final = 1024 * 1024
 JOURNAL_REF: Final = "journal_ref"
+#: The key a call's recorded outcome is filed under when it is not an output (a timeout, an
+#: unknown effect): ``{OUTCOME: {"status": ..., "output": ..., "metadata": ...}}``.
+OUTCOME: Final = "trellis_outcome"
 
 
 def content_key(kind: str, *parts: Any) -> str:
@@ -64,6 +73,9 @@ class Journal(BaseModel):
     calls: dict[str, list[Any]] = Field(default_factory=dict)
     #: the tools the run has called (they stay offered to the model after a pause)
     used: list[str] = Field(default_factory=list)
+    #: per call, how many of its occurrences started: one more than ``calls`` records was
+    #: running when the attempt ended without recording it (a crash)
+    started: dict[str, int] = Field(default_factory=dict)
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence
@@ -128,6 +140,26 @@ class Replay:
             self._seen[f"a:{key}"] = index + 1
             return InterruptResolution.model_validate(recorded[index])
         return None
+
+    def occurrence(self, key: str) -> int:
+        """Which occurrence of ``key`` the next call is (0 for the first)."""
+        return self._seen[f"c:{key}"]
+
+    def interrupted(self, key: str) -> bool:
+        """Whether this occurrence of ``key`` started in an earlier attempt and never ended."""
+        return self.occurrence(key) < self.journal.started.get(key, 0)
+
+    def start(self, key: str) -> None:
+        """Mark this occurrence of ``key`` as running (undone by :meth:`unstart`)."""
+        self.journal.started[key] = self.occurrence(key) + 1
+
+    def unstart(self, key: str) -> None:
+        """This occurrence of ``key`` ended without a record (it failed, or paused): it runs
+        again in a later attempt, as if it never started."""
+        if self.occurrence(key):
+            self.journal.started[key] = self.occurrence(key)
+        else:
+            self.journal.started.pop(key, None)
 
     def call(self, key: str) -> tuple[bool, Any]:
         """``(True, output)`` when this occurrence of the call already ran."""

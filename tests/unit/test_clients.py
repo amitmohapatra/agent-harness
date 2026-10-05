@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -12,6 +13,7 @@ import respx
 
 from tests.support.memory import AGENT_TOOLS, FakeMemoryService
 from trellis.contracts import ToolCall, ToolError, ToolOutcome
+from trellis.harness import runtime as runtime_module
 from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory
@@ -76,6 +78,30 @@ async def test_a_call_is_scoped_to_its_server_and_a_failed_tool_raises() -> None
     }
     with pytest.raises(ToolError, match="no such sku"):
         await gateway.execute("erp-get_stock", {"sku": "?"}, clients=["erp"])
+    await gateway.aclose()
+
+
+@respx.mock
+async def test_in_a_run_a_request_waits_what_is_left_of_the_call_and_carries_its_key() -> None:
+    executed = respx.post(f"{GATEWAY}/v1/mcp/tool/execute").mock(
+        return_value=httpx.Response(200, json={"role": "tool", "content": "ok"})
+    )
+    message = {"role": "assistant", "content": "hi"}
+    completed = respx.post(f"{GATEWAY}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": [{"message": message}]})
+    )
+    gateway = Gateway(f"{GATEWAY}/v1", "vk")
+    run = SimpleNamespace(run_id="run_1", idempotency_key="run_1:k:0", remaining=lambda: 12.5)
+    token = runtime_module._current.set(run)  # type: ignore[arg-type]
+    try:
+        assert await gateway.execute("erp-ship", {}, clients=["erp"]) == "ok"
+        await gateway.complete([{"role": "user", "content": "hi"}], model="m")
+    finally:
+        runtime_module._current.reset(token)
+    request = executed.calls[0].request
+    assert json.loads(request.content)["id"] == "run_1:k:0"
+    assert request.extensions["timeout"]["read"] == 12.5
+    assert completed.calls[0].request.extensions["timeout"]["read"] == 12.5
     await gateway.aclose()
 
 

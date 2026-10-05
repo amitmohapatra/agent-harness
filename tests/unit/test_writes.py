@@ -299,3 +299,21 @@ async def test_a_harness_replays_memory_writes_only_with_memory_on(tmp_path: Pat
 
     async with Harness(config=Settings(spool_dir=str(tmp_path))) as h:
         assert h._replay({"op": "record_messages", "scope": {}, "args": {}}) is None
+
+
+async def test_background_writes_belong_to_no_run() -> None:
+    from trellis.harness import runtime as runtime_module
+
+    writes, seen = Writes(), []
+
+    async def look() -> None:
+        seen.append(runtime_module.current())
+
+    token = runtime_module._current.set(object())  # type: ignore[arg-type]
+    try:
+        await writes.submit("look", look)  # the first write starts the workers, in a run
+    finally:
+        runtime_module._current.reset(token)
+    await writes.drain()
+    assert seen == [None]
+    await writes.aclose()

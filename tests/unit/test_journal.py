@@ -44,3 +44,23 @@ def test_an_answer_with_no_open_question_files_nothing() -> None:
     journal = Journal()
     journal.answered(resolution("blue"))
     assert journal.answers == {} and journal.pending is None
+
+
+def test_a_call_started_and_never_ended_is_interrupted_for_the_next_attempt() -> None:
+    journal = Journal()
+    first = Replay(journal)
+    first.start("k")
+    first.record_call("k", "done")  # the first occurrence ended
+    first.start("k")  # the second was running when the worker died
+    again = Replay(journal)
+    assert again.call("k") == (True, "done") and again.interrupted("k")
+    again.unstart("k")  # it failed (or asked) instead: it runs again, as never started
+    assert not again.interrupted("k") and journal.started == {"k": 1}
+    again.record_call("k", "done again")
+    last = Replay(journal)
+    assert last.call("k") == (True, "done") and last.call("k") == (True, "done again")
+    assert not last.interrupted("k")
+    lone = Journal()
+    Replay(lone).start("j")
+    Replay(lone).unstart("j")
+    assert lone.started == {}

@@ -34,6 +34,7 @@ import logging
 import os
 import random
 from collections.abc import Awaitable, Callable
+from contextvars import Context
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -147,8 +148,12 @@ class Writes:
         if self._queue is None or self._loop is not loop:
             self._loop = loop
             self._queue = asyncio.Queue(MAX_PENDING)
+            # in a context of their own: the workers outlive the run that happened to start
+            # them, and belong to none (``trellis.current()`` is ``None`` there)
             self._workers = [
-                loop.create_task(self._work(self._queue), name=f"trellis-writes-{i}")
+                loop.create_task(
+                    self._work(self._queue), name=f"trellis-writes-{i}", context=Context()
+                )
                 for i in range(WRITERS)
             ]
             self._replayed(self._queue)

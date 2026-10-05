@@ -100,15 +100,20 @@ class Gateway:
         clients: Sequence[str],
         parent_request_id: str | None = None,
     ) -> Any:
-        """Run one call; the tool's result, or :class:`ToolError` when the tool failed."""
+        """Run one call; the tool's result, or :class:`ToolError` when the tool failed. Inside
+        a run the request waits at most what is left of the call's time, and carries the
+        call's idempotency key as its id (the gateway's log shows it; the MCP protocol gives a
+        server no field for it)."""
         runtime = current()
         call = {
-            "id": f"call_{runtime.run_id if runtime else 'direct'}_{name}",
+            "id": (runtime.idempotency_key if runtime else None)
+            or f"call_{runtime.run_id if runtime else 'direct'}_{name}",
             "type": "function",
             "function": {"name": name, "arguments": json.dumps(args)},
         }
         options = Options(mcp_clients=list(clients), parent_request_id=parent_request_id)
-        turn = await self.client.execute_tool(call, options=options)
+        timeout = runtime.remaining() if runtime else None
+        turn = await self.client.execute_tool(call, options=options, timeout=timeout)
         content = turn.get("content")
         if turn.get("is_error") or turn.get("isError"):
             raise ToolError(str(content), source=f"mcp.{name}")
@@ -133,7 +138,11 @@ class Gateway:
             await asyncio.sleep(LOG_POLL_SECONDS)
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
-        return await self.client.complete(messages, **body)
+        """A chat completion; inside a run, each request waits at most what is left of the
+        model call's time (the SDK's retries stay within it: the caller bounds them)."""
+        runtime = current()
+        timeout = runtime.remaining() if runtime else None
+        return await self.client.complete(messages, timeout=timeout, **body)
 
     async def aclose(self) -> None:
         await self.client.aclose()
