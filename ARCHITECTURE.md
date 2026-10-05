@@ -112,6 +112,10 @@ src/trellis/
     pipeline.py        one attempt of one run, from its record — the one way every entry
                        starts one (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
+    features.py        without=: the features a run or an agent turns off (Feature)
+    hooks/             Hooks (before/after run, model, tool; on_error) and how they chain;
+                       langchain (middleware) and openai_agents (RunHooks): the model hooks
+                       through each framework's own mechanism
     journal.py         what a re-run needs: answers and tool outputs, keyed by content (and
                        the journals of the sub-agents' runs working inside its calls)
     subagents.py       agent.as_tool(): a wrapped agent as a tool, each call a child run
@@ -230,7 +234,10 @@ flowchart TB
 
 ## The pipeline
 
-Every run of every framework goes through `pipeline.attempt`:
+Every attempt of every run goes through `pipeline.attempt`, from the run's record — however it
+started: `agent.run`/`stream`, a resume, `agent.execute(job)` (any worker), a sub-agent's call,
+`serve_chat`, `serve_a2a`, `h.evaluate` — so its time limit, version and `without=` apply
+everywhere; the run hooks (`on_run_start`, `on_run_end`, `on_error`) fire around it:
 
 ```mermaid
 flowchart LR
@@ -355,8 +362,12 @@ tools of code that does not use `h.wrap` (`Governance.from_env`, `governed`).
 Every call, whoever makes it, goes through `tools/bridge.call`:
 
 1. **replay** — the journal already has this call (same tool, same arguments, n-th time): its
-   recorded output is returned and nothing runs;
-2. **governance** — `Harness.governance(tenant).check(tool, args, side_effects=...)`, by the
+   recorded output is returned and nothing runs; a tool of a feature the run is `without=` is
+   refused;
+2. **hooks** — the run's `before_tool` hooks may deny the call, rewrite its arguments or ask a
+   person about it; their decision is journaled with the call's occurrence
+   ([docs/hooks.md](docs/hooks.md));
+3. **governance** — `Harness.governance(tenant).check(tool, args, side_effects=...)`, by the
    tool's name, as the catalog says at the time of the call (so a rule set after a graph was
    compiled, or on a tool an OpenAI Agents handoff carries, still applies): `read` runs,
    `write` runs and is announced (`tool_notice` event), `irreversible` asks for approval. The
@@ -365,9 +376,11 @@ Every call, whoever makes it, goes through `tools/bridge.call`:
    and validates the rules (a rule that cannot be read or evaluated asks). The bridge acts on
    the decision: it pauses the run (`Runtime.approve` with the decision's question), announces
    the call, or runs it;
-3. **execution** — in an `execute_tool` span, between `TOOL_CALL_*` events; a failure is an
-   error result the model reads, a pause propagates;
-4. **record** — journaled (the tool is then offered for the rest of the run), counted, and
+4. **execution** — `tools.base.execute`, the one executor `governed` uses too (the tool's
+   timeout within the run's, retries of reads, an unknown outcome for a write out of time), in
+   an `execute_tool` span, between `TOOL_CALL_*` events; a failure is an error result the
+   model reads, a pause propagates; the `after_tool` hooks may change the outcome;
+5. **record** — journaled (the tool is then offered for the rest of the run), counted, and
    with memory writes on sent to the memory service's tool records in the background.
 
 A tool called outside a harness run is refused. What the model is *offered* (the tools the
@@ -383,6 +396,9 @@ continues:
 
 * **LangGraph with a checkpointer**: `ask` *is* `langgraph.types.interrupt`; the resume is
   `Command(resume={<LangGraph interrupt id>: resolution})` and the graph continues where it stopped.
+* **Claude Agent SDK**: the attempt ends the same way, and the CLI's session (`Journal.session`)
+  is resumed by the next attempt (`resume=`), which calls the paused tool again: the journal
+  answers it, and the built-in tools the session ran are not run again.
 * **Everything else**: `ask` raises and the attempt ends (a framework that swallows the
   exception is still paused: the runtime records the pause first). The resume runs the agent
   again from its input, as the next attempt, with the **journal**: questions already answered
