@@ -91,7 +91,9 @@ tools = [
 ```
 
 `tool` is `langchain_core.tools.tool`: `governed` and `recorded` keep the function's signature,
-so the tool's schema is the one it always had. The graph is built from `tools` exactly as
+so the tool's schema is the one it always had. `governed(..., timeout=20)` also bounds a call
+and retries a read after an error that may pass, as a harness tool call is
+([reliability.md](../reliability.md)). The graph is built from `tools` exactly as
 before (`create_agent(model, tools=tools, checkpointer=saver)`, or a `StateGraph` with
 `ToolNode(tools)` and `model.bind_tools(tools)`), with a checkpointer: the pause lives there.
 
@@ -210,6 +212,7 @@ graph. A webhook on `run.paused` tells the reviewer's UI instead of polling ([ru
 |---|---|---|
 | where the pause lives | your checkpointer, plus the `Interrupt` you send agent-runs | the harness: the graph's checkpointer, or a re-run against its journal without one |
 | the tools' governance | `governed(...)` on each tool | every harness tool, automatically |
+| time limits, retries | `governed(..., timeout=)` on each tool; your model client's timeout; `RunStart.timeout_seconds` (agent-runs ends the run) | `@tool(timeout=)`, `ReAct(model_timeout=)`, `run(timeout=, deadline=)`; reads retried, unknown writes never re-run, after a crash too |
 | recording | your `recorded` and `history.add` | the transcript, every tool call and the outcome, queued in the background with a spool |
 | memory push | your `SystemMessage` | a leading system message with a fixed id, one per checkpointed thread |
 | evaluation | `judge(...)` where you choose | `Harness(judges=[...])` on a sampled share, in the background |
