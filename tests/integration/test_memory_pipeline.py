@@ -140,11 +140,11 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     assert "## Tools" in model.requests[0]["messages"][0]["content"]  # confidence/args/missing
     offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
     memory_tools = MEMORY_TOOLS
-    # the candidates and the memory tools, never all six
-    assert offered[0] == ["t1", "t3", *memory_tools]
-    assert offered[1] == ["t1", "t3", *memory_tools]
+    # the candidates and the memory tools, never all six, sorted by name
+    assert offered[0] == sorted(["t1", "t3", *memory_tools])
+    assert offered[1] == sorted(["t1", "t3", *memory_tools])
     # tool_search found t5 among the run's own tools: offered from the next call on
-    assert offered[2] == ["t1", "t3", "t5", *memory_tools]
+    assert offered[2] == sorted(["t1", "t3", "t5", *memory_tools])
 
 
 @pytest.mark.parametrize("omit", [True, False], ids=["no-candidates-field", "nothing-fits"])
@@ -216,7 +216,7 @@ async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     result = await agent.run("how do I like to be contacted?", user="u1")
     assert result.answer == "email"
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
-    assert offered == MEMORY_TOOLS
+    assert offered == sorted(MEMORY_TOOLS)
     [call] = memory_service.named("call_agent_tool")
     assert call.path["name"] == "memory_search" and call.body["args"] == {"query": "preferences"}
     await memory_harness.writes.drain()
