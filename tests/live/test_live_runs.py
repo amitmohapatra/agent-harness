@@ -30,12 +30,13 @@ from trellis.contracts import (
     new_id,
 )
 from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
-from trellis.runs import LeaseLostError, RunsClient, RunSummary
+from trellis.runs import Claimed, LeaseLostError, RunsClient, RunSummary
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]  # the key is the memory service's
 
 ROOT = Path(__file__).resolve().parents[2]
-#: The ticker sweeps every 5 s; a lapsed 5 s lease is re-queued within ~10 s.
+#: The ticker sweeps every 5 s; a lapsed 5 s lease is re-queued within ~10 s, and claimable
+#: after agent-runs' backoff (5 s for a first lapse).
 SWEEP_SECONDS = 30.0
 
 
@@ -117,8 +118,15 @@ async def test_a_lapsed_lease_puts_the_run_back_and_fences_the_old_worker(
     assert await eventually(requeued, within=SWEEP_SECONDS)
     with pytest.raises(LeaseLostError):
         await runs.heartbeat(queued.run_id, "w1", lease_seconds=5, tenant=tenant)
-    taken = await runs.claim("w2", [agent_id], lease_seconds=30)
-    assert taken is not None and taken.run.attempt == 2
+    claims: list[Claimed] = []
+
+    async def taken() -> bool:  # once the backoff after a lapse has passed
+        claimed = await runs.claim("w2", [agent_id], lease_seconds=30)
+        claims.extend([claimed] if claimed is not None else [])
+        return claimed is not None
+
+    assert await eventually(taken, within=SWEEP_SECONDS)
+    assert claims[0].run.attempt == 2
     with pytest.raises(LeaseLostError):
         await runs.finish(queued.run_id, RunStatus.SUCCESS, worker_id="w1", tenant=tenant)
     await runs.finish(queued.run_id, RunStatus.SUCCESS, worker_id="w2", tenant=tenant)
@@ -268,7 +276,8 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
 
     assert await eventually(requeued, within=SWEEP_SECONDS)
     worker = harness.worker([agent], concurrency=1)
-    assert await worker.run_once()  # replays the export from the artifact, then asks
+    # once the backoff after a lapse has passed: replays the export from the artifact, asks
+    assert await eventually(worker.run_once, within=SWEEP_SECONDS)
     paused = await handle.result(timeout=30)
     assert paused.interrupt is not None and exported == [3]
     record = await handle.status()
