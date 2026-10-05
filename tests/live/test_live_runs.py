@@ -19,8 +19,9 @@ import pytest
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import eventually, memory_scope
-from trellis import Harness
+from trellis import Harness, Runtime, tool
 from trellis.contracts import (
+    ConfigurationError,
     Interrupt,
     InterruptDecision,
     InterruptResolution,
@@ -28,6 +29,7 @@ from trellis.contracts import (
     RunStatus,
     new_id,
 )
+from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
 from trellis.runs import LeaseLostError, RunsClient, RunSummary
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]  # the key is the memory service's
@@ -224,6 +226,61 @@ async def test_ask_and_resume_continue_in_other_worker_processes(tmp_path: Path)
             return bool(entries) and entries[0].stats.calls == 1
 
         assert await eventually(charged_once)
+
+
+class Crash(BaseException):
+    """The worker process dies: nothing is written, the lease lapses."""
+
+
+async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
+    harness: Harness,
+) -> None:
+    """agent-runs keeps at most 1 MiB as a checkpoint: a run whose tool returned more saves
+    its journal as a run artifact, and the attempts after a worker crash and after a resume
+    read it back — the tool runs once. A wrong answer is refused before agent-runs sees it."""
+    exported: list[int] = []
+    crashes = [Crash()]
+
+    @tool(side_effects="write")
+    def export(rows: int) -> str:
+        """Export a report."""
+        exported.append(rows)
+        return "x" * (MAX_CHECKPOINT_BYTES + 1)
+
+    async def reporter(input: str, agent: Runtime) -> str:
+        report = await agent.tools.call("export", rows=3)
+        if crashes:
+            raise crashes.pop()
+        sent = await agent.ask("Send it?", options=["yes", "no"])
+        return f"{len(report)} {sent}"
+
+    agent = harness.wrap(reporter, id=f"live-report-{uuid.uuid4().hex[:8]}", tools=[export])
+    handle = await agent.start("x", user="live-user")
+    claimed = await harness.runs.claim("w-dies", [agent.id], lease_seconds=5)
+    assert claimed is not None
+    with pytest.raises(Crash):
+        await agent._claimed(claimed.run, "w-dies", lease_seconds=5)
+    record = await handle.status()
+    assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+
+    async def requeued() -> bool:
+        return (await handle.status()).status is RunStatus.QUEUED
+
+    assert await eventually(requeued, within=SWEEP_SECONDS)
+    worker = harness.worker([agent], concurrency=1)
+    assert await worker.run_once()  # replays the export from the artifact, then asks
+    paused = await handle.result(timeout=30)
+    assert paused.interrupt is not None and exported == [3]
+    record = await handle.status()
+    assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+    asked = paused.interrupt.interrupt_id
+    with pytest.raises(ConfigurationError, match="is not one of the options"):
+        await agent.resume(asked, "answer", answer="maybe", reviewer="live-user")
+    await agent.resume(asked, "answer", answer="yes", reviewer="live-user")
+    assert await worker.run_once()
+    done = await handle.result(timeout=30)
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer == f"{MAX_CHECKPOINT_BYTES + 1} yes" and exported == [3]
 
 
 # longer than the suite's 120 s: the ticker's fire is waited for up to 240 s
