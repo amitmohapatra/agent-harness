@@ -3,8 +3,8 @@ the harness calls, answered in the shapes the running gateway answers with.
 
 * ``/v1/chat/completions`` — each request recorded (:attr:`FakeGateway.completions`) and
   answered by :attr:`FakeGateway.chat`, a ``ScriptedChat`` (``tests/support/models.py``);
-* ``/api/prompt-repo/prompts`` — :attr:`FakeGateway.prompts`, by name: each a list of
-  committed versions (their messages);
+* ``/api/prompt-repo/prompts`` and ``/api/prompt-repo/prompts/{id}/versions`` —
+  :attr:`FakeGateway.prompts`, by name: each a list of committed versions (their messages);
 * ``/api/skills``, ``/api/skills/{id}``, ``/api/skills/serve/{name}/files/{path}`` —
   :attr:`FakeGateway.skills`, by name: the versions (description, body, files) and the one
   served;
@@ -19,6 +19,7 @@ every request).
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote
@@ -28,7 +29,10 @@ from bifrost_sdk import Bifrost
 from bifrost_sdk.admin import Admin
 
 from tests.support.models import ScriptedChat, Turn
+from trellis import Harness
 from trellis.harness.clients.bifrost import Gateway
+from trellis.harness.prompts import PromptSource, PromptSources
+from trellis.harness.skills import SkillSource, SkillSources
 
 URL = "http://gw.test/v1"
 
@@ -63,6 +67,24 @@ class FakeGateway:
         bifrost = Bifrost(URL, api_key="vk", client=http, admin_client=api, max_retries=0)
         return Gateway(URL, "vk", client=bifrost, admin=Admin(URL, client=api))
 
+    async def attach(
+        self,
+        h: Harness,
+        *,
+        prompts: Sequence[PromptSource] = (),
+        skills: Sequence[SkillSource] = (),
+    ) -> Harness:
+        """``h`` with this fake as its gateway: the client, and the gateway's prompt and skill
+        sources (after ``prompts`` and ``skills``, as ``Harness(prompts=, skills=)`` orders
+        them)."""
+        if h.gateway is not None:
+            await h.gateway.aclose()
+        h.gateway = gateway = self.gateway()
+        h.prompts = PromptSources.of(h.settings, gateway=gateway, given=prompts)
+        h.skills = SkillSources.of(h.settings, gateway=gateway, given=skills)
+        h.evals.prompts = h.prompts
+        return h
+
     def asked(self, path: str) -> int:
         return sum(1 for r in self.requests if r.url.path == path)
 
@@ -82,6 +104,10 @@ class FakeGateway:
             )
         if path == "/api/prompt-repo/prompts":
             return httpx.Response(200, json={"prompts": [self._prompt(n) for n in self.prompts]})
+        if path.startswith("/api/prompt-repo/prompts/p-"):
+            name = path.removeprefix("/api/prompt-repo/prompts/p-").removesuffix("/versions")
+            rows = [self._version(name, n) for n in range(1, len(self.prompts[name]) + 1)]
+            return httpx.Response(200, json={"versions": rows})
         if path == "/api/mcp/clients":
             return httpx.Response(200, json={"clients": self._clients(), "count": len(self.auto)})
         return self._skills(path, request)
@@ -112,18 +138,21 @@ class FakeGateway:
 
     def _prompt(self, name: str) -> dict[str, Any]:
         versions = self.prompts[name]
-        latest = None
-        if versions:
-            rows = [{"order_index": i, "message": m} for i, m in enumerate(versions[-1])]
-            latest = {
-                "id": len(versions),
-                "prompt_id": f"p-{name}",
-                "version_number": len(versions),
-                "messages": rows,
-                "provider": "local",
-                "model": "small",
-            }
+        latest = self._version(name, len(versions)) if versions else None
         return {"id": f"p-{name}", "name": name, "latest_version": latest}
+
+    def _version(self, name: str, number: int) -> dict[str, Any]:
+        rows = [
+            {"order_index": i, "message": m} for i, m in enumerate(self.prompts[name][number - 1])
+        ]
+        return {
+            "id": number,
+            "prompt_id": f"p-{name}",
+            "version_number": number,
+            "messages": rows,
+            "provider": "local",
+            "model": "small",
+        }
 
     def _skill(self, name: str, version: str | None = None) -> dict[str, Any]:
         skill = self.skills[name]

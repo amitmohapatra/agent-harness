@@ -31,9 +31,11 @@ from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.identity import Identity
+from trellis.harness.prompts import Prompt, PromptSource, PromptSources
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
+from trellis.harness.skills import Skill, SkillSource, SkillSources
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.sources import as_source
@@ -83,9 +85,17 @@ class Harness:
     """``Harness()`` reads the environment (``.env.example`` lists every variable);
     ``Harness(config=Settings(...))`` is the same without it. ``judges`` are the online
     evaluators every sampled successful run is scored by (``TRELLIS_JUDGE_SAMPLE``: by default
-    0.1 of the runs), in the background."""
+    0.1 of the runs), in the background. ``prompts`` and ``skills`` are sources asked before
+    the ones the environment names (``trellis.harness.prompts``, ``trellis.harness.skills``)."""
 
-    def __init__(self, config: Settings | None = None, *, judges: Sequence[Evaluator] = ()) -> None:
+    def __init__(
+        self,
+        config: Settings | None = None,
+        *,
+        judges: Sequence[Evaluator] = (),
+        prompts: Sequence[PromptSource] = (),
+        skills: Sequence[SkillSource] = (),
+    ) -> None:
         self.settings = config or Settings.from_env()
         s = self.settings
         if s.runs_url and not s.memory_url:
@@ -131,6 +141,11 @@ class Harness:
         self._model_keys_off = False
         #: governance per tenant (:meth:`governance`)
         self._governance: dict[str, Governance] = {}
+        #: where prompts and skills are looked up: ``prompts`` and ``skills``, then the
+        #: environment's (``PROMPTS_DIR``, Langfuse, ``SKILLS_DIR``, the gateway)
+        self.prompts = PromptSources.of(s, gateway=self.gateway, given=prompts)
+        self.skills = SkillSources.of(s, gateway=self.gateway, given=skills)
+        self.evals.prompts = self.prompts
         telemetry.configure(s)
 
     # ------------------------------------------------------------------ attaching
@@ -142,14 +157,15 @@ class Harness:
         tools: Sequence[Source | Callable[..., Any]] = (),
         version: str | None = None,
         mcp: Sequence[str] | None = None,
-        skills: Sequence[str] = (),
+        skills: Sequence[str | Skill] = (),
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
         ``tools`` are the agent's own, run in this process (functions, ``a2a``, ``openapi``);
         its MCP tools are the ones the Bifrost virtual key allows — or, with ``mcp``, the tools
-        of those Virtual MCPs of the gateway (by slug). ``skills`` are skills of the gateway's
-        Skills Repository (``"name"``, ``"name@version"``: ``trellis.harness.skills``).
+        of those Virtual MCPs of the gateway (by slug). ``skills`` are skills by name
+        (``"name"``, ``"name@version"``, from the skill sources) or given (``Skill``):
+        ``trellis.harness.skills``.
         ``version`` is the version of the agent's code (else ``TRELLIS_AGENT_VERSION``),
         recorded with each run it starts: a run resumed on another version goes on, with a
         warning naming both."""
@@ -324,6 +340,18 @@ class Harness:
             user=user,
         )
 
+    async def prompt(self, ref: str | Prompt, /, **values: Any) -> str:
+        """The prompt ``ref`` names (``"name"``, ``"name@version"``, or a ``Prompt``), from the
+        first prompt source that has it, as text with ``values`` filled in — for a framework's
+        own instructions (LangGraph, OpenAI Agents, Claude, Deep Agents, a function). Inside a
+        run it is pinned: journaled, so a resumed run reads the same text."""
+        return await self.prompts.render(ref, **values)
+
+    async def prompt_messages(self, ref: str | Prompt, /, **values: Any) -> list[dict[str, Any]]:
+        """:meth:`prompt` as chat messages (a chat prompt's; a text prompt is one system
+        message)."""
+        return await self.prompts.messages(ref, **values)
+
     async def model_headers(self, *, prompt: str | None = None) -> dict[str, str]:
         """The headers to give a framework's own model client pointed at the gateway
         (``ChatOpenAI(default_headers=...)``, ``AsyncOpenAI(default_headers=...)``): the
@@ -345,6 +373,7 @@ class Harness:
         judge = self.evals.judge_gateway
         judge = judge if judge is not self.gateway else None
         clients = (self.gateway, judge, self.memory, self.runs, self.evals.langfuse)
+        clients += (self.prompts, self.skills)
         closers = [c.aclose() for c in clients if c is not None]
         await asyncio.gather(*closers)
 

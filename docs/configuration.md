@@ -3,7 +3,8 @@
 The harness reads the environment and nothing else — no YAML, no keyword arguments on
 `Harness()` besides `config=Settings(...)` (the same fields, for tests and embedding) and the
 online judges (`judges=[...]`: code that says *what* to judge; which model judges, through which
-key and how often is the environment's), no per-agent options on `wrap` beyond the agent's id,
+key and how often is the environment's) and the prompt and skill sources the code itself holds
+(`prompts=[...]`, `skills=[...]`: [prompts.md](prompts.md), [skills.md](skills.md)), no per-agent options on `wrap` beyond the agent's id,
 its own local tools and its version. Unset means "not in
 this deployment". Every variable, with a one-line description, is in
 [`.env.example`](../.env.example); `tests/unit/test_settings.py` checks the file lists exactly
@@ -24,6 +25,10 @@ what is read.
 | `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the judge's calls go through `BIFROST_VIRTUAL_KEY`, on the agents' budget. Set it to a **separate virtual key** so evaluation spend is budgeted, limited and reported on its own |
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |
+| `PROMPTS_DIR` | no folder of prompts; set: `<name>.md` files there are a prompt source, asked after the code's own ([prompts.md](prompts.md)) |
+| `SKILLS_DIR` | no folder of skills; set: `<name>/SKILL.md` folders there are a skill source, asked after the code's own ([skills.md](skills.md)) |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | prompts are not read from Langfuse; both set: Langfuse's prompt management is a prompt source, after `PROMPTS_DIR` and before the gateway (the names Langfuse's own SDK reads) |
+| `LANGFUSE_HOST` | Langfuse Cloud (`https://cloud.langfuse.com`), when the Langfuse keys are set |
 | `TRELLIS_GROUNDING_SAMPLE` | 0.1: a tenth of the successful runs with a text answer (and memory on) are checked against the context they were given (`/v1/verify`, a score on the trace — [observability.md](observability.md#scores)); `0` turns it off, `1` checks every run. A number from 0 to 1, else `Settings` refuses it (`ValidationError`); the run id decides, so a run is either always or never sampled |
 
 `Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
@@ -46,6 +51,11 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `judge_model` | `TRELLIS_JUDGE_MODEL` |
 | `judge_virtual_key` | `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | `judge_sample` | `TRELLIS_JUDGE_SAMPLE` (0 to 1; `None`: 0.1 with judges) |
+| `prompts_dir` | `PROMPTS_DIR` |
+| `skills_dir` | `SKILLS_DIR` |
+| `langfuse_host` | `LANGFUSE_HOST` |
+| `langfuse_public_key` | `LANGFUSE_PUBLIC_KEY` |
+| `langfuse_secret_key` | `LANGFUSE_SECRET_KEY` |
 
 `RUNS_URL` without `MEMORY_URL`, and `MEMORY_URL` without `TRELLIS_API_KEY`, are refused when the
 `Harness` is built (`ConfigurationError`). The names are the platform's: agent-runs reads the
