@@ -561,25 +561,30 @@ sequenceDiagram
 ## Run states
 
 The run record's status (contracts `RunStatus`) and who moves it. The harness writes `QUEUED`,
-`RUNNING`, `PAUSED`, `SUCCESS`, `ERROR` and `CANCELLED`. agent-runs' ticker moves the rest: a
-lapsed lease back to `QUEUED` (or to `ERROR` once every attempt lapsed), and a paused run past
-its interrupt's deadline to `escalate_to` (once) or to `TIMEOUT`. `PARTIAL` and `REJECTED` are
-valid endings of the contract that the harness never writes.
+`RUNNING`, `PAUSED`, `SUCCESS`, `ERROR`, `TIMEOUT` (an attempt out of its run's working time or
+past its deadline) and `CANCELLED`. agent-runs moves the rest: a lapsed lease back to `QUEUED`
+after a backoff (or to `ERROR` at the fifth lapse), a queued run that ended `ERROR` with a
+retryable error back to `QUEUED` (at most 3 times), a released run back to `QUEUED` at once, a
+cancel of a queued or paused run to `CANCELLED`, a run past its working-time limit or its
+deadline to `TIMEOUT`, and a paused run past its interrupt's deadline to `escalate_to` (once) or
+to `TIMEOUT`. `PARTIAL` and `REJECTED` are valid endings of the contract that the harness never
+writes. ([docs/reliability.md](docs/reliability.md) has the limits, retries and cancel.)
 
 ```mermaid
 stateDiagram-v2
   [*] --> QUEUED: agent.start, a schedule fires
   [*] --> RUNNING: agent.run, stream, serve_chat, serve_a2a
   QUEUED --> RUNNING: a worker claims it (lease)
-  QUEUED --> CANCELLED: finish CANCELLED in agent-runs before a claim
+  QUEUED --> CANCELLED: agent.cancel before a claim
   RUNNING --> PAUSED: ask or an approval (interrupt + journal)
-  RUNNING --> QUEUED: lease lapsed (next attempt)
+  RUNNING --> QUEUED: lease lapsed or released, a retryable error (next attempt)
   RUNNING --> SUCCESS: answered
   RUNNING --> ERROR: the agent failed, or the lease lapsed on every attempt
-  RUNNING --> CANCELLED: stream closed, lease lost, a cancel
+  RUNNING --> TIMEOUT: out of its working time, past its deadline
+  RUNNING --> CANCELLED: agent.cancel, stream closed, lease lost
   PAUSED --> RUNNING: resume (started in process)
   PAUSED --> QUEUED: resume (came from the queue)
-  PAUSED --> CANCELLED: resume with cancel, A2A cancel
+  PAUSED --> CANCELLED: resume with cancel, agent.cancel, A2A cancel
   PAUSED --> PAUSED: deadline passed, escalated to escalate_to
   PAUSED --> TIMEOUT: deadline passed, nobody to escalate to
   SUCCESS --> [*]
@@ -628,7 +633,7 @@ sequenceDiagram
   end
   alt a run is still going
     Wk->>R: cancel(RELEASED): nothing written
-    Note over AR: its lease lapses → QUEUED, next attempt
+    Wk->>AR: release(run): QUEUED at once, next attempt
   end
   Wk-->>HW: the loop ended
   HW->>W: drain ≤ DRAIN_SECONDS

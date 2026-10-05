@@ -47,8 +47,10 @@ async with remote("https://planner.example/a2a", tenant="acme", user="ada") as p
         plan = await planner.reply(asked.task_id, input(asked.question))
 ```
 
-* `await agent(message)`: a new task with `message` (text, or a JSON value as a data part); the
-  answer is the task's `result` artifact (several artifacts as a list), or its text.
+* `await agent(message, *, message_id=None)`: a new task with `message` (text, or a JSON value
+  as a data part); the answer is the task's `result` artifact (several artifacts as a list), or
+  its text. `message_id` names the message (the same id again is the same message to a server
+  that deduplicates; the harness's `a2a(url)` tool sends its call's idempotency key).
 * `await agent.connect()` / `async with remote(...) as agent`: reads the card once (a call
   connects first when nothing has); `aclose()` closes the HTTP client it opened.
 * `agent.card` is the remote `AgentCard`; `agent.spec` a contracts `ToolSpec` (`write`,

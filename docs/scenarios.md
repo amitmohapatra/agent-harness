@@ -85,6 +85,8 @@ outside a tool (and the model calls) run again on the re-run.
 | A run on a cadence, acting for someone | `await agent.schedule(cron, input, on_behalf_of=...)` — idempotent, so it is safe in deployment code |
 | Development and tests | leave `RUNS_URL` unset: runs, the queue and schedules live in the process (`LocalRuns`) and nothing survives a restart |
 | Workers in production: deploys, scaling, stop signals | `python -m trellis.harness.worker module:h --concurrency N` (or `TRELLIS_WORKER_CONCURRENCY`; default the CPU count, 1–8); `SIGTERM` lets held runs finish for 25 s, then releases them for another worker — give the container ~45 s ([runs.md](runs.md#workers)) |
+| A run bounded in time, or stopped | `run`/`stream`/`start(..., timeout=, deadline=)` (working time across attempts; an end time) → `TIMEOUT`; `await agent.cancel(run_id, reason=...)` wherever it is ([reliability.md](reliability.md)) |
+| Tools that may hang, services that blip, workers that die | `@tool(timeout=)` (and `openapi`/`a2a` `timeout=`): reads are retried, writes run once, and a write that timed out or was cut by a crash is told to the model as unknown, never re-run ([reliability.md](reliability.md#unknown-outcomes)) |
 | Memory writes that survive an outage and a restart | `TRELLIS_SPOOL_DIR` on a volume that outlives the process: what could not be delivered is replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 
 A run started with `run`/`stream` resumes in the process that calls `resume`; one started with

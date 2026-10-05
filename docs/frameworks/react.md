@@ -32,10 +32,11 @@ agent = h.wrap(target, id="weather", tools=[temperature])
 result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answer: a Forecast
 ```
 
-`ReAct(system, model, output=None, max_steps=12, *, max_result_chars=20000, max_repeats=3)`.
-`model` is a Bifrost model name, sent to `BIFROST_URL` with the agent's virtual key, or any
-object with `async complete(messages, **body) -> dict` (a chat-completions response) — your
-own client, or a scripted model in a test.
+`ReAct(system, model, output=None, max_steps=12, *, max_result_chars=20000, max_repeats=3,
+model_timeout=None)`. `model` is a Bifrost model name, sent to `BIFROST_URL` with the agent's
+virtual key, or any object with `async complete(messages, **body) -> dict` (a chat-completions
+response) — your own client, or a scripted model in a test. `model_timeout` is the most one
+model call may take, in seconds.
 
 ## What is automatic
 
@@ -48,6 +49,7 @@ own client, or a scripted model in a test.
 | Bad arguments | arguments that are not a JSON object, or do not fit the tool's schema, are an error the model reads (the tool does not run) |
 | Large results | a tool result over `max_result_chars` is cut with a marker; the whole result is kept as a run artifact |
 | Stalls | the same call in `max_repeats` consecutive steps, or `max_steps` model calls, stops the run |
+| Slow models | a model call takes at most `model_timeout` (and what is left of the run's `timeout=`/`deadline=`), the gateway's own retries inside it; past it the run fails with a `ModelError` that may be retried (a queued run is queued again; its journaled steps are not asked again) — [reliability.md](../reliability.md#model-timeouts) |
 | Records, grounding, judges, tracing | as for every target; `chat` spans carry the model, usage and finish reasons |
 
 ## Approvals, streaming, durable runs, surfaces, evaluation

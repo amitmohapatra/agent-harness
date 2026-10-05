@@ -55,7 +55,9 @@ await agent.resume(interrupt_id, "cancel", reviewer="cfo")
 ```
 
 What `ask` returns: the answer; `True`/`False` for approve/reject; the edited value for edit;
-cancel ends the run `CANCELLED`. A rejected tool call is not run and the model reads that it
+cancel ends the run `CANCELLED` (so does `agent.cancel(run_id, reason=...)`, which needs no
+interrupt and stops a run whatever it is doing: [reliability.md](reliability.md#cancel)). A
+rejected tool call is not run and the model reads that it
 was rejected — with the reviewer's reason when the reject carries one as `answer`
 (`"refund was not run: the approver rejected it (over budget)"`). The interrupt id names its run, so nothing else is needed; a
 resume must answer the interrupt the run currently waits on.
