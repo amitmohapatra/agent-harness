@@ -80,11 +80,11 @@ h = Harness(runs=runs, memory=False, governance=Governance())
 agent = h.wrap(ReAct(system="You handle refunds.", model="provider/model"), id="refunds")
 ```
 
-`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, judges=())`:
-`runs` a `RunStore` (`trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or
+`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, judges=(),
+hooks=())`: `runs` a `RunStore` (`trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or
 your own with the same calls), `memory` a `trellis.memory.MemoryClient`, `gateway` a
 `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`, `governance` a `Governance` (used
-for every tenant). Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
+for every tenant); `hooks` the [hooks](hooks.md) of every agent it wraps. Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
 (its own run store, its own scheduler loop, governance, no memory).
 
 ## Mixing both ways
