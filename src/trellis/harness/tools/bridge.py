@@ -18,7 +18,8 @@ run's time; a call that only reads (or is idempotent) is tried again after an er
 pass, within that time; the tool reads its idempotency key from ``trellis.current()``. A call
 that does more than read is marked started, and saved, before it runs: one that times out, or
 was running when its worker died, has an unknown effect — the model is told so, the journal
-keeps what it was told, and it is never run again blind.
+keeps what it was told, and it is never run again blind (unless its tool is idempotent, or
+continues where it was: a sub-agent's run).
 
 Calls may come at once (``ReAct``'s reads, the frameworks that run tools concurrently): their
 steps are numbered as they arrive (or as the caller numbered them, ``step=``), identical calls
@@ -94,9 +95,9 @@ async def _called(
         outcome = _replayed(tool.name, output)
         _events(runtime, ref, tool_call, outcome)
         return outcome
-    if runtime.replay.interrupted(key) and not tool.spec.idempotent:
+    if runtime.replay.interrupted(key) and not (tool.spec.idempotent or tool.resumable):
         # its worker died while it ran: it is not run again blind (an idempotent tool is,
-        # with the same key, below)
+        # with the same key, below, and so is one that continues where it was)
         return await _interrupted(runtime, ref, tool_call, key)
 
     decision, tool_call, rejected = await _decided(runtime, tool, tool_call)

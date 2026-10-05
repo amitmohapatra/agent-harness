@@ -455,11 +455,13 @@ class Harness:
         *,
         key: str,
         comment: str | None = None,
+        trace: str | None = None,
     ) -> None:
-        """A score on the run's trace (``EvalServices.score``): a ``score`` span always, and
-        Langfuse's scores API when the OTLP settings reach it — a number (``NUMERIC``), a bool
-        (``BOOLEAN``, 1 or 0) or a category (``CATEGORICAL``)."""
-        trace_id = telemetry.trace_hex(run_id)
+        """A score on the run's trace (``EvalServices.score``) — ``trace``'s, the run whose
+        trace it is in, for a sub-agent's run —: a ``score`` span always, and Langfuse's scores
+        API when the OTLP settings reach it — a number (``NUMERIC``), a bool (``BOOLEAN``, 1 or
+        0) or a category (``CATEGORICAL``)."""
+        trace_id = telemetry.trace_hex(trace or run_id)
         await self.evals.score(trace_id, name, value, key=key, comment=comment, run_id=run_id)
 
 

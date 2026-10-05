@@ -17,7 +17,9 @@ outcome (:data:`OUTCOME`), so a re-run tells the model the same thing and runs n
 The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
 no question and no side effect. A journal larger than a checkpoint may be is stored as a run
-artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journal.read`).
+artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journal.read`). A
+sub-agent's run working inside one of the run's tool calls keeps its journal in the run's
+(``children``), so the run's progress saves the child's too.
 
 Calls made at once (a framework running several tools together) take their occurrences in the
 order they asked: identical calls run one after another (:meth:`Replay.exclusive`), so each has
@@ -81,6 +83,8 @@ class Journal(BaseModel):
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)
+    #: the journals of the sub-agents' runs working inside the run's tool calls now, by run id
+    children: dict[str, Journal] = Field(default_factory=dict)
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence

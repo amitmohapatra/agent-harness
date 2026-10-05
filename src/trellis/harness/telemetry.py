@@ -25,7 +25,8 @@ which the harness also sends). A callable evaluated with no harness gets a root 
 
 Every attempt of a run is in one trace whose id is derived from the run id
 (:func:`trace_id_of`), so a resume in another process, a score computed later and
-``h.feedback`` all land on the trace the run started.
+``h.feedback`` all land on the trace the run started. A sub-agent's run (``Agent.as_tool``)
+works inside its parent's tool call: its spans are in the parent's trace, under that call.
 
 Export: ``OTEL_EXPORTER_OTLP_ENDPOINT`` (+ ``OTEL_EXPORTER_OTLP_HEADERS``) installs an OTLP/HTTP
 exporter — Langfuse's endpoint, or a collector (``deploy/otel-collector.yaml``) that sends
@@ -276,6 +277,9 @@ class RunTrace:
     attempt: int = 1
     #: the agent's version (``h.wrap(..., version=)``), when it has one
     version: str | None = None
+    #: the run in whose tool call this one works (a sub-agent's run): its spans are in that
+    #: run's trace, under the call, and the trace's own attributes stay the parent's
+    parent: str | None = None
 
     def attributes(self) -> dict[str, Any]:
         session = self.thread or self.run_id
@@ -287,18 +291,25 @@ class RunTrace:
                 "langfuse.version": self.version,
             }
         )
+        traced = (
+            {"trellis.parent_run_id": self.parent}
+            if self.parent is not None
+            else {
+                "langfuse.trace.name": self.agent_id,
+                "langfuse.trace.tags": [self.agent_id, self.framework],
+                "langfuse.trace.metadata.run_id": self.run_id,
+                "langfuse.trace.metadata.tenant": self.tenant,
+                "langfuse.trace.metadata.framework": self.framework,
+            }
+        )
         return {
             **versioned,
+            **traced,
             "gen_ai.operation.name": "invoke_agent",
             "gen_ai.agent.id": self.agent_id,
             "gen_ai.agent.name": self.agent_id,
             "gen_ai.conversation.id": session,
             "langfuse.observation.type": "agent",
-            "langfuse.trace.name": self.agent_id,
-            "langfuse.trace.tags": [self.agent_id, self.framework],
-            "langfuse.trace.metadata.run_id": self.run_id,
-            "langfuse.trace.metadata.tenant": self.tenant,
-            "langfuse.trace.metadata.framework": self.framework,
             "user.id": self.user,
             "session.id": session,
             "trellis.run_id": self.run_id,
@@ -309,9 +320,17 @@ class RunTrace:
 
 @contextmanager
 def agent_span(run: RunTrace, task: str) -> Iterator[trace.Span]:
-    """The attempt's span, in the run's trace; ``output(span, answer)`` records the answer."""
+    """The attempt's span, in the run's trace — a sub-agent's run's under its parent's tool
+    call; ``output(span, answer)`` records the answer."""
     attributes = {**run.attributes(), "langfuse.observation.input": _text(task)}
-    with _root_span(run.run_id, run.agent_id, attributes) as current:
+    if run.parent is None:
+        with _root_span(run.run_id, run.agent_id, attributes) as current:
+            yield current
+        return
+    with _tracer.start_as_current_span(f"invoke_agent {run.agent_id}") as current:
+        if current.is_recording():
+            current.set_attributes(redact_attributes(attributes))
+            _experimented(current)
         yield current
 
 

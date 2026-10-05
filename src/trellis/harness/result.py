@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from trellis.contracts import AgentError, Interrupt, RunStatus
+from trellis.contracts import AgentError, Interrupt, RunRecord, RunStatus
 
 
 class Result(BaseModel):
@@ -21,3 +21,14 @@ class Result(BaseModel):
     answer: Any = None
     interrupt: Interrupt | None = None
     error: AgentError | None = None
+
+    @classmethod
+    def of(cls, record: RunRecord) -> Result:
+        """A run as its record says it is now."""
+        return cls(
+            run_id=record.run_id,
+            status=record.status,
+            answer=record.output,
+            interrupt=record.awaiting,
+            error=record.error,
+        )
