@@ -106,7 +106,8 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | a tool that may hang to give up | `@tool(timeout=20)`, `openapi(spec, timeout=)`, `a2a(url, timeout=)` — a read says it timed out, a write is reported as of unknown effect |
 | a model call bounded | `ReAct(..., model_timeout=30)` |
 | a `ReAct` model whose window is not 128k tokens (and whose model object does not say) | `ReAct(..., context_window=32_000)`: older results are cleared and older turns compacted from it |
-| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` → `TIMEOUT` |
+| every run of an agent bounded, however it starts (chat, A2A, evaluation, schedules too) | `h.wrap(..., timeout=900)` → `TIMEOUT` |
+| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` (over the agent's) → `TIMEOUT` |
 | reads retried, writes never repeated, after a crash too | nothing: automatic ([reliability.md](reliability.md#retries)) |
 | a tool's service to deduplicate | hand it `trellis.current().idempotency_key` (OpenAPI writes send it already) |
 | to stop a run | `await agent.cancel(run_id, reason=...)` or `await handle.cancel()` — queued, paused, here or on a worker |

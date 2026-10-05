@@ -192,18 +192,11 @@ class SubAgent:
         try:
             return await pipeline.attempt(
                 child,
-                child._identity_of(record),
+                record,
                 record.input,
-                number=record.attempt,
                 journal=journal,
                 resolution=resolution,
-                budget=pipeline.Budget.of(
-                    timeout=record.timeout_seconds,
-                    worked=record.worked_seconds,
-                    deadline=record.deadline,
-                    remaining=parent.remaining(),
-                ),
-                started_on=record.agent_version,
+                remaining=parent.remaining(),
                 parent=parent,
             )
         finally:

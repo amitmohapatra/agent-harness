@@ -16,9 +16,10 @@ from typing import Any
 import pytest
 
 from trellis import Harness, Runtime, Settings
-from trellis.contracts import ConfigurationError, RunRecord, RunStatus
+from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.runs import LocalRuns
 from trellis.harness.worker.__main__ import main, serve
+from trellis.runs import Job
 from trellis.runs import worker as claim_loop
 
 
@@ -56,19 +57,23 @@ async def test_a_claimed_run_is_its_agents_next_attempt_as_the_lease_holder(
     agent = harness.wrap(echo, id="echo")
     other = harness.wrap(echo, id="other")
     handle = await agent.start("x", user="u")
-    claimed: list[tuple[str, str, int | None]] = []
-    attempt = agent._claimed
+    jobs: list[Job] = []
+    attempt = agent.execute
 
-    async def recording(record: RunRecord, worker_id: str, **lease: Any) -> Any:
-        claimed.append((record.run_id, worker_id, lease["lease_seconds"]))
-        return await attempt(record, worker_id, **lease)
+    async def recording(job: Job) -> Any:
+        jobs.append(job)
+        return await attempt(job)
 
-    monkeypatch.setattr(agent, "_claimed", recording)
+    monkeypatch.setattr(agent, "execute", recording)
     worker = harness.worker([agent, other])
     assert await worker.run_once() is True
-    assert claimed == [(handle.run_id, worker.worker_id, worker.loop.lease_seconds)]
+    [job] = jobs
+    assert (job.record.run_id, job.worker_id) == (handle.run_id, worker.worker_id)
+    assert job.lease_seconds == worker.loop.lease_seconds
     assert (await handle.result(timeout=5)).answer == "x"
     assert await worker.run_once() is False  # nothing queued
+    with pytest.raises(ConfigurationError, match=f"run {handle.run_id} is echo's, not other's"):
+        await other.execute(job)
 
 
 async def test_run_starts_the_background_writes_and_drains_them_when_stopped(

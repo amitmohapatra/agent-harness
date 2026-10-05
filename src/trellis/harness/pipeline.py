@@ -8,9 +8,13 @@ online judges). The adapter is
 the only part that knows the framework. Each attempt is one ``invoke_agent`` span in the run's
 trace.
 
-The attempt works at most what is left of the run's time (:class:`Budget`: its ``timeout``
-less the time it already worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled
-(``agent.cancel``), it ends ``CANCELLED`` with the reason.
+:func:`attempt` is the one way an attempt starts — ``agent.run``/``stream``, a resume, a
+worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``serve_a2a`` and
+``h.evaluate`` alike — from the run's record: its identity, its attempt, its version, and what
+is left of its time. The attempt works at most that (:class:`Budget`: its ``timeout`` — the
+agent's default, ``h.wrap(timeout=)``, when the run names none — less the time it already
+worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.cancel``), it ends
+``CANCELLED`` with the reason.
 """
 
 from __future__ import annotations
@@ -97,6 +101,19 @@ class Budget:
         return None if tightest is None else dataclasses.replace(tightest, deadline=deadline)
 
 
+def _budget(agent: Agent, record: RunRecord, remaining: float | None) -> Budget | None:
+    """What is left of a run's time, from its record: the working-time limit — the run's, else
+    the agent's (a scheduled run names none) — less the time it already worked (agent-runs
+    keeps it across attempts, a crash included), or what its lease says is ``remaining``; and
+    the deadline."""
+    return Budget.of(
+        timeout=agent.timeout if record.timeout_seconds is None else record.timeout_seconds,
+        worked=record.worked_seconds,
+        deadline=record.deadline,
+        remaining=remaining,
+    )
+
+
 def _timed_out(code: str, message: str) -> AgentError:
     # the category alone would say retryable: a run out of time is not run again
     return AgentError(code=code, category=ErrorCategory.TIMEOUT, message=message, retryable=False)
@@ -104,48 +121,46 @@ def _timed_out(code: str, message: str) -> AgentError:
 
 async def attempt(
     agent: Agent,
-    identity: Identity,
+    record: RunRecord,
     input: Any,
     *,
-    number: int = 1,
     journal: Journal | None = None,
     resolution: InterruptResolution | None = None,
     listener: Callable[[RunEvent], None] | None = None,
-    streaming: bool = False,
     worker_id: str | None = None,
     lease_seconds: int | None = None,
+    remaining: float | None = None,
     observe: Callable[[PromptContext | None], None] | None = None,
-    budget: Budget | None = None,
-    started_on: str | None = None,
     parent: Runtime | None = None,
 ) -> Result:
-    """Run one attempt and record how it ended. The run record must already be RUNNING;
-    ``worker_id`` names the worker holding its lease (the store fences its writes), and
-    ``lease_seconds`` its length (progress checkpoints extend it). ``observe`` is told the memory
-    context the run was given (an offline evaluation's evaluators read it). ``budget`` is what
-    is left of the run's time; ``started_on`` the agent version that started the run (a
-    resume on another version says so); ``parent`` the run in whose tool call this one works
+    """Run the next attempt of the run ``record`` is (already RUNNING), on ``input`` (its
+    record's, or — a run started in this process — the object it was started with), and
+    record how it ended. ``listener`` hears its events, the text as it streams. ``worker_id``
+    names the worker holding its lease (the store fences its writes), ``lease_seconds`` its
+    length (progress checkpoints extend it), and ``remaining`` the working time the lease says
+    the run has left. ``observe`` is told the memory context the run was given (an offline
+    evaluation's evaluators read it). ``parent`` is the run in whose tool call this one works
     (a sub-agent's run: its progress is the parent's, its spans in the parent's trace)."""
+    identity = Identity.of(record)
+    budget = _budget(agent, record, remaining)
     journal = journal or Journal()
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
-    replay = _replay(journal, resolution)
-    events = RunEvents(identity.context(), number)
+    events = RunEvents(identity.context(), record.attempt)
     if listener is not None:
         events.listen(listener)
-    query = query_of(input)
     runtime = Runtime(
         identity=identity,
         agent=agent,
         events=events,
-        replay=replay,
-        attempt=number,
+        replay=_replay(journal, resolution),
+        attempt=record.attempt,
         worker_id=worker_id,
         lease_seconds=lease_seconds,
         run_memory=await agent.run_memory(identity),
         writes_memory=await agent.harness.writes_memory(),
         used=set(journal.used),
-        task=query,
+        task=query_of(input),
         started_at=datetime.now(UTC),
         ends_at=None if budget is None else time.monotonic() + budget.seconds,
         deadline=None if budget is None else budget.deadline,
@@ -153,7 +168,7 @@ async def attempt(
         running_in=asyncio.current_task(),
     )
     events.emit(RunEventType.RUN_STARTED, data={"agent_id": identity.agent_id})
-    _versioned(agent, runtime, started_on)
+    _versioned(agent, runtime, record.agent_version)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
     error: Exception | None = None
@@ -162,18 +177,7 @@ async def attempt(
     tokens = (_current.set(runtime), _call.set(None))
     agent.running[identity.run_id] = runtime
     try:
-        run_trace = RunTrace(
-            run_id=identity.run_id,
-            agent_id=identity.agent_id,
-            tenant=identity.tenant,
-            user=identity.user,
-            thread=identity.thread,
-            framework=agent.adapter.name,
-            attempt=number,
-            version=agent.version,
-            parent=None if parent is None else parent.run_id,
-        )
-        with agent_span(run_trace, query) as span:
+        with agent_span(_traced(runtime), runtime.task) as span:
             async with clock:
                 tools = await agent.tools_for(runtime)
                 runtime.toolbox = {t.name: t for t in tools}
@@ -189,7 +193,7 @@ async def attempt(
                     input,
                     pending=pending,
                     resolution=resolution,
-                    streaming=streaming,
+                    streaming=listener is not None,
                 )
             output(span, jsonable(extracted.answer))
     except RunCancelled as exc:
@@ -215,6 +219,21 @@ async def attempt(
     timed_out = budget.error if budget is not None and clock.expired() else None
     return await _concluded(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
+    )
+
+
+def _traced(runtime: Runtime) -> RunTrace:
+    """The attempt as its ``invoke_agent`` span says it: a sub-agent's in its parent's trace."""
+    return RunTrace(
+        run_id=runtime.run_id,
+        agent_id=runtime.agent_id,
+        tenant=runtime.tenant,
+        user=runtime.user,
+        thread=runtime.thread,
+        framework=runtime.agent.adapter.name,
+        attempt=runtime.attempt,
+        version=runtime.agent.version,
+        parent=None if runtime.parent is None else runtime.parent.run_id,
     )
 
 

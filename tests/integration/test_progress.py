@@ -16,7 +16,7 @@ from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
 from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES, content_key
 from trellis.harness.runs import LocalRuns
-from trellis.runs import Lease, LeaseLostError, PayloadTooLargeError
+from trellis.runs import Job, Lease, LeaseLostError, PayloadTooLargeError
 
 paid: list[int] = []
 looked: list[str] = []
@@ -93,7 +93,9 @@ async def crash_once(store: LocalRuns, agent: Any, handle: Any) -> None:
     claimed = await store.claim(worker.worker_id, [agent.id])
     assert claimed is not None
     with pytest.raises(Crash):
-        await agent._claimed(claimed.run, worker.worker_id, lease_seconds=60)
+        await agent.execute(
+            Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
+        )
     lapse(store, handle.run_id)
 
 

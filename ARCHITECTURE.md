@@ -420,7 +420,7 @@ sequenceDiagram
   Agent->>AR: POST /v1/runs (queue: true) → QUEUED
   Wk->>AR: POST /v1/runs/claim (lease 60 s)
   AR-->>Wk: {run, lease} → RUNNING, attempt 1
-  Wk->>P: agent._claimed(record, worker_id)
+  Wk->>P: agent.execute(job) (record, worker_id, lease)
   loop every 20 s while it runs
     Wk->>AR: POST /v1/runs/{id}/heartbeat (409 → LeaseLostError: stop, write nothing)
   end

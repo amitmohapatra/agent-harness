@@ -736,8 +736,8 @@ async def test_an_online_judge_failure_reaches_the_runs_listeners() -> None:
     seen: list[Any] = []
     async with Harness(config=Settings(judge_sample=1.0), judges=[broken]) as h:
         agent = h.wrap(capital, id="c")
-        identity = await agent._opened("France", user="u", thread=None, tenant=None)
-        await pipeline.attempt(agent, identity, "France", listener=seen.append)
+        record = await agent._opened("France", user="u", thread=None, tenant=None)
+        await pipeline.attempt(agent, record, "France", listener=seen.append)
         await h.writes.drain()
     warnings = [e for e in seen if e.data.get("code") == "judge_failed"]
     assert warnings and "judge broken: RuntimeError: judge down" in warnings[0].data["message"]

@@ -56,6 +56,7 @@ from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
+from trellis.runs import Job
 from trellis.runs.answers import answer_problem
 
 if TYPE_CHECKING:
@@ -95,12 +96,18 @@ class Agent:
         version: str | None = None,
         mcp: Sequence[str] | None = None,
         skills: Sequence[str] = (),
+        timeout: float | None = None,
     ):
+        if timeout is not None and timeout <= 0:
+            raise ConfigurationError(f"{id}: a timeout is a number of seconds over 0")
         self.harness = harness
         self.target = target
         self.id = safe_id(id)
         #: the version of the agent's code: recorded with every run it starts, on its spans
         self.version = version or harness.settings.agent_version
+        #: the most working time one of its runs may take, in seconds, when the run names
+        #: none (``None``: no limit)
+        self.timeout = timeout
         self.adapter = detect(target)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))
@@ -142,13 +149,13 @@ class Agent:
         deadline: datetime | None = None,
     ) -> Result:
         """Run to its end (or its first pause) and return how it ended. ``timeout``: the most
-        working time the run may take, in seconds (not counting a pause), and ``deadline``
-        when it must have ended; past either it ends ``TIMEOUT``."""
-        identity = await self._opened(
+        working time the run may take, in seconds (not counting a pause; else the agent's,
+        ``h.wrap(timeout=)``), and ``deadline`` when it must have ended; past either it ends
+        ``TIMEOUT``."""
+        record = await self._opened(
             input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
         )
-        budget = pipeline.Budget.of(timeout=timeout, deadline=deadline)
-        return await pipeline.attempt(self, identity, input, budget=budget)
+        return await pipeline.attempt(self, record, input)
 
     async def stream(
         self,
@@ -162,14 +169,11 @@ class Agent:
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
         early cancels the run. ``timeout`` and ``deadline`` as for :meth:`run`."""
-        identity = await self._opened(
+        record = await self._opened(
             input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
         )
-        budget = pipeline.Budget.of(timeout=timeout, deadline=deadline)
         async for event in self._events(
-            lambda listen: pipeline.attempt(
-                self, identity, input, listener=listen, streaming=True, budget=budget
-            )
+            lambda listen: pipeline.attempt(self, record, input, listener=listen)
         ):
             yield event
 
@@ -380,16 +384,7 @@ class Agent:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
         return await pipeline.attempt(
-            self,
-            self._identity_of(record),
-            record.input,
-            number=resumed.attempt,
-            journal=journal,
-            resolution=resolution,
-            listener=listener,
-            streaming=listener is not None,
-            budget=_budget(record),
-            started_on=record.agent_version,
+            self, resumed, record.input, journal=journal, resolution=resolution, listener=listener
         )
 
     async def _resumed(
@@ -400,7 +395,7 @@ class Agent:
         where it was asked: on the sub-agent's run)."""
         runs = self.harness.runs
         assert record.awaiting is not None
-        identity = self._identity_of(record)
+        identity = Identity.of(record)
         feedback = (
             None
             if asked_by(record.awaiting) is not None
@@ -421,29 +416,27 @@ class Agent:
             )
         return journal, resumed
 
-    async def _claimed(
-        self,
-        record: RunRecord,
-        worker_id: str,
-        *,
-        lease_seconds: int | None = None,
-        remaining: float | None = None,
-    ) -> Result:
-        """A worker's run: fresh from the queue, continuing after a resolution, or after a
-        worker died (its checkpoint is the progress it saved). ``remaining`` is the working
-        time agent-runs says the run has left (its lease's)."""
+    async def execute(self, job: Job) -> Result:
+        """The next attempt of a run of this agent a worker claimed (``job``: its record, the
+        worker holding its lease, the lease's length and the working time it says is left) —
+        fresh from the queue, continuing after a person's answer, or after a worker died (its
+        checkpoint is the progress it saved) — with its journal, governance, memory and
+        limits. Any worker hands it the runs it claims: ``h.worker``, a
+        ``trellis.runs.Worker(runs, agent.execute, [agent.id])``, or a loop of your own around
+        ``runs.claim``."""
+        record = job.record
+        if record.agent_id != self.id:
+            raise ConfigurationError(f"run {record.run_id} is {record.agent_id}'s, not {self.id}'s")
         artifacts = self.harness.runs.artifacts
         return await pipeline.attempt(
             self,
-            self._identity_of(record),
+            record,
             record.input,
-            number=record.attempt,
             journal=await Journal.read(record.checkpoint, artifacts, tenant=record.tenant_id),
             resolution=record.last_resolution,
-            worker_id=worker_id,
-            lease_seconds=lease_seconds,
-            budget=_budget(record, remaining),
-            started_on=record.agent_version,
+            worker_id=job.worker_id,
+            lease_seconds=job.lease_seconds,
+            remaining=job.remaining_seconds,
         )
 
     async def _events(
@@ -677,9 +670,10 @@ class Agent:
         run_id: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
-    ) -> Identity:
-        """Record an in-process run as started; its identity. (Surfaces pass their own
-        ``run_id`` when the protocol names the run.)"""
+    ) -> RunRecord:
+        """Record an in-process run as started; its record, which its first attempt starts
+        from (``pipeline.attempt``). (Surfaces pass their own ``run_id`` when the protocol
+        names the run.)"""
         start = await self._start(
             input,
             user=user,
@@ -691,7 +685,7 @@ class Agent:
             deadline=deadline,
         )
         await self.harness.runs.start(start)
-        return self._identity_of(RunRecord.from_start(start))
+        return RunRecord.from_start(start)
 
     async def _start(
         self,
@@ -707,13 +701,14 @@ class Agent:
         parent: str | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
-        a queued run's input already is. The run's time limit, deadline, the agent's version
-        and the run it is a sub-agent's run of (``parent``) go with it when there are any."""
+        a queued run's input already is. The run's time limit (else the agent's), deadline,
+        the agent's version and the run it is a sub-agent's run of (``parent``) go with it when
+        there are any."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
         given = {
-            "timeout_seconds": timeout,
+            "timeout_seconds": self.timeout if timeout is None else timeout,
             "deadline": deadline,
             "agent_version": self.version,
             "parent_run_id": parent,
@@ -728,18 +723,6 @@ class Agent:
             **{name: value for name, value in given.items() if value is not None},
         )
 
-    @staticmethod
-    def _identity_of(record: RunRecord) -> Identity:
-        return Identity(
-            tenant=record.tenant_id,
-            user=record.user_id or record.on_behalf_of or "system",
-            agent_id=record.agent_id,
-            run_id=record.run_id,
-            # a scheduled run has no thread: its transcript is its own
-            thread=record.thread_id or record.run_id,
-            workspace=record.workspace_id,
-        )
-
 
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
@@ -752,18 +735,6 @@ def graded(answer: Any) -> str:
     if answer is None or isinstance(answer, str):
         return answer or ""
     return json.dumps(pipeline.jsonable(answer), default=str)
-
-
-def _budget(record: RunRecord, remaining: float | None = None) -> pipeline.Budget | None:
-    """What is left of a run's time, from its record: the working-time limit less the time
-    it already worked (agent-runs keeps it across attempts, a crash included) — or what its
-    lease says is ``remaining`` — and the deadline."""
-    return pipeline.Budget.of(
-        timeout=record.timeout_seconds,
-        worked=record.worked_seconds,
-        deadline=record.deadline,
-        remaining=remaining,
-    )
 
 
 def _redacted(call: ToolCall, outcome: ToolOutcome) -> tuple[ToolCall, ToolOutcome]:

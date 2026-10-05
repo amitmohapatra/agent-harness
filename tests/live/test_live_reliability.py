@@ -18,6 +18,7 @@ from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import eventually, free_port, memory_scope, serving
 from trellis import Harness, Runtime, openapi, tool
 from trellis.contracts import RunStatus
+from trellis.runs import Job
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]
 
@@ -36,7 +37,9 @@ async def died(h: Harness, agent: Any, handle: Any) -> None:
     claimed = await h.runs.claim("w-dies", [agent.id], lease_seconds=5)
     assert claimed is not None
     with pytest.raises(Crash):
-        await agent._claimed(claimed.run, "w-dies", lease_seconds=5)
+        await agent.execute(
+            Job(record=claimed.run, worker_id="w-dies", lease_seconds=5, store=h.runs)
+        )
 
     async def requeued() -> bool:
         return (await handle.status()).status is RunStatus.QUEUED

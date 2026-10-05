@@ -146,6 +146,7 @@ class Harness:
         version: str | None = None,
         mcp: Sequence[str] | None = None,
         skills: Sequence[str] = (),
+        timeout: float | None = None,
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
@@ -155,8 +156,19 @@ class Harness:
         Skills Repository (``"name"``, ``"name@version"``: ``trellis.harness.skills``).
         ``version`` is the version of the agent's code (else ``TRELLIS_AGENT_VERSION``),
         recorded with each run it starts: a run resumed on another version goes on, with a
-        warning naming both."""
-        agent = Agent(self, target, id=id, tools=tools, version=version, mcp=mcp, skills=skills)
+        warning naming both. ``timeout`` is the most working time one of its runs may take, in
+        seconds, when the run names none (``run``/``stream``/``start(timeout=)`` override it):
+        on every entry — ``serve_chat``, ``serve_a2a``, ``h.evaluate``, scheduled runs too."""
+        agent = Agent(
+            self,
+            target,
+            id=id,
+            tools=tools,
+            version=version,
+            mcp=mcp,
+            skills=skills,
+            timeout=timeout,
+        )
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
         self.agents[agent.id] = agent

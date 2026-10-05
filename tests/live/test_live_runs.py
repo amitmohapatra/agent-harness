@@ -30,7 +30,7 @@ from trellis.contracts import (
     new_id,
 )
 from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
-from trellis.runs import Claimed, LeaseLostError, RunsClient, RunSummary
+from trellis.runs import Claimed, Job, LeaseLostError, RunsClient, RunSummary
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]  # the key is the memory service's
 
@@ -267,7 +267,9 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
     claimed = await harness.runs.claim("w-dies", [agent.id], lease_seconds=5)
     assert claimed is not None
     with pytest.raises(Crash):
-        await agent._claimed(claimed.run, "w-dies", lease_seconds=5)
+        await agent.execute(
+            Job(record=claimed.run, worker_id="w-dies", lease_seconds=5, store=harness.runs)
+        )
     record = await handle.status()
     assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
 
