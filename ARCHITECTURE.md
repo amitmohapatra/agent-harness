@@ -83,7 +83,7 @@ flowchart LR
 
 | Neighbour | What the harness uses it for | Endpoints (module) |
 |---|---|---|
-| Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s model calls, the MCP log of Code Mode scripts | `POST /mcp` (`tools/list`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs` (`clients/bifrost.py`, through `bifrost-sdk`) |
+| Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows (or a Virtual MCP's), their execution, Code Mode, `ReAct`'s and the judge's model calls, the MCP log of Code Mode scripts, stored prompts, skills, the MCP clients' Agent Mode lists | `POST /mcp[/<slug>]` (`tools/list`, `tools/call`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs`, `GET /api/prompt-repo/prompts`, `GET /api/skills[/...]`, `GET /api/mcp/clients` (`clients/bifrost.py`, through `bifrost-sdk`) |
 | Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, the tool catalog's `/v1/tools`, `/v1/tools/catalog` and approval feedback in `governance/catalog.py`, and `/v1/verify` in `evals.grounding_score`, through `trellis-memory`) |
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/artifacts`, `/v1/artifacts/{id}`, `/v1/schedules` (`runs.py`, through `trellis.runs.RunsClient`) |
 | Chat UI | runs and their events, resumes, reconnects, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`agui`) |
@@ -332,7 +332,11 @@ local sources and every MCP tool the Bifrost virtual key allows — fresh: liste
 `TOOLS_TTL_SECONDS` (300), one listing at a time (concurrent runs that find it stale share one).
 A new listing is published to the catalog through governance, in the background (and published
 again at the next listing if that failed). Code Mode is chosen for the Code Mode servers whose
-tools all only read as governance says now, when there are enough of them.
+tools all only read as governance says now, when there are enough of them; its meta-tools are
+offered under the harness's names, so the gateway (which runs a declared meta-tool itself under
+its own name) returns every call to the bridge. With `mcp=` the definitions are the named
+Virtual MCPs' tools, each run through its bundle; a tool its client lists in
+`tools_to_auto_execute` is left out ([docs/gateway.md](docs/gateway.md)).
 
 Governance (`governance/`, one `Governance` per tenant: `Harness.governance`) is the only place a
 call's action is decided ([docs/governance.md](docs/governance.md)). It reads the catalog's word

@@ -10,11 +10,12 @@ catalog.
 
 | Where from | Tools | Side effects |
 |---|---|---|
-| **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
+| **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key) — or, with `h.wrap(..., mcp=[slug])`, the tools of those Virtual MCPs — named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)) | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
 | `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph; `timeout=` seconds per call (none by default; a sync function runs in a worker thread) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, timeout=None)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` per exchange (120 s by default) | `"write"` |
 | `agent.as_tool(*, name=None, description=None, side_effects=None)` | one: another agent wrapped by this harness, `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"`; `side_effects=` overrides it |
 | `openapi(spec, *, only=None, base_url=None, headers=None, timeout=30)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
+| `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills of the gateway's Skills Repository, their versions pinned per run ([gateway.md](gateway.md#skills)) | `"read"` |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
 `tools=` takes only what runs in this process; which MCP tools an agent has is decided where
@@ -77,14 +78,18 @@ or the service names no tools, every tool is offered.
 The Code Mode servers of the gateway (`is_code_mode_client`: a script sees only those) whose
 every allowed tool only reads — as governance says now: the catalog's risk over the tool's own,
 and no `approve_when` — go to Code Mode when there are at
-least 3 of them or 20 tools between them: the agent gets Bifrost's meta-tools
-(`listToolFiles`, `readToolFile`, `getToolDocs`, `executeToolCode`) scoped to those servers
-and writes one Starlark script (`server.tool(param=value)`, `print(...)`) instead of many
+least 3 of them or 20 tools between them: the agent gets Bifrost's meta-tools, under the
+harness's names — `list_tool_files`, `read_tool_file`, `get_tool_docs`, `execute_tool_code`,
+each run as the gateway's (`listToolFiles`, ...) — scoped to those servers, and writes one
+Starlark script (`server.tool(param=value)`, `print(...)`) instead of many
 calls. Every other tool stays a normal tool, so no script reaches a tool that writes. Scripts
 run under the run id (`x-bf-parent-request-id`); with memory writes on, their nested calls are
 read back from Bifrost's MCP log after the run — it is written a few seconds behind, so it is
 read until two reads agree (at most 20 s) — and recorded as tool calls. Agent Mode (the
-gateway running tools itself) is never used.
+gateway running tools itself) is never used: under its own names the gateway would run a
+declared meta-tool itself, inside the completion, so the harness's names keep every call in
+the bridge ([gateway.md](gateway.md#what-the-gateway-never-does-for-a-run)). Not through a
+Virtual MCP (`mcp=`): a script reaches every tool of a server, a bundle only some.
 
 ## Tools built into the agent: `h.tools`
 

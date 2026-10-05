@@ -36,6 +36,8 @@ from trellis.runs import LeaseLostError
 from trellis.runs.answers import schema_problem
 
 if TYPE_CHECKING:
+    from bifrost_sdk.admin import Skill
+
     from trellis.harness.agent import Agent
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.tools.base import Tool
@@ -109,6 +111,8 @@ class Runtime:
     offered: set[str] | None = None
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
+    #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
+    skills: dict[str, Skill] = field(default_factory=dict)
     #: set by an adapter whose framework can suspend itself (LangGraph ``interrupt``)
     suspend: Suspend | None = None
     #: the pause this attempt ended on

@@ -385,7 +385,11 @@ def tool_span(
 
 
 @contextmanager
-def model_span(model: str, messages: Any) -> Iterator[trace.Span]:
+def model_span(
+    model: str, messages: Any, *, extra: Mapping[str, Any] | None = None
+) -> Iterator[trace.Span]:
+    """A model call's ``chat`` span; ``extra`` attributes say more about the request (the
+    stored prompt it selects)."""
     with _tracer.start_as_current_span(f"chat {model}", kind=trace.SpanKind.CLIENT) as current:
         if current.is_recording():
             attributes = {
@@ -394,6 +398,7 @@ def model_span(model: str, messages: Any) -> Iterator[trace.Span]:
                 "gen_ai.request.model": model,
                 "langfuse.observation.type": "generation",
                 "langfuse.observation.input": _text(messages),
+                **(extra or {}),
             }
             current.set_attributes(redact_attributes(attributes))
             _experimented(current)
@@ -412,6 +417,13 @@ def retrieval_span(query: str) -> Iterator[trace.Span]:
             current.set_attributes(redact_attributes(attributes))
             _experimented(current)
         yield current
+
+
+def attribute(name: str, value: str) -> None:
+    """An attribute of the span current now (the run's span, in its pipeline)."""
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute(name, value)
 
 
 def output(span: trace.Span, value: Any, *, key: str = "langfuse.observation.output") -> None:

@@ -4,8 +4,9 @@ An `agents.Agent` is a target. The harness runs it with the SDK's own `Runner`, 
 your agent that also carries the harness tools; your agent object is never changed.
 
 **Install:** `pip install 'trellis-harness[openai-agents]'`. Your model is your own:
-`OpenAIChatCompletionsModel(model=..., openai_client=AsyncOpenAI(base_url=BIFROST_URL, ...))` to go
-through Bifrost. `agents.set_tracing_disabled(True)` keeps the SDK's own tracing (which goes to
+`OpenAIChatCompletionsModel(model=..., openai_client=AsyncOpenAI(base_url=BIFROST_URL,
+default_headers=await h.model_headers(), ...))` to go through Bifrost (the headers keep the
+gateway from adding its MCP tools to the model's requests: [gateway.md](../gateway.md)). `agents.set_tracing_disabled(True)` keeps the SDK's own tracing (which goes to
 OpenAI) off; the harness traces through OpenTelemetry.
 
 This page is Way 1: the harness runs the agent. To keep calling `Runner.run` yourself and plug

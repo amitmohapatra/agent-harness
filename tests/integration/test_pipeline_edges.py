@@ -313,7 +313,7 @@ async def test_the_toolbox_for_openai_agents_is_function_tools(harness: Harness)
 
     [native] = await harness.tools(lookup, framework="openai-agents")
     assert isinstance(native, FunctionTool) and native.name == "lookup"
-    assert harness.built_for([native]) == []  # only LangGraph tools name their toolbox
+    assert harness.built_for([native]) == ([], None)  # only LangGraph tools name their toolbox
 
 
 async def test_a_finish_already_recorded_is_not_a_failed_run(

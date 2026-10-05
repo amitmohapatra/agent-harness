@@ -12,13 +12,12 @@ from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from tests.live.conftest import MODEL
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
 
 URL = os.environ.get("BIFROST_URL")
 KEY = os.environ.get("BIFROST_VIRTUAL_KEY") or "unused"
-#: Cheap, and reliable at tool calling through the gateway.
-MODEL = "openrouter/openai/gpt-4.1-nano"
 
 pytestmark = [
     pytest.mark.live,
@@ -56,7 +55,13 @@ async def test_react_calls_a_tool_and_answers_in_the_schema() -> None:
 
 async def test_langgraph_with_a_model_pointed_at_bifrost() -> None:
     async with harness() as h:
-        model = ChatOpenAI(base_url=URL, api_key=KEY, model=MODEL, max_tokens=2048)  # type: ignore[arg-type]
+        model = ChatOpenAI(
+            base_url=URL,
+            api_key=KEY,  # type: ignore[arg-type]
+            model=MODEL,
+            max_tokens=2048,  # type: ignore[call-arg]
+            default_headers=await h.model_headers(),
+        )
         graph = create_agent(model, tools=await h.tools(stock, framework="langgraph"))
         result = await h.wrap(graph, id="live-graph").run(
             "Units of A-1 in stock? Use the tool.", user="live"
@@ -68,7 +73,10 @@ async def test_langgraph_with_a_model_pointed_at_bifrost() -> None:
 async def test_openai_agents_with_a_model_pointed_at_bifrost() -> None:
     async with harness() as h:
         model = OpenAIChatCompletionsModel(
-            model=MODEL, openai_client=AsyncOpenAI(base_url=URL, api_key=KEY)
+            model=MODEL,
+            openai_client=AsyncOpenAI(
+                base_url=URL, api_key=KEY, default_headers=await h.model_headers()
+            ),
         )
         target = Agent(name="stock", instructions="Use the stock tool.", model=model)
         result = await h.wrap(target, id="live-openai", tools=[stock]).run(

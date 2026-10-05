@@ -91,7 +91,9 @@ async def test_in_a_run_a_request_waits_what_is_left_of_the_call_and_carries_its
         return_value=httpx.Response(200, json={"choices": [{"message": message}]})
     )
     gateway = Gateway(f"{GATEWAY}/v1", "vk")
-    run = SimpleNamespace(run_id="run_1", idempotency_key="run_1:k:0", remaining=lambda: 12.5)
+    run = SimpleNamespace(
+        run_id="run_1", idempotency_key="run_1:k:0", remaining=lambda: 12.5, tenant="t", user="u"
+    )
     token = runtime_module._current.set(run)  # type: ignore[arg-type]
     try:
         assert await gateway.execute("erp-ship", {}, clients=["erp"]) == "ok"

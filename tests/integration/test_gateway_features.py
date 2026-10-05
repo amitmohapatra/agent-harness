@@ -1,0 +1,321 @@
+"""The gateway's repositories and bundles through a wrapped agent: a stored prompt on every
+model call of a ``ReAct`` (pinned for the run) and of the LLM judge, skills disclosed in the
+context and read through two journaled tools, Virtual MCPs as the agent's MCP tools, and the
+headers a framework's own model client is given."""
+
+from __future__ import annotations
+
+import copy
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
+
+import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+from tests.support.gateway import URL, FakeGateway, SkillVersions
+from trellis import Harness, ReAct, Runtime, Settings, skills, tool
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus
+from trellis.harness import fresh, telemetry
+from trellis.harness.clients import bifrost
+from trellis.harness.evals import EvalCase, EvalServices, judge, llm_judge
+from trellis.harness.skills import LOAD_SKILL, READ_SKILL_FILE, SECTION
+
+SYSTEM = [{"role": "system", "content": "You triage."}]
+SQL = SkillVersions(
+    {
+        "1.0.0": ("Reviews SQL, the old way.", "Old rules.", {"rules.md": "old"}),
+        "1.1.0": ("Reviews SQL.", "Read rules.md first.", {"rules.md": "No SELECT *."}),
+    },
+    served="1.1.0",
+)
+REFUNDS = SkillVersions({"2.0.0": ("Handles refunds.", "Refund within 30 days.", {})}, "2.0.0")
+
+
+@pytest.fixture
+def fake() -> FakeGateway:
+    skills = copy.deepcopy({"sql": SQL, "refunds": REFUNDS})
+    return FakeGateway(prompts={"triage": [SYSTEM, SYSTEM]}, skills=skills)
+
+
+@pytest.fixture
+async def h(fake: FakeGateway) -> AsyncIterator[Harness]:
+    async with Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key="vk")) as made:
+        await made.gateway.aclose()  # type: ignore[union-attr]
+        made.gateway = fake.gateway()
+        yield made
+
+
+@pytest.fixture
+def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
+    yield exporter
+
+
+@tool(side_effects="irreversible")
+def close_ticket(ticket: str) -> str:
+    """Close a ticket."""
+    return f"closed {ticket}"
+
+
+# --------------------------------------------------------------------------- prompts
+async def test_every_model_call_selects_the_prompt_pinned_for_the_run(
+    h: Harness, fake: FakeGateway, spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(fresh, "_now", lambda: clock[0])
+    fake.chat.turns += [("close_ticket", {"ticket": "T-1"}), "closed it"]
+    agent = h.wrap(
+        ReAct(system="Tickets.", model="local/small", prompt="triage"),
+        id="triage",
+        tools=[close_ticket],
+    )
+    paused = await agent.run("close T-1", user="ada")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    fake.prompts["triage"].append(SYSTEM)  # a newer version, read after the TTL...
+    clock[0] += bifrost.REPOSITORY_TTL_SECONDS + 1
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
+    assert done.status is RunStatus.SUCCESS and done.answer == "closed it"
+    # ...but the run keeps the version it started with, on every call
+    assert [r.headers["x-bf-prompt-version"] for r in fake.completions] == ["2", "2"]
+    assert {r.headers["x-bf-prompt-id"] for r in fake.completions} == {"p-triage"}
+    chats = [s for s in spans.get_finished_spans() if s.name.startswith("chat ")]
+    assert [(s.attributes or {})["trellis.prompt.version"] for s in chats] == [2, 2]
+    assert {(s.attributes or {})["trellis.prompt.name"] for s in chats} == {"triage"}
+    fresh_run = await agent.run("hello", user="ada")  # a new run pins the newer version
+    assert fresh_run.status is RunStatus.ERROR  # (the script has nothing more to say)
+    assert fake.completions[-1].headers["x-bf-prompt-version"] == "3"
+
+
+def test_a_prompt_needs_a_model_name_and_a_version_number() -> None:
+    with pytest.raises(ConfigurationError, match="needs a Bifrost model name"):
+        ReAct(system="s", model=object(), prompt="triage")  # type: ignore[arg-type]
+    with pytest.raises(ConfigurationError, match="version is a number"):
+        ReAct(system="s", model="local/small", prompt="triage@latest")
+    with pytest.raises(ConfigurationError, match="version is a number"):
+        llm_judge("Polite.", prompt="triage@x")
+
+
+async def test_a_run_whose_prompt_is_not_there_fails_saying_so(h: Harness) -> None:
+    agent = h.wrap(ReAct(system="s", model="local/small", prompt="nope"), id="nope")
+    result = await agent.run("hi", user="ada")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "no committed prompt named 'nope'" in result.error.message
+
+
+async def test_the_judge_selects_its_prompt(h: Harness, fake: FakeGateway) -> None:
+    fake.chat.turns.append('{"score": 1, "reasoning": "polite"}')
+    services = EvalServices(judge_gateway=h.gateway, judge_model="local/judge")
+    case = EvalCase(input="hi", output="Hello!", run_id="run_1")
+    scores, failed = await judge(case, [llm_judge("Polite.", prompt="triage@1")], services=services)
+    assert failed == {} and scores[0].value == 1
+    assert fake.completions[-1].headers["x-bf-prompt-version"] == "1"
+
+
+async def test_a_judge_prompt_needs_a_model_name() -> None:
+    services = EvalServices(judge_model=object())
+    case = EvalCase(input="hi", output="Hello!", run_id="run_1")
+    _, failed = await judge(case, [llm_judge("Polite.", prompt="triage")], services=services)
+    assert "needs a Bifrost model name" in failed["llm_judge"]
+
+
+async def test_a_frameworks_model_client_gets_the_deny_all_scope_and_the_prompt(
+    h: Harness,
+) -> None:
+    assert await h.model_headers(prompt="triage@1") == {
+        "x-bf-mcp-include-clients": "",
+        "x-bf-mcp-include-tools": "",
+        "x-bf-prompt-id": "p-triage",
+        "x-bf-prompt-version": "1",
+    }
+    async with Harness(config=Settings()) as bare:
+        assert await bare.model_headers() == {
+            "x-bf-mcp-include-clients": "",
+            "x-bf-mcp-include-tools": "",
+        }
+        with pytest.raises(ConfigurationError, match="BIFROST_URL"):
+            await bare.model_headers(prompt="triage")
+
+
+# --------------------------------------------------------------------------- skills
+def events_of(found: list[Any], name: str) -> list[dict[str, Any]]:
+    return [
+        e.data
+        for e in found
+        if e.type is RunEventType.CUSTOM and (e.data or {}).get("name") == name
+    ]
+
+
+async def test_skills_are_disclosed_pinned_loaded_and_read_by_any_target(
+    h: Harness, spans: InMemorySpanExporter
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def analyst(question: str, agent: Runtime) -> str:
+        seen["context"] = agent.context
+        seen["loaded"] = await agent.tools.call(LOAD_SKILL, name="sql")
+        seen["file"] = await agent.tools.call(READ_SKILL_FILE, name="sql", path="rules.md")
+        return "reviewed"
+
+    agent = h.wrap(analyst, id="analyst", skills=["sql", "refunds@2.0.0"])
+    events = [e async for e in agent.stream("review this query", user="ada")]
+    assert seen["context"] == "\n".join(
+        [SECTION, "- sql: Reviews SQL.", "- refunds: Handles refunds."]
+    )
+    assert seen["loaded"] == (
+        "# sql (version 1.1.0)\n\nRead rules.md first.\n\nFiles (read_skill_file):\n- rules.md"
+    )
+    assert seen["file"] == "No SELECT *."
+    assert events_of(events, "skills") == [
+        {"name": "skills", "versions": {"sql": "1.1.0", "refunds": "2.0.0"}}
+    ]
+    [root] = [s for s in spans.get_finished_spans() if s.name.startswith("invoke_agent")]
+    assert (root.attributes or {})["trellis.skills"] == "sql@1.1.0,refunds@2.0.0"
+    called = [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START]
+    assert called == [LOAD_SKILL, READ_SKILL_FILE]  # through the bridge, journaled
+
+
+async def test_a_resumed_run_keeps_the_versions_it_started_with(
+    h: Harness, fake: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(fresh, "_now", lambda: clock[0])
+    loaded: list[str] = []
+
+    async def analyst(question: str, agent: Runtime) -> str:
+        loaded.append(await agent.tools.call(LOAD_SKILL, name="sql"))
+        await agent.ask("Go on?")
+        return await agent.tools.call(READ_SKILL_FILE, name="sql", path="rules.md")
+
+    agent = h.wrap(analyst, id="analyst", skills=["sql"])
+    paused = await agent.run("review", user="ada")
+    assert paused.interrupt is not None
+    fake.skills["sql"].served = "1.0.0"  # rolled back while the run waited
+    clock[0] += bifrost.REPOSITORY_TTL_SECONDS + 1
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="ada")
+    assert loaded[0] == loaded[-1]  # the body is the pinned version's, read from the journal
+    # the gateway serves files of 1.0.0 now: 1.1.0's file is refused, saying why
+    assert "uses version 1.1.0" in str(done.answer) and "serves (1.0.0)" in str(done.answer)
+
+
+async def test_a_skill_the_gateway_cannot_give_is_a_warning_and_the_run_goes_on(
+    h: Harness, fake: FakeGateway
+) -> None:
+    async def analyst(question: str, agent: Runtime) -> str:
+        return f"{agent.context}|{await agent.tools.call(LOAD_SKILL, name='ghost')}"
+
+    agent = h.wrap(analyst, id="analyst", skills=["ghost", "sql"])
+    events = [e async for e in agent.stream("review", user="ada")]
+    [warning] = [w for w in events_of(events, "warning") if w["code"] == "skills_unavailable"]
+    assert "no skill named 'ghost'" in warning["message"]
+    answer = next(e for e in events if e.type is RunEventType.RUN_FINISHED).data["result"]
+    assert answer.startswith(SECTION) and "- sql: Reviews SQL." in answer
+    assert "no skill 'ghost' in this run (its skills: sql)" in answer
+    fake.down = ("/api/skills",)  # unreachable: a run that never read a skill has none
+    async with Harness(config=Settings(bifrost_url=URL)) as other:
+        await other.gateway.aclose()  # type: ignore[union-attr]
+        other.gateway = fake.gateway()
+        found = [
+            e async for e in other.wrap(analyst, id="a2", skills=["sql"]).stream("r", user="u")
+        ]
+    assert [w["code"] for w in events_of(found, "warning")] == ["skills_unavailable"]
+    assert "None|" in next(e for e in found if e.type is RunEventType.RUN_FINISHED).data["result"]
+
+
+async def test_a_skill_file_must_be_one_the_skill_lists(h: Harness) -> None:
+    async def analyst(question: str, agent: Runtime) -> str:
+        return str(await agent.tools.call(READ_SKILL_FILE, name="sql", path="x.md"))
+
+    result = await h.wrap(analyst, id="analyst", skills=["sql"]).run("r", user="u")
+    assert result.status is RunStatus.SUCCESS
+    assert "has no file 'x.md'" in str(result.answer)
+
+
+async def test_a_file_of_a_skill_deleted_since_the_run_began_is_refused(
+    h: Harness, fake: FakeGateway
+) -> None:
+    async def analyst(question: str, agent: Runtime) -> str:
+        del fake.skills["sql"]
+        return str(await agent.tools.call(READ_SKILL_FILE, name="sql", path="rules.md"))
+
+    result = await h.wrap(analyst, id="analyst", skills=["sql"]).run("r", user="u")
+    assert "serves files only of the version it serves (none)" in str(result.answer)
+
+
+async def test_a_react_model_reads_the_skills_section_and_is_offered_the_tools(
+    h: Harness, fake: FakeGateway
+) -> None:
+    fake.chat.turns += [(LOAD_SKILL, {"name": "refunds"}), "Refund within 30 days."]
+    agent = h.wrap(ReAct(system="Support.", model="local/small"), id="support", skills=["refunds"])
+    result = await agent.run("can I get a refund?", user="ada")
+    assert result.answer == "Refund within 30 days."
+    first = fake.chat.requests[0]
+    assert first["messages"][0]["content"].endswith("- refunds: Handles refunds.")
+    offered = [t["function"]["name"] for t in first["tools"]]
+    assert offered == [LOAD_SKILL, READ_SKILL_FILE]
+    assert offered and first["tools"][0]["function"]["parameters"]["properties"]["name"][
+        "enum"
+    ] == ["refunds"]
+
+
+def test_skills_are_named_once_each() -> None:
+    with pytest.raises(ConfigurationError, match="each skill once"):
+        skills("sql", "sql@1.0.0")
+    with pytest.raises(ConfigurationError, match="each skill once"):
+        skills()
+
+
+async def test_skills_need_the_gateway() -> None:
+    async def analyst(question: str, agent: Runtime) -> str:
+        return "x"
+
+    async with Harness(config=Settings()) as bare:
+        result = await bare.wrap(analyst, id="a", skills=["sql"]).run("r", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "BIFROST_URL" in result.error.message
+
+
+async def test_skills_are_read_inside_a_run_only() -> None:
+    [load, _] = await skills("sql").resolve()
+    with pytest.raises(Exception, match="inside a Harness run"):
+        await load.run({"name": "sql"})
+
+
+# --------------------------------------------------------------------------- Virtual MCPs
+async def test_an_agent_has_the_tools_of_its_virtual_mcps(h: Harness, fake: FakeGateway) -> None:
+    fake.bundles = {"": ["erp-pay", "crm-get"], "finance": ["erp-pay"]}
+
+    async def payer(question: str, agent: Runtime) -> Any:
+        return [sorted(agent.toolbox), await agent.tools.call("erp-pay", amount=3)]
+
+    names, paid = (await h.wrap(payer, id="payer", mcp=["finance"]).run("pay", user="u")).answer
+    assert names == ["erp-pay"]
+    assert paid == {"name": "erp-pay", "arguments": {"amount": 3}}
+    assert fake.asked("/mcp/finance") == 2  # listed, then run, through the bundle
+    everything = await h.wrap(payer, id="all").run("pay", user="u")
+    assert everything.answer[0] == ["crm-get", "erp-pay"]  # no mcp=: the key's whole reach
+
+
+def test_a_graph_takes_skills_and_virtual_mcps_through_h_tools(h: Harness) -> None:
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    graph = create_agent(GenericFakeChatModel(messages=iter([])), tools=[])
+    for given in ({"skills": ["sql"]}, {"mcp": ["finance"]}):
+        with pytest.raises(ConfigurationError, match="skills as skills"):
+            h.wrap(graph, id="g", **given)  # type: ignore[arg-type]
+
+
+async def test_a_graphs_toolbox_is_its_h_tools_calls(h: Harness, fake: FakeGateway) -> None:
+    fake.bundles = {"": ["erp-pay"], "finance": ["erp-pay"], "audit": ["log-read"]}
+    finance = await h.tools(skills("sql"), framework="langgraph", mcp=["finance"])
+    audit = await h.tools(framework="langgraph", mcp=["audit", "finance"])
+    assert [t.name for t in finance] == [LOAD_SKILL, READ_SKILL_FILE, "erp-pay"]
+    sources, mcp = h.built_for([*finance, *audit])
+    assert mcp == ["finance", "audit"] and [type(s).__name__ for s in sources] == ["Skills"]
+    whole = await h.tools(framework="langgraph")
+    assert h.built_for([*finance, *whole])[1] is None  # one call reaches everything the key does

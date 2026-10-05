@@ -34,6 +34,11 @@ What keeps a run going when the model slips:
   the gateway's own retries included: past it the run fails with a ``ModelError`` that may be
   retried.
 
+``prompt=`` names a stored prompt of the gateway's Prompt Repository (``"triage"``, or
+``"triage@3"`` for that version): its id is resolved once (``Gateway.prompt``, kept fresh),
+the version is pinned for the run (journaled: a resumed run sends the same) and every model
+call selects it — the gateway prepends its messages — and says so on its ``chat`` span.
+
 What keeps the conversation within the model's window (``context_window``: the target's, else
 the model object's, else :data:`CONTEXT_WINDOW`), estimated as :data:`CHARS_PER_TOKEN`
 characters a token:
@@ -54,6 +59,7 @@ steps, so a resumed run reads exactly what the model read.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -71,6 +77,7 @@ from trellis.harness.adapters.base import (
     ToolFormat,
     context_window,
 )
+from trellis.harness.clients.bifrost import PromptPin, prompt_ref
 from trellis.harness.journal import Pending, content_key
 from trellis.harness.runtime import Runtime
 from trellis.harness.telemetry import model_span, usage
@@ -156,12 +163,20 @@ class ReAct:
     #: the model's context window in tokens, when the model object does not say
     #: (``None``: its ``context_window``, else :data:`CONTEXT_WINDOW`)
     context_window: int | None = field(default=None, kw_only=True)
+    #: a stored prompt of the gateway (``"name"``, ``"name@version"``) every model call selects
+    prompt: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.model_timeout is not None and self.model_timeout <= 0:
             raise ConfigurationError("model_timeout is a number of seconds over 0")
         if self.context_window is not None and self.context_window <= 0:
             raise ConfigurationError("context_window is a number of tokens over 0")
+        if self.prompt is not None:
+            prompt_ref(self.prompt)
+            if not isinstance(self.model, str):
+                raise ConfigurationError(
+                    "prompt= needs a Bifrost model name: the gateway prepends the stored prompt"
+                )
 
 
 @dataclass(slots=True)
@@ -204,7 +219,7 @@ class ReActAdapter:
                     "schema": target.output.model_json_schema(),
                 },
             }
-        loop = _Loop(target, run, _model(target, run), body, list(native_input))
+        loop = _Loop(target, run, await _model(target, run), body, list(native_input))
         messages = loop.messages
         result = ReActResult(messages=messages)
         streaks: dict[str, int] = {}
@@ -336,7 +351,9 @@ class _Loop:
             return dict(recorded)
         target = self.target.model
         name = target if isinstance(target, str) else type(target).__name__
-        with model_span(name, messages) as span:
+        prompt = self.model.prompt if isinstance(self.model, _Named) else None
+        extra = prompt.attributes() if prompt is not None else None
+        with model_span(name, messages, extra=extra) as span:
             try:
                 async with runtime.limited(limit):
                     reply = await self.model.complete(messages, **request)
@@ -577,22 +594,34 @@ def _arguments(schema: dict[str, Any] | None, raw: Any) -> tuple[dict[str, Any] 
     return (None, problem) if problem else (args, "")
 
 
-def _model(target: ReAct, run: Invocation) -> Any:
+async def _model(target: ReAct, run: Invocation) -> Any:
     if not isinstance(target.model, str):
         return target.model
-    gateway = run.runtime.agent.harness.gateway
+    runtime = run.runtime
+    gateway = runtime.agent.harness.gateway
     if gateway is None:
         raise ConfigurationError("ReAct with a model name needs BIFROST_URL")
-    return _Named(gateway, target.model)
+    if target.prompt is None:
+        return _Named(gateway, target.model)
+    # the version a resumed run pinned, else the one the gateway resolves now (journaled)
+    key = content_key("react-prompt", target.prompt)
+    replayed, recorded = runtime.replay.call(key)
+    if replayed:
+        return _Named(gateway, target.model, PromptPin(**recorded))
+    prompt = await gateway.prompt(target.prompt)
+    runtime.replay.record_call(key, dataclasses.asdict(prompt))
+    return _Named(gateway, target.model, prompt)
 
 
 @dataclass(frozen=True, slots=True)
 class _Named:
     gateway: Any
     model: str
+    #: the stored prompt every call selects
+    prompt: PromptPin | None = None
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
-        return await self.gateway.complete(messages, model=self.model, **body)
+        return await self.gateway.complete(messages, model=self.model, prompt=self.prompt, **body)
 
 
 def _message(reply: dict[str, Any]) -> dict[str, Any]:

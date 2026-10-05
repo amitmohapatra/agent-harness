@@ -17,8 +17,9 @@ the [README](../README.md); how it works is in [ARCHITECTURE.md](../ARCHITECTURE
 | Code that decides itself what happens (a workflow, a router, glue between agents) | an async function `(input, agent)` | No model of its own: call tools with `await agent.tools.call(...)`, ask with `await agent.ask(...)`, read `agent.context` and `agent.memory`. |
 
 Teams bring their own model objects pointed at Bifrost's OpenAI-compatible endpoint
-(`ChatOpenAI(base_url=BIFROST_URL)`, `OpenAIChatCompletionsModel(AsyncOpenAI(base_url=...))`);
-the harness wraps agents, not models. Each target has a page with the lines to add to an
+(`ChatOpenAI(base_url=BIFROST_URL, default_headers=await h.model_headers())`,
+`OpenAIChatCompletionsModel(AsyncOpenAI(base_url=..., default_headers=...))`); the harness wraps
+agents, not models ([gateway.md](gateway.md)). Each target has a page with the lines to add to an
 existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.md),
 [Deep Agents](frameworks/deepagents.md), [OpenAI Agents SDK](frameworks/openai-agents.md),
 [Claude Agent SDK](frameworks/claude-agent-sdk.md), [ReAct](frameworks/react.md),

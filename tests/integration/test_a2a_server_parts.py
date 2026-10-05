@@ -53,14 +53,7 @@ from trellis.contracts import (
 from trellis.harness.a2a import executor as executor_module
 from trellis.harness.a2a import push
 from trellis.harness.a2a.executor import RunExecutor
-from trellis.harness.a2a.identity import (
-    ANONYMOUS,
-    IDENTITY_HEADER,
-    HeaderIdentity,
-    IdentityRefused,
-    header,
-    identity_headers,
-)
+from trellis.harness.a2a.identity import ANONYMOUS, HeaderIdentity, IdentityRefused, header
 from trellis.harness.a2a.push import (
     PushNotifier,
     TargetRefused,
@@ -77,6 +70,7 @@ from trellis.harness.a2a.translate import (
     values,
 )
 from trellis.harness.agent import Agent
+from trellis.harness.identity import IDENTITY_HEADER, identity_headers
 from trellis.harness.runs import LocalRuns
 from trellis.runs.webhooks import verify_signature
 

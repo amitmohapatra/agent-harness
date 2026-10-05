@@ -17,6 +17,8 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Final, Literal
 
+from bifrost_sdk import NO_GATEWAY_TOOLS
+
 from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
@@ -113,10 +115,10 @@ class Harness:
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: every agent wrapped here, by id (what ``python -m trellis.harness.worker`` serves)
         self.agents: dict[str, Agent] = {}
-        #: the sources of each :meth:`tools` call, by the number its LangChain tools carry in
-        #: their metadata: a LangGraph agent's toolbox is the sources of the calls its graph's
-        #: tools came from
-        self._built: dict[int, list[Source]] = {}
+        #: the sources and Virtual MCPs of each :meth:`tools` call, by the number its LangChain
+        #: tools carry in their metadata: a LangGraph agent's toolbox is those of the calls its
+        #: graph's tools came from
+        self._built: dict[int, tuple[list[Source], list[str] | None]] = {}
         self._key = Fresh(
             self._whoami,
             what="who TRELLIS_API_KEY is",
@@ -139,30 +141,42 @@ class Harness:
         id: str,
         tools: Sequence[Source | Callable[..., Any]] = (),
         version: str | None = None,
+        mcp: Sequence[str] | None = None,
+        skills: Sequence[str] = (),
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
         ``tools`` are the agent's own, run in this process (functions, ``a2a``, ``openapi``);
-        its MCP tools are the ones the Bifrost virtual key allows. ``version`` is the version
-        of the agent's code (else ``TRELLIS_AGENT_VERSION``), recorded with each run it starts:
-        a run resumed on another version goes on, with a warning naming both."""
-        agent = Agent(self, target, id=id, tools=tools, version=version)
+        its MCP tools are the ones the Bifrost virtual key allows — or, with ``mcp``, the tools
+        of those Virtual MCPs of the gateway (by slug). ``skills`` are skills of the gateway's
+        Skills Repository (``"name"``, ``"name@version"``: ``trellis.harness.skills``).
+        ``version`` is the version of the agent's code (else ``TRELLIS_AGENT_VERSION``),
+        recorded with each run it starts: a run resumed on another version goes on, with a
+        warning naming both."""
+        agent = Agent(self, target, id=id, tools=tools, version=version, mcp=mcp, skills=skills)
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
         self.agents[agent.id] = agent
         return agent
 
-    async def tools(self, *sources: Source | Callable[..., Any], framework: Framework) -> Any:
+    async def tools(
+        self,
+        *sources: Source | Callable[..., Any],
+        framework: Framework,
+        mcp: Sequence[str] | None = None,
+    ) -> Any:
         """The toolbox as ``framework``'s own tools, for building an agent with them before
         wrapping it: LangChain tools (LangGraph, Deep Agents), ``FunctionTool``\\ s (OpenAI
-        Agents), or one in-process MCP server (Claude). It holds ``sources``, the MCP tools
-        the virtual key allows and — memory on — the memory service's agent tools. Every call
-        is still the harness's: governance, approval, record."""
+        Agents), or one in-process MCP server (Claude). It holds ``sources`` (``skills(...)``
+        among them), the MCP tools the virtual key allows (or the Virtual MCPs ``mcp`` names
+        hold) and — memory on — the memory service's agent tools. Every call is still the
+        harness's: governance, approval, record."""
         mine = [as_source(s) for s in sources]
+        bundles = None if mcp is None else list(mcp)
         tenant = await self.tenant()
         number = len(self._built)
-        self._built[number] = mine
-        tools = await self.resolve(mine, tenant=tenant)
+        self._built[number] = (mine, bundles)
+        tools = await self.resolve(mine, tenant=tenant, mcp=bundles)
         if self.memory is not None:
             scope = self.memory.scoped(tenant)
             tools.extend(await self.memory_tools(scope))
@@ -310,6 +324,20 @@ class Harness:
             user=user,
         )
 
+    async def model_headers(self, *, prompt: str | None = None) -> dict[str, str]:
+        """The headers to give a framework's own model client pointed at the gateway
+        (``ChatOpenAI(default_headers=...)``, ``AsyncOpenAI(default_headers=...)``): the
+        gateway's deny-all MCP scope, so it neither adds the virtual key's MCP tools to the
+        framework's requests nor runs any itself (the harness's tools are the framework's), and
+        — ``prompt``, a stored prompt's name or ``name@version`` — that prompt's selection: the
+        gateway prepends it to every request (the version resolved now, not per run)."""
+        headers = dict(NO_GATEWAY_TOOLS)
+        if prompt is not None:
+            if self.gateway is None:
+                raise ConfigurationError("a stored prompt is the gateway's: set BIFROST_URL")
+            headers.update((await self.gateway.prompt(prompt)).options().headers())
+        return headers
+
     async def aclose(self) -> None:
         """Finish the queued writes, export the queued spans and close the clients."""
         await self.writes.aclose()
@@ -365,13 +393,23 @@ class Harness:
             raise ConfigurationError(f"TRELLIS_API_KEY speaks for {own!r}, not {requested!r}")
         return own
 
-    def built_for(self, tools: Sequence[Any]) -> list[Source]:
-        """The sources of the :meth:`tools` calls that ``tools`` (a graph's bound tools) came
-        from — each graph has its own toolbox, so two graphs may each have a ``search``."""
-        numbers = {
-            n for t in tools if (n := (getattr(t, "metadata", None) or {}).get(TOOLBOX)) is not None
-        }
-        return [s for n in sorted(numbers) for s in self._built[n]]
+    def built_for(self, tools: Sequence[Any]) -> tuple[list[Source], list[str] | None]:
+        """The sources and Virtual MCPs of the :meth:`tools` calls that ``tools`` (a graph's
+        bound tools) came from — each graph has its own toolbox, so two graphs may each have a
+        ``search`` (the key's whole reach when any of the calls named no Virtual MCP)."""
+        numbers = sorted(
+            {
+                n
+                for t in tools
+                if (n := (getattr(t, "metadata", None) or {}).get(TOOLBOX)) is not None
+            }
+        )
+        built = [self._built[n] for n in numbers]
+        sources = [s for found, _ in built for s in found]
+        named = [bundles for _, bundles in built]
+        if not named or None in named:
+            return sources, None
+        return sources, list(dict.fromkeys(slug for bundles in named for slug in bundles or ()))
 
     @property
     def known_tenant(self) -> str | None:
@@ -407,14 +445,19 @@ class Harness:
 
         return Governance(MemoryCatalog(scope.ctx), submit=submit, tenant=tenant)
 
-    def toolbox(self, sources: Sequence[Source], *, tenant: str) -> Toolbox:
-        """A toolbox of ``sources`` and the MCP tools in ``tenant``, published to its catalog
-        and kept fresh (``tools/toolbox.py``)."""
-        return Toolbox(sources, gateway=self.gateway, governance=self.governance(tenant))
+    def toolbox(
+        self, sources: Sequence[Source], *, tenant: str, mcp: Sequence[str] | None = None
+    ) -> Toolbox:
+        """A toolbox of ``sources`` and the MCP tools in ``tenant`` (the key's, or those of
+        the Virtual MCPs ``mcp`` names), published to its catalog and kept fresh
+        (``tools/toolbox.py``)."""
+        return Toolbox(sources, gateway=self.gateway, governance=self.governance(tenant), mcp=mcp)
 
-    async def resolve(self, sources: Sequence[Source], *, tenant: str) -> list[Tool]:
+    async def resolve(
+        self, sources: Sequence[Source], *, tenant: str, mcp: Sequence[str] | None = None
+    ) -> list[Tool]:
         """The toolbox once: ``sources`` and the MCP tools."""
-        return await self.toolbox(sources, tenant=tenant).tools()
+        return await self.toolbox(sources, tenant=tenant, mcp=mcp).tools()
 
     def _replay(self, record: dict[str, Any]) -> Callable[[], Awaitable[object]] | None:
         """A memory write an earlier process spooled, as a write again (memory on)."""

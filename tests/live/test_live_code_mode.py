@@ -28,9 +28,9 @@ async def test_read_only_code_mode_servers_run_as_code_mode(
     script = f'r = {wikis[1]}.read_wiki_structure(repoName="facebook/react")\nprint(str(r)[:120])'
 
     async def researcher(input: str, agent: Runtime) -> Any:
-        files = await agent.tools.call("listToolFiles")
+        files = await agent.tools.call("list_tool_files")
         assert f"{wikis[1]}.pyi" in str(files)
-        return await agent.tools.call("executeToolCode", code=script)
+        return await agent.tools.call("execute_tool_code", code=script)
 
     async with live_harness(wikis_key) as h:
         agent = h.wrap(researcher, id=f"live-research-{suffix}")
