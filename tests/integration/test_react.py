@@ -58,7 +58,8 @@ async def test_an_unknown_tool_is_told_to_the_model(harness: Harness) -> None:
 
 
 async def test_a_loop_that_never_answers_is_stopped(harness: Harness) -> None:
-    model = ScriptedChat([("stock", {"sku": sku}) for sku in "abc"])
+    # asked once more without tools at the step limit, the model still says nothing
+    model = ScriptedChat([*[("stock", {"sku": sku}) for sku in "abc"], ("stock", {"sku": "d"})])
     agent = harness.wrap(ReAct(system="s", model=model, max_steps=3), id="loop", tools=[stock])
     result = await agent.run("x", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
@@ -179,8 +180,13 @@ async def test_a_huge_result_is_cut_and_kept_whole_as_a_run_artifact(harness: Ha
     result = await harness.wrap(target, id="dumper", tools=[dump]).run("x", user="u")
     assert result.status is RunStatus.SUCCESS
     told = model.requests[1]["messages"][-1]["content"]
-    assert told.startswith("x" * 100 + "\n…[cut: dump returned 500 characters, 100 are shown")
-    artifact_id = told.rsplit("run artifact ", 1)[1].rstrip("]")
+    assert told.startswith(
+        "x" * 50 + "\n…[cut: dump returned 500 characters, the first 50 and the last 50 are "
+        'shown; read_result(id="call_1", offset=50) reads the rest; the full result is run '
+        "artifact "
+    )
+    assert told.endswith("]…\n" + "x" * 50)
+    artifact_id = told.rsplit("run artifact ", 1)[1].split("]")[0]
     kept = await harness.runs.artifacts.download(artifact_id, tenant="default")
     assert kept is not None and json.loads(kept) == {"tool": "dump", "output": "x" * 500}
 
@@ -202,7 +208,10 @@ async def test_a_huge_result_is_still_cut_when_it_cannot_be_kept(
     target = ReAct(system="s", model=model, max_result_chars=10)
     await harness.wrap(target, id="dumper", tools=[dump]).run("x", user="u")
     told = model.requests[1]["messages"][-1]["content"]
-    assert told == "y" * 10 + "\n…[cut: dump returned 50 characters, 10 are shown]"
+    assert told == (
+        "y" * 5 + "\n…[cut: dump returned 50 characters, the first 5 and the last 5 are shown; "
+        'read_result(id="call_1", offset=5) reads the rest]…\n' + "y" * 5
+    )
     assert "no artifacts here" in caplog.text
 
 

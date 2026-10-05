@@ -32,6 +32,8 @@ FAKE_CLAUDE_CLI = str(
 )
 
 Turn = str | tuple[str, dict[str, Any]]
+#: a ``ReAct`` turn may also make several calls in one message
+Turns = Turn | list[tuple[str, dict[str, Any]]]
 
 
 def online() -> bool:
@@ -132,7 +134,7 @@ def openai_agents_model(turns: Sequence[Turn]) -> Any:
 class ScriptedChat:
     """A chat-completions endpoint answering from a script (the ``ReAct`` model shape)."""
 
-    def __init__(self, turns: Sequence[Turn]) -> None:
+    def __init__(self, turns: Sequence[Turns]) -> None:
         self.turns = list(turns)
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
@@ -140,21 +142,23 @@ class ScriptedChat:
         if isinstance(turn, str):
             message: dict[str, Any] = {"role": "assistant", "content": turn}
         else:
+            calls = turn if isinstance(turn, list) else [turn]
             message = {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [
                     {
-                        "id": f"call_{len(self.turns)}",
+                        "id": f"call_{len(self.turns)}_{n}",
                         "type": "function",
-                        "function": {"name": turn[0], "arguments": json.dumps(turn[1])},
+                        "function": {"name": name, "arguments": json.dumps(args)},
                     }
+                    for n, (name, args) in enumerate(calls)
                 ],
             }
         return {"choices": [{"message": message}]}
 
 
-def react_model(turns: Sequence[Turn]) -> Any:
+def react_model(turns: Sequence[Turns]) -> Any:
     """A model name for Bifrost when online, else the script."""
     return MODEL if online() else ScriptedChat(turns)
 

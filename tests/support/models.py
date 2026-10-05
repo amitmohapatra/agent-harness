@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-Turn = str | tuple[str, dict[str, Any]] | dict[str, Any]
+Call = tuple[str, dict[str, Any]]
+Turn = str | Call | list[Call] | dict[str, Any]
 
 
 class ScriptedChat:
-    """Each call answers with the next turn: text, ``(tool, args)``, or a raw message."""
+    """Each call answers with the next turn: text, ``(tool, args)``, several calls in one
+    message (``[(tool, args), ...]``), or a raw message."""
 
     def __init__(self, turns: list[Turn]) -> None:
         self.turns = list(turns)
@@ -20,17 +22,18 @@ class ScriptedChat:
         turn = self.turns.pop(0)
         if isinstance(turn, str):
             message: dict[str, Any] = {"role": "assistant", "content": turn}
-        elif isinstance(turn, tuple):
-            name, args = turn
+        elif isinstance(turn, tuple | list):
+            calls = turn if isinstance(turn, list) else [turn]
             message = {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [
                     {
-                        "id": f"call_{len(self.requests)}",
+                        "id": f"call_{len(self.requests)}" + (f"_{n}" if n else ""),
                         "type": "function",
                         "function": {"name": name, "arguments": json.dumps(args)},
                     }
+                    for n, (name, args) in enumerate(calls)
                 ],
             }
         else:

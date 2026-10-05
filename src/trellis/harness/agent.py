@@ -48,9 +48,10 @@ from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
-from trellis.harness.runtime import Runtime, run_of
-from trellis.harness.telemetry import output, retrieval_span
-from trellis.harness.tools.base import Tool, arguments_problem
+from trellis.harness.runtime import Runtime, reason_of, run_of
+from trellis.harness.subagents import SubAgent, asked_by, cancel_children
+from trellis.harness.telemetry import output, retrieval_span, trace_hex
+from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -192,20 +193,23 @@ class Agent:
         """Cancel a run, whatever it is doing, keeping ``reason`` with it: a queued or paused
         run is ``CANCELLED`` at once; one running in this process stops now and ends
         ``CANCELLED``; one a worker elsewhere runs is stopped by that worker at its next
-        heartbeat (agent-runs). A run that already ended raises ``ConflictError``. The run's
-        record is returned. ``tenant`` is the run's, named by a platform key only."""
+        heartbeat (agent-runs). Its sub-agents' runs that have not ended are cancelled with
+        it. A run that already ended raises ``ConflictError``. The run's record is returned.
+        ``tenant`` is the run's, named by a platform key only."""
         tenant = await self.harness.tenant(tenant)
-        record = await self.harness.runs.cancel(run_id, reason=reason, tenant=tenant)
+        runs = self.harness.runs
+        record = await runs.cancel(run_id, reason=reason, tenant=tenant)
         runtime = self.running.get(run_id)
-        if runtime is None:
-            return record
-        runtime.cancelled = reason or "cancelled"
-        assert runtime.running_in is not None
-        runtime.running_in.cancel()
-        await asyncio.wait({runtime.running_in})
-        found = await self.harness.runs.get(run_id, tenant=tenant)
-        assert found is not None
-        return found
+        if runtime is not None:
+            runtime.cancelled = reason or "cancelled"
+            assert runtime.running_in is not None
+            runtime.running_in.cancel()
+            await asyncio.wait({runtime.running_in})
+            found = await runs.get(run_id, tenant=tenant)
+            assert found is not None
+            record = found
+        await cancel_children(runs, run_id, reason=reason, tenant=tenant)
+        return record
 
     async def resume(
         self,
@@ -219,7 +223,8 @@ class Agent:
         """Answer the interrupt a run is paused on. A run started in process continues here;
         a run that came from the queue goes back to it (``QUEUED``) and a worker continues it.
         ``answer`` is the answer to a question, or the edited arguments of an ``EDIT``;
-        ``tenant`` is the run's, named by a platform key only."""
+        ``tenant`` is the run's, named by a platform key only. A question a sub-agent asked is
+        answered here, on its parent's run: the answer goes on to the sub-agent's run."""
         record, resolution = await self._resolution(
             interrupt_id, decision, answer, reviewer, tenant=await self.harness.tenant(tenant)
         )
@@ -250,6 +255,20 @@ class Agent:
         )
         return await self.harness.runs.schedules.create(spec)
 
+    def as_tool(
+        self,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        side_effects: SideEffects | None = None,
+    ) -> SubAgent:
+        """This agent as a tool other agents call, any framework (``tools=[agent.as_tool()]``,
+        ``h.tools(agent.as_tool(), framework=...)``): each call is a child run of this agent
+        (``trellis.harness.subagents``). ``name`` (else the agent's id), ``description`` (else
+        the function's docstring, or a generic one) and ``side_effects`` (else ``read`` when
+        every tool it declares only reads, ``write`` otherwise) are the tool's."""
+        return SubAgent(self, name=name, description=description, side_effects=side_effects)
+
     # ------------------------------------------------------------------ surfaces
     def serve_chat(self, app: Any, *, path: str = "/agui", identity: Any = None) -> None:
         """Mount the AG-UI routes for this agent on a FastAPI ``app``."""
@@ -279,6 +298,11 @@ class Agent:
             raise ConfigurationError(f"no run {run_id} of agent {self.id}")
         if record.status is not RunStatus.PAUSED or record.awaiting is None:
             raise ConfigurationError(f"run {run_id} is {record.status.value}, not paused")
+        if record.parent_run_id is not None:
+            raise ConfigurationError(
+                f"run {run_id} is a sub-agent's run: answer the question its parent run "
+                f"{record.parent_run_id} waits on"
+            )
         if record.awaiting.interrupt_id != interrupt_id:
             raise ConfigurationError(
                 f"run {run_id} waits on {record.awaiting.interrupt_id}, not {interrupt_id}"
@@ -335,10 +359,44 @@ class Agent:
         resolution: InterruptResolution,
         listener: Callable[[RunEvent], None] | None = None,
     ) -> Result:
+        journal, resumed = await self._resumed(record, resolution)
+        if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
+            await cancel_children(
+                self.harness.runs,
+                record.run_id,
+                reason=reason_of(resolution),
+                tenant=record.tenant_id,
+            )
+        if resumed.status is not RunStatus.RUNNING:
+            # cancelled, or back on the queue for a worker (a run that came from the queue)
+            return Result(run_id=record.run_id, status=resumed.status)
+        return await pipeline.attempt(
+            self,
+            self._identity_of(record),
+            record.input,
+            number=resumed.attempt,
+            journal=journal,
+            resolution=resolution,
+            listener=listener,
+            streaming=listener is not None,
+            budget=_budget(record),
+            started_on=record.agent_version,
+        )
+
+    async def _resumed(
+        self, record: RunRecord, resolution: InterruptResolution
+    ) -> tuple[Journal, RunRecord]:
+        """The paused run answered in the run store, with the journal its next attempt reads;
+        a decision about a tool call becomes feedback (a sub-agent's question is fed back
+        where it was asked: on the sub-agent's run)."""
         runs = self.harness.runs
         assert record.awaiting is not None
         identity = self._identity_of(record)
-        feedback = resolution.to_feedback(record.awaiting, identity.context())
+        feedback = (
+            None
+            if asked_by(record.awaiting) is not None
+            else resolution.to_feedback(record.awaiting, identity.context())
+        )
         # read before the resume: a journal that cannot be read leaves the run waiting
         journal = await Journal.read(record.checkpoint, runs.artifacts, tenant=record.tenant_id)
         # The run store first: a decision is feedback only once it took effect. A resume
@@ -352,21 +410,7 @@ class Agent:
                 lambda: run_memory.feedback(feedback),
                 record=run_memory.record("feedback", record=feedback.model_dump(mode="json")),
             )
-        if resumed.status is not RunStatus.RUNNING:
-            # cancelled, or back on the queue for a worker (a run that came from the queue)
-            return Result(run_id=record.run_id, status=resumed.status)
-        return await pipeline.attempt(
-            self,
-            identity,
-            record.input,
-            number=resumed.attempt,
-            journal=journal,
-            resolution=resolution,
-            listener=listener,
-            streaming=listener is not None,
-            budget=_budget(record),
-            started_on=record.agent_version,
-        )
+        return journal, resumed
 
     async def _claimed(
         self,
@@ -536,12 +580,13 @@ class Agent:
             or not sampled(runtime.run_id, self.harness.settings.grounding_sample)
         ):
             return
-        bundle_id, run_id = pushed.bundle_id, runtime.run_id
+        bundle_id, run_id, traced = pushed.bundle_id, runtime.run_id, runtime.trace_run
 
         async def work() -> None:
             score = await grounding_score(memory.ctx, answer, bundle_id)
             if score is not None:
-                await self.harness.score(run_id, "grounding", score, key=f"{run_id}:grounding")
+                key = f"{run_id}:grounding"
+                await self.harness.score(run_id, "grounding", score, key=key, trace=traced)
 
         await self.harness.writes.submit("memory.verify", work, events=runtime.events)
 
@@ -560,6 +605,7 @@ class Agent:
             input=runtime.task,
             output=answer,
             run_id=runtime.run_id,
+            trace_id=trace_hex(runtime.trace_run),
             bundle_id=pushed.bundle_id if pushed is not None else None,
             context=runtime.context,
             memory=memory.ctx if memory is not None else None,
@@ -637,14 +683,20 @@ class Agent:
         record_input: bool = False,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
+        parent: str | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
-        a queued run's input already is. The run's time limit, deadline and the agent's
-        version go with it when there are any."""
+        a queued run's input already is. The run's time limit, deadline, the agent's version
+        and the run it is a sub-agent's run of (``parent``) go with it when there are any."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
-        given = {"timeout_seconds": timeout, "deadline": deadline, "agent_version": self.version}
+        given = {
+            "timeout_seconds": timeout,
+            "deadline": deadline,
+            "agent_version": self.version,
+            "parent_run_id": parent,
+        }
         return RunStart(
             run_id=run_id,
             tenant_id=await self.harness.tenant(tenant),
@@ -725,13 +777,7 @@ class RunHandle:
             while True:
                 record = await self.status()
                 if record.status is RunStatus.PAUSED or record.final:
-                    return Result(
-                        run_id=record.run_id,
-                        status=record.status,
-                        answer=record.output,
-                        interrupt=record.awaiting,
-                        error=record.error,
-                    )
+                    return Result.of(record)
                 await asyncio.sleep(POLL_SECONDS)
 
 

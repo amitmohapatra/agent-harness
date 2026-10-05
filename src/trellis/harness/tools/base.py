@@ -58,6 +58,9 @@ class Tool:
     #: The most one call may take, in seconds, retries included (``None``: no limit of its
     #: own; the run's time still bounds it).
     timeout: float | None = None
+    #: A call cut by a crash continues where it was when it runs again (a sub-agent: its run
+    #: keeps a journal of its own), so it is run again rather than reported of unknown effect.
+    resumable: bool = False
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:

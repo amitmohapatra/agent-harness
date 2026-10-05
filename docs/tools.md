@@ -13,6 +13,7 @@ catalog.
 | **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
 | `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph; `timeout=` seconds per call (none by default; a sync function runs in a worker thread) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, timeout=None)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` per exchange (120 s by default) | `"write"` |
+| `agent.as_tool(*, name=None, description=None, side_effects=None)` | one: another agent wrapped by this harness, `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"`; `side_effects=` overrides it |
 | `openapi(spec, *, only=None, base_url=None, headers=None, timeout=30)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
@@ -33,7 +34,10 @@ journal replay, governance (run, announce, or pause for approval:
 `TOOL_CALL_START/ARGS/END/RESULT` events (arguments and results redacted —
 [observability.md](observability.md#redaction) — and results previewed up to 2000 characters), then the
 record. A tool that raises becomes an error result the model reads (`"<tool> failed: ..."`); a
-pause is never swallowed. A harness tool called outside a run is refused.
+pause is never swallowed. A harness tool called outside a run is refused. Calls may come at
+once (`ReAct`'s reads, a framework running tools concurrently): identical ones take their
+turn, each with its own journal entry and idempotency key, and the progress saves go one at a
+time ([reliability.md](reliability.md#calls-made-at-once)).
 
 Execution is bounded and counted ([reliability.md](reliability.md)): a call takes at most its
 tool's `timeout` and what is left of the run's time; one that only reads (or is idempotent) is
@@ -59,7 +63,7 @@ step, argument values found in memory, what is missing) and the `tools` that fit
 
 | Framework | Narrowing |
 |---|---|
-| `ReAct` | per model call (each request carries the tools offered at that moment) |
+| `ReAct` | per model call (each request carries the tools offered at that moment, sorted by name; the set only grows within a run) |
 | OpenAI Agents | per turn (`FunctionTool.is_enabled`); the team's own tools are untouched |
 | Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query) |
 | LangGraph / Deep Agents | none: a compiled graph binds its tools when it is built |

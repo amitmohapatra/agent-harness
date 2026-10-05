@@ -16,6 +16,7 @@ less the time it already worked, and its ``deadline``) and then ends ``TIMEOUT``
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -47,7 +48,7 @@ from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
-from trellis.harness.runtime import RunCancelled, Runtime, _current, interrupt_id
+from trellis.harness.runtime import RunCancelled, Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, metrics, output
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, LeaseLostError
@@ -62,10 +63,12 @@ log = logging.getLogger("trellis.run")
 @dataclass(frozen=True, slots=True)
 class Budget:
     """What is left of a run's time as an attempt begins: ``seconds`` (none, or less, past
-    it), and the error the run ends ``TIMEOUT`` with when they run out."""
+    it), the error the run ends ``TIMEOUT`` with when they run out, and the run's
+    ``deadline`` (a sub-agent's run inherits it)."""
 
     seconds: float
     error: AgentError
+    deadline: datetime | None = None
 
     @classmethod
     def of(
@@ -90,7 +93,8 @@ class Budget:
             left = (deadline - datetime.now(UTC)).total_seconds()
             message = f"the run did not end by its deadline, {deadline.isoformat()}"
             found.append(cls(left, _timed_out("run_deadline", message)))
-        return min(found, key=lambda b: b.seconds, default=None)
+        tightest = min(found, key=lambda b: b.seconds, default=None)
+        return None if tightest is None else dataclasses.replace(tightest, deadline=deadline)
 
 
 def _timed_out(code: str, message: str) -> AgentError:
@@ -113,13 +117,15 @@ async def attempt(
     observe: Callable[[PromptContext | None], None] | None = None,
     budget: Budget | None = None,
     started_on: str | None = None,
+    parent: Runtime | None = None,
 ) -> Result:
     """Run one attempt and record how it ended. The run record must already be RUNNING;
     ``worker_id`` names the worker holding its lease (the store fences its writes), and
     ``lease_seconds`` its length (progress checkpoints extend it). ``observe`` is told the memory
     context the run was given (an offline evaluation's evaluators read it). ``budget`` is what
     is left of the run's time; ``started_on`` the agent version that started the run (a
-    resume on another version says so)."""
+    resume on another version says so); ``parent`` the run in whose tool call this one works
+    (a sub-agent's run: its progress is the parent's, its spans in the parent's trace)."""
     journal = journal or Journal()
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
@@ -142,6 +148,8 @@ async def attempt(
         task=query,
         started_at=datetime.now(UTC),
         ends_at=None if budget is None else time.monotonic() + budget.seconds,
+        deadline=None if budget is None else budget.deadline,
+        parent=parent,
         running_in=asyncio.current_task(),
     )
     events.emit(RunEventType.RUN_STARTED, data={"agent_id": identity.agent_id})
@@ -150,7 +158,8 @@ async def attempt(
     pushed: PromptContext | None = None
     error: Exception | None = None
     clock = asyncio.timeout(None if budget is None else budget.seconds)
-    token = _current.set(runtime)
+    # a sub-agent's run works inside its parent's tool call: not in that call, in its own run
+    tokens = (_current.set(runtime), _call.set(None))
     agent.running[identity.run_id] = runtime
     try:
         run_trace = RunTrace(
@@ -162,6 +171,7 @@ async def attempt(
             framework=agent.adapter.name,
             attempt=number,
             version=agent.version,
+            parent=None if parent is None else parent.run_id,
         )
         with agent_span(run_trace, query) as span:
             async with clock:
@@ -199,7 +209,8 @@ async def attempt(
         if runtime.pending is None:
             error = exc
     finally:
-        _current.reset(token)
+        _call.reset(tokens[1])
+        _current.reset(tokens[0])
         agent.running.pop(identity.run_id, None)
     timed_out = budget.error if budget is not None and clock.expired() else None
     return await _concluded(
