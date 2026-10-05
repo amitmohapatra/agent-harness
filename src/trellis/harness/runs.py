@@ -172,7 +172,9 @@ class LocalRuns:
     """The same store in this process, for development and tests: nothing survives a restart,
     only workers in this process claim, and a due schedule fires when a worker claims. A
     ``tenant=`` is checked as agent-runs checks a key's tenant: a run of another tenant is not
-    there; without one, every tenant's runs are."""
+    there; without one, every tenant's runs are. A run's working time (``worked_seconds``)
+    grows each time it stops running, as agent-runs keeps it; its limits are the attempts'
+    to keep (``pipeline.Budget``)."""
 
     def __init__(self) -> None:
         self._runs: dict[str, RunRecord] = {}
@@ -180,6 +182,8 @@ class LocalRuns:
         #: runs that were ever queued: a resume sends them back to the queue
         self._queued: set[str] = set()
         self._leases: dict[str, tuple[str, datetime]] = {}
+        #: when each running run last started running
+        self._running_since: dict[str, datetime] = {}
         self._schedules: dict[str, Schedule] = {}
         #: artifact id -> (tenant, bytes)
         self._artifacts: dict[str, tuple[str, bytes]] = {}
@@ -198,6 +202,8 @@ class LocalRuns:
         self._runs[record.run_id] = record
         if status is RunStatus.QUEUED:
             self._enqueue(record.run_id)
+        else:
+            self._running_since[record.run_id] = record.created_at
         return record
 
     async def claim(
@@ -359,8 +365,14 @@ class LocalRuns:
             raise _conflict(f"run {record.run_id}: {record.status} cannot become {status}")
         if status.final:  # an ending clears what the run waited on and would resume from
             changes.update(awaiting=None, checkpoint=None)
+        moment = datetime.now(UTC)
+        since = self._running_since.pop(record.run_id, None)
+        if since is not None and status is not RunStatus.RUNNING:  # it stops working
+            changes["worked_seconds"] = record.worked_seconds + (moment - since).total_seconds()
+        elif status is RunStatus.RUNNING:
+            self._running_since[record.run_id] = since or moment
         moved = RunRecord.model_validate(
-            {**record.model_dump(), **changes, "status": status, "updated_at": datetime.now(UTC)}
+            {**record.model_dump(), **changes, "status": status, "updated_at": moment}
         )
         self._runs[moved.run_id] = moved
         return moved

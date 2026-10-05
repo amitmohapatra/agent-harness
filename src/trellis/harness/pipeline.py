@@ -7,6 +7,10 @@ writes (transcript, the run's ``system`` outcome, the sampled grounding check, t
 online judges). The adapter is
 the only part that knows the framework. Each attempt is one ``invoke_agent`` span in the run's
 trace.
+
+The attempt works at most what is left of the run's time (:class:`Budget`: its ``timeout``
+less the time it already worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled
+(``agent.cancel``), it ends ``CANCELLED`` with the reason.
 """
 
 from __future__ import annotations
@@ -14,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +29,7 @@ from pydantic import BaseModel
 from trellis.contracts import (
     AgentError,
     ConfigurationError,
+    ErrorCategory,
     Interrupt,
     InterruptReason,
     InterruptResolution,
@@ -47,8 +54,39 @@ from trellis.runs import RELEASED, ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
+    from trellis.harness.tools.base import Tool
 
 log = logging.getLogger("trellis.run")
+
+
+@dataclass(frozen=True, slots=True)
+class Budget:
+    """What is left of a run's time as an attempt begins: ``seconds`` (none, or less, past
+    it), and the error the run ends ``TIMEOUT`` with when they run out."""
+
+    seconds: float
+    error: AgentError
+
+    @classmethod
+    def of(
+        cls, *, timeout: float | None, worked: float = 0.0, deadline: datetime | None
+    ) -> Budget | None:
+        """The tighter of the working-time limit (``timeout`` less the seconds ``worked``
+        in earlier attempts) and the ``deadline``; ``None`` when the run has neither."""
+        found: list[Budget] = []
+        if timeout is not None:
+            message = f"the run worked past its time limit of {timeout:g}s"
+            found.append(cls(timeout - worked, _timed_out("run_timeout", message)))
+        if deadline is not None:
+            left = (deadline - datetime.now(UTC)).total_seconds()
+            message = f"the run did not end by its deadline, {deadline.isoformat()}"
+            found.append(cls(left, _timed_out("run_deadline", message)))
+        return min(found, key=lambda b: b.seconds, default=None)
+
+
+def _timed_out(code: str, message: str) -> AgentError:
+    # the category alone would say retryable: a run out of time is not run again
+    return AgentError(code=code, category=ErrorCategory.TIMEOUT, message=message, retryable=False)
 
 
 async def attempt(
@@ -64,11 +102,15 @@ async def attempt(
     worker_id: str | None = None,
     lease_seconds: int | None = None,
     observe: Callable[[PromptContext | None], None] | None = None,
+    budget: Budget | None = None,
+    started_on: str | None = None,
 ) -> Result:
     """Run one attempt and record how it ended. The run record must already be RUNNING;
     ``worker_id`` names the worker holding its lease (the store fences its writes), and
     ``lease_seconds`` its length (progress checkpoints extend it). ``observe`` is told the memory
-    context the run was given (an offline evaluation's evaluators read it)."""
+    context the run was given (an offline evaluation's evaluators read it). ``budget`` is what
+    is left of the run's time; ``started_on`` the agent version that started the run (a
+    resume on another version says so)."""
     journal = journal or Journal()
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
@@ -90,13 +132,17 @@ async def attempt(
         used=set(journal.used),
         task=query,
         started_at=datetime.now(UTC),
+        ends_at=None if budget is None else time.monotonic() + budget.seconds,
+        running_in=asyncio.current_task(),
     )
     events.emit(RunEventType.RUN_STARTED, data={"agent_id": identity.agent_id})
+    _versioned(agent, runtime, started_on)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
     error: Exception | None = None
-    cancelled = False
+    clock = asyncio.timeout(None if budget is None else budget.seconds)
     token = _current.set(runtime)
+    agent.running[identity.run_id] = runtime
     try:
         run_trace = RunTrace(
             run_id=identity.run_id,
@@ -106,45 +152,49 @@ async def attempt(
             thread=identity.thread,
             framework=agent.adapter.name,
             attempt=number,
+            version=agent.version,
         )
         with agent_span(run_trace, query) as span:
-            tools = await agent.tools_for(runtime)
-            runtime.toolbox = {t.name: t for t in tools}
-            pushed = await agent.push(runtime)
-            if observe is not None:
-                observe(pushed)
-            if unresumable is not None:
-                raise unresumable
-            native_input = agent.adapter.prepare_input(agent.target, input, runtime.context)
-            if pending is not None and resolution is not None:
-                native_input = agent.adapter.resume_input(
-                    agent.target, native_input, pending, resolution
+            async with clock:
+                tools = await agent.tools_for(runtime)
+                runtime.toolbox = {t.name: t for t in tools}
+                pushed = await agent.push(runtime)
+                if observe is not None:
+                    observe(pushed)
+                if unresumable is not None:
+                    raise unresumable
+                extracted = await _invoked(
+                    agent,
+                    runtime,
+                    tools,
+                    input,
+                    pending=pending,
+                    resolution=resolution,
+                    streaming=streaming,
                 )
-            run_tools = [] if agent.adapter.fixed_tools else tools
-            if agent.adapter.narrows == "run":
-                run_tools = [t for t in run_tools if runtime.offers(t.name)]
-            invocation = Invocation(
-                runtime, run_tools, convert(agent.adapter.tool_format, run_tools)
-            )
-            produced = await _execute(agent, native_input, invocation, streaming=streaming)
-            extracted = agent.adapter.extract(agent.target, produced)
             output(span, jsonable(extracted.answer))
-    except RunCancelled:
-        cancelled = True
+    except RunCancelled as exc:
+        runtime.cancelled = str(exc)
     except asyncio.CancelledError as exc:
-        # the caller went away (a closed stream, a lost lease): the run ends here — unless
-        # its worker is stopping and released it for another worker to run again
-        if RELEASED not in exc.args:
-            await _settle_cancelled(agent, identity, events, worker_id)
-        raise
+        task = asyncio.current_task()
+        assert task is not None
+        # ``agent.cancel`` ends the run CANCELLED with its reason, and its task goes on;
+        # otherwise the caller went away (a closed stream, a lost lease): the run ends here —
+        # unless its worker is stopping and released it for another worker to run again
+        if runtime.cancelled is None or task.uncancel():
+            if RELEASED not in exc.args:
+                await _settle_cancelled(agent, identity, events, worker_id)
+            raise
     except Exception as exc:
         # a framework may wrap or swallow the pause: the runtime is what says it paused
         if runtime.pending is None:
             error = exc
     finally:
         _current.reset(token)
+        agent.running.pop(identity.run_id, None)
+    timed_out = budget.error if budget is not None and clock.expired() else None
     return await _concluded(
-        agent, runtime, journal, extracted, pushed=pushed, error=error, cancelled=cancelled
+        agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
 
 
@@ -156,9 +206,9 @@ async def _concluded(
     *,
     pushed: PromptContext | None,
     error: Exception | None,
-    cancelled: bool,
+    timed_out: AgentError | None,
 ) -> Result:
-    """Record how the attempt ended: cancelled, paused, failed or answered."""
+    """Record how the attempt ended: cancelled, out of time, paused, failed or answered."""
     if runtime.lease_lost:
         # another worker may hold the run now (a framework may have swallowed the error)
         raise LeaseLostError(
@@ -166,16 +216,36 @@ async def _concluded(
             code="LEASE_LOST",
             status=409,
         )
-    if cancelled:
-        await _settle_cancelled(agent, runtime.identity, runtime.events, runtime.worker_id)
+    if runtime.cancelled is not None:
+        await _settle_cancelled(
+            agent, runtime.identity, runtime.events, runtime.worker_id, reason=runtime.cancelled
+        )
         return Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
+    if timed_out is not None:
+        log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)
+        return await _failed(agent, runtime, timed_out, extracted, status=RunStatus.TIMEOUT)
     paused = _pause(runtime, extracted, error)
     if paused is not None:
         return await _paused(agent, runtime, journal, paused, extracted)
     if error is not None:
-        return await _failed(agent, runtime, error, extracted)
+        failure = AgentError.of(error, source=agent.adapter.name)
+        log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
+        return await _failed(agent, runtime, failure, extracted)
     assert extracted is not None
     return await _succeeded(agent, runtime, extracted, pushed)
+
+
+def _versioned(agent: Agent, runtime: Runtime, started_on: str | None) -> None:
+    """A run continued by another version of the agent than the one that started it goes
+    on, with a warning naming both."""
+    if started_on is None or agent.version is None or started_on == agent.version:
+        return
+    message = (
+        f"run {runtime.run_id} was started by {agent.id} {started_on} and continues on "
+        f"{agent.version}"
+    )
+    log.warning("%s", message)
+    runtime.events.warning("agent_version", message)
 
 
 async def _unheld(
@@ -217,6 +287,30 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
         else:
             journal.answered(resolution)
     return Replay(journal)
+
+
+async def _invoked(
+    agent: Agent,
+    runtime: Runtime,
+    tools: list[Tool],
+    input: Any,
+    *,
+    pending: Pending | None,
+    resolution: InterruptResolution | None,
+    streaming: bool,
+) -> Extracted:
+    """The framework's part: its input (resumed where it paused), the run's tools in its
+    format, and what it produced."""
+    adapter, target = agent.adapter, agent.target
+    native_input = adapter.prepare_input(target, input, runtime.context)
+    if pending is not None and resolution is not None:
+        native_input = adapter.resume_input(target, native_input, pending, resolution)
+    run_tools = [] if adapter.fixed_tools else tools
+    if adapter.narrows == "run":
+        run_tools = [t for t in run_tools if runtime.offers(t.name)]
+    invocation = Invocation(runtime, run_tools, convert(adapter.tool_format, run_tools))
+    produced = await _execute(agent, native_input, invocation, streaming=streaming)
+    return adapter.extract(target, produced)
 
 
 async def _execute(
@@ -351,17 +445,22 @@ async def _paused(
 
 
 async def _failed(
-    agent: Agent, runtime: Runtime, exc: BaseException, extracted: Extracted | None
+    agent: Agent,
+    runtime: Runtime,
+    error: AgentError,
+    extracted: Extracted | None,
+    *,
+    status: RunStatus = RunStatus.ERROR,
 ) -> Result:
-    error = AgentError.of(exc, source=agent.adapter.name)
-    log.warning("run %s failed: %s", runtime.run_id, error.message, exc_info=exc)
-    await _ended(agent, runtime, RunStatus.ERROR, error=error)
+    """The run ended ``ERROR`` — or ``TIMEOUT``, out of time — with ``error``."""
+    outcome = RunOutcome.TIMEOUT if status is RunStatus.TIMEOUT else RunOutcome.ERROR
+    await _ended(agent, runtime, status, error=error)
     runtime.events.emit(RunEventType.RUN_ERROR, error=error)
-    runtime.events.finished(RunOutcome.ERROR, error=error)
-    metrics.run_finished(runtime.agent_id, RunOutcome.ERROR.value)
+    runtime.events.finished(outcome, error=error)
+    metrics.run_finished(runtime.agent_id, outcome.value)
     await agent.recorded_run(runtime, _transcript(runtime, extracted))
-    await agent.recorded_outcome(runtime, RunStatus.ERROR, error.message)
-    return Result(run_id=runtime.run_id, status=RunStatus.ERROR, error=error)
+    await agent.recorded_outcome(runtime, status, error.message)
+    return Result(run_id=runtime.run_id, status=status, error=error)
 
 
 async def _succeeded(
@@ -423,15 +522,26 @@ def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[tuple[str
 
 
 async def _settle_cancelled(
-    agent: Agent, identity: Identity, events: RunEvents, worker_id: str | None
+    agent: Agent,
+    identity: Identity,
+    events: RunEvents,
+    worker_id: str | None,
+    *,
+    reason: str | None = None,
 ) -> None:
+    """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
+    ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log)."""
     try:
         await agent.harness.runs.finish(
             identity.run_id, RunStatus.CANCELLED, worker_id=worker_id, tenant=identity.tenant
         )
     except (LeaseLostError, ConflictError):
         log.info("run %s was taken over by another worker; nothing written", identity.run_id)
-    events.finished(RunOutcome.CANCELLED)
+    if reason is not None:
+        log.info("run %s was cancelled: %s", identity.run_id, reason)
+        events.finished(RunOutcome.CANCELLED, reason=reason)
+    else:
+        events.finished(RunOutcome.CANCELLED)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
 
 

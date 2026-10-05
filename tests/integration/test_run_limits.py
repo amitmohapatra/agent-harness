@@ -1,0 +1,241 @@
+"""A run's time, its version and its cancellation, through the public API: ``timeout=`` (working
+time, across attempts and a crash) and ``deadline=`` end a run ``TIMEOUT``; ``ReAct``'s
+``model_timeout`` bounds each model call; ``version=`` is recorded with every run, and a resume
+on another version says so; ``agent.cancel`` stops a run in this process, ``CANCELLED`` with
+the reason."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+
+from tests.support.models import ScriptedChat
+from trellis import Harness, ReAct, Runtime, Settings, tool
+from trellis.contracts import ConfigurationError, RunEventType, RunOutcome, RunStatus
+from trellis.harness.runs import LocalRuns
+
+
+class Crash(BaseException):
+    """The worker process dies: nothing is written, the lease lapses."""
+
+
+def lapse(store: LocalRuns, run_id: str) -> None:
+    worker, _ = store._leases[run_id]
+    store._leases[run_id] = (worker, datetime.now(UTC) - timedelta(seconds=1))
+
+
+async def slow(input: Any, agent: Runtime) -> str:
+    await asyncio.sleep(float(input))
+    return "done"
+
+
+# --------------------------------------------------------------------------- run time
+
+
+async def test_a_run_past_its_time_limit_ends_timeout(harness: Harness) -> None:
+    agent = harness.wrap(slow, id="slow")
+    result = await agent.run("5", user="u", timeout=0.05)
+    assert result.status is RunStatus.TIMEOUT and result.error is not None
+    assert result.error.code == "run_timeout" and not result.error.retryable
+    assert result.error.message == "the run worked past its time limit of 0.05s"
+    record = await harness.runs.get(result.run_id)
+    assert record is not None and record.status is RunStatus.TIMEOUT
+    assert record.timeout_seconds == 0.05
+    assert (await agent.run("0", user="u", timeout=5)).answer == "done"
+
+
+async def test_a_run_past_its_deadline_ends_timeout_on_the_stream(harness: Harness) -> None:
+    deadline = datetime.now(UTC) - timedelta(seconds=1)
+    agent = harness.wrap(slow, id="slow")
+    events = [e async for e in agent.stream("5", user="u", timeout=60, deadline=deadline)]
+    error, finished = events[-2:]
+    assert error.type is RunEventType.RUN_ERROR and error.error is not None
+    assert error.error.code == "run_deadline"
+    assert finished.outcome is RunOutcome.TIMEOUT
+    record = await harness.runs.get(finished.run_id)
+    assert record is not None and record.deadline == deadline
+
+
+async def test_working_time_counts_across_a_crash(harness: Harness) -> None:
+    crashes = [Crash()]
+
+    async def billing(input: str, agent: Runtime) -> str:
+        await asyncio.sleep(0.3)
+        if crashes:
+            raise crashes.pop()
+        return "billed"
+
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    agent = harness.wrap(billing, id="billing")
+    handle = await agent.start("x", user="u", timeout=0.5)
+    worker = harness.worker([agent])
+    claimed = await store.claim(worker.worker_id, [agent.id])
+    assert claimed is not None and claimed.run.timeout_seconds == 0.5
+    with pytest.raises(Crash):
+        await agent._claimed(claimed.run, worker.worker_id, lease_seconds=60)
+    lapse(store, handle.run_id)
+    assert await worker.run_once()  # the next attempt: 0.2 s left of the run's 0.5
+    done = await handle.result(timeout=5)
+    assert done.status is RunStatus.TIMEOUT and done.error is not None
+    assert done.error.code == "run_timeout"
+    record = await handle.status()
+    assert record.attempt == 2 and record.worked_seconds >= 0.5
+
+
+async def test_a_call_may_take_what_is_left_of_its_own_time_and_the_runs(
+    harness: Harness,
+) -> None:
+    seen: dict[str, float | None] = {}
+
+    @tool(side_effects="read", timeout=30)
+    def look(sku: str) -> str:
+        """Look a SKU up."""
+        from trellis import current
+
+        runtime = current()
+        assert runtime is not None
+        seen["call"] = runtime.remaining()
+        return sku
+
+    async def looking(input: str, agent: Runtime) -> str:
+        seen["run"] = agent.remaining()
+        return await agent.tools.call("look", sku="A")
+
+    agent = harness.wrap(looking, id="looking", tools=[look])
+    await agent.run("x", user="u", timeout=10)
+    assert seen["call"] is not None and seen["call"] <= 10  # the run's time is the tighter
+    await agent.run("x", user="u")
+    assert seen["run"] is None and seen["call"] is not None and 29 < seen["call"] <= 30
+
+
+# --------------------------------------------------------------------------- model calls
+
+
+class Slow(ScriptedChat):
+    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+        await asyncio.sleep(5)
+        return await super().complete(messages, **body)
+
+
+class GivesUp(ScriptedChat):
+    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+        raise TimeoutError("the model's own client gave up")
+
+
+async def test_a_model_call_past_its_timeout_fails_the_run_retryably(harness: Harness) -> None:
+    agent = harness.wrap(ReAct(system="s", model=Slow(["hi"]), model_timeout=0.05), id="slow")
+    result = await agent.run("q", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert result.error.code == "MODEL_ERROR" and result.error.retryable
+    assert result.error.message == "the model did not answer within 0.05s"
+    gives_up = harness.wrap(ReAct(system="s", model=GivesUp([])), id="gives-up")
+    failed = await gives_up.run("q", user="u")
+    assert failed.error is not None and failed.error.message == "the model did not answer"
+
+
+# --------------------------------------------------------------------------- version
+
+
+async def test_runs_carry_the_agents_version_and_a_resume_on_another_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def asks(input: str, agent: Runtime) -> str:
+        return await agent.ask("Go on?")
+
+    async with Harness(config=Settings(agent_version="2026.10")) as h:
+        old = h.wrap(asks, id="asks")
+        paused = await old.run("x", user="u")
+        record = await h.runs.get(paused.run_id)
+        assert record is not None and record.agent_version == "2026.10"
+        async with Harness(config=Settings()) as deployed:
+            deployed.runs = h.runs
+            new = deployed.wrap(asks, id="asks", version="2026.11")
+            assert paused.interrupt is not None
+            with caplog.at_level(logging.WARNING, logger="trellis.run"):
+                done = await new.resume(
+                    paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u"
+                )
+    assert done.answer == "yes"
+    assert f"run {paused.run_id} was started by asks 2026.10 and continues on 2026.11" in (
+        caplog.text
+    )
+
+
+# --------------------------------------------------------------------------- cancel
+
+
+async def test_a_run_in_this_process_is_cancelled_with_its_reason(harness: Harness) -> None:
+    started = asyncio.Event()
+    runs: list[str] = []
+
+    async def waits(input: str, agent: Runtime) -> str:
+        runs.append(agent.run_id)
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    agent = harness.wrap(waits, id="waits")
+    running = asyncio.create_task(agent.run("x", user="u"))
+    await started.wait()
+    record = await agent.cancel(runs[0], reason="a duplicate of run 7")
+    assert record.status is RunStatus.CANCELLED
+    assert (await running).status is RunStatus.CANCELLED
+
+    started.clear()
+    events: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.stream("x", user="u"):
+            events.append(event)
+
+    streaming = asyncio.create_task(watch())
+    await started.wait()
+    await agent.cancel(runs[1])
+    await streaming
+    assert events[-1].outcome is RunOutcome.CANCELLED
+    assert events[-1].data == {"reason": "cancelled"}
+
+
+async def test_a_cancelled_queued_run_ends_cancelled_and_its_caller_too(
+    harness: Harness,
+) -> None:
+    started = asyncio.Event()
+
+    async def waits(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    agent = harness.wrap(waits, id="waits")
+    handle = await agent.start("x", user="u")
+    working = asyncio.create_task(harness.worker([agent]).run_once())
+    await started.wait()
+    assert (await handle.cancel(reason="not needed")).status is RunStatus.CANCELLED
+    assert await working
+
+    started.clear()
+    runs: list[str] = []
+
+    async def noted(input: str, agent: Runtime) -> str:
+        runs.append(agent.run_id)
+        return await waits(input, agent)
+
+    other = harness.wrap(noted, id="noted")
+    running = asyncio.create_task(other.run("x", user="u"))
+    await started.wait()
+    running.cancel()  # its caller goes away too: the caller's cancel wins
+    record = await other.cancel(runs[0], reason="dup")
+    assert record.status is RunStatus.CANCELLED
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_a_run_not_in_this_process_cannot_be_cancelled_here(harness: Harness) -> None:
+    agent = harness.wrap(slow, id="slow")
+    with pytest.raises(ConfigurationError, match="no run run_x of agent slow runs in this"):
+        await agent.cancel("run_x")

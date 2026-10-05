@@ -281,3 +281,13 @@ async def test_closing_without_an_exporter_flushes_nothing(monkeypatch: pytest.M
     """The API's default (proxy) provider has nothing queued and no flush."""
     monkeypatch.setattr(telemetry.trace, "get_tracer_provider", object)
     await telemetry.flush()  # no error
+
+
+def test_an_agents_version_is_on_its_spans(spans) -> None:
+    with telemetry.agent_span(dataclasses.replace(RUN, version="2026.10"), "q"):
+        pass
+    with telemetry.agent_span(RUN, "q"):
+        pass
+    versioned, plain = (dict(s.attributes or {}) for s in spans.get_finished_spans())
+    assert versioned["gen_ai.agent.version"] == versioned["langfuse.version"] == "2026.10"
+    assert "gen_ai.agent.version" not in plain and "langfuse.version" not in plain

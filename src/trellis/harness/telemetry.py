@@ -274,10 +274,21 @@ class RunTrace:
     thread: str | None
     framework: str
     attempt: int = 1
+    #: the agent's version (``h.wrap(..., version=)``), when it has one
+    version: str | None = None
 
     def attributes(self) -> dict[str, Any]:
         session = self.thread or self.run_id
+        versioned = (
+            {}
+            if self.version is None
+            else {
+                "gen_ai.agent.version": self.version,
+                "langfuse.version": self.version,
+            }
+        )
         return {
+            **versioned,
             "gen_ai.operation.name": "invoke_agent",
             "gen_ai.agent.id": self.agent_id,
             "gen_ai.agent.name": self.agent_id,

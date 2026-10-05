@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -239,3 +240,16 @@ async def test_a_manual_schedule_never_fires_on_its_own() -> None:
     )
     assert manual.next_fire_at is None
     assert await runs.claim("w", ["a"]) is None
+
+
+async def test_a_runs_working_time_grows_each_time_it_stops_running() -> None:
+    runs = LocalRuns()
+    await runs.start(start())
+    await asyncio.sleep(0.02)
+    paused = await runs.pause(interrupt())
+    assert paused.worked_seconds >= 0.02
+    await asyncio.sleep(0.05)  # waiting for a person does not count
+    await runs.resume(resolution(), tenant="t")
+    await asyncio.sleep(0.02)
+    done = await runs.finish("run_1", RunStatus.SUCCESS, tenant="t")
+    assert 0.04 <= done.worked_seconds < paused.worked_seconds + 0.05

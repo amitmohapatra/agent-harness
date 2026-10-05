@@ -81,12 +81,22 @@ ABSTAIN_NOTES: Final = {
 
 
 class Agent:
-    """Run it, stream it, queue it, resume it, schedule it, serve it."""
+    """Run it, stream it, queue it, resume it, cancel it, schedule it, serve it."""
 
-    def __init__(self, harness: Harness, target: Any, *, id: str, tools: Sequence[Any] = ()):
+    def __init__(
+        self,
+        harness: Harness,
+        target: Any,
+        *,
+        id: str,
+        tools: Sequence[Any] = (),
+        version: str | None = None,
+    ):
         self.harness = harness
         self.target = target
         self.id = safe_id(id)
+        #: the version of the agent's code: recorded with every run it starts, on its spans
+        self.version = version or harness.settings.agent_version
         self.adapter = detect(target)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))
@@ -100,6 +110,8 @@ class Agent:
             self.sources = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
         self._toolboxes: dict[str, Toolbox] = {}
+        #: the runs an attempt of which runs in this process now, by id
+        self.running: dict[str, Runtime] = {}
 
     @functools.cached_property
     def evals(self) -> EvalServices:
@@ -110,34 +122,87 @@ class Agent:
 
     # ------------------------------------------------------------------ running
     async def run(
-        self, input: Any, *, user: str, thread: str | None = None, tenant: str | None = None
+        self,
+        input: Any,
+        *,
+        user: str,
+        thread: str | None = None,
+        tenant: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        deadline: datetime | None = None,
     ) -> Result:
-        """Run to its end (or its first pause) and return how it ended."""
-        identity = await self._opened(input, user=user, thread=thread, tenant=tenant)
-        return await pipeline.attempt(self, identity, input)
+        """Run to its end (or its first pause) and return how it ended. ``timeout``: the most
+        working time the run may take, in seconds (not counting a pause), and ``deadline``
+        when it must have ended; past either it ends ``TIMEOUT``."""
+        identity = await self._opened(
+            input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
+        )
+        budget = pipeline.Budget.of(timeout=timeout, deadline=deadline)
+        return await pipeline.attempt(self, identity, input, budget=budget)
 
     async def stream(
-        self, input: Any, *, user: str, thread: str | None = None, tenant: str | None = None
+        self,
+        input: Any,
+        *,
+        user: str,
+        thread: str | None = None,
+        tenant: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        deadline: datetime | None = None,
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
-        early cancels the run."""
-        identity = await self._opened(input, user=user, thread=thread, tenant=tenant)
+        early cancels the run. ``timeout`` and ``deadline`` as for :meth:`run`."""
+        identity = await self._opened(
+            input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
+        )
+        budget = pipeline.Budget.of(timeout=timeout, deadline=deadline)
         async for event in self._events(
-            lambda listen: pipeline.attempt(self, identity, input, listener=listen, streaming=True)
+            lambda listen: pipeline.attempt(
+                self, identity, input, listener=listen, streaming=True, budget=budget
+            )
         ):
             yield event
 
     async def start(
-        self, input: Any, *, user: str, thread: str | None = None, tenant: str | None = None
+        self,
+        input: Any,
+        *,
+        user: str,
+        thread: str | None = None,
+        tenant: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        deadline: datetime | None = None,
     ) -> RunHandle:
-        """Queue the run for a worker (``h.worker([...]).run()``); it outlives this process."""
+        """Queue the run for a worker (``h.worker([...]).run()``); it outlives this process.
+        ``timeout`` and ``deadline`` as for :meth:`run`: the working time counts across every
+        worker that runs it, a crash included."""
         try:
             json.dumps(input)
         except (TypeError, ValueError) as exc:
             raise ConfigurationError("a queued run's input must be JSON") from exc
-        start = await self._start(input, user=user, thread=thread, tenant=tenant)
+        start = await self._start(
+            input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
+        )
         await self.harness.runs.start(start, queue=True)
         return RunHandle(self, start.run_id, tenant=start.tenant_id)
+
+    async def cancel(
+        self, run_id: str, *, reason: str | None = None, tenant: str | None = None
+    ) -> RunRecord:
+        """Cancel a run, whatever it is doing: one running in this process stops at once and
+        ends ``CANCELLED`` with ``reason``; a queued or paused one is ``CANCELLED`` in the run
+        store; one a worker elsewhere runs is stopped by that worker. The run's record is
+        returned. ``tenant`` is the run's, named by a platform key only."""
+        tenant = await self.harness.tenant(tenant)
+        runtime = self.running.get(run_id)
+        if runtime is None or runtime.tenant != tenant or runtime.running_in is None:
+            raise ConfigurationError(f"no run {run_id} of agent {self.id} runs in this process")
+        runtime.cancelled = reason or "cancelled"
+        runtime.running_in.cancel()
+        await asyncio.wait({runtime.running_in})
+        record = await self.harness.runs.get(run_id, tenant=tenant)
+        assert record is not None
+        return record
 
     async def resume(
         self,
@@ -296,6 +361,8 @@ class Agent:
             resolution=resolution,
             listener=listener,
             streaming=listener is not None,
+            budget=_budget(record),
+            started_on=record.agent_version,
         )
 
     async def _claimed(
@@ -313,6 +380,8 @@ class Agent:
             resolution=record.last_resolution,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
+            budget=_budget(record),
+            started_on=record.agent_version,
         )
 
     async def _events(
@@ -530,11 +599,20 @@ class Agent:
         thread: str | None,
         tenant: str | None,
         run_id: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        deadline: datetime | None = None,
     ) -> Identity:
         """Record an in-process run as started; its identity. (Surfaces pass their own
         ``run_id`` when the protocol names the run.)"""
         start = await self._start(
-            input, user=user, thread=thread, tenant=tenant, run_id=run_id, record_input=True
+            input,
+            user=user,
+            thread=thread,
+            tenant=tenant,
+            run_id=run_id,
+            record_input=True,
+            timeout=timeout,
+            deadline=deadline,
         )
         await self.harness.runs.start(start)
         return self._identity_of(RunRecord.from_start(start))
@@ -548,12 +626,16 @@ class Agent:
         tenant: str | None,
         run_id: str | None = None,
         record_input: bool = False,
+        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        deadline: datetime | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
-        a queued run's input already is."""
+        a queued run's input already is. The run's time limit, deadline and the agent's
+        version go with it when there are any."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
+        given = {"timeout_seconds": timeout, "deadline": deadline, "agent_version": self.version}
         return RunStart(
             run_id=run_id,
             tenant_id=await self.harness.tenant(tenant),
@@ -561,6 +643,7 @@ class Agent:
             thread_id=thread or run_id,  # a run with no conversation is its own thread
             user_id=user,
             input=pipeline.jsonable(input) if record_input else input,
+            **{name: value for name, value in given.items() if value is not None},
         )
 
     @staticmethod
@@ -579,6 +662,14 @@ class Agent:
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
+
+
+def _budget(record: RunRecord) -> pipeline.Budget | None:
+    """What is left of a run's time, from its record: the working-time limit less the time
+    it already worked (agent-runs keeps it across attempts, a crash included), the deadline."""
+    return pipeline.Budget.of(
+        timeout=record.timeout_seconds, worked=record.worked_seconds, deadline=record.deadline
+    )
 
 
 def _redacted(call: ToolCall, outcome: ToolOutcome) -> tuple[ToolCall, ToolOutcome]:
@@ -610,6 +701,10 @@ class RunHandle:
         if record is None:
             raise ConfigurationError(f"no run {self.run_id}")
         return record
+
+    async def cancel(self, *, reason: str | None = None) -> RunRecord:
+        """Cancel the run (``Agent.cancel``)."""
+        return await self.agent.cancel(self.run_id, reason=reason, tenant=self.tenant)
 
     async def result(self, *, timeout: float | None = None) -> Result:  # noqa: ASYNC109
         """Wait until the run pauses or ends (a worker must be running it)."""

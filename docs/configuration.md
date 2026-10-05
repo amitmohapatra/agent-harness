@@ -3,8 +3,8 @@
 The harness reads the environment and nothing else — no YAML, no keyword arguments on
 `Harness()` besides `config=Settings(...)` (the same fields, for tests and embedding) and the
 online judges (`judges=[...]`: code that says *what* to judge; which model judges, through which
-key and how often is the environment's), no per-agent options on `wrap` beyond the agent's id
-and its own local tools. Unset means "not in
+key and how often is the environment's), no per-agent options on `wrap` beyond the agent's id,
+its own local tools and its version. Unset means "not in
 this deployment". Every variable, with a one-line description, is in
 [`.env.example`](../.env.example); `tests/unit/test_settings.py` checks the file lists exactly
 what is read.
@@ -20,6 +20,7 @@ what is read.
 | `OTEL_EXPORTER_OTLP_HEADERS` | no OTLP headers; no Langfuse scores API |
 | `TRELLIS_SPOOL_DIR` | memory writes this process cannot deliver are logged, counted and lost (set: kept in `<dir>/trellis-writes.jsonl` and replayed at the next start — [memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.harness.worker` and `concurrency=` on `h.worker` win over it) |
+| `TRELLIS_AGENT_VERSION` | runs carry no agent version unless `h.wrap(..., version=)` names one. Set it to the release or deploy id: every run an agent starts records it (`RunStart.agent_version`), its spans carry it, and a run resumed on another version goes on with a `warning` event naming both ([reliability.md](reliability.md#agent-version)) |
 | `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the judge's calls go through `BIFROST_VIRTUAL_KEY`, on the agents' budget. Set it to a **separate virtual key** so evaluation spend is budgeted, limited and reported on its own |
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |
@@ -40,6 +41,7 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `otlp_headers` | `OTEL_EXPORTER_OTLP_HEADERS`, parsed as the OTel spec writes it (`k1=v1,k2=v2`, values URL-decoded, keys lower-cased) |
 | `spool_dir` | `TRELLIS_SPOOL_DIR` |
 | `worker_concurrency` | `TRELLIS_WORKER_CONCURRENCY` (at least 1) |
+| `agent_version` | `TRELLIS_AGENT_VERSION` (at most 128 characters) |
 | `grounding_sample` | `TRELLIS_GROUNDING_SAMPLE` (0 to 1, default 0.1) |
 | `judge_model` | `TRELLIS_JUDGE_MODEL` |
 | `judge_virtual_key` | `TRELLIS_JUDGE_VIRTUAL_KEY` |
@@ -70,6 +72,8 @@ went wrong.
   memory service that takes no model keys (its credential encryption is not configured) is
   logged once per process and not asked again.
 
-Everything else — limits, timeouts, the tool-hint threshold, lease length — is a named
-constant next to the code that uses it. What each variable turns on, in one table:
+Everything else — limits, retries, the tool-hint threshold, lease length — is a named
+constant next to the code that uses it; the timeouts that only the agent's author knows are
+arguments where the thing is defined (`@tool(timeout=)`, `openapi(timeout=)`, `a2a(timeout=)`,
+`ReAct(model_timeout=)`, `agent.run(timeout=, deadline=)`: [reliability.md](reliability.md)). What each variable turns on, in one table:
 [docs/README.md](README.md#what-each-environment-variable-turns-on).
