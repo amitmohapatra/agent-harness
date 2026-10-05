@@ -17,18 +17,14 @@ suggestions from.
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
-import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Final, Literal
 
 from trellis.contracts import (
-    AgentError,
     AgentExecutionContext,
     ConfigurationError,
-    ErrorCategory,
     Interrupt,
     InterruptDecision,
     InterruptReason,
@@ -50,7 +46,7 @@ from trellis.harness.governance.catalog import (
 from trellis.harness.governance.decision import Action, Decision, decide
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
-from trellis.harness.tools.base import ToolTimeout, invoked, retried, retries_of, timed_out
+from trellis.harness.tools.base import Tool, execute, invoked
 from trellis.memory import MemoryClient
 
 #: How a publish is sent: given the entries and the send itself, run it — the harness queues it
@@ -242,12 +238,15 @@ def governed(
     worker thread), tried again after an error that may pass when it only reads; out of time
     it raises :class:`~trellis.harness.tools.base.ToolTimeout`, whose message is what the
     model should read (for a call that does more than read: that it may have taken effect)."""
-    tool = name or fn.__name__
-    spec = ToolSpec(name=tool, side_effects=side_effects)
+    tool = Tool(
+        ToolSpec(name=name or fn.__name__, side_effects=side_effects),
+        lambda args: invoked(fn, **args),
+        timeout=timeout,
+    )
 
     @functools.wraps(fn)
     async def call(**args: Any) -> Any:
-        decision = await governance.check(tool, args, side_effects=side_effects)
+        decision = await governance.check(tool.name, args, side_effects=side_effects)
         if decision.asks:
             answer = await _settled(on_ask(decision))
             if answer is False:
@@ -261,21 +260,12 @@ def governed(
                 )
         elif decision.announces and on_announce is not None:
             await _settled(on_announce(decision))
-        reads = decision.risk == "read"
-        began = time.monotonic()
-        try:
-            async with asyncio.timeout(timeout):
-                return await retried(
-                    lambda: invoked(fn, **args), retries=retries_of(spec, reads=reads)
-                )
-        except Exception as exc:
-            if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
-                raise
-            took = time.monotonic() - began
-            text = timed_out(tool, took=took, limit=timeout, unknown=not reads)
-            raise ToolTimeout(text, unknown=not reads) from exc
+        outcome, error = await execute(tool, args, reads=decision.risk == "read")
+        if error is not None:
+            raise error
+        return outcome.output
 
-    call.__name__ = tool
+    call.__name__ = tool.name
     return call
 
 

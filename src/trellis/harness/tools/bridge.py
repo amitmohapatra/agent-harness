@@ -29,11 +29,9 @@ take their turn (``Replay.exclusive``), and the journal's progress saves go one 
 from __future__ import annotations
 
 import time
-from typing import Any, Final
+from typing import Any
 
 from trellis.contracts import (
-    AgentError,
-    ErrorCategory,
     InterruptDecision,
     RunEventType,
     ToolCall,
@@ -47,13 +45,13 @@ from trellis.harness.journal import OUTCOME, content_key
 from trellis.harness.runtime import Paused, RunCancelled, Runtime, answer_of, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
-from trellis.harness.tools.base import Tool, interrupted, retried, retries_of, timed_out
-
-#: The ``ToolOutcome.metadata`` flag of a call whose effect is not known: it does more than
-#: read, and timed out or was running when its worker died. Its ``error_class`` says so too
-#: (:data:`OUTCOME_UNKNOWN`), which the memory service's tool records keep.
-UNKNOWN: Final = "unknown"
-OUTCOME_UNKNOWN: Final = "OutcomeUnknown"
+from trellis.harness.tools.base import (
+    OUTCOME_UNKNOWN,
+    UNKNOWN,
+    Tool,
+    execute,
+    interrupted,
+)
 
 
 async def call(
@@ -117,12 +115,12 @@ async def _called(
     started = time.perf_counter()
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
-        try:
-            outcome = await _executed(runtime, tool, args, idempotency_key, reads=reads)
-        except (Paused, RunCancelled):
+        within = runtime.limited(tool.timeout, key=idempotency_key)
+        outcome, error = await execute(tool, args, reads=reads, within=within)
+        if isinstance(error, Paused | RunCancelled):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
-            raise
+            raise error
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
@@ -187,47 +185,6 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
     _events(runtime, ref, call, outcome)
     await runtime.agent.record_tool(runtime, call, outcome)
     return outcome
-
-
-async def _executed(
-    runtime: Runtime, tool: Tool, args: dict[str, Any], key: str, *, reads: bool
-) -> ToolOutcome:
-    """One call within its time — the tool's ``timeout`` and what is left of the run's —
-    tried again after an error that may pass when it only reads (or is idempotent). A call
-    that runs out of time, or fails with a timeout of its own, is a ``TIMEOUT``: for one that
-    does more than read, its effect is unknown (``metadata["unknown"]``)."""
-    attempts = 0
-
-    async def once() -> Any:
-        nonlocal attempts
-        attempts += 1
-        return await tool.run(args)
-
-    began = time.monotonic()
-    try:
-        async with runtime.limited(tool.timeout, key=key):
-            output = await retried(once, retries=retries_of(tool.spec, reads=reads))
-    except (Paused, RunCancelled):
-        raise
-    except Exception as exc:
-        if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
-            return ToolOutcome(
-                tool=tool.name,
-                status=ToolStatus.ERROR,
-                output=f"{tool.name} failed: {exc}",
-                error_class=type(exc).__name__,
-                attempts=attempts,
-            )
-        took = time.monotonic() - began
-        return ToolOutcome(
-            tool=tool.name,
-            status=ToolStatus.TIMEOUT,
-            output=timed_out(tool.name, took=took, limit=tool.timeout, unknown=not reads),
-            error_class=type(exc).__name__ if reads else OUTCOME_UNKNOWN,
-            attempts=attempts,
-            metadata={} if reads else {UNKNOWN: True},
-        )
-    return ToolOutcome(tool=tool.name, output=output, attempts=attempts)
 
 
 def _journaled(outcome: ToolOutcome) -> Any:
