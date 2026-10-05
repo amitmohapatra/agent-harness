@@ -24,8 +24,9 @@ and runs none itself (Agent Mode). A framework's own model client pointed at the
 the same headers from `await h.model_headers()`:
 
 ```python
-model = ChatOpenAI(base_url=BIFROST_URL, api_key=VIRTUAL_KEY, model=MODEL,
-                   default_headers=await h.model_headers())
+model = ChatOpenAI(
+    base_url=BIFROST_URL, api_key=VIRTUAL_KEY, model=MODEL, default_headers=await h.model_headers()
+)
 ```
 
 Without them the gateway adds the key's MCP tools to the framework's requests (the model is
@@ -195,14 +196,29 @@ Virtual MCP), authenticated with the virtual key (`Authorization: Bearer <key>`)
 
 ```python
 # LangChain (langchain-mcp-adapters)
-client = MultiServerMCPClient({"bifrost": {"transport": "streamable_http", "url": f"{GATEWAY}/mcp",
-                                           "headers": {"Authorization": f"Bearer {VIRTUAL_KEY}"}}})
+client = MultiServerMCPClient(
+    {
+        "bifrost": {
+            "transport": "streamable_http",
+            "url": f"{GATEWAY}/mcp",
+            "headers": {"Authorization": f"Bearer {VIRTUAL_KEY}"},
+        }
+    }
+)
 # OpenAI Agents SDK
-server = MCPServerStreamableHttp(params={"url": f"{GATEWAY}/mcp",
-                                         "headers": {"Authorization": f"Bearer {VIRTUAL_KEY}"}})
+server = MCPServerStreamableHttp(
+    params={"url": f"{GATEWAY}/mcp", "headers": {"Authorization": f"Bearer {VIRTUAL_KEY}"}}
+)
 # Claude Agent SDK
-options = ClaudeAgentOptions(mcp_servers={"bifrost": {"type": "http", "url": f"{GATEWAY}/mcp",
-                                          "headers": {"Authorization": f"Bearer {VIRTUAL_KEY}"}}})
+options = ClaudeAgentOptions(
+    mcp_servers={
+        "bifrost": {
+            "type": "http",
+            "url": f"{GATEWAY}/mcp",
+            "headers": {"Authorization": f"Bearer {VIRTUAL_KEY}"},
+        }
+    }
+)
 ```
 
 | | The framework's own MCP client | `h.tools(..., framework=...)` / `tools=` |
