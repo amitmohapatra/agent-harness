@@ -59,6 +59,7 @@ class FunctionTool:
         name: str | None = None,
         description: str | None = None,
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+        idempotent: bool = False,
         timeout: float | None = None,
     ) -> None:
         self.fn = fn
@@ -69,6 +70,7 @@ class FunctionTool:
             input_schema=self.model.model_json_schema(),
             source="local",
             side_effects=side_effects,
+            idempotent=idempotent,
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -93,6 +95,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    idempotent: bool = False,
     timeout: float | None = None,
 ) -> FunctionTool: ...
 @overload
@@ -101,6 +104,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    idempotent: bool = False,
     timeout: float | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
@@ -110,17 +114,25 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    idempotent: bool = False,
     timeout: float | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
     The schema comes from the signature (pydantic validates the model's arguments), the
-    description from the docstring's first paragraph. ``timeout``: the most one call may take,
+    description from the docstring's first paragraph. ``idempotent``: a call repeated with the
+    same idempotency key (``trellis.current().idempotency_key``) has its effect once, so it is
+    retried like a read and run again after a crash. ``timeout``: the most one call may take,
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped).
     """
     made = functools.partial(
-        FunctionTool, name=name, description=description, side_effects=side_effects, timeout=timeout
+        FunctionTool,
+        name=name,
+        description=description,
+        side_effects=side_effects,
+        idempotent=idempotent,
+        timeout=timeout,
     )
     return made(fn) if fn is not None else made
 

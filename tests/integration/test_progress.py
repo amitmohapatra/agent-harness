@@ -13,10 +13,9 @@ import pytest
 
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
-from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus, ToolSpec
+from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
 from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES, content_key
 from trellis.harness.runs import LocalRuns
-from trellis.harness.tools.base import Tool
 from trellis.runs import Lease, LeaseLostError, PayloadTooLargeError
 
 paid: list[int] = []
@@ -330,41 +329,32 @@ async def test_a_write_running_when_its_worker_died_is_unknown_and_not_run_again
     assert wired == [5]  # not wired twice
 
 
-class Idempotent:
-    """A source whose tool says it is idempotent: after a crash it runs again, with its key."""
-
-    def __init__(self) -> None:
-        self.keys: list[str | None] = []
-        self.crashes = [Crash()]
-
-    async def resolve(self) -> list[Tool]:
-        spec = ToolSpec(name="upsert", side_effects="write", idempotent=True)
-        return [Tool(spec, self.run)]
-
-    async def run(self, args: dict[str, Any]) -> str:
-        runtime = current()
-        self.keys.append(runtime.idempotency_key if runtime else None)
-        if self.crashes:
-            raise self.crashes.pop()
-        return "stored"
-
-
 async def test_an_idempotent_write_runs_again_after_a_crash_with_the_same_key(
     harness: Harness,
 ) -> None:
-    source = Idempotent()
+    keys: list[str | None] = []
+    crashes = [Crash()]
+
+    @tool(side_effects="write", idempotent=True)
+    async def upsert(row: int) -> str:
+        """Store a row: the service applies a repeated key once."""
+        runtime = current()
+        keys.append(runtime.idempotency_key if runtime else None)
+        if crashes:
+            raise crashes.pop()
+        return "stored"
 
     async def saving(input: str, agent: Runtime) -> str:
         return await agent.tools.call("upsert", row=1)
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = harness.wrap(saving, id="saving", tools=[source])
+    agent = harness.wrap(saving, id="saving", tools=[upsert])
     handle = await agent.start("x", user="u")
     await crash_once(store, agent, handle)
     assert await harness.worker([agent]).run_once()
     assert (await handle.result(timeout=5)).answer == "stored"
-    first, again = source.keys
+    first, again = keys
     assert first is not None and first == again  # the service sees one request, twice
 
 

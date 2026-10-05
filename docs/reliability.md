@@ -155,8 +155,10 @@ operation answering `408`, `425`, `429`, `500`, `502`, `503` or `504` raises suc
 
 **Automatic.** Up to 2 retries (`READ_RETRIES`), each after a random wait under 0.5 s, doubled
 per retry (`RETRY_BACKOFF_SECONDS`), all within the call's timeout. `ToolOutcome.attempts`
-says how many were made. An MCP tool whose server says `idempotentHint` is idempotent; a tool
-of your own source is when its `ToolSpec(idempotent=True)` says so.
+says how many were made. An MCP tool whose server says `idempotentHint` is idempotent; a
+function tool is when `@tool(idempotent=True)` says so (it hands its service the call's
+`trellis.current().idempotency_key`), and a tool of your own source when its
+`ToolSpec(idempotent=True)` does.
 
 **On failure.** The last error is the outcome the model reads (`"<tool> failed: ..."`), as
 before.
