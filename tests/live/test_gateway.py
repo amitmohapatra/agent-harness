@@ -12,13 +12,12 @@ from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from tests.live.conftest import MODEL
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
 
 URL = os.environ.get("BIFROST_URL")
 KEY = os.environ.get("BIFROST_VIRTUAL_KEY") or "unused"
-#: Cheap, and reliable at tool calling through the gateway.
-MODEL = "openrouter/openai/gpt-4.1-nano"
 
 pytestmark = [
     pytest.mark.live,

@@ -2,16 +2,28 @@
 a deployment uses (``.env.example``). ``make test-live`` runs it; a test whose service is
 unset or unreachable is skipped, never failed.
 
-The gateway gets temporary MCP clients for the session (the public DeepWiki server, under
-:data:`WIKIS` names) and virtual keys that allow some of their tools: an agent's MCP tools are
-exactly what its key allows, so each test picks its key (:func:`live_harness`)."""
+Two variables of its own pick what it runs against: ``TRELLIS_LIVE_MODEL``, the gateway model
+its agents use (default :data:`DEFAULT_MODEL`), and ``TRELLIS_LIVE_MCP_URL``, the wiki MCP
+server (default the public DeepWiki, :data:`DEEPWIKI_URL`).
+
+The gateway gets MCP clients of that server for the session, under :data:`WIKIS` names, and
+virtual keys that allow some of their tools: an agent's MCP tools are exactly what its key
+allows, so each test picks its key (:func:`live_harness`). A public server is registered for
+the session and removed after it. A local one (``tests/live/mcp_fixture.py``, started here when
+it is not running yet, with its ops server beside it) cannot be registered — the gateway
+refuses loopback servers through its management API — so its clients are declared in the
+gateway's ``config.json`` (the fixture module's docstring has them), and the tests that need
+them skip when they are not."""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Final
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -26,14 +38,17 @@ from trellis.memory import MemoryClient
 #: How long a memory call may take here (a deployment keeps the SDK's 10 s).
 LIVE_TIMEOUT: Final = 60.0
 #: Cheap, and reliable at tool calling through the gateway.
-MODEL: Final = "openrouter/openai/gpt-4.1-nano"
-#: A public MCP server the suite registers in the gateway as a Code Mode client, and removes.
+DEFAULT_MODEL: Final = "openrouter/openai/gpt-4.1-nano"
+#: The public MCP server the suite registers in the gateway as Code Mode clients, and removes.
 DEEPWIKI_URL: Final = "https://mcp.deepwiki.com/mcp"
 #: Three servers are enough for Code Mode (a key that allows them all).
 WIKIS: Final = ("trellislivewiki", "trellislivewiki2", "trellislivewiki3")
 TOOLS_PER_WIKI: Final = 3
 #: The one wiki tool the framework tests' key allows.
 WIKI_TOOL: Final = "read_wiki_structure"
+#: The local ops server's client (``mcp_fixture.py``): a write, an irreversible and a
+#: header-authenticated tool.
+OPS: Final = "trellisliveops"
 
 
 def _env(name: str) -> str | None:
@@ -51,6 +66,10 @@ def _reachable(url: str | None, path: str) -> bool:
 
 
 BIFROST_URL = _env("BIFROST_URL")
+MODEL = _env("TRELLIS_LIVE_MODEL") or DEFAULT_MODEL
+MCP_URL = _env("TRELLIS_LIVE_MCP_URL") or DEEPWIKI_URL
+#: The wiki server is this machine's (``mcp_fixture.py``): declared in the gateway, not added.
+LOCAL_MCP = urlsplit(MCP_URL).hostname in ("127.0.0.1", "localhost")
 MEMORY_URL = _env("MEMORY_URL")
 RUNS_URL = _env("RUNS_URL")
 GATEWAY_UP = _reachable(BIFROST_URL.removesuffix("/v1") if BIFROST_URL else None, "/health")
@@ -91,12 +110,64 @@ async def harness() -> AsyncIterator[Harness]:
 
 
 @pytest.fixture(scope="session")
-def wikis() -> Iterator[list[str]]:
-    """Temporary Code Mode MCP clients in the gateway (the same public server under
-    :data:`WIKIS` names), removed after the session."""
+def mcp_fixture() -> Iterator[str]:
+    """The local MCP servers (``mcp_fixture.py``) at ``TRELLIS_LIVE_MCP_URL``, started for the
+    session unless they already run, and the gateway's clients of them connected; the wiki
+    server's URL. Skips when the URL is not this machine's, or the gateway declares none of
+    the clients."""
+    if not GATEWAY_UP or BIFROST_URL is None:
+        pytest.skip("needs a Bifrost gateway (BIFROST_URL)")
+    if not LOCAL_MCP:
+        pytest.skip("needs the local MCP servers: TRELLIS_LIVE_MCP_URL=http://127.0.0.1:<port>/mcp")
+    started = None
+    if not _reachable(MCP_URL.rsplit("/", 1)[0], "/"):
+        started = subprocess.Popen(
+            [sys.executable, "-m", "tests.live.mcp_fixture", MCP_URL],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    try:
+        asyncio.run(_connected(BIFROST_URL))
+        yield MCP_URL
+    finally:
+        if started is not None:
+            started.terminate()
+            started.wait()
+
+
+async def _connected(url: str) -> None:
+    """The gateway's clients of the local servers, reconnected when they were down when the
+    gateway started; skips when its ``config.json`` declares none."""
+    async with Bifrost(url) as bf, httpx.AsyncClient(base_url=url.removesuffix("/v1")) as api:
+        for _ in range(60):  # the servers start
+            if _reachable(MCP_URL.rsplit("/", 1)[0], "/"):
+                break
+            await asyncio.sleep(0.5)
+        declared = [c for c in await bf.mcp.clients() if c.config.name in (*WIKIS, OPS)]
+        if not declared:
+            pytest.skip("the gateway's config.json declares no client of the local MCP servers")
+        for client in declared:
+            if not client.tools:
+                await api.post(f"/api/mcp/client/{client.id}/reconnect")
+        for _ in range(60):
+            clients = await bf.mcp.clients()
+            if all(c.tools for c in clients if c.config.name in (*WIKIS, OPS)):
+                return
+            await asyncio.sleep(0.5)
+
+
+@pytest.fixture(scope="session")
+def wikis(request: pytest.FixtureRequest) -> Iterator[list[str]]:
+    """Code Mode MCP clients of the wiki server in the gateway, under :data:`WIKIS` names:
+    the local server's, declared in the gateway (``mcp_fixture``), or the public one's, added
+    for the session and removed after it."""
     if not GATEWAY_UP or BIFROST_URL is None:
         pytest.skip("needs a Bifrost gateway (BIFROST_URL)")
     url = BIFROST_URL
+    if LOCAL_MCP:
+        request.getfixturevalue("mcp_fixture")
+        yield list(WIKIS)
+        return
 
     async def change(add: bool) -> None:
         async with Bifrost(url) as bf:
@@ -107,7 +178,7 @@ def wikis() -> Iterator[list[str]]:
                 await bf.mcp.add(
                     MCPClientConfig(
                         name=name,
-                        connection=MCPConnection(type="http", url=DEEPWIKI_URL),
+                        connection=MCPConnection(type="http", url=MCP_URL),
                         tools_to_execute=("*",),
                         is_code_mode_client=True,
                     )
@@ -170,4 +241,19 @@ def wikis_key(wikis: list[str]) -> Iterator[str]:
     yield from _virtual_key(
         "trellis-live-all-wikis",
         [{"mcp_client_name": w, "tools_to_execute": ["*"]} for w in wikis],
+    )
+
+
+@pytest.fixture(scope="session")
+def ops(mcp_fixture: str) -> str:
+    """The local ops server's client in the gateway (``mcp_fixture.py``): a write, an
+    irreversible and a header-authenticated tool."""
+    return OPS
+
+
+@pytest.fixture(scope="session")
+def ops_key(ops: str) -> Iterator[str]:
+    """A key allowing every tool of the ops server."""
+    yield from _virtual_key(
+        "trellis-live-ops", [{"mcp_client_name": ops, "tools_to_execute": ["*"]}]
     )
