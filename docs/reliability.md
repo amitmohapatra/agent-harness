@@ -208,8 +208,9 @@ async def pay(invoice: str, amount: int) -> str:
 **Automatic.** An OpenAPI operation that does more than read sends it as `Idempotency-Key`; an
 A2A call opens its task with it as the message id; an MCP call through Bifrost carries it as
 the tool call's id (in the gateway's log — the MCP protocol gives a server no field for it, so
-an MCP server that must deduplicate needs a key argument of its own). It is also the
-`ToolCall.idempotency_key` of an approval's `tool_call`.
+an MCP server that must deduplicate needs a key argument of its own). It is not
+`ToolCall.idempotency_key`: that one names the call itself — the same tool and arguments in any
+run — so the memory service learns approvals across runs from it.
 
 **On failure.** Nothing to fail: a service that ignores the key simply does not deduplicate,
 and the journal still keeps the harness from repeating a call it saw complete.

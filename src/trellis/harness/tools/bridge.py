@@ -62,9 +62,11 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
         )
     key = content_key("call", tool.name, args)
     step = runtime.next_step()
+    # what the tool hands its service: this run's n-th such call, in every attempt (the
+    # call's own key, the same for the same call anywhere, is what feedback is filed under)
     idempotency_key = f"{runtime.run_id}:{key}:{runtime.replay.occurrence(key)}"
     tool_call = ToolCall(
-        tool=tool.name, args=args, task=runtime.task, step=step, idempotency_key=idempotency_key
+        tool=tool.name, args=args, task=runtime.task, step=step, idempotency_key=call_id or key
     )
     ref = call_id or f"{runtime.run_id}:{step}"
     replayed, output = runtime.replay.call(key)

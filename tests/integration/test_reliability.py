@@ -28,6 +28,7 @@ from tests.unit.test_sources import DOCUMENT
 from trellis import Harness, ReAct, Runtime, current, openapi, tool
 from trellis.contracts import ConfigurationError, RunEvent, RunEventType, ToolError
 from trellis.harness.governance import Governance, governed
+from trellis.harness.journal import content_key
 from trellis.harness.tools import base
 from trellis.harness.tools.base import ToolTimeout
 from trellis.harness.tools.convert import text_of
@@ -314,3 +315,31 @@ async def test_a_write_of_unknown_effect_is_recorded_so(
     [recorded] = memory_service.named("record_tool")
     assert recorded.body["status"] == "timeout"
     assert recorded.body["error_class"] == "OutcomeUnknown"
+
+
+async def test_the_key_a_tool_hands_on_is_the_runs_and_the_calls_own_names_the_call(
+    harness: Harness,
+) -> None:
+    keys: list[str | None] = []
+
+    @tool(side_effects="irreversible")
+    def refund(order: str) -> str:
+        """Refund an order."""
+        runtime = current()
+        keys.append(runtime.idempotency_key if runtime else None)
+        return "refunded"
+
+    async def refunding(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("refund", order=input)
+
+    agent = harness.wrap(refunding, id="refunds", tools=[refund])
+    first, second = [await agent.run("o1", user="u") for _ in range(2)]
+    for paused in (first, second):
+        assert paused.interrupt is not None and paused.interrupt.tool_call is not None
+        # the call itself, the same in every run: what approvals are learned from
+        assert paused.interrupt.tool_call.idempotency_key == content_key(
+            "call", "refund", {"order": "o1"}
+        )
+        await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="cfo")
+    assert keys[0] != keys[1]  # each run's own: a second refund is not deduplicated away
+    assert all(k and k.startswith(r.run_id) for k, r in zip(keys, (first, second), strict=True))

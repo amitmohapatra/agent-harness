@@ -196,9 +196,10 @@ class Runtime:
     @property
     def idempotency_key(self) -> str | None:
         """Inside a tool call: its idempotency key — the same for that call in every attempt
-        of the run (re-run after a pause or a crash), different for every other call. Hand it
-        to the service the tool calls, which then performs a repeated request once (OpenAPI
-        tools send it as ``Idempotency-Key``). ``None`` outside a tool call."""
+        of the run (re-run after a pause or a crash), different for every other call (another
+        run's, a second identical call of this run). Hand it to the service the tool calls,
+        which then performs a repeated request once (OpenAPI tools send it as
+        ``Idempotency-Key``). ``None`` outside a tool call."""
         call = _call.get()
         return call.key if call is not None else None
 
