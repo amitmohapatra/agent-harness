@@ -18,10 +18,15 @@ The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store ke
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
 no question and no side effect. A journal larger than a checkpoint may be is stored as a run
 artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journal.read`).
+
+Calls made at once (a framework running several tools together) take their occurrences in the
+order they asked: identical calls run one after another (:meth:`Replay.exclusive`), so each has
+its own occurrence and a re-run hands each the output it got, whatever order they finished in.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections import defaultdict
@@ -126,11 +131,17 @@ class Journal(BaseModel):
 class Replay:
     """One attempt's cursor over a journal: what the n-th occurrence of a key already got."""
 
-    __slots__ = ("_seen", "journal")
+    __slots__ = ("_seen", "_turns", "journal")
 
     def __init__(self, journal: Journal) -> None:
         self.journal = journal
         self._seen: dict[str, int] = defaultdict(int)
+        self._turns: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    def exclusive(self, key: str) -> asyncio.Lock:
+        """What one call of ``key`` holds from its replay to its record: identical calls made
+        at once run one after another, in the order they asked."""
+        return self._turns[key]
 
     def answer(self, key: str) -> InterruptResolution | None:
         """The recorded answer for this occurrence of ``key``, advancing the cursor."""

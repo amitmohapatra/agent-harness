@@ -19,6 +19,10 @@ pass, within that time; the tool reads its idempotency key from ``trellis.curren
 that does more than read is marked started, and saved, before it runs: one that times out, or
 was running when its worker died, has an unknown effect — the model is told so, the journal
 keeps what it was told, and it is never run again blind.
+
+Calls may come at once (``ReAct``'s reads, the frameworks that run tools concurrently): their
+steps are numbered as they arrive (or as the caller numbered them, ``step=``), identical calls
+take their turn (``Replay.exclusive``), and the journal's progress saves go one at a time.
 """
 
 from __future__ import annotations
@@ -51,9 +55,12 @@ UNKNOWN: Final = "unknown"
 OUTCOME_UNKNOWN: Final = "OutcomeUnknown"
 
 
-async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) -> ToolOutcome:
-    """Run ``tool`` for the current run. Pauses propagate; every other failure is an outcome
-    the framework shows its model (``ERROR``, or ``TIMEOUT``)."""
+async def call(
+    tool: Tool, args: dict[str, Any], *, call_id: str | None = None, step: int | None = None
+) -> ToolOutcome:
+    """Run ``tool`` for the current run (``step``: the call's number, when the caller numbered
+    the calls it makes at once). Pauses propagate; every other failure is an outcome the
+    framework shows its model (``ERROR``, or ``TIMEOUT``)."""
     runtime = current()
     if runtime is None:
         raise ToolError(
@@ -61,7 +68,20 @@ async def call(tool: Tool, args: dict[str, Any], *, call_id: str | None = None) 
             source="tools",
         )
     key = content_key("call", tool.name, args)
-    step = runtime.next_step()
+    step = runtime.next_step() if step is None else step
+    async with runtime.replay.exclusive(key):
+        return await _called(runtime, tool, args, key=key, step=step, call_id=call_id)
+
+
+async def _called(
+    runtime: Runtime,
+    tool: Tool,
+    args: dict[str, Any],
+    *,
+    key: str,
+    step: int,
+    call_id: str | None,
+) -> ToolOutcome:
     # what the tool hands its service: this run's n-th such call, in every attempt (the
     # call's own key, the same for the same call anywhere, is what feedback is filed under)
     idempotency_key = f"{runtime.run_id}:{key}:{runtime.replay.occurrence(key)}"

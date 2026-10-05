@@ -133,6 +133,8 @@ class Runtime:
     _asked: int = 0
     _steps: int = 0
     _saved_at: float | None = None
+    #: one progress save at a time, so a later save never lands before an earlier one
+    _saving: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     # ------------------------------------------------------------------ identity
     @property
@@ -238,7 +240,15 @@ class Runtime:
         running it again; otherwise at most every :data:`PROGRESS_SECONDS`. A journal too large
         for a checkpoint travels as a run artifact (``Journal.checkpoint``). A refused save is a
         warning (the run goes on; the next save tries again); a lost lease stops the run
-        (``LeaseLostError``)."""
+        (``LeaseLostError``). Saves made at once (tools running together) go one at a time."""
+        try:
+            async with self._saving:
+                await self._saved(now=now)
+        except LeaseLostError:
+            self.lease_lost = True
+            raise
+
+    async def _saved(self, *, now: bool) -> None:
         if self.worker_id is None or self.lease_seconds is None:
             return
         clock = time.monotonic()
@@ -257,7 +267,6 @@ class Runtime:
                 tenant=self.tenant,
             )
         except LeaseLostError:
-            self.lease_lost = True
             raise
         except Exception as exc:
             self._unsaved(f"{type(exc).__name__}: {exc}")
