@@ -329,6 +329,7 @@ Way 1, wrapped:
 | `memory_features.py` | a document the next context cites, `agent.memory`, a person's feedback (memory on) |
 | `evaluate_offline.py` | `h.evaluate`: a dataset scored by exact match, contains and a judge; the report |
 | `online_judges.py` | `Harness(judges=[...])`: judges on live runs, in the background |
+| `reliability.py` | a read retried, a write past its `timeout` reported as of unknown effect (with its idempotency key), a run past its `timeout`, a cancel |
 
 Way 2, blocks (your framework's own objects, not wrapped):
 

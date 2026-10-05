@@ -348,3 +348,10 @@ line naming both versions.
 * **Without `RUNS_URL`**, `LocalRuns` keeps the working time, leases, cancels and releases as
   agent-runs does, but nothing survives a restart and nothing enforces a limit for a run no
   attempt is working on (the attempts themselves still stop on time).
+
+## Run it
+
+* [`examples/reliability.py`](../examples/reliability.py) — a read retried, a write past its
+  timeout of unknown effect, a run past its time limit, a cancel.
+* Tests: `tests/integration/test_reliability.py` (every adapter), `test_run_limits.py`,
+  `test_progress.py` (crashes), and against the real services `tests/live/test_live_reliability.py`.
