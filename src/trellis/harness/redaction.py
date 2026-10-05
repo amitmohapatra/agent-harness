@@ -78,7 +78,9 @@ _VALUE_PATTERNS = (
     ),
 )
 
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+#: An address starts where a run of its characters starts (the lookbehind): tried from every
+#: position inside a long run instead, masking would be quadratic in the value's length.
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.]+")
 
 
 class Redactor:
