@@ -229,6 +229,7 @@ async def _concluded(
         await _settle_cancelled(
             agent, runtime.identity, runtime.events, runtime.worker_id, reason=runtime.cancelled
         )
+        await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
         return Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
     if timed_out is not None:
         log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)

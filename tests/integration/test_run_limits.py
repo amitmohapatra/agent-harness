@@ -275,3 +275,26 @@ async def test_a_run_cancelled_elsewhere_is_stopped_by_its_worker(
     await harness.runs.cancel(handle.run_id, reason="dup", tenant=handle.tenant)
     assert await asyncio.wait_for(working, 5)
     assert (await handle.status()).status is RunStatus.CANCELLED
+
+
+async def test_a_cancelled_run_keeps_its_transcript_and_says_nothing_of_the_agent(
+    memory_harness: Harness, memory_service: Any
+) -> None:
+    started = asyncio.Event()
+    runs: list[str] = []
+
+    async def waits(input: str, agent: Runtime) -> str:
+        runs.append(agent.run_id)
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    agent = memory_harness.wrap(waits, id="waits")
+    running = asyncio.create_task(agent.run("reconcile March", user="u"))
+    await started.wait()
+    await agent.cancel(runs[0], reason="dup")
+    assert (await running).status is RunStatus.CANCELLED
+    await memory_harness.writes.drain()
+    [batch] = memory_service.named("messages")
+    assert [m["content"] for m in batch.body["messages"]] == ["reconcile March"]
+    assert memory_service.named("feedback") == []  # no outcome: a cancel says nothing
