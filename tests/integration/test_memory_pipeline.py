@@ -665,7 +665,7 @@ async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
     billing = OpenAIAgent(
         name="billing",
         model=Model("b", [("pay", {"amount": 500}), ("pay", {"amount": 500}), "paid"]),
-        tools=await memory_harness.tools(pay, framework="openai-agents"),
+        tools=await memory_harness.tools(pay, framework="openai_agents"),
     )
     triage = OpenAIAgent(
         name="triage",

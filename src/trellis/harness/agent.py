@@ -108,7 +108,7 @@ class Agent:
         if given and self.adapter.fixed_tools:
             raise ConfigurationError(
                 f"a {self.adapter.name} target binds its tools when it is built: pass "
-                f"await h.tools(..., framework='langgraph') to the graph instead of "
+                f"await h.tools(..., framework='{self.adapter.name}') to the graph instead of "
                 f"{'/'.join(f'{n}=' for n in given)} (skills as skills(...), mcp= to h.tools)"
             )
         self.sources = [as_source(t) for t in tools]

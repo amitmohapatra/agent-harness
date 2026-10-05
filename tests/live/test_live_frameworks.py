@@ -74,7 +74,7 @@ async def langgraph(h: Harness, wiki: str, tmp: Path) -> tuple[Any, list[Any]]:
 
 
 async def deep_agent(h: Harness, wiki: str, tmp: Path) -> tuple[Any, list[Any]]:
-    tools = await h.tools(stock, framework="langgraph")
+    tools = await h.tools(stock, framework="deepagents")
     return create_deep_agent(model=await chat_model(h), tools=tools, system_prompt=SYSTEM), []
 
 
@@ -123,10 +123,10 @@ async def claude(h: Harness, wiki: str, tmp: Path) -> tuple[Any, list[Any]]:
 TARGETS: dict[str, Build] = {
     "langgraph": langgraph,
     "deepagents": deep_agent,
-    "openai-agents": openai_agents,
+    "openai_agents": openai_agents,
     "react": react,
     "function": function,
-    "claude": claude,
+    "claude_agent_sdk": claude,
 }
 
 
@@ -153,12 +153,12 @@ async def test_a_target_runs_with_memory_and_tools(
         assert loaded and loaded[0].data["chars"] > 0  # push
         called = {e.data.get("tool") for e in events if e.type is RunEventType.TOOL_CALL_START}
         assert {"memory_search", "stock"} <= called, called  # pull, and the local tool
-        if framework in ("function", "claude", "react"):
+        if framework in ("function", "claude_agent_sdk", "react"):
             assert f"{deepwiki}-{WIKI_TOOL}" in called  # the MCP tool, through Bifrost
         # the key allows one tool of one wiki: the toolbox holds exactly that MCP tool
         toolbox = await h.resolve(agent.sources, tenant=await h.tenant())
         assert [t.name for t in toolbox if t.spec.source == "mcp"] == [f"{deepwiki}-{WIKI_TOOL}"]
-        if framework == "claude":
+        if framework == "claude_agent_sdk":
             started = json.loads((tmp_path / "cli.json").read_text())
             assert "Berlin" in started["system_prompt"]
         assert h.writes.failed == 0  # every background write landed

@@ -17,7 +17,7 @@ from deepagents import create_deep_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 
-tools = await h.tools(refund, lookup_order, framework="langgraph")
+tools = await h.tools(refund, lookup_order, framework="deepagents")
 graph = create_deep_agent(
     model=model,
     tools=tools,

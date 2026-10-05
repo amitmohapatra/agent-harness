@@ -91,11 +91,11 @@ FRAMEWORKS: Final = (
     "langgraph",
     "stategraph",
     "deepagents",
-    "openai-agents",
-    "claude",
+    "openai_agents",
+    "claude_agent_sdk",
 )
 #: The targets whose framework pauses for approval itself.
-NATIVE: Final = ("langgraph", "deepagents", "openai-agents")
+NATIVE: Final = ("langgraph", "deepagents", "openai_agents")
 #: The graph targets: tools are built in with ``h.tools`` (a compiled graph binds them).
 GRAPHS: Final = ("langgraph", "stategraph", "deepagents")
 
@@ -182,7 +182,7 @@ class Built:
 async def build(case: Case, plan: Sequence[Call], *, hitl: bool = False) -> Built:
     """``case.framework``'s target, its model following ``plan``. ``hitl``: approvals of
     ``case.email`` by the framework itself."""
-    tools = case.tools(native_email=hitl and case.framework == "openai-agents")
+    tools = case.tools(native_email=hitl and case.framework == "openai_agents")
     return await BUILDERS[case.framework](case, list(plan), tools, hitl)
 
 
@@ -279,7 +279,7 @@ def state_graph(model: PlannedChatModel, tools: list[Any], *, confirm: bool) -> 
 async def _deep_agent(case: Case, plan: list[Call], tools: list[Any], hitl: bool) -> Built:
     """Deep Agents: it plans (``write_todos``), hands the stock check to a sub-agent (``task``)
     — which calls the harness's stock tool itself — then follows ``plan``."""
-    native = await case.h.tools(*tools, framework="langgraph")
+    native = await case.h.tools(*tools, framework="deepagents")
     checker = PlannedChatModel(plan=[(case.stock, {"sku": "A-1"})], final="A-1: {last} units.")
     model = PlannedChatModel(
         plan=[
@@ -327,8 +327,8 @@ BUILDERS: Final[dict[str, Builder]] = {
     "langgraph": _langgraph,
     "stategraph": _state_graph,
     "deepagents": _deep_agent,
-    "openai-agents": _openai_agents,
-    "claude": _claude,
+    "openai_agents": _openai_agents,
+    "claude_agent_sdk": _claude,
 }
 
 
@@ -475,7 +475,7 @@ async def test_the_frameworks_own_approval_is_a_harness_interrupt(
         asked = paused.interrupt
         assert asked.reason is InterruptReason.APPROVAL and asked.tool_call is not None
         assert asked.tool_call.tool == case.email and asked.tool_call.args["to"] == "ops"
-        if framework != "openai-agents":  # the middleware's whole request travels along
+        if framework != "openai_agents":  # the middleware's whole request travels along
             assert asked.payload is not None and asked.payload["action_requests"]
         record = await stored(h, paused.run_id)
         assert record.status is RunStatus.PAUSED and record.awaiting is not None
@@ -488,7 +488,7 @@ async def test_the_frameworks_own_approval_is_a_harness_interrupt(
         else:
             assert case.ledger == [] and REASON in done.answer
         assert (await stored(h, done.run_id)).status is RunStatus.SUCCESS
-        if framework == "openai-agents":  # the SDK's own tool: no harness record to count
+        if framework == "openai_agents":  # the SDK's own tool: no harness record to count
             await h.writes.drain()
             return
         counted = {"approvals": 1, "calls": 1} if decision == "approve" else {"rejections": 1}
@@ -552,7 +552,7 @@ async def test_a_deep_agents_sub_agent_call_waits_in_agent_runs(tmp_path: Path) 
     and the approval resumes the sub-agent in place."""
     async with live_harness() as h:
         case = Case(h, "deepagents", tmp_path)
-        native = await h.tools(*case.tools(), framework="langgraph")
+        native = await h.tools(*case.tools(), framework="deepagents")
         buyer = PlannedChatModel(plan=[(case.reorder, {"sku": "A-1", "qty": 20})], final="{last}")
         model = PlannedChatModel(
             plan=[("task", {"description": "Reorder 20 x A-1.", "subagent_type": "buyer"})]

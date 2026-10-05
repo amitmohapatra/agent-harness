@@ -49,7 +49,7 @@ refunds = Agent(
     name="refunds",
     instructions="You refund orders.",
     model=model,
-    tools=await h.tools(refund, framework="openai-agents"),  # FunctionTools, still the harness's
+    tools=await h.tools(refund, framework="openai_agents"),  # FunctionTools, still the harness's
 )
 triage = Agent(name="triage", instructions="Route requests.", model=model, handoffs=[refunds])
 agent = h.wrap(triage, id="support")

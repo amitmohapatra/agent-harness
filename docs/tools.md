@@ -103,10 +103,12 @@ agent = h.wrap(graph, id="stock")
 ```
 
 The result holds `stock`, the MCP tools the virtual key allows and (memory on) the memory
-tools. `framework="openai-agents"` returns `FunctionTool`s (for an agent reached by a handoff,
-whose tools `wrap(tools=)` does not reach); `framework="claude-agent-sdk"` returns one
+tools. `framework` is the adapter's name: `"langgraph"` (and `"deepagents"` for
+`create_deep_agent`) returns LangChain tools; `framework="openai_agents"` returns `FunctionTool`s (for an agent reached by a handoff,
+whose tools `wrap(tools=)` does not reach); `framework="claude_agent_sdk"` returns one
 in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its tools,
-`mcp__trellis__<tool>`, in `allowed_tools`). A LangGraph agent's tool hints are asked for among
+`mcp__trellis__<tool>`, in `allowed_tools`). Any other name is refused with the valid ones
+(`ConfigurationError`). A LangGraph agent's tool hints are asked for among
 these tools.
 
 The tools are built once, but governed at each call: governance looks the call up by its tool's

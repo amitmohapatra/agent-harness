@@ -40,7 +40,7 @@ The harness tools — `tools=[...]`, the MCP tools the Bifrost virtual key allow
 the memory tools — reach Claude as one in-process MCP server named `trellis` (tool names
 `mcp__trellis__<tool>`), added beside your own `mcp_servers` (a dict, a config file path or its
 JSON text) and pre-allowed in `allowed_tools`: the harness's bridge is their permission check.
-To build options yourself instead, `await h.tools(..., framework="claude-agent-sdk")` returns
+To build options yourself instead, `await h.tools(..., framework="claude_agent_sdk")` returns
 that server's config (add it to `mcp_servers` as `"trellis"` and its tools to `allowed_tools`).
 
 **`query(...)` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.

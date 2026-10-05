@@ -22,6 +22,7 @@ from bifrost_sdk import NO_GATEWAY_TOOLS
 from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
+from trellis.harness.adapters.base import ToolFormat
 from trellis.harness.agent import Agent
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
@@ -50,12 +51,14 @@ from trellis.runs import RunsClient, RunSummary
 
 log = logging.getLogger("trellis.harness")
 
-Framework = Literal["langgraph", "openai-agents", "claude-agent-sdk"]
-#: The native tool format each framework's agents are built with.
-FORMATS: Final = {
+Framework = Literal["langgraph", "deepagents", "openai_agents", "claude_agent_sdk"]
+#: The native tool format each framework's agents are built with, by the framework's adapter
+#: name (Deep Agents builds a LangGraph graph: LangChain tools too).
+FORMATS: Final[dict[str, ToolFormat]] = {
     "langgraph": "langchain",
-    "openai-agents": "openai_agents",
-    "claude-agent-sdk": "claude",
+    "deepagents": "langchain",
+    "openai_agents": "openai_agents",
+    "claude_agent_sdk": "claude",
 }
 #: The metadata key on a LangChain tool built by :meth:`Harness.tools`: which call built it.
 TOOLBOX: Final = "trellis_toolbox"
@@ -165,12 +168,18 @@ class Harness:
         framework: Framework,
         mcp: Sequence[str] | None = None,
     ) -> Any:
-        """The toolbox as ``framework``'s own tools, for building an agent with them before
-        wrapping it: LangChain tools (LangGraph, Deep Agents), ``FunctionTool``\\ s (OpenAI
-        Agents), or one in-process MCP server (Claude). It holds ``sources`` (``skills(...)``
-        among them), the MCP tools the virtual key allows (or the Virtual MCPs ``mcp`` names
-        hold) and — memory on — the memory service's agent tools. Every call is still the
-        harness's: governance, approval, record."""
+        """The toolbox as ``framework``'s own tools (by its adapter's name), for building an
+        agent with them before wrapping it: LangChain tools (``langgraph``, ``deepagents``),
+        ``FunctionTool``\\ s (``openai_agents``), or one in-process MCP server
+        (``claude_agent_sdk``); another name is refused, naming these. It holds ``sources``
+        (``skills(...)`` among them), the MCP tools the virtual key allows (or the Virtual MCPs
+        ``mcp`` names hold) and — memory on — the memory service's agent tools. Every call is
+        still the harness's: governance, approval, record."""
+        tool_format = FORMATS.get(framework)
+        if tool_format is None:
+            raise ConfigurationError(
+                f"no framework {framework!r}: name one of {', '.join(FORMATS)}"
+            )
         mine = [as_source(s) for s in sources]
         bundles = None if mcp is None else list(mcp)
         tenant = await self.tenant()
@@ -180,8 +189,8 @@ class Harness:
         if self.memory is not None:
             scope = self.memory.scoped(tenant)
             tools.extend(await self.memory_tools(scope))
-        native = convert(FORMATS[framework], tools)  # type: ignore[arg-type]
-        if framework == "langgraph" and native:
+        native = convert(tool_format, tools)
+        if tool_format == "langchain" and native:
             for tool in native:
                 tool.metadata = {**(tool.metadata or {}), TOOLBOX: number}
         return native

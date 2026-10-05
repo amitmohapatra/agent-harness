@@ -30,7 +30,7 @@ async def test_a_deep_agent_uses_its_own_tools_and_the_harness_tools(harness: Ha
     )
     graph = create_deep_agent(
         model=model,
-        tools=await harness.tools(refund, framework="langgraph"),
+        tools=await harness.tools(refund, framework="deepagents"),
         system_prompt="You process refunds.",
         checkpointer=InMemorySaver(),
     )

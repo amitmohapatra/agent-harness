@@ -311,7 +311,7 @@ async def test_the_toolbox_for_openai_agents_is_function_tools(harness: Harness)
         """Units of a SKU."""
         return 1
 
-    [native] = await harness.tools(lookup, framework="openai-agents")
+    [native] = await harness.tools(lookup, framework="openai_agents")
     assert isinstance(native, FunctionTool) and native.name == "lookup"
     assert harness.built_for([native]) == ([], None)  # only LangGraph tools name their toolbox
 

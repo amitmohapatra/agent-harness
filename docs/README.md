@@ -74,7 +74,7 @@ block page.
 |---|---|---|
 | a LangChain v1 agent (`create_agent`) or any compiled LangGraph graph | the graph, built with `await h.tools(..., framework="langgraph")` | [langgraph.md](frameworks/langgraph.md) |
 | a Deep Agent (`create_deep_agent`) | the graph it returns, built the same way | [deepagents.md](frameworks/deepagents.md) |
-| an OpenAI Agents SDK `Agent` (handoffs included) | the `Agent`, with `tools=[...]` (a handoff's specialist: `h.tools(..., framework="openai-agents")`) | [openai-agents.md](frameworks/openai-agents.md) |
+| an OpenAI Agents SDK `Agent` (handoffs included) | the `Agent`, with `tools=[...]` (a handoff's specialist: `h.tools(..., framework="openai_agents")`) | [openai-agents.md](frameworks/openai-agents.md) |
 | a Claude Agent SDK setup | the `ClaudeAgentOptions`, with `tools=[...]` | [claude-agent-sdk.md](frameworks/claude-agent-sdk.md) |
 | a model and tools, no framework | `ReAct(system=..., model=...)` | [react.md](frameworks/react.md) |
 | code that decides itself (a workflow, a router, glue) | `async def fn(input, agent)` | [functions.md](frameworks/functions.md) |

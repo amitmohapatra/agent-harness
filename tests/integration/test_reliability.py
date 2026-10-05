@@ -97,7 +97,7 @@ async def _langgraph(h: Harness, tools: list[Any], tmp: Path) -> Built:
 
 async def _deepagents(h: Harness, tools: list[Any], tmp: Path) -> Built:
     graph = create_deep_agent(
-        model=PlannedChatModel(plan=PLAN), tools=await h.tools(*tools, framework="langgraph")
+        model=PlannedChatModel(plan=PLAN), tools=await h.tools(*tools, framework="deepagents")
     )
     return graph, []
 
@@ -123,8 +123,8 @@ BUILDERS: Final[dict[str, Builder]] = {
     "react": _react,
     "langgraph": _langgraph,
     "deepagents": _deepagents,
-    "openai-agents": _openai_agents,
-    "claude": _claude,
+    "openai_agents": _openai_agents,
+    "claude_agent_sdk": _claude,
 }
 
 
