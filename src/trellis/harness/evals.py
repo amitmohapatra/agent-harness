@@ -36,6 +36,7 @@ builds experiments from: ``telemetry.Experiment``).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -52,7 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from trellis.contracts import ConfigurationError, RunStatus, new_id
 from trellis.harness import pipeline, telemetry
 from trellis.harness.adapters.react import _message, _Named, _unfenced
-from trellis.harness.clients.bifrost import Gateway
+from trellis.harness.clients.bifrost import Gateway, prompt_ref
 from trellis.harness.settings import Settings
 
 if TYPE_CHECKING:
@@ -410,11 +411,18 @@ class llm_judge:
     """A judge model scores the answer against ``criteria`` (0 to 1, with its reasoning as the
     comment). The model is the one :func:`evaluate` or :func:`judge` was given
     (:meth:`EvalServices.model`: ``TRELLIS_JUDGE_MODEL`` through ``BIFROST_URL`` with
-    ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). A reply that is not the JSON
-    asked for is asked once more; a second one is no score, with a warning."""
+    ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). ``prompt`` names a stored
+    prompt of the gateway (``"name"``, ``"name@version"``) the gateway prepends to the judge's
+    messages (a judge model named, not a model object). A reply that is not the JSON asked for
+    is asked once more; a second one is no score, with a warning."""
 
     criteria: str
     name: str = "llm_judge"
+    prompt: str | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self.prompt is not None:
+            prompt_ref(self.prompt)
 
     async def __call__(self, case: EvalCase) -> EvalScore | None:
         services = _services.get()
@@ -423,6 +431,13 @@ class llm_judge:
                 "llm_judge runs inside evaluate() or judge(): their services name the judge's model"
             )
         model = services.model()
+        if self.prompt is not None:
+            if not isinstance(model, _Named):
+                raise ConfigurationError(
+                    "llm_judge(prompt=) needs a Bifrost model name: the gateway prepends the "
+                    "stored prompt"
+                )
+            model = dataclasses.replace(model, prompt=await model.gateway.prompt(self.prompt))
         messages = [
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user", "content": _judge_prompt(self.criteria, case)},

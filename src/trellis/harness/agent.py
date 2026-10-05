@@ -29,7 +29,7 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import pipeline
+from trellis.harness import pipeline, skills
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
@@ -49,6 +49,7 @@ from trellis.harness.journal import Journal
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, reason_of, run_of
+from trellis.harness.skills import Skills
 from trellis.harness.subagents import SubAgent, asked_by, cancel_children
 from trellis.harness.telemetry import output, retrieval_span, trace_hex
 from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
@@ -92,6 +93,8 @@ class Agent:
         id: str,
         tools: Sequence[Any] = (),
         version: str | None = None,
+        mcp: Sequence[str] | None = None,
+        skills: Sequence[str] = (),
     ):
         self.harness = harness
         self.target = target
@@ -101,14 +104,20 @@ class Agent:
         self.adapter = detect(target)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))
-        if tools and self.adapter.fixed_tools:
+        given = [n for n, v in (("tools", tools), ("mcp", mcp), ("skills", skills)) if v]
+        if given and self.adapter.fixed_tools:
             raise ConfigurationError(
                 f"a {self.adapter.name} target binds its tools when it is built: pass "
-                f"await h.tools(..., framework='langgraph') to the graph instead of tools="
+                f"await h.tools(..., framework='langgraph') to the graph instead of "
+                f"{'/'.join(f'{n}=' for n in given)} (skills as skills(...), mcp= to h.tools)"
             )
         self.sources = [as_source(t) for t in tools]
+        if skills:
+            self.sources.append(Skills(skills))
+        #: the Virtual MCPs whose tools the agent has (``None``: everything its key allows)
+        self.mcp = None if mcp is None else list(mcp)
         if self.adapter.fixed_tools:
-            self.sources = harness.built_for(bound_tools(target))
+            self.sources, self.mcp = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
         self._toolboxes: dict[str, Toolbox] = {}
         #: the runs an attempt of which runs in this process now, by id
@@ -477,10 +486,20 @@ class Agent:
     def _toolbox(self, tenant: str) -> Toolbox:
         box = self._toolboxes.get(tenant)
         if box is None:
-            box = self._toolboxes[tenant] = self.harness.toolbox(self.sources, tenant=tenant)
+            box = self._toolboxes[tenant] = self.harness.toolbox(
+                self.sources, tenant=tenant, mcp=self.mcp
+            )
         return box
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
+        """What is pushed into the framework's input, in the runtime's context: the memory
+        context (:meth:`remembered`), then the section of the skills the run pinned
+        (``skills.pin``). The memory context, when there is one, is returned."""
+        pushed = await self.remembered(runtime)
+        await skills.pin(runtime, self.sources)
+        return pushed
+
+    async def remembered(self, runtime: Runtime) -> PromptContext | None:
         """The memory context for this run, in the runtime — with the tools section once the
         toolbox is large enough, whose candidates narrow the tools the model is offered. A
         failure is a warning."""
