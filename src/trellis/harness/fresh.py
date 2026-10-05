@@ -1,4 +1,5 @@
-"""A value read from a service and kept fresh: what the key is, the memory tools listed.
+"""A value read from a service and kept fresh: what the key is, the memory tools listed, an
+agent's toolbox.
 
 Read once, kept for ``ttl`` seconds, read again after that — one read at a time, however many
 runs ask at once. While the service cannot be reached the last value read is kept (and asked
@@ -39,7 +40,7 @@ class Fresh[T]:
 
     async def get(self) -> T:
         async with self._lock:
-            now = time.monotonic()
+            now = _now()
             if self.value is not None and now < self._until:
                 return self.value
             try:
@@ -59,3 +60,7 @@ class Fresh[T]:
                 return self.value
             self._until = now + self._ttl
             return self.value
+
+
+def _now() -> float:
+    return time.monotonic()
