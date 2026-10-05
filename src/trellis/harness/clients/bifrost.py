@@ -305,6 +305,12 @@ class Gateway:
             raise LookupError(f"the gateway has no skill named {name!r}")
         return found
 
+    async def served(self, name: str) -> str | None:
+        """The version of the skill ``name`` the gateway serves now — read now, not kept: the
+        gateway serves a file only of that version (``None``: no such skill)."""
+        found = [s for s in await self.admin.skills.list(search=name) if s.name == name]
+        return found[0].version if found else None
+
     async def skill_file(self, name: str, path: str) -> bytes:
         """A file of the skill's served version (the only one the gateway serves files of)."""
         return await self.admin.skills.read_file(name, path)

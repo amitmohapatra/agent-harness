@@ -140,12 +140,12 @@ async def _read(args: dict[str, Any]) -> str:
     path = str(args.get("path"))
     if path not in {f.path for f in skill.files}:
         raise ToolError(f"skill {skill.name} {skill.version} has no file {path!r}", source="tools")
-    served = await gateway.skill(skill.name)
-    if served.version != skill.version:
+    served = await gateway.served(skill.name)
+    if served != skill.version:
         raise ToolError(
             f"{path} of skill {skill.name} cannot be read: this run uses version "
             f"{skill.version}, and the gateway serves files only of the version it serves "
-            f"({served.version})",
+            f"({served or 'none'})",
             source="tools",
         )
     return (await gateway.skill_file(skill.name, path)).decode("utf-8", errors="replace")

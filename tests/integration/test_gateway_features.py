@@ -235,6 +235,17 @@ async def test_a_skill_file_must_be_one_the_skill_lists(h: Harness) -> None:
     assert "has no file 'x.md'" in str(result.answer)
 
 
+async def test_a_file_of_a_skill_deleted_since_the_run_began_is_refused(
+    h: Harness, fake: FakeGateway
+) -> None:
+    async def analyst(question: str, agent: Runtime) -> str:
+        del fake.skills["sql"]
+        return str(await agent.tools.call(READ_SKILL_FILE, name="sql", path="rules.md"))
+
+    result = await h.wrap(analyst, id="analyst", skills=["sql"]).run("r", user="u")
+    assert "serves files only of the version it serves (none)" in str(result.answer)
+
+
 async def test_a_react_model_reads_the_skills_section_and_is_offered_the_tools(
     h: Harness, fake: FakeGateway
 ) -> None:

@@ -129,6 +129,9 @@ async def test_a_skill_reads_as_served_or_as_a_version_kept_for_good() -> None:
     asked = fake.asked("/api/skills/s-sql")
     assert await gateway.skill("sql", "1.0.0") == old
     assert fake.asked("/api/skills/s-sql") == asked  # a published version never changes
+    assert await gateway.skill("sql") == served  # kept: read again after its TTL
+    assert await gateway.served("sql") == "1.1.0"  # read now, every time
+    assert await gateway.served("nope") is None
     assert await gateway.skill_file("sql", "a.md") == b"A"
     with pytest.raises(LookupError, match="no skill named 'nope'"):
         await gateway.skill("nope")
