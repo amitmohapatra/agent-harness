@@ -19,6 +19,7 @@ for you.
 | [scenarios.md](scenarios.md) | which to use when, in more detail: targets, tools, memory, pauses, runs, surfaces, observability, evaluation |
 | [configuration.md](configuration.md) | the environment, `Settings`, and who the key says the deployment is |
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
+| [subagents.md](subagents.md) | `agent.as_tool()`: an agent as another agent's tool — child runs, their pauses answered through the parent, crashes, cancel, time |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts |
@@ -103,6 +104,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 |---|---|
 | a tool that may hang to give up | `@tool(timeout=20)`, `openapi(spec, timeout=)`, `a2a(url, timeout=)` — a read says it timed out, a write is reported as of unknown effect |
 | a model call bounded | `ReAct(..., model_timeout=30)` |
+| a `ReAct` model whose window is not 128k tokens (and whose model object does not say) | `ReAct(..., context_window=32_000)`: older results are cleared and older turns compacted from it |
 | a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` → `TIMEOUT` |
 | reads retried, writes never repeated, after a crash too | nothing: automatic ([reliability.md](reliability.md#retries)) |
 | a tool's service to deduplicate | hand it `trellis.current().idempotency_key` (OpenAPI writes send it already) |
@@ -136,7 +138,8 @@ started with `start` or a schedule goes back to the queue and any worker continu
 |---|---|---|
 | a Python function in this process | `@tool(side_effects=...)`, or a bare function in `tools=[...]` | its declared side effects, overridden by the catalog |
 | an HTTP API with an OpenAPI document | `openapi(spec, only=[...])` | the method (GET read … DELETE irreversible), and the catalog |
-| another agent | `a2a(url)` | `write`, and the catalog |
+| another agent served elsewhere | `a2a(url)` | `write`, and the catalog |
+| another agent this harness wraps (a sub-agent) | `agent.as_tool()` in `tools=[...]` or `h.tools(...)` ([subagents.md](subagents.md)) | `read` when every tool it declares reads, else `write`; and the catalog |
 | shared across agents, owned by a platform team | an MCP server in Bifrost, allowed on the agent's virtual key — nothing in code | the server's annotations, and the catalog |
 | the agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write |
 | a framework's own tool (`function_tool`, Deep Agents' file tools, Claude's `Bash`) | as the framework does | the framework's permissions, not the harness's |

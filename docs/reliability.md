@@ -22,7 +22,8 @@ rules where it has the same pieces: `governed` for your own tools, `trellis.runs
 | [Retries](#retries) | — | reads retried, writes run once |
 | [Idempotency keys](#idempotency-keys) | the tool hands `trellis.current().idempotency_key` to its service | OpenAPI, A2A and MCP calls carry it |
 | [Unknown outcomes](#unknown-outcomes) | — | a write that timed out or was cut by a crash is told to the model, never re-run blind |
-| [Cancel](#cancel) | `agent.cancel(run_id, reason=)` | wherever the run is: queued, paused, here, on a worker |
+| [Calls made at once](#calls-made-at-once) | — | numbered in order, identical ones in turn, replayed call by call, saved one save at a time |
+| [Cancel](#cancel) | `agent.cancel(run_id, reason=)` | wherever the run is: queued, paused, here, on a worker; its sub-agents' runs with it |
 | [Releasing on shutdown](#releasing-on-shutdown) | — | a stopping worker hands its runs back at once |
 | [The last good tool list](#the-last-good-tool-list) | — | a gateway that is down does not empty the toolbox |
 | [Agent version](#agent-version) | `h.wrap(..., version=)` or `TRELLIS_AGENT_VERSION` | recorded with each run; a resume on another version says so |
@@ -254,7 +255,36 @@ questions answered are not asked again, tool calls completed return their record
 `ReAct`'s model steps are not asked again, a write that was in flight is [unknown](#unknown-outcomes)
 (or re-run with its key when idempotent), and the working time already spent still counts
 against `timeout`. Runs kept in process (`run`, `stream`) save no progress: nobody resumes them
-after their process died.
+after their process died. A [sub-agent](subagents.md)'s run working inside a call when the
+worker died is saved with its parent's progress, and the parent's next attempt continues it the
+same way.
+
+## Calls made at once
+
+**What.** Tool calls that run at the same time in one run: `ReAct`'s reads (several calls in
+one step: the reads at once, then the writes one at a time in the model's order —
+[react.md](frameworks/react.md)), and the frameworks that run tools concurrently themselves
+(LangGraph's tool node, the OpenAI Agents SDK, a function's `asyncio.gather`).
+
+**When.** Automatically, whenever a framework (or the model) makes them.
+
+**Where.** The bridge, every adapter; Way 2's `governed` calls are your framework's to order.
+
+**Automatic.**
+
+* Each call's step is numbered as it arrives — `ReAct` numbers a step's calls in the model's
+  order before any runs — and is the call's `ToolCall.step` (an approval shows it).
+* Identical calls (the same tool with the same arguments) made at once take their turn: one
+  runs, then the next, in the order they were made, so each has its own occurrence in the
+  journal and its own idempotency key; different calls run together.
+* The journal records each call where it belongs, so a resumed run hands each call the output
+  it got the first time, whatever order they finished in.
+* Progress saves go one at a time, and each saves the journal as it is then: a later checkpoint
+  never lands before an earlier one, and the last holds every call that finished.
+
+**On failure.** A call that pauses (an approval, an `ask` inside a tool) lets the calls beside
+it finish — they are journaled — and then the run pauses; on resume they replay. Cancelling the
+run cancels every call still running.
 
 ## Cancel
 
@@ -277,7 +307,9 @@ reason=...)` with `RunsClient`, and `trellis.runs.Worker` stops your handler. Ev
 
 **Automatic.** agent-runs keeps the reason and who asked; the pipeline ends the attempt as a
 cancellation — the event, the transcript so far, no outcome feedback, no judges. A cancelled
-run is never retried. Who may cancel: whoever may answer the run (agent-runs' rule).
+run is never retried. Who may cancel: whoever may answer the run (agent-runs' rule). The run's
+[sub-agents](subagents.md)' runs that have not ended are cancelled with it (one paused for a
+person at once), and theirs.
 
 **On failure.** A run kept in *another* process's `run`/`stream` (no worker, so no heartbeat)
 is cancelled in agent-runs at once, but that process learns only at its next write, which is
@@ -327,6 +359,7 @@ line naming both versions.
 | an A2A exchange: `a2a(timeout=)`; `remote(timeout=)` (per request) | 120 s | the author |
 | an MCP call | the run's remaining time, else the Bifrost SDK's 60 s | — |
 | a model call: `ReAct(model_timeout=)` | the Bifrost SDK's 60 s per attempt | the author |
+| a sub-agent's run (`agent.as_tool()`) | what is left of its parent's time, and its parent's deadline | — |
 | a run's working time: `timeout=` | none | the caller of `run`/`stream`/`start` |
 | a run's end: `deadline=` | none | the caller |
 | the platform's longest run | none | operations: `RUNS__RUNS__MAX_RUN_SECONDS` in agent-runs |

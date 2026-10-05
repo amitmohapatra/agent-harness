@@ -109,7 +109,9 @@ src/trellis/
     agent.py           Agent: run, stream, start, resume, schedule, serve_*; RunHandle
     pipeline.py        one attempt of one run (the fixed pipeline below)
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
-    journal.py         what a re-run needs: answers and tool outputs, keyed by content
+    journal.py         what a re-run needs: answers and tool outputs, keyed by content (and
+                       the journals of the sub-agents' runs working inside its calls)
+    subagents.py       agent.as_tool(): a wrapped agent as a tool, each call a child run
     events.py          a run's RunEvent stream (built only when someone listens)
     writes.py          background writes: retries, backpressure, the spool, auto-drain
     fresh.py           a value read from a service, kept for a TTL, the last one through outages
