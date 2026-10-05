@@ -211,6 +211,36 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | quality on live traffic | `Harness(judges=[...])`, sampled by `TRELLIS_JUDGE_SAMPLE` |
 | the same for an agent you do not wrap | `evaluate(my_agent, dataset, [...])` and `judge(case, [...], services=...)` ([blocks/evaluation.md](blocks/evaluation.md)) |
 
+### What is on, and how to turn it off
+
+Everything the deployment configures is on for every agent — nothing to set. One switch turns
+parts of it off: `without={...}`.
+
+```python
+agent = h.wrap(graph, id="triage", without={"judges"})  # every run of this agent
+await agent.run(question, user="ada", without={"memory"})  # this run: no memory at all
+```
+
+| Feature (`without=` name) | On when | What it is | Turned off |
+|---|---|---|---|
+| `memory` | `MEMORY_URL` | `memory_push`, `memory_pull` and `records` together | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
+| `memory_push` | `MEMORY_URL` | the memory context pushed into the framework's input (and the tool hints with it) | no context, no `/v1/context` call |
+| `memory_pull` | `MEMORY_URL` | the memory tools (`memory_search`, `tool_search`, ...) | not offered (a graph's, bound at build, answer that they are off) |
+| `records` | `MEMORY_URL` | the transcript, every tool call, the outcome, decisions as feedback | nothing written to memory about the run |
+| `hints` | `MEMORY_URL`, from 5 tools | the tool hints narrow the tools the model is offered | every tool offered |
+| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_GROUNDING_SAMPLE`) | the answer checked against the context it was given | not checked |
+| `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_JUDGE_SAMPLE`) | the online judges | not judged |
+| `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools (`mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
+| `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
+| `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
+
+`without=` on `h.wrap` turns them off for every run of the agent; on `agent.run`, `stream` and
+`start` for that run, on top of the agent's — kept with the run's record, so its resume, the
+worker that continues it and its sub-agents' runs are without them too. A name not in the table
+is refused (`ConfigurationError`, naming them). Not switchable, because they are automatic and
+deterministic: governance and approvals, the journal and replay, retries and time limits,
+tracing and redaction, the run record.
+
 ### What each environment variable turns on
 
 | Variable | Turns on |

@@ -23,7 +23,7 @@ async def test_the_key_names_the_tenant_and_its_role() -> None:
     async with live_harness() as h:
         key = await h.key()
         assert key.tenant_id is not None and await h.tenant() == key.tenant_id
-        assert key.role in ("service", "admin") and await h.writes_memory()
+        assert key.role in ("service", "admin") and h.memory is not None
 
 
 async def test_an_approval_rule_in_the_catalog_decides_which_calls_wait() -> None:

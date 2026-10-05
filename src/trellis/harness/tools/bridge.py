@@ -2,7 +2,8 @@
 record.
 
 1. **replay** — a call the journal already has (a resumed run re-planning the same step)
-   returns its recorded output and runs nothing;
+   returns its recorded output and runs nothing; a tool of a feature the run is without
+   (``without=``: a graph's tools are bound when it is built) is an error the model reads;
 2. **governance** — the run's tenant's :class:`~trellis.harness.governance.Governance` decides,
    by the tool's name, as the catalog says at the time of the call: ``run`` runs, ``announce``
    is announced on the run's stream, ``ask`` pauses the run for approval (an approver may edit
@@ -93,6 +94,16 @@ async def _called(
         outcome = _replayed(tool.name, output)
         _events(runtime, ref, tool_call, outcome)
         return outcome
+    if tool.feature is not None and not runtime.uses(tool.feature):
+        # a tool the framework was built with, of a feature this run is without
+        off = ToolOutcome(
+            tool=tool.name,
+            status=ToolStatus.ERROR,
+            output=f"{tool.name} is off in this run (without {tool.feature})",
+            error_class="FeatureOff",
+        )
+        _events(runtime, ref, tool_call, off)
+        return off
     if runtime.replay.interrupted(key) and not (tool.spec.idempotent or tool.resumable):
         # its worker died while it ran: it is not run again blind (an idempotent tool is,
         # with the same key, below, and so is one that continues where it was)
@@ -105,7 +116,7 @@ async def _called(
     args = tool_call.args
     runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool.name)
     runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)
-    runtime.used_code_mode |= tool.code_mode
+    runtime.used_code_mode |= tool.feature == "code_mode"
     runtime.used.add(tool.name)
     reads = decision.risk == "read"
     if not reads:

@@ -183,7 +183,7 @@ async def test_every_tool_is_published_once_mcp_with_annotations_local_with_side
 async def test_many_read_only_code_mode_tools_become_the_meta_tools() -> None:
     tools, _, _ = await resolved([Def(f"wiki-t{i}", "wiki") for i in range(20)])
     assert list(tools) == [s.name for s in CODE_MODE_TOOLS]
-    assert all(t.code_mode for t in tools.values())
+    assert all(t.feature == "code_mode" for t in tools.values())
 
 
 async def test_three_read_only_servers_go_to_code_mode_scoped_to_them_others_stay_normal() -> None:
@@ -194,7 +194,7 @@ async def test_three_read_only_servers_go_to_code_mode_scoped_to_them_others_sta
         Def("erp-create_po", "erp", annotations=None),
     ]
     tools, gateway, _ = await resolved(defs)
-    assert "erp-create_po" in tools and not tools["erp-create_po"].code_mode
+    assert "erp-create_po" in tools and tools["erp-create_po"].feature != "code_mode"
     await tools["execute_tool_code"].run({"code": "print(1)"})  # the harness's name...
     # ...run as the gateway's meta-tool
     assert gateway.executed == [("executeToolCode", {"code": "print(1)"}, ("a", "b", "c"))]
@@ -208,7 +208,7 @@ async def test_through_virtual_mcps_each_tool_runs_through_its_bundle_and_none_b
     )
     tools, _, _ = await resolved([], gateway=gateway, mcp=["finance", "audit"])
     assert list(tools) == ["a-x", "b-x", "c-x", "erp-pay", "d-y"]  # a-x once, through finance
-    assert not any(t.code_mode for t in tools.values())
+    assert not any(t.feature == "code_mode" for t in tools.values())
     await tools["a-x"].run({})
     await tools["d-y"].run({})
     assert gateway.through == ["finance", "audit"]
@@ -250,7 +250,7 @@ async def test_agent_mode_lists_that_cannot_be_read_leave_every_tool(
 )
 async def test_code_mode_only_when_every_tool_of_those_servers_reads(defs: list[Def]) -> None:
     tools, _, _ = await resolved(defs)
-    assert not any(t.code_mode for t in tools.values())
+    assert not any(t.feature == "code_mode" for t in tools.values())
     assert len(tools) == len(defs)
 
 
@@ -262,7 +262,7 @@ async def test_code_mode_only_when_every_tool_of_those_servers_reads(defs: list[
 async def test_governance_keeps_a_server_out_of_code_mode(rule: Rule) -> None:
     catalog = FakeCatalog({"wiki-t0": rule})
     tools, _, _ = await resolved([Def(f"wiki-t{i}", "wiki") for i in range(20)], catalog)
-    assert not any(t.code_mode for t in tools.values())
+    assert not any(t.feature == "code_mode" for t in tools.values())
 
 
 async def test_two_tools_of_one_name_are_refused() -> None:
@@ -310,11 +310,11 @@ async def test_a_rule_that_changes_changes_the_code_mode_choice(
     monkeypatch.setattr(catalog_module, "_now", clock)
     catalog = FakeCatalog()
     made, gateway, writes = box([Def(f"wiki-t{i}", "wiki") for i in range(20)], catalog)
-    assert all(t.code_mode for t in await made.tools())
+    assert all(t.feature == "code_mode" for t in await made.tools())
     catalog.rules["wiki-t3"] = Rule(risk="read", approve_when="true")
     catalog.version = 2
     clock.now += catalog_module.GOVERNANCE_TTL_SECONDS + 1
-    assert not any(t.code_mode for t in await made.tools())
+    assert not any(t.feature == "code_mode" for t in await made.tools())
     assert gateway.listed == 1  # the definitions stood: only the rules were read again
     await writes.aclose()
 

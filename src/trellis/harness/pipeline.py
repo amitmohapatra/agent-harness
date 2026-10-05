@@ -49,6 +49,7 @@ from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.events import RunEvents
+from trellis.harness.features import run_without
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
@@ -141,7 +142,7 @@ async def attempt(
     the run has left. ``observe`` is told the memory context the run was given (an offline
     evaluation's evaluators read it). ``parent`` is the run in whose tool call this one works
     (a sub-agent's run: its progress is the parent's, its spans in the parent's trace)."""
-    identity = Identity.of(record)
+    identity, without = Identity.of(record), run_without(record)
     budget = _budget(agent, record, remaining)
     journal = journal or Journal()
     unresumable = await _unheld(agent, identity, journal, resolution)
@@ -157,8 +158,8 @@ async def attempt(
         attempt=record.attempt,
         worker_id=worker_id,
         lease_seconds=lease_seconds,
-        run_memory=await agent.run_memory(identity),
-        writes_memory=await agent.harness.writes_memory(),
+        run_memory=await agent.run_memory(identity, without),
+        without=without,
         used=set(journal.used),
         task=query_of(input),
         started_at=datetime.now(UTC),

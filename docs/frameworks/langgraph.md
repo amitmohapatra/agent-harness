@@ -142,7 +142,10 @@ graph's model).
 ## Limits
 
 * Harness tools are fixed when the graph is compiled: the model is offered every bound tool
-  (hints shape the context, not the schemas sent).
+  (hints shape the context, not the schemas sent). A bound tool of a feature the run is
+  `without=` (an MCP tool, a skill's, a memory tool) stays bound, and its call is an error the
+  model reads; build the graph with `h.tools(..., mcp=[])` (or without `skills(...)`) to leave
+  them out of its schemas.
 * A custom state without `messages` gets no context message: read `trellis.current().context`.
 * An `InMemorySaver` pause resumes in place only in the process that paused; elsewhere a
   harness pause is a re-run from the journal and a graph's own pause fails (above).
