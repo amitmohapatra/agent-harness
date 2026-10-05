@@ -520,7 +520,7 @@ async def test_a_sandbox_that_cannot_be_paused_is_a_warning_and_one_no_source_ho
     async def work(input: str, agent: Runtime) -> Any:
         await agent.tools.call("sandbox_exec", command="echo hi")
         await paused(dataclasses.replace(agent, agent=plain))  # nothing: not its source
-        await ended(plain, agent.replay.journal, agent.run_id)
+        await ended(plain, agent.replay.journal.sandbox, agent.run_id)
         return await agent.ask("Go on?")
 
     agent = harness.wrap(work, id="stubborn", tools=[sandbox(provider)])

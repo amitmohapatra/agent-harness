@@ -5,8 +5,7 @@ hints that narrow what the model is offered) → the adapter → the outcome rec
 with its journal as the run's checkpoint, finished with its answer or error; the run's sandbox
 paused or deleted with it) → background writes (transcript, the run's ``system`` outcome, the
 sampled grounding check, the sampled online judges). The adapter is the only part that knows
-the framework. Each attempt is one ``invoke_agent`` span in the run's
-trace.
+the framework. Each attempt is one ``invoke_agent`` span in the run's trace.
 
 :func:`attempt` is the one way an attempt starts — ``agent.run``/``stream``, a resume, a
 worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``serve_a2a`` and
@@ -209,7 +208,7 @@ async def attempt(
             if RELEASED not in exc.args and await _settle_cancelled(
                 agent, identity, events, worker_id
             ):
-                await sandbox.ended(agent, journal, identity.run_id)
+                await sandbox.ended(agent, journal.sandbox, identity.run_id)
             raise
     except Exception as exc:
         # a framework may wrap or swallow the pause: the runtime is what says it paused
@@ -284,7 +283,7 @@ async def _concluded(
         assert extracted is not None
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
-        await sandbox.ended(agent, journal, runtime.run_id)
+        await sandbox.ended(agent, journal.sandbox, runtime.run_id)
     return result
 
 

@@ -224,8 +224,8 @@ class Agent:
             assert found is not None
             record = found
         elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
-            journal = await Journal.read(held.checkpoint, runs.artifacts, tenant=tenant)
-            await sandbox.ended(self, journal, run_id)
+            # (a journal kept as a run artifact is not read for it: the reaper deletes it)
+            await sandbox.ended(self, (held.checkpoint or {}).get("sandbox"), run_id)
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
 
@@ -385,7 +385,7 @@ class Agent:
                 reason=reason_of(resolution),
                 tenant=record.tenant_id,
             )
-            await sandbox.ended(self, journal, record.run_id)
+            await sandbox.ended(self, journal.sandbox, record.run_id)
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)

@@ -61,7 +61,6 @@ from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, Tool
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
-    from trellis.harness.journal import Journal
     from trellis.harness.runs import RunStore
 
 log = logging.getLogger("trellis.sandbox")
@@ -264,12 +263,13 @@ async def paused(runtime: Runtime) -> None:
     runtime.events.custom(EVENT, action="paused", sandbox=ref.id)
 
 
-async def ended(agent: Agent, journal: Journal, run_id: str) -> None:
-    """The run ``run_id`` of ``agent`` ended (``journal``: its own): its sandbox deleted. A
-    failure is logged — the run's end stands, and :func:`reap` deletes the sandbox later."""
-    if journal.sandbox is None:
+async def ended(agent: Agent, recorded: dict[str, Any] | None, run_id: str) -> None:
+    """The run ``run_id`` of ``agent`` ended: the sandbox its journal names (``recorded``:
+    ``Journal.sandbox``) deleted. A failure is logged — the run's end stands, and :func:`reap`
+    deletes the sandbox later."""
+    if recorded is None:
         return
-    ref = SandboxRef.model_validate(journal.sandbox)
+    ref = SandboxRef.model_validate(recorded)
     source = _source(agent)
     if source is None:  # not among the agent's own sources (a handoff's specialist's)
         log.warning("the sandbox %s of run %s is left to the reaper", ref.id, run_id)
