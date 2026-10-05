@@ -19,6 +19,7 @@ for you.
 | [scenarios.md](scenarios.md) | which to use when, in more detail: targets, tools, memory, pauses, runs, surfaces, observability, evaluation |
 | [configuration.md](configuration.md) | the environment, `Settings`, and who the key says the deployment is |
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
+| [gateway.md](gateway.md) | the Bifrost gateway: stored prompts (`prompt=`), skills (`skills=`), Virtual MCPs (`mcp=`), who an MCP call is for, what the gateway never does for a run (no injected tools, no Agent Mode, Code Mode through the bridge), frameworks' own MCP clients |
 | [subagents.md](subagents.md) | `agent.as_tool()`: an agent as another agent's tool — child runs, their pauses answered through the parent, crashes, cancel, time |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |

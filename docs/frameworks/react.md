@@ -33,12 +33,14 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 ```
 
 `ReAct(system, model, output=None, max_steps=12, *, max_result_chars=20000, max_repeats=3,
-model_timeout=None, context_window=None)`. `model` is a Bifrost model name, sent to
+model_timeout=None, context_window=None, prompt=None)`. `model` is a Bifrost model name, sent to
 `BIFROST_URL` with the agent's virtual key, or any object with `async complete(messages, **body)
 -> dict` (a chat-completions response) — your own client, or a scripted model in a test.
 `model_timeout` is the most one model call may take, in seconds. `context_window` is the
 model's window in tokens, only when the model object does not say (its `context_window`
-attribute) and the 128k assumed is wrong for it.
+attribute) and the 128k assumed is wrong for it. `prompt` names a stored prompt of the
+gateway's Prompt Repository (`"triage"`, or `"triage@3"` for that version) the gateway
+prepends to every model call — a model name only ([gateway.md](../gateway.md#prompts)).
 
 ## What is automatic
 
@@ -57,6 +59,8 @@ attribute) and the 128k assumed is wrong for it.
 | Stalls and failures | the same call in `max_repeats` consecutive steps stops the run; so do 3 consecutive steps in which every call failed (no such tool, arguments that do not fit, an error or a timeout: `ERROR_STREAK`) — a `ModelError` saying so |
 | Sub-agents | another wrapped agent in `tools=[agent.as_tool()]` is a call like any other: a child run that answers, pauses this run with its question, or is continued after a crash ([subagents.md](../subagents.md)) |
 | Slow models | a model call takes at most `model_timeout` (and what is left of the run's `timeout=`/`deadline=`), the gateway's own retries inside it; past it the run fails with a `ModelError` that may be retried (a queued run is queued again; its journaled steps are not asked again) — [reliability.md](../reliability.md#model-timeouts) |
+| Stored prompt | with `prompt=`: resolved once (kept fresh), its version pinned at the run's first model call and journaled, so every call of the run — a resume included — selects the same version; each `chat` span says which (`trellis.prompt.*`) |
+| Skills | with `h.wrap(..., skills=[...])`: their names and descriptions appended to `system` with the memory context, `load_skill` and `read_skill_file` in every request's `tools` ([gateway.md](../gateway.md#skills)) |
 | Records, grounding, judges, tracing | as for every target; `chat` spans carry the model, usage and finish reasons |
 
 ## Approvals, streaming, durable runs, surfaces, evaluation

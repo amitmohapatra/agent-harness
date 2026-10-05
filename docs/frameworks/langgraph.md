@@ -6,7 +6,9 @@ too, with a page of its own ([deepagents.md](deepagents.md)).
 
 **Install:** `pip install 'trellis-harness[langgraph]'` (LangGraph, `langchain-core` and
 `langchain`, which has `create_agent` and its middleware). Your model is your own LangChain chat
-model — `ChatOpenAI(base_url=BIFROST_URL, ...)` to go through Bifrost.
+model — `ChatOpenAI(base_url=BIFROST_URL, default_headers=await h.model_headers(), ...)` to go
+through Bifrost (the headers keep the gateway from adding its MCP tools to the model's requests,
+and select a stored prompt with `prompt=`: [gateway.md](../gateway.md)).
 
 This page is Way 1: the harness runs the graph. To keep calling the graph yourself and plug in
 the blocks (memory, governed tools asking through `interrupt`, the pause in agent-runs, a
