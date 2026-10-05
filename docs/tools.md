@@ -3,16 +3,17 @@
 ## The toolbox
 
 An agent's tools, per agent and tenant, in `tools/toolbox.py` — their definitions listed again
-after `TOOLS_TTL_SECONDS` (300). Whether a call runs, is announced or asks is not the tools':
+after `TOOLS_TTL_SECONDS` (300); while a listing fails (the gateway is down), the last good one
+stands and is listed again after `TOOLS_RETRY_SECONDS` (30). Whether a call runs, is announced or asks is not the tools':
 [governance](governance.md) decides it at each call, from the side effects below and the tool
 catalog.
 
 | Where from | Tools | Side effects |
 |---|---|---|
-| **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write |
-| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph | `side_effects=` (`"write"` by default) |
-| `a2a(url, *, name=None)` | one: the remote agent, `{"message": string}` in, its answer out | `"write"` |
-| `openapi(spec, *, only=None, base_url=None, headers=None)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
+| **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
+| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph; `timeout=` seconds per call (none by default; a sync function runs in a worker thread) | `side_effects=` (`"write"` by default) |
+| `a2a(url, *, name=None, timeout=None)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` per exchange (120 s by default) | `"write"` |
+| `openapi(spec, *, only=None, base_url=None, headers=None, timeout=30)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
 `tools=` takes only what runs in this process; which MCP tools an agent has is decided where
@@ -33,6 +34,16 @@ journal replay, governance (run, announce, or pause for approval:
 [observability.md](observability.md#redaction) — and results previewed up to 2000 characters), then the
 record. A tool that raises becomes an error result the model reads (`"<tool> failed: ..."`); a
 pause is never swallowed. A harness tool called outside a run is refused.
+
+Execution is bounded and counted ([reliability.md](reliability.md)): a call takes at most its
+tool's `timeout` and what is left of the run's time; one that only reads (or is idempotent) is
+tried again, up to twice, after an error that may pass (an OpenAPI `429` or `503`, a timeout, a
+dropped connection) — a write runs once; the tool reads its idempotency key from
+`trellis.current().idempotency_key` (OpenAPI writes send it as `Idempotency-Key`, A2A uses it
+as the message id); and a write is marked started, and saved, before it runs. A read out of
+time reads `"<tool> timed out after 20s"`; a write out of time, or one running when its worker
+died, has an *unknown* effect: the model reads that it may or may not have taken effect and
+should check, the journal keeps that, and the call is never run again blind.
 
 ## Tool hints: what the model is offered
 
@@ -97,3 +108,5 @@ it was set, within the 30 s the rules are kept ([governance.md](governance.md#wa
 
 `trellis.current().tools.call(name, **args)` calls any of the run's tools through the bridge;
 `tools.hints(task)` asks the memory service which of them fit (and offers the tools it names).
+Inside a tool call, `trellis.current().idempotency_key` is that call's key and
+`trellis.current().remaining()` the seconds it may still take (`None`: no limit).

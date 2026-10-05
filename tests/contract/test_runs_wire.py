@@ -16,6 +16,7 @@ import enum
 import json
 import re
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -215,15 +216,8 @@ class RunsService:
                 run_id, status, output=body["output"], error=error, worker_id=worker, tenant=tenant
             )
             return 200, done.model_dump(mode="json")
-        if action == "heartbeat":
-            lease: Lease = await store.heartbeat(
-                run_id,
-                body["worker_id"],
-                lease_seconds=body["lease_seconds"],
-                checkpoint=body.get("checkpoint"),
-                tenant=tenant,
-            )
-            return 200, lease.model_dump(mode="json")
+        if action in ("heartbeat", "cancel", "release"):
+            return 200, (await self._held(run_id, action, body, tenant)).model_dump(mode="json")
         assert action == "artifacts", action
         ref = await store.artifacts.upload(
             run_id,
@@ -233,6 +227,24 @@ class RunsService:
             tenant=tenant,
         )
         return 201, ref.model_dump(mode="json")
+
+    async def _held(
+        self, run_id: str, action: str, body: Any, tenant: str | None
+    ) -> RunRecord | Lease:
+        """A worker's heartbeat or release, or a cancel."""
+        if action == "heartbeat":
+            return await self.store.heartbeat(
+                run_id,
+                body["worker_id"],
+                lease_seconds=body["lease_seconds"],
+                checkpoint=body.get("checkpoint"),
+                tenant=tenant,
+            )
+        if action == "cancel":
+            return await self.store.cancel(run_id, reason=body.get("reason"), tenant=tenant)
+        return await self.store.release(
+            run_id, body["worker_id"], checkpoint=body.get("checkpoint"), tenant=tenant
+        )
 
 
 def _bounded(checkpoint: dict[str, Any] | None) -> None:
@@ -378,6 +390,26 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
 def export(order: str) -> str:
     """Export an order's history."""
     return "x" * (MAX_CHECKPOINT_BYTES + 1)  # a journal larger than a checkpoint may be
+
+
+async def test_a_runs_limits_version_and_cancel_speak_the_runs_contract(
+    wired: tuple[Harness, RunsService],
+) -> None:
+    h, service = wired
+    deadline = datetime.now(UTC) + timedelta(hours=1)
+    queued = h.wrap(billing, id="billing", tools=[charge], version="2026.10")
+    handle = await queued.start({"order": "o-8"}, user="ada", timeout=60, deadline=deadline)
+    record = await handle.status()
+    assert (record.timeout_seconds, record.deadline, record.agent_version) == (
+        60,
+        deadline,
+        "2026.10",
+    )
+    assert (await handle.cancel(reason="a duplicate")).status is RunStatus.CANCELLED
+    timed = await h.wrap(failing, id="failing").run("x", user="ada", timeout=30)
+    assert timed.status is RunStatus.ERROR  # within its time: the error, not a timeout
+    assert service.violations == [], "\n".join(service.violations)
+    assert ("POST", "/v1/runs/{id}/cancel") in service.seen
 
 
 async def test_a_journal_larger_than_a_checkpoint_travels_as_a_run_artifact(

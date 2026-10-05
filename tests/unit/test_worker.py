@@ -118,7 +118,7 @@ async def test_cancelling_a_running_worker_cancels_the_runs_it_holds(harness: Ha
 
 async def test_a_released_run_writes_nothing(harness: Harness) -> None:
     """A second stop releases the runs held (``trellis.runs.RELEASED``): the pipeline records
-    no ending, so the lease lapses and another worker runs the run again."""
+    no ending, and the worker hands the run back to the queue for another worker at once."""
     started = asyncio.Event()
 
     async def forever(input: str, agent: Runtime) -> str:
@@ -136,7 +136,8 @@ async def test_a_released_run_writes_nothing(harness: Harness) -> None:
     assert not task.done()  # the run held gets its grace period
     worker.stop()
     await asyncio.wait_for(task, 5)
-    assert (await handle.status()).status is RunStatus.RUNNING
+    record = await handle.status()
+    assert record.status is RunStatus.QUEUED and record.attempt == 2
 
 
 async def test_a_lease_another_worker_took_stops_the_run_and_writes_nothing(
@@ -161,7 +162,7 @@ async def test_a_lease_another_worker_took_stops_the_run_and_writes_nothing(
     record = await handle.status()
     assert record.status is RunStatus.RUNNING  # the other worker's run, untouched
     assert f"lease on {handle.run_id} lost" in caplog.text
-    assert "taken over by another worker; nothing written" in caplog.text
+    assert "ended or taken over elsewhere; nothing written" in caplog.text
 
 
 # --------------------------------------------------------------------------- the CLI

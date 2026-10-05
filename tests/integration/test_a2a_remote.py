@@ -304,3 +304,25 @@ async def test_a_remote_failure_is_the_tool_error_the_calling_model_reads(
     assert "out of stock" in result.answer
     await harness.aclose()
     await served.aclose()
+
+
+async def test_the_tool_takes_its_timeout_and_opens_its_task_with_the_calls_key(
+    remote_harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[str] = []
+    send = a2a_client._send
+
+    async def recorded(client: Any, message: Message, context: Any) -> Any:
+        sent.append(message.message_id)
+        return await send(client, message, context)
+
+    monkeypatch.setattr(a2a_client, "_send", recorded)
+    harness = Harness(config=Settings())
+    agent = harness.wrap(delegate, id="caller", tools=[a2a(URL, timeout=7)])
+    result = await agent.run("world", user="u1")
+    assert result.answer == "hello world"
+    assert sent[0].startswith(f"{result.run_id}:")  # the same message again after a crash
+    [tool] = await harness.resolve([a2a(URL, timeout=7)], tenant=TENANT)
+    assert tool.timeout == 7
+    await harness.aclose()
+    await remote_harness.aclose()

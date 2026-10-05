@@ -23,6 +23,7 @@ for you.
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts |
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, schedules, the inbox, the agent-runs wire |
+| [reliability.md](reliability.md) | time limits (tools, models, runs, deadlines), retries and every retry layer, idempotency keys, crashes and unknown outcomes, cancel, the agent's version |
 | [surfaces.md](surfaces.md) | `serve_chat` (AG-UI), `serve_a2a`, and `a2a(url)` tools |
 | [observability.md](observability.md) | OTel GenAI spans, Langfuse, scores, the collector |
 | [evaluation.md](evaluation.md) | offline (`h.evaluate` over a dataset) and online (`judges=` on sampled runs) evaluation; the evaluators, the judge's model and budget, Langfuse experiments |
@@ -96,6 +97,18 @@ own (built-in tools, sub-agents, handoffs) — each page says.
 A run started with `run`/`stream`/`serve_chat` resumes in the process that calls `resume`; one
 started with `start` or a schedule goes back to the queue and any worker continues it.
 
+### Time, failures and cancelling
+
+| You want | Use |
+|---|---|
+| a tool that may hang to give up | `@tool(timeout=20)`, `openapi(spec, timeout=)`, `a2a(url, timeout=)` — a read says it timed out, a write is reported as of unknown effect |
+| a model call bounded | `ReAct(..., model_timeout=30)` |
+| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` → `TIMEOUT` |
+| reads retried, writes never repeated, after a crash too | nothing: automatic ([reliability.md](reliability.md#retries)) |
+| a tool's service to deduplicate | hand it `trellis.current().idempotency_key` (OpenAPI writes send it already) |
+| to stop a run | `await agent.cancel(run_id, reason=...)` or `await handle.cancel()` — queued, paused, here or on a worker |
+| to know which code ran a run | `h.wrap(..., version=)` or `TRELLIS_AGENT_VERSION` |
+
 ### Local or agent-runs
 
 | | Without `RUNS_URL` | With `RUNS_URL` |
@@ -104,6 +117,8 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | `start` + workers | workers in this process | any worker process, leases, crash recovery |
 | schedules | fire when a worker in this process asks for work | agent-runs' ticker |
 | deadlines and escalation (`ask(deadline=, escalate_to=)`) | not enforced | the ticker escalates or times the run out |
+| a run's `timeout=` and `deadline=` | each attempt stops on time | each attempt stops on time, and the ticker ends a run past either, its worker dead or not |
+| a queued run that fails with an error that may pass | ends `ERROR` | queued again, up to 3 times, after a backoff |
 | large `ask` payloads | in process | run artifacts (`payload_ref`) |
 
 ### AG-UI or A2A
@@ -170,6 +185,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `_HEADERS` | trace export; with Langfuse's credentials, its scores API and datasets |
 | `TRELLIS_SPOOL_DIR` | memory writes kept on disk across an outage and a restart |
 | `TRELLIS_WORKER_CONCURRENCY` | runs a worker executes at once |
+| `TRELLIS_AGENT_VERSION` | the agents' version, recorded with every run they start |
 | `TRELLIS_GROUNDING_SAMPLE` | the share of runs checked for grounding |
 | `TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`, `TRELLIS_JUDGE_SAMPLE` | the judge's model, its budget, and the share of runs online judges score |
 

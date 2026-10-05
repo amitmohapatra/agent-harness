@@ -14,6 +14,7 @@ from bifrost_sdk import ToolAnnotations
 from tests.support.catalog import FakeCatalog
 from trellis import tool
 from trellis.contracts import ConfigurationError
+from trellis.harness import fresh
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
@@ -210,7 +211,7 @@ class Clock:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     clock = Clock()
-    monkeypatch.setattr(toolbox, "_now", clock)
+    monkeypatch.setattr(fresh, "_now", clock)
     return clock
 
 
@@ -274,4 +275,47 @@ async def test_an_empty_toolbox_asks_the_catalog_nothing() -> None:
     made, _, writes = box([], catalog)
     assert await made.tools() == []
     assert catalog.asked == []
+    await writes.aclose()
+
+
+async def test_a_listing_that_fails_keeps_the_last_good_one(clock: Clock) -> None:
+    made, gateway, writes = box([Def("erp-get", "erp")], FakeCatalog())
+    first = await made.tools()
+    down = Gateway([])
+
+    async def unreachable() -> list[Def]:
+        down.listed += 1
+        raise ConnectionError("the gateway is down")
+
+    gateway.tools = unreachable  # type: ignore[method-assign]
+    clock.now += toolbox.TOOLS_TTL_SECONDS + 1
+    assert [t.name for t in await made.tools()] == [t.name for t in first]
+    clock.now += toolbox.TOOLS_RETRY_SECONDS / 2
+    await made.tools()
+    assert down.listed == 1  # not asked again before the retry interval
+    clock.now += toolbox.TOOLS_RETRY_SECONDS
+    await made.tools()
+    assert down.listed == 2
+    await writes.aclose()
+
+
+async def test_a_toolbox_never_listed_raises_when_listing_fails() -> None:
+    made, gateway, writes = box([])
+
+    async def unreachable() -> list[Def]:
+        raise ConnectionError("the gateway is down")
+
+    gateway.tools = unreachable  # type: ignore[method-assign]
+    with pytest.raises(ConnectionError, match="down"):
+        await made.tools()
+    await writes.aclose()
+
+
+async def test_an_mcp_tool_its_server_says_is_idempotent_is_idempotent() -> None:
+    hinted = ToolAnnotations.model_validate({"idempotentHint": True})
+    made, _, writes = box([Def("erp-put", "erp", annotations=hinted), Def("erp-post", "erp")])
+    assert {t.name: t.spec.idempotent for t in await made.tools()} == {
+        "erp-put": True,
+        "erp-post": False,
+    }
     await writes.aclose()

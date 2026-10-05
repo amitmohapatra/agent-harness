@@ -14,7 +14,7 @@ nothing (attributes are built only for a recording span).
 
 | Span | Attributes |
 |---|---|
-| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the thread), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer) |
+| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the thread), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer); with an agent version (`h.wrap(..., version=)`, `TRELLIS_AGENT_VERSION`), `gen_ai.agent.version` and `langfuse.version` |
 | `retrieve memory` — the pushed context | `gen_ai.operation.name=retrieve`, `langfuse.observation.type=retriever`, input (the question), output (the rendered context) |
 | `execute_tool <tool>` — one per call | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` (`extension` for MCP, else `function`), `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `langfuse.observation.type=tool`, `trellis.tool.source`, `trellis.governance.action` (`run`, `announce` or `ask`: [governance.md](governance.md)) |
 | `chat <model>` — a model call the harness makes (`ReAct`) | `gen_ai.operation.name=chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`, `langfuse.observation.type=generation`, input/output |
@@ -47,8 +47,8 @@ person's feedback days later, lands on it without anything stored.
 
 | Counter | Attributes | Counted when |
 |---|---|---|
-| `trellis.runs` | `agent`, `outcome` (`success`, `error`, `interrupt`, `cancelled`) | an attempt ends |
-| `trellis.tool_calls` | `tool`, `status` (`ok`, `error`) | the bridge executed a call (a replayed or rejected call is not counted) |
+| `trellis.runs` | `agent`, `outcome` (`success`, `error`, `timeout`, `interrupt`, `cancelled`) | an attempt ends |
+| `trellis.tool_calls` | `tool`, `status` (`ok`, `error`, `timeout`) | the bridge executed a call (a replayed or rejected call is not counted) |
 | `trellis.writes.failed` | `write` (the background write's label, e.g. `memory.transcript`) | a background write failed or the write queue was full |
 
 They go wherever the application's OTel meter provider sends them (the harness installs a

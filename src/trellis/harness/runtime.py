@@ -2,15 +2,18 @@
 
 The runtime is set for the duration of one attempt of one run (a ``ContextVar``, so every
 task the framework spawns inherits it). It carries the run's identity, its memory scope, its
-tools and the one way to pause: :meth:`Runtime.ask`.
+tools, its time (:meth:`Runtime.remaining`; inside a tool call, that call's
+:attr:`~Runtime.idempotency_key`) and the one way to pause: :meth:`Runtime.ask`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -50,6 +53,18 @@ INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 PROGRESS_SECONDS: Final = 20.0
 
 _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=None)
+
+
+@dataclass(frozen=True, slots=True)
+class _Call:
+    """The tool or model call the code running now is in: when it must end (``time.monotonic``)
+    and, for a tool call, its idempotency key."""
+
+    ends: float | None
+    key: str | None
+
+
+_call: ContextVar[_Call | None] = ContextVar("trellis_call", default=None)
 
 
 def current() -> Runtime | None:
@@ -109,6 +124,12 @@ class Runtime:
     #: the run's transcript, tool calls and outcome are recorded in the memory service
     writes_memory: bool = False
     started_at: datetime | None = None
+    #: when the run must stop working (``time.monotonic``): what was left of its time limit
+    #: and its deadline when the attempt began (``None``: neither)
+    ends_at: float | None = None
+    #: the task the attempt runs in (``agent.cancel`` cancels it), and why it was cancelled
+    running_in: asyncio.Task[Any] | None = None
+    cancelled: str | None = None
     _asked: int = 0
     _steps: int = 0
     _saved_at: float | None = None
@@ -170,6 +191,44 @@ class Runtime:
     def next_step(self) -> int:
         self._steps += 1
         return self._steps
+
+    # ------------------------------------------------------------------ time
+    @property
+    def idempotency_key(self) -> str | None:
+        """Inside a tool call: its idempotency key — the same for that call in every attempt
+        of the run (re-run after a pause or a crash), different for every other call (another
+        run's, a second identical call of this run). Hand it to the service the tool calls,
+        which then performs a repeated request once (OpenAPI tools send it as
+        ``Idempotency-Key``). ``None`` outside a tool call."""
+        call = _call.get()
+        return call.key if call is not None else None
+
+    def remaining(self) -> float | None:
+        """The seconds the code running now may still take: what is left of the run's time
+        (its ``timeout`` and ``deadline``) and of the tool or model call it is in; ``None``
+        when nothing limits it."""
+        call = _call.get()
+        ends = [t for t in (self.ends_at, call.ends if call else None) if t is not None]
+        if not ends:
+            return None
+        return max(0.0, min(ends) - time.monotonic())
+
+    @contextlib.asynccontextmanager
+    async def limited(
+        self, seconds: float | None, *, key: str | None = None
+    ) -> AsyncIterator[None]:
+        """The code inside — a tool call (``key``: its idempotency key) or a model call —
+        takes at most ``seconds`` (``None``: no limit of its own), or raises ``TimeoutError``;
+        the run's own time bounds it as well (the pipeline stops the run)."""
+        own = None if seconds is None else time.monotonic() + seconds
+        outer = _call.get()
+        ends = [t for t in (own, outer.ends if outer else None) if t is not None]
+        token = _call.set(_Call(min(ends) if ends else None, key))
+        try:
+            async with asyncio.timeout(seconds):
+                yield
+        finally:
+            _call.reset(token)
 
     # ------------------------------------------------------------------ progress
     async def progress(self, *, now: bool) -> None:

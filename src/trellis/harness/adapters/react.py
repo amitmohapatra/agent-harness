@@ -22,7 +22,10 @@ What keeps a run going when the model slips:
   run (a stall), as ``max_steps`` does;
 * every model step is journaled (keyed by the step and the conversation so far): a resumed
   run — after a pause, or a worker crash — replays the steps it already took instead of
-  calling the model again, and the journal replays their tool calls.
+  calling the model again, and the journal replays their tool calls;
+* a model call takes at most ``model_timeout`` seconds (and what is left of the run's time),
+  the gateway's own retries included: past it the run fails with a ``ModelError`` that may be
+  retried.
 """
 
 from __future__ import annotations
@@ -73,6 +76,12 @@ class ReAct:
     max_result_chars: int = field(default=MAX_RESULT_CHARS, kw_only=True)
     #: consecutive steps repeating one call (same tool, same arguments) that stop the run
     max_repeats: int = field(default=MAX_REPEATS, kw_only=True)
+    #: the most one model call may take, in seconds (``None``: the gateway's own limit)
+    model_timeout: float | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self.model_timeout is not None and self.model_timeout <= 0:
+            raise ConfigurationError("model_timeout is a number of seconds over 0")
 
 
 @dataclass(slots=True)
@@ -125,7 +134,15 @@ class ReActAdapter:
         for step in range(target.max_steps):
             offered = openai_chat.convert([t for t in run.tools if runtime.offers(t.name)])
             request = {**body, "tools": offered} if offered else body
-            message = await _step(runtime, model, messages, name=name, step=step, request=request)
+            message = await _step(
+                runtime,
+                model,
+                messages,
+                name=name,
+                step=step,
+                request=request,
+                limit=target.model_timeout,
+            )
             messages.append(message)
             content = message.get("content")
             if isinstance(content, str) and content:
@@ -167,15 +184,24 @@ async def _step(
     name: str,
     step: int,
     request: dict[str, Any],
+    limit: float | None,
 ) -> dict[str, Any]:
     """One model step: the journal's, when a resumed run already took it with this
-    conversation, else the model's (journaled, and saved as progress in a worker)."""
+    conversation, else the model's within ``limit`` seconds (journaled, and saved as progress
+    in a worker)."""
     key = content_key("react", step, [m for m in messages if m.get("role") != "system"])
     replayed, recorded = runtime.replay.call(key)
     if replayed:
         return dict(recorded)
     with model_span(name, messages) as span:
-        reply = await model.complete(messages, **request)
+        try:
+            async with runtime.limited(limit):
+                reply = await model.complete(messages, **request)
+        except TimeoutError as exc:
+            within = "" if limit is None else f" within {limit:g}s"
+            raise ModelError(
+                f"the model did not answer{within}", source="react", retryable=True
+            ) from exc
         usage(span, reply)
         message = _message(reply)
         span_output(span, message.get("content") or message.get("tool_calls"))

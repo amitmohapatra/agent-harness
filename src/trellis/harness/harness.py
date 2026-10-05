@@ -132,13 +132,20 @@ class Harness:
 
     # ------------------------------------------------------------------ attaching
     def wrap(
-        self, target: Any, *, id: str, tools: Sequence[Source | Callable[..., Any]] = ()
+        self,
+        target: Any,
+        *,
+        id: str,
+        tools: Sequence[Source | Callable[..., Any]] = (),
+        version: str | None = None,
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
         ``tools`` are the agent's own, run in this process (functions, ``a2a``, ``openapi``);
-        its MCP tools are the ones the Bifrost virtual key allows."""
-        agent = Agent(self, target, id=id, tools=tools)
+        its MCP tools are the ones the Bifrost virtual key allows. ``version`` is the version
+        of the agent's code (else ``TRELLIS_AGENT_VERSION``), recorded with each run it starts:
+        a run resumed on another version goes on, with a warning naming both."""
+        agent = Agent(self, target, id=id, tools=tools, version=version)
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
         self.agents[agent.id] = agent

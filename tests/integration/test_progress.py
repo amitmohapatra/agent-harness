@@ -12,10 +12,11 @@ from typing import Any
 import pytest
 
 from tests.support.models import ScriptedChat
-from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
-from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
+from trellis import Harness, ReAct, Runtime, Settings, current, tool
+from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus, ToolSpec
+from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES, content_key
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.base import Tool
 from trellis.runs import Lease, LeaseLostError, PayloadTooLargeError
 
 paid: list[int] = []
@@ -172,8 +173,12 @@ async def test_reads_are_saved_at_most_every_progress_interval(
     handle = await agent.start("x", user="u")
     assert await harness.worker([agent]).run_once()
     assert (await handle.result(timeout=5)).status is RunStatus.SUCCESS
-    # the first read saves, the next two are within the interval, the write always saves
-    assert len(saved) == 2
+    # the first read saves, the next two are within the interval, the write saves before it
+    # runs (marked started) and after
+    assert len(saved) == 3
+    assert saved[1] is not None and saved[1]["started"] == {
+        content_key("call", "pay", {"amount": 1}): 1
+    }
     assert saved[-1] is not None and len(saved[-1]["calls"]) == 4
 
 
@@ -222,7 +227,7 @@ async def test_a_lease_lost_while_saving_progress_stops_the_run(
     agent = harness.wrap(billing, id="billing", tools=[pay])
     handle = await agent.start("x", user="u")
     assert await harness.worker([agent]).run_once()
-    assert paid == [1]  # nothing after the lost lease
+    assert paid == []  # nothing after the lost lease: the write's save before it runs failed
     assert (await handle.status()).status is RunStatus.RUNNING  # nothing written
 
 
@@ -289,3 +294,100 @@ async def test_a_journal_whose_artifact_is_gone_leaves_the_run_waiting(harness: 
         await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
     record = await store.get(paused.run_id)
     assert record is not None and record.status is RunStatus.PAUSED
+
+
+# --------------------------------------------------------------------------- a call in flight
+
+
+async def test_a_write_running_when_its_worker_died_is_unknown_and_not_run_again(
+    harness: Harness,
+) -> None:
+    crashes = [Crash()]
+    wired: list[int] = []
+
+    @tool(side_effects="write")
+    async def wire(amount: int) -> str:
+        """Wire money."""
+        wired.append(amount)
+        if crashes:
+            raise crashes.pop()  # the worker dies while the bank works on it
+        return "wired"
+
+    async def billing(input: str, agent: Runtime) -> str:
+        return await agent.tools.call("wire", amount=5)
+
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    agent = harness.wrap(billing, id="billing", tools=[wire])
+    handle = await agent.start("x", user="u")
+    await crash_once(store, agent, handle)
+    assert await harness.worker([agent]).run_once()
+    done = await handle.result(timeout=5)
+    assert done.answer == (
+        "wire was interrupted by a crash; it may or may not have taken effect: check before "
+        "calling it again"
+    )
+    assert wired == [5]  # not wired twice
+
+
+class Idempotent:
+    """A source whose tool says it is idempotent: after a crash it runs again, with its key."""
+
+    def __init__(self) -> None:
+        self.keys: list[str | None] = []
+        self.crashes = [Crash()]
+
+    async def resolve(self) -> list[Tool]:
+        spec = ToolSpec(name="upsert", side_effects="write", idempotent=True)
+        return [Tool(spec, self.run)]
+
+    async def run(self, args: dict[str, Any]) -> str:
+        runtime = current()
+        self.keys.append(runtime.idempotency_key if runtime else None)
+        if self.crashes:
+            raise self.crashes.pop()
+        return "stored"
+
+
+async def test_an_idempotent_write_runs_again_after_a_crash_with_the_same_key(
+    harness: Harness,
+) -> None:
+    source = Idempotent()
+
+    async def saving(input: str, agent: Runtime) -> str:
+        return await agent.tools.call("upsert", row=1)
+
+    store = harness.runs
+    assert isinstance(store, LocalRuns)
+    agent = harness.wrap(saving, id="saving", tools=[source])
+    handle = await agent.start("x", user="u")
+    await crash_once(store, agent, handle)
+    assert await harness.worker([agent]).run_once()
+    assert (await handle.result(timeout=5)).answer == "stored"
+    first, again = source.keys
+    assert first is not None and first == again  # the service sees one request, twice
+
+
+async def test_a_write_that_asks_or_fails_runs_again_on_resume(harness: Harness) -> None:
+    ran: list[str] = []
+
+    @tool(side_effects="write")
+    async def post(text: str) -> str:
+        """Post a message, after a person confirms the wording."""
+        ran.append(text)
+        runtime = current()
+        assert runtime is not None
+        if text == "draft":
+            raise ValueError("the board is read-only")
+        return f"posted {await runtime.ask(f'Post {text!r}?')}"
+
+    async def poster(input: str, agent: Runtime) -> list[Any]:
+        return [await agent.tools.call("post", text=t) for t in ("draft", "hi")]
+
+    agent = harness.wrap(poster, id="poster", tools=[post])
+    paused = await agent.run("x", user="u")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    # neither the failed call nor the one that asked reads as interrupted by a crash
+    assert done.answer == ["post failed: the board is read-only", "posted yes"]
+    assert ran == ["draft", "hi", "draft", "hi"]

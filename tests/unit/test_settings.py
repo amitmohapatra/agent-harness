@@ -24,6 +24,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
             "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Basic%20cGs6c2s=,x-langfuse-host=http://lf",
             "TRELLIS_SPOOL_DIR": "/var/spool/trellis",
             "TRELLIS_WORKER_CONCURRENCY": "6",
+            "TRELLIS_AGENT_VERSION": "2026.10.5",
             "TRELLIS_GROUNDING_SAMPLE": "0.25",
             "TRELLIS_JUDGE_MODEL": "judges/strong",
             "TRELLIS_JUDGE_VIRTUAL_KEY": "eval-vk",
@@ -35,7 +36,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
     assert settings.judge_sample == 0.5
     assert settings.api_key == "tk"
     assert settings.spool_dir == "/var/spool/trellis" and settings.worker_concurrency == 6
-    assert settings.runs_url == "http://runs"
+    assert settings.runs_url == "http://runs" and settings.agent_version == "2026.10.5"
     assert settings.otlp_headers == {
         "authorization": "Basic cGs6c2s=",
         "x-langfuse-host": "http://lf",

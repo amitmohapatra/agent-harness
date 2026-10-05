@@ -16,9 +16,9 @@ classifiers = [
 # The core imports no agent framework: each adapter imports its framework lazily, the first
 # time a target of that type is wrapped. The extras only decide what gets installed.
 dependencies = [
-  "trellis-contracts>=0.4",
+  "trellis-contracts>=0.5.1",
   "trellis-memory>=0.4",
-  "trellis-runs>=0.3",
+  "trellis-runs>=0.3.2",
   "bifrost-sdk>=0.2",
   "pydantic>=2.13,<3",
   "httpx>=0.28",

@@ -16,10 +16,19 @@ signatures.
 | `agent.run` / `agent.stream` | `RUNNING` (recorded in process), then `PAUSED` or an ending |
 | `agent.start` | `QUEUED`; `RunHandle.result()` waits for a pause or an ending |
 | `agent.resume` | the next attempt: `RUNNING` for an in-process run, `QUEUED` again for one that came from the queue; `CANCELLED` on cancel |
+| `agent.cancel(run_id, reason=)` / `handle.cancel(reason=)` | `CANCELLED`: at once when queued or paused; a run running here stops now; one on a worker elsewhere is stopped by that worker at its next heartbeat |
 | `agent.schedule(cron, input, on_behalf_of=, tz=, tenant=)` | a `Schedule`; each fire queues a run acting for `on_behalf_of` |
 
+`run`, `stream` and `start` take `timeout=` (the most working time, in seconds, across every
+attempt — pauses and the queue not counted) and `deadline=` (when the run must have ended):
+past either the run ends `TIMEOUT`, never retried. They are the record's `timeout_seconds` and
+`deadline`, and agent-runs keeps the time worked (`worked_seconds`) across attempts and crashes;
+`h.wrap(..., version=)` (or `TRELLIS_AGENT_VERSION`) is its `agent_version`
+([reliability.md](reliability.md#run-time-limit-and-deadline)).
+
 `start` returns a `RunHandle`: `run_id`, `await handle.status()` (the `RunRecord`; a run the
-store does not have raises `ConfigurationError`) and `await handle.result(timeout=None)`, which
+store does not have raises `ConfigurationError`), `await handle.cancel(reason=None)` and
+`await handle.result(timeout=None)`, which
 reads the run every 0.5 s until it pauses or ends and returns a `Result` (`asyncio.timeout`
 raises `TimeoutError` past `timeout`). A queued run's input must be JSON (`start` refuses
 anything else); a run started in process records its input as JSON where it can and as text
@@ -51,8 +60,9 @@ breaks the harness itself is logged and the worker goes on.
 `python -m trellis.harness.worker` call on `SIGTERM` or `SIGINT` — stops claiming and lets the
 runs the worker holds finish, for up to 25 s (`trellis.runs`' `GRACE_SECONDS`). A run still
 going then is *released* (cancelled with `trellis.runs.RELEASED`): stopped without writing
-anything, so its lease lapses and agent-runs queues it again as its next attempt for another
-worker (the journal replays what its last checkpoint holds — its progress, below: every tool
+anything, and handed back to agent-runs (`POST /v1/runs/{id}/release`), which queues it at once
+as its next attempt for another worker — no waiting for the lease to lapse, and no lapse counted
+(the journal replays what its last checkpoint holds — its progress, below: every tool
 call with side effects it completed). A second signal releases the runs at once. Then the
 memory write queue drains (at most 10 s; what is left is spooled or counted lost —
 [memory.md](memory.md)) and the process exits `0`. Give the container at least 40 s to stop
@@ -69,7 +79,12 @@ A worker claims a queued run under a 60 s lease and heartbeats it every 20 s (a 
 heartbeat is logged and retried at the next beat). It names itself
 on the pause, the finish and an artifact upload, so a worker whose lease lapsed cannot write
 over a run another worker has since claimed; a heartbeat refused (`409`) stops the run without
-writing. A lapsed lease sends the run back to the queue as its next attempt. A paused run
+writing, and one that answers `cancel_requested` (someone cancelled the run) stops it and ends
+it `CANCELLED`. Each lease says the working time the run has left (`remaining_seconds`: its
+`timeout` or agent-runs' maximum, the lesser, less what it worked), and the attempt stops then,
+`TIMEOUT`. A lapsed lease sends the run back to the queue as its next attempt (after 5 s,
+doubling per lapse; the fifth ends it `ERROR`); a run its worker ends `ERROR` with an error that
+may pass is queued again too, up to 3 times, after 10 s, 20 s, 40 s. A paused run
 carries its journal as the run's checkpoint, so the worker that claims it after a resume — any
 worker — repeats no question and no tool call made before the pause.
 
@@ -82,9 +97,12 @@ holder may send): at once after every completed call that does more than read (a
 20 s (`PROGRESS_SECONDS`). When the worker dies — killed, out of memory, its machine gone — the
 lease lapses, agent-runs queues the run again with that checkpoint, and the next attempt
 replays the recorded calls instead of running them again: a payment made before the crash is
-not made twice. What the attempt was doing *during* the crash — a call that had started but
-not been recorded — runs again, so a tool that must never run twice still needs idempotency
-of its own (a key derived from its arguments, which the service it calls deduplicates on).
+not made twice. A call that does more than read is also saved as *started* before it runs, so
+what the attempt was doing *during* the crash is known: such a call is not run again blind —
+the model reads that it was interrupted and may or may not have taken effect, and checks; a
+tool that is idempotent runs again with the same idempotency key
+([reliability.md](reliability.md#unknown-outcomes)). A read that was in flight simply runs
+again.
 A save that fails is a `warning` event and a log line — the run goes on, and the next save
 tries again; a save refused with `409` (the lease is gone) stops the run without writing
 anything more. Runs started in process (`run`, `stream`) save no progress: nobody resumes them
@@ -144,8 +162,10 @@ id: `runs.start` (`POST /v1/runs`, `RunStart` + `queue`), `runs.claim`
 (`POST /v1/runs/{id}/finish?worker_id=`), `runs.get` (`GET /v1/runs/{id}`), `runs.list`
 page by page (`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=`, the inbox),
 `artifacts.upload` (`POST /v1/runs/{id}/artifacts?worker_id=&checksum=`, an `ask` payload or
-a journal larger than a checkpoint → `ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`) and `schedules.create`
-(`POST /v1/schedules`, `ScheduleSpec`).
+a journal larger than a checkpoint → `ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`),
+`runs.cancel` (`POST /v1/runs/{id}/cancel {reason}`), `runs.release`
+(`POST /v1/runs/{id}/release {worker_id, checkpoint?}`, a stopping worker's runs) and
+`schedules.create` (`POST /v1/schedules`, `ScheduleSpec`).
 
 **The tenant is explicit.** A call whose body names the tenant (a start, a pause, a schedule)
 sends it as `X-Trellis-Tenant`; every other call the harness makes passes `tenant=` — the run's

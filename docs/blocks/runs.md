@@ -127,6 +127,13 @@ async for waiting in runs.iterate(
 
 `runs.resolutions(run_id)` is the audit trail: every answer, who gave it and when.
 
+`await runs.cancel(run_id, reason="duplicate")` cancels a run whatever its status: queued or
+paused, it is `CANCELLED` at once; held by a worker, that worker stops it (above); ended, it is a
+`ConflictError`. agent-runs keeps the reason and who asked; whoever may answer the run may
+cancel it. A `RunStart` may carry `timeout_seconds` (the most working time, across attempts,
+pauses not counted), `deadline` and `agent_version`: agent-runs ends a run past either limit
+`TIMEOUT` itself, its worker alive or not ([reliability.md](../reliability.md)).
+
 ## Workers
 
 `Worker` claims queued runs of some agents and hands each to your handler, an
@@ -149,13 +156,22 @@ async with RunsClient() as runs:
 ```
 
 * The lease (60 s) is renewed every third of it while the handler runs. A heartbeat refused
-  with `LEASE_LOST` cancels the handler: another worker has the run.
+  with `LEASE_LOST` cancels the handler: another worker has the run. A heartbeat that says
+  `cancel_requested` (someone called `runs.cancel`) cancels it too, and the worker ends the run
+  `CANCELLED`; `job.cancel_requested` tells the handler which it was.
+* `job.remaining_seconds` is the working time the run has left (its `RunStart.timeout_seconds`
+  or the service's maximum, the lesser, less what it worked; `None`: no limit): bound your
+  steps by it — past it agent-runs ends the run `TIMEOUT` and the next heartbeat stops the
+  handler.
 * `job.checkpoint(data)` saves progress (and extends the lease): the attempt after a crash
   claims the run with that checkpoint. `job.pause(interrupt, checkpoint=...)` and
   `job.finish(...)` are fenced: after the lease was lost they raise `LeaseLostError`.
 * `serve()` stops on SIGTERM or SIGINT: no new claims, the runs held get 25 s, then are
-  released (cancelled with `trellis.runs.RELEASED`, nothing written) for another worker. `run()`
-  is the same loop without signals (`stop()` ends it), `run_once()` claims and runs one.
+  released (cancelled with `trellis.runs.RELEASED`, nothing written, and handed back with
+  `runs.release`: queued at once for another worker, no lapse counted). `run()` is the same
+  loop without signals (`stop()` ends it), `run_once()` claims and runs one.
+* A handler that raises ends its run `ERROR` at once; agent-runs queues a run whose error is
+  retryable again, up to 3 times, after 10 s, 20 s, 40 s.
 * A resumed queued run comes back to a worker like any other: the same handler reads
   `record.last_resolution` to know what the person said.
 

@@ -2114,7 +2114,7 @@ wheels = [
 
 [[package]]
 name = "trellis-contracts"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "../agent-contracts" }
 dependencies = [
     { name = "pydantic" },
@@ -2266,7 +2266,7 @@ provides-extras = ["otel", "dev"]
 
 [[package]]
 name = "trellis-runs"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "../agent-runs/sdk/python" }
 dependencies = [
     { name = "httpx" },

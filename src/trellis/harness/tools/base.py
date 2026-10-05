@@ -4,15 +4,23 @@ Every source — a local function, an MCP tool the Bifrost virtual key allows, a
 OpenAPI operation, the memory service's agent tools — resolves to :class:`Tool`\\ s. The native
 converters (``tools.convert``) wrap a ``Tool`` in the framework's own tool type, and every
 call goes through the bridge (governance, approval, journal, recording) before ``run``.
+
+How a call is run is the same for every source, wrapped (the bridge) or not (``governed``):
+at most its ``timeout``, a call that only reads (or is idempotent) tried again after an error
+that may pass (:func:`retried`), a sync function in a worker thread (:func:`invoked`), and a
+call that timed out told to the model as :func:`timed_out` says.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
-from trellis.contracts import ToolSpec
+from trellis.contracts import AgentError, ConfigurationError, ErrorCategory, ToolError, ToolSpec
 
 SideEffects = Literal["read", "write", "irreversible"]
 
@@ -33,12 +41,27 @@ JSON_TYPES: Final[dict[str, tuple[type, ...]]] = {
 }
 
 
+#: Retries of a call that only reads (or is idempotent) after an error that may pass (the
+#: error's own ``retryable``, or its category's): within the call's timeout, after a random
+#: wait under :data:`RETRY_BACKOFF_SECONDS`, doubled for each retry. A call that does more
+#: than read runs once.
+READ_RETRIES: Final = 2
+RETRY_BACKOFF_SECONDS: Final = 0.5
+
+
 @dataclass(frozen=True, slots=True)
 class Tool:
     spec: ToolSpec
     run: Runner = field(repr=False)
     #: Bifrost Code Mode meta-tool: its nested calls are recorded from the gateway's log.
     code_mode: bool = False
+    #: The most one call may take, in seconds, retries included (``None``: no limit of its
+    #: own; the run's time still bounds it).
+    timeout: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.timeout is not None and self.timeout <= 0:
+            raise ConfigurationError(f"{self.spec.name}: a timeout is a number of seconds over 0")
 
     @property
     def name(self) -> str:
@@ -54,6 +77,68 @@ class Source(Protocol):
     definitions (``toolbox.TOOLS_TTL_SECONDS``)."""
 
     async def resolve(self) -> list[Tool]: ...
+
+
+class ToolTimeout(ToolError):
+    """A call that did not finish in its time (``governed``). ``unknown``: it does more than
+    read, so it may or may not have taken effect."""
+
+    code = "TOOL_TIMEOUT"
+    category = ErrorCategory.TIMEOUT
+
+    def __init__(self, message: str, *, unknown: bool) -> None:
+        super().__init__(message, source="tools")
+        self.unknown = unknown
+
+
+def retries_of(spec: ToolSpec, *, reads: bool) -> int:
+    """How often a call is tried again: :data:`READ_RETRIES` for one that only ``reads`` (its
+    risk as governance sees it) or is idempotent, none for anything else."""
+    return READ_RETRIES if reads or spec.idempotent else 0
+
+
+async def retried(call: Callable[[], Awaitable[Any]], *, retries: int) -> Any:
+    """``call()``, tried again up to ``retries`` times after an error that may pass, with a
+    jittered backoff. The caller's timeout bounds the whole of it."""
+    attempt = 0
+    while True:
+        try:
+            return await call()
+        except Exception as exc:
+            if attempt == retries or not AgentError.of(exc).retryable:
+                raise
+        await asyncio.sleep(random.uniform(0, RETRY_BACKOFF_SECONDS * 2**attempt))
+        attempt += 1
+
+
+async def invoked(fn: Callable[..., Any], /, **kwargs: Any) -> Any:
+    """What ``fn(**kwargs)`` returns: an async function awaited, a sync one run in a worker
+    thread (so it blocks neither the run's other work nor its timeout — though a thread,
+    once started, cannot be stopped: it runs on after a timeout, its result unused)."""
+    if inspect.iscoroutinefunction(fn):
+        return await fn(**kwargs)
+    result = await asyncio.to_thread(fn, **kwargs)
+    return await result if inspect.isawaitable(result) else result
+
+
+def timed_out(tool: str, *, took: float, limit: float | None, unknown: bool) -> str:
+    """What the model reads about a call that ran out of time — its ``limit``, once it ``took``
+    that long, or a timeout of its own (after what it took) —: for one that does more than
+    read (``unknown``), that it may have taken effect."""
+    seconds = limit if limit is not None and took >= limit else round(took, 1)
+    text = f"{tool} timed out after {seconds:g}s"
+    if unknown:
+        text += "; it may or may not have taken effect: check before calling it again"
+    return text
+
+
+def interrupted(tool: str) -> str:
+    """What the model reads about a call that does more than read and was running when its
+    worker died: whether it took effect is not known."""
+    return (
+        f"{tool} was interrupted by a crash; it may or may not have taken effect: check "
+        "before calling it again"
+    )
 
 
 def arguments_problem(schema: dict[str, Any], args: dict[str, Any]) -> str | None:

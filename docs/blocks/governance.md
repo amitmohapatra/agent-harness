@@ -54,7 +54,7 @@ else:
 | Call | What it does |
 |---|---|
 | `await gov.check(tool, args, *, side_effects="write")` | the `Decision` for one call. `side_effects` is what the tool says it does (`read`, `write`, `irreversible`); the catalog's word overrides it |
-| `governed(fn, gov, *, name=None, side_effects="write", on_ask, on_announce=None)` | `fn` (sync or async) as an async callable that takes the tool's arguments as keywords and is checked at every call |
+| `governed(fn, gov, *, name=None, side_effects="write", timeout=None, on_ask, on_announce=None)` | `fn` (sync or async) as an async callable that takes the tool's arguments as keywords and is checked at every call — and run as a harness tool call is: at most `timeout` seconds, retried when it only reads |
 | `await gov.publish(specs, *, annotations=None)` | tells the catalog about the tools (`ToolSpec`s; an MCP tool's annotations by name), once per content; a failed publish is sent again next time |
 | `await gov.decided(decision, verdict, *, reviewer, run_id, user, edited=None)` | records what a person decided (`"approve"`, `"reject"` or `"edit"` with the `edited` arguments) as `TOOL_CALL` feedback, from which the memory service learns approval suggestions; idempotent per run and call; needs `agent_id` and `tenant` |
 | `await gov.rules(names)` | the catalog's `Rule` (`risk`, `approve_when`) for each name, `None` where it has none |
@@ -91,6 +91,14 @@ except Rejected:
   propagates: LangGraph's `interrupt` is a natural `on_ask`, because the graph pauses there and
   its checkpointer keeps the pause.
 * A call that is **announced** runs `on_announce(decision)` first, when given.
+* Then it **runs** as a harness tool call does ([reliability.md](../reliability.md)): at most
+  `timeout` seconds (a sync `fn` in a worker thread, which cannot be stopped); a call that only
+  reads (as governance sees it) is tried again, up to twice, after an error that may pass, and
+  one that does more runs once. Out of time it raises `ToolTimeout` (a `ToolError`, from
+  `trellis.harness.tools.base`), whose message is what your model should read — for a call
+  that does more than read (`unknown`), that it may or may not have taken effect. Hand your
+  service an idempotency key of your own (your run's id and the call): Way 2 has no harness run
+  to derive one from.
 * The wrapped function keeps its signature, so a framework that builds tools from signatures
   (LangChain's `@tool`, OpenAI Agents' `function_tool`) builds the same tool from it.
 
