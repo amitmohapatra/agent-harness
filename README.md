@@ -228,7 +228,8 @@ argument of a function target: `run_id`, `agent_id`, `user`, `thread`, `tenant`,
 `task` (the question), `context` (the pushed memory context), `memory` (the memory SDK's
 verbs in the run's scope; needs `MEMORY_URL`), `idempotency_key` (inside a tool call: that
 call's key, the same in every attempt), `remaining()` (the seconds the code may still take, or
-`None`), `await tools.call(name, **args)`,
+`None`), `uses(feature)` (whether the run has that part of the harness on: `without=`),
+`await tools.call(name, **args)`,
 `await tools.hints(task)`, `await ask(question, *, expects, table, diff, options, assignee,
 deadline, escalate_to)` (pauses the run; returns the answer on resume —
 [docs/interrupts.md](docs/interrupts.md)) and `log(message, **fields)`.
