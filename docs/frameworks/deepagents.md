@@ -71,6 +71,12 @@ given ([the table](langgraph.md#approvals-and-pauses)).
 
 ## Limits
 
+* Harness tools are bound when the graph is built, as for `create_agent`: build it without
+  what its agent goes without (`h.tools(..., without={...})`), and give it the harness's
+  middleware (`create_deep_agent(..., middleware=[ModelHooks()])`) to hide from the model the
+  tools of a part turned off later; without it they are offered, and a call is refused
+  ([langgraph.md](langgraph.md#limits)).
+
 * Deep Agents' built-in tools (files, `execute`, `task`, `write_todos`) are not the harness's
   (above): gate them with `interrupt_on`.
 * A sub-agent's harness call that asks pauses the whole run (the interrupt names the call), and

@@ -160,11 +160,14 @@ graph's model).
 
 ## Limits
 
-* Harness tools are fixed when the graph is compiled: the model is offered every bound tool
-  (hints shape the context, not the schemas sent). A bound tool of a feature the run is
-  `without=` (an MCP tool, a skill's, a memory tool) stays bound, and its call is an error the
-  model reads; build the graph with `h.tools(..., mcp=[])` (or without `skills(...)`) to leave
-  them out of its schemas.
+* Harness tools are fixed when the graph is compiled (hints shape the context, not the
+  schemas sent). Build it without what its agent goes without — `h.tools(...,
+  without={"mcp"})` neither lists the key's MCP tools nor binds them; `without={"memory_pull"}`
+  leaves the memory tools out. A part turned off after the graph was built (`h.wrap(without=)`,
+  a run's `without=`) stays bound: the harness's middleware, `create_agent(...,
+  middleware=[ModelHooks()])`, leaves its tools out of what each model call is offered; a graph
+  built without the middleware (or a hand-built `StateGraph`) is offered them, and a call of
+  one is an error the model reads ("off in this run").
 * A custom state without `messages` gets no context message: read `trellis.current().context`.
 * An `InMemorySaver` pause resumes in place only in the process that paused; elsewhere a
   harness pause is a re-run from the journal and a graph's own pause fails (above).

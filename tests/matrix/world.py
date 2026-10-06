@@ -69,6 +69,7 @@ from trellis.harness.features import features
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Hooks
+from trellis.harness.hooks.langchain import ModelHooks
 from trellis.harness.identity import identity_headers
 from trellis.harness.journal import MAX_CHECKPOINT_BYTES
 from trellis.harness.result import Result
@@ -434,15 +435,16 @@ class World:
         adapter = "claude_agent_sdk" if adapter == "claude" else adapter
         if adapter in FIXED and (mcp is not None or self.without):
             # a graph's tools are bound when it is built: built without what the agent goes
-            # without
+            # without, and with the harness's middleware (it hides what a run turns off)
             bundles = None if mcp is None else list(mcp)
             native = await h.tools(*tools, framework=adapter, mcp=bundles, without=self.without)  # type: ignore[arg-type]
             model = PlannedChatModel(plan=plan)
+            middleware = [ModelHooks()]
             if adapter == "langgraph":
-                return create_agent(model, tools=native), []
+                return create_agent(model, tools=native, middleware=middleware), []
             from deepagents import create_deep_agent
 
-            return create_deep_agent(model=model, tools=native), []
+            return create_deep_agent(model=model, tools=native, middleware=middleware), []
         return await BUILDERS[adapter](h, tools, self.tmp, plan)
 
     # ------------------------------------------------------------------ driving a run

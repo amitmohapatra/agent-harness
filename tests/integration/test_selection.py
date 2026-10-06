@@ -5,10 +5,12 @@ agent's, kept with the run across a pause, a worker and its sub-agents' runs).""
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final, cast
 
 import pytest
+from pydantic import Field
 
 from tests.support.adapters import BUILDERS
 from tests.support.memory import FakeMemoryService
@@ -20,6 +22,7 @@ from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.evals import EvalCase, EvalScore
 from trellis.harness.features import features
+from trellis.harness.hooks.langchain import ModelHooks
 from trellis.harness.skills import LOAD_SKILL, Skills
 
 #: The calls through which a run reaches the memory service.
@@ -203,6 +206,53 @@ async def test_without_mcp_the_gateway_is_not_asked_for_the_keys_tools(
         assert "stock" in published and "wiki-search" not in published
         assert "wiki-search" in (await h.wrap(fn, id="all").run("q", user="u")).answer
         assert stub.listed == 1
+
+
+class Offering(PlannedChatModel):
+    """A planned model that keeps the tools it was offered at each call."""
+
+    offered: list[list[str]] = Field(default_factory=list)
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Offering:  # type: ignore[override]
+        self.offered.append(sorted(getattr(t, "name", "") for t in tools))
+        return self
+
+
+async def test_a_graph_with_the_middleware_is_offered_only_the_tools_its_run_uses(
+    memory_service: FakeMemoryService,
+) -> None:
+    """A graph's tools are bound when it is built; the harness's middleware hides from its
+    model those of a part turned off afterwards — the agent's ``without=``, or a run's."""
+    from langchain.agents import create_agent
+
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        tools = await h.tools(stock, framework="langgraph")
+        bound = sorted(t.name for t in tools)
+        assert "memory_search" in bound and "stock" in bound
+        model = Offering(plan=[("stock", {"sku": "A-1"})])
+        graph = create_agent(model, tools=tools, middleware=[ModelHooks()])
+        everything = h.wrap(graph, id="everything")
+        assert (await everything.run("A-1?", user="u")).answer == "Done. A-1: 7"
+        assert model.offered[-1] == bound
+        await everything.run("A-1?", user="u", without={"memory_pull"})
+        assert model.offered[-1] == ["stock"]
+        pulled = h.wrap(graph, id="unpulled", without={"memory_pull"})
+        assert (await pulled.run("A-1?", user="u")).answer == "Done. A-1: 7"
+        assert model.offered[-1] == ["stock"]
+        await ModelHooks().awrap_model_call(cast("Any", Tools([])), _offered_to)  # no run: as is
+
+
+class Tools:
+    """A model request as the middleware reads it, outside any run."""
+
+    def __init__(self, tools: list[Any]) -> None:
+        self.tools = tools
+        self.messages: list[Any] = []
+
+
+async def _offered_to(request: Any) -> Any:
+    assert request.tools == []
+    return "reply"
 
 
 async def test_a_runs_own_without_adds_to_the_agents_and_holds_across_a_resume(

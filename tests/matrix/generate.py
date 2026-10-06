@@ -32,7 +32,6 @@ from tests.matrix.model import (
 from tests.matrix.world import (
     NoEnding,
     NotTimedOut,
-    OffButOffered,
     UnclosedToolCall,
 )
 
@@ -69,19 +68,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
             "the attempt first: it ends CANCELLED (no error), or TIMEOUT with no RUN_FINISHED "
             "on its event stream",
             raises=(NotTimedOut, NoEnding, UnclosedToolCall),
-        ),
-    ),
-    (
-        {
-            "features": {"F42"},
-            "adapters": {"langgraph", "deepagents"},
-            "when": lambda f, a, w, m, s: "memory" in s.on and "memory_pull" not in s.on,
-        },
-        Bug(
-            "BUG-10",
-            "LangGraph/Deep Agents: without={'memory_pull'} still offers the memory tools "
-            "h.tools() bound into the graph (a call is refused: 'off in this run')",
-            raises=OffButOffered,
         ),
     ),
     (
