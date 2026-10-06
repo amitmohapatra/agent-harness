@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from typing import Literal
 from urllib.parse import unquote
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -64,16 +65,22 @@ class Settings(BaseModel):
     #: 1, chosen by the run id; unset: 0.1 when there are judges.
     judge_sample: float | None = Field(default=None, ge=0.0, le=1.0)
     #: A folder of prompts, one ``<name>.md`` each (``prompts.prompts_dir``): a source of
-    #: prompts, asked after the ones the code passes.
+    #: prompts, unless the code passes ``Harness(prompts=)``.
     prompts_dir: str | None = None
     #: A folder of Agent Skills, one ``<name>/SKILL.md`` each (``skills.skills_dir``): a
-    #: source of skills, asked after the ones the code passes.
+    #: source of skills, unless the code passes ``Harness(skills=)``.
     skills_dir: str | None = None
     #: Langfuse's prompt management (the names Langfuse's own SDK reads): prompts are read
     #: from Langfuse when both keys are set, at ``langfuse_host`` (unset: Langfuse Cloud).
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
+    #: Where ``sandbox()`` makes the sandboxes its tools work in when it is given no provider:
+    #: ``docker``, the Docker daemon on this machine (``trellis.harness.sandbox``); unset: none.
+    sandbox: Literal["docker"] | None = None
+    #: The image those sandboxes are made from, unless a ``SandboxSpec`` names one; unset: the
+    #: provider's own (``DockerSandbox``: ``python:3.12-slim``).
+    sandbox_image: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -102,6 +109,8 @@ class Settings(BaseModel):
             langfuse_host=get("LANGFUSE_HOST"),
             langfuse_public_key=get("LANGFUSE_PUBLIC_KEY"),
             langfuse_secret_key=get("LANGFUSE_SECRET_KEY"),
+            sandbox=get("SANDBOX"),  # type: ignore[arg-type]
+            sandbox_image=get("SANDBOX_IMAGE"),
             **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]
         )
 

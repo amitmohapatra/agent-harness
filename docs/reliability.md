@@ -27,6 +27,7 @@ rules where it has the same pieces: `governed` for your own tools, `trellis.runs
 | [Releasing on shutdown](#releasing-on-shutdown) | — | a stopping worker hands its runs back at once |
 | [The last good tool list](#the-last-good-tool-list) | — | a gateway that is down does not empty the toolbox |
 | [Agent version](#agent-version) | `h.wrap(..., version=)` or `TRELLIS_AGENT_VERSION` | recorded with each run; a resume on another version says so |
+| [Sandboxes](sandbox.md#automatic) | `sandbox(timeout=)` | a command out of time killed with what it started; the run's sandbox recorded before use, attached after a crash, never replaced blindly, deleted at the end |
 
 ## Tool timeouts
 
@@ -52,6 +53,7 @@ tools = [transfer, openapi(spec_url, timeout=10), a2a(planner_url, timeout=300)]
 | `@tool(timeout=)` / `tool(fn, timeout=)` | none unless you give one |
 | `openapi(spec, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool); also the document's fetch |
 | `a2a(url, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too; `remote()` the same), the whole exchange |
+| `sandbox(timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too): a command past it is killed, with what it started ([sandbox.md](sandbox.md)) |
 | an MCP tool (Bifrost) | none of its own: the request waits what is left of the run's time (else the Bifrost SDK's 60 s) |
 | `governed(fn, gov, timeout=)` (Way 2) | none unless you give one |
 
@@ -264,8 +266,9 @@ agent-runs queues the run again (after 5 s, doubling per lapse; the fifth lapse 
 `ERROR`). The next attempt claims it with the last checkpoint — the journal — and replays it:
 questions answered are not asked again, tool calls completed return their recorded output,
 `ReAct`'s model steps are not asked again, a write that was in flight is [unknown](#unknown-outcomes)
-(or re-run with its key when idempotent), and the working time already spent still counts
-against `timeout`. Runs kept in process (`run`, `stream`) save no progress: nobody resumes them
+(or re-run with its key when idempotent), the run's [sandbox](sandbox.md#automatic) is the one it
+had (attached, never replaced blindly), and the working time already spent still counts against
+`timeout`. Runs kept in process (`run`, `stream`) save no progress: nobody resumes them
 after their process died. A [sub-agent](subagents.md)'s run working inside a call when the
 worker died is saved with its parent's progress, and the parent's next attempt continues it the
 same way.
@@ -368,6 +371,7 @@ line naming both versions.
 | a tool call: `@tool(timeout=)`, `governed(timeout=)` | none | the tool's author |
 | an OpenAPI operation, its document: `openapi(timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`) | the author |
 | an A2A exchange: `a2a(timeout=)`; `remote(timeout=)` (per request) | 120 s (the same) | the author |
+| a sandbox call: `sandbox(timeout=)` (a command killed past it) | 120 s (the same) | the author |
 | an MCP call | the run's remaining time, else the Bifrost SDK's 60 s | — |
 | a model call: `ReAct(model_timeout=)` | the Bifrost SDK's 60 s per attempt | the author |
 | a sub-agent's run (`agent.as_tool()`) | what is left of its parent's time, and its parent's deadline | — |

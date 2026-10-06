@@ -29,6 +29,8 @@ what is read.
 | `SKILLS_DIR` | no folder of skills; set: `<name>/SKILL.md` folders there are a skill source, unless the code passes `Harness(skills=)` ([skills.md](skills.md)) |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | prompts are not read from Langfuse; both set: Langfuse's prompt management is a prompt source, after `PROMPTS_DIR` and before the gateway (the names Langfuse's own SDK reads) |
 | `LANGFUSE_HOST` | Langfuse Cloud (`https://cloud.langfuse.com`), when the Langfuse keys are set |
+| `SANDBOX` | `sandbox()` given no provider has none: its tools tell the model so. `docker` makes each run's sandbox a container of the Docker daemon on this machine ([sandbox.md](sandbox.md)); any other value is refused (`ValidationError`) |
+| `SANDBOX_IMAGE` | those sandboxes are made from the provider's own image (`python:3.12-slim` for Docker) unless a `SandboxSpec(image=)` names one |
 | `TRELLIS_GROUNDING_SAMPLE` | 0.1: a tenth of the successful runs with an answer (a structured one as its JSON; memory on) are checked against the context they were given (`/v1/verify`, a score on the trace — [observability.md](observability.md#scores)); `0` turns it off, `1` checks every run. A number from 0 to 1, else `Settings` refuses it (`ValidationError`); the run id decides, so a run is either always or never sampled |
 
 `Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
@@ -56,6 +58,8 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `langfuse_host` | `LANGFUSE_HOST` |
 | `langfuse_public_key` | `LANGFUSE_PUBLIC_KEY` |
 | `langfuse_secret_key` | `LANGFUSE_SECRET_KEY` |
+| `sandbox` | `SANDBOX` (`"docker"` or `None`) |
+| `sandbox_image` | `SANDBOX_IMAGE` |
 
 `RUNS_URL` without `MEMORY_URL`, and `MEMORY_URL` without `TRELLIS_API_KEY`, are refused when the
 `Harness` is built (`ConfigurationError`). The names are the platform's: agent-runs reads the
