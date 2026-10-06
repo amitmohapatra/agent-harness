@@ -73,14 +73,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
         ),
     ),
     (
-        {"features": {"F05"}, "modes": {"a2a"}},
-        Bug(
-            "BUG-5",
-            "A2A tasks/cancel of a working task: 'Task not found', or answered while the run "
-            "goes on to its end",
-        ),
-    ),
-    (
         {
             "features": {"F42"},
             "adapters": {"langgraph", "deepagents"},

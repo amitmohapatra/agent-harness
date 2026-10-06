@@ -5,12 +5,14 @@
 * A pause is the platform's one pause: ``input-required`` with the question, and the next
   message on the task is the answer, resumed through the agent (so the run store, feedback and
   the journal see an A2A answer exactly as they see any other).
-* A terminal state is sent once, whichever of the stream and a cancel gets there first.
+* A task is saved before its run starts: a caller that knows its id finds it at once.
+* ``tasks/cancel`` cancels the run (``agent.cancel``: it stops, ``CANCELLED``); a terminal
+  state is sent once, whichever of the stream and the cancel gets there first.
 """
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
@@ -28,7 +30,6 @@ from trellis.contracts import (
     InterruptDecision,
     InterruptReason,
     RunEvent,
-    RunStatus,
 )
 from trellis.harness import pipeline
 from trellis.harness.a2a.identity import IdentityRefused, UserResolver
@@ -41,6 +42,7 @@ from trellis.harness.a2a.translate import (
     update_for,
     value_part,
 )
+from trellis.runs import ConflictError, NotFoundError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -62,7 +64,6 @@ class RunExecutor(AgentExecutor):
         self.agent = agent
         self.user_of = user_of
         self.tasks = tasks
-        self._running: dict[str, asyncio.Task[Any]] = {}
         self._settled: OrderedDict[str, None] = OrderedDict()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -95,6 +96,7 @@ class RunExecutor(AgentExecutor):
                 history=[context.message] if context.message is not None else None,
             )
         )
+        await self.tasks.opened(task_id)
         payload = _payload(context.message)
         agent = self.agent
         record = await agent._opened(
@@ -108,18 +110,16 @@ class RunExecutor(AgentExecutor):
         )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        self._user(context)
+        """Cancel the task's run, whatever it is doing, as ``agent.cancel`` does (one working
+        here stops, ``CANCELLED`` with the reason; one paused is cancelled at once), and end
+        the task ``canceled`` — once, whichever of this and its stream gets there first."""
+        user = self._user(context)
         task_id = str(context.task_id or "")
         task = context.current_task
         context_id = (task.context_id if task is not None else "") or task_id
-        running = self._running.pop(task_id, None)
-        if running is not None:
-            running.cancel()
-        else:
-            tenant = await self.agent.harness.tenant()
-            record = await self.agent.harness.runs.get(task_id, tenant=tenant)
-            if record is not None and record.status is RunStatus.PAUSED:
-                await self.agent.harness.runs.finish(task_id, RunStatus.CANCELLED, tenant=tenant)
+        tenant = await self.agent.harness.tenant()
+        with contextlib.suppress(NotFoundError, ConflictError):  # no run holds it, or it ended
+            await self.agent.cancel(task_id, reason=f"cancelled by {user} (A2A)", tenant=tenant)
         await self._cancelled(event_queue, task_id, context_id)
 
     # ------------------------------------------------------------------ answering a pause
@@ -184,7 +184,6 @@ class RunExecutor(AgentExecutor):
         events: AsyncIterator[RunEvent],
     ) -> None:
         updater = TaskUpdater(event_queue, task_id, context_id)
-        self._running[task_id] = asyncio.current_task()  # type: ignore[assignment]
         finished = False
         try:
             await updater.update_status(TaskState.TASK_STATE_WORKING)
@@ -197,14 +196,8 @@ class RunExecutor(AgentExecutor):
                         or update.state == TaskState.TASK_STATE_INPUT_REQUIRED
                     )
                     await self._apply(updater, task_id, update)
-        except asyncio.CancelledError:
-            if task_id not in self._running:  # cancel() took it: the task says so there
-                return
-            raise
         except Exception as exc:
             log.warning("A2A task %s failed: %s", task_id, exc)
-        finally:
-            self._running.pop(task_id, None)
         if not finished and self._settle(task_id):
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
