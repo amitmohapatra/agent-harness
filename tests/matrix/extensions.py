@@ -4,7 +4,7 @@ suite fails on XPASS, and the row is turned into a real one (a scenario in ``fea
 its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 
 * ``F34`` approval rule in code (W5): ``@tool(approval=fn)`` — landed, a real row now.
-* ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed; waits on BUG-2.
+* ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed, a real row now.
 * ``F70`` the framework's own run options (G13): ``agent.run(..., framework_options=...)``.
 * the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
   one selection cell each.
@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from tests.matrix.model import ADAPTERS, NA, Bug, Feature, Gap
-from tests.matrix.world import USER, UnclosedToolCall, World
+from tests.matrix.world import USER, World
 from trellis import Ask, tool
 
 
@@ -91,11 +91,7 @@ EXTENSIONS: Final[list[Feature]] = [
         "HITL v2: options with labels, several answers",
         audit="F36 (W5)",
         how="ask(options=[Option], multiple=True)",
-        gap=Bug(
-            "BUG-2",
-            "the ask inside the tool pauses it: its tool call never ends on the event stream",
-            raises=UnclosedToolCall,
-        ),
+        gap=None,
         probe=hitl_v2,
     ),
     _pending(
