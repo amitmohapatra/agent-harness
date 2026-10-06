@@ -20,6 +20,8 @@ for you.
 | [configuration.md](configuration.md) | the environment, `Settings`, and who the key says the deployment is |
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
 | [gateway.md](gateway.md) | the Bifrost gateway: stored prompts (`prompt=`), skills (`skills=`), Virtual MCPs (`mcp=`), who an MCP call is for, what the gateway never does for a run (no injected tools, no Agent Mode, Code Mode through the bridge), frameworks' own MCP clients |
+| [prompts.md](prompts.md) | prompts from code, `.md` files (`PROMPTS_DIR`), Langfuse and the gateway: one name, the order they are looked up in, `ReAct(prompt=)`, `h.prompt` for any framework, the judge; pinned per run |
+| [skills.md](skills.md) | Agent Skills from code, `SKILL.md` folders (`SKILLS_DIR`) and the gateway, mixed in one run: progressive disclosure, pinned per run, `without={"skills"}` |
 | [subagents.md](subagents.md) | `agent.as_tool()`: an agent as another agent's tool — child runs, their pauses answered through the parent, crashes, cancel, time |
 | [sandbox.md](sandbox.md) | `sandbox()`: commands and files in a sandbox of the run's own (Docker; how E2B, Daytona, Modal plug in) — its life, pauses, crashes, timeouts, governance; the frameworks' own sandboxes or ours |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
@@ -61,7 +63,7 @@ inbox, and a judge.
 ## Composition: a Harness is the blocks you give it
 
 The two ways are one set of blocks — the run store, the memory client, the Bifrost gateway,
-governance — composed differently.
+governance, the prompt and skill sources — composed differently.
 
 | You want | Write | What you get |
 |---|---|---|
@@ -82,11 +84,14 @@ h = Harness(runs=runs, memory=False, governance=Governance())
 agent = h.wrap(ReAct(system="You handle refunds.", model="provider/model"), id="refunds")
 ```
 
-`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, judges=(),
-hooks=())`: `runs` a `RunStore` (`trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or
-your own with the same calls), `memory` a `trellis.memory.MemoryClient`, `gateway` a
-`trellis.harness.clients.bifrost.Gateway(url, virtual_key)`, `governance` a `Governance` (used
-for every tenant); `hooks` the [hooks](hooks.md) of every agent it wraps. Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
+`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, prompts=None,
+skills=None, judges=(), hooks=())`: `runs` a `RunStore` (`trellis.runs.RunsClient`,
+`trellis.harness.runs.LocalRuns`, or your own with the same calls), `memory` a
+`trellis.memory.MemoryClient`, `gateway` a `trellis.harness.clients.bifrost.Gateway(url,
+virtual_key)`, `governance` a `Governance` (used for every tenant), `prompts` and `skills` the
+prompt and skill sources, in the order they are asked (`[prompts_dir("prompts"),
+Prompt(...)]`, `[skills_dir("skills"), Skill(...)]`: [prompts.md](prompts.md),
+[skills.md](skills.md); `[]` is none); `hooks` the [hooks](hooks.md) of every agent it wraps. Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
 (its own run store, its own scheduler loop, governance, no memory).
 
 ## Mixing both ways
@@ -253,13 +258,15 @@ tracing and redaction, the run record.
 |---|---|
 | `MEMORY_URL` (+ `TRELLIS_API_KEY`) | memory: push, pull tools, records, the tool catalog (risks, `approve_when`), grounding, documents, feedback in memory |
 | `RUNS_URL` | agent-runs: durable runs, workers across processes, the ticker's schedules and deadlines, run artifacts |
-| `BIFROST_URL` (+ `BIFROST_VIRTUAL_KEY`) | MCP tools (what the key allows), Code Mode, `ReAct` and `llm_judge` model names, the memory model key |
+| `BIFROST_URL` (+ `BIFROST_VIRTUAL_KEY`) | MCP tools (what the key allows), Code Mode, `ReAct` and `llm_judge` model names, the memory model key, the gateway's stored prompts and skills as sources |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `_HEADERS` | trace export; with Langfuse's credentials, its scores API and datasets |
 | `TRELLIS_SPOOL_DIR` | memory writes kept on disk across an outage and a restart |
 | `TRELLIS_WORKER_CONCURRENCY` | runs a worker executes at once |
 | `TRELLIS_AGENT_VERSION` | the agents' version, recorded with every run they start |
 | `TRELLIS_GROUNDING_SAMPLE` | the share of runs checked for grounding |
 | `TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`, `TRELLIS_JUDGE_SAMPLE` | the judge's model, its budget, and the share of runs online judges score |
+| `PROMPTS_DIR`, `SKILLS_DIR` | a folder of `.md` prompts, a folder of `SKILL.md` skills, as sources ([prompts.md](prompts.md), [skills.md](skills.md)) |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` (+ `LANGFUSE_HOST`) | Langfuse's prompt management as a prompt source |
 | `SANDBOX` (+ `SANDBOX_IMAGE`) | the sandboxes `sandbox()` makes when given no provider: `docker`, of that image |
 
 Details: [configuration.md](configuration.md).

@@ -64,6 +64,17 @@ class Settings(BaseModel):
     #: The share of successful runs the online judges (``Harness(judges=[...])``) score, 0 to
     #: 1, chosen by the run id; unset: 0.1 when there are judges.
     judge_sample: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: A folder of prompts, one ``<name>.md`` each (``prompts.prompts_dir``): a source of
+    #: prompts, unless the code passes ``Harness(prompts=)``.
+    prompts_dir: str | None = None
+    #: A folder of Agent Skills, one ``<name>/SKILL.md`` each (``skills.skills_dir``): a
+    #: source of skills, unless the code passes ``Harness(skills=)``.
+    skills_dir: str | None = None
+    #: Langfuse's prompt management (the names Langfuse's own SDK reads): prompts are read
+    #: from Langfuse when both keys are set, at ``langfuse_host`` (unset: Langfuse Cloud).
+    langfuse_host: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
     #: Where ``sandbox()`` makes the sandboxes its tools work in when it is given no provider:
     #: ``docker``, the Docker daemon on this machine (``trellis.harness.sandbox``); unset: none.
     sandbox: Literal["docker"] | None = None
@@ -93,6 +104,11 @@ class Settings(BaseModel):
             judge_model=get("TRELLIS_JUDGE_MODEL"),
             judge_virtual_key=get("TRELLIS_JUDGE_VIRTUAL_KEY"),
             judge_sample=get("TRELLIS_JUDGE_SAMPLE"),  # type: ignore[arg-type]
+            prompts_dir=get("PROMPTS_DIR"),
+            skills_dir=get("SKILLS_DIR"),
+            langfuse_host=get("LANGFUSE_HOST"),
+            langfuse_public_key=get("LANGFUSE_PUBLIC_KEY"),
+            langfuse_secret_key=get("LANGFUSE_SECRET_KEY"),
             sandbox=get("SANDBOX"),  # type: ignore[arg-type]
             sandbox_image=get("SANDBOX_IMAGE"),
             **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]

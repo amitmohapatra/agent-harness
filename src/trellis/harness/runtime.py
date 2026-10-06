@@ -39,12 +39,11 @@ from trellis.harness.journal import Pending, Replay, content_key
 from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
-    from bifrost_sdk.admin import Skill
-
     from trellis.harness.agent import Agent
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.governance.decision import Decision
     from trellis.harness.sandbox.base import Sandbox
+    from trellis.harness.skills import ResolvedSkill
     from trellis.harness.tools.base import Tool
     from trellis.memory import MemoryContext
     from trellis.memory.models import ToolHints
@@ -113,7 +112,7 @@ class Runtime:
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
     #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
-    skills: dict[str, Skill] = field(default_factory=dict)
+    skills: dict[str, ResolvedSkill] = field(default_factory=dict)
     #: the sandbox this attempt's sandbox tools work in, once one of them ran (``sandbox``)
     sandbox: Sandbox | None = None
     #: set by an adapter whose framework can suspend itself (LangGraph ``interrupt``)

@@ -79,6 +79,8 @@ LANGFUSE_SCORES_PATH: Final = "/api/public/scores"
 LANGFUSE_DATASET_PATH: Final = "/api/public/v2/datasets/{name}"
 LANGFUSE_ITEMS_PATH: Final = "/api/public/dataset-items"
 LANGFUSE_RUN_ITEMS_PATH: Final = "/api/public/dataset-run-items"
+#: Langfuse's prompt management: one prompt, by ``version`` or ``label`` (``prompts.py``).
+LANGFUSE_PROMPT_PATH: Final = "/api/public/v2/prompts/{name}"
 #: Dataset items one page asks for (Langfuse's default page size).
 LANGFUSE_PAGE: Final = 50
 SCORES_TIMEOUT_SECONDS: Final = 10.0
@@ -512,7 +514,8 @@ ScoreType = Literal["NUMERIC", "BOOLEAN", "CATEGORICAL"]
 
 class Langfuse:
     """Langfuse's public API as far as the harness uses it — scores on a run's trace, datasets
-    and dataset runs — reached with the OTLP exporter's own credentials."""
+    and dataset runs, reached with the OTLP exporter's own credentials; prompts, reached with
+    the Langfuse keys (``prompts.py``)."""
 
     def __init__(self, host: str, authorization: str, *, client: httpx.AsyncClient | None = None):
         self.host = host.rstrip("/")
@@ -579,6 +582,21 @@ class Langfuse:
             pages = int((body.get("meta") or {}).get("totalPages") or 0)
             page += 1
         return found.json(), items
+
+    async def prompt(
+        self, name: str, *, version: int | None = None, label: str | None = None
+    ) -> dict[str, Any] | None:
+        """The prompt ``name`` as Langfuse serves it (``version``, else ``label``): its
+        ``type`` (``text``, ``chat``), ``prompt``, ``version``, ``config``. ``None`` when
+        Langfuse has no such prompt, version or label."""
+        params: dict[str, Any] = {"version": version} if version is not None else {"label": label}
+        response = await self._client.get(
+            LANGFUSE_PROMPT_PATH.format(name=quote(name, safe="")), params=params
+        )
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        response.raise_for_status()
+        return response.json()
 
     async def link(
         self,

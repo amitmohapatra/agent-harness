@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.gateway import URL, FakeGateway, SkillVersions
+from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, skills, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import fresh, telemetry
@@ -90,13 +91,38 @@ async def test_every_model_call_selects_the_prompt_pinned_for_the_run(
     assert fake.completions[-1].headers["x-bf-prompt-version"] == "3"
 
 
-def test_a_prompt_needs_a_model_name_and_a_version_number() -> None:
-    with pytest.raises(ConfigurationError, match="needs a Bifrost model name"):
-        ReAct(system="s", model=object(), prompt="triage")  # type: ignore[arg-type]
-    with pytest.raises(ConfigurationError, match="version is a number"):
-        ReAct(system="s", model="local/small", prompt="triage@latest")
-    with pytest.raises(ConfigurationError, match="version is a number"):
-        llm_judge("Polite.", prompt="triage@x")
+def test_a_prompt_is_a_name_or_name_at_version() -> None:
+    with pytest.raises(ConfigurationError, match="is not a name"):
+        ReAct(system="s", model="local/small", prompt="triage@")
+    with pytest.raises(ConfigurationError, match="is not a name"):
+        llm_judge("Polite.", prompt="@1")
+    with pytest.raises(ConfigurationError, match="fills the variables of a prompt"):
+        ReAct(system="s", model="local/small", prompt_vars={"x": 1})
+
+
+@pytest.mark.parametrize(
+    ("target", "problem"),
+    [
+        (
+            ReAct(system="s", model=ScriptedChat(["hi"]), prompt="triage"),
+            "a stored prompt of the gateway",
+        ),
+        (
+            ReAct(system="s", model="local/small", prompt="triage", prompt_vars={"x": 1}),
+            "no prompt_vars=",
+        ),
+        (
+            ReAct(system="s", model="local/small", prompt="triage@latest"),
+            "a stored prompt's version is a number from 1, not 'latest'",
+        ),
+    ],
+)
+async def test_a_stored_prompt_needs_a_model_name_no_vars_and_a_version_number(
+    h: Harness, target: ReAct, problem: str
+) -> None:
+    result = await h.wrap(target, id="triage").run("hi", user="ada")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert problem in result.error.message
 
 
 async def test_a_run_whose_prompt_is_not_there_fails_saying_so(h: Harness) -> None:
@@ -115,8 +141,8 @@ async def test_the_judge_selects_its_prompt(h: Harness, fake: FakeGateway) -> No
     assert fake.completions[-1].headers["x-bf-prompt-version"] == "1"
 
 
-async def test_a_judge_prompt_needs_a_model_name() -> None:
-    services = EvalServices(judge_model=object())
+async def test_a_judge_prompt_of_the_gateway_needs_a_model_name(h: Harness) -> None:
+    services = EvalServices(judge_model=object(), judge_gateway=h.gateway)
     case = EvalCase(input="hi", output="Hello!", run_id="run_1")
     _, failed = await judge(case, [llm_judge("Polite.", prompt="triage")], services=services)
     assert "needs a Bifrost model name" in failed["llm_judge"]

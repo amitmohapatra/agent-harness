@@ -77,6 +77,22 @@ which the SDK hands the model as the tool's error. The harness passes no
 The answer is the run's `final_output` (a pydantic `output_type` is kept as JSON in the run
 record).
 
+## Native or ours: skills, prompts, sandbox
+
+* **Sandbox and skills:** the SDK's `SandboxAgent` (`agents.sandbox`: `Shell`, `Filesystem`,
+  `Compaction`, and the `Skills` and `Memory` capabilities; Docker, Unix-local and hosted
+  clients) is the native choice for an agent that works on files and folders of skills. It runs
+  only with `RunConfig(sandbox=SandboxRunConfig(client=...))`, which `h.wrap` does not pass:
+  run it with `Runner.run` yourself and plug the blocks in
+  ([blocks/openai-agents.md](../blocks/openai-agents.md)). Under `h.wrap`, an `Agent` gets
+  `sandbox()` and `skills=[...]`: every command governed and journaled, skills from Bifrost's
+  registry pinned per run ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours),
+  [skills.md](../skills.md#native-or-ours)).
+* **Prompts:** `Agent(prompt=Prompt(id=..., version=...))` is a prompt stored at OpenAI, for
+  OpenAI's models through the Responses API; the harness passes it through untouched. For a
+  prompt from a folder, Langfuse or Bifrost, pinned per run:
+  `instructions=await h.prompt(...)` ([prompts.md](../prompts.md#native-or-ours)).
+
 ## Approvals and pauses
 
 | Pause | How it continues |

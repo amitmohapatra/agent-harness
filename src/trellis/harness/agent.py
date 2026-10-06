@@ -66,7 +66,7 @@ from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, reason_of, run_of
-from trellis.harness.skills import Skills
+from trellis.harness.skills import Skill, Skills
 from trellis.harness.subagents import SubAgent, asked_by, cancel_children
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
@@ -114,7 +114,7 @@ class Agent:
         tools: Sequence[Any] = (),
         version: str | None = None,
         mcp: Sequence[str] | None = None,
-        skills: Sequence[str] = (),
+        skills: Sequence[str | Skill] = (),
         timeout: float | None = None,
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
