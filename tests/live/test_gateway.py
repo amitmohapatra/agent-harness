@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -13,6 +14,8 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from tests.live.conftest import MODEL
+from tests.live.proof import RUN_SECONDS, TEST_SECONDS, Proof, ended, governed, recorded, streamed
+from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
 
@@ -36,21 +39,51 @@ class Stock(BaseModel):
     units: int
 
 
+#: How a ``ReAct`` run ends on its model's account: an answer not in the schema, no answer
+#: within its steps, a stall.
+REACT_MODEL_ERRORS = frozenset({"ValidationError", "ModelError"})
+
+
 def harness() -> Harness:
     """The gateway alone: no memory, runs in process."""
     return Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key=KEY))
 
 
+@pytest.mark.timeout(TEST_SECONDS)
 async def test_react_calls_a_tool_and_answers_in_the_schema() -> None:
+    """``ReAct`` through the gateway: the run ends, with its events, as the harness ends it; a
+    stock call the model makes runs through the harness (on the stream, journaled, governed);
+    an answer is an instance of the schema — the harness parsed it — and one that does not
+    fit is the run's error. The model's numbers are not judged; when it makes no call, its
+    scripted twin makes one, and the twin's answer is the tool's result in the schema."""
+    question = "How many units of A-1 are in stock?"
+    system = "Answer stock questions with the stock tool."
     async with harness() as h:
-        agent = h.wrap(
-            ReAct(system="Answer stock questions with the stock tool.", model=MODEL, output=Stock),
-            id="live-react",
-            tools=[stock],
-        )
-        result = await agent.run("How many units of A-1 are in stock?", user="live")
-    assert result.status is RunStatus.SUCCESS, result.error
-    assert result.answer == Stock(sku="A-1", units=42)
+        decisions = governed(h, await h.tenant())
+        proof = Proof()
+        target = ReAct(system=system, model=MODEL, output=Stock, max_steps=4)
+        agent = h.wrap(target, id="live-react", tools=[stock], hooks=[proof])
+        run = await streamed("react", agent.stream(question, user="live", timeout=RUN_SECONDS))
+        ended(run)
+        recorded(run, proof, decisions)
+        assert proof.result is not None
+        if proof.result.status is RunStatus.SUCCESS:
+            assert isinstance(proof.result.answer, Stock)
+        elif proof.result.status is not RunStatus.TIMEOUT:
+            assert proof.result.error is not None, run.summary()
+            assert proof.result.error.code in REACT_MODEL_ERRORS, run.summary()
+        if "stock" in run.started():
+            return
+        twin = PlannedChat([("stock", {"sku": "A-1"})], final='{"sku": "A-1", "units": {last}}')
+        target = ReAct(system=system, model=twin, output=Stock)
+        proof = Proof()
+        agent = h.wrap(target, id="live-react-twin", tools=[stock], hooks=[proof])
+        run = await streamed("react-twin", agent.stream(question, user="live"))
+        ended(run)
+        recorded(run, proof, decisions)
+        assert run.started() == ["stock"]
+        assert proof.result is not None and proof.result.answer == Stock(sku="A-1", units=42)
+        assert '"stock"' in json.dumps(twin.requests[0]["tools"])  # offered
 
 
 async def test_langgraph_with_a_model_pointed_at_bifrost() -> None:
