@@ -81,15 +81,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
         ),
     ),
     (
-        {"features": {"F61"}, "adapters": {"react"}, "when": _on("tracing")},
-        Bug(
-            "BUG-4",
-            "ReAct's chat spans carry the conversation unredacted (tool-call arguments are "
-            "JSON text the redactor does not parse; tool results as they are)",
-            raises=AssertionError,
-        ),
-    ),
-    (
         {
             "features": {"F42"},
             "adapters": {"langgraph", "deepagents"},

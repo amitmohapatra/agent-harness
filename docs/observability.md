@@ -117,7 +117,9 @@ shows them. The rules are the same everywhere and need no setting: names that lo
 JWTs, `sk-...`, long key-like blobs) become `[redacted]`, e-mail addresses are masked, long
 values are cut at 2000 characters. Names are matched by their words, not substrings
 (`gen_ai.usage.input_tokens` and `tokenizer` stay; `refresh-token` and `X-Api-Key` go), and a
-number is never treated as a credential. Mappings and lists are redacted recursively, bytes
+number is never treated as a credential. Mappings and lists are redacted recursively, and so
+is text that is a JSON object or array (a model's tool-call arguments, a tool result as the
+model read it, in a `chat` span's input and output): it stays JSON text, redacted. Bytes
 become `<n bytes>`, anything else its JSON or its text. The redactor is the contracts
 `TelemetryRedactor`; it never raises into a run.
 

@@ -18,12 +18,16 @@ from a2a.types import (
 )
 from fastapi import FastAPI
 from google.protobuf.json_format import MessageToDict
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.integration.test_a2a_server import URL, asgi, caller, connect
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType
+from trellis.harness import telemetry
 from trellis.harness.a2a import push
 from trellis.harness.agui.sse import decode
 from trellis.harness.events import LOG, RunEvents
@@ -78,6 +82,25 @@ async def test_the_model_reads_the_tool_output_as_it_is(harness: Harness) -> Non
     told = model.requests[1]["messages"][-1]
     assert told["role"] == "tool" and SECRET in told["content"] and EMAIL in told["content"]
     assert not leaked(json.dumps([e.model_dump(mode="json") for e in events]))
+
+
+async def test_reacts_chat_spans_carry_the_conversation_redacted(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``chat`` span's input and output hold the model's tool calls, whose arguments are JSON
+    text, and the tool results as the model read them: redacted like everything else."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
+    model = ScriptedChat([("notify", ARGS), "done"])
+    agent = harness.wrap(ReAct(system="You notify.", model=model), id="react", tools=[notify])
+    assert (await agent.run("go", user="u")).answer == "done"
+    chats = [s for s in exporter.get_finished_spans() if s.name.startswith("chat")]
+    assert len(chats) == 2
+    shown = json.dumps([dict(s.attributes or {}) for s in chats])
+    assert not leaked(shown) and "[redacted]" in shown and "[email]" in shown
+    assert received == [ARGS]
 
 
 def test_a_value_is_redacted_once_and_a_long_output_is_a_preview() -> None:
