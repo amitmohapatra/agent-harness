@@ -103,16 +103,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
             raises=AssertionError,
         ),
     ),
-    (
-        {"features": {"F17", "F18"}, "adapters": {"claude"}, "when": _on("gateway")},
-        Bug(
-            "BUG-8",
-            "Claude: a tool whose input schema has no 'properties' ({'type': 'object'}, as MCP "
-            "servers declare an argument-less tool) is offered with a required 'type' argument "
-            "(the SDK reads it as a name -> type map): every call fails validation",
-            raises=AssertionError,
-        ),
-    ),
 ]
 
 
