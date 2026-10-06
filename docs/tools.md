@@ -15,7 +15,7 @@ catalog.
 | `a2a(url, *, name=None, timeout=None)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` per exchange (120 s by default) | `"write"` |
 | `agent.as_tool(*, name=None, description=None, side_effects=None)` | one: another agent wrapped by this harness, `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"`; `side_effects=` overrides it |
 | `openapi(spec, *, only=None, base_url=None, headers=None, timeout=30)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
-| `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills of the gateway's Skills Repository, their versions pinned per run ([gateway.md](gateway.md#skills)) | `"read"` |
+| `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills from code, `SKILLS_DIR` and the gateway's Skills Repository, each pinned per run ([skills.md](skills.md)) | `"read"` |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
 `tools=` takes only what runs in this process; which MCP tools an agent has is decided where

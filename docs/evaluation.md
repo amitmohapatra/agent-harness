@@ -93,7 +93,7 @@ Built in:
 | `grounding(name="grounding")` | the share of the answer's claims the run's memory context supports — `grounding_score(memory, answer, bundle_id)`: the memory service's `/v1/verify` with the case's `bundle_id` in its `memory` scope, the same function as the sampled check every wrapped run gets (which, in a run's scope, also records the run's `judge` feedback there). No score without a memory scope, without a pushed context, or for an answer with no checkable claim |
 | `exact_match(name="exact_match", case_sensitive=False)` | whether the answer is `expected` (text trimmed, case-blind by default; anything else compared as JSON); no score without `expected` |
 | `contains(name="contains", case_sensitive=False)` | whether the answer contains `expected` — each of them, for a list; the comment names what is missing |
-| `llm_judge(criteria, *, name="llm_judge", prompt=None)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `prompt`: a stored prompt of the gateway (`"name"`, `"name@version"`) the gateway prepends to the judge's messages — a rubric kept and versioned in the gateway's Prompt Repository ([gateway.md](gateway.md#prompts)); it needs a judge model name |
+| `llm_judge(criteria, *, name="llm_judge", prompt=None)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `prompt`: a prompt (`"name"`, `"name@version"`, a `Prompt`) from the prompt sources — a rubric kept in code, a `.md` file, Langfuse or the gateway ([prompts.md](prompts.md)) — put before the judge's messages (a gateway prompt by the gateway, which needs a judge model name) |
 
 ### `llm_judge`
 
