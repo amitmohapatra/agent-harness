@@ -371,6 +371,13 @@ class SkillSources(Chain[ResolvedSkill]):
         return cls(sources)
 
     @classmethod
+    def given(cls, sources: SkillSources | Sequence[SkillSource]) -> SkillSources:
+        """The sources a block was given, as they are (a chain, or the sources in order)."""
+        if isinstance(sources, SkillSources):
+            return sources
+        return cls(sources)
+
+    @classmethod
     def from_env(
         cls, environ: Mapping[str, str] | None = None, *, given: Sequence[SkillSource] = ()
     ) -> SkillSources:
@@ -475,7 +482,7 @@ class Skills:
             },
             side_effects="read",
         )
-        return [Tool(load, _load), Tool(read, _read)]
+        return [Tool(load, _load, feature="skills"), Tool(read, _read, feature="skills")]
 
 
 def skills(*refs: str | Skill) -> Skills:

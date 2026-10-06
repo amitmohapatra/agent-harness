@@ -12,12 +12,12 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from pydantic import BaseModel
 
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, ReAct, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import telemetry
-from trellis.harness.clients.memory import Memory
 from trellis.harness.evals import (
     EvalCase,
     EvalItem,
@@ -62,13 +62,8 @@ class JudgeOrAnswer:
 
 
 def langfuse_harness(service: FakeMemoryService | None = None, **settings: Any) -> Harness:
-    config = {"otlp_headers": OTLP, **settings}
-    if service is not None:
-        config.update(memory_url="http://m", api_key="test")
-    h = Harness(config=Settings(**config))
-    if service is not None:
-        h.memory = Memory("http://m", None, client=service.client())
-    return h
+    config = Settings(**{"otlp_headers": OTLP, **settings})
+    return Harness(config=config, memory=service.client() if service is not None else None)
 
 
 async def capital(input: str, agent: Runtime) -> str:
@@ -684,6 +679,26 @@ async def test_online_judges_score_sampled_runs_in_the_background(
     assert scored == ([(trace, "helpful", 0.8, "good", run)] if judged else [])
 
 
+async def test_online_judges_grade_a_structured_answer_as_its_json() -> None:
+    class Capital(BaseModel):
+        country: str
+        city: str
+
+    async def structured(input: str, agent: Runtime) -> Capital:
+        return Capital(country=input, city="Paris")
+
+    graded: list[Any] = []
+
+    async def seen(case: EvalCase) -> EvalScore | None:
+        graded.append(case.output)
+        return None
+
+    async with Harness(config=Settings(judge_sample=1.0), judges=[seen]) as h:
+        await h.wrap(structured, id="s").run("France", user="u")
+        await h.writes.drain()
+    assert graded == ['{"country": "France", "city": "Paris"}']
+
+
 async def test_judges_default_to_a_tenth_of_runs_and_none_without_judges() -> None:
     async with Harness(config=Settings(), judges=[contains()]) as h:
         assert h.judge_sample == 0.1
@@ -715,8 +730,8 @@ async def test_an_online_judge_failure_reaches_the_runs_listeners() -> None:
     seen: list[Any] = []
     async with Harness(config=Settings(judge_sample=1.0), judges=[broken]) as h:
         agent = h.wrap(capital, id="c")
-        identity = await agent._opened("France", user="u", thread=None, tenant=None)
-        await pipeline.attempt(agent, identity, "France", listener=seen.append)
+        record = await agent._opened("France", user="u", thread=None, tenant=None)
+        await pipeline.attempt(agent, record, "France", listener=seen.append)
         await h.writes.drain()
     warnings = [e for e in seen if e.data.get("code") == "judge_failed"]
     assert warnings and "judge broken: RuntimeError: judge down" in warnings[0].data["message"]

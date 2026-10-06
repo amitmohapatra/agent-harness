@@ -11,7 +11,6 @@ from tests.support.memory import FakeMemoryService
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.contracts.ids import stable_id
-from trellis.harness.clients.memory import Memory
 from trellis.runs import ConflictError
 
 
@@ -130,8 +129,7 @@ async def test_a_brief_memory_outage_is_retried_and_counted_once(
     memory_service: FakeMemoryService,
 ) -> None:
     memory_service.fail_times["feedback"] = 2
-    async with Harness(config=Settings(memory_url="http://memory.test", api_key="test")) as h:
-        h.memory = Memory("http://memory.test", None, client=memory_service.client(max_retries=3))
+    async with Harness(config=Settings(), memory=memory_service.client(max_retries=3)) as h:
         agent = h.wrap(_wipes, id="ops", tools=[wipe])
         paused = await agent.run("wipe d1", user="u")
         assert paused.interrupt is not None

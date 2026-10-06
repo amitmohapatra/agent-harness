@@ -30,6 +30,7 @@ from trellis.contracts import (
     ToolError,
 )
 from trellis.harness.events import LOG, RunEvents
+from trellis.harness.features import Feature
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
 from trellis.runs import LeaseLostError
@@ -124,8 +125,9 @@ class Runtime:
     lease_seconds: int | None = None
     #: the lease was lost while saving progress: the run stops and writes nothing more
     lease_lost: bool = False
-    #: the run's transcript, tool calls and outcome are recorded in the memory service
-    writes_memory: bool = False
+    #: what this run turned off itself (``agent.run(without=)``, kept with its record; its
+    #: sub-agents' runs inherit it) — its agent's are ``agent.without``
+    without: frozenset[Feature] = frozenset()
     started_at: datetime | None = None
     #: when the run must stop working (``time.monotonic``): what was left of its time limit
     #: and its deadline when the attempt began (``None``: neither)
@@ -176,8 +178,15 @@ class Runtime:
     def memory(self) -> MemoryContext:
         """The memory service in this run's scope (the SDK's verbs)."""
         if self.run_memory is None:
-            raise ConfigurationError("memory is off in this deployment: set MEMORY_URL")
+            raise ConfigurationError(
+                "memory is off for this run: set MEMORY_URL (and leave it out of without=)"
+            )
         return self.run_memory.ctx
+
+    def uses(self, feature: Feature) -> bool:
+        """Whether ``feature`` is on for this run: neither the run nor its agent turned it off
+        (``without=``)."""
+        return feature not in self.without and feature not in self.agent.without
 
     @property
     def tools(self) -> Tools:
@@ -348,15 +357,18 @@ class Runtime:
         )
         return answer_of(resolution)
 
-    async def approve(self, call: ToolCall, question: str) -> InterruptResolution:
+    async def approve(
+        self, call: ToolCall, question: str, *, assignee: str | None = None
+    ) -> InterruptResolution:
         """Ask for approval of a tool call (the bridge's pause): ``question`` is governance's
-        (``Decision.question``)."""
+        (``Decision.question``), ``assignee`` whose it is (a hook's ``Ask``; else anyone's)."""
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,
             question=question,
             ui="approve",
             tool_call=call,
+            assignee=assignee,
         )
 
     async def interrupt(

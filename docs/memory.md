@@ -1,6 +1,9 @@
 # Memory
 
-Memory is on exactly when `MEMORY_URL` is set; there is nothing to configure per agent. Every
+Memory is on when `MEMORY_URL` is set (or `Harness(memory=MemoryClient(...))`), for every
+agent; `without={"memory"}` — or one part: `memory_push`, `memory_pull`, `records` — turns it
+off for an agent (`h.wrap`) or a run (`agent.run`)
+([what is on, and how to turn it off](README.md#what-is-on-and-how-to-turn-it-off)). Every
 call the harness makes to the memory service is in `trellis/harness/clients/memory.py`, in the
 run's scope (tenant, user, agent, run, thread). With memory on, every run reads (push, pull)
 and records (transcript, tool calls, outcome); with it off there is no context, no memory
@@ -108,7 +111,7 @@ precedence **human > judge > system**:
 * **system** — the harness, when the run ends: `SUCCESS` → `confirm`, `ERROR` → `reject` (a
   cancelled run says nothing about the agent). Never "no exception = success" on its own: the
   judge and people outrank it.
-* **judge** — on a sampled share of successful runs with a text answer
+* **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
   (`TRELLIS_GROUNDING_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on

@@ -24,6 +24,7 @@ for you.
 | [skills.md](skills.md) | Agent Skills from code, `SKILL.md` folders (`SKILLS_DIR`) and the gateway, mixed in one run: progressive disclosure, pinned per run, Way 2's `SkillSources.pin` |
 | [subagents.md](subagents.md) | `agent.as_tool()`: an agent as another agent's tool — child runs, their pauses answered through the parent, crashes, cancel, time |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
+| [hooks.md](hooks.md) | your code around runs, model calls and tool calls: guardrails (deny, ask, rewrite), redaction of your own, audit — where each hook fires on each adapter |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts |
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, schedules, the inbox, the agent-runs wire |
@@ -57,6 +58,40 @@ inbox, and a judge.
 | [blocks/openai-agents.md](blocks/openai-agents.md) | an OpenAI Agents `Agent`: `needs_approval` from governance, the `RunState` as the run's checkpoint |
 | [blocks/claude-agent-sdk.md](blocks/claude-agent-sdk.md) | a Claude Agent SDK `query()`: `can_use_tool` from governance, the session as the checkpoint |
 
+## Composition: a Harness is the blocks you give it
+
+The two ways are one set of blocks — the run store, the memory client, the Bifrost gateway,
+governance, the prompt and skill sources — composed differently.
+
+| You want | Write | What you get |
+|---|---|---|
+| everything, from the deployment (Way 1) | `Harness()` | each block built from its environment variable (`RUNS_URL`, `MEMORY_URL`, `BIFROST_URL`; governance from the catalog per tenant), each off when its variable is unset |
+| some blocks of your own, the rest from the deployment | `Harness(runs=RunsClient(...), governance=Governance(...))` | the blocks you pass, used as they are (and yours to close); the others built from the environment |
+| a block off although the deployment names it | `Harness(memory=False)` (`gateway=False`, `runs=False`: runs kept in this process) | that block off for every agent of this harness |
+| your own scheduler or worker | `await agent.execute(job)` for each run it claims (`trellis.runs.Worker(runs, agent.execute, [agent.id])`, or a loop of yours around `runs.claim`) | the run's next attempt with its journal, governance, memory and limits ([runs.md](runs.md#workers)) |
+| `ReAct` (or any target) with your blocks | `Harness(<your blocks>).wrap(ReAct(...))` | one loop and one path: the same `ReAct` as Way 1, on your blocks |
+| the blocks without the harness (Way 2) | import the block and call it ([the blocks](#way-2-pluggable-blocks-your-framework-our-pieces)) | your framework runs the agent; your code calls each block where it chooses |
+
+```python
+from trellis import Harness, ReAct
+from trellis.harness.governance import Governance
+from trellis.runs import RunsClient
+
+runs = RunsClient()  # RUNS_URL, TRELLIS_API_KEY
+h = Harness(runs=runs, memory=False, governance=Governance())
+agent = h.wrap(ReAct(system="You handle refunds.", model="provider/model"), id="refunds")
+```
+
+`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, prompts=None,
+skills=None, judges=(), hooks=())`: `runs` a `RunStore` (`trellis.runs.RunsClient`,
+`trellis.harness.runs.LocalRuns`, or your own with the same calls), `memory` a
+`trellis.memory.MemoryClient`, `gateway` a `trellis.harness.clients.bifrost.Gateway(url,
+virtual_key)`, `governance` a `Governance` (used for every tenant), `prompts` and `skills` the
+prompt and skill sources, in the order they are asked (`[prompts_dir("prompts"),
+Prompt(...)]`, `[skills_dir("skills"), Skill(...)]`: [prompts.md](prompts.md),
+[skills.md](skills.md); `[]` is none); `hooks` the [hooks](hooks.md) of every agent it wraps. Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
+(its own run store, its own scheduler loop, governance, no memory).
+
 ## Mixing both ways
 
 [blocks/mixing.md](blocks/mixing.md): wrapped agents and your own in one deployment, sharing one
@@ -76,7 +111,7 @@ block page.
 |---|---|---|
 | a LangChain v1 agent (`create_agent`) or any compiled LangGraph graph | the graph, built with `await h.tools(..., framework="langgraph")` | [langgraph.md](frameworks/langgraph.md) |
 | a Deep Agent (`create_deep_agent`) | the graph it returns, built the same way | [deepagents.md](frameworks/deepagents.md) |
-| an OpenAI Agents SDK `Agent` (handoffs included) | the `Agent`, with `tools=[...]` (a handoff's specialist: `h.tools(..., framework="openai-agents")`) | [openai-agents.md](frameworks/openai-agents.md) |
+| an OpenAI Agents SDK `Agent` (handoffs included) | the `Agent`, with `tools=[...]` (a handoff's specialist: `h.tools(..., framework="openai_agents")`) | [openai-agents.md](frameworks/openai-agents.md) |
 | a Claude Agent SDK setup | the `ClaudeAgentOptions`, with `tools=[...]` | [claude-agent-sdk.md](frameworks/claude-agent-sdk.md) |
 | a model and tools, no framework | `ReAct(system=..., model=...)` | [react.md](frameworks/react.md) |
 | code that decides itself (a workflow, a router, glue) | `async def fn(input, agent)` | [functions.md](frameworks/functions.md) |
@@ -108,7 +143,8 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | a tool that may hang to give up | `@tool(timeout=20)`, `openapi(spec, timeout=)`, `a2a(url, timeout=)` — a read says it timed out, a write is reported as of unknown effect |
 | a model call bounded | `ReAct(..., model_timeout=30)` |
 | a `ReAct` model whose window is not 128k tokens (and whose model object does not say) | `ReAct(..., context_window=32_000)`: older results are cleared and older turns compacted from it |
-| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` → `TIMEOUT` |
+| every run of an agent bounded, however it starts (chat, A2A, evaluation, schedules too) | `h.wrap(..., timeout=900)` → `TIMEOUT` |
+| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` (over the agent's) → `TIMEOUT` |
 | reads retried, writes never repeated, after a crash too | nothing: automatic ([reliability.md](reliability.md#retries)) |
 | a tool's service to deduplicate | hand it `trellis.current().idempotency_key` (OpenAPI writes send it already) |
 | to stop a run | `await agent.cancel(run_id, reason=...)` or `await handle.cancel()` — queued, paused, here or on a worker |
@@ -145,7 +181,8 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | another agent this harness wraps (a sub-agent) | `agent.as_tool()` in `tools=[...]` or `h.tools(...)` ([subagents.md](subagents.md)) | `read` when every tool it declares reads, else `write`; and the catalog |
 | shared across agents, owned by a platform team | an MCP server in Bifrost, allowed on the agent's virtual key — nothing in code | the server's annotations, and the catalog |
 | the agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write |
-| a framework's own tool (`function_tool`, Deep Agents' file tools, Claude's `Bash`) | as the framework does | the framework's permissions, not the harness's |
+| a framework's own tool (`function_tool`, Deep Agents' file tools) | as the framework does | the framework's permissions, not the harness's |
+| Claude Code's built-in tools (`Bash`, `Write`, `Read`...) | as the CLI does | governance by risk (`Bash` asks, writes announced, reads run) and your hooks, through the SDK's permission callback; then your own `can_use_tool` |
 
 ### Approvals and pauses
 
@@ -155,6 +192,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | some calls approved, decided by an administrator without a deploy | the catalog's `approve_when` (`amount > 10000`) |
 | the framework's own gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`) | keep it: it becomes the same approval — gate each tool in one place |
 | the same decisions for tools of an agent you do not wrap | `Governance.from_env(...)` with `check` or `governed(...)` ([blocks/governance.md](blocks/governance.md)) |
+| a rule only your code knows: deny a call, rewrite its arguments, ask someone | a hook: `before_tool` returning `Deny`, `Rewrite` or `Ask` ([hooks.md](hooks.md)) |
 | a question, a choice, a table or diff to review | `trellis.current().ask(...)` (or a graph's own `interrupt()`) |
 | someone else to answer, by a deadline | `ask(..., assignee="role:…", deadline=..., escalate_to=...)` and `h.inbox(...)` |
 | to answer | `agent.resume(id, "approve" \| "reject" \| "edit" \| "answer" \| "cancel", answer=..., reviewer=...)` |
@@ -180,6 +218,36 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | grounding as an explicit evaluator in a report | `grounding()` |
 | quality on live traffic | `Harness(judges=[...])`, sampled by `TRELLIS_JUDGE_SAMPLE` |
 | the same for an agent you do not wrap | `evaluate(my_agent, dataset, [...])` and `judge(case, [...], services=...)` ([blocks/evaluation.md](blocks/evaluation.md)) |
+
+### What is on, and how to turn it off
+
+Everything the deployment configures is on for every agent — nothing to set. One switch turns
+parts of it off: `without={...}`.
+
+```python
+agent = h.wrap(graph, id="triage", without={"judges"})  # every run of this agent
+await agent.run(question, user="ada", without={"memory"})  # this run: no memory at all
+```
+
+| Feature (`without=` name) | On when | What it is | Turned off |
+|---|---|---|---|
+| `memory` | `MEMORY_URL` | `memory_push`, `memory_pull` and `records` together | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
+| `memory_push` | `MEMORY_URL` | the memory context pushed into the framework's input (and the tool hints with it) | no context, no `/v1/context` call |
+| `memory_pull` | `MEMORY_URL` | the memory tools (`memory_search`, `tool_search`, ...) | not offered (a graph's, bound at build, answer that they are off) |
+| `records` | `MEMORY_URL` | the transcript, every tool call, the outcome, decisions as feedback | nothing written to memory about the run |
+| `hints` | `MEMORY_URL`, from 5 tools | the tool hints narrow the tools the model is offered | every tool offered |
+| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_GROUNDING_SAMPLE`) | the answer checked against the context it was given | not checked |
+| `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_JUDGE_SAMPLE`) | the online judges | not judged |
+| `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools (`mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
+| `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
+| `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
+
+`without=` on `h.wrap` turns them off for every run of the agent; on `agent.run`, `stream` and
+`start` for that run, on top of the agent's — kept with the run's record, so its resume, the
+worker that continues it and its sub-agents' runs are without them too. A name not in the table
+is refused (`ConfigurationError`, naming them). Not switchable, because they are automatic and
+deterministic: governance and approvals, the journal and replay, retries and time limits,
+tracing and redaction, the run record.
 
 ### What each environment variable turns on
 

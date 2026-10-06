@@ -19,7 +19,6 @@ every request).
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote
@@ -29,10 +28,7 @@ from bifrost_sdk import Bifrost
 from bifrost_sdk.admin import Admin
 
 from tests.support.models import ScriptedChat, Turn
-from trellis import Harness
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.prompts import PromptSource, PromptSources
-from trellis.harness.skills import SkillSource, SkillSources
 
 URL = "http://gw.test/v1"
 
@@ -66,24 +62,6 @@ class FakeGateway:
         api = httpx.AsyncClient(transport=transport, base_url=URL.removesuffix("/v1"))
         bifrost = Bifrost(URL, api_key="vk", client=http, admin_client=api, max_retries=0)
         return Gateway(URL, "vk", client=bifrost, admin=Admin(URL, client=api))
-
-    async def attach(
-        self,
-        h: Harness,
-        *,
-        prompts: Sequence[PromptSource] = (),
-        skills: Sequence[SkillSource] = (),
-    ) -> Harness:
-        """``h`` with this fake as its gateway: the client, and the gateway's prompt and skill
-        sources (after ``prompts`` and ``skills``, as ``Harness(prompts=, skills=)`` orders
-        them)."""
-        if h.gateway is not None:
-            await h.gateway.aclose()
-        h.gateway = gateway = self.gateway()
-        h.prompts = PromptSources.of(h.settings, gateway=gateway, given=prompts)
-        h.skills = SkillSources.of(h.settings, gateway=gateway, given=skills)
-        h.evals.prompts = h.prompts
-        return h
 
     def asked(self, path: str) -> int:
         return sum(1 for r in self.requests if r.url.path == path)

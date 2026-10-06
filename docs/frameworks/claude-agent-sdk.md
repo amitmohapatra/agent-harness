@@ -39,20 +39,35 @@ if result.interrupt:
 The harness tools — `tools=[...]`, the MCP tools the Bifrost virtual key allows and, memory on,
 the memory tools — reach Claude as one in-process MCP server named `trellis` (tool names
 `mcp__trellis__<tool>`), added beside your own `mcp_servers` (a dict, a config file path or its
-JSON text) and pre-allowed in `allowed_tools`: the harness's bridge is their permission check.
-To build options yourself instead, `await h.tools(..., framework="claude-agent-sdk")` returns
-that server's config (add it to `mcp_servers` as `"trellis"` and its tools to `allowed_tools`).
+JSON text); the harness's permission callback lets them through: the bridge is their check.
+To build options yourself instead, `await h.tools(..., framework="claude_agent_sdk")` returns
+that server's config (add it to `mcp_servers` as `"trellis"`).
 
 **`query(...)` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 
 ## Claude Code's built-in tools
 
-`Read`, `Write`, `Edit`, `Bash`, `WebFetch` and the rest are the CLI's own. The harness does not
-see them: they are not governed, approved, journaled or recorded, and on a re-run after a pause
-they run again. Their permissions are the SDK's — `allowed_tools`, `disallowed_tools`,
-`permission_mode`, `can_use_tool`. Put anything with side effects that must happen once, or be
-approved, behind a harness tool, and keep the built-ins to what is safe to repeat (or turn them
-off with `disallowed_tools`).
+`Read`, `Write`, `Edit`, `Bash`, `WebFetch` and the rest are the CLI's own: it runs them. The
+harness decides whether it may, through the SDK's own permission callback — the options it runs
+carry a `can_use_tool` of the harness's:
+
+* **What.** A built-in call the CLI asks permission for is decided as a harness tool call is:
+  the run's `before_tool` hooks ([hooks.md](../hooks.md)), then governance by the tool's risk —
+  and a person when it asks. Approved (or edited), it runs once; rejected or denied, Claude reads
+  why.
+* **Risk.** `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `TodoWrite` read (they run);
+  `Write`, `Edit`, `MultiEdit`, `NotebookEdit` write (they run, announced); `Bash` is
+  irreversible (it asks). Any other tool the CLI asks about (your own MCP server's) is a write.
+  The tool catalog's `risk` and `approve_when` override these, as for any tool
+  ([governance.md](../governance.md)).
+* **Your own `can_use_tool`** is asked after the harness's decision, with the arguments as they
+  were decided (a hook's rewrite, a reviewer's edit): what it answers stands.
+* **Where not.** The CLI asks only about calls it does not already allow: a built-in your
+  `allowed_tools` names whole (`"Read"`), or every call under `permission_mode=
+  "bypassPermissions"`, never reaches the callback (the SDK warns of it). A
+  `permission_prompt_tool_name` of your own is refused: give your check as `can_use_tool`.
+* **Not recorded.** A built-in call is not journaled or recorded in memory (the CLI keeps its
+  result in its session, below).
 
 ## What is automatic
 
@@ -69,13 +84,21 @@ The answer is the `ResultMessage`'s `structured_output` (an `output_format`) or 
 
 ## Approvals and pauses
 
-A harness tool that asks (`irreversible`, a catalog `approve_when`), or `trellis.current().ask`
-inside one, pauses the run: the harness stops consuming the query and the CLI process ends.
-`agent.resume(...)` starts the query again from the prompt as the run's next attempt; the
-journal returns the harness calls already made and the answer given, so the approved call runs
-once (Claude is asked again for the steps before it). Every decision works: `approve`, `reject`
-with a reason (the tool result Claude reads: "… was not run: the approver rejected it (why)"),
-`edit`, `answer`, `cancel`.
+A harness tool that asks (`irreversible`, a catalog `approve_when`, a hook's `Ask`),
+`trellis.current().ask` inside one, or a built-in tool that asks, pauses the run: the call is
+answered "Waiting for a person's approval.", the harness stops consuming the query and the CLI
+process ends. The session the CLI kept (`ResultMessage.session_id`) is in the run's journal.
+`agent.resume(...)` runs the next attempt in that session (`ClaudeAgentOptions(resume=...)`),
+told to call the tool it was calling again: Claude goes on from where it was — the built-in
+tools it ran are not run again, the steps before are not asked again — and the journal answers
+the call (the approved call runs once). Every decision works: `approve`, `reject` with a reason
+(the tool result Claude reads: "… was not run: the approver rejected it (why)"), `edit`,
+`answer`, `cancel`.
+
+**On failure.** The CLI keeps its sessions on its machine (or in your `session_store`). A run
+resumed where the CLI does not hold the session (another worker's machine) gets a `warning`
+event (`claude_session`) and runs the query again from its prompt, against the journal — the
+harness calls already made are not made again; the built-ins run again.
 
 ## Streaming
 
@@ -90,8 +113,11 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
 
 ## Limits
 
-* Built-in tools are not the harness's (above).
-* A pause ends the CLI process; the resume is a new query, not the SDK session resumed.
+* A built-in tool the CLI does not ask about (`allowed_tools`, `bypassPermissions`) is not the
+  harness's; a built-in that ran is not journaled or recorded (above).
+* No model hooks: the CLI makes the model calls ([hooks.md](../hooks.md)).
+* A session resumes on the machine whose CLI holds it (or a shared `session_store`);
+  elsewhere the query runs again from its prompt (above).
 * A `system_prompt` given as a prompt file is read by the CLI; the context has no place in it
   and is not added (use a string or a preset with `append`).
 

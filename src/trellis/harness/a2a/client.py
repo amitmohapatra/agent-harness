@@ -42,10 +42,8 @@ from trellis.harness.a2a.identity import EXTENSION_URI
 from trellis.harness.a2a.translate import TERMINAL_STATES, value_part, values
 from trellis.harness.identity import identity_headers
 from trellis.harness.runtime import current
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, Tool
 
-#: How long one exchange with a remote agent may take.
-TIMEOUT_SECONDS: Final = 120.0
 #: A model's tool names: letters, digits, ``_`` and ``-``, at most 64 characters.
 _UNSAFE: Final = re.compile(r"[^A-Za-z0-9_-]")
 MAX_NAME: Final = 64
@@ -79,7 +77,7 @@ def remote(
     on_input: OnInput | None = None,
     name: str | None = None,
     headers: Mapping[str, str] | None = None,
-    timeout: float = TIMEOUT_SECONDS,
+    timeout: float = REMOTE_TIMEOUT_SECONDS,
     client: httpx.AsyncClient | None = None,
 ) -> RemoteAgent:
     """The agent whose card is at ``{url}/.well-known/agent-card.json``, called as ``tenant`` /
@@ -121,7 +119,7 @@ class RemoteAgent:
         on_input: OnInput | None = None,
         name: str | None = None,
         headers: Mapping[str, str] | None = None,
-        timeout: float = TIMEOUT_SECONDS,
+        timeout: float = REMOTE_TIMEOUT_SECONDS,
         client: httpx.AsyncClient | None = None,
         card: AgentCard | None = None,
     ) -> None:
@@ -246,14 +244,12 @@ async def remote_agent_tool(
     url: str,
     *,
     name: str | None = None,
-    timeout: float | None = None,  # noqa: ASYNC109 - the tool's, for each of its calls
+    timeout: float = REMOTE_TIMEOUT_SECONDS,  # noqa: ASYNC109 - the tool's, for each of its calls
 ) -> Tool:
     """The ``a2a(url)`` tool: the card read once, then each call a :class:`RemoteAgent` as the
     calling run (its tenant, user and thread; ``on_input`` its ``ask``; the call's idempotency
-    key the opening message's id), taking at most ``timeout`` (:data:`TIMEOUT_SECONDS` when
-    ``None``)."""
-    seconds = TIMEOUT_SECONDS if timeout is None else timeout
-    async with _http(seconds) as http:
+    key the opening message's id), taking at most ``timeout``."""
+    async with _http(timeout) as http:
         card = await _read_card(http, url.rstrip("/"), {})
 
     async def run(args: dict[str, Any]) -> Any:
@@ -266,13 +262,13 @@ async def remote_agent_tool(
             user=runtime.user,
             thread=runtime.thread or runtime.run_id,
             on_input=runtime.ask,
-            timeout=seconds,
+            timeout=timeout,
             card=card,
         ) as agent:
             text = str(args.get("message") or "")
             return await agent(text, message_id=runtime.idempotency_key)
 
-    return Tool(_spec(card, name), run, timeout=seconds)
+    return Tool(_spec(card, name), run, timeout=timeout)
 
 
 async def _read_card(http: httpx.AsyncClient, url: str, headers: Mapping[str, str]) -> AgentCard:

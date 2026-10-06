@@ -200,7 +200,7 @@ async def test_a_deep_agent_interrupt_on_is_answered_with_harness_decisions(
     )
     graph = create_deep_agent(
         model=model,
-        tools=await harness.tools(email, framework="langgraph"),
+        tools=await harness.tools(email, framework="deepagents"),
         system_prompt="You send emails.",
         interrupt_on={"email": True},
         checkpointer=InMemorySaver(),

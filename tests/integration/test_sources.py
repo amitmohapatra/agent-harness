@@ -17,8 +17,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from tests.integration.test_reliability import BUILDERS
 from tests.support import langfuse as lf
+from tests.support.adapters import BUILDERS
 from tests.support.models import ScriptedChat
 from tests.support.planned import FINAL, PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, skills, tool
@@ -54,7 +54,8 @@ def folders(tmp_path: Path) -> Path:
 @pytest.fixture
 async def h(folders: Path) -> AsyncIterator[Harness]:
     settings = Settings(prompts_dir=str(folders / "prompts"), skills_dir=str(folders / "skills"))
-    async with Harness(config=settings, skills=[TONE]) as made:
+    skills_ = [TONE, skills_dir(folders / "skills")]
+    async with Harness(config=settings, skills=skills_) as made:
         yield made
 
 
@@ -101,9 +102,7 @@ async def test_skills_of_every_source_through_every_adapter(
 ) -> None:
     plan = [(LOAD_SKILL, {"name": "tone"}), (READ_SKILL_FILE, {"name": "sql", "path": "rules.md"})]
     seen: list[Any] = []
-    target, tools = await BUILDERS[framework](
-        h, [skills("sql", "tone")], tmp_path, plan=plan, seen=seen
-    )
+    target, tools = await BUILDERS[framework](h, [skills("sql", "tone")], tmp_path, plan, seen=seen)
     agent = h.wrap(target, id=f"skilled-{framework}", tools=tools)
     events = [e async for e in agent.stream("review my query", user="ada")]
     finished = events[-1]
@@ -146,7 +145,7 @@ async def test_a_prompt_from_a_folder_is_any_frameworks_instructions(
     else:  # the framework's own instructions, read once when it is built
         system = await h.prompt("triage", team="EU")
         target, tools = await BUILDERS[framework](
-            h, [ping], tmp_path, plan=plan, system=system, seen=seen
+            h, [ping], tmp_path, plan, system=system, seen=seen
         )
     events = [
         e async for e in h.wrap(target, id=f"p-{framework}", tools=tools).stream("hi", user="u")
@@ -329,3 +328,36 @@ async def test_code_that_is_not_wrapped_reads_prompts_and_pins_skills(folders: P
     resumed = await sources.pin(["sql", TONE], recorded=checkpoint)
     assert resumed.section == kit.section and await resumed.load("sql") == await kit.load("sql")
     assert await resumed.read("tone", "words.md") == "Use: refund."
+
+
+# --------------------------------------------------------------------------- blocks and selection
+async def test_sources_given_as_blocks_are_used_as_they_are(folders: Path) -> None:
+    settings = Settings(prompts_dir=str(folders / "prompts"), skills_dir=str(folders / "skills"))
+    async with Harness(config=settings) as from_env:
+        assert from_env.prompts.labels == [f"prompts_dir({folders / 'prompts'})"]
+        assert from_env.skills.labels == [f"skills_dir({folders / 'skills'})"]
+    chain = PromptSources([Prompt("triage", "Given.")])
+    async with Harness(config=settings, prompts=chain, skills=SkillSources([TONE])) as given:
+        assert given.prompts is chain and given.evals.prompts is chain
+        assert given.skills.labels == ["code"]  # the environment's folder is not asked
+        assert await given.prompt("triage") == "Given."
+    async with Harness(config=settings, prompts=[], skills=[]) as none:
+        assert none.prompts.labels == [] and none.skills.labels == []
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_without_skills_no_source_is_asked_and_nothing_is_offered(
+    h: Harness, framework: str, tmp_path: Path
+) -> None:
+    seen: list[Any] = []
+    target, tools = await BUILDERS[framework](
+        h, [skills("sql", "tone"), ping], tmp_path, [("ping", {})], seen=seen
+    )
+    agent = h.wrap(target, id=f"plain-{framework}", tools=tools, without={"skills"})
+    events = [e async for e in agent.stream("review", user="ada")]
+    finished = events[-1]
+    assert finished.outcome is not None and finished.outcome.value == "success", finished
+    assert customs(events, "skills") == [] and customs(events, "warning") == []
+    for model in seen:
+        told = said(model)
+        assert "## Skills" not in told and LOAD_SKILL not in told

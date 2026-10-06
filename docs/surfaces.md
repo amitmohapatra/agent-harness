@@ -3,8 +3,9 @@
 Two ways in, one way out. `serve_chat` puts an agent in front of a person's chat UI (AG-UI over
 server-sent events); `serve_a2a` publishes it to other agents (A2A JSON-RPC); `a2a(url)` makes
 another agent one of this agent's tools. Each surface runs the agent through the same pipeline
-as `agent.run`: the run record, memory, tools, approvals and traces are the same whichever way
-a run came in — and whichever framework the agent is built with ([framework pages](README.md#which-target)). Both need an extra: `[agui]`
+as `agent.run`, started the same way: the run record, memory, tools, approvals, traces, the
+agent's time limit (`h.wrap(timeout=)`), its version and what it is `without=` are the same
+whichever way a run came in — and whichever framework the agent is built with ([framework pages](README.md#which-target)). Both need an extra: `[agui]`
 (FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
 The code is `trellis.harness.agui` (the AG-UI server) and `trellis.harness.a2a` (`server`, and
 `client`, the A2A client the `a2a(url)` tool is built on).
@@ -146,7 +147,7 @@ edge, at most 4096 characters, its tenant (when it names one) the key's — else
 (warned once per server). A header that is too long, not a JSON object, names another tenant
 or no user is refused.
 
-## Calling A2A agents: `a2a(url, *, name=None)`
+## Calling A2A agents: `a2a(url, *, name=None, timeout=120)`
 
 A remote agent is one tool (`write`), named after its card (or `name`; unsafe characters become
 `_`, at most 64), described by the card, taking `{"message": string}`. The card is read once;

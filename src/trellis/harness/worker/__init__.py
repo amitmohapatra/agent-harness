@@ -6,7 +6,7 @@ a heartbeat that says the run was cancelled cancels it too, and it ends ``CANCEL
 off while the queue is empty, runs ``concurrency`` at a time, and on a stop lets the runs it
 holds finish for a grace period before it releases the rest (cancelled with
 ``trellis.runs.RELEASED``: nothing written, and the run goes back on the queue for another
-worker at once). This module hands it each claimed run's agent (``Agent._claimed``: the next
+worker at once). This module hands it each claimed run's agent (``Agent.execute``: the next
 attempt, with the run's checkpoint as its journal and the working time its lease says is
 left) and, around the loop, the harness's background writes: started before the first claim
 (it replays what an earlier process spooled), drained when the loop ends.
@@ -65,8 +65,8 @@ class Worker:
         self.loop.stop()
 
     async def run(self) -> None:
-        """Claim and execute until stopped (or cancelled: the runs held are then cancelled
-        and end ``CANCELLED``)."""
+        """Claim and execute until stopped (or cancelled: the runs held then stop, writing
+        nothing — their leases lapse, and agent-runs queues them again)."""
         await self._writing(self.loop.run())
 
     async def serve(self) -> None:
@@ -80,13 +80,7 @@ class Worker:
 
     async def _execute(self, job: Job) -> Result:
         """The claimed run's next attempt, as the worker holding its lease."""
-        agent = self.agents[job.record.agent_id]
-        return await agent._claimed(
-            job.record,
-            job.worker_id,
-            lease_seconds=job.lease_seconds,
-            remaining=job.remaining_seconds,
-        )
+        return await self.agents[job.record.agent_id].execute(job)
 
     async def _writing(self, loop: Awaitable[None]) -> None:
         self.harness.writes.start()  # replays what an earlier process could not deliver

@@ -51,6 +51,16 @@ async def test_a_create_agent_graph_runs_with_harness_tools(harness: Harness) ->
     assert executed == ["stock:a"]
 
 
+async def test_h_tools_names_a_framework_by_its_adapter(harness: Harness) -> None:
+    [deep] = await harness.tools(stock, framework="deepagents")  # a LangGraph graph too
+    assert deep.name == "stock"
+    valid = "langgraph, deepagents, openai_agents, claude_agent_sdk"
+    with pytest.raises(
+        ConfigurationError, match=f"no framework 'openai-agents': name one of {valid}"
+    ):
+        await harness.tools(stock, framework="openai-agents")  # type: ignore[arg-type]
+
+
 async def test_streaming_carries_text_and_tool_events(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7 units of a"])
     agent = harness.wrap(await agent_graph(harness, model), id="stock")

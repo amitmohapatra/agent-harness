@@ -50,8 +50,8 @@ tools = [transfer, openapi(spec_url, timeout=10), a2a(planner_url, timeout=300)]
 | Source | Its own limit |
 |---|---|
 | `@tool(timeout=)` / `tool(fn, timeout=)` | none unless you give one |
-| `openapi(spec, timeout=)` | 30 s (`OPENAPI_TIMEOUT_SECONDS`); also the document's fetch |
-| `a2a(url, timeout=)` | 120 s (`trellis.harness.a2a.client.TIMEOUT_SECONDS`), the whole exchange |
+| `openapi(spec, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool); also the document's fetch |
+| `a2a(url, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too; `remote()` the same), the whole exchange |
 | an MCP tool (Bifrost) | none of its own: the request waits what is left of the run's time (else the Bifrost SDK's 60 s) |
 | `governed(fn, gov, timeout=)` (Way 2) | none unless you give one |
 
@@ -111,13 +111,17 @@ waiting included. Either, both, or neither.
 **When.** `timeout` for "do not work on this for more than ten minutes", even if a review in
 the middle takes a day; `deadline` for "the answer is useless after 9:00".
 
-**Where.** `agent.run`, `agent.stream` and `agent.start` (Way 1); `RunStart.timeout_seconds`
-and `RunStart.deadline` with `RunsClient.start` (Way 2). Every adapter.
+**Where.** The agent's default limit: `h.wrap(..., timeout=)` — every run it starts, on every
+entry: `run`, `stream`, `start`, `serve_chat`, `serve_a2a`, `h.evaluate` and its scheduled
+runs. A run's own: `agent.run`, `agent.stream` and `agent.start(timeout=, deadline=)`, which
+override the agent's (Way 1); `RunStart.timeout_seconds` and `RunStart.deadline` with
+`RunsClient.start` (Way 2). Every adapter.
 
 **How.**
 
 ```python
-result = await agent.run("Reconcile March", user="ada", timeout=600)
+agent = h.wrap(target, id="reconcile", timeout=900)  # every run of it, wherever it starts
+result = await agent.run("Reconcile March", user="ada", timeout=600)  # this one: 600
 handle = await agent.start(task, user="ada", timeout=600, deadline=tomorrow_9am)
 ```
 
@@ -132,6 +136,11 @@ handle = await agent.start(task, user="ada", timeout=600, deadline=tomorrow_9am)
   less what it worked), so a worker stops on time instead of being cut off.
 * agent-runs enforces both itself (its ticker), so a run is bounded even when its worker dies
   and never comes back.
+* Every entry starts an attempt the one way (`pipeline.attempt`, from the run's record), so a
+  chat run, an A2A task and an evaluation item are bounded as `agent.run` is. A scheduled run's
+  record names no limit (agent-runs' schedules carry none yet): the worker that runs it holds
+  it to the agent's `timeout`, but agent-runs' ticker does not, and the run records no agent
+  version.
 
 **On failure.** The run ends `TIMEOUT` with an error `run_timeout` (working time) or
 `run_deadline`, category `TIMEOUT`, `retryable` false — a run out of time is not run again.
@@ -155,8 +164,10 @@ operation answering `408`, `425`, `429`, `500`, `502`, `503` or `504` raises suc
 
 **Automatic.** Up to 2 retries (`READ_RETRIES`), each after a random wait under 0.5 s, doubled
 per retry (`RETRY_BACKOFF_SECONDS`), all within the call's timeout. `ToolOutcome.attempts`
-says how many were made. An MCP tool whose server says `idempotentHint` is idempotent; a tool
-of your own source is when its `ToolSpec(idempotent=True)` says so.
+says how many were made. An MCP tool whose server says `idempotentHint` is idempotent; a
+function tool is when `@tool(idempotent=True)` says so (it hands its service the call's
+`trellis.current().idempotency_key`), and a tool of your own source when its
+`ToolSpec(idempotent=True)` does.
 
 **On failure.** The last error is the outcome the model reads (`"<tool> failed: ..."`), as
 before.
@@ -355,12 +366,13 @@ line naming both versions.
 | Timeout | Default | Set by |
 |---|---|---|
 | a tool call: `@tool(timeout=)`, `governed(timeout=)` | none | the tool's author |
-| an OpenAPI operation, its document: `openapi(timeout=)` | 30 s | the author |
-| an A2A exchange: `a2a(timeout=)`; `remote(timeout=)` (per request) | 120 s | the author |
+| an OpenAPI operation, its document: `openapi(timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`) | the author |
+| an A2A exchange: `a2a(timeout=)`; `remote(timeout=)` (per request) | 120 s (the same) | the author |
 | an MCP call | the run's remaining time, else the Bifrost SDK's 60 s | — |
 | a model call: `ReAct(model_timeout=)` | the Bifrost SDK's 60 s per attempt | the author |
 | a sub-agent's run (`agent.as_tool()`) | what is left of its parent's time, and its parent's deadline | — |
-| a run's working time: `timeout=` | none | the caller of `run`/`stream`/`start` |
+| an agent's runs' working time: `h.wrap(timeout=)` | none | the agent's author (every entry, scheduled runs too) |
+| a run's working time: `timeout=` | the agent's | the caller of `run`/`stream`/`start` |
 | a run's end: `deadline=` | none | the caller |
 | the platform's longest run | none | operations: `RUNS__RUNS__MAX_RUN_SECONDS` in agent-runs |
 | an answer: `ask(deadline=, escalate_to=)` | none | the agent's code ([interrupts.md](interrupts.md)) |

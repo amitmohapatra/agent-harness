@@ -27,7 +27,6 @@ from trellis.contracts import (
     RunStatus,
     ScheduleSpec,
 )
-from trellis.harness.clients.memory import Memory
 from trellis.harness.runs import RunStore
 from trellis.runs import RunsClient
 
@@ -57,8 +56,7 @@ async def test_every_memory_call_the_harness_makes_speaks_the_contract(
 
     memory_service.claims = 3
     settings = Settings(memory_url="http://memory.test", api_key="test", bifrost_virtual_key="vk")
-    async with Harness(config=settings) as h:
-        h.memory = Memory("http://memory.test", "test", client=memory_service.client())
+    async with Harness(config=settings, memory=memory_service.client()) as h:
         agent = h.wrap(works, id="contract", tools=[refund])
         paused = await agent.run("refund o1", user="ada", thread="thr_1")
         assert paused.interrupt is not None

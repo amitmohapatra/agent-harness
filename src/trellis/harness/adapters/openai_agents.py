@@ -2,7 +2,8 @@
 
 * input: a message list, the memory context first as a ``system`` message;
 * run: ``Runner.run``/``Runner.run_streamed`` on a clone of the agent carrying the harness
-  tools next to its own (the caller's agent is never changed);
+  tools next to its own (the caller's agent is never changed), with the run's hooks around its
+  model calls as the SDK's ``RunHooks`` (``hooks.openai_agents``);
 * pause: ``trellis.current().ask`` stops the run and a resume re-runs it against the journal;
   the SDK's own ``needs_approval`` tools pause with the SDK's ``RunState``, and a resume
   approves or rejects on that state and continues it (``RunState.approve``/``reject``). The SDK
@@ -76,23 +77,23 @@ class OpenAIAgentsAdapter:
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
         from agents import Runner
 
-        agent = self._agent(target, run)
-        result = await Runner.run(agent, await self._input(agent, native_input))
+        agent, hooks = self._agent(target, run), _hooks(run)
+        result = await Runner.run(agent, await self._input(agent, native_input), hooks=hooks)
         state = _edited_call(result, native_input)
         if state is not None:  # the model called the edited tool as told: it runs, approved
-            result = await Runner.run(agent, state)
+            result = await Runner.run(agent, state, hooks=hooks)
         return result
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from agents import Runner
 
-        agent = self._agent(target, run)
-        result = Runner.run_streamed(agent, await self._input(agent, native_input))
+        agent, hooks = self._agent(target, run), _hooks(run)
+        result = Runner.run_streamed(agent, await self._input(agent, native_input), hooks=hooks)
         async for delta in _deltas(result):
             yield delta
         state = _edited_call(result, native_input)
         if state is not None:
-            result = Runner.run_streamed(agent, state)
+            result = Runner.run_streamed(agent, state, hooks=hooks)
             async for delta in _deltas(result):
                 yield delta
         yield Output(result)
@@ -167,6 +168,15 @@ class OpenAIAgentsAdapter:
             else:
                 state.reject(item, rejection_message=native_input.message)
         return state
+
+
+def _hooks(run: Invocation) -> Any:
+    """The run's model hooks as the SDK's own ``RunHooks`` — none when it has no hooks."""
+    if not run.runtime.agent.hooks:
+        return None
+    from trellis.harness.hooks.openai_agents import ModelHooks
+
+    return ModelHooks()
 
 
 async def _deltas(result: Any) -> AsyncIterator[str]:

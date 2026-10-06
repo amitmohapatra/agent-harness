@@ -7,7 +7,7 @@ Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A
 function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
 the tool catalog may override either (``trellis.harness.governance``). Each takes a
 ``timeout``: the most one call may take (an OpenAPI operation and an A2A exchange have one by
-default).
+default, the same: :data:`~trellis.harness.tools.base.REMOTE_TIMEOUT_SECONDS`).
 """
 
 from __future__ import annotations
@@ -22,7 +22,14 @@ from pydantic import BaseModel, ConfigDict, create_model
 
 from trellis.contracts import ToolError, ToolSpec
 from trellis.harness.runtime import current
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects, Source, Tool, invoked
+from trellis.harness.tools.base import (
+    DEFAULT_SIDE_EFFECTS,
+    REMOTE_TIMEOUT_SECONDS,
+    SideEffects,
+    Source,
+    Tool,
+    invoked,
+)
 
 #: What an OpenAPI method does, as a risk tier.
 METHOD_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
@@ -34,8 +41,6 @@ METHOD_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "patch": "write",
     "delete": "irreversible",
 }
-#: How long an OpenAPI operation may take (and the document's fetch), unless ``timeout=``.
-OPENAPI_TIMEOUT_SECONDS: Final = 30.0
 #: The statuses an OpenAPI operation answers that may pass on their own: a call that only
 #: reads is tried again after one (``tools.base.retried``).
 RETRYABLE_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -54,6 +59,7 @@ class FunctionTool:
         name: str | None = None,
         description: str | None = None,
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+        idempotent: bool = False,
         timeout: float | None = None,
     ) -> None:
         self.fn = fn
@@ -64,6 +70,7 @@ class FunctionTool:
             input_schema=self.model.model_json_schema(),
             source="local",
             side_effects=side_effects,
+            idempotent=idempotent,
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -88,6 +95,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    idempotent: bool = False,
     timeout: float | None = None,
 ) -> FunctionTool: ...
 @overload
@@ -96,6 +104,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    idempotent: bool = False,
     timeout: float | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
@@ -105,17 +114,25 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    idempotent: bool = False,
     timeout: float | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
     The schema comes from the signature (pydantic validates the model's arguments), the
-    description from the docstring's first paragraph. ``timeout``: the most one call may take,
+    description from the docstring's first paragraph. ``idempotent``: a call repeated with the
+    same idempotency key (``trellis.current().idempotency_key``) has its effect once, so it is
+    retried like a read and run again after a crash. ``timeout``: the most one call may take,
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped).
     """
     made = functools.partial(
-        FunctionTool, name=name, description=description, side_effects=side_effects, timeout=timeout
+        FunctionTool,
+        name=name,
+        description=description,
+        side_effects=side_effects,
+        idempotent=idempotent,
+        timeout=timeout,
     )
     return made(fn) if fn is not None else made
 
@@ -139,7 +156,7 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
 class A2ASource:
     """A remote A2A agent as one tool: a message in, its answer out."""
 
-    def __init__(self, url: str, name: str | None, timeout: float | None) -> None:
+    def __init__(self, url: str, name: str | None, timeout: float) -> None:
         self.url = url
         self.name = name
         self.timeout = timeout
@@ -150,10 +167,9 @@ class A2ASource:
         return [await remote_agent_tool(self.url, name=self.name, timeout=self.timeout)]
 
 
-def a2a(url: str, *, name: str | None = None, timeout: float | None = None) -> A2ASource:
+def a2a(url: str, *, name: str | None = None, timeout: float = REMOTE_TIMEOUT_SECONDS) -> A2ASource:
     """The A2A agent whose card is at ``url`` (its base URL), as a tool. ``timeout``: the most
-    one exchange may take, in seconds (``None``: ``trellis.harness.a2a.client.TIMEOUT_SECONDS``,
-    120)."""
+    one exchange may take, in seconds."""
     return A2ASource(url, name, timeout)
 
 
@@ -215,7 +231,7 @@ def openapi(
     only: Iterable[str] | None = None,
     base_url: str | None = None,
     headers: Mapping[str, str] | None = None,
-    timeout: float = OPENAPI_TIMEOUT_SECONDS,
+    timeout: float = REMOTE_TIMEOUT_SECONDS,
 ) -> OpenAPISource:
     """The operations of an OpenAPI 3 document (a URL or the parsed document) as tools.
     ``timeout``: the most one operation may take, in seconds."""

@@ -80,6 +80,7 @@ from trellis.harness.adapters.base import (
     context_window,
 )
 from trellis.harness.clients.bifrost import PromptPin
+from trellis.harness.hooks import ModelCall
 from trellis.harness.journal import Pending, content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt
 from trellis.harness.repository import pinned
@@ -353,8 +354,9 @@ class _Loop:
         kind: str = "react",
     ) -> dict[str, Any]:
         """One model call: the journal's, when a resumed run already made it with this
-        conversation, else the model's within ``model_timeout`` (journaled, and saved as
-        progress in a worker)."""
+        conversation, else the model's within ``model_timeout`` — the run's ``before_model``
+        hooks may rewrite its messages, and its ``after_model`` hooks see the reply —
+        (journaled, and saved as progress in a worker)."""
         runtime, limit = self.runtime, self.target.model_timeout
         key = content_key(kind, step, _history(messages))
         replayed, recorded = runtime.replay.call(key)
@@ -363,15 +365,23 @@ class _Loop:
         target = self.target.model
         name = target if isinstance(target, str) else type(target).__name__
         extra = self.prompt.attributes() if self.prompt is not None else None
-        with model_span(name, messages, extra=extra) as span:
+        hooks = runtime.agent.hooks
+        call = await hooks.model(ModelCall("react", messages, model=name))
+        with model_span(name, call.messages, extra=extra) as span:
             try:
                 async with runtime.limited(limit):
-                    reply = await self.model.complete(messages, **request)
+                    reply = await self.model.complete(call.messages, **request)
             except TimeoutError as exc:
                 within = "" if limit is None else f" within {limit:g}s"
-                raise ModelError(
+                late = ModelError(
                     f"the model did not answer{within}", source="react", retryable=True
-                ) from exc
+                )
+                await hooks.failed("model", late)
+                raise late from exc
+            except Exception as exc:
+                await hooks.failed("model", exc)
+                raise
+            await hooks.answered(call, reply)
             usage(span, reply)
             message = _message(reply)
             span_output(span, message.get("content") or message.get("tool_calls"))

@@ -10,11 +10,11 @@ catalog.
 
 | Where from | Tools | Side effects |
 |---|---|---|
-| **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key) — or, with `h.wrap(..., mcp=[slug])`, the tools of those Virtual MCPs — named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)) | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
-| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph; `timeout=` seconds per call (none by default; a sync function runs in a worker thread) | `side_effects=` (`"write"` by default) |
-| `a2a(url, *, name=None, timeout=None)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` per exchange (120 s by default) | `"write"` |
+| **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key) — or, with `h.wrap(..., mcp=[slug])`, the tools of those Virtual MCPs — named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `mcp=[]` (or `without={"mcp"}`) is no MCP tools | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
+| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph; `timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash) | `side_effects=` (`"write"` by default) |
+| `a2a(url, *, name=None, timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` seconds per exchange | `"write"` |
 | `agent.as_tool(*, name=None, description=None, side_effects=None)` | one: another agent wrapped by this harness, `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"`; `side_effects=` overrides it |
-| `openapi(spec, *, only=None, base_url=None, headers=None, timeout=30)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
+| `openapi(spec, *, only=None, base_url=None, headers=None, timeout=120)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
 | `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills from code, `SKILLS_DIR` and the gateway's Skills Repository, each pinned per run ([skills.md](skills.md)) | `"read"` |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
@@ -103,10 +103,12 @@ agent = h.wrap(graph, id="stock")
 ```
 
 The result holds `stock`, the MCP tools the virtual key allows and (memory on) the memory
-tools. `framework="openai-agents"` returns `FunctionTool`s (for an agent reached by a handoff,
-whose tools `wrap(tools=)` does not reach); `framework="claude-agent-sdk"` returns one
+tools. `framework` is the adapter's name: `"langgraph"` (and `"deepagents"` for
+`create_deep_agent`) returns LangChain tools; `framework="openai_agents"` returns `FunctionTool`s (for an agent reached by a handoff,
+whose tools `wrap(tools=)` does not reach); `framework="claude_agent_sdk"` returns one
 in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its tools,
-`mcp__trellis__<tool>`, in `allowed_tools`). A LangGraph agent's tool hints are asked for among
+`mcp__trellis__<tool>`, in `allowed_tools`). Any other name is refused with the valid ones
+(`ConfigurationError`). A LangGraph agent's tool hints are asked for among
 these tools.
 
 The tools are built once, but governed at each call: governance looks the call up by its tool's

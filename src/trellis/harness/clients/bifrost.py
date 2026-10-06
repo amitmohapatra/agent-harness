@@ -334,5 +334,6 @@ def code_mode_tools(gateway: Gateway, servers: Sequence[str]) -> list[Tool]:
         )
 
     return [
-        Tool(spec, functools.partial(run, spec.name), code_mode=True) for spec in CODE_MODE_TOOLS
+        Tool(spec, functools.partial(run, spec.name), feature="code_mode")
+        for spec in CODE_MODE_TOOLS
     ]

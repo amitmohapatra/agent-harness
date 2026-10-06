@@ -70,7 +70,8 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 | Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
 | Tool hints | the context is asked for with the toolbox's names (5 or more); the graph's bound tools are not narrowed (`narrows="none"`) |
-| Grounding, judges | sampled successful runs with a text answer ([evaluation.md](../evaluation.md)) |
+| Grounding, judges | sampled successful runs with an answer ([evaluation.md](../evaluation.md)) |
+| Hooks | the tool and run hooks as for every target; the model hooks through LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[ModelHooks()])` (`from trellis.harness.hooks.langchain import ModelHooks`; a `before_model` call is the request made) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per harness call, `retrieve memory`; LangChain's own instrumentation nests under it |
 
 The answer is the state's `structured_response` (a `response_format`) or the last AI message's
@@ -144,7 +145,10 @@ graph's model).
 ## Limits
 
 * Harness tools are fixed when the graph is compiled: the model is offered every bound tool
-  (hints shape the context, not the schemas sent).
+  (hints shape the context, not the schemas sent). A bound tool of a feature the run is
+  `without=` (an MCP tool, a skill's, a memory tool) stays bound, and its call is an error the
+  model reads; build the graph with `h.tools(..., mcp=[])` (or without `skills(...)`) to leave
+  them out of its schemas.
 * A custom state without `messages` gets no context message: read `trellis.current().context`.
 * An `InMemorySaver` pause resumes in place only in the process that paused; elsewhere a
   harness pause is a re-run from the journal and a graph's own pause fails (above).

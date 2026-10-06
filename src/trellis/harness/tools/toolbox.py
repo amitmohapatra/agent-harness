@@ -168,29 +168,37 @@ class Toolbox:
         )
         #: the listing the tools were built from
         self._listing: Listing | None = None
-        #: the tools as the rules last stood, and those rules
-        self._tools: list[Tool] | None = None
+        #: the tools as the rules last stood — with Code Mode and without — and those rules
+        self._tools: dict[bool, list[Tool]] = {}
         self._rules: dict[str, Rule | None] | None = None
 
-    async def tools(self) -> list[Tool]:
+    async def tools(self, *, code_mode: bool = True) -> list[Tool]:
+        """The tools: with Code Mode where it fits (``code_mode=False``: the Code Mode
+        servers' tools as normal tools — ``without={"code_mode"}``)."""
         async with self._lock:
             listing = await self._listings.get()
             if listing is not self._listing:  # listed again
-                self._listing, self._tools = listing, None
+                self._listing, self._tools = listing, {}
                 await _publish(self._governance, listing)
             rules = await self._governance.rules(listing.names)
-            if self._tools is None or rules != self._rules:
-                self._tools, self._rules = self._built(listing, rules), rules
-            return list(self._tools)
+            if rules != self._rules:
+                self._tools, self._rules = {}, rules
+            if code_mode not in self._tools:
+                self._tools[code_mode] = self._built(listing, rules, code_mode=code_mode)
+            return list(self._tools[code_mode])
 
-    def _built(self, listing: Listing, rules: dict[str, Rule | None]) -> list[Tool]:
+    def _built(
+        self, listing: Listing, rules: dict[str, Rule | None], *, code_mode: bool
+    ) -> list[Tool]:
         tools = list(listing.local)
         if self._gateway is not None:
-            tools.extend(_mcp(self._gateway, listing, rules))
+            tools.extend(_mcp(self._gateway, listing, rules, code_mode=code_mode))
         return tools
 
 
-def _mcp(gateway: Gateway, listing: Listing, rules: dict[str, Rule | None]) -> list[Tool]:
+def _mcp(
+    gateway: Gateway, listing: Listing, rules: dict[str, Rule | None], *, code_mode: bool
+) -> list[Tool]:
     slugs = listing.slugs
     tools = [
         Tool(
@@ -205,10 +213,11 @@ def _mcp(gateway: Gateway, listing: Listing, rules: dict[str, Rule | None]) -> l
                 clients=(d.client,),
                 slug=None if slugs is None else slugs[d.name],
             ),
+            feature="mcp",
         )
         for d in listing.defs
     ]
-    if slugs is not None:
+    if slugs is not None or not code_mode:
         return tools
     scriptable = _scriptable(listing.defs, {t.name: t for t in tools}, rules)
     if not scriptable:

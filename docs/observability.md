@@ -90,7 +90,7 @@ The harness uses the credentials the OTLP headers already carry — no extra var
 
 | Score | When | Value |
 |---|---|---|
-| `grounding` | a sampled share of successful runs with a text answer (`TRELLIS_GROUNDING_SAMPLE`, default 0.1, chosen by the run id): the memory service's `/v1/verify {bundle_id, answer, run_id}` against the context the run was given — the one grounding judge, which owns the evidence and records the run's `judge` feedback itself | the share of the answer's claims the evidence supports, 0..1 (an answer with no checkable claim is no score) |
+| `grounding` | a sampled share of successful runs with an answer — a structured one as its JSON (`TRELLIS_GROUNDING_SAMPLE`, default 0.1, chosen by the run id): the memory service's `/v1/verify {bundle_id, answer, run_id}` against the context the run was given — the one grounding judge, which owns the evidence and records the run's `judge` feedback itself | the share of the answer's claims the evidence supports, 0..1 (an answer with no checkable claim is no score) |
 | an evaluator's name (`exact_match`, `llm_judge`, ...) | `h.evaluate` or `evaluate` (every item of a dataset), an online judge (`Harness(judges=[...])`, a sampled share of runs), or `judge(...)` from code you do not wrap — [evaluation.md](evaluation.md), [blocks/evaluation.md](blocks/evaluation.md) | 0..1 (`NUMERIC`), a bool (`BOOLEAN`), or a category (`CATEGORICAL`); the evaluator's comment (a judge's reasoning) |
 | `feedback` | `h.feedback(run_id, verdict, correction=None)` — also the run's `human` feedback in the memory service, which outranks the judge's and the run's own | confirm/approve 1.0, edit 0.5, correct/reject 0.0; the correction as the comment |
 
@@ -120,6 +120,11 @@ values are cut at 2000 characters. Names are matched by their words, not substri
 number is never treated as a credential. Mappings and lists are redacted recursively, bytes
 become `<n bytes>`, anything else its JSON or its text. The redactor is the contracts
 `TelemetryRedactor`; it never raises into a run.
+
+Redaction of your own — a domain's identifiers, what the model itself must not read — is a
+hook: `after_tool` returns the outcome masked (what the model reads, the journal and memory
+keep), `before_model` the messages masked ([hooks.md](hooks.md),
+[`examples/hooks.py`](../examples/hooks.py)).
 
 ## Events
 

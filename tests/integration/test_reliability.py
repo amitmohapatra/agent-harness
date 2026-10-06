@@ -8,22 +8,16 @@ And the same rules for code that is not wrapped (``governed``)."""
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-import uuid
-from collections.abc import Awaitable
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final
 
 import httpx
 import pytest
 import respx
-from agents import Agent as OpenAIAgent
-from claude_agent_sdk import ClaudeAgentOptions
-from deepagents import create_deep_agent
-from langchain.agents import create_agent
 
-from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
+from tests.support.adapters import BUILDERS
+from tests.support.planned import Call
 from tests.unit.test_sources import DOCUMENT
 from trellis import Harness, ReAct, Runtime, current, openapi, tool
 from trellis.contracts import ConfigurationError, RunEvent, RunEventType, ToolError
@@ -31,9 +25,7 @@ from trellis.harness.governance import Governance, governed
 from trellis.harness.journal import content_key
 from trellis.harness.tools import base
 from trellis.harness.tools.base import ToolTimeout
-from trellis.harness.tools.convert import text_of
 
-CLI: Final = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 UNKNOWN_TEXT: Final = (
     "transfer timed out after 0.05s; it may or may not have taken effect: check before "
     "calling it again"
@@ -71,135 +63,6 @@ class Ledger:
 
 
 PLAN: Final[list[Call]] = [("quote", {"sku": "A-1"}), ("transfer", {"amount": 5})]
-SYSTEM: Final = "You pay."
-
-Built = tuple[Any, list[Any]]
-
-
-class Builder(Protocol):
-    """Builds one framework's target that makes the ``plan``'s calls, then answers
-    :data:`FINAL`, told ``system``; the model (or, for Claude, the file its CLI records what
-    it was started with in) is appended to ``seen``."""
-
-    def __call__(
-        self,
-        h: Harness,
-        tools: list[Any],
-        tmp: Path,
-        *,
-        plan: list[Call] = ...,
-        system: str = ...,
-        seen: list[Any] | None = ...,
-    ) -> Awaitable[Built]: ...
-
-
-async def _function(
-    h: Harness,
-    tools: list[Any],
-    tmp: Path,
-    *,
-    plan: list[Call] = PLAN,
-    system: str = SYSTEM,
-    seen: list[Any] | None = None,
-) -> Built:
-    async def follow(input: Any, agent: Runtime) -> str:
-        results = [text_of(await agent.tools.call(name, **args)) for name, args in plan]
-        return FINAL.replace("{last}", results[-1])
-
-    return follow, tools
-
-
-async def _react(
-    h: Harness,
-    tools: list[Any],
-    tmp: Path,
-    *,
-    plan: list[Call] = PLAN,
-    system: str = SYSTEM,
-    seen: list[Any] | None = None,
-) -> Built:
-    model = PlannedChat(plan)
-    _saw(seen, model)
-    return ReAct(system=system, model=model), tools
-
-
-async def _langgraph(
-    h: Harness,
-    tools: list[Any],
-    tmp: Path,
-    *,
-    plan: list[Call] = PLAN,
-    system: str = SYSTEM,
-    seen: list[Any] | None = None,
-) -> Built:
-    model = PlannedChatModel(plan=plan)
-    _saw(seen, model)
-    built = await h.tools(*tools, framework="langgraph")
-    return create_agent(model, tools=built, system_prompt=system), []
-
-
-async def _deepagents(
-    h: Harness,
-    tools: list[Any],
-    tmp: Path,
-    *,
-    plan: list[Call] = PLAN,
-    system: str = SYSTEM,
-    seen: list[Any] | None = None,
-) -> Built:
-    model = PlannedChatModel(plan=plan)
-    _saw(seen, model)
-    built = await h.tools(*tools, framework="langgraph")
-    return create_deep_agent(model=model, tools=built, system_prompt=system), []
-
-
-async def _openai_agents(
-    h: Harness,
-    tools: list[Any],
-    tmp: Path,
-    *,
-    plan: list[Call] = PLAN,
-    system: str = SYSTEM,
-    seen: list[Any] | None = None,
-) -> Built:
-    model = PlannedModel(plan)
-    _saw(seen, model)
-    return OpenAIAgent(name="payer", instructions=system, model=model), tools
-
-
-async def _claude(
-    h: Harness,
-    tools: list[Any],
-    tmp: Path,
-    *,
-    plan: list[Call] = PLAN,
-    system: str = SYSTEM,
-    seen: list[Any] | None = None,
-) -> Built:
-    script = [{"tool": name, "args": args} for name, args in plan] + [{"text": FINAL}]
-    record = tmp / f"cli-{uuid.uuid4().hex[:6]}.json"
-    _saw(seen, record)
-    options = ClaudeAgentOptions(
-        cli_path=CLI,
-        system_prompt=system,
-        env={"FAKE_CLAUDE_SCRIPT": json.dumps(script), "FAKE_CLAUDE_RECORD": str(record)},
-    )
-    return options, tools
-
-
-def _saw(seen: list[Any] | None, model: Any) -> None:
-    if seen is not None:
-        seen.append(model)
-
-
-BUILDERS: Final[dict[str, Builder]] = {
-    "function": _function,
-    "react": _react,
-    "langgraph": _langgraph,
-    "deepagents": _deepagents,
-    "openai-agents": _openai_agents,
-    "claude": _claude,
-}
 
 
 @pytest.fixture(autouse=True)
@@ -212,7 +75,7 @@ async def test_a_write_out_of_time_is_unknown_and_a_flaky_read_is_retried(
     harness: Harness, framework: str, tmp_path: Path
 ) -> None:
     ledger = Ledger()
-    target, tools = await BUILDERS[framework](harness, ledger.tools(), tmp_path)
+    target, tools = await BUILDERS[framework](harness, ledger.tools(), tmp_path, PLAN)
     agent = harness.wrap(target, id=f"payer-{framework}", tools=tools)
     events = [e async for e in agent.stream("pay A-1", user="u")]
     finished = events[-1]

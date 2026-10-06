@@ -455,6 +455,13 @@ class PromptSources(Chain[ResolvedPrompt]):
         return cls(sources)
 
     @classmethod
+    def given(cls, sources: PromptSources | Sequence[PromptSource]) -> PromptSources:
+        """The sources a block was given, as they are (a chain, or the sources in order)."""
+        if isinstance(sources, PromptSources):
+            return sources
+        return cls(sources)
+
+    @classmethod
     def from_env(
         cls, environ: Mapping[str, str] | None = None, *, given: Sequence[PromptSource] = ()
     ) -> PromptSources:

@@ -183,17 +183,15 @@ class _Surface:
         if body.run_id and (safe_id(body.run_id) != body.run_id or self.hub.get(body.run_id)):
             raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
         payload = body.latest_user_text() or body.state
-        identity = await agent._opened(
+        record = await agent._opened(
             payload, user=user, thread=body.thread_id, tenant=tenant, run_id=body.run_id
         )
-        buffer = self.hub.open(identity.run_id, user)
+        buffer = self.hub.open(record.run_id, user)
         self._launch(
             buffer,
             body.thread_id,
-            identity.run_id,
-            lambda listen: pipeline.attempt(
-                agent, identity, payload, listener=listen, streaming=True
-            ),
+            record.run_id,
+            lambda listen: pipeline.attempt(agent, record, payload, listener=listen),
         )
         return buffer, -1
 

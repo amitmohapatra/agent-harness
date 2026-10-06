@@ -16,7 +16,6 @@ from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, InterruptReason, RunEventType, RunStatus
 from trellis.harness import fresh as fresh_module
 from trellis.harness import writes as writes_module
-from trellis.harness.clients.memory import Memory
 
 
 @pytest.fixture(autouse=True)
@@ -26,8 +25,7 @@ def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 async def harness(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
-    async with Harness(config=Settings(memory_url="http://memory.test", api_key="test")) as h:
-        h.memory = Memory("http://memory.test", "test", client=memory_service.client())
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
         yield h
 
 

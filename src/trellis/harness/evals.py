@@ -54,6 +54,7 @@ from trellis.contracts import ConfigurationError, RunStatus, new_id
 from trellis.harness import pipeline, telemetry
 from trellis.harness.adapters.react import _message, _Named, _unfenced
 from trellis.harness.clients.bifrost import Gateway
+from trellis.harness.identity import Identity
 from trellis.harness.prompts import BifrostPrompts, Prompt, PromptSources
 from trellis.harness.repository import pinned
 from trellis.harness.settings import Settings
@@ -779,11 +780,11 @@ async def _item(
     pushed: list[Any] = []
     run_id: str | None = None
     try:
-        identity = await agent._opened(item.input, user=user, thread=None, tenant=None)
-        run_id = identity.run_id
+        record = await agent._opened(item.input, user=user, thread=None, tenant=None)
+        run_id = record.run_id
         current = await run.experiment(run_id, item)
         with telemetry.experiment(current):
-            result = await pipeline.attempt(agent, identity, item.input, observe=pushed.append)
+            result = await pipeline.attempt(agent, record, item.input, observe=pushed.append)
         if result.status is RunStatus.PAUSED and result.interrupt is not None:
             await agent.resume(result.interrupt.interrupt_id, "cancel", reviewer=EVAL_REVIEWER)
     except Exception as exc:
@@ -800,7 +801,7 @@ async def _item(
         error = result.error.message if result.error is not None else None
         return _result(services, item, None, status, run_id, error=error)
     context = pushed[0] if pushed else None
-    memory = await agent.run_memory(identity)
+    memory = await agent.run_memory(Identity.of(record))
     case = EvalCase(
         input=item.input,
         output=result.answer,

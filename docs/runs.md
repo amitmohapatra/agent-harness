@@ -47,6 +47,14 @@ The claim loop is agent-runs' SDK's, `trellis.runs.Worker`; the harness's worker
 next attempt, and the harness's background writes start before the first claim and drain when
 the loop ends. The same loop with a handler of your own: [blocks/runs.md](blocks/runs.md#workers).
 
+**Your own worker or scheduler.** `await agent.execute(job)` is the claimed run's next attempt
+— fresh, continued after an answer, or after a worker died — with its journal, governance,
+memory and time limit: the one thing a worker does with a wrapped agent's run. Any loop can do
+it: `trellis.runs.Worker(runs, agent.execute, [agent.id])`, or your own around
+`runs.claim(worker_id, [agent.id])` (`job` is a `trellis.runs.Job`: the claimed record, the
+worker's id, the lease's length). A job of another agent is refused (`ConfigurationError`).
+[examples/react_with_blocks.py](../examples/react_with_blocks.py) runs one with a loop of its own.
+
 `h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
 at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and
 8. `await worker.run()` claims and executes until stopped: an idle worker asks again after
@@ -66,8 +74,10 @@ as its next attempt for another worker — no waiting for the lease to lapse, an
 call with side effects it completed). A second signal releases the runs at once. Then the
 memory write queue drains (at most 10 s; what is left is spooled or counted lost —
 [memory.md](memory.md)) and the process exits `0`. Give the container at least 40 s to stop
-(e.g. a termination grace period of 45 s). Cancelling `worker.run()` instead cancels the runs
-it holds: they end `CANCELLED`.
+(e.g. a termination grace period of 45 s). Cancelling `worker.run()` instead stops the runs
+it holds without writing anything: their leases lapse and agent-runs queues them again. A
+worker's run ends `CANCELLED` only when someone asked (`agent.cancel`: its heartbeat says
+`cancel_requested`), and `TIMEOUT` when its working time is used up — the worker writes that.
 
 A worker runs any target. Build it the same way in every worker process (at import, in the
 module the worker loads); a LangGraph graph's own `interrupt()` (or HITL middleware) pause needs a

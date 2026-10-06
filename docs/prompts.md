@@ -19,7 +19,7 @@ instructions = await h.prompt("triage", team="EU")  # any framework's own instru
 |---|---|
 | the prompt's name (`"triage"`, `"triage@3"`, `"triage@staging"`) or a `Prompt(...)` | where it is looked up, in a fixed order; the version pinned per run and journaled; the run's `prompt` event and span attribute; the last good copy of a remote source |
 | its variables (`prompt_vars=`, `h.prompt(ref, team="EU")`) | `{{variable}}` filled in; a variable left out is an error, not a literal `{{team}}` sent to the model |
-| optionally `Harness(prompts=[...])`: sources only the code knows | asked before the environment's |
+| optionally `Harness(prompts=[...])`: the sources, when the code knows them | used as they are, in their order, instead of the environment's |
 
 ## What
 
@@ -35,17 +35,20 @@ A prompt source answers one question, `resolve(name, version) -> ResolvedPrompt`
 | Langfuse: `langfuse_prompts(...)` | `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` (at `LANGFUSE_HOST`, else Langfuse Cloud) | the version labelled `production` | version `v` (a number), else the version labelled `v` | Langfuse's public API (`GET /api/public/v2/prompts/{name}`); text and chat prompts, chat placeholders; its `config` |
 | Bifrost: the gateway's Prompt Repository | `BIFROST_URL` | the latest committed version | committed version `v` | selected by header where the harness calls the model ([gateway.md](gateway.md#prompts)); its messages are its text elsewhere |
 
-**The order.** A name is looked up in the sources the code passes (`Harness(prompts=[...])`, in
-their order), then `PROMPTS_DIR`, then Langfuse, then the gateway. The first source that has
-the name — and the version named — answers; a name in two sources is the first one's. A
-`Prompt` given where a prompt is named is used as it is.
+**The order.** Like every block of a `Harness`, the prompt sources passed
+(`Harness(prompts=[...])`, or a `PromptSources`) are used as they are, in their order; not
+passed, they are the ones the environment names, in this order. The first source that has the
+name — and the version named — answers; a name in two sources is the first one's. A `Prompt`
+given where a prompt is named is used as it is.
 
-| Order | Source | On when |
+| Order (from the environment) | Source | On when |
 |---|---|---|
-| 1 | `Harness(prompts=[...])` | the code passes it |
-| 2 | `prompts_dir(PROMPTS_DIR)` | `PROMPTS_DIR` is set |
-| 3 | Langfuse | `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set |
-| 4 | the gateway's Prompt Repository | `BIFROST_URL` is set |
+| 1 | `prompts_dir(PROMPTS_DIR)` | `PROMPTS_DIR` is set |
+| 2 | Langfuse | `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set |
+| 3 | the gateway's Prompt Repository | `BIFROST_URL` is set (or `Harness(gateway=)`) |
+
+To add a source of your own to the environment's, pass them all:
+`Harness(prompts=PromptSources.of(Settings.from_env(), gateway=gw, given=[Prompt(...)]))`.
 
 ## When
 
@@ -66,7 +69,7 @@ LLM judge: `llm_judge(criteria, prompt=)`. Way 2, code that is not wrapped:
 ```python
 from trellis.harness.prompts import PromptSources
 
-prompts = PromptSources.from_env()  # PROMPTS_DIR, Langfuse, BIFROST_URL
+prompts = PromptSources.from_env()  # PROMPTS_DIR, Langfuse, BIFROST_URL (or PromptSources([...]))
 system = await prompts.render("triage@3", team="EU")
 messages = await prompts.messages("triage")  # a chat prompt's messages
 await prompts.aclose()
@@ -81,8 +84,10 @@ h = Harness(prompts=[Prompt("greet", "Greet {{name}} in one line.")])
 
 # a ReAct: a prompt that is not the gateway's becomes the instructions, before `system` and the
 # pushed context (a chat prompt's other messages, e.g. examples, follow the system message)
-agent = h.wrap(ReAct(system="Be brief.", model=MODEL, prompt="greet", prompt_vars={"name": "Ada"}),
-               id="greeter")
+agent = h.wrap(
+    ReAct(system="Be brief.", model=MODEL, prompt="greet", prompt_vars={"name": "Ada"}),
+    id="greeter",
+)
 
 # any other framework: its own instructions
 graph = create_agent(model, tools=tools, system_prompt=await h.prompt("triage", team="EU"))

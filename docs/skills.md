@@ -19,7 +19,7 @@ graph = create_agent(model, tools=await h.tools(skills("sql-review", tone), fram
 | You write | Automatic |
 |---|---|
 | the skills' names (`"sql-review"`, `"refunds@1.2.0"`) or `Skill(...)` objects | where each is looked up; its version pinned per run and journaled with its body; one `## Skills` section in the context; `load_skill` and `read_skill_file`, governed and journaled |
-| optionally `Harness(skills=[...])`: sources only the code knows | asked before the environment's |
+| optionally `Harness(skills=[...])`: the sources, when the code knows them | used as they are, in their order, instead of the environment's |
 
 ## What
 
@@ -57,16 +57,19 @@ The front matter's `name` is the folder's; `description` is required; `version` 
 `metadata.version`) names the version, else it is the folder's content digest (any change is a
 new version).
 
-**The order.** A `Skill` given is its own. A name is looked up in the sources the code passes
-(`Harness(skills=[...])`), then `SKILLS_DIR`, then the gateway: the first that has the name —
-and the version named — answers.
+**The order.** A `Skill` given where skills are named is its own. A name is looked up in the
+skill sources: like every block of a `Harness`, the ones passed (`Harness(skills=[...])`, or a
+`SkillSources`) are used as they are, in their order; not passed, they are the ones the
+environment names, in this order. The first that has the name — and the version named —
+answers.
 
-| Order | Source | On when |
+| Order (from the environment) | Source | On when |
 |---|---|---|
-| 0 | a `Skill` given where skills are named | always |
-| 1 | `Harness(skills=[...])` | the code passes it |
-| 2 | `skills_dir(SKILLS_DIR)` | `SKILLS_DIR` is set |
-| 3 | the gateway's Skills Repository | `BIFROST_URL` is set |
+| 1 | `skills_dir(SKILLS_DIR)` | `SKILLS_DIR` is set |
+| 2 | the gateway's Skills Repository | `BIFROST_URL` is set (or `Harness(gateway=)`) |
+
+`without={"skills"}` (on `h.wrap` or a run) turns skills off whatever their source: no section,
+no tools, nothing pinned.
 
 ## When
 
@@ -89,12 +92,15 @@ kit = await sources.pin(["sql-review", tone])
 system = f"{instructions}\n\n{kit.section}"  # into your framework's prompt
 checkpoint["skills"] = kit.record()  # keep it with your framework's state
 
+
 # your framework's two tools
 async def load_skill(name: str) -> str:
     return await kit.load(name)
 
+
 async def read_skill_file(name: str, path: str) -> str:
     return await kit.read(name, path)
+
 
 # resuming: the same skills, whatever the sources hold now
 kit = await sources.pin(["sql-review", tone], recorded=checkpoint["skills"])
@@ -104,8 +110,11 @@ kit = await sources.pin(["sql-review", tone], recorded=checkpoint["skills"])
 
 ```python
 h = Harness(skills=[skills_dir("skills")])
-agent = h.wrap(ReAct(system="You review SQL.", model=MODEL), id="reviewer",
-               skills=["sql-review", Skill("tone", "How we write.", "Short sentences.")])
+agent = h.wrap(
+    ReAct(system="You review SQL.", model=MODEL),
+    id="reviewer",
+    skills=["sql-review", Skill("tone", "How we write.", "Short sentences.")],
+)
 result = await agent.run("Review: SELECT * FROM orders", user="ada")
 ```
 
