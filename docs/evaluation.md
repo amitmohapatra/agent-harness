@@ -15,7 +15,7 @@ Every evaluation name is imported from `trellis.harness.evals` (the `trellis` pa
 wrapped API only). This page is how evaluation works and what a wrapped agent gets (Way 1);
 evaluating your own code, not wrapped, with `evaluate` and `judge` is
 [blocks/evaluation.md](blocks/evaluation.md) (Way 2): the same evaluators, judge and Langfuse
-records. `examples/evaluate_offline.py` and `examples/online_judges.py` run Way 1 with no
+records. `examples/05_features/trajectory_evals.py` and `examples/05_features/online_judges.py` run Way 1 with no
 services. Against the real memory service, `tests/live/test_live_matrix.py` runs a
 wrapped evaluation with grounding, `exact_match` and a scripted judge, and checks the Langfuse
 dataset run, scores and experiment attributes.
@@ -178,7 +178,7 @@ evaluator where one will do.
 
 ## Offline: `evaluate` and `h.evaluate`
 
-```python
+```text
 await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None,
                  concurrency=4, limit=None, user=None)
 ```

@@ -40,7 +40,7 @@ await runs.aclose()  # or: async with RunsClient() as runs
 
 ## A run, a pause, an answer
 
-The records are the contracts models ([contracts.md](contracts.md)): a run is a `RunRecord`
+The records are the contracts models ([mixing.md](mixing.md#the-records-they-share)): a run is a `RunRecord`
 started from a `RunStart`, paused with an `Interrupt`, resumed with an `InterruptResolution`.
 
 ```python
@@ -187,7 +187,9 @@ async with RunsClient() as runs:
 * A resumed queued run comes back to a worker like any other: the same handler reads
   `record.last_resolution` to know what the person said.
 
-[`examples/blocks_worker.py`](../../examples/blocks_worker.py) runs a queue of refunds through
+[`examples/03_way2_runs/schedule.py`](../../examples/03_way2_runs/schedule.py) creates a schedule with
+metadata, fires it and runs it with a `Worker`;
+[`examples/03_way2_runs/worker_and_webhooks.py`](../../examples/03_way2_runs/worker_and_webhooks.py) runs a queue of refunds through
 a `Worker`, pauses one for finance, answers it from the inbox, and finishes it on the next claim.
 
 ## Schedules
@@ -252,25 +254,12 @@ unreachable receiver are retried.
 
 ## Behaviour
 
-* **Tenancy.** A tenant key names its tenant. A platform key names it on every call: from the
-  body for `start`, `pause` and `schedules.create`, else from `tenant=`, else from the client's
-  `tenant`. Nothing is remembered between calls.
-* **Reads and writes.** A read by id answers `None` for a record that does not exist; a write
-  raises. Every write is safe to repeat: a start is idempotent on its `run_id` (or
-  `idempotency_key`), a repeated pause or finish answers the stored run, an artifact is stored
-  once per checksum, a schedule create is an upsert.
-* **Retries.** A call that fails on the way (no response, `429`, `502`, `503`, `504`) is sent
-  again up to `max_retries` times, after the `Retry-After` agent-runs asked for (at most 30 s)
-  or a full-jitter backoff from 0.25 s doubling to 5 s.
-* **Errors.** Every refusal is a `RunsError` with `code`, `status`, `retryable`, `request_id`:
-  `NotFoundError`, `ConflictError` (an illegal transition, an answer to another interrupt),
-  `LeaseLostError` (the worker no longer holds the run: stop, write nothing; **not** a
-  `ConflictError`), `ValidationError`, `PayloadTooLargeError`, `RateLimitedError`,
-  `AuthenticationError`, `AuthorizationError`, `DependencyUnavailableError`.
-
-The full operation table, the configuration and the error classes are in the SDK's
-[README](https://github.com/amitmohapatra/agent-runs/blob/main/sdk/python/README.md); the API
-in agent-runs' [docs/api.md](https://github.com/amitmohapatra/agent-runs/blob/main/docs/api.md).
+Tenancy (a platform key names the tenant on every call), idempotent writes, retries (`429`,
+`502`-`504`, `Retry-After`) and the error classes (`RunsError`: `NotFoundError`,
+`ConflictError`, `LeaseLostError` — stop, write nothing —, `RateLimitedError`...) are the SDK's:
+its [README](https://github.com/amitmohapatra/agent-runs/blob/main/sdk/python/README.md#errors-and-retries)
+has them, with every operation and the configuration; the API is agent-runs'
+[docs/api.md](https://github.com/amitmohapatra/agent-runs/blob/main/docs/api.md).
 
 ## With Way 1
 

@@ -141,4 +141,4 @@ Progressive disclosure, for every framework:
 
 ## Example
 
-[`examples/prompts_and_skills.py`](../examples/prompts_and_skills.py).
+[`examples/05_features/skills_and_prompts.py`](../examples/05_features/skills_and_prompts.py).

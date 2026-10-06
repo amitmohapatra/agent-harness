@@ -10,7 +10,7 @@ plugged in by your own code:
 | runs ([runs.md](runs.md)) | the pause waits in `role:support`'s inbox with the session id as its checkpoint; after the reviewer's answer a new query resumes the session, and the permission callback lets exactly the approved call through |
 | evaluation ([evaluation.md](evaluation.md)) | the answer is judged on the run's trace |
 
-The runnable version is [`examples/blocks_claude.py`](../../examples/blocks_claude.py): offline
+The runnable version is [`examples/03_way2_governance/claude_recipe.py`](../../examples/03_way2_governance/claude_recipe.py): offline
 it runs a scripted stand-in for the `claude` CLI that asks the permission callback as the real
 CLI does; with `BIFROST_URL` it runs the real `claude` through Bifrost's Anthropic route. The
 snippets below are from it. Wrapping the same options instead (Way 1):

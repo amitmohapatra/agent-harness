@@ -41,7 +41,7 @@ result = await agent.run({"order": "o-7", "amount": 40, "question": "Refund o-7"
 | `await agent.ask(question, ...)` | a pause for a person ([interrupts.md](../interrupts.md)); returns the answer on resume |
 | `agent.log(message, **fields)` | a log line and a `log` event on the stream |
 | `run_id`, `user`, `thread`, `tenant`, `attempt`, `task` | who and what the run is |
-| `agent.uses(feature)` | whether the run has a part of the harness on, or is `without=` it ([what is on](../README.md#what-is-on-and-how-to-turn-it-off)) |
+| `agent.uses(feature)` | whether the run has a part of the harness on, or is `without=` it ([what is on](../configuration.md#what-is-on-and-how-to-turn-it-off)) |
 
 Memory is asked about the input's text: the input itself, the last user message of a list, or a
 dict's `query`/`question`/`input`/`prompt`/`text`/`message` field — a dict without one gets no
@@ -76,10 +76,13 @@ they are refused (`ConfigurationError`) — the function reads what it needs fro
 
 ## Run it
 
-* [`examples/cowork.py`](../../examples/cowork.py), [`examples/schedule.py`](../../examples/schedule.py),
-  [`examples/serve_chat.py`](../../examples/serve_chat.py),
-  [`examples/a2a_agents.py`](../../examples/a2a_agents.py),
-  [`examples/memory_features.py`](../../examples/memory_features.py).
+* [`examples/01_start/hello.py`](../../examples/01_start/hello.py) — Level 0;
+  [`examples/02_way1_function/agent.py`](../../examples/02_way1_function/agent.py) — memory, local and
+  MCP tools, a question, a hook, `without=`.
+* [`examples/02_way1_function/queue_worker_inbox.py`](../../examples/02_way1_function/queue_worker_inbox.py), [`examples/02_way1_function/schedule.py`](../../examples/02_way1_function/schedule.py),
+  [`examples/05_features/serve_agui_and_a2a.py`](../../examples/05_features/serve_agui_and_a2a.py),
+  [`examples/03_way2_a2a/remote.py`](../../examples/03_way2_a2a/remote.py),
+  [`examples/02_way1_function/memory_documents_feedback.py`](../../examples/02_way1_function/memory_documents_feedback.py).
 * Tests: `tests/integration/test_function_agent.py`, and against the real services
   `tests/live/test_live_matrix.py` (`function`, and the worker, schedule, A2A, document and
   feedback tests).

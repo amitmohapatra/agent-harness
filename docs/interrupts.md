@@ -345,7 +345,10 @@ interrupt may decide. `reviewer.answer(agent, result)` answers one pause, `settl
 `runs.resume`. An interrupt the script does not cover raises `LookupError` naming it;
 `reviewer.answered` lists what was answered.
 
-**Example.** [`examples/approvals.py`](../examples/approvals.py): an approval rule in a hook (a
+**Example.** [`examples/06_scenarios/sql_approval_own_screen.py`](../examples/06_scenarios/sql_approval_own_screen.py):
+SQL that changes data waits for a DBA on their own `sql-review` screen, an `edit` adds a
+`WHERE`, and the next change is approved for the rest of the run.
+[`examples/05_features/hitl_forms_options_own_screen.py`](../examples/05_features/hitl_forms_options_own_screen.py): an approval rule in a hook (a
 small refund runs unasked, a large one is asked on finance's screen), labelled options with
 several picks, a result from outside the run (an `ask` in the tool), answered by a `Reviewer`. Tests:
 `tests/integration/test_approvals.py`, `test_questions.py` and `test_inbox.py` (every adapter,

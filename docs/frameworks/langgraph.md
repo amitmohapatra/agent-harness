@@ -208,12 +208,14 @@ versions pinned per run. `sandbox()` governs and journals every command
 
 ## Run it
 
-* [`examples/langgraph_agent.py`](../../examples/langgraph_agent.py) — `create_agent`, no
+* [`examples/02_way1_langgraph/agent.py`](../../examples/02_way1_langgraph/agent.py) — `create_agent`, no
   checkpointer, an approval re-run from the journal.
-* [`examples/langgraph_stategraph.py`](../../examples/langgraph_stategraph.py) — a hand-built
+* [`examples/02_way1_langgraph/stategraph.py`](../../examples/02_way1_langgraph/stategraph.py) — a hand-built
   `StateGraph` with a checkpointer: a harness approval in the tool node, then the graph's own
   `interrupt()`.
-* [`examples/langchain_hitl_middleware.py`](../../examples/langchain_hitl_middleware.py) —
+* [`examples/05_features/langgraph_interrupt_fields.py`](../../examples/05_features/langgraph_interrupt_fields.py) —
+  the graph's own `interrupt({...})` with options, several picks, a component and an assignee.
+* [`examples/02_way1_langgraph/hitl_middleware.py`](../../examples/02_way1_langgraph/hitl_middleware.py) —
   `HumanInTheLoopMiddleware`: an edit, then a reject with a reason.
 * Tests: `tests/integration/test_langgraph.py`, `tests/integration/test_hitl_middleware.py`,
   and against the real services `tests/live/test_live_matrix.py` (`langgraph`, `stategraph`).

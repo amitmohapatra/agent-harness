@@ -20,7 +20,7 @@ pip install -e '../agent-harness[a2a]'    # the A2A SDK; no Harness needed
 
 It reads no environment: who the call is for is an argument.
 
-```python
+```text
 remote(url, *, tenant, user, thread=None, on_input=None, name=None, headers=None,
        timeout=120.0, client=None) -> RemoteAgent
 ```
@@ -103,8 +103,8 @@ should be governed ([governance.md](governance.md)): a remote agent is a `write`
 A wrapped agent calls remote agents with `a2a(url)` in its tools, which is built on `remote`:
 the identity and the thread are the calling run's, and `on_input` is the run's own `ask`, so a
 remote question pauses the calling run in agent-runs and the resumed run answers it
-([surfaces.md](../surfaces.md#calling-a2a-agents-a2aurl--namenone)). A wrapped agent served
+([surfaces.md](../surfaces.md#calling-a2a-agents-a2aurl--namenone-timeout120)). A wrapped agent served
 with `serve_a2a` is a remote agent your code calls with `remote` ([mixing.md](mixing.md)).
 
-[`examples/a2a_agents.py`](../../examples/a2a_agents.py) serves a wrapped agent over A2A, calls
+[`examples/03_way2_a2a/remote.py`](../../examples/03_way2_a2a/remote.py) serves a wrapped agent over A2A, calls
 it as another agent's tool, and calls it from plain code with `remote()`.

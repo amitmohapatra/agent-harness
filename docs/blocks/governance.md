@@ -139,6 +139,8 @@ A wrapped agent's every tool call goes through the same `Governance.check` insid
 administrator sets on `create_po` governs your graph and every wrapped agent in the tenant
 ([mixing.md](mixing.md)).
 
-Runnable: [`examples/blocks_langgraph.py`](../../examples/blocks_langgraph.py),
-[`examples/blocks_openai_agents.py`](../../examples/blocks_openai_agents.py),
-[`examples/blocks_claude.py`](../../examples/blocks_claude.py).
+Runnable: [`examples/03_way2_governance/governed_tools.py`](../../examples/03_way2_governance/governed_tools.py)
+(`check`, an `approve_when` rule, `governed` with hooks, `decided`),
+[`examples/03_way2_governance/langgraph_recipe.py`](../../examples/03_way2_governance/langgraph_recipe.py),
+[`examples/03_way2_governance/openai_agents_recipe.py`](../../examples/03_way2_governance/openai_agents_recipe.py),
+[`examples/03_way2_governance/claude_recipe.py`](../../examples/03_way2_governance/claude_recipe.py).

@@ -4,7 +4,8 @@ The harness has one way to attach (`h.wrap(target, id=...)`) and a few choices a
 page is Way 1. (Not wrapping, and calling the blocks from your own framework, is Way 2:
 [docs/README.md](README.md#way-2-pluggable-blocks-your-framework-our-pieces).) Each section
 below starts from what you are trying to do and names the call. The API itself is in
-the [README](../README.md); how it works is in [ARCHITECTURE.md](../ARCHITECTURE.md).
+[api.md](api.md); how it works is in [architecture.md](architecture.md); every setting is in
+[configuration.md](configuration.md).
 
 ## What to wrap
 
@@ -23,8 +24,8 @@ agents, not models ([gateway.md](gateway.md)). Each target has a page with the l
 existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.md),
 [Deep Agents](frameworks/deepagents.md), [OpenAI Agents SDK](frameworks/openai-agents.md),
 [Claude Agent SDK](frameworks/claude-agent-sdk.md), [ReAct](frameworks/react.md),
-[plain functions](frameworks/functions.md); the short decision tables are in
-[docs/README.md](README.md#what-to-use-when).
+[plain functions](frameworks/functions.md); how they compare is in
+[architecture.md](architecture.md#the-adapters).
 
 ## Where a tool comes from
 
@@ -35,9 +36,17 @@ existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.
 | Another agent | `a2a(url)` | One `write` tool; its questions become this run's questions. |
 | Another agent this harness wraps (a specialist the model delegates to) | `agent.as_tool()` | Each call is a child run: its questions pause this run, its crash is continued, it is cancelled with this run; read-only children run at once ([subagents.md](subagents.md)). |
 | Shared by many agents, owned by a platform team, budgeted | an MCP server registered in Bifrost, allowed on the agent's virtual key | Nothing in code: the toolbox is what the key allows, governed by the server's annotations and the catalog. Many read-only Code Mode servers become Code Mode meta-tools. |
+| Code the model writes and runs, away from the host | `sandbox()` in `tools=[...]` or `h.tools(...)`, `SANDBOX=docker` ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` write, `sandbox_read` reads; and the catalog. |
+| The agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write. |
+| A framework's own tool (`function_tool`, Deep Agents' file tools) | as the framework does | The framework's permissions, not the harness's. |
+| Claude Code's built-in tools (`Bash`, `Write`, `Read`...) | as the CLI does | Governance by risk (`Bash` asks, writes announced, reads run) and your hooks, through the SDK's permission callback; then your own `can_use_tool`. |
 | Needed when the agent is built (a compiled graph; any framework's agent built before wrapping) | `await h.tools(*sources, framework=...)` | The same toolbox in the framework's own type; every call still goes through the bridge. |
 
 Approvals by tool: make the tool `irreversible` (or let its MCP server say `destructiveHint`).
+A rule only your code knows (deny a call, rewrite its arguments, ask someone by its amount): a
+`before_tool` hook returning `Deny`, `Rewrite` or `Ask` ([hooks.md](hooks.md)). The framework's
+own gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`): keep it — it becomes
+the same approval; gate each tool in one place.
 Approvals by call: an administrator's `approve_when` rule in the memory service's tool catalog
 (`amount > 10000`) asks exactly when it holds — no code change, and it replaces what the risk
 decides ([governance.md](governance.md)).
@@ -94,6 +103,34 @@ outside a tool (and the model calls) run again on the re-run.
 A run started with `run`/`stream` resumes in the process that calls `resume`; one started with
 `start` (or by a schedule) goes back to the queue on resume and any worker continues it.
 
+## Time, failures and cancelling
+
+| You want | Use |
+|---|---|
+| a tool that may hang to give up | `@tool(timeout=20)`, `openapi(spec, timeout=)`, `a2a(url, timeout=)` — a read says it timed out, a write is reported as of unknown effect |
+| a model call bounded | `ReAct(..., model_timeout=30)` |
+| a `ReAct` model whose window is not 128k tokens (and whose profile does not say) | `ReAct(..., context_window=32_000)`: older results are cleared and older turns summarized from it |
+| every run of an agent bounded, however it starts (chat, A2A, evaluation, schedules too) | `h.wrap(..., timeout=900)` → `TIMEOUT` |
+| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` (over the agent's) → `TIMEOUT` |
+| reads retried, writes never repeated, after a crash too | nothing: automatic ([reliability.md](reliability.md#retries)) |
+| a tool's service to deduplicate | hand it `trellis.current().idempotency_key` (OpenAPI writes send it already) |
+| to stop a run | `await agent.cancel(run_id, reason=...)` or `await handle.cancel()` — queued, paused, here or on a worker |
+| to know which code ran a run | `h.wrap(..., version=)` or `TRELLIS_AGENT_VERSION` |
+| urgent work first, one conversation at a time | `agent.start(..., priority=100)`, `concurrency_key=` ([runs.md](runs.md#queue-order-and-busy-conversations)) |
+
+## Local or agent-runs
+
+| | Without `RUNS_URL` | With `RUNS_URL` |
+|---|---|---|
+| run records, the inbox | this process (`LocalRuns`), lost on restart | agent-runs (Postgres) |
+| `start` + workers | workers in this process | any worker process, leases, crash recovery |
+| schedules | fire when a worker in this process asks for work (or `h.runs.schedules.fire(id)`) | agent-runs' ticker |
+| deadlines and escalation (`ask(deadline=, escalate_to=)`) | not enforced | the ticker escalates or times the run out |
+| a run's `timeout=` and `deadline=` | each attempt stops on time | each attempt stops on time, and the ticker ends a run past either, its worker dead or not |
+| a queued run that fails with an error that may pass | ends `ERROR` | queued again, up to 3 times, after a backoff |
+| large `ask` payloads | in process | run artifacts (`payload_ref`) |
+| a run's events from another replica | no | agent-runs' event log (`agent.events`, an AG-UI reconnect) |
+
 ## AG-UI or A2A
 
 | Who is on the other side | Use |
@@ -102,7 +139,10 @@ A run started with `run`/`stream` resumes in the process that calls `resume`; on
 | Another agent, any framework or vendor, that should call yours | `agent.serve_a2a(app, url)`: the agent card, JSON-RPC, streaming, signed push notifications; pauses are `input-required` |
 | Your agent needs another agent | `a2a(url)` in `tools=[...]` |
 
-Both surfaces can be mounted on one FastAPI app (`examples/serve_chat.py`). Identity is always
+Both surfaces can be mounted on one FastAPI app
+([examples/05_features/serve_agui_and_a2a.py](../examples/05_features/serve_agui_and_a2a.py)).
+Code that is not wrapped (any framework) calls another agent with `remote(url, tenant=, user=)`
+([blocks/a2a.md](blocks/a2a.md)). Identity is always
 the deployment's: pass `identity=` (or put an authenticating edge in front for A2A's trusted
 header); without it every caller is `anonymous`.
 
@@ -126,6 +166,9 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 | A score for every item of a test set, before shipping | `await h.evaluate(agent, "dataset-name" or [items], [exact_match(), llm_judge("...")])`: each item through the real pipeline, scores on the traces, a Langfuse dataset run, an `EvalReport` |
 | Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_JUDGE_SAMPLE`) judged in the background |
 | A judge that does not grade itself, on its own budget | `TRELLIS_JUDGE_MODEL` (a stronger model than the agent's) and `TRELLIS_JUDGE_VIRTUAL_KEY` |
+| Which tools a run called, in what order, with what arguments | `called("lookup", before="refund")`, `tool_sequence([...])`, or your own reading `case.trajectory` ([evaluation.md](evaluation.md#trajectories)) |
+| Every run's answer checked against what memory gave it, cheaply | nothing: the sampled grounding check (`TRELLIS_GROUNDING_SAMPLE`, 10 %); `grounding()` makes it an explicit evaluator |
+| An exact or partial match against an expected answer | `exact_match()`, `contains()` (offline: they need `expected`) |
 | A check of your own | any `async (EvalCase) -> EvalScore \| None` in the evaluators or judges |
 | Evaluation of an agent you do not wrap | `evaluate(any_async_callable, dataset, [...])` and `judge(case, [...], services=...)` from `trellis.harness.evals` ([blocks/evaluation.md](blocks/evaluation.md)) |
 

@@ -104,7 +104,7 @@ A Deep Agent is a graph: `framework_options=` goes into its run's config as for 
 
 ## Run it
 
-* [`examples/deepagents_agent.py`](../../examples/deepagents_agent.py) — planning with
+* [`examples/02_way1_deepagents/agent.py`](../../examples/02_way1_deepagents/agent.py) — planning with
   `TodoListMiddleware`, an approval resumed in place.
 * Tests: `tests/integration/test_deepagents.py`, `tests/integration/test_hitl_middleware.py`
   (`interrupt_on`), and against the real services `tests/live/test_live_matrix.py`
