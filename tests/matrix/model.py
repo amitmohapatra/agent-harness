@@ -72,6 +72,9 @@ class Switch:
     title: str
     how: str
     requires: frozenset[str] = frozenset()
+    #: the ``without=`` name that turns it off for an agent whose deployment has what it
+    #: requires (``None``: it is off when its service or argument is not given)
+    without: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

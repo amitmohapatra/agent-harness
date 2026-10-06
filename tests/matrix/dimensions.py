@@ -35,6 +35,23 @@ SWITCHES: Final[tuple[Switch, ...]] = (
     Switch("tracing", "tracing (OTel spans)", "OTEL_EXPORTER_OTLP_ENDPOINT, or the app's provider"),
     Switch("agent_timeout", "the agent's time limit", "h.wrap(..., timeout=)"),
     Switch("version", "the agent's version", "h.wrap(..., version=) or TRELLIS_AGENT_VERSION"),
+    Switch("hooks", "hooks around runs and tool calls", "h.wrap(hooks=[...]) / Harness(hooks=)"),
+    # parts of a service, each off with without= while the service is on
+    *(
+        Switch(
+            name, title, f"on with {'+'.join(needs)}; off: without={name!r}", frozenset(needs), name
+        )
+        for name, title, needs in (
+            ("memory_push", "memory push (the context)", ("memory",)),
+            ("memory_pull", "memory pull (the memory tools)", ("memory",)),
+            ("records", "memory records", ("memory",)),
+            # the hints come with the pushed context; Code Mode is scripts over the MCP tools
+            ("hints", "tool hints", ("memory", "memory_push")),
+            ("mcp", "the key's MCP tools (and Code Mode)", ("gateway",)),
+            ("code_mode", "Code Mode", ("gateway", "mcp")),
+            ("skills", "skills", ("gateway",)),
+        )
+    ),
 )
 BY_ID: Final = {s.id: s for s in SWITCHES}
 ALL: Final = frozenset(BY_ID)
@@ -42,7 +59,7 @@ ALL: Final = frozenset(BY_ID)
 
 # --------------------------------------------------------------------------- pending switches
 async def _without(world: World, name: str) -> None:
-    """``h.wrap(..., without={name})`` (G2): one switch off per agent, the rest as deployed."""
+    """``h.wrap(..., without={name})``: one part off for an agent, the rest as deployed."""
     from tests.matrix.kit import Desk
 
     h = world.harness()
@@ -63,27 +80,23 @@ def _pending(name: str, title: str, gap: str = "G2") -> PendingSwitch:
     return PendingSwitch(name, title, gap, probe)
 
 
-#: Switches the plan adds (``without=``, G2/G24): until they exist, a selection naming one is
-#: one strict-xfail cell; when one lands, move it to ``SWITCHES`` and give ``World`` its effect.
+#: Switches the plan adds and ``without=`` does not name yet (G2/G24): until they exist, a
+#: selection naming one is one strict-xfail cell; when one lands, move it to ``SWITCHES``.
 PENDING: Final[tuple[PendingSwitch, ...]] = (
-    _pending("memory.push", "memory push alone"),
-    _pending("memory.pull", "memory pull alone"),
-    _pending("memory.records", "memory records alone"),
-    _pending("hints", "tool hints"),
-    _pending("code_mode", "Code Mode"),
     _pending("governance", "governance (a bare agent)"),
     _pending("redaction", "redaction (extra keys or off)", gap="G24"),
-    _pending("hooks", "hooks (before/after/on_error)", gap="G4"),
 )
 
 
 # --------------------------------------------------------------------------- selections
 def closure(on: frozenset[str]) -> frozenset[str]:
-    """``on`` with what each switch in it requires."""
+    """``on`` with what each switch in it requires, and what those require."""
     found = set(on)
-    for name in on:
-        found |= BY_ID[name].requires
-    return frozenset(found)
+    while True:
+        more = {r for name in found for r in BY_ID[name].requires} - found
+        if not more:
+            return frozenset(found)
+        found |= more
 
 
 def valid(row: Mapping[str, object]) -> bool:

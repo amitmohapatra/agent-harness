@@ -39,6 +39,7 @@ from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from tests.matrix.dimensions import SWITCHES
 from tests.matrix.model import Feature, Selection
 from tests.matrix.models import ModelLog
 from tests.support.adapters import BUILDERS
@@ -55,19 +56,24 @@ from trellis.contracts import (
     RunEventType,
     RunRecord,
     RunStatus,
+    ToolCall,
     new_id,
 )
-from trellis.harness import telemetry
+from trellis.harness import pipeline, telemetry
 from trellis.harness.a2a.identity import EXTENSION_URI
 from trellis.harness.agent import Agent
 from trellis.harness.agui.sse import decode
 from trellis.harness.evals import EvalCase, EvalScore
 from trellis.harness.events import RunEvents
+from trellis.harness.features import features
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.hooks import Hooks
 from trellis.harness.identity import identity_headers
 from trellis.harness.journal import MAX_CHECKPOINT_BYTES
+from trellis.harness.result import Result
 from trellis.harness.runs import LocalRuns
+from trellis.harness.runtime import Runtime
 from trellis.harness.tools import base
 from trellis.runs import Lease, PayloadTooLargeError
 from trellis.runs import Worker as RunsWorker
@@ -133,6 +139,22 @@ class MatrixGateway(FakeGateway):
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})
 
 
+class Recorder(Hooks):
+    """The hooks switch: a hook that only notes what it saw (on: every run and tool call)."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, str]] = []
+
+    async def on_run_start(self, run: Runtime) -> None:
+        self.seen.append(("start", run.run_id))
+
+    async def on_run_end(self, run: Runtime, result: Result) -> None:
+        self.seen.append(("end", run.run_id))
+
+    async def before_tool(self, call: ToolCall) -> None:
+        self.seen.append(("tool", call.tool))
+
+
 class MatrixRuns(LocalRuns):
     """The in-process run store, refusing a checkpoint over agent-runs' bound as agent-runs
     does (so a journal larger than one goes to an artifact, as in production)."""
@@ -163,6 +185,8 @@ class Outcome:
     events: list[RunEvent]
     pauses: list[Interrupt]
     surface: list[Any] = field(default_factory=list)
+    #: the parts the run's own ``without=`` turned off
+    without: frozenset[str] = frozenset()
 
     @property
     def status(self) -> RunStatus:
@@ -242,6 +266,13 @@ class World:
             way == "react_with_blocks" and feature.id in ON_WITH_BLOCKS
         )
         self.store = MatrixRuns()
+        #: the parts the selection turns off while their service is on (``without=``)
+        self.without = frozenset(
+            sw.without
+            for sw in SWITCHES
+            if sw.without and sw.requires <= self.switched and sw.id not in self.switched
+        )
+        self.recorder = Recorder()
         self.memory_service = FakeMemoryService(candidates=[])  # no narrowing unless asked
         self.fake_gateway = MatrixGateway(bundles={"": [KEY_TOOL]})
         #: the team's own approval rules (``react_with_blocks``: its governance block)
@@ -254,11 +285,22 @@ class World:
         self.others: list[Harness] = []
         self.overrides: dict[str, Any] = {}
         self._agents = 0
+        self._run_options: dict[str, Any] = {}
         self._current: _Handle | None = None
         self.exporter: InMemorySpanExporter | None = None
         self._tap(monkeypatch)
         #: what every scripted model was sent and offered
         self.models = ModelLog(monkeypatch)
+        #: the tools each Claude run was given (its CLI lists them itself)
+        self.claude_offered: list[list[str]] = []
+        converted = pipeline.convert
+
+        def converting(tool_format: Any, tools: Any) -> Any:
+            if tool_format == "claude":
+                self.claude_offered.append([t.name for t in tools])
+            return converted(tool_format, tools)
+
+        monkeypatch.setattr(pipeline, "convert", converting)
         monkeypatch.setattr(base, "RETRY_BACKOFF_SECONDS", 0.001)
         if "tracing" in self.switched:
             self.exporter = InMemorySpanExporter()
@@ -310,6 +352,7 @@ class World:
             gateway=gateway,
             governance=governance,
             judges=[self.judge] if "judges" in on else (),
+            hooks=[self.recorder] if "hooks" in on and self.way == "react_with_blocks" else (),
         )
 
     def rules(self, rules: dict[str, Rule]) -> None:
@@ -369,6 +412,10 @@ class World:
             wrap.setdefault("version", VERSION)
         if "agent_timeout" in self.switched:
             wrap.setdefault("timeout", AGENT_TIMEOUT)
+        if self.without:
+            wrap["without"] = {*self.without, *wrap.get("without", ())}
+        if "hooks" in self.switched and self.way != "react_with_blocks":
+            wrap["hooks"] = [*wrap.get("hooks", ()), self.recorder]
         if name is None:
             self._agents += 1
             name = f"{self.feature.id.lower()}.{self.adapter}.{self._agents}"
@@ -407,15 +454,20 @@ class World:
         target: Target | None = None,
         parent: str | None = None,
         during: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+        run: dict[str, Any] | None = None,
         **wrap: Any,
     ) -> Outcome:
         """Run the agent under test once, in the cell's mode, to its end: each pause answered
         with ``answer`` (by another process, in ``elsewhere``). ``during`` is called with the
-        run's id while its first attempt is under way (to cancel it)."""
+        run's id while its first attempt is under way (to cancel it). ``run`` holds the run's
+        own options (``timeout=``, ``without=``: ``run``, ``stream`` and ``start`` take them)."""
         tools, plan = list(tools), list(plan)
         if self.mode == "elsewhere":
             tools, plan = [*tools, confirm], [CONFIRM, *plan]
         agent = await self.agent(tools, plan, mcp=mcp, target=target, parent=parent, **wrap)
+        self._run_options = dict(run or {})
+        if "timeout" in self._run_options:
+            self.overrides["timeout"] = self._run_options["timeout"]
         handle = self._current = await self._start(agent, input)
         watching = None
         if during is not None:
@@ -454,6 +506,7 @@ class World:
         if injected_pause(self.mode, pauses):
             pauses = pauses[1:]
         outcome = Outcome(run_id, record, events, pauses, handle.surface)
+        outcome.without = features(self._run_options.get("without", ()))
         self.outcomes.append(outcome)
         return outcome
 
@@ -508,11 +561,11 @@ class World:
         handle = _Handle(agent, 0)
         mode = self.mode
         if mode == "run":
-            handle.task = asyncio.create_task(agent.run(input, user=USER))
+            handle.task = asyncio.create_task(agent.run(input, user=USER, **self._run_options))
         elif mode == "stream":
-            handle.task = asyncio.create_task(_streamed(agent, input))
+            handle.task = asyncio.create_task(_streamed(agent, input, self._run_options))
         elif mode in ("worker", "elsewhere"):
-            started = await agent.start(input, user=USER)
+            started = await agent.start(input, user=USER, **self._run_options)
             handle.run_id = started.run_id
             handle.task = asyncio.create_task(self._work(agent))
         elif mode == "schedule":
@@ -648,17 +701,19 @@ class World:
         self._services()
 
     def _run_switches(self, outcome: Outcome) -> None:
-        """One run: memory, the gateway's tools, the judges and tracing as switched."""
-        on, names = self.switched, set(outcome.called())
+        """One run: memory's parts, the gateway's tools, the judges, tracing and hooks as
+        switched (the run's own ``without=`` turning more off)."""
+        on, names = self.switched - outcome.without, set(outcome.called())
         loaded = [e for e in outcome.events if e.type is RunEventType.CONTEXT_LOADED]
-        if "memory" in on:
-            assert loaded, f"memory on: no context was pushed into {outcome.run_id}"
+        if {"memory", "memory_push"} <= on:
+            assert loaded, f"memory push on: no context was pushed into {outcome.run_id}"
         else:
-            assert not loaded, "memory off: a context was pushed"
+            assert not loaded, "memory push off: a context was pushed"
+        if not {"memory", "memory_pull"} <= on:
             pulled = names & set(MEMORY_TOOLS)
-            assert not pulled, f"memory off: memory tools were called: {pulled}"
-        if "gateway" not in on:
-            assert KEY_TOOL not in names, "gateway off: an MCP tool was called"
+            assert not pulled, f"memory pull off: memory tools were called: {pulled}"
+        if not {"gateway", "mcp"} <= on:
+            assert KEY_TOOL not in names, "the key's MCP tools off: one was called"
         succeeded = outcome.status is RunStatus.SUCCESS
         judged = [c for c in self.judged if c.run_id == outcome.run_id]
         if "judges" in on and succeeded and outcome.answer not in (None, ""):
@@ -674,9 +729,12 @@ class World:
                 and (s.attributes or {}).get("langfuse.trace.metadata.run_id") == outcome.run_id
             ]
             assert len(spans) >= len(attempts), f"tracing on: {len(spans)} agent spans"
+        hooked = {kind for kind, ref in self.recorder.seen if ref == outcome.run_id}
+        if "hooks" in on:
+            assert hooked == {"start", "end"}, f"hooks on: run {outcome.run_id} saw {hooked}"
 
     def _memory(self) -> None:
-        """Memory on: the runs' transcripts recorded, grounding as switched; off: not a call."""
+        """Memory on: what each part does, as switched; off: not a call."""
         on = self.switched
         if "memory" not in on:
             assert not self.memory_service.calls, "memory off: the memory service was called"
@@ -694,21 +752,30 @@ class World:
                 and o.answer
             ]
             assert verified >= len(grounded), f"grounding on: {verified} verified"
+        recording = [o for o in self.outcomes if "records" not in o.without]
         recorded = self.memory_service.named("messages")
-        assert recorded or not self.outcomes, "memory on: no transcript was recorded"
+        if "records" in on and recording:
+            assert recorded, "memory records on: no transcript was recorded"
+        elif "records" not in on:
+            stored = recorded + self.memory_service.named("record_tool")
+            assert not stored, "memory records off: a transcript or a tool call was recorded"
 
     def _services(self) -> None:
-        """The gateway, the judges and tracing: nothing when off."""
+        """The gateway, the judges, tracing and hooks: nothing when off."""
         on = self.switched
+        listed = [r for r in self.fake_gateway.requests if r.url.path == "/mcp"]
         if "gateway" not in on:
             assert not self.fake_gateway.requests, "gateway off: the gateway was called"
+        elif "mcp" not in on and listed:
+            raise OffButCalled("the key's MCP tools off: they were listed")
         elif self.outcomes and self.feature.id not in NO_KEY_LISTING:
-            listed = [r for r in self.fake_gateway.requests if r.url.path == "/mcp"]
             assert listed, "gateway on: the key's MCP tools were never listed"
         if "judges" not in on:
             assert not self.judged, "judges off: a judge ran"
         if "tracing" not in on:
             assert not telemetry._tracer.start_span("probe").is_recording()
+        if "hooks" not in on:
+            assert not self.recorder.seen, "hooks off: a hook ran"
 
     def _timeout_and_version(self, record: RunRecord) -> None:
         """The agent's version and time limit are recorded with each run it starts (a
@@ -745,6 +812,22 @@ class UnclosedToolCall(AssertionError):
     """A tool call started on the event stream never ended there (BUG-2)."""
 
 
+class OffButCalled(AssertionError):
+    """A part turned off (``without=``) still called its service (BUG-9)."""
+
+
+class OffButOffered(AssertionError):
+    """A part turned off (``without=``) still had its tools offered to the model (BUG-10)."""
+
+
+class NoEnding(AssertionError):
+    """An attempt's events have no RUN_FINISHED (BUG-7)."""
+
+
+class NotTimedOut(AssertionError):
+    """A run past its time limit ended otherwise than TIMEOUT (BUG-7)."""
+
+
 class MemoryContract(AssertionError):
     """What the harness sent the memory service broke its OpenAPI document (BUG-3)."""
 
@@ -763,7 +846,8 @@ def _well_formed(outcome: Outcome) -> None:
         assert [e.sequence for e in events] == list(range(len(events))), (attempt, events)
         assert events[0].type is RunEventType.RUN_STARTED, (attempt, events[0])
         finished = [n for n, e in enumerate(events) if e.type is RunEventType.RUN_FINISHED]
-        assert finished, (attempt, "no RUN_FINISHED")
+        if not finished:
+            raise NoEnding((attempt, "no RUN_FINISHED"))
         if finished[0] != len(events) - 1:
             raise EventAfterEnd((attempt, events[finished[0] + 1 :]))
         started = [e.tool_call_id for e in events if e.type is RunEventType.TOOL_CALL_START]
@@ -772,8 +856,8 @@ def _well_formed(outcome: Outcome) -> None:
             raise UnclosedToolCall((attempt, started, ended))
 
 
-async def _streamed(agent: Agent, input: str) -> list[RunEvent]:
-    return [e async for e in agent.stream(input, user=USER)]
+async def _streamed(agent: Agent, input: str, options: dict[str, Any]) -> list[RunEvent]:
+    return [e async for e in agent.stream(input, user=USER, **options)]
 
 
 async def _as_list(task: Awaitable[Any]) -> list[Any]:
