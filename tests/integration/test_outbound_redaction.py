@@ -36,6 +36,7 @@ from trellis.harness.redaction import DEFAULT as REDACTOR
 
 EMAIL = "ada@example.com"
 SECRET = "sk-live0123456789abcdefghij"
+CARD = "4111 1111 1111 1111"
 ARGS = {"email": EMAIL, "api_key": SECRET}
 SHOWN_ARGS = {"email": "[email]", "api_key": "[redacted]"}
 SHOWN_OUTPUT = {"sent_to": "[email]", "receipt": "[redacted]"}
@@ -51,7 +52,7 @@ def notify(email: str, api_key: str) -> dict[str, str]:
 
 async def notifying(input: Any, agent: Runtime) -> str:
     await agent.tools.call("notify", **ARGS)
-    agent.log("notified", card_number="4111 1111 1111 1111", customer=EMAIL)
+    agent.log("notified", card_number=CARD, customer=EMAIL)
     return "sent"
 
 
@@ -61,7 +62,9 @@ def _reset() -> None:
 
 
 def leaked(text: str) -> bool:
-    return EMAIL in text or SECRET in text or "4111" in text
+    """Whether a value left unredacted: the values themselves, never a fragment of one (a
+    random id — a run's, an event's — holds any four digits now and then)."""
+    return EMAIL in text or SECRET in text or CARD in text
 
 
 async def test_the_event_stream_carries_tool_calls_redacted(harness: Harness) -> None:
