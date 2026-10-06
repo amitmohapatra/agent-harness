@@ -3,8 +3,8 @@ is a strict xfail with the gap or plan item: the day the feature lands its probe
 suite fails on XPASS, and the row is turned into a real one (a scenario in ``features.py``,
 its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 
-* ``F34`` approval rule in code (W5, G9): ``@tool(approval=fn)``.
-* ``F36v2`` HITL v2 (W5, G9): ``ask(options=[Option(...)], multiple=True)``.
+* ``F34`` approval rule in code (W5): ``@tool(approval=fn)`` — landed, a real row now.
+* ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed; waits on BUG-2.
 * ``F70`` the framework's own run options (G13): ``agent.run(..., framework_options=...)``.
 * the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
   one selection cell each.
@@ -17,24 +17,22 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from tests.matrix.model import ADAPTERS, NA, Feature, Gap
-from tests.matrix.world import USER, World
-from trellis import tool
+from tests.matrix.model import ADAPTERS, NA, Bug, Feature, Gap
+from tests.matrix.world import USER, UnclosedToolCall, World
+from trellis import Ask, tool
 
 
 async def approval_fn(w: World) -> None:
-    def big(args: dict[str, Any]) -> bool:
-        return args.get("amount", 0) > 100
+    def big(args: dict[str, Any]) -> Ask | None:
+        return Ask("Over 100: pay it?") if args.get("amount", 0) > 100 else None
 
-    proposed: dict[str, Any] = {"approval": big}
-
-    @tool(side_effects="write", **proposed)
+    @tool(side_effects="write", approval=big)
     async def pay(amount: int) -> str:
         """Pay."""
         return f"paid {amount}"
 
-    o = (await w.go([pay], [("pay", {"amount": 500})])).succeeded()
-    assert len(o.pauses) == 1
+    o = (await w.go([pay], [("pay", {"amount": 500}), ("pay", {"amount": 50})])).succeeded()
+    assert len(o.pauses) == 1, o.pauses  # the big payment asks; the small one runs
 
 
 async def hitl_v2(w: World) -> None:
@@ -65,14 +63,16 @@ async def framework_options(w: World) -> None:
     assert result.status.value == "SUCCESS"
 
 
-def _pending(feature_id: str, title: str, *, audit: str, how: str, gap: Gap, probe: Any) -> Feature:
+def _pending(
+    feature_id: str, title: str, *, audit: str, how: str, gap: Gap | Bug | None, probe: Any
+) -> Feature:
     return Feature(
         feature_id,
         title,
         audit,
         how,
         probe,
-        adapters=dict.fromkeys(ADAPTERS, gap),
+        adapters={} if gap is None else dict.fromkeys(ADAPTERS, gap),
         way2=NA("probed in Way 1; the plan names no Way 2 form yet"),
     )
 
@@ -83,7 +83,7 @@ EXTENSIONS: Final[list[Feature]] = [
         "an approval rule in code",
         audit="F34",
         how="@tool(approval=fn) (W5)",
-        gap=Gap("G9", "no approval= on tool() yet"),
+        gap=None,
         probe=approval_fn,
     ),
     _pending(
@@ -91,7 +91,11 @@ EXTENSIONS: Final[list[Feature]] = [
         "HITL v2: options with labels, several answers",
         audit="F36 (W5)",
         how="ask(options=[Option], multiple=True)",
-        gap=Gap("G9", "ask takes plain string options only"),
+        gap=Bug(
+            "BUG-2",
+            "the ask inside the tool pauses it: its tool call never ends on the event stream",
+            raises=UnclosedToolCall,
+        ),
         probe=hitl_v2,
     ),
     _pending(

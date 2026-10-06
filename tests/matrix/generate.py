@@ -64,7 +64,7 @@ def _on(*switches: str) -> Callable[[str, str, str, str, Selection], bool]:
 #: when its bug is fixed: its cells then XPASS and fail the suite until it is.
 KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
     (
-        {"features": {"F09", "F09r"}, "modes": {"worker", "elsewhere"}},
+        {"features": {"F09", "F09r"}, "modes": {"worker", "elsewhere", "schedule"}},
         Bug(
             "BUG-7",
             "a queued run past its time limit: the runs SDK Worker's own timeout (G34) cancels "
