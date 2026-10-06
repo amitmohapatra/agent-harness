@@ -162,7 +162,17 @@ async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
             assert not offered & set(GATEWAY_NAMES.values())
         results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
         assert [r["status"] for r in results] == ["ok"] * len(calls)
-        assert f"{wikis[1]}.pyi" in str(results[0]["output"])
+        # a model may make both calls in one step, so their results arrive in either order
+        tool_of = {
+            e.tool_call_id: e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START
+        }
+        listing = next(
+            e.data["output"]
+            for e in events
+            if e.type is RunEventType.TOOL_CALL_RESULT
+            and tool_of.get(e.tool_call_id) == "list_tool_files"
+        )
+        assert f"{wikis[1]}.pyi" in str(listing)
         await h.writes.drain()
         assert h.writes.failed == 0
         logged = await h.gateway.code_mode_calls(finished.run_id, since)

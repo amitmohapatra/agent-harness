@@ -28,6 +28,7 @@ from trellis import Harness, Hooks, Result, Runtime
 from trellis.contracts import RunEvent, RunEventType, RunOutcome, ToolCall, ToolOutcome
 from trellis.harness.governance import Decision
 from trellis.harness.journal import content_key
+from trellis.harness.tools.base import FIX_ARGUMENTS
 
 _Client = TypeVar("_Client")
 
@@ -60,6 +61,7 @@ MODEL_FAILURES: Final = frozenset(
         "InternalServerError",  # the openai client's 500
         "ServerError",  # the gateway client's (ReAct with a model name)
         "APITimeoutError",
+        "MODEL_ERROR",  # ReAct's own stops: a stall, its step limit, a model call that failed
     }
 )
 
@@ -232,9 +234,15 @@ def harness_ok(run: Run) -> None:
 def recorded(run: Run, proof: Proof, decisions: list[tuple[str, Decision]]) -> None:
     """Every call the run started ran through the harness: its result on the stream is the
     outcome its hooks saw, it is on the run's journal (its trajectory, and its output kept
-    for a re-run when it succeeded), and governance decided it first."""
+    for a re-run when it succeeded), and governance decided it first. A call whose arguments
+    did not fit its tool's schema was refused before any of that (the model reads why and
+    calls again), so it is on the stream only."""
     ran = [(call.tool, outcome.status.value) for call, outcome in proof.calls]
-    on_stream = [(r["tool"], r["status"]) for r in run.results()]
+    on_stream = [
+        (r["tool"], r["status"])
+        for r in run.results()
+        if not str(r.get("output", "")).endswith(FIX_ARGUMENTS)
+    ]
     assert sorted(on_stream) == sorted(ran), (on_stream, ran)
     assert [c.tool for c, _ in proof.trajectory] == [c.tool for c, _ in proof.calls]
     for call, outcome in proof.calls:
