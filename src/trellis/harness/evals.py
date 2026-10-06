@@ -249,13 +249,11 @@ class EvalServices:
         """The services the environment names: Langfuse through the OTLP variables (which also
         export the spans, unless the application installed its own tracer provider), the judge
         through ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else
-        ``BIFROST_VIRTUAL_KEY``) and ``TRELLIS_JUDGE_MODEL``, and the prompt sources it names.
-        Close them with :meth:`aclose` (or ``async with``)."""
+        ``BIFROST_VIRTUAL_KEY``) and ``TRELLIS_JUDGE_MODEL``. Close them with :meth:`aclose`
+        (or ``async with``)."""
         settings = Settings.from_env(environ)
         telemetry.configure(settings)
-        made = cls.of(settings)
-        made.prompts = PromptSources.of(settings, gateway=made.judge_gateway)
-        return made
+        return cls.of(settings)
 
     @classmethod
     def of(cls, settings: Settings, *, gateway: Gateway | None = None) -> EvalServices:

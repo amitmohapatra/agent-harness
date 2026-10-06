@@ -81,30 +81,7 @@ repository (`SKILLS_DIR`), publish and roll them out in the gateway, or write on
 
 Way 1, every adapter: `h.wrap(..., skills=[...])` for a function, `ReAct`, OpenAI Agents and the
 Claude Agent SDK; `h.tools(skills(...), framework=...)` for a graph that binds its tools when it
-is built (LangGraph, Deep Agents). The `skills` feature covers skills of every source. Way 2,
-code that is not wrapped, pins the same way:
-
-```python
-from trellis.harness.skills import SkillSources
-
-sources = SkillSources.from_env()  # SKILLS_DIR, BIFROST_URL
-kit = await sources.pin(["sql-review", tone])
-system = f"{instructions}\n\n{kit.section}"  # into your framework's prompt
-checkpoint["skills"] = kit.record()  # keep it with your framework's state
-
-
-# your framework's two tools
-async def load_skill(name: str) -> str:
-    return await kit.load(name)
-
-
-async def read_skill_file(name: str, path: str) -> str:
-    return await kit.read(name, path)
-
-
-# resuming: the same skills, whatever the sources hold now
-kit = await sources.pin(["sql-review", tone], recorded=checkpoint["skills"])
-```
+is built (LangGraph, Deep Agents). The `skills` feature covers skills of every source: `without={"skills"}` turns them all off.
 
 ## How
 

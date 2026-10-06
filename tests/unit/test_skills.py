@@ -243,14 +243,3 @@ async def test_a_pinned_set_loads_and_reads_by_name() -> None:
     assert empty.section == "" and empty.record() == {}
     with pytest.raises(ToolError, match="its skills: none"):
         await empty.read("x", "y")
-
-
-async def test_from_env_names_the_environments_sources_and_closes_its_gateway(
-    tmp_path: Path,
-) -> None:
-    sources = SkillSources.from_env(
-        {"SKILLS_DIR": str(tmp_path), "BIFROST_URL": "http://gw.test/v1"}, given=[TONE]
-    )
-    assert sources.labels == ["code", f"skills_dir({tmp_path})", "Bifrost"]
-    await sources.aclose()
-    assert SkillSources.from_env({}).labels == []

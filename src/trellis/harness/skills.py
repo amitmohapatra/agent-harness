@@ -351,8 +351,6 @@ class SkillSources(Chain[ResolvedSkill]):
 
     def __init__(self, sources: Sequence[SkillSource] = ()) -> None:
         super().__init__(sources)
-        #: the gateway :meth:`from_env` made, closed with the sources
-        self._gateway: Gateway | None = None
 
     @classmethod
     def of(
@@ -376,22 +374,6 @@ class SkillSources(Chain[ResolvedSkill]):
         if isinstance(sources, SkillSources):
             return sources
         return cls(sources)
-
-    @classmethod
-    def from_env(
-        cls, environ: Mapping[str, str] | None = None, *, given: Sequence[SkillSource] = ()
-    ) -> SkillSources:
-        """``given``, then the sources the environment names — for code that is not wrapped
-        (close them with :meth:`aclose`)."""
-        settings = Settings.from_env(environ)
-        gateway = (
-            Gateway(settings.bifrost_url, settings.bifrost_virtual_key)
-            if settings.bifrost_url
-            else None
-        )
-        made = cls.of(settings, gateway=gateway, given=given)
-        made._gateway = gateway
-        return made
 
     async def pin(
         self, refs: Sequence[str | Skill], *, recorded: Mapping[str, Any] | None = None
@@ -443,11 +425,6 @@ class SkillSources(Chain[ResolvedSkill]):
             source=kept["source"],
             origin=origin,
         )
-
-    async def aclose(self) -> None:
-        await super().aclose()
-        if self._gateway is not None:
-            await self._gateway.aclose()
 
 
 # --------------------------------------------------------------------------- in a run

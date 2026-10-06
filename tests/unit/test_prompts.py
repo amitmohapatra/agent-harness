@@ -303,15 +303,3 @@ async def test_no_prompt_source_says_how_to_name_one() -> None:
     sources = PromptSources.of(Settings())
     with pytest.raises(ConfigurationError, match=r"no prompt source for 'a@1': pass Harness"):
         await sources.get("a@1")
-
-
-async def test_from_env_names_the_environments_sources_and_closes_its_gateway(
-    tmp_path: Path,
-) -> None:
-    sources = PromptSources.from_env(
-        {"PROMPTS_DIR": str(tmp_path), "BIFROST_URL": "http://gw.test/v1"},
-        given=[Prompt("a", "A")],
-    )
-    assert sources.labels == ["code", f"prompts_dir({tmp_path})", "Bifrost"]
-    await sources.aclose()
-    assert PromptSources.from_env({}).labels == []

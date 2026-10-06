@@ -64,16 +64,7 @@ Way 1, every adapter: `ReAct(prompt=)` renders it into the instructions (or, for
 selects it); LangGraph, Deep Agents, OpenAI Agents, the Claude Agent SDK and a function read it
 with `await h.prompt(ref, **vars)` (text) or `await h.prompt_messages(ref, **vars)` (chat
 messages) — once when the framework's agent is built, or inside a run (pinned for the run). The
-LLM judge: `llm_judge(criteria, prompt=)`. Way 2, code that is not wrapped:
-
-```python
-from trellis.harness.prompts import PromptSources
-
-prompts = PromptSources.from_env()  # PROMPTS_DIR, Langfuse, BIFROST_URL (or PromptSources([...]))
-system = await prompts.render("triage@3", team="EU")
-messages = await prompts.messages("triage")  # a chat prompt's messages
-await prompts.aclose()
-```
+LLM judge: `llm_judge(criteria, prompt=)`.
 
 ## How
 

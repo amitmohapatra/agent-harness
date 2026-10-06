@@ -25,7 +25,7 @@ from trellis import Harness, ReAct, Runtime, Settings, skills, tool
 from trellis.contracts import RunEvent, RunEventType, RunStatus
 from trellis.harness import fresh, telemetry
 from trellis.harness.evals import EvalCase, EvalServices, judge, llm_judge
-from trellis.harness.prompts import Prompt, PromptSources, prompts_dir
+from trellis.harness.prompts import Prompt, PromptSources
 from trellis.harness.repository import TTL_SECONDS
 from trellis.harness.skills import (
     LOAD_SKILL,
@@ -311,23 +311,6 @@ async def test_the_judge_reads_a_prompt_from_any_source(h: Harness) -> None:
     bare = EvalServices(judge_model=model)  # no sources: the judge's gateway only, and none
     _, failed = await judge(case, [llm_judge("Polite.", prompt="strict")], services=bare)
     assert "no prompt source for 'strict'" in failed["llm_judge"]
-
-
-# --------------------------------------------------------------------------- Way 2
-async def test_code_that_is_not_wrapped_reads_prompts_and_pins_skills(folders: Path) -> None:
-    prompts = PromptSources([prompts_dir(folders / "prompts")])
-    sources = SkillSources([skills_dir(folders / "skills")])
-    system = await prompts.render("triage@2", team="EU")
-    kit = await sources.pin(["sql", TONE])
-    instructions = f"{system}\n\n{kit.section}"  # into the framework's own prompt
-    assert instructions.startswith("Triage for EU.\n\n## Skills")
-    checkpoint = json.loads(json.dumps(kit.record()))  # kept with the framework's checkpoint
-    (folders / "skills" / "sql" / "SKILL.md").write_text(
-        "---\nname: sql\ndescription: Changed.\n---\nNew.\n"
-    )
-    resumed = await sources.pin(["sql", TONE], recorded=checkpoint)
-    assert resumed.section == kit.section and await resumed.load("sql") == await kit.load("sql")
-    assert await resumed.read("tone", "words.md") == "Use: refund."
 
 
 # --------------------------------------------------------------------------- blocks and selection

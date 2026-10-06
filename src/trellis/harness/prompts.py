@@ -426,8 +426,6 @@ class PromptSources(Chain[ResolvedPrompt]):
 
     def __init__(self, sources: Sequence[PromptSource] = ()) -> None:
         super().__init__(sources)
-        #: the gateway :meth:`from_env` made, closed with the sources
-        self._gateway: Gateway | None = None
 
     @classmethod
     def of(
@@ -460,22 +458,6 @@ class PromptSources(Chain[ResolvedPrompt]):
         if isinstance(sources, PromptSources):
             return sources
         return cls(sources)
-
-    @classmethod
-    def from_env(
-        cls, environ: Mapping[str, str] | None = None, *, given: Sequence[PromptSource] = ()
-    ) -> PromptSources:
-        """``given``, then the sources the environment names — for code that is not wrapped
-        (close them with :meth:`aclose`)."""
-        settings = Settings.from_env(environ)
-        gateway = (
-            Gateway(settings.bifrost_url, settings.bifrost_virtual_key)
-            if settings.bifrost_url
-            else None
-        )
-        made = cls.of(settings, gateway=gateway, given=given)
-        made._gateway = gateway
-        return made
 
     async def get(
         self, ref: str | Prompt, *, runtime: Runtime | None = None, kind: str = EVENT
@@ -513,8 +495,3 @@ class PromptSources(Chain[ResolvedPrompt]):
     async def messages(self, ref: str | Prompt, /, **values: Any) -> list[dict[str, Any]]:
         """The prompt as chat messages, ``values`` filled in (pinned inside a run)."""
         return (await self.get(ref, runtime=current())).messages(**values)
-
-    async def aclose(self) -> None:
-        await super().aclose()
-        if self._gateway is not None:
-            await self._gateway.aclose()

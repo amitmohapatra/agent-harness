@@ -21,7 +21,7 @@ for you.
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
 | [gateway.md](gateway.md) | the Bifrost gateway: stored prompts (`prompt=`), skills (`skills=`), Virtual MCPs (`mcp=`), who an MCP call is for, what the gateway never does for a run (no injected tools, no Agent Mode, Code Mode through the bridge), frameworks' own MCP clients |
 | [prompts.md](prompts.md) | prompts from code, `.md` files (`PROMPTS_DIR`), Langfuse and the gateway: one name, the order they are looked up in, `ReAct(prompt=)`, `h.prompt` for any framework, the judge; pinned per run |
-| [skills.md](skills.md) | Agent Skills from code, `SKILL.md` folders (`SKILLS_DIR`) and the gateway, mixed in one run: progressive disclosure, pinned per run, Way 2's `SkillSources.pin` |
+| [skills.md](skills.md) | Agent Skills from code, `SKILL.md` folders (`SKILLS_DIR`) and the gateway, mixed in one run: progressive disclosure, pinned per run, `without={"skills"}` |
 | [subagents.md](subagents.md) | `agent.as_tool()`: an agent as another agent's tool — child runs, their pauses answered through the parent, crashes, cancel, time |
 | [sandbox.md](sandbox.md) | `sandbox()`: commands and files in a sandbox of the run's own (Docker; how E2B, Daytona, Modal plug in) — its life, pauses, crashes, timeouts, governance; the frameworks' own sandboxes or ours |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
