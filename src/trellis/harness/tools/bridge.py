@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import AbstractAsyncContextManager
 from typing import Any, Final
 
 from trellis.contracts import (
@@ -156,9 +155,39 @@ async def _called(
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
         return rejected
-    args = tool_call.args
     runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool.name)
-    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)
+    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=tool_call.args)
+    try:
+        outcome = await _ran(
+            runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key
+        )
+    except asyncio.CancelledError:
+        # the run was cancelled, or ran out of time, while the call was under way
+        out = runtime.cancelled is None and runtime.remaining() == 0
+        _cut(runtime, ref, tool.name, ToolStatus.TIMEOUT.value if out else CANCELLED)
+        raise
+    except (Paused, RunCancelled) as cut:
+        _cut(runtime, ref, tool.name, PAUSED if isinstance(cut, Paused) else CANCELLED)
+        raise
+    _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)
+    await _record(runtime, tool_call, outcome, decision, key=key)
+    return outcome
+
+
+async def _ran(
+    runtime: Runtime,
+    tool: Tool,
+    tool_call: ToolCall,
+    decision: Decision,
+    *,
+    key: str,
+    ref: str,
+    idem: str,
+) -> ToolOutcome:
+    """The call, started on the stream, under way: saved as started (one that does more than
+    read), executed (``idem``: the key the tool hands its service), and its outcome as the
+    ``after_tool`` hooks leave it. A pause (it asked a person) or a cancellation propagates."""
+    args = tool_call.args
     runtime.used_code_mode |= tool.feature == "code_mode"
     runtime.used.add(tool.name)
     reads = decision.risk == "read"
@@ -169,8 +198,8 @@ async def _called(
     started = time.perf_counter()
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
-        within = runtime.limited(tool.timeout, key=idempotency_key)
-        outcome, error = await _executed(runtime, ref, tool, args, reads=reads, within=within)
+        within = runtime.limited(tool.timeout, key=idem)
+        outcome, error = await execute(tool, args, reads=reads, within=within)
         if isinstance(error, Paused | RunCancelled):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
@@ -181,30 +210,7 @@ async def _called(
         await hooks.failed("tool", error)
     outcome = await hooks.done(tool_call, outcome)
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
-    await _record(runtime, tool_call, outcome, decision, key=key, ref=ref)
     return outcome
-
-
-async def _executed(
-    runtime: Runtime,
-    ref: str,
-    tool: Tool,
-    args: dict[str, Any],
-    *,
-    reads: bool,
-    within: AbstractAsyncContextManager[Any],
-) -> tuple[ToolOutcome, Exception | None]:
-    """The call executed (:func:`execute`); one cut short — the run cancelled or out of time
-    while it ran, or it asked a person — ends on the stream first (:func:`_cut`)."""
-    try:
-        outcome, error = await execute(tool, args, reads=reads, within=within)
-    except asyncio.CancelledError:
-        out = runtime.cancelled is None and runtime.remaining() == 0
-        _cut(runtime, ref, tool.name, ToolStatus.TIMEOUT.value if out else CANCELLED)
-        raise
-    if isinstance(error, Paused | RunCancelled):
-        _cut(runtime, ref, tool.name, PAUSED if isinstance(error, Paused) else CANCELLED)
-    return outcome, error
 
 
 async def _record(
@@ -214,17 +220,15 @@ async def _record(
     decision: Decision,
     *,
     key: str,
-    ref: str,
 ) -> None:
-    """A call that ran: journaled (or, failed, run again by a later attempt), saved, on the
-    stream, counted and recorded."""
+    """A call that ran (and ended on the stream): journaled (or, failed, run again by a later
+    attempt), saved, counted and recorded."""
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
         runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
     # a call with side effects is saved at once: a crash after it does not repeat it
     await runtime.progress(now=not decision.runs)
-    _ended(runtime, ref, call.tool, status=outcome.status.value, output=outcome.output)
     metrics.tool_called(call.tool, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
 

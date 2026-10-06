@@ -416,6 +416,50 @@ async def test_a_cancelled_run_keeps_its_transcript_and_says_nothing_of_the_agen
 # --------------------------------------------------------------------------- a call cut short
 
 
+async def test_a_call_cut_short_before_it_runs_still_ends_on_the_stream(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call that does more than read is saved as started before it runs: cut short while
+    that save waits (or, after it ran, while its hooks or its own save do), it ends on the
+    stream all the same."""
+    saving = asyncio.Event()
+
+    async def progress(self: Runtime, *, now: bool) -> None:
+        if now:
+            saving.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(Runtime, "progress", progress)
+
+    @tool(side_effects="write")
+    def note(text: str) -> str:
+        """Note something."""
+        return text
+
+    async def notes(input: Any, agent: Runtime) -> Any:
+        return await agent.tools.call("note", text="x")
+
+    agent = harness.wrap(notes, id="noting", tools=[note])
+    events: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.stream("x", user="u"):
+            events.append(event)
+
+    watching = asyncio.create_task(watch())
+    await saving.wait()
+    await agent.cancel(events[0].run_id)
+    await watching
+    kinds = [e.type for e in events if e.tool_call_id is not None]
+    assert kinds == [
+        RunEventType.TOOL_CALL_START,
+        RunEventType.TOOL_CALL_ARGS,
+        RunEventType.TOOL_CALL_END,
+        RunEventType.TOOL_CALL_RESULT,
+    ]
+    assert events[-2].data["status"] == "cancelled" and events[-1].outcome is RunOutcome.CANCELLED
+
+
 @pytest.mark.parametrize("framework", list(BUILDERS))
 @pytest.mark.parametrize("cut", ["paused", "cancelled", "timeout"])
 async def test_a_call_cut_short_still_ends_on_the_stream_on_every_adapter(
