@@ -16,9 +16,9 @@ from langchain_core.messages import BaseMessage, ToolMessage
 from pydantic import Field
 
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.models import ScriptedChat
+from tests.support.models import Script, ScriptedChat
 from tests.support.openai_model import ScriptedModel
-from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel, _text
+from tests.support.planned import FINAL, Call, PlannedChatModel, PlannedModel, _text
 
 Step = Call | list[Call]
 
@@ -33,17 +33,22 @@ def grouped(plan: Sequence[Step], results: Sequence[str], final: str = FINAL) ->
     return final.replace("{last}", results[-1] if results else "")
 
 
-class GroupedChat(PlannedChat):
-    """``ReAct``'s chat endpoint, following a grouped plan."""
-
+class _Grouped(Script):
     def __init__(self, plan: Sequence[Step]) -> None:
         super().__init__([])
         self.steps = list(plan)
 
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+    def next(self, body: dict[str, Any]) -> Any:
+        messages = body.get("messages") or []
         results = [_text(m.get("content")) for m in messages if m.get("role") == "tool"]
-        self.turns = [grouped(self.steps, results, self.final)]
-        return await ScriptedChat.complete(self, messages, **body)
+        return grouped(self.steps, results)
+
+
+class GroupedChat(ScriptedChat):
+    """``ReAct``'s gateway model, following a grouped plan."""
+
+    def __init__(self, plan: Sequence[Step]) -> None:
+        super().__init__(script=_Grouped(plan))
 
 
 class GroupedChatModel(PlannedChatModel):
@@ -86,14 +91,14 @@ class ModelLog:
         self._bound: dict[int, list[str]] = {}
         log = self
 
-        chat_complete = ScriptedChat.complete
+        reply = Script.reply
 
-        async def complete(chat: ScriptedChat, messages: list[dict[str, Any]], **body: Any) -> Any:
+        def replied(script: Script, body: dict[str, Any]) -> Any:
             offered = [t["function"]["name"] for t in body.get("tools") or []]
-            log.calls.append((json.dumps(messages, default=str), offered))
-            return await chat_complete(chat, messages, **body)
+            log.calls.append((json.dumps(body.get("messages"), default=str), offered))
+            return reply(script, body)
 
-        monkeypatch.setattr(ScriptedChat, "complete", complete)
+        monkeypatch.setattr(Script, "reply", replied)
 
         def bind_tools(model: ScriptedChatModel, tools: Sequence[Any], **kw: Any) -> Any:
             log._bound[id(model)] = [getattr(t, "name", str(t)) for t in tools]

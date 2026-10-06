@@ -54,9 +54,10 @@ class Settings(BaseModel):
     #: (the memory service's ``/v1/verify``), 0 to 1; chosen by the run id, so a run is either
     #: always or never sampled.
     grounding_sample: float = Field(default=0.1, ge=0.0, le=1.0)
-    #: The model ``llm_judge`` asks, a Bifrost model name (through ``BIFROST_URL``); unset: the
-    #: judged agent's own model (a ``ReAct``'s), logged once — a different, stronger model
-    #: than the agent's avoids a model grading itself.
+    #: The model ``llm_judge`` asks, a Bifrost model name (through ``BIFROST_URL``), unless a
+    #: judge names its own (``llm_judge(model=)``); unset: the gateway model a ``ReAct`` agent
+    #: was built with, logged once (with none, ``llm_judge`` is refused) — a different,
+    #: stronger model than the agent's avoids a model grading itself.
     judge_model: str | None = None
     #: The virtual key the judge's calls go through (its own budget and limits); unset:
     #: ``BIFROST_VIRTUAL_KEY``.

@@ -30,7 +30,6 @@ from tests.matrix.model import (
     cell_id,
 )
 from tests.matrix.world import (
-    MemoryContract,
     NoEnding,
     NotTimedOut,
     OffButCalled,
@@ -99,15 +98,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
             "a tool call cut short (an ask inside it, a cancel, the run's time limit) never "
             "ends on the event stream: TOOL_CALL_START without TOOL_CALL_END/RESULT",
             raises=UnclosedToolCall,
-        ),
-    ),
-    (
-        {"features": {"F26"}, "adapters": {"react"}, "when": _on("grounding", "memory")},
-        Bug(
-            "BUG-3",
-            "grounding sends answers over 8000 characters to /v1/verify (its maxLength): the "
-            "memory service refuses them",
-            raises=MemoryContract,
         ),
     ),
     (

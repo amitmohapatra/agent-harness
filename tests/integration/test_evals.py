@@ -604,6 +604,84 @@ async def test_without_a_judge_key_or_model_the_agents_are_used(
     assert caplog.text.count("the judge shares the model of the agent it judges") == 1
 
 
+def gateway_judging(models: dict[str, str]) -> Any:
+    """The gateway's chat route: a judge's request answered with the verdict its model gives
+    (``models``), any other with "Paris"."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if b"strict evaluator" in request.content:
+            verdict = models[body["model"]]
+            return httpx.Response(200, json=judge_reply(verdict))
+        return httpx.Response(200, json=judge_reply("Paris"))
+
+    respx.post(f"{GW.rsplit('/v1', 1)[0]}/mcp").mock(
+        return_value=httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
+    )
+    return respx.post(f"{GW}/chat/completions").mock(side_effect=answer)
+
+
+def asked(route: Any) -> list[str]:
+    """The models the judges asked, in order."""
+    return [
+        json.loads(c.request.content)["model"]
+        for c in route.calls
+        if b"strict evaluator" in c.request.content
+    ]
+
+
+@respx.mock
+async def test_the_judge_model_wins_over_the_agents_own(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BIFROST_URL", GW)
+    route = gateway_judging({"judges/strong": '{"score": 1, "reasoning": "right"}'})
+    settings = Settings(bifrost_url=GW, bifrost_virtual_key="vk", judge_model="judges/strong")
+    with caplog.at_level(logging.WARNING, logger="trellis.evals"):
+        async with Harness(config=settings) as h:
+            agent = h.wrap(ReAct(system="s", model="agents/small"), id="geo")
+            report = await h.evaluate(agent, [{"input": "France"}], [llm_judge("ok?")])
+    assert report.summary["llm_judge"].mean == 1.0
+    assert asked(route) == ["judges/strong"]  # never the agent's model
+    assert "shares the model" not in caplog.text
+    [item] = report.items
+    assert item.scores[0].comment == "right [judge: judges/strong]"
+
+
+@respx.mock
+async def test_two_judges_ask_two_models_and_each_score_says_which(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = gateway_judging(
+        {
+            "judges/one": '{"score": 1, "reasoning": "polite"}',
+            "judges/two": '{"score": 0.5, "reasoning": "half right"}',
+        }
+    )
+    spans: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        telemetry, "score_span", lambda *a, **kw: spans.append({"name": a[1], **kw})
+    )
+    judges = [
+        llm_judge("Polite?", name="polite", model="judges/one"),
+        llm_judge("Right?", name="right", model="judges/two"),
+    ]
+    async with Harness(config=Settings(bifrost_url=GW, bifrost_virtual_key="vk")) as h:
+        report = await h.evaluate(h.wrap(capital, id="c"), [{"input": "France"}], judges)
+    assert asked(route) == ["judges/one", "judges/two"]
+    assert report.summary["polite"].mean == 1.0 and report.summary["right"].mean == 0.5
+    [item] = report.items
+    assert [s.model for s in item.scores] == ["judges/one", "judges/two"]
+    assert [s.comment for s in item.scores] == [
+        "polite [judge: judges/one]",
+        "half right [judge: judges/two]",
+    ]
+    assert [(s["name"], s["model"]) for s in spans] == [
+        ("polite", "judges/one"),
+        ("right", "judges/two"),
+    ]
+
+
 async def test_a_judge_with_no_model_to_ask_is_an_evaluator_failure(harness: Harness) -> None:
     report = await harness.evaluate(
         harness.wrap(capital, id="c"), [{"input": "France"}], [llm_judge("ok?")]
@@ -696,7 +774,7 @@ async def test_online_judges_score_sampled_runs_in_the_background(
         result = await h.wrap(capital, id="c").run("France", user="u")
         await h.writes.drain()
     assert result.status is RunStatus.SUCCESS and len(model.judged) == judged
-    trace, run = telemetry.trace_hex(result.run_id), {"run_id": result.run_id}
+    trace, run = telemetry.trace_hex(result.run_id), {"run_id": result.run_id, "model": None}
     assert scored == ([(trace, "helpful", 0.8, "good", run)] if judged else [])
 
 

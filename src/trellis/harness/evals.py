@@ -140,6 +140,8 @@ class EvalScore:
     name: str
     value: float | bool | str
     comment: str | None = None
+    #: the model that gave it, when a model did (:class:`llm_judge`): on its span
+    model: str | None = None
 
 
 Evaluator = Callable[[EvalCase], Awaitable[EvalScore | None]]
@@ -249,15 +251,17 @@ class EvalReport:
 class EvalServices:
     """What evaluation reaches: Langfuse (``None``: scores are ``score`` spans only, and a
     dataset must be given as items), the judge's gateway, and the model :func:`llm_judge` asks —
-    ``judge_model`` (``TRELLIS_JUDGE_MODEL``, a Bifrost model name; a chat model is asked as it
-    is), else ``fallback_model`` (a wrapped ``ReAct``'s own model, logged once). The deployment
-    chooses the judge, never the code: :meth:`from_env` reads it from the environment, and a
-    wrapped agent's (``agent.evals``) are its harness's."""
+    a judge's own (``llm_judge(model=)``), else ``judge_model`` (``TRELLIS_JUDGE_MODEL``, a
+    Bifrost model name; a chat-completions object is asked as it is), else ``fallback_model``
+    (the gateway model name a wrapped ``ReAct`` was built with, logged once: a model grading
+    itself is biased; with none, ``llm_judge`` is refused). The deployment chooses the judge:
+    :meth:`from_env` reads it from the environment, and a wrapped agent's (``agent.evals``)
+    are its harness's."""
 
     langfuse: telemetry.Langfuse | None = None
     judge_gateway: Gateway | None = None
     judge_model: Any = None
-    fallback_model: Any = None
+    fallback_model: str | None = None
     #: where ``llm_judge(prompt=)`` is looked up (``None``: the judge's gateway only)
     prompts: PromptSources | None = None
     _shares_logged: bool = field(default=False, init=False, repr=False)
@@ -288,15 +292,19 @@ class EvalServices:
             judge_model=settings.judge_model,
         )
 
-    def model(self) -> Any:
-        """The chat model the judge asks: the judge's model through the judge's gateway, else
-        the fallback model (logged once: a model grading its own answers is biased)."""
-        model = self.judge_model
+    def model(self, named: str | None = None) -> Any:
+        """The chat model the judge asks: ``named`` (a judge's own, ``llm_judge(model=)``),
+        else the judge's model (``TRELLIS_JUDGE_MODEL``), each through the judge's gateway;
+        else the gateway model the judged agent was named with (logged once: a model grading
+        its own answers is biased — set a separate, stronger judge model)."""
+        model = named or self.judge_model
         if model is None:
             model = self.fallback_model
             if model is None:
                 raise ConfigurationError(
-                    "llm_judge needs a model: set TRELLIS_JUDGE_MODEL (a Bifrost model name)"
+                    "llm_judge needs a judge model: set TRELLIS_JUDGE_MODEL (a gateway model "
+                    "name; TRELLIS_JUDGE_VIRTUAL_KEY for its own key) or llm_judge(model=) — "
+                    "another, stronger model than the agent's"
                 )
             if not self._shares_logged:
                 self._shares_logged = True
@@ -319,17 +327,19 @@ class EvalServices:
         key: str,
         comment: str | None = None,
         run_id: str | None = None,
+        model: str | None = None,
     ) -> None:
         """A score on the trace ``trace_id`` (32 hex characters; a run's is
         ``telemetry.trace_hex(run_id)``): a ``score`` span always, and Langfuse's scores API
         when it is reached — a number (``NUMERIC``), a bool (``BOOLEAN``, 1 or 0) or a
-        category (``CATEGORICAL``). ``key`` makes a retry update the score rather than add one."""
+        category (``CATEGORICAL``). ``key`` makes a retry update the score rather than add one;
+        ``model`` is the model that gave it (on the span)."""
         data_type: telemetry.ScoreType = "NUMERIC"
         if isinstance(value, bool):
             data_type, value = "BOOLEAN", float(value)
         elif isinstance(value, str):
             data_type = "CATEGORICAL"
-        telemetry.score_span(trace_id, name, value, comment, run_id=run_id)
+        telemetry.score_span(trace_id, name, value, comment, run_id=run_id, model=model)
         if self.langfuse is not None:
             await self.langfuse.post(
                 trace_id, name, value, data_type=data_type, comment=comment, key=key
@@ -496,7 +506,8 @@ def _said(tools: Sequence[str]) -> str:
 @dataclass(frozen=True, slots=True)
 class llm_judge:
     """A judge model scores the answer against ``criteria`` (0 to 1, with its reasoning as the
-    comment). The model is the one :func:`evaluate` or :func:`judge` was given
+    comment, which names the judge's model). The model is ``model`` (a gateway model name: two
+    judges may use two models), else the one :func:`evaluate` or :func:`judge` was given
     (:meth:`EvalServices.model`: ``TRELLIS_JUDGE_MODEL`` through ``BIFROST_URL`` with
     ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). ``prompt`` names a prompt
     (``"name"``, ``"name@version"``, or a ``Prompt``), looked up as every prompt is
@@ -507,6 +518,8 @@ class llm_judge:
     criteria: str
     name: str = "llm_judge"
     prompt: str | Prompt | None = field(default=None, kw_only=True)
+    #: the gateway model this judge asks, over the services' (``TRELLIS_JUDGE_MODEL``)
+    model: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, str):
@@ -518,7 +531,8 @@ class llm_judge:
             raise ConfigurationError(
                 "llm_judge runs inside evaluate() or judge(): their services name the judge's model"
             )
-        model = services.model()
+        model = services.model(self.model)
+        asked = model.model if isinstance(model, _Named) else None
         messages = [
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user", "content": _judge_prompt(self.criteria, case)},
@@ -544,7 +558,11 @@ class llm_judge:
             content = message.get("content")
             score, problem = _verdict(content)
             if score is not None:
-                return EvalScore(self.name, score[0], score[1] or None)
+                said = score[1] or None
+                if asked is not None:
+                    log.info("judge %s scored run %s with %s", self.name, case.run_id, asked)
+                    said = f"{said} [judge: {asked}]" if said else f"[judge: {asked}]"
+                return EvalScore(self.name, score[0], said, model=asked)
             if attempt == 0:
                 messages.append({"role": "assistant", "content": str(content or "")})
                 messages.append({"role": "user", "content": JUDGE_RETRY.format(problem=problem)})
@@ -670,6 +688,7 @@ async def judge(
                 key=f"{ref}:{score.name}",
                 comment=score.comment,
                 run_id=case.run_id,
+                model=score.model,
             )
         except Exception as exc:
             log.warning("score %s of run %s was not posted: %s", score.name, ref, exc)

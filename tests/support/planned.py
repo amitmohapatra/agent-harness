@@ -24,6 +24,8 @@ from tests.support.openai_model import ScriptedModel
 
 Call = tuple[str, dict[str, Any]]
 FINAL = "Done. {last}"
+#: What a summarization middleware's request to the model holds (LangChain's, Deep Agents').
+SUMMARIZE = "Messages to summarize"
 
 
 def planned(plan: Sequence[Call], results: Sequence[str], final: str) -> str | Call:
@@ -57,6 +59,8 @@ class _Planned(Script):
 
     def next(self, body: dict[str, Any]) -> Any:
         messages = body.get("messages") or []
+        if messages and SUMMARIZE in str(messages[-1].get("content")):
+            return "Summary: the work so far."  # a summarization middleware's own request
         results = [_text(m.get("content")) for m in messages if m.get("role") == "tool"]
         return planned(self.plan, results, self.final)
 

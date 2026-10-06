@@ -490,16 +490,24 @@ def usage(
 
 
 def score_span(
-    trace_id: str, name: str, value: float | str, comment: str | None, *, run_id: str | None = None
+    trace_id: str,
+    name: str,
+    value: float | str,
+    comment: str | None,
+    *,
+    run_id: str | None = None,
+    model: str | None = None,
 ) -> None:
     """A score as a span in the trace ``trace_id`` (32 hex characters: a run's is
-    :func:`trace_hex`) — what every OTLP backend receives."""
+    :func:`trace_hex`) — what every OTLP backend receives; ``model``: the model that gave it
+    (a judge's)."""
     attributes = {
         "langfuse.observation.type": "evaluator",
         "trellis.run_id": run_id,
         "trellis.score.name": name,
         "trellis.score.value": value,
         "trellis.score.comment": comment,
+        "trellis.score.model": model,
     }
     parent = _parent(int(trace_id, 16), f"{run_id or trace_id}:root")
     with _tracer.start_as_current_span(

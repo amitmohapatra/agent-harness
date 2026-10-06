@@ -126,11 +126,13 @@ class _HarnessToolsState(AgentState[Any]):
 
 @dataclass(eq=False)
 class _Step:
-    """One model step's calls as they run: the number of its first call, its harness calls
-    that do more than read in the model's order, the ones that finished (in this attempt, or
-    in an earlier one: a resume runs only the calls that had not), and the exception one of
+    """One model step's calls as they run: which step (its place in the conversation), the
+    number of its first call, its harness calls that do more than read in the model's order,
+    the ones that finished (in this attempt, or in an earlier one: a resume runs only the calls
+    that had not), and the exception one of
     them stopped on (a pause: the later ones wait for the resume)."""
 
+    key: str
     first: int
     writes: list[str]
     finished: set[str]
@@ -199,22 +201,23 @@ class HarnessTools(AgentMiddleware):
         call's place in it."""
         call_id = request.tool_call["id"]
         messages = request.state.get("messages", []) if isinstance(request.state, dict) else []
-        message = next(
+        at, message = next(
             (
-                m
-                for m in reversed(messages)
+                (n, m)
+                for n, m in reversed(list(enumerate(messages)))
                 if isinstance(m, AIMessage) and any(c["id"] == call_id for c in m.tool_calls)
             ),
-            AIMessage(content="", tool_calls=[request.tool_call]),
+            (len(messages), AIMessage(content="", tool_calls=[request.tool_call])),
         )
         calls = message.tool_calls
-        key = message.id or ",".join(str(c["id"]) for c in calls)
+        # where the step is in the conversation, and what it is: a model may reuse call ids
+        key = content_key("step", at, message.id, [c["id"] for c in calls])
         steps = self._steps.setdefault(runtime, {})
         step = steps.get(key)
         if step is None:
             writes = [str(c["id"]) for c in calls if _writes(runtime.toolbox.get(c["name"]))]
-            ran = {w for w in writes if runtime.replay.journal.calls.get(_ran(w))}
-            step = steps[key] = _Step(runtime.next_step(len(calls)), writes, ran)
+            ran = {w for w in writes if runtime.replay.journal.calls.get(_ran(key, w))}
+            step = steps[key] = _Step(key, runtime.next_step(len(calls)), writes, ran)
         return step, next(n for n, c in enumerate(calls) if c["id"] == call_id)
 
 
@@ -244,16 +247,16 @@ async def _turn(runtime: Runtime, step: _Step, call_id: str) -> AsyncIterator[No
         step.stopped = exc
         raise
     else:
-        runtime.replay.record_call(_ran(call_id), True)
+        runtime.replay.record_call(_ran(step.key, call_id), True)
         step.finished.add(call_id)
     finally:
         async with step.turn:
             step.turn.notify_all()
 
 
-def _ran(call_id: str) -> str:
+def _ran(step: str, call_id: str) -> str:
     """The journal key saying a call of a model step finished."""
-    return content_key("ran", call_id)
+    return content_key("ran", step, call_id)
 
 
 def _named(tool: BaseTool | dict[str, Any]) -> str:
