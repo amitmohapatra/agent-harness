@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
+from trellis import Harness
 from trellis.harness.evals import EvalServices
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.memory import MemoryClient
@@ -32,7 +33,7 @@ FAKE_CLAUDE_CLI = str(
 )
 
 Turn = str | tuple[str, dict[str, Any]]
-#: a ``ReAct`` turn may also make several calls in one message
+#: a turn may also make several calls in one message
 Turns = Turn | list[tuple[str, dict[str, Any]]]
 
 
@@ -46,8 +47,9 @@ def gateway() -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- LangChain
-def langchain_model(turns: Sequence[Turn]) -> Any:
-    """A chat model for LangGraph / Deep Agents: Bifrost when online, else the script."""
+def langchain_model(turns: Sequence[Turns]) -> Any:
+    """A chat model for LangGraph, Deep Agents and ``ReAct``: Bifrost when online, else the
+    script (a turn may make several calls at once)."""
     if online():
         from langchain_openai import ChatOpenAI
 
@@ -74,9 +76,13 @@ def langchain_model(turns: Sequence[Turn]) -> Any:
             if isinstance(turn, str):
                 message = AIMessage(content=turn)
             else:
+                calls = turn if isinstance(turn, list) else [turn]
                 message = AIMessage(
                     content="",
-                    tool_calls=[{"name": turn[0], "args": turn[1], "id": f"call_{len(script)}"}],
+                    tool_calls=[
+                        {"name": name, "args": args, "id": f"call_{len(script)}_{n}"}
+                        for n, (name, args) in enumerate(calls)
+                    ],
                 )
             return ChatResult(generations=[ChatGeneration(message=message)])
 
@@ -131,54 +137,47 @@ def openai_agents_model(turns: Sequence[Turn]) -> Any:
 
 
 # --------------------------------------------------------------------------- ReAct
-class ScriptedChat:
-    """A chat-completions endpoint answering from a script (the ``ReAct`` model shape)."""
-
-    def __init__(self, turns: Sequence[Turns]) -> None:
-        self.turns = list(turns)
-
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
-        turn = self.turns.pop(0)
-        if isinstance(turn, str):
-            message: dict[str, Any] = {"role": "assistant", "content": turn}
-        else:
-            calls = turn if isinstance(turn, list) else [turn]
-            message = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": f"call_{len(self.turns)}_{n}",
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(args)},
-                    }
-                    for n, (name, args) in enumerate(calls)
-                ],
-            }
-        return {"choices": [{"message": message}]}
-
-
 def react_model(turns: Sequence[Turns]) -> Any:
-    """A model name for Bifrost when online, else the script."""
-    return MODEL if online() else ScriptedChat(turns)
+    """A model name for Bifrost when online (``ReAct`` makes it a gateway model), else the
+    script."""
+    return MODEL if online() else langchain_model(turns)
 
 
 # --------------------------------------------------------------------------- evaluation
-class Answering:
-    """A chat-completions endpoint that answers each question from a table, and — asked by the
-    evaluation judge (``llm_judge``) — grades an answer 1 when it contains the expected one
-    (with nothing expected: when it is an answer at all), else 0, as the strict JSON the judge
-    asks for."""
+def answering_model(answers: dict[str, str]) -> Any:
+    """A model name for Bifrost when online, else a chat model answering each question from
+    the table."""
+    if online():
+        return MODEL
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
 
-    def __init__(self, answers: dict[str, str]) -> None:
-        self.answers = answers
+    class Answering(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "answering"
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+            return self
+
+        def _generate(
+            self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+        ) -> ChatResult:
+            question = next(m.content for m in reversed(messages) if isinstance(m, HumanMessage))
+            answer = AIMessage(content=answers.get(str(question), "I don't know."))
+            return ChatResult(generations=[ChatGeneration(message=answer)])
+
+    return Answering()
+
+
+class Judging:
+    """A chat-completions endpoint for the evaluation judge (``llm_judge``): it grades an
+    answer 1 when it contains the expected one (with nothing expected: when it is an answer at
+    all), else 0, as the strict JSON the judge asks for."""
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
-        if "strict evaluator" in str(messages[0].get("content")):
-            content = self._grade(str(messages[-1]["content"]))
-        else:
-            question = next(m["content"] for m in reversed(messages) if m["role"] == "user")
-            content = self.answers.get(question, "I don't know.")
+        content = self._grade(str(messages[-1]["content"]))
         return {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
     @staticmethod
@@ -191,14 +190,15 @@ class Answering:
         return json.dumps({"score": 1.0 if good else 0.0, "reasoning": reasoning})
 
 
-def answering_model(answers: dict[str, str]) -> Any:
-    """A model name for Bifrost when online, else the answer table (which also judges)."""
-    return MODEL if online() else Answering(answers)
+def judge_offline(h: Harness) -> None:
+    """Offline, the harness's judge is the scripted one (online: ``TRELLIS_JUDGE_MODEL``)."""
+    if not online():
+        h.evals.judge_model = Judging()
 
 
 def judge_services() -> EvalServices:
     """Langfuse and the judge the environment names; offline, the scripted judge."""
-    return EvalServices.from_env() if online() else EvalServices(judge_model=Answering({}))
+    return EvalServices.from_env() if online() else EvalServices(judge_model=Judging())
 
 
 # --------------------------------------------------------------------------- Way 2 blocks

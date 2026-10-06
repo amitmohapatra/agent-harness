@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from _offline import answering_model
+from _offline import answering_model, judge_offline
 
 from trellis import Harness, ReAct, Settings
 from trellis.harness.evals import EvalCase, EvalScore, llm_judge
@@ -30,6 +30,7 @@ async def main() -> None:
     environment = {"TRELLIS_JUDGE_SAMPLE": "1", **os.environ}
     judges = [concise, llm_judge("Answers the question correctly.", name="correct")]
     async with Harness(config=Settings.from_env(environment), judges=judges) as h:
+        judge_offline(h)
         model = answering_model({"What is the capital of Japan?": "Tokyo"})
         agent = h.wrap(ReAct(system="Answer briefly.", model=model), id="concierge")
         result = await agent.run("What is the capital of Japan?", user="ada")
