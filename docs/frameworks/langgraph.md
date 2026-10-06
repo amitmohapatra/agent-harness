@@ -192,6 +192,10 @@ versions pinned per run. `sandbox()` governs and journals every command
   middleware=[ModelHooks()])`, leaves its tools out of what each model call is offered; a graph
   built without the middleware (or a hand-built `StateGraph`) is offered them, and a call of
   one is an error the model reads ("off in this run").
+* A tool call whose arguments the chat model could not parse (`AIMessage.invalid_tool_calls`,
+  as langchain-openai reports broken JSON) is not a call to `create_agent` (or Deep Agents):
+  the run ends on that message, and the model is told nothing (OpenAI Agents and `ReAct` tell
+  it, and it calls again).
 * A custom state without `messages` gets no context message: read `trellis.current().context`.
 * An `InMemorySaver` pause resumes in place only in the process that paused; elsewhere a
   harness pause is a re-run from the journal and a graph's own pause fails (above).

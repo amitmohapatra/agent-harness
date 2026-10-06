@@ -128,13 +128,15 @@ class OpenAIAgentsAdapter:
         pause = None
         if output.interruptions:
             item = output.interruptions[0]
-            args = json.loads(item.arguments) if item.arguments else {}
+            # the SDK pauses on a call before reading its arguments: ones that are not a JSON
+            # object reach the person as the model wrote them
+            args = _arguments(item)
             pause = NativePause(
                 value=None,
                 native_id=item.call_id,
                 state=output.to_state().to_json(),
                 tool=item.name,
-                args=args if isinstance(args, dict) else {"arguments": args},
+                args=args if isinstance(args, dict) else {"arguments": item.arguments},
             )
         return Extracted(answer=output.final_output, transcript=transcript, pause=pause)  # type: ignore[arg-type]
 

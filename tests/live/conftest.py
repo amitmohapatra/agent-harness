@@ -4,8 +4,10 @@ unset or unreachable is skipped, never failed.
 
 Two variables of its own pick what it runs against: ``TRELLIS_LIVE_MODEL``, the gateway model
 its agents use (default :data:`DEFAULT_MODEL`), and ``TRELLIS_LIVE_MCP_URL``, the wiki MCP
-server (default the public DeepWiki, :data:`DEEPWIKI_URL`). The sandbox tests need only the
-Docker daemon (its socket), and make their sandboxes of ``SANDBOX_IMAGE`` when it is set.
+server (default the public DeepWiki, :data:`DEEPWIKI_URL`); ``TRELLIS_LIVE_TIMEOUT`` and
+``TRELLIS_LIVE_MAX_TOKENS`` size the model-driven tests' runs to the model
+(``tests/live/proof.py``). The sandbox tests need only the Docker daemon (its socket), and
+make their sandboxes of ``SANDBOX_IMAGE`` when it is set.
 
 The gateway gets MCP clients of that server for the session, under :data:`WIKIS` names, and
 virtual keys that allow some of their tools: an agent's MCP tools are exactly what its key

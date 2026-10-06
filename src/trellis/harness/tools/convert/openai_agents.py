@@ -1,12 +1,17 @@
 """Harness tools as OpenAI Agents SDK ``FunctionTool``\\ s. Each is enabled per turn only while
 the run offers it (``Runtime.offers``: the tool hints' candidates, the memory tools, the tools
-already used), so the model sees the tool schemas that fit the task."""
+already used), so the model sees the tool schemas that fit the task.
+
+The SDK hands a ``FunctionTool`` the model's arguments as the text the model wrote; text that
+is not a JSON object is what the model reads back (:func:`arguments_of`), as the SDK's own
+``@function_tool`` does it — the call is not run, and the run goes on — rather than an
+exception, which ends a run (the SDK raises everything a ``FunctionTool`` raises)."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
 from agents import FunctionTool
 from agents.tool_context import ToolContext
@@ -16,6 +21,9 @@ from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert import text_of
 
+#: What the model is told after arguments it cannot be called with (as ``ReAct`` tells it).
+FIX_ARGUMENTS: Final = "Call it again with arguments that fit its schema."
+
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
     return [_one(t) for t in tools]
@@ -23,7 +31,9 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
 
 def _one(tool: Tool) -> FunctionTool:
     async def invoke(context: ToolContext[Any], arguments: str) -> str:
-        args = json.loads(arguments) if arguments else {}
+        args = arguments_of(arguments)
+        if isinstance(args, str):
+            return f"{tool.name} was not run: {args}. {FIX_ARGUMENTS}"
         return text_of((await bridge.call(tool, args, call_id=context.tool_call_id)).output)
 
     return FunctionTool(
@@ -35,6 +45,15 @@ def _one(tool: Tool) -> FunctionTool:
         strict_json_schema=False,
         is_enabled=lambda _context, _agent: _offered(tool.name),
     )
+
+
+def arguments_of(raw: str | None) -> dict[str, Any] | str:
+    """The arguments of a call as an object, or what is wrong with them."""
+    try:
+        args = json.loads(raw) if raw else {}
+    except ValueError as exc:
+        return f"its arguments are not valid JSON ({exc})"
+    return args if isinstance(args, dict) else "its arguments must be a JSON object"
 
 
 def _offered(name: str) -> bool:
