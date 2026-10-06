@@ -245,10 +245,15 @@ async def cancel(w: World) -> None:
 
 
 async def scheduled(w: World) -> None:
-    ran: list[str | None] = []
+    """A schedule carries what a started run can (ADR 0007): its queue order, and its metadata
+    — the run's own choices, under the keys a started run keeps them — copied into each fired
+    run, where the worker's handler reads them."""
+    ran: list[tuple[Any, ...]] = []
+    chosen = {"without": ["judges"], "framework_options": {"max_turns": 3}}
 
     async def handle(job: Job) -> None:
-        ran.append(job.record.on_behalf_of)
+        record = job.record
+        ran.append((record.on_behalf_of, record.priority, record.concurrency_key, record.metadata))
         await job.finish(RunStatus.SUCCESS, output="briefed")
 
     spec = ScheduleSpec(
@@ -259,13 +264,17 @@ async def scheduled(w: World) -> None:
         timezone="UTC",
         on_behalf_of=USER,
         input="inbox",
+        priority=5,
+        concurrency_key="briefing",
+        metadata=chosen,
     )
     schedule = await w.store.schedules.create(spec)
     w.store._schedules[schedule.schedule_id] = schedule.model_copy(
         update={"next_fire_at": datetime.now(UTC) - timedelta(seconds=1)}
     )
     assert await RunsWorker(w.store, handle, [AGENT]).run_once()
-    assert ran == [USER]
+    fired = {**chosen, "schedule_id": schedule.schedule_id}
+    assert ran == [(USER, 5, "briefing", fired)], ran
 
 
 # --------------------------------------------------------------------------- memory

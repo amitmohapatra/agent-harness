@@ -60,8 +60,37 @@ call, approvals, journal, records.
 
 **`Runner.run` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 Outside a harness run, a harness tool refuses to run (`ToolError`: "runs inside a Harness run"),
-which the SDK hands the model as the tool's error. The harness passes no
-`RunConfig`: the SDK's defaults apply (`max_turns` 10); set model settings on the `Agent`.
+which the SDK hands the model as the tool's error. `Runner.run`'s own arguments are
+`framework_options=`: on `h.wrap` for every run, on `run`/`stream`/`start` for one (over the
+agent's) — `max_turns`, `run_config`, `context`, `session`... The harness gives `Runner.run` the
+agent, its input and its hooks itself: `starting_agent`, `input` and `hooks` are refused, and so
+is a name `Runner.run` does not take ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+
+```python
+agent = h.wrap(
+    triage, id="support", framework_options={"run_config": RunConfig(tracing_disabled=True)}
+)
+await agent.run(question, user="ada", framework_options={"max_turns": 25})
+```
+
+A queued run's own (`start`, `schedule`) are JSON (`max_turns`, a `run_config` given as a dict);
+a `RunConfig` object goes on `h.wrap`, which every process builds again from code. The harness
+sets no `RunConfig` field of its own (its hooks are `Runner.run`'s `hooks=`), so yours is passed
+as it is.
+
+A `SandboxAgent` is wrapped the same way: the SDK runs it only with `RunConfig(sandbox=...)`
+(else `UserError: SandboxAgent execution requires RunConfig(sandbox=...)`), so give its sandbox
+client there. Its own tools (`exec_command`, `apply_patch`...) are the SDK's; the harness tools
+you add sit beside them ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+
+```python
+box = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+agent = h.wrap(
+    SandboxAgent(name="analyst", instructions="..."),
+    id="analyst",
+    framework_options={"run_config": box},
+)
+```
 
 ## What is automatic
 
@@ -106,7 +135,8 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 * A resume after a harness approval re-runs the conversation: the model is asked again for the
   steps before the pause (their tool calls replay from the journal).
 * The SDK's sessions (`session=`) are not used: memory is the memory service's.
-* No `RunConfig` per run (above).
+* A `RunConfig` object given to one in-process run (`run`/`stream`) is not kept with its record:
+  a resume runs with the agent's (put it on `h.wrap`, or give it as a dict).
 
 ## Run it
 

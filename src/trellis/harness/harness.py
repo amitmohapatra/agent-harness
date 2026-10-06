@@ -189,6 +189,7 @@ class Harness:
         timeout: float | None = None,
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
+        framework_options: Mapping[str, Any] | None = None,
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
@@ -204,7 +205,11 @@ class Harness:
         ``without`` turns parts of what the harness does off for every run of the agent
         (``trellis.harness.features``: ``memory``, ``judges``, ``mcp``...); everything
         configured is on otherwise. ``hooks`` run around its runs, model calls and tool calls,
-        after the harness's (``trellis.harness.hooks``)."""
+        after the harness's (``trellis.harness.hooks``). ``framework_options`` are the
+        framework's own options for every run's call, passed through unchanged (a LangGraph
+        config's keys, ``Runner.run``'s arguments, ``ClaudeAgentOptions`` fields; each
+        framework's page says which the harness keeps for itself): a run's own
+        (``run``/``stream``/``start``/``schedule(framework_options=)``) go over them."""
         agent = Agent(
             self,
             target,
@@ -216,6 +221,7 @@ class Harness:
             timeout=timeout,
             without=without,
             hooks=hooks,
+            framework_options=framework_options,
         )
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
