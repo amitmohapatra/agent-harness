@@ -1,18 +1,18 @@
-"""The reference inbox (``h.serve_inbox``): its page, the paused runs it lists, and answers it
-checks before the run goes on in the background."""
+"""The inbox without a page of the harness's: ``h.inbox`` lists the paused runs (with the
+interrupt each waits on), ``agent.resume`` answers them — checked first, as the reviewer named —
+and a screen of your own serves both in a few lines. AG-UI's resume answers a chat's own runs
+(``test_agui.py``)."""
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 
-from trellis import Harness, Runtime, Settings, tool
-from trellis.contracts import RunStatus
+from trellis import Harness, Runtime, tool
+from trellis.contracts import ConfigurationError, InterruptReason, RunStatus
 
 
 @tool(side_effects="irreversible")
@@ -26,123 +26,95 @@ async def refunds(input: Any, agent: Runtime) -> Any:
     return f"{plan}: {await agent.tools.call('refund', amount=5)}"
 
 
-def reviewer(request: Request) -> str:
-    return request.headers.get("x-user", "")
+async def test_paused_runs_are_listed_and_answered_with_h_inbox_and_agent_resume(
+    harness: Harness,
+) -> None:
+    agent = harness.wrap(refunds, id="refunds", tools=[refund])
+    paused = await agent.run("go", user="ada")
+    [listed] = await harness.inbox("role:sales")
+    assert (listed.run_id, listed.agent_id, listed.assignee) == (
+        paused.run_id,
+        "refunds",
+        "role:sales",
+    )
+    assert listed.awaiting is not None and listed.awaiting.options == ["a", "b"]
+    assert await harness.inbox("role:none") == []
+    owner = harness.agents[listed.agent_id]
+    with pytest.raises(ConfigurationError, match="not one of the options"):
+        await owner.resume(listed.run_id, "answer", answer="z", reviewer="lee")
+    record = await harness.runs.get(listed.run_id)
+    assert record is not None and record.status is RunStatus.PAUSED and record.attempt == 1
+    asked = await owner.resume(
+        listed.awaiting.interrupt_id, "answer", answer="a", reviewer="lee", comment="the usual"
+    )
+    assert asked.status is RunStatus.PAUSED
+    record = await harness.runs.get(listed.run_id)
+    assert record is not None and record.last_resolution is not None
+    assert (record.last_resolution.reviewer, record.last_resolution.comment) == ("lee", "the usual")
+    [approval] = await harness.inbox()  # anyone's
+    assert approval.awaiting is not None and approval.awaiting.reason is InterruptReason.APPROVAL
+    assert approval.awaiting.tool_call is not None and approval.awaiting.tool_call.tool == "refund"
+    done = await owner.resume(approval.run_id, "approve", reviewer="lee")
+    assert done.status is RunStatus.SUCCESS and done.answer == "a: refunded 5"
+    other = await agent.run("go", user="ada")
+    cancelled = await agent.resume(other.run_id, "cancel", reviewer="lee")
+    assert cancelled.status is RunStatus.CANCELLED
+    record = await harness.runs.get(other.run_id)
+    assert record is not None and record.last_resolution is not None
+    assert record.last_resolution.reviewer == "lee"
+    with pytest.raises(ConfigurationError, match="no run run_other"):
+        await agent.resume("run_other.1.1", "answer", answer="a", reviewer="lee")
 
 
-@pytest.fixture
-async def inbox() -> AsyncIterator[tuple[Harness, httpx.AsyncClient]]:
-    harness = Harness(config=Settings())
-    harness.wrap(refunds, id="refunds", tools=[refund])
+async def test_a_screen_of_your_own_lists_and_answers_with_the_same_two_calls(
+    harness: Harness,
+) -> None:
+    """What a team's own inbox route needs: ``h.inbox`` and ``agent.resume``, a refused answer
+    ``409`` with why, the reviewer named by the request."""
     app = FastAPI()
-    harness.serve_inbox(app, identity=reviewer)
+
+    @app.get("/inbox")
+    async def listing(assignee: str | None = None) -> list[dict[str, Any]]:
+        return [
+            {"run_id": s.run_id, "interrupt": s.awaiting.awaiting()}
+            for s in await harness.inbox(assignee)
+            if s.agent_id in harness.agents and s.awaiting is not None
+        ]
+
+    @app.post("/inbox/{run_id}")
+    async def answer(run_id: str, request: Request) -> dict[str, Any]:
+        given = await request.json()
+        record = await harness.runs.get(run_id)
+        if record is None or record.agent_id not in harness.agents:
+            raise HTTPException(404, f"no run {run_id}")
+        try:
+            result = await harness.agents[record.agent_id].resume(
+                run_id,
+                given["decision"],
+                answer=given.get("answer"),
+                comment=given.get("comment"),
+                reviewer=request.headers["x-user"],
+            )
+        except ConfigurationError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"status": result.status.value}
+
+    agent = harness.wrap(refunds, id="refunds", tools=[refund])
+    paused = await agent.run("go", user="ada")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://inbox", headers={"x-user": "lee"}
     ) as http:
-        yield harness, http
-    await harness.aclose()
-
-
-async def settled(
-    harness: Harness, run_id: str, status: RunStatus, *, attempt: int = 1
-) -> RunStatus:
-    """The run's status once it is ``status`` on ``attempt`` or later (it goes on in the
-    background)."""
-    for _ in range(200):
-        record = await harness.runs.get(run_id)
-        assert record is not None
-        if record.status is status and record.attempt >= attempt:
-            return record.status
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"{run_id} never became {status}")
-
-
-async def test_the_page_lists_paused_runs_and_answers_them(
-    inbox: tuple[Harness, httpx.AsyncClient],
-) -> None:
-    harness, http = inbox
-    page = await http.get("/inbox")
-    assert page.status_code == 200 and "trellisComponents" in page.text
-    paused = await harness.agents["refunds"].run("go", user="ada")
-    assert paused.interrupt is not None
-    [listed] = (await http.get("/inbox/runs", params={"assignee": "role:sales"})).json()
-    assert listed["interrupt"]["options"] == ["a", "b"] and listed["agent_id"] == "refunds"
-    assert (await http.get("/inbox/runs", params={"assignee": "role:none"})).json() == []
-    url = f"/inbox/runs/{paused.run_id}/resume"
-    answer = {"interrupt_id": paused.interrupt.interrupt_id, "decision": "answer"}
-    refused = await http.post(url, json={**answer, "answer": "z"})
-    assert refused.status_code == 409 and "BAD_RESUME" in refused.json()["detail"]
-    accepted = await http.post(url, json={**answer, "answer": "a", "comment": "the usual"})
-    assert accepted.status_code == 202
-    assert await settled(harness, paused.run_id, RunStatus.PAUSED, attempt=2) is RunStatus.PAUSED
+        [listed] = (await http.get("/inbox", params={"assignee": "role:sales"})).json()
+        assert listed["run_id"] == paused.run_id and listed["interrupt"]["options"] == ["a", "b"]
+        url = f"/inbox/{paused.run_id}"
+        refused = await http.post(url, json={"decision": "answer", "answer": "z"})
+        assert refused.status_code == 409 and "not one of the options" in refused.text
+        assert (await http.post("/inbox/run_none", json={"decision": "cancel"})).status_code == 404
+        went_on = await http.post(url, json={"decision": "answer", "answer": "a"})
+        assert went_on.json() == {"status": "PAUSED"}  # now on the refund's approval
+        done = await http.post(url, json={"decision": "approve"})
+        assert done.json() == {"status": "SUCCESS"}
     record = await harness.runs.get(paused.run_id)
-    assert record is not None and record.awaiting is not None and record.attempt == 2
-    assert record.last_resolution is not None
-    assert (record.last_resolution.reviewer, record.last_resolution.comment) == ("lee", "the usual")
-    approval = {"interrupt_id": record.awaiting.interrupt_id, "decision": "approve"}
-    assert (await http.post(url, json=approval)).status_code == 202
-    assert await settled(harness, paused.run_id, RunStatus.SUCCESS) is RunStatus.SUCCESS
-
-
-async def test_an_answer_to_a_run_not_served_here_is_not_found(
-    inbox: tuple[Harness, httpx.AsyncClient],
-) -> None:
-    harness, http = inbox
-    paused = await harness.agents["refunds"].run("go", user="ada")
-    assert paused.interrupt is not None
-    answer = {"interrupt_id": paused.interrupt.interrupt_id, "decision": "answer", "answer": "a"}
-    assert (await http.post("/inbox/runs/run_none/resume", json=answer)).status_code == 404
-    other = {**answer, "interrupt_id": "run_other.1.1"}
-    response = await http.post(f"/inbox/runs/{paused.run_id}/resume", json=other)
-    assert response.status_code == 404 and "is not a question of" in response.json()["detail"]
-    nobody = await http.get("/inbox/runs", headers={"x-user": ""})
-    assert nobody.status_code == 401
-
-
-async def test_a_run_that_fails_to_go_on_is_logged(
-    inbox: tuple[Harness, httpx.AsyncClient], caplog: pytest.LogCaptureFixture
-) -> None:
-    harness, http = inbox
-    agent = harness.agents["refunds"]
-    paused = await agent.run("go", user="ada")
-    assert paused.interrupt is not None
-
-    async def broken(*args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("the store went away")
-
-    agent._continue = broken  # type: ignore[method-assign]
-    answer = {"interrupt_id": paused.interrupt.interrupt_id, "decision": "answer", "answer": "a"}
-    with caplog.at_level("ERROR", logger="trellis.inbox"):
-        response = await http.post(f"/inbox/runs/{paused.run_id}/resume", json=answer)
-        assert response.status_code == 202
-        for _ in range(100):
-            if "failed to continue" in caplog.text:
-                break
-            await asyncio.sleep(0.01)
-    assert "the store went away" in caplog.text
-
-
-async def test_without_an_identity_every_answer_is_anonymous(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    async with Harness(config=Settings()) as harness:
-        agent = harness.wrap(refunds, id="refunds", tools=[refund])
-        app = FastAPI()
-        with caplog.at_level("WARNING", logger="trellis.inbox"):
-            harness.serve_inbox(app, path="/review")
-        assert "every answer is 'anonymous'" in caplog.text
-        paused = await agent.run("go", user="ada")
-        assert paused.interrupt is not None
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://inbox") as http:
-            answer = {"interrupt_id": paused.run_id, "decision": "cancel"}
-            response = await http.post(f"/review/runs/{paused.run_id}/resume", json=answer)
-            assert response.status_code == 404  # an interrupt's own id, not the run's
-            answer["interrupt_id"] = paused.interrupt.interrupt_id
-            response = await http.post(f"/review/runs/{paused.run_id}/resume", json=answer)
-        assert response.status_code == 202
-        assert await settled(harness, paused.run_id, RunStatus.CANCELLED) is RunStatus.CANCELLED
-        record = await harness.runs.get(paused.run_id)
-        assert record is not None and record.last_resolution is not None
-        assert record.last_resolution.reviewer == "anonymous"
+    assert record is not None and record.last_resolution is not None
+    assert record.last_resolution.reviewer == "lee"

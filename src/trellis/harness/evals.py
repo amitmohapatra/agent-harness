@@ -9,6 +9,8 @@ score, or ``None`` when it has nothing to say about this case. Built in:
   memory service's ``/v1/verify`` with the run's ``bundle_id``: :func:`grounding_score`, the
   same check as the sampled one every wrapped run gets);
 * :func:`exact_match`, :func:`contains` — against the case's ``expected``;
+* :func:`called`, :func:`tool_sequence` — against the run's trajectory (``EvalCase.trajectory``:
+  the tool calls it made, in order, with their arguments and outcomes);
 * :func:`llm_judge` — a judge model scores the answer against plain-language criteria (strict
   JSON ``{score, reasoning}`` at temperature 0). Which model, and through which virtual key,
   is the deployment's (``TRELLIS_JUDGE_MODEL``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), never the code's.
@@ -50,11 +52,14 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trellis.contracts import ConfigurationError, RunStatus, new_id
+from trellis.contracts import ConfigurationError, RunStatus, ToolCall, ToolOutcome, new_id
 from trellis.harness import pipeline, telemetry
 from trellis.harness.adapters.react import _message, _Named, _unfenced
-from trellis.harness.clients.bifrost import Gateway, prompt_ref
+from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.identity import Identity
+from trellis.harness.journal import Journal
+from trellis.harness.prompts import BifrostPrompts, Prompt, PromptSources
+from trellis.harness.repository import pinned
 from trellis.harness.settings import Settings
 
 if TYPE_CHECKING:
@@ -90,6 +95,9 @@ _ENDS: Final = re.compile(r"[.!?](?=\s)|\n")
 _JSON_OBJECT: Final = re.compile(r"\{.*\}", re.S)
 
 ItemStatus = Literal["success", "error", "interrupted", "cancelled"]
+#: One step of a run's trajectory: a tool call and how it came out (contracts ``ToolCall`` and
+#: ``ToolOutcome``, as the run's tool records hold them).
+Step = tuple[ToolCall, ToolOutcome]
 
 
 # --------------------------------------------------------------------------- the model
@@ -116,6 +124,10 @@ class EvalCase:
     #: the memory scope the context was built in (what :func:`grounding` verifies in)
     memory: MemoryContext | None = field(default=None, repr=False, compare=False)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    #: the harness tool calls the run made, in order across its attempts, each with its
+    #: outcome (the run's journal: ``Journal.trajectory``) — ``None`` when it is not known (a
+    #: target of :func:`evaluate` that returned none in its :class:`EvalOutput`)
+    trajectory: Sequence[Step] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,13 +145,15 @@ Evaluator = Callable[[EvalCase], Awaitable[EvalScore | None]]
 
 @dataclass(frozen=True, slots=True)
 class EvalOutput:
-    """What a target of :func:`evaluate` may return instead of its bare answer: the answer, and
-    the memory context it was given — its ``bundle_id`` and the scope it was built in — which
-    :func:`grounding` checks the answer against."""
+    """What a target of :func:`evaluate` may return instead of its bare answer: the answer, the
+    memory context it was given — its ``bundle_id`` and the scope it was built in — which
+    :func:`grounding` checks the answer against, and the tool calls it made (its
+    ``trajectory``, which :func:`called` and :func:`tool_sequence` read)."""
 
     answer: Any
     bundle_id: str | None = None
     memory: MemoryContext | None = field(default=None, repr=False, compare=False)
+    trajectory: Sequence[Step] | None = None
 
 
 #: Any code :func:`evaluate` can run on an item: ``async (input) -> answer`` (or an
@@ -242,6 +256,8 @@ class EvalServices:
     judge_gateway: Gateway | None = None
     judge_model: Any = None
     fallback_model: Any = None
+    #: where ``llm_judge(prompt=)`` is looked up (``None``: the judge's gateway only)
+    prompts: PromptSources | None = None
     _shares_logged: bool = field(default=False, init=False, repr=False)
 
     @classmethod
@@ -319,7 +335,7 @@ class EvalServices:
 
     async def aclose(self) -> None:
         """Close the clients (the ones :meth:`from_env` made; a harness closes its own)."""
-        clients = (self.judge_gateway, self.langfuse)
+        clients = (self.judge_gateway, self.langfuse, self.prompts)
         await asyncio.gather(*(c.aclose() for c in clients if c is not None))
 
     async def __aenter__(self) -> EvalServices:
@@ -425,22 +441,87 @@ class contains:
 
 
 @dataclass(frozen=True, slots=True)
+class called:
+    """Whether the run called ``tool`` — with ``args``, each of them equal to the call's (the
+    call's others not compared) — and, with ``before``, did so before its first call of
+    ``before`` (which it must have made). Named ``called:<tool>`` unless ``name`` says; no score
+    without a trajectory."""
+
+    tool: str
+    before: str | None = field(default=None, kw_only=True)
+    args: Mapping[str, Any] | None = field(default=None, kw_only=True)
+    name: str = field(default="", kw_only=True)
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            object.__setattr__(self, "name", f"called:{self.tool}")
+
+    async def __call__(self, case: EvalCase) -> EvalScore | None:
+        if case.trajectory is None:
+            return None
+        tools = [call.tool for call, _ in case.trajectory]
+        wanted = self.args or {}
+        found = [
+            n
+            for n, (call, _) in enumerate(case.trajectory)
+            if call.tool == self.tool
+            and all(k in call.args and call.args[k] == v for k, v in wanted.items())
+        ]
+        if not found:
+            how = " with those arguments" if self.tool in tools else ""
+            return EvalScore(self.name, False, f"{self.tool} was not called{how}: {_said(tools)}")
+        if self.before is None:
+            return EvalScore(self.name, True)
+        if self.before not in tools:
+            return EvalScore(self.name, False, f"{self.before} was not called: {_said(tools)}")
+        if found[0] < tools.index(self.before):
+            return EvalScore(self.name, True)
+        return EvalScore(self.name, False, f"{self.tool} came after {self.before}: {_said(tools)}")
+
+
+@dataclass(frozen=True, slots=True)
+class tool_sequence:
+    """Whether the run called ``tools`` in this order — other calls between and around them
+    allowed, or, ``exact``, its calls being exactly these. No score without a trajectory."""
+
+    tools: Sequence[str]
+    exact: bool = field(default=False, kw_only=True)
+    name: str = field(default="tool_sequence", kw_only=True)
+
+    async def __call__(self, case: EvalCase) -> EvalScore | None:
+        if case.trajectory is None:
+            return None
+        made = [call.tool for call, _ in case.trajectory]
+        if self.exact:
+            ok = made == list(self.tools)
+        else:
+            remaining = iter(made)
+            ok = all(tool in remaining for tool in self.tools)  # in order: consumes the calls
+        return EvalScore(self.name, ok, None if ok else _said(made))
+
+
+def _said(tools: Sequence[str]) -> str:
+    return f"the calls were {', '.join(tools)}" if tools else "no tool was called"
+
+
+@dataclass(frozen=True, slots=True)
 class llm_judge:
     """A judge model scores the answer against ``criteria`` (0 to 1, with its reasoning as the
     comment). The model is the one :func:`evaluate` or :func:`judge` was given
     (:meth:`EvalServices.model`: ``TRELLIS_JUDGE_MODEL`` through ``BIFROST_URL`` with
-    ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). ``prompt`` names a stored
-    prompt of the gateway (``"name"``, ``"name@version"``) the gateway prepends to the judge's
-    messages (a judge model named, not a model object). A reply that is not the JSON asked for
-    is asked once more; a second one is no score, with a warning."""
+    ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). ``prompt`` names a prompt
+    (``"name"``, ``"name@version"``, or a ``Prompt``), looked up as every prompt is
+    (``EvalServices.prompts``): put before the judge's messages — by the gateway, for a stored
+    prompt of the gateway's (a judge model named, not a model object). A reply that is not the
+    JSON asked for is asked once more; a second one is no score, with a warning."""
 
     criteria: str
     name: str = "llm_judge"
-    prompt: str | None = field(default=None, kw_only=True)
+    prompt: str | Prompt | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
-        if self.prompt is not None:
-            prompt_ref(self.prompt)
+        if isinstance(self.prompt, str):
+            pinned(self.prompt)
 
     async def __call__(self, case: EvalCase) -> EvalScore | None:
         services = _services.get()
@@ -449,17 +530,26 @@ class llm_judge:
                 "llm_judge runs inside evaluate() or judge(): their services name the judge's model"
             )
         model = services.model()
-        if self.prompt is not None:
-            if not isinstance(model, _Named):
-                raise ConfigurationError(
-                    "llm_judge(prompt=) needs a Bifrost model name: the gateway prepends the "
-                    "stored prompt"
-                )
-            model = dataclasses.replace(model, prompt=await model.gateway.prompt(self.prompt))
         messages = [
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user", "content": _judge_prompt(self.criteria, case)},
         ]
+        if self.prompt is not None:
+            gateway = services.judge_gateway
+            prompts = services.prompts or PromptSources(
+                [BifrostPrompts(gateway)] if gateway is not None else []
+            )
+            found = await prompts.get(self.prompt)
+            selected = found.pin()
+            if selected is None:
+                messages = [*found.messages(), *messages]
+            elif isinstance(model, _Named):
+                model = dataclasses.replace(model, prompt=selected)
+            else:
+                raise ConfigurationError(
+                    f"llm_judge(prompt=) names {found.ref}, a stored prompt of the gateway, "
+                    "which needs a Bifrost model name: the gateway prepends it"
+                )
         for attempt in range(2):
             message = _message(await model.complete(messages, temperature=0))
             content = message.get("content")
@@ -780,12 +870,15 @@ async def _item(
     answer; whatever goes wrong is the item's error, never the evaluation's."""
     pushed: list[Any] = []
     run_id: str | None = None
+    journal = Journal()  # the run's: its trajectory is the case's
     try:
         record = await agent._opened(item.input, user=user, thread=None, tenant=None)
         run_id = record.run_id
         current = await run.experiment(run_id, item)
         with telemetry.experiment(current):
-            result = await pipeline.attempt(agent, record, item.input, observe=pushed.append)
+            result = await pipeline.attempt(
+                agent, record, item.input, journal=journal, observe=pushed.append
+            )
         if result.status is RunStatus.PAUSED and result.interrupt is not None:
             await agent.resume(result.interrupt.interrupt_id, "cancel", reviewer=EVAL_REVIEWER)
     except Exception as exc:
@@ -812,6 +905,7 @@ async def _item(
         context=getattr(context, "rendered", None),
         memory=memory.ctx if memory is not None else None,
         metadata=item.metadata,
+        trajectory=list(journal.trajectory),
     )
     with telemetry.experiment(current):  # the score spans are the experiment's too
         scores, failed = await judge(case, evaluators, services=services)
@@ -851,6 +945,7 @@ async def _called(
         bundle_id=output.bundle_id,
         memory=output.memory,
         metadata=item.metadata,
+        trajectory=output.trajectory,
     )
     with telemetry.experiment(current):
         scores, failed = await judge(case, evaluators, services=services)
@@ -902,8 +997,10 @@ __all__ = [
     "EvalServices",
     "Evaluator",
     "EvaluatorStats",
+    "Step",
     "Summary",
     "Target",
+    "called",
     "contains",
     "evaluate",
     "exact_match",
@@ -911,4 +1008,5 @@ __all__ = [
     "grounding_score",
     "judge",
     "llm_judge",
+    "tool_sequence",
 ]

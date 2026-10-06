@@ -8,7 +8,9 @@ too, with a page of its own ([deepagents.md](deepagents.md)).
 `langchain`, which has `create_agent` and its middleware). Your model is your own LangChain chat
 model — `ChatOpenAI(base_url=BIFROST_URL, default_headers=await h.model_headers(), ...)` to go
 through Bifrost (the headers keep the gateway from adding its MCP tools to the model's requests,
-and select a stored prompt with `prompt=`: [gateway.md](../gateway.md)).
+and select a stored prompt with `prompt=`: [gateway.md](../gateway.md)); a prompt from any source
+— code, `.md` files, Langfuse, the gateway — is `system_prompt=await h.prompt("triage", ...)`
+([prompts.md](../prompts.md)).
 
 This page is Way 1: the harness runs the graph. To keep calling the graph yourself and plug in
 the blocks (memory, governed tools asking through `interrupt`, the pause in agent-runs, a
@@ -128,6 +130,19 @@ answered by the checkpointer: resumed where it does not hold them, the run fails
 those may be resumed in another process, give every process a shared, durable checkpointer
 (`langgraph-checkpoint-postgres`'s `AsyncPostgresSaver`).
 
+## The graph's own run options
+
+`framework_options=` (on `h.wrap`, or a run's own on `run`/`stream`/`start`) goes into the config
+the harness calls `ainvoke`/`astream` with: `recursion_limit`, `configurable` keys your nodes
+read, `tags`, `metadata`, `callbacks`. The run's thread is the harness's: its
+`configurable.thread_id` wins over one given. Another key is refused when you wrap or run
+([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+
+```python
+agent = h.wrap(graph, id="triage", framework_options={"recursion_limit": 40})
+await agent.run(question, user="ada", framework_options={"configurable": {"region": "eu"}})
+```
+
 ## Streaming
 
 `agent.stream(...)` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`, text deltas
@@ -157,6 +172,15 @@ agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(ur
 `Harness(judges=[...])` work on the graph unchanged (the evaluators come from
 `trellis.harness.evals`); `llm_judge` needs `TRELLIS_JUDGE_MODEL` (the harness does not know a
 graph's model).
+
+## Native or ours: skills, prompts, sandbox
+
+A `StateGraph` of your own has no skills, prompt store or sandbox: use the harness's
+(`h.tools(skills(...), sandbox(), framework="langgraph")`, `await h.prompt(...)`). A LangChain
+`create_agent` can take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders instead
+([skills.md](../skills.md#native-or-ours)); the harness's skills are for Bifrost's registry and
+versions pinned per run. `sandbox()` governs and journals every command
+([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 
 ## Limits
 

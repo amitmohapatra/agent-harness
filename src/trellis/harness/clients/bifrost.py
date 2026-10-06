@@ -18,7 +18,7 @@ import functools
 import json
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 
@@ -28,6 +28,7 @@ from bifrost_sdk.admin import Admin, Skill
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.fresh import Fresh
 from trellis.harness.identity import identity_headers
+from trellis.harness.repository import RETRY_SECONDS, TTL_SECONDS, NotFound, pinned
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import Tool
 
@@ -39,11 +40,10 @@ LOG_POLL_SECONDS: Final = 2.0
 LOG_SETTLE_SECONDS: Final = 20.0
 #: How long a stored prompt's id and latest version, and a skill's served version, are kept
 #: before they are read again; while the gateway cannot be reached the last ones read stand
-#: (read again after :data:`REPOSITORY_RETRY_SECONDS`).
-REPOSITORY_TTL_SECONDS: Final = 300.0
-REPOSITORY_RETRY_SECONDS: Final = 30.0
-#: What separates a prompt's or a skill's name from the version it is pinned to.
-PINNED: Final = "@"
+#: (read again after :data:`REPOSITORY_RETRY_SECONDS`): every remote source's
+#: (``repository``).
+REPOSITORY_TTL_SECONDS: Final = TTL_SECONDS
+REPOSITORY_RETRY_SECONDS: Final = RETRY_SECONDS
 
 #: Bifrost's Code Mode meta-tools, under the harness's names. The gateway publishes no schema
 #: for them; these are the arguments its executor checks for. Under its own names (camelCase)
@@ -111,14 +111,6 @@ GATEWAY_NAMES: Final = {
 }
 
 
-def pinned(ref: str) -> tuple[str, str | None]:
-    """``"name@version"`` as its name and version (``None`` when it names none)."""
-    name, _, version = ref.partition(PINNED)
-    if not name or (PINNED in ref and not version):
-        raise ConfigurationError(f"{ref!r} is not a name, or name{PINNED}version")
-    return name, version or None
-
-
 def prompt_ref(ref: str) -> tuple[str, int | None]:
     """A stored prompt's name and the version it is pinned to: ``"triage"``, ``"triage@3"``."""
     name, version = pinned(ref)
@@ -129,11 +121,13 @@ def prompt_ref(ref: str) -> tuple[str, int | None]:
 
 @dataclass(frozen=True, slots=True)
 class PromptPin:
-    """A stored prompt as a model call selects it: its id and one committed version."""
+    """A stored prompt as a model call selects it: its id and one committed version (and that
+    version's messages, which the gateway prepends: what a framework reads as its text)."""
 
     name: str
     id: str
     version: int
+    messages: tuple[dict[str, Any], ...] = field(default=(), compare=False, repr=False)
 
     def options(self) -> Options:
         return Options(prompt_id=self.id, prompt_version=self.version)
@@ -251,8 +245,8 @@ class Gateway:
     async def prompt(self, ref: str) -> PromptPin:
         """The stored prompt ``ref`` names (``"name"`` or ``"name@version"``): its id, and the
         version pinned — else its latest committed one, read again every
-        :data:`REPOSITORY_TTL_SECONDS`. ``ConfigurationError`` for a prompt that does not
-        exist, has no committed version, or not the one named."""
+        :data:`REPOSITORY_TTL_SECONDS`. ``NotFound`` (a ``ConfigurationError``) for a prompt
+        that does not exist, has no committed version, or not the one named."""
         found = self._prompts.get(ref)
         if found is None:
             found = self._prompts[ref] = Fresh(
@@ -272,13 +266,20 @@ class Gateway:
             raise ConfigurationError(f"the gateway's prompt {name!r}: {exc}") from exc
         latest = found.latest_version if found is not None else None
         if found is None or latest is None:
-            raise ConfigurationError(f"the gateway has no committed prompt named {name!r}")
+            raise NotFound(f"the gateway has no committed prompt named {name!r}")
         if version is not None and version > latest.number:
-            raise ConfigurationError(
+            raise NotFound(
                 f"the gateway's prompt {name!r} has no version {version} (its latest: "
                 f"{latest.number})"
             )
-        return PromptPin(name=name, id=found.id, version=version or latest.number)
+        chosen = latest
+        if version is not None and version != latest.number:
+            versions = await self.admin.prompts.versions(found.id)
+            kept = next((v for v in versions if v.number == version), None)
+            if kept is None:
+                raise NotFound(f"the gateway's prompt {name!r} has no version {version}")
+            chosen = kept
+        return PromptPin(name=name, id=found.id, version=chosen.number, messages=chosen.messages)
 
     async def skill(self, name: str, version: str | None = None) -> Skill:
         """The skill ``name`` as ``version`` reads — its ``SKILL.md`` body and file list —

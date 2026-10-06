@@ -14,7 +14,8 @@ the "model" read). ``FAKE_CLAUDE_RECORD`` names a file the CLI writes what it wa
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
 the temporary directory): the steps done so far — a tool call that failed or paused is not done.
 ``--resume=<id>`` goes on after them, as the real CLI continues a conversation; a session it
-does not hold is the real CLI's error result.
+does not hold is the real CLI's error result. ``--max-turns`` stops a query after that many
+steps, with the real CLI's ``error_max_turns`` result.
 """
 
 from __future__ import annotations
@@ -146,7 +147,11 @@ class Cli:
             kept.write_text(json.dumps({"done": 0}))
         done = json.loads(kept.read_text())["done"]
         last = read = ""
-        for step, item in enumerate(script[done:], start=done):
+        limit = argument("--max-turns")
+        for turns, (step, item) in enumerate(enumerate(script[done:], start=done)):
+            if limit is not None and turns >= int(limit):  # what the real CLI ends with
+                send(result(session, "Reached maximum number of turns", subtype="error_max_turns"))
+                return
             if "text" in item:
                 last = item["text"].replace("{last}", read)
                 send(assistant(session, [{"type": "text", "text": last}]))
@@ -212,13 +217,18 @@ def assistant(session: str, content: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def result(
-    session: str, error: str | None = None, *, last: str = "", turns: int = 0
+    session: str,
+    error: str | None = None,
+    *,
+    last: str = "",
+    turns: int = 0,
+    subtype: str = "error_during_execution",
 ) -> dict[str, Any]:
     """The query's end: its answer, or — ``error`` — what the real CLI says when it cannot run
-    it (``num_turns`` 0)."""
+    it (``num_turns`` 0), or stops it (``subtype``: ``error_max_turns`` past ``--max-turns``)."""
     ended: dict[str, Any] = {
         "type": "result",
-        "subtype": "success" if error is None else "error_during_execution",
+        "subtype": "success" if error is None else subtype,
         "duration_ms": 1,
         "duration_api_ms": 1,
         "is_error": error is not None,

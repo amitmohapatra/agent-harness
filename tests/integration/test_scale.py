@@ -20,7 +20,7 @@ from tests.support.runlog import LoggedRuns
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import RunEvent, RunEventType, RunOutcome, RunStatus
 from trellis.harness import logs, telemetry
-from trellis.harness.agent import NO_RESULT, Throttled
+from trellis.harness.agent import Throttled
 from trellis.harness.agui.sse import decode
 from trellis.harness.runlog import BATCH, RunLog
 from trellis.harness.runs import LocalRuns
@@ -161,7 +161,6 @@ async def test_in_process_events_follow_a_run_here_until_it_ends(harness: Harnes
     await agent.cancel(again.run_id)
     assert await asyncio.wait_for(asyncio.gather(*followers), 5) == [[], []]
     assert not agent._watching
-    assert repr(NO_RESULT) == "NO_RESULT"
 
 
 async def test_in_process_events_include_the_attempt_running_now(harness: Harness) -> None:

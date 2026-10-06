@@ -23,6 +23,10 @@ sub-agent's run working inside one of the run's tool calls keeps its journal in 
 soon as it exists (``sandbox``), so every later attempt works in that one
 (``trellis.harness.sandbox``).
 
+Every call that ran is also on the run's trajectory (``trajectory``), in order: the calls and
+outcomes its tool records are made of, kept across its attempts for the evaluators
+(``EvalCase.trajectory``).
+
 Calls made at once (a framework running several tools together) take their occurrences in the
 order they asked: identical calls run one after another (:meth:`Replay.exclusive`), so each has
 its own occurrence and a re-run hands each the output it got, whatever order they finished in.
@@ -38,7 +42,14 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trellis.contracts import ArtifactRef, HarnessError, Interrupt, InterruptResolution
+from trellis.contracts import (
+    ArtifactRef,
+    HarnessError,
+    Interrupt,
+    InterruptResolution,
+    ToolCall,
+    ToolOutcome,
+)
 
 if TYPE_CHECKING:
     from trellis.harness.runs import RunArtifacts
@@ -82,6 +93,10 @@ class Journal(BaseModel):
     calls: dict[str, list[Any]] = Field(default_factory=dict)
     #: the tools the run has called (they stay offered to the model after a pause)
     used: list[str] = Field(default_factory=list)
+    #: the run's trajectory: every harness tool call that ran, in order across its attempts,
+    #: with its outcome — the call and outcome its tool record is made of (what evaluators read:
+    #: ``EvalCase.trajectory``); a call replayed from the journal is in it once
+    trajectory: list[tuple[ToolCall, ToolOutcome]] = Field(default_factory=list)
     #: the tools a reviewer approved for the rest of the run (``remember="run"``; ``"<tool> for
     #: <assignee>"`` when the approval was asked of someone): their later calls asked of the
     #: same are not asked about again in this run
@@ -204,6 +219,12 @@ class Replay:
         self._seen[f"c:{key}"] += 1
         if tool is not None and tool not in self.journal.used:
             self.journal.used.append(tool)
+
+    def record_step(self, call: ToolCall, outcome: ToolOutcome) -> None:
+        """A call that ran, and its outcome, on the run's trajectory (the call without the
+        run's task, which every call repeats)."""
+        step = (call.model_copy(update={"task": None}), outcome.model_copy())
+        self.journal.trajectory.append(step)
 
     def record_answer(self, key: str, resolution: InterruptResolution) -> None:
         self.journal.answers.setdefault(key, []).append(resolution.model_dump(mode="json"))

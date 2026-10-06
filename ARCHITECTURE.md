@@ -320,7 +320,7 @@ the bridge runs is.
 
 ## The adapter contract
 
-Four functions per framework, nothing else (`adapters/base.py`):
+Four functions per framework, and one check (`adapters/base.py`):
 
 * `prepare_input(target, input, context)` — the framework's input, the memory context as a
   system message (or appended to the system prompt);
@@ -330,7 +330,12 @@ Four functions per framework, nothing else (`adapters/base.py`):
   reported itself (LangGraph's `interrupt`, an OpenAI Agents `needs_approval`);
 * `resume_input(target, native_input, pending, resolution)` — what continues a pause:
   `Command(resume=...)` for a checkpointed graph, the SDK's `RunState` for its approvals,
-  otherwise the original input (a re-run).
+  otherwise the original input (a re-run);
+* `check_options(options)` — refuses `framework_options=` its run call cannot take (a key it
+  does not know, one the harness sets itself; a function and `ReAct` take none), at wrap and
+  call time. The options themselves reach `invoke`/`stream` as `runtime.framework_options` — the
+  agent's with the run's own over them, kept with the run's record — and go to the framework's
+  run call unchanged ([configuration.md](docs/configuration.md#the-frameworks-own-run-options)).
 
 Per-run harness tools reach the adapter already converted (`tools/convert/<format>.py`). An
 adapter with fixed tools (a compiled graph) refuses `tools=` at wrap time; its tools come from
@@ -394,10 +399,11 @@ Agent Mode is never used.
 ## Pauses and resumes
 
 `Runtime.ask` is the one pause (built as a `Question`, `asking.py`, which Way 2 and a graph's
-own `interrupt(value)` use too; an approval and an external tool's result are the same pause).
+own `interrupt(value)` use too; an approval is the same pause, and so is a result from outside
+the run, which is an `ask` in the tool).
 Its interrupt (a contracts `Interrupt`) has the id `<run_id>.<attempt>.<n>`: it names its run,
-so `resume` needs nothing else. Once the pause is recorded, the notifiers are told
-(`notify.py`, in the background). With `RUNS_URL` every attempt's events also go to the run's
+so `resume` needs nothing else. Telling people a run waits is agent-runs' (its `run.paused`
+webhook), not the harness's. With `RUNS_URL` every attempt's events also go to the run's
 event log in agent-runs (`runlog.py`), the last ones before the pause or the ending is recorded.
 How a run continues:
 

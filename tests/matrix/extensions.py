@@ -3,14 +3,15 @@ is a strict xfail with the gap or plan item: the day the feature lands its probe
 suite fails on XPASS, and the row is turned into a real one (a scenario in ``features.py``,
 its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 
-* ``F34`` approval rule in code (W5): ``@tool(approval=fn)`` — landed, a real row now.
+* ``F34`` approval rule in code (W5): a ``before_tool`` hook asking by the call's arguments on a
+  ``write`` tool — a real row.
 * ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed, a real row now.
-* ``F70`` the framework's own run options (G13): ``agent.run(..., framework_options=...)``.
 * the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
   one selection cell each.
 
-Hooks (F71*), ``without=`` (the selection's switches, F75r), ``timeout=`` (F09, F09r) and the
-sandbox (F73) have landed: they are rows of ``features.py``.
+Hooks (F71*), ``without=`` (the selection's switches, F75r), ``timeout=`` (F09, F09r), the
+framework's own run options (F70, G13) and the sandbox (F73) have landed: they are rows of
+``features.py``.
 """
 
 from __future__ import annotations
@@ -18,21 +19,28 @@ from __future__ import annotations
 from typing import Any, Final
 
 from tests.matrix.model import ADAPTERS, NA, Bug, Feature, Gap
-from tests.matrix.world import USER, World
-from trellis import Ask, tool
+from tests.matrix.world import World
+from trellis import Ask, Hooks, tool
+from trellis.contracts import ToolCall
 
 
-async def approval_fn(w: World) -> None:
-    def big(args: dict[str, Any]) -> Ask | None:
-        return Ask("Over 100: pay it?") if args.get("amount", 0) > 100 else None
+class _OverHundred(Hooks):
+    """An approval rule in code: a payment over 100 asks; a smaller one runs unasked."""
 
-    @tool(side_effects="write", approval=big)
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        return Ask("Over 100: pay it?") if call.args.get("amount", 0) > 100 else None
+
+
+async def approval_rule(w: World) -> None:
+    @tool(side_effects="write")
     async def pay(amount: int) -> str:
         """Pay."""
         return f"paid {amount}"
 
-    o = (await w.go([pay], [("pay", {"amount": 500}), ("pay", {"amount": 50})])).succeeded()
+    plan = [("pay", {"amount": 500}), ("pay", {"amount": 50})]
+    o = (await w.go([pay], plan, hooks=[_OverHundred()])).succeeded()
     assert len(o.pauses) == 1, o.pauses  # the big payment asks; the small one runs
+    assert "Over 100: pay it?" in o.pauses[0].question, o.pauses
 
 
 async def hitl_v2(w: World) -> None:
@@ -56,13 +64,6 @@ async def hitl_v2(w: World) -> None:
     assert "S" in o.text
 
 
-async def framework_options(w: World) -> None:
-    agent = await w.agent([], [])
-    proposed: dict[str, Any] = {"framework_options": {"recursion_limit": 5}}
-    result = await agent.run("x", user=USER, **proposed)
-    assert result.status.value == "SUCCESS"
-
-
 def _pending(
     feature_id: str, title: str, *, audit: str, how: str, gap: Gap | Bug | None, probe: Any
 ) -> Feature:
@@ -82,9 +83,9 @@ EXTENSIONS: Final[list[Feature]] = [
         "F34",
         "an approval rule in code",
         audit="F34",
-        how="@tool(approval=fn) (W5)",
+        how="a before_tool hook returning Ask by the call's arguments; the tool write (W5)",
         gap=None,
-        probe=approval_fn,
+        probe=approval_rule,
     ),
     _pending(
         "F36v2",
@@ -93,13 +94,5 @@ EXTENSIONS: Final[list[Feature]] = [
         how="ask(options=[Option], multiple=True)",
         gap=None,
         probe=hitl_v2,
-    ),
-    _pending(
-        "F70",
-        "the framework's own run options",
-        audit="F70",
-        how="agent.run(..., framework_options=)",
-        gap=Gap("G13", "no way to pass the framework's own per-run options"),
-        probe=framework_options,
     ),
 ]

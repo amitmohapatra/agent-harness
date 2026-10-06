@@ -18,10 +18,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final, overload
 
 import httpx
-from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
+from pydantic import BaseModel, ConfigDict, create_model
 
-from trellis.contracts import ToolCall, ToolError, ToolSpec
-from trellis.harness.hooks import Approval
+from trellis.contracts import ToolError, ToolSpec
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import (
     DEFAULT_SIDE_EFFECTS,
@@ -62,14 +61,9 @@ class FunctionTool:
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
         idempotent: bool = False,
         timeout: float | None = None,
-        approval: Approval | None = None,
-        external: bool = False,
     ) -> None:
         self.fn = fn
         self.model = _arguments_model(fn)
-        self.external = external
-        #: an external tool's result schema: its return annotation's (``None``: any value)
-        self.result_schema = _result_schema(fn) if external else None
         self.spec = ToolSpec(
             name=name or fn.__name__,
             description=description or (inspect.getdoc(fn) or "").split("\n\n")[0],
@@ -78,7 +72,7 @@ class FunctionTool:
             side_effects=side_effects,
             idempotent=idempotent,
         )
-        self.tool = Tool(self.spec, self._run, timeout=timeout, approval=approval)
+        self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -90,32 +84,7 @@ class FunctionTool:
     async def _run(self, args: dict[str, Any]) -> Any:
         validated = self.model.model_validate(args)
         values = {name: getattr(validated, name) for name in type(validated).model_fields}
-        if self.external:
-            return await self._outside(values)
         return await invoked(self.fn, **values)
-
-    async def _outside(self, args: dict[str, Any]) -> Any:
-        """An external tool's call: the run pauses with it, and the result given from
-        outside is what the call returns (the function itself never runs)."""
-        runtime = current()
-        if runtime is None:
-            raise ToolError(
-                f"{self.spec.name} is an external tool: its result is given to a paused run "
-                "(agent.resume(run_id, result=...)), so it is called inside a Harness run",
-                source="tools",
-            )
-        call = ToolCall(
-            tool=self.spec.name,
-            args=args,
-            task=runtime.task,
-            idempotency_key=runtime.idempotency_key,
-        )
-        result = await runtime.external(call, self.result_schema)
-        if result is False:
-            raise ToolError(
-                f"{self.spec.name} was not done: its result was refused", source="tools"
-            )
-        return result
 
 
 @overload
@@ -128,8 +97,6 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     timeout: float | None = None,
-    approval: Approval | None = None,
-    external: bool = False,
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -139,8 +106,6 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     timeout: float | None = None,
-    approval: Approval | None = None,
-    external: bool = False,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -151,8 +116,6 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     timeout: float | None = None,
-    approval: Approval | None = None,
-    external: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
@@ -161,15 +124,8 @@ def tool(
     same idempotency key (``trellis.current().idempotency_key``) has its effect once, so it is
     retried like a read and run again after a crash. ``timeout``: the most one call may take,
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
-    is dropped).
-
-    ``approval``: your rule for each call, ``fn(args)`` (sync or async) returning ``None``
-    (governance decides, as for any tool), ``True`` (approved: it runs without asking) or
-    ``Ask(question, assignee=, component=, props=)`` (a person approves it first, asked that);
-    its answer is journaled. ``external``: the call is done outside the run (a person, another
-    system): the run pauses with it and the result given from outside
-    (``agent.resume(run_id, result=...)``) is what the model reads; the function is never
-    run, its return annotation is the result's schema.
+    is dropped). A result that comes from outside the run (a person, another system) is an
+    ``ask`` in the function: ``return await trellis.current().ask(question, expects=...)``.
     """
     made = functools.partial(
         FunctionTool,
@@ -178,19 +134,8 @@ def tool(
         side_effects=side_effects,
         idempotent=idempotent,
         timeout=timeout,
-        approval=approval,
-        external=external,
     )
     return made(fn) if fn is not None else made
-
-
-def _result_schema(fn: Callable[..., Any]) -> dict[str, Any] | None:
-    """The JSON Schema of what ``fn`` returns, from its return annotation (``None`` without
-    one, or for ``None``/``Any``)."""
-    annotation = inspect.signature(fn, eval_str=True).return_annotation
-    if annotation in (inspect.Signature.empty, None, type(None), Any):
-        return None
-    return TypeAdapter(annotation).json_schema()
 
 
 def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:

@@ -83,9 +83,6 @@ class Tool:
     #: A call cut by a crash continues where it was when it runs again (a sub-agent: its run
     #: keeps a journal of its own), so it is run again rather than reported of unknown effect.
     resumable: bool = False
-    #: Your rule for when a call is approved or asked about (``tool(approval=fn)``:
-    #: ``fn(args) -> None | True | Ask``), ahead of governance; ``None``: governance decides.
-    approval: Callable[[dict[str, Any]], Any] | None = None
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:

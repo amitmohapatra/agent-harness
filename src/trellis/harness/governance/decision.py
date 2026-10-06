@@ -40,7 +40,7 @@ ACTIONS: Final[dict[str, Action]] = {
 class Decision:
     """One call's action, and why (``reason``: what an approver reads). ``risk`` is the tool's
     as governance saw it (the catalog's over the tool's own) and ``rule`` its approval rule,
-    if any. A call your code asks about (a hook's or an approval function's ``Ask``) also
+    if any. A call your code asks about (a ``before_tool`` hook's ``Ask``) also
     says whose it is (``assignee``) and the screen it is reviewed on (``component``,
     ``props``)."""
 
@@ -79,8 +79,8 @@ class Decision:
         component: str | None = None,
         props: Mapping[str, Any] | None = None,
     ) -> Decision:
-        """This call waiting for a person, for ``reason`` (a hook's or an approval function's
-        ``Ask``: whose it is, and the screen it is reviewed on)."""
+        """This call waiting for a person, for ``reason`` (a hook's ``Ask``: whose it is, and
+        the screen it is reviewed on)."""
         return dataclasses.replace(
             self,
             action=Action.ASK,
@@ -90,13 +90,11 @@ class Decision:
             props=props,
         )
 
-    def approved(self, why: str | None = None) -> Decision:
-        """This call approved without asking — by its tool's approval function
-        (``tool(approval=)``), or ``why`` (a reviewer approved the tool for the rest of the
-        run) —: it runs, announced unless it only reads."""
+    def approved(self, why: str) -> Decision:
+        """This call approved without asking, for ``why`` (a reviewer approved the tool for
+        the rest of the run): it runs, announced unless it only reads."""
         action = Action.RUN if self.risk == "read" else Action.ANNOUNCE
-        reason = why or f"{self.tool} was approved by its approval function."
-        return dataclasses.replace(self, action=action, reason=reason)
+        return dataclasses.replace(self, action=action, reason=why)
 
 
 def decide(tool: str, risk: str, rule: str | None, args: Mapping[str, Any]) -> Decision:

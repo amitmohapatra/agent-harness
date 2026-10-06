@@ -56,8 +56,6 @@ LOG: Final = "log"
 #: for a call approved without asking because a reviewer approved its tool for the rest of the
 #: run (``tool``, ``remembered: true``).
 DECISION: Final = "decision"
-#: The ``CUSTOM`` event name of a notification sent for a pause (``notify.py``).
-NOTIFIED: Final = "notified"
 #: How much of a tool result rides on the event stream.
 PREVIEW_CHARS: Final = 2000
 

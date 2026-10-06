@@ -7,13 +7,13 @@ script, the same way every time (``trellis.testing.Reviewer``)::
     assert reviewer.answered[0] == ("refund", "APPROVE", None)
 
 A script entry is found for an interrupt by, in order: the tool of the call it asks about (an
-approval, an external tool's result), the ``component`` it names, its question (exactly), then
-``"*"``. What the entry says:
+approval), the ``component`` it names, its question (exactly), then ``"*"``. What the entry
+says:
 
 * for an approval: ``"approve"``, ``"reject"``, ``"cancel"``, ``True``/``False``, or a dict —
   the edited arguments (an ``edit``);
-* for anything else: the answer itself (a list of option values with ``multiple``; an
-  external tool's result);
+* for anything else: the answer itself (a list of option values with ``multiple``; a result
+  from outside the run that an ``ask`` in a tool waits for);
 * :class:`Decide` for full control (``Decide("approve", remember="run", comment="ok")``,
   ``Decide("cancel")``), or a function of the ``Interrupt`` returning any of these.
 

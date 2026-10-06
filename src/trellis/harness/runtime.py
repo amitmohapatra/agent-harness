@@ -31,7 +31,7 @@ from trellis.contracts import (
     ToolCall,
     ToolError,
 )
-from trellis.harness.asking import Question, answer_of
+from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
 from trellis.harness.identity import Identity
@@ -39,12 +39,11 @@ from trellis.harness.journal import Pending, Replay, content_key
 from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
-    from bifrost_sdk.admin import Skill
-
     from trellis.harness.agent import Agent
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.governance.decision import Decision
     from trellis.harness.sandbox.base import Sandbox
+    from trellis.harness.skills import ResolvedSkill
     from trellis.harness.tools.base import Tool
     from trellis.memory import MemoryContext
     from trellis.memory.models import ToolHints
@@ -113,7 +112,7 @@ class Runtime:
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
     #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
-    skills: dict[str, Skill] = field(default_factory=dict)
+    skills: dict[str, ResolvedSkill] = field(default_factory=dict)
     #: the sandbox this attempt's sandbox tools work in, once one of them ran (``sandbox``)
     sandbox: Sandbox | None = None
     #: set by an adapter whose framework can suspend itself (LangGraph ``interrupt``)
@@ -134,6 +133,10 @@ class Runtime:
     #: what this run turned off itself (``agent.run(without=)``, kept with its record; its
     #: sub-agents' runs inherit it) — its agent's are ``agent.without``
     without: frozenset[Feature] = frozenset()
+    #: the framework's own run options, as its adapter hands them to its run call: the agent's
+    #: (``h.wrap(framework_options=)``) with the run's own over them (``agent.run(
+    #: framework_options=)``, kept with its record)
+    framework_options: dict[str, Any] = field(default_factory=dict)
     started_at: datetime | None = None
     #: when the run must stop working (``time.monotonic``): what was left of its time limit
     #: and its deadline when the attempt began (``None``: neither)
@@ -364,8 +367,8 @@ class Runtime:
 
     async def approve(self, call: ToolCall, decision: Decision) -> InterruptResolution:
         """Ask for approval of a tool call (the bridge's pause): the question is governance's
-        (``Decision.question``), whose it is and the screen it is reviewed on a hook's or an
-        approval function's ``Ask`` (else anyone's, the approval control)."""
+        (``Decision.question``), whose it is and the screen it is reviewed on a hook's ``Ask``
+        (else anyone's, the approval control)."""
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,
@@ -376,22 +379,6 @@ class Runtime:
             component=decision.component,
             props=None if decision.props is None else dict(decision.props),
         )
-
-    async def external(self, call: ToolCall, expects: dict[str, Any] | None) -> Any:
-        """The result of a tool call made outside the run (``tool(external=True)``): the run
-        pauses with the call (``reason=QUESTION``, ``tool_call`` attached, ``expects`` the
-        result's schema when the tool says), and on resume this returns the result given
-        (``agent.resume(run_id, result=...)``). A reject is ``False``; a cancel ends the
-        run."""
-        resolution = await self.interrupt(
-            content_key("external", call.tool, call.args),
-            reason=InterruptReason.QUESTION,
-            question=f"The result of {call.tool}?",
-            ui="form",
-            expects=expects,
-            tool_call=call,
-        )
-        return answer_of(resolution)
 
     async def interrupt(
         self, key: str, *, payload: dict[str, Any] | None = None, **fields: Any

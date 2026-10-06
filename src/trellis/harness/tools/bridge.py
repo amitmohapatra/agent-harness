@@ -13,9 +13,10 @@ record.
 4. **execution** — inside a span, with ``TOOL_CALL_*`` events around it (the stream gets the
    arguments and the output redacted; the tool and the model get them as they are); the
    ``after_tool`` hooks may change the outcome the model reads;
-5. **record** — journaled for a later resume (and, in a worker, saved as the run's progress
-   checkpoint: at once after a call with side effects), counted, and (memory on) sent,
-   redacted, to the memory service's tool records in the background.
+5. **record** — journaled for a later resume (and on the run's trajectory, which evaluators
+   read; in a worker, saved as the run's progress checkpoint: at once after a call with side
+   effects), counted, and (memory on) sent, redacted, to the memory service's tool records in
+   the background.
 
 Execution is bounded: a call takes at most its tool's ``timeout`` and what is left of the
 run's time; a call that only reads (or is idempotent) is tried again after an error that may
@@ -48,7 +49,7 @@ from trellis.contracts import (
 from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
-from trellis.harness.hooks import Ask, Deny, denied, noted, read, ruled
+from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
@@ -149,8 +150,6 @@ async def _called(
         refused = denied(tool_call, verdict)
         _events(runtime, ref, tool_call, refused)
         return refused
-    if verdict is None and tool.approval is not None:
-        verdict = await _ruled(runtime, tool, tool_call, key)
     decision, tool_call, rejected = await _decided(runtime, tool.spec, tool_call, verdict)
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
@@ -226,6 +225,7 @@ async def _record(
         runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
+    runtime.replay.record_step(call, outcome)
     # a call with side effects is saved at once: a crash after it does not repeat it
     await runtime.progress(now=not decision.runs)
     metrics.tool_called(call.tool, outcome.status.value)
@@ -245,43 +245,23 @@ async def _hooked(runtime: Runtime, call: ToolCall, key: str) -> tuple[ToolCall,
         hooked, verdict = await hooks.tool(call)
         kept = {"args": hooked.args, "verdict": noted(verdict)}
         runtime.replay.record_call(journaled, kept)
-    verdict = read(kept["verdict"])
-    assert verdict is not True  # a hook denies or asks; approving is an approval function's
-    return call.model_copy(update={"args": kept["args"]}), verdict
-
-
-async def _ruled(runtime: Runtime, tool: Tool, call: ToolCall, key: str) -> Ask | bool | None:
-    """What the tool's approval function says about this occurrence of the call (``None``,
-    ``True`` or an ``Ask``). Journaled: a re-run reads it rather than asking the function
-    again."""
-    assert tool.approval is not None
-    journaled = content_key("approval", key, runtime.replay.occurrence(key))
-    replayed, kept = runtime.replay.call(journaled)
-    if not replayed:
-        kept = noted(await ruled(tool.approval, call))
-        runtime.replay.record_call(journaled, kept)
-    verdict = read(kept)
-    assert not isinstance(verdict, Deny)  # an approval function never denies
-    return verdict
+    return call.model_copy(update={"args": kept["args"]}), read(kept["verdict"])
 
 
 async def _decided(
-    runtime: Runtime, spec: ToolSpec, call: ToolCall, asked: Ask | bool | None
+    runtime: Runtime, spec: ToolSpec, call: ToolCall, asked: Ask | None
 ) -> tuple[Decision, ToolCall, ToolOutcome | None]:
     """Governance's decision, as the catalog says now, by name (a graph's tools were built
-    before) — asking a person whenever a hook or the tool's approval function ``asked``, and
-    not when the approval function approved (``True``) or a reviewer approved the tool for the
-    rest of the run (``remember="run"``) — and what came of it: the call (with an approver's
-    edited arguments), announced when it is to be, or the outcome of a call the approver
-    rejected."""
+    before) — asking a person whenever a hook ``asked`` (whose it is, on which screen), and
+    not when a reviewer approved the tool for the rest of the run (``remember="run"``) — and
+    what came of it: the call (with an approver's edited arguments), announced when it is to
+    be, or the outcome of a call the approver rejected."""
     governance = runtime.agent.harness.governance(runtime.tenant)
     decision = await governance.check(spec.name, call.args, side_effects=spec.side_effects)
-    if isinstance(asked, Ask):
+    if asked is not None:
         decision = decision.asking(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
-    elif asked is True and decision.asks:
-        decision = decision.approved()
     remembered = runtime.replay.journal.remembered
     reach = _reach(spec.name, decision.assignee)
     if decision.asks and reach in remembered:
@@ -326,6 +306,7 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
         metadata={UNKNOWN: True},
     )
     runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
+    runtime.replay.record_step(call, outcome)
     await runtime.progress(now=True)
     _events(runtime, ref, call, outcome)
     await runtime.agent.record_tool(runtime, call, outcome)

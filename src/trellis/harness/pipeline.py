@@ -47,7 +47,14 @@ from trellis.contracts import (
 )
 from trellis.harness import sandbox
 from trellis.harness.adapters import convert
-from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
+from trellis.harness.adapters.base import (
+    FRAMEWORK_OPTIONS,
+    Extracted,
+    Invocation,
+    NativePause,
+    Output,
+    query_of,
+)
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.events import DECISION, RunEvents
@@ -200,6 +207,7 @@ async def _attempt(
         lease_seconds=None if job is None else job.lease_seconds,
         run_memory=await agent.run_memory(identity, without),
         without=without,
+        framework_options={**agent.framework_options, **record.metadata.get(FRAMEWORK_OPTIONS, {})},
         used=set(journal.used),
         task=query_of(input),
         started_at=datetime.now(UTC),
@@ -658,8 +666,6 @@ async def _paused(
         ),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)
-    if runtime.parent is None:  # a sub-agent's question is its parent's to announce
-        await agent.harness.notified(interrupt, events)
     await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
     return Result(run_id=runtime.run_id, status=RunStatus.PAUSED, interrupt=interrupt)
 

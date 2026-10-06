@@ -64,24 +64,23 @@ class Settings(BaseModel):
     #: The share of successful runs the online judges (``Harness(judges=[...])``) score, 0 to
     #: 1, chosen by the run id; unset: 0.1 when there are judges.
     judge_sample: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: A folder of prompts, one ``<name>.md`` each (``prompts.prompts_dir``): a source of
+    #: prompts, unless the code passes ``Harness(prompts=)``.
+    prompts_dir: str | None = None
+    #: A folder of Agent Skills, one ``<name>/SKILL.md`` each (``skills.skills_dir``): a
+    #: source of skills, unless the code passes ``Harness(skills=)``.
+    skills_dir: str | None = None
+    #: Langfuse's prompt management (the names Langfuse's own SDK reads): prompts are read
+    #: from Langfuse when both keys are set, at ``langfuse_host`` (unset: Langfuse Cloud).
+    langfuse_host: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
     #: Where ``sandbox()`` makes the sandboxes its tools work in when it is given no provider:
     #: ``docker``, the Docker daemon on this machine (``trellis.harness.sandbox``); unset: none.
     sandbox: Literal["docker"] | None = None
     #: The image those sandboxes are made from, unless a ``SandboxSpec`` names one; unset: the
     #: provider's own (``DockerSandbox``: ``python:3.12-slim``).
     sandbox_image: str | None = None
-    #: A Slack incoming webhook told whenever a run pauses for a person (``notify.Slack``).
-    slack_webhook_url: str | None = None
-    #: An SMTP server that mails whoever a paused run waits for (``notify.Email``):
-    #: ``smtp://user:password@host:587`` (STARTTLS when offered) or ``smtps://…`` (TLS).
-    smtp_url: str | None = None
-    #: The address that mail is sent from (needed with ``smtp_url``).
-    smtp_from: str | None = None
-    #: Where mail about a question that is not assigned to an address goes (a role's).
-    smtp_to: str | None = None
-    #: Where paused runs are answered (the reference inbox ``h.serve_inbox`` serves, or your
-    #: own): a notification links to ``<inbox_url>#<interrupt id>``.
-    inbox_url: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -105,13 +104,13 @@ class Settings(BaseModel):
             judge_model=get("TRELLIS_JUDGE_MODEL"),
             judge_virtual_key=get("TRELLIS_JUDGE_VIRTUAL_KEY"),
             judge_sample=get("TRELLIS_JUDGE_SAMPLE"),  # type: ignore[arg-type]
+            prompts_dir=get("PROMPTS_DIR"),
+            skills_dir=get("SKILLS_DIR"),
+            langfuse_host=get("LANGFUSE_HOST"),
+            langfuse_public_key=get("LANGFUSE_PUBLIC_KEY"),
+            langfuse_secret_key=get("LANGFUSE_SECRET_KEY"),
             sandbox=get("SANDBOX"),  # type: ignore[arg-type]
             sandbox_image=get("SANDBOX_IMAGE"),
-            slack_webhook_url=get("SLACK_WEBHOOK_URL"),
-            smtp_url=get("SMTP_URL"),
-            smtp_from=get("SMTP_FROM"),
-            smtp_to=get("SMTP_TO"),
-            inbox_url=get("TRELLIS_INBOX_URL"),
             **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]
         )
 

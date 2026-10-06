@@ -419,7 +419,7 @@ async def _sse(buffer: RunBuffer, after: int) -> AsyncIterator[str]:
 def _decision(answer: Resume, awaiting: Interrupt) -> InterruptDecision:
     """The contracts decision a protocol resume entry means: ``cancelled`` abandons the run;
     an approval is answered ``true`` (approve), ``false`` (reject) or with the edited
-    arguments; anything else answers a question (an external tool's result too). The
+    arguments; anything else answers a question. The
     ``decision`` extension names it."""
     if answer.decision is not None:
         return answer.decision

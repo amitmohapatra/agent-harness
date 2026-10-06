@@ -17,7 +17,7 @@ signatures.
 | `agent.start` | `QUEUED`; `RunHandle.result()` waits for a pause or an ending |
 | `agent.resume` | the next attempt: `RUNNING` for an in-process run, `QUEUED` again for one that came from the queue; `CANCELLED` on cancel |
 | `agent.cancel(run_id, reason=)` / `handle.cancel(reason=)` | `CANCELLED`: at once when queued or paused; a run running here stops now; one on a worker elsewhere is stopped by that worker at its next heartbeat |
-| `agent.schedule(cron, input, on_behalf_of=, tz=, tenant=)` | a `Schedule`; each fire queues a run acting for `on_behalf_of` |
+| `agent.schedule(cron, input, on_behalf_of=, tz=, tenant=, ...)` | a `Schedule`; each fire queues a run acting for `on_behalf_of`, with the run options `start` takes (below) |
 
 `run`, `stream` and `start` take `timeout=` (the most working time, in seconds, across every
 attempt — pauses and the queue not counted) and `deadline=` (when the run must have ended):
@@ -190,10 +190,26 @@ its queued runs wait.
 
 `agent.schedule` is one `runs.schedules.create(spec)` (`POST /v1/schedules`): agent-runs upserts
 on `(tenant, agent, on_behalf_of, cadence, sha256 of the canonical input)`, so scheduling the
-same thing again (a redeploy) answers the schedule that exists, unchanged. The schedule carries
-the agent's `timeout` and `version` (`ScheduleSpec.timeout_seconds`, `agent_version`), which
-every fired run copies (agent-runs and `LocalRuns` alike). A schedule has no priority or
-concurrency key of its own (the contract's `ScheduleSpec` names none). The cadence is a cron
+same thing again (a redeploy) answers the schedule that exists, unchanged. A scheduled run
+carries everything a started one can (contracts 0.6.1, ADR 0007): `schedule` takes the same
+run options as `start`, and every fired run gets them — agent-runs and `LocalRuns` alike:
+
+| Run option | `agent.start(...)` keeps it in | `agent.schedule(...)` keeps it in | Each fired run gets |
+|---|---|---|---|
+| `timeout=` (else the agent's `h.wrap(timeout=)`) | `RunStart.timeout_seconds` | `ScheduleSpec.timeout_seconds` | `timeout_seconds` |
+| the agent's `version` | `RunStart.agent_version` | `ScheduleSpec.agent_version` | `agent_version` |
+| `without=` | `RunStart.metadata["without"]` | `ScheduleSpec.metadata["without"]` | `metadata["without"]` |
+| `framework_options=` (JSON) | `RunStart.metadata["framework_options"]` | `ScheduleSpec.metadata["framework_options"]` | `metadata["framework_options"]` |
+| `priority=` | `RunStart.priority` | `ScheduleSpec.priority` | `priority` |
+| `concurrency_key=` (`start`: by default `thread:<thread>`) | `RunStart.concurrency_key` | `ScheduleSpec.concurrency_key` | `concurrency_key` |
+
+agent-runs copies a schedule's `metadata` into each fired run's `RunStart.metadata`, its own
+keys (`schedule_id`...) laid over it, so a worker reads a scheduled run's choices exactly as a
+started run's. `priority=` and `concurrency_key=` need trellis-contracts 0.6.1 or later: with an
+older one `schedule` refuses them (`ConfigurationError`) rather than drop them. In Way 2 the
+same keys work without a harness: `runs.schedules.create(ScheduleSpec(..., priority=,
+metadata={"without": [...], "framework_options": {...}}))`, and whatever executes the fired run
+(a `trellis.runs.Worker` handler, `agent.execute`) reads them from `job.record`. The cadence is a cron
 expression or one of `hourly`, `daily`, `weekly`, `weekdays`, `manual`. Pause and resume a
 schedule with `RunsClient`: `await runs.schedules.update(schedule_id,
 ScheduleUpdate(enabled=False))` (or `True`). In process, a due schedule fires when a worker asks
@@ -219,7 +235,9 @@ answers only as one of them, a run assigned to that person or to nobody, never a
 Notifications (a run paused, escalated or finished) are agent-runs' tenant webhook
 subscriptions (`RunsClient.webhooks.create`, `POST /v1/webhooks`), not a harness setting; a
 receiver checks each delivery with `trellis.runs.webhooks.verify_signature`
-([blocks/runs.md](blocks/runs.md#webhooks)).
+([blocks/runs.md](blocks/runs.md#webhooks), [interrupts.md](interrupts.md#telling-people)).
+Runs kept in process (no `RUNS_URL`) have no webhooks: nothing is told unless a run hook of
+yours tells it.
 
 ## agent-runs wire
 

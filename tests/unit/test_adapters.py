@@ -190,7 +190,8 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(claude_agent_sdk, "query", query)
     replay = SimpleNamespace(journal=Journal())
-    run = Invocation(runtime=SimpleNamespace(pending=None, replay=replay), tools=[])  # type: ignore[arg-type]
+    runtime = SimpleNamespace(pending=None, replay=replay, framework_options={})
+    run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
     native = adapter.prepare_input(None, "go", None)
     options = ClaudeAgentOptions(system_prompt="Mine.")
@@ -240,7 +241,7 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
             yield {"type": "custom", "data": "progress"}
             yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
 
-    runtime = SimpleNamespace(thread=None, run_id="run_1")
+    runtime = SimpleNamespace(thread=None, run_id="run_1", framework_options={})
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]
     assert items[0] == "hel" and len(items) == 2

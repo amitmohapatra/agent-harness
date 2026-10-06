@@ -1,7 +1,7 @@
 """W5 questions on every adapter, ``ReAct`` and Way 2: labelled options and several picks, a
 form from a pydantic model with widget hints, the asker's own screen; the answer checked by the
-one check agent-runs makes; whoever waits is told (notifiers); a sub-agent's question carried
-to its parent whole."""
+one check agent-runs makes; whoever waits is told (a run hook, in process); a sub-agent's
+question carried to its parent whole, and told once."""
 
 from __future__ import annotations
 
@@ -15,19 +15,15 @@ from pydantic import BaseModel
 import trellis
 from tests.support.adapters import BUILDERS
 from tests.support.planned import Call
-from trellis import Harness, Runtime, Settings, tool
+from trellis import Harness, Hooks, Runtime, Settings, tool
 from trellis.contracts import (
     ConfigurationError,
-    Interrupt,
     InterruptReason,
     Option,
-    RunEventType,
     RunStart,
     RunStatus,
 )
-from trellis.harness import pipeline
 from trellis.harness.asking import Question
-from trellis.harness.events import NOTIFIED, WARNING
 from trellis.harness.runs import LocalRuns
 from trellis.testing import Reviewer
 
@@ -144,78 +140,53 @@ async def test_way_2_asks_the_same_question_through_its_own_run_store() -> None:
         question.answer(reviewer.resolution(interrupt).model_copy(update={"answer": {"zip": 1}}))
 
 
-# --------------------------------------------------------------------------- notifiers
+# --------------------------------------------------------------------------- telling people
 
 
-class Recording:
-    name = "recording"
+class Telling(Hooks):
+    """Telling whoever waits, in process: a run hook that sees each pause (what a webhook
+    receiver does with agent-runs)."""
 
     def __init__(self) -> None:
-        self.told: list[tuple[Interrupt, str | None]] = []
+        self.told: list[str] = []
 
-    async def notify(self, interrupt: Interrupt, link: str | None) -> None:
-        self.told.append((interrupt, link))
+    async def on_run_end(self, run: Runtime, result: Any) -> None:
+        asked = result.interrupt
+        # a sub-agent's question is its parent's to answer: told once, as the parent's run
+        if result.status is RunStatus.PAUSED and asked is not None and run.parent is None:
+            call = f"; call {asked.tool_call.tool}" if asked.tool_call is not None else ""
+            self.told.append(f"{asked.question} (for {asked.assignee}{call}) /runs/{run.run_id}")
 
 
-class Broken:
-    async def notify(self, interrupt: Interrupt, link: str | None) -> None:
-        raise ConnectionError("the pager is down")
-
-
-async def test_whoever_waits_is_told_redacted_with_a_link_and_a_broken_notifier_is_a_warning() -> (
-    None
-):
-    told = Recording()
-    settings = Settings(inbox_url="https://ops.example/inbox")
-    async with Harness(config=settings, notifiers=[told, Broken()]) as h:
-
-        async def fn(input: str, agent: Runtime) -> Any:
-            return await agent.tools.call(
-                "wire", amount=5, password="hunter2", to="bob@example.com"
-            )
+async def test_without_agent_runs_a_run_hook_tells_whoever_waits() -> None:
+    """``LocalRuns`` has no webhooks: a run hook (``on_run_end`` with a ``PAUSED`` result) is
+    how a pause is told in process — the question, whose it is, the call under approval and
+    the run to answer."""
+    telling = Telling()
+    async with Harness(config=Settings(), hooks=[telling]) as h:
+        assert isinstance(h.runs, LocalRuns)
 
         @tool(side_effects="irreversible")
-        def wire(amount: int, password: str, to: str) -> str:
+        def wire(amount: int) -> str:
             """Wire."""
             return "wired"
 
-        agent = h.wrap(fn, id="paging", tools=[wire])
-        events = [e async for e in agent.stream("pay bob@example.com", user="ada")]
-        await h.writes.drain()
-        [(interrupt, link)] = told.told
-        assert interrupt.tool_call is not None
-        assert interrupt.tool_call.args["password"] == "[redacted]"
-        assert interrupt.tool_call.args["to"] == "[email]"
-        assert link == f"https://ops.example/inbox#{interrupt.interrupt_id}"
-        assert events[-1].outcome is not None and events[-1].outcome.value == "interrupt"
-    customs = [e.data for e in events if e.type is RunEventType.CUSTOM]
-    # the notifiers report on the run's events after its RUN_FINISHED: none were streamed
-    assert not [c for c in customs if c["name"] in (NOTIFIED, WARNING)]
-
-
-async def test_a_notifier_failure_is_a_warning_on_the_run_and_a_success_an_event() -> None:
-    told = Recording()
-    async with Harness(config=Settings(), notifiers=[told, Broken()]) as h:
-
         async def fn(input: str, agent: Runtime) -> Any:
-            return await agent.ask("Go?")
+            plan = await agent.ask("Which plan?", options=["a", "b"], assignee="role:sales")
+            return f"{plan}: {await agent.tools.call('wire', amount=5)}"
 
-        agent = h.wrap(fn, id="told")
-        seen: list[Any] = []
-        record = await agent._opened("go", user="ada", thread=None, tenant=None)
-        result = await pipeline.attempt(agent, record, "go", listener=seen.append)
-        await h.writes.drain()
-    assert result.status is RunStatus.PAUSED
-    names = [e.data.get("name") for e in seen if e.type is RunEventType.CUSTOM]
-    assert NOTIFIED in names and WARNING in names  # after the pause, on its events
-    warning = next(e.data for e in seen if e.data.get("code") == "notify_failed")
-    assert "Broken was not told" in warning["message"]
-    assert "the pager is down" in warning["message"]
+        agent = h.wrap(fn, id="telling", tools=[wire])
+        done = await Reviewer({"Which plan?": "a", "wire": "approve"}).run(agent, "go", user="ada")
+    assert done.answer == "a: wired"
+    assert telling.told == [
+        f"Which plan? (for role:sales) /runs/{done.run_id}",
+        f"Approve wire? wire is irreversible. (for None; call wire) /runs/{done.run_id}",
+    ]
 
 
 async def test_a_sub_agents_question_is_carried_whole_and_told_once() -> None:
-    told = Recording()
-    async with Harness(config=Settings(), notifiers=[told]) as h:
+    telling = Telling()
+    async with Harness(config=Settings(), hooks=[telling]) as h:
 
         async def child(input: str, agent: Runtime) -> Any:
             return await agent.ask(
@@ -234,7 +205,6 @@ async def test_a_sub_agents_question_is_carried_whole_and_told_once() -> None:
 
         boss = h.wrap(parent, id="boss", tools=[helper.as_tool()])
         paused = await boss.run("go", user="ada")
-        await h.writes.drain()
         asked = paused.interrupt
         assert asked is not None
         assert (asked.multiple, asked.component, asked.props, asked.ui_schema) == (
@@ -243,6 +213,6 @@ async def test_a_sub_agents_question_is_carried_whole_and_told_once() -> None:
             {"for": "child"},
             {"x": 1},
         )
-        assert [i.run_id for i, _ in told.told] == [paused.run_id]  # the parent's, once
+        assert telling.told == [f"Which plan? (for user:ada) /runs/{paused.run_id}"]  # once
         done = await boss.resume(asked.interrupt_id, "answer", answer=["b"], reviewer="lee")
         assert done.answer == ["b"]

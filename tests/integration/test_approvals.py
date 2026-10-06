@@ -1,7 +1,9 @@
-"""W5 approvals on every adapter, ``ReAct`` and Way 2: a tool's approval function
-(``tool(approval=fn)``: ``None``, ``True`` or an ``Ask`` with its own screen), journaled; a
-reviewer's comment, kept with the decision; an approval remembered for the rest of the run, never
-for another; an external tool, whose result comes from outside the run."""
+"""W5 approvals on every adapter, ``ReAct`` and Way 2: an approval rule in code — a
+``before_tool`` hook asking by the call's arguments (whose it is, on its own screen), journaled,
+beside the tool's ``side_effects`` and the catalog's ``approve_when``; a reviewer's comment, kept
+with the decision; an approval remembered for the rest of the run, never for another; a result
+from outside the run, which an ``ask`` in the tool waits for and the model reads as the tool's
+output."""
 
 from __future__ import annotations
 
@@ -10,15 +12,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import TypeAdapter
 
 from tests.support.adapters import BUILDERS
+from tests.support.memory import FakeMemoryService
 from tests.support.planned import Call
-from trellis import Ask, Harness, Runtime, tool
+from trellis import Ask, Harness, Hooks, Runtime, current, tool
 from trellis.contracts import (
     ConfigurationError,
     InterruptReason,
     RunEventType,
     RunStatus,
+    ToolCall,
     ToolError,
 )
 from trellis.harness.events import DECISION
@@ -26,31 +31,8 @@ from trellis.harness.governance import Decision, Governance, Rejected, governed
 from trellis.testing import Decide, Reviewer
 
 refunded: list[int] = []
-ruled: list[int] = []
-
-
-def refund_rule(args: dict[str, Any]) -> Ask | bool | None:
-    """Small refunds are fine, large ones go to finance on their own screen, the rest is
-    governance's (an irreversible tool: it asks)."""
-    amount = args["amount"]
-    ruled.append(amount)
-    if amount <= 10:
-        return True
-    if amount > 100:
-        return Ask(
-            f"Refund {amount}?",
-            assignee="role:finance",
-            component="refund-review",
-            props={"amount": amount},
-        )
-    return None
-
-
-@tool(side_effects="irreversible", approval=refund_rule)
-def refund(amount: int) -> str:
-    """Refund an amount."""
-    refunded.append(amount)
-    return f"refunded {amount}"
+#: what was paid, in order (the approval rules in code below)
+paid: list[int] = []
 
 
 @tool(side_effects="irreversible")
@@ -60,16 +42,10 @@ def wire(amount: int) -> str:
     return f"wired {amount}"
 
 
-@tool(side_effects="write", external=True)
-def sign(contract: str) -> str:
-    """Have a contract signed: a person signs it in the e-signature system."""
-    raise AssertionError("an external tool's function never runs")
-
-
 @pytest.fixture(autouse=True)
 def _reset() -> None:
     refunded.clear()
-    ruled.clear()
+    paid.clear()
 
 
 def decisions(events: list[Any]) -> list[dict[str, Any]]:
@@ -78,54 +54,123 @@ def decisions(events: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
-# --------------------------------------------------------------------------- approval=
+# --------------------------------------------------------------------------- rules in code: hooks
+
+
+class Threshold(Hooks):
+    """An approval rule in code, by arguments: over 100 goes to finance on its own screen
+    (``Ask(assignee=, component=, props=)``); anything else is governance's."""
+
+    def __init__(self) -> None:
+        self.ruled: list[int] = []
+
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        amount = call.args["amount"]
+        self.ruled.append(amount)
+        if amount > 100:
+            return Ask(
+                f"Pay {amount}?",
+                assignee="role:finance",
+                component="pay-review",
+                props={"amount": amount},
+            )
+        return None
+
+
+@tool(side_effects="write")
+def pay(amount: int) -> str:
+    """Pay an amount."""
+    paid.append(amount)
+    return f"paid {amount}"
 
 
 @pytest.mark.parametrize("framework", list(BUILDERS))
-async def test_an_approval_function_approves_asks_or_leaves_it_to_governance_on_every_adapter(
-    harness: Harness, framework: str, tmp_path: Path
+async def test_a_hook_and_the_catalog_rule_by_arguments_on_every_adapter(
+    memory_harness: Harness, memory_service: FakeMemoryService, framework: str, tmp_path: Path
 ) -> None:
-    plan: list[Call] = [("refund", {"amount": a}) for a in (5, 50, 500)]
-    target, tools = await BUILDERS[framework](harness, [refund], tmp_path, plan)
-    agent = harness.wrap(target, id=f"refunds-{framework}", tools=tools)
-    first = await agent.run("refund three", user="ada")
+    """A small amount runs unasked (the tool is ``write``), a middle one is asked by the
+    catalog's ``approve_when``, a large one by the hook on finance's screen; the hook's verdict
+    is journaled: a re-run reads it."""
+    memory_service.catalog = {"pay": {"side_effects": "write", "approve_when": "amount > 20"}}
+    rule = Threshold()
+    plan: list[Call] = [("pay", {"amount": a}) for a in (5, 50, 500)]
+    target, tools = await BUILDERS[framework](memory_harness, [pay], tmp_path, plan)
+    agent = memory_harness.wrap(target, id=f"payer-{framework}", tools=tools, hooks=[rule])
+    first = await agent.run("pay three", user="ada")
     assert first.interrupt is not None, first
-    assert first.interrupt.question == "Approve refund? refund is irreversible."
-    assert first.interrupt.component is None and refunded == [5]  # 5: approved by the rule
+    assert first.interrupt.question == "Approve pay? amount > 20."  # the catalog's rule
+    assert first.interrupt.assignee is None and first.interrupt.component is None
+    assert paid == [5]  # small: nobody asked
     second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="lee")
     asked = second.interrupt
     assert asked is not None and asked.reason is InterruptReason.APPROVAL, second
-    assert asked.question == "Approve refund? Refund 500?"
+    assert asked.question == "Approve pay? Pay 500?"
+    assert asked.tool_call is not None and asked.tool_call.args == {"amount": 500}
     assert (asked.assignee, asked.component, asked.props) == (
         "role:finance",
-        "refund-review",
+        "pay-review",
         {"amount": 500},
     )
     done = await agent.resume(asked.interrupt_id, "approve", reviewer="cfo")
-    assert done.status is RunStatus.SUCCESS and done.answer == "Done. refunded 500", done
-    assert refunded == [5, 50, 500]
-    assert sorted(ruled) == [5, 50, 500]  # each call ruled once: a re-run reads the journal
+    assert done.status is RunStatus.SUCCESS and done.answer == "Done. paid 500", done
+    assert paid == [5, 50, 500]
+    assert sorted(rule.ruled) == [5, 50, 500]  # each call ruled once: a re-run reads the journal
 
 
-async def test_an_approval_function_may_be_async_and_must_say_none_true_or_ask(
-    harness: Harness,
+class Escalating(Hooks):
+    """Every payment is asked about; over 500 of finance."""
+
+    async def before_tool(self, call: ToolCall) -> Ask:
+        amount = call.args["amount"]
+        return Ask(f"Pay {amount}?", assignee="role:finance" if amount > 500 else None)
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_remembering_a_hooks_ask_covers_later_asks_of_the_same_assignee_on_every_adapter(
+    harness: Harness, framework: str, tmp_path: Path
 ) -> None:
-    async def rule(args: dict[str, Any]) -> Any:
-        return args["say"]
+    plan: list[Call] = [("pay", {"amount": a}) for a in (50, 60, 900, 950)]
+    target, tools = await BUILDERS[framework](harness, [pay], tmp_path, plan)
+    agent = harness.wrap(target, id=f"remembering-{framework}", tools=tools, hooks=[Escalating()])
+    first = await agent.run("pay four", user="ada")
+    assert first.interrupt is not None and first.interrupt.assignee is None, first
+    finance = await agent.resume(
+        first.interrupt.interrupt_id, "approve", reviewer="lee", remember="run"
+    )
+    asked = finance.interrupt  # 60 was not asked; 900 is finance's: still asked
+    assert asked is not None and asked.assignee == "role:finance", finance
+    assert asked.question == "Approve pay? Pay 900?" and paid == [50, 60]
+    done = await agent.resume(asked.interrupt_id, "approve", reviewer="cfo", remember="run")
+    assert done.status is RunStatus.SUCCESS and done.answer == "Done. paid 950", done
+    assert paid == [50, 60, 900, 950]  # 950: finance's again, remembered
+    other = await agent.run("pay four", user="ada")  # never across runs
+    assert other.status is RunStatus.PAUSED
 
-    @tool(side_effects="irreversible", approval=rule)
-    def act(say: Any) -> str:
-        """Act."""
-        return "acted"
 
-    async def fn(input: Any, agent: Runtime) -> Any:
-        return await agent.tools.call("act", say=input)
+async def test_governed_asks_by_arguments_with_a_hook() -> None:
+    """Way 2: ``governed(..., hooks=)`` — a small amount runs unasked, a large one is asked
+    on finance's screen (``on_ask`` gets the ``Ask``'s assignee, component and props), and
+    an ``irreversible`` tool the hook leaves alone is governance's to ask about."""
+    asked: list[Decision] = []
 
-    agent = harness.wrap(fn, id="acting", tools=[act])
-    assert (await agent.run(True, user="u")).answer == "acted"
-    failed = await agent.run("yes", user="u")
-    assert failed.status is RunStatus.ERROR and failed.error is not None
-    assert "returned 'yes': return None" in failed.error.message
+    async def on_ask(decision: Decision) -> bool:
+        asked.append(decision)
+        return decision.props is None
+
+    def settle(amount: int) -> str:
+        return f"settled {amount}"
+
+    gov = Governance()
+    small = governed(settle, gov, side_effects="write", on_ask=on_ask, hooks=[Threshold()])
+    assert await small(amount=5) == "settled 5"  # nobody asked
+    with pytest.raises(Rejected):
+        await small(amount=500)  # the hook asked, on finance's screen
+    risky = governed(settle, gov, side_effects="irreversible", on_ask=on_ask, hooks=[Threshold()])
+    assert await risky(amount=50) == "settled 50"  # governance asked
+    assert [(d.question, d.assignee, d.component, d.props) for d in asked] == [
+        ("Approve settle? Pay 500?", "role:finance", "pay-review", {"amount": 500}),
+        ("Approve settle? settle is irreversible.", None, None, None),
+    ]
 
 
 # --------------------------------------------------------------------------- remember, comment
@@ -214,86 +259,11 @@ async def test_only_an_approval_of_a_tool_call_is_remembered(harness: Harness) -
         await agent.resume(paused.interrupt.interrupt_id, "answer", reviewer="a", remember="run")
     with pytest.raises(ConfigurationError, match="of a tool call is remembered"):
         await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="a", remember="run")
-    with pytest.raises(ConfigurationError, match="name the decision"):
-        await agent.resume(paused.interrupt.interrupt_id, reviewer="a")
-    with pytest.raises(ConfigurationError, match="pass reviewer="):
-        await agent.resume(paused.interrupt.interrupt_id, "answer", answer="x")
     by_run = await agent.resume(paused.run_id, "answer", answer="that", reviewer="a")
     assert by_run.answer == "that"  # the run's id answers what it waits on
 
 
-# --------------------------------------------------------------------------- external results
-
-
-@pytest.mark.parametrize("framework", list(BUILDERS))
-async def test_an_external_tools_result_comes_from_outside_on_every_adapter(
-    harness: Harness, framework: str, tmp_path: Path
-) -> None:
-    plan: list[Call] = [("sign", {"contract": "c-1"})]
-    target, tools = await BUILDERS[framework](harness, [sign], tmp_path, plan)
-    agent = harness.wrap(target, id=f"signing-{framework}", tools=tools)
-    paused = await agent.run("get c-1 signed", user="ada")
-    asked = paused.interrupt
-    assert asked is not None and asked.reason is InterruptReason.QUESTION, paused
-    assert asked.tool_call is not None and asked.tool_call.tool == "sign"
-    assert asked.tool_call.args == {"contract": "c-1"}
-    assert asked.expects == {"type": "string"}  # the function's return annotation
-    with pytest.raises(ConfigurationError, match="does not fit"):
-        await agent.resume(paused.run_id, result=7)
-    with pytest.raises(ConfigurationError, match="a result answers the call"):
-        await agent.resume(paused.run_id, "approve", result="x")
-    done = await agent.resume(paused.run_id, result="signed by ada")
-    assert done.status is RunStatus.SUCCESS and done.answer == "Done. signed by ada", done
-
-
-async def test_a_refused_external_result_is_an_error_the_model_reads(harness: Harness) -> None:
-    @tool(external=True)
-    def scan(page: int):  # type: ignore[no-untyped-def]  # no annotation: any result
-        """Scan a page."""
-
-    async def fn(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call("scan", page=1)
-
-    agent = harness.wrap(fn, id="scanning", tools=[scan])
-    paused = await agent.run("scan", user="ada")
-    assert paused.interrupt is not None and paused.interrupt.expects is None
-    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="ops")
-    assert done.answer == "scan failed: scan was not done: its result was refused"
-
-
-async def test_an_external_tool_called_outside_a_run_says_so() -> None:
-    with pytest.raises(ToolError, match="is an external tool"):
-        await sign.tool.run({"contract": "c-1"})
-
-
-# --------------------------------------------------------------------------- Way 2
-
-
-async def test_governed_takes_the_approval_function_too() -> None:
-    asked: list[Decision] = []
-
-    async def on_ask(decision: Decision) -> bool:
-        asked.append(decision)
-        return decision.props is None
-
-    def pay(amount: int) -> str:
-        return f"paid {amount}"
-
-    call = governed(
-        pay,
-        Governance(),
-        side_effects="irreversible",
-        on_ask=on_ask,
-        approval=refund_rule,
-    )
-    assert await call(amount=5) == "paid 5"  # approved by the rule: nobody asked
-    assert await call(amount=50) == "paid 50"  # governance asked
-    with pytest.raises(Rejected):
-        await call(amount=500)  # the rule asked, on its screen
-    assert [(d.assignee, d.component, d.props) for d in asked] == [
-        (None, None, None),
-        ("role:finance", "refund-review", {"amount": 500}),
-    ]
+# --------------------------------------------------------------------------- a scripted reviewer
 
 
 async def test_reviewer_answers_approvals_and_questions_by_script(harness: Harness) -> None:
@@ -309,19 +279,62 @@ async def test_reviewer_answers_approvals_and_questions_by_script(harness: Harne
     assert reviewer.answered == [("wire", "APPROVE", None), ("Which plan?", "ANSWER", "b")]
 
 
-async def test_a_remembered_approval_does_not_answer_a_question_asked_of_someone_else(
-    harness: Harness,
-) -> None:
-    async def fn(input: str, agent: Runtime) -> Any:
-        return [await agent.tools.call("refund", amount=a) for a in (50, 60, 900)]
+# --------------------------------------------------------------------------- results from outside
 
-    agent = harness.wrap(fn, id="escalating", tools=[refund])
-    paused = await agent.run("go", user="ada")
-    assert paused.interrupt is not None and paused.interrupt.assignee is None
-    asked = await agent.resume(
-        paused.interrupt.interrupt_id, "approve", reviewer="lee", remember="run"
+
+@tool(side_effects="write")
+async def sign(contract: str) -> str:
+    """Have a contract signed: a person signs it in the e-signature system."""
+    runtime = current()
+    assert runtime is not None
+    return await runtime.ask(
+        f"Signed {contract}?",
+        expects=TypeAdapter(str).json_schema(),  # what this tool returns
+        component="e-signature",
+        props={"contract": contract},
     )
-    assert asked.interrupt is not None and asked.interrupt.assignee == "role:finance"
-    assert refunded == [50, 60]  # 60 asked of nobody in particular: remembered
-    done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="cfo")
-    assert done.answer == ["refunded 50", "refunded 60", "refunded 900"]
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_a_result_from_outside_is_an_ask_in_the_tool_on_every_adapter(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """The run pauses inside the tool; the answer, checked against the tool's return type, is
+    what the tool returns and the model reads."""
+    plan: list[Call] = [("sign", {"contract": "c-1"})]
+    target, tools = await BUILDERS[framework](harness, [sign], tmp_path, plan)
+    agent = harness.wrap(target, id=f"signing-{framework}", tools=tools)
+    paused = await agent.run("get c-1 signed", user="ada")
+    asked = paused.interrupt
+    assert asked is not None and asked.reason is InterruptReason.QUESTION, paused
+    assert asked.expects == {"type": "string"}
+    assert (asked.component, asked.props) == ("e-signature", {"contract": "c-1"})
+    with pytest.raises(ConfigurationError, match="does not fit"):
+        await agent.resume(paused.run_id, "answer", answer=7, reviewer="esign")
+    done = await agent.resume(paused.run_id, "answer", answer="signed by ada", reviewer="esign")
+    assert done.status is RunStatus.SUCCESS and done.answer == "Done. signed by ada", done
+
+
+async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness: Harness) -> None:
+    @tool
+    async def scan(page: int) -> Any:
+        """Scan a page."""
+        runtime = current()
+        assert runtime is not None
+        result = await runtime.ask(f"The scan of page {page}?")  # any value
+        if result is False:  # rejected
+            raise ToolError(f"the scan of page {page} was refused", source="tools")
+        return result
+
+    async def fn(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("scan", page=1)
+
+    agent = harness.wrap(fn, id="scanning", tools=[scan])
+    paused = await agent.run("scan", user="ada")
+    assert paused.interrupt is not None and paused.interrupt.expects is None
+    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="ops")
+    assert done.answer == "scan failed: the scan of page 1 was refused"
+    again = await agent.run("scan", user="ada")
+    assert again.interrupt is not None
+    scanned = await Reviewer({"The scan of page 1?": {"pages": 1}}).settle(agent, again)
+    assert scanned.answer == {"pages": 1}
