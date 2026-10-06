@@ -6,8 +6,9 @@ scripted reviewer (``trellis.testing.Reviewer``) as a test would.
   tool is ``write``: governance only announces it), over 500 it asks finance on its own screen
   (``Ask(..., assignee=, component=, props=)``), anything between is asked of whoever answers;
 * ``pick_plans`` asks which plans to offer: labelled options, several picks;
-* ``sign`` is external: the run pauses with the call, and the signature system's answer is what
-  the model reads (``agent.resume(run_id, result=...)``).
+* ``sign``'s result comes from outside the run: the tool asks (``ask(..., expects=)``), the run
+  pauses inside it, and the signature system's answer is what the tool returns and the model
+  reads (``agent.resume(run_id, "answer", answer=...)``).
 
     .venv/bin/python examples/approvals.py
 """
@@ -61,10 +62,18 @@ async def pick_plans(customer: str) -> str:
     return ", ".join(picked)
 
 
-@tool(side_effects="write", external=True)
-def sign(contract: str) -> str:
+@tool(side_effects="write")
+async def sign(contract: str) -> str:
     """Have a contract signed in the e-signature system (a person signs it)."""
-    raise NotImplementedError  # never runs: the result comes from outside
+    runtime = trellis.current()
+    assert runtime is not None
+    # the run pauses here; what the e-signature system answers is what this tool returns
+    return await runtime.ask(
+        f"Signed {contract}?",
+        expects={"type": "string"},  # what this tool returns
+        component="e-signature",
+        props={"contract": contract},
+    )
 
 
 async def main() -> None:
@@ -95,9 +104,11 @@ async def main() -> None:
         while result.status is RunStatus.PAUSED and result.interrupt is not None:
             asked = result.interrupt
             print("waiting:", asked.question, f"({asked.component or asked.ui})")
-            if asked.tool_call is not None and asked.tool_call.tool == "sign":
-                # the e-signature system answers the external call: what the model reads
-                result = await agent.resume(result.run_id, result="signed by ada, 10:42")
+            if asked.component == "e-signature":
+                # the e-signature system answers: what sign returns and the model reads
+                result = await agent.resume(
+                    result.run_id, "answer", answer="signed by ada, 10:42", reviewer="e-signature"
+                )
             else:
                 result = await reviewer.answer(agent, result)
         print(result.status.value, result.answer)

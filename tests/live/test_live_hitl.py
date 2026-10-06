@@ -1,8 +1,8 @@
 """W5 against agent-runs (and, for one model-driven run, the gateway): an approval rule in code (a
 ``before_tool`` hook asking by the call's arguments, on its own screen), labelled options with several picks checked by agent-runs itself, a comment
-kept in agent-runs' resolution history, an approval remembered for the run, an external tool's
-result, Way 2's ``Question`` paused in agent-runs, and a ``ReAct`` agent through the gateway
-pausing on an external tool. What is asserted is the harness's behaviour, not the model's
+kept in agent-runs' resolution history, an approval remembered for the run, a result from
+outside the run (an ``ask`` in the tool), Way 2's ``Question`` paused in agent-runs, and a ``ReAct`` agent through the gateway
+pausing inside a tool that waits for a result from outside. What is asserted is the harness's behaviour, not the model's
 words."""
 
 from __future__ import annotations
@@ -58,10 +58,18 @@ def wire(amount: int) -> str:
     return f"wired {amount}"
 
 
-@tool(side_effects="write", external=True)
-def sign(contract: str) -> str:
+@tool(side_effects="write")
+async def sign(contract: str) -> str:
     """Have a contract signed by a person in the e-signature system."""
-    raise AssertionError("never runs")
+    runtime = trellis.current()
+    assert runtime is not None
+    # the run pauses here; what the e-signature system answers is what this tool returns
+    return await runtime.ask(
+        f"Signed {contract}?",
+        expects={"type": "string"},  # what this tool returns
+        component="e-signature",
+        props={"contract": contract},
+    )
 
 
 async def settle_account(input: str, agent: Runtime) -> Any:
@@ -76,7 +84,7 @@ async def settle_account(input: str, agent: Runtime) -> Any:
 
 
 @pytest.mark.timeout(120)
-async def test_approvals_choices_comments_and_external_results_through_agent_runs() -> None:
+async def test_approvals_choices_comments_and_results_from_outside_through_agent_runs() -> None:
     wired.clear()
     async with live_harness() as h:
         assert isinstance(h.runs, RunsClient)
@@ -117,10 +125,13 @@ async def test_approvals_choices_comments_and_external_results_through_agent_run
         assert screen is not None and screen.component == "wire-review"  # 900: finance's
         assert screen.props == {"amount": 900} and screen.assignee == "role:finance"
         result = await agent.resume(screen.interrupt_id, "approve", reviewer="cfo", comment="ok")
-        external = result.interrupt
-        assert external is not None and external.reason is InterruptReason.QUESTION
-        assert external.tool_call is not None and external.tool_call.tool == "sign"
-        done = await agent.resume(result.run_id, result="signed by ada")
+        outside = result.interrupt
+        assert outside is not None and outside.reason is InterruptReason.QUESTION
+        assert (outside.component, outside.props) == ("e-signature", {"contract": "c-7"})
+        assert outside.expects == {"type": "string"}
+        done = await agent.resume(
+            result.run_id, "answer", answer="signed by ada", reviewer="e-signature"
+        )
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == {
             "plans": ["basic", "pro"],
@@ -160,7 +171,7 @@ async def test_way_2_pauses_with_the_same_question_in_agent_runs() -> None:
 
 @needs_gateway
 @pytest.mark.timeout(300)
-async def test_a_react_agent_through_the_gateway_pauses_on_an_external_tool() -> None:
+async def test_a_react_agent_through_the_gateway_reads_a_result_from_outside() -> None:
     async with live_harness() as h:
         target = ReAct(
             system="You get contracts signed. Always call the sign tool with the contract id "
@@ -173,9 +184,11 @@ async def test_a_react_agent_through_the_gateway_pauses_on_an_external_tool() ->
         if paused.status is not RunStatus.PAUSED:
             pytest.skip(f"the model did not call the tool ({paused.status.value}: {paused.error})")
         asked = paused.interrupt
-        assert asked is not None and asked.tool_call is not None
-        assert asked.tool_call.tool == "sign" and asked.expects == {"type": "string"}
-        done = await agent.resume(paused.run_id, result="signed by ada at 10:42")
+        assert asked is not None and asked.component == "e-signature"
+        assert asked.expects == {"type": "string"}  # what sign returns
+        done = await agent.resume(
+            paused.run_id, "answer", answer="signed by ada at 10:42", reviewer="e-signature"
+        )
         assert done.status is RunStatus.SUCCESS, done.error
         record = await h.runs.get(done.run_id)
         assert record is not None and record.attempt == 2

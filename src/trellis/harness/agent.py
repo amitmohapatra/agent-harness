@@ -102,16 +102,6 @@ ABSTAIN_NOTES: Final = {
 }
 
 
-class _NoResult:
-    """``resume(result=)`` not given (``None`` is a result)."""
-
-    def __repr__(self) -> str:
-        return "NO_RESULT"
-
-
-NO_RESULT: Final[Any] = _NoResult()
-
-
 class Agent:
     """Run it, stream it, queue it, resume it, cancel it, schedule it, serve it."""
 
@@ -302,11 +292,10 @@ class Agent:
     async def resume(
         self,
         interrupt_id: str,
-        decision: InterruptDecision | str | None = None,
+        decision: InterruptDecision | str,
         *,
         answer: Any = None,
-        result: Any = NO_RESULT,
-        reviewer: str | None = None,
+        reviewer: str,
         comment: str | None = None,
         remember: InterruptRemember = "once",
         tenant: str | None = None,
@@ -314,24 +303,13 @@ class Agent:
         """Answer the interrupt a run is paused on (``interrupt_id``, or the run's id: what it
         waits on now). A run started in process continues here; a run that came from the queue
         goes back to it (``QUEUED``) and a worker continues it. ``answer`` is the answer to a
-        question, or the edited arguments of an ``EDIT``; ``result`` the result of an external
-        tool's call (``tool(external=True)``: an ``answer`` the model reads as the tool's
-        output, no ``decision`` or ``reviewer`` needed). ``reviewer`` is who decided;
+        question (a result from outside the run included: what an ``ask`` in a tool returns
+        to it), or the edited arguments of an ``EDIT``. ``reviewer`` is who decided;
         ``comment`` their remark, kept with the decision (the run record, the ``decision``
         event, the span, the feedback); ``remember="run"`` with an ``approve`` of a tool call
         approves that tool's later calls in this run without asking (never another run's).
         ``tenant`` is the run's, named by a platform key only. A question a sub-agent asked is
         answered here, on its parent's run: the answer goes on to the sub-agent's run."""
-        if result is not NO_RESULT:
-            if decision not in (None, InterruptDecision.ANSWER, "answer", "ANSWER"):
-                raise ConfigurationError("a result answers the call: give no other decision")
-            decision, answer = InterruptDecision.ANSWER, result
-        if decision is None:
-            raise ConfigurationError(
-                "name the decision: answer, approve, reject, edit or cancel (or give result=)"
-            )
-        if reviewer is None and result is NO_RESULT:
-            raise ConfigurationError("a decision is somebody's: pass reviewer=")
         record, resolution = await self._resolution(
             interrupt_id,
             decision,
@@ -404,7 +382,7 @@ class Agent:
         interrupt_id: str,
         decision: InterruptDecision | str,
         answer: Any,
-        reviewer: str | None,
+        reviewer: str,
         *,
         tenant: str,
         comment: str | None = None,
@@ -1026,4 +1004,4 @@ class RunHandle:
                 await asyncio.sleep(POLL_SECONDS)
 
 
-__all__ = ["NO_RESULT", "Agent", "RunHandle", "Throttled"]
+__all__ = ["Agent", "RunHandle", "Throttled"]

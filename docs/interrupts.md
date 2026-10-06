@@ -158,38 +158,46 @@ asks.
 **On failure.** `remember="run"` on anything but an approval of a tool call is refused
 (`ConfigurationError`); a comment over 4000 characters too.
 
-## External results: `tool(external=True)`
+## Results from outside: `ask` in the tool
 
-**What.** A tool whose call is done outside the run — a person signing in an e-signature
-system, a batch job, a human operator: the run pauses with the call, and the result given
-from outside is what the model reads as the tool's output.
+**What.** A tool whose result comes from outside the run — a person signing in an e-signature
+system, a batch job, a human operator: the tool asks (`trellis.current().ask(...)`), the run
+pauses inside it, and the answer given from outside is what the tool returns and the model
+reads as its output.
 
 **When.** When the work takes as long as it takes and nothing in the process can do it.
 
-**Where.** `@tool(external=True)` on every adapter and `ReAct` (the bridge); Way 2: pause with
-a `Question(..., expects=...)` whose interrupt your code builds with the call, and hand the
-answer to your framework as the tool's result.
+**Where.** Any tool of any adapter and `ReAct` (as `ask` is, above); Way 2: pause with a
+`Question(..., expects=...)` and hand the answer to your framework as the tool's result.
 
 **How.**
 
 ```python
-@tool(side_effects="write", external=True)
-def sign(contract: str) -> str:
-    """Have a contract signed (a person signs it)."""  # never runs
+@tool(side_effects="write")
+async def sign(contract: str) -> str:
+    """Have a contract signed (a person signs it)."""
+    return await trellis.current().ask(
+        f"Signed {contract}?",
+        expects={"type": "string"},  # what the tool returns: TypeAdapter(str).json_schema()
+        component="e-signature",  # the system that answers, and what it needs
+        props={"contract": contract},
+    )
 
 
-paused = await agent.run("get c-7 signed", user="ada")  # paused on the call
-await agent.resume(paused.run_id, result="signed by ada, 10:42")
+paused = await agent.run("get c-7 signed", user="ada")  # paused inside sign
+await agent.resume(paused.run_id, "answer", answer="signed by ada, 10:42", reviewer="e-signature")
 ```
 
-**Automatic.** The interrupt is a `QUESTION` with the call in `tool_call` and, from the
-function's return annotation, `expects` (here `{"type": "string"}`); governance still decides
-first (an `irreversible` external tool is approved, then asked for its result). The result is
-journaled like any call's output. The answer also comes as agent-runs' `ANSWER` resolution of
-the interrupt (any client), or as an AG-UI or A2A answer.
+**Automatic.** The interrupt is a `QUESTION` with `expects` the result's schema and, when the
+tool names them, the `component` that answers it and its `props` (the call's arguments it
+needs). Governance decides on the call first (an `irreversible` tool is approved, then asks for
+its result). The answer is journaled with the run like any `ask`'s, and the call's output like
+any call's. The answer also comes as agent-runs' `ANSWER` resolution of the interrupt (any
+client), or as an AG-UI or A2A answer.
 
-**On failure.** A result that does not fit `expects` is refused at `resume`; a `reject` is an
-error the model reads (`sign was not done: its result was refused`); a `cancel` ends the run.
+**On failure.** A result that does not fit `expects` is refused at `resume`; a `reject` returns
+`False` to the tool, which raises to make it an error the model reads
+(`raise ToolError("the signature was refused", source="tools")`); a `cancel` ends the run.
 
 ## Telling people
 
@@ -249,7 +257,7 @@ reviewer = Reviewer(
     {
         "refund": "approve",
         "Which plans?": ["basic", "pro"],
-        "sign": "signed",
+        "e-signature": "signed by ada",  # a result from outside, by its component
         "plan-picker": Decide("cancel"),
     }
 )
@@ -258,7 +266,7 @@ result = await reviewer.run(agent, "settle acme", user="ada")  # every pause ans
 
 An entry is found by the tool the interrupt asks about, its `component`, its question, then
 `"*"`. For an approval: `"approve"`, `"reject"`, `"cancel"`, `True`/`False`, or a dict (the
-edited arguments); otherwise the answer itself (an external tool's result too).
+edited arguments); otherwise the answer itself (a result from outside the run too).
 `Decide(decision, answer=None, comment=None, remember="once")` says it all; a function of the
 interrupt may decide. `reviewer.answer(agent, result)` answers one pause, `settle` all of them
 (at most 50), and `reviewer.resolution(interrupt)` is the `InterruptResolution` for Way 2's
@@ -267,7 +275,7 @@ interrupt may decide. `reviewer.answer(agent, result)` answers one pause, `settl
 
 **Example.** [`examples/approvals.py`](../examples/approvals.py): an approval rule in a hook (a
 small refund runs unasked, a large one is asked on finance's screen), labelled options with
-several picks, an external tool's result, answered by a `Reviewer`. Tests:
+several picks, a result from outside the run (an `ask` in the tool), answered by a `Reviewer`. Tests:
 `tests/integration/test_approvals.py`, `test_questions.py` and `test_inbox.py` (every adapter,
 Way 2), and against the services `tests/live/test_live_hitl.py`.
 
@@ -281,11 +289,10 @@ await agent.resume(interrupt_id, "reject", reviewer="cfo")
 await agent.resume(interrupt_id, "reject", answer="over budget", reviewer="cfo")  # with a reason
 await agent.resume(interrupt_id, "cancel", reviewer="cfo")
 await agent.resume(interrupt_id, "approve", reviewer="cfo", comment="ok today", remember="run")
-await agent.resume(run_id, result="signed by ada")  # an external tool's result; the run's id
+await agent.resume(run_id, "answer", answer="signed by ada", reviewer="e-signature")  # the run's id
 ```
 
-The run's id answers whatever it waits on now. `reviewer` is required for a decision (not for
-a `result=`).
+The run's id answers whatever it waits on now. `reviewer` is required.
 
 What `ask` returns: the answer; `True`/`False` for approve/reject; the edited value for edit;
 cancel ends the run `CANCELLED` (so does `agent.cancel(run_id, reason=...)`, which needs no

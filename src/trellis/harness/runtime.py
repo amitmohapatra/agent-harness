@@ -31,7 +31,7 @@ from trellis.contracts import (
     ToolCall,
     ToolError,
 )
-from trellis.harness.asking import Question, answer_of
+from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
 from trellis.harness.identity import Identity
@@ -373,22 +373,6 @@ class Runtime:
             component=decision.component,
             props=None if decision.props is None else dict(decision.props),
         )
-
-    async def external(self, call: ToolCall, expects: dict[str, Any] | None) -> Any:
-        """The result of a tool call made outside the run (``tool(external=True)``): the run
-        pauses with the call (``reason=QUESTION``, ``tool_call`` attached, ``expects`` the
-        result's schema when the tool says), and on resume this returns the result given
-        (``agent.resume(run_id, result=...)``). A reject is ``False``; a cancel ends the
-        run."""
-        resolution = await self.interrupt(
-            content_key("external", call.tool, call.args),
-            reason=InterruptReason.QUESTION,
-            question=f"The result of {call.tool}?",
-            ui="form",
-            expects=expects,
-            tool_call=call,
-        )
-        return answer_of(resolution)
 
     async def interrupt(
         self, key: str, *, payload: dict[str, Any] | None = None, **fields: Any

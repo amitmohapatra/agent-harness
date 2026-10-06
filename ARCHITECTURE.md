@@ -394,7 +394,8 @@ Agent Mode is never used.
 ## Pauses and resumes
 
 `Runtime.ask` is the one pause (built as a `Question`, `asking.py`, which Way 2 and a graph's
-own `interrupt(value)` use too; an approval and an external tool's result are the same pause).
+own `interrupt(value)` use too; an approval is the same pause, and so is a result from outside
+the run, which is an `ask` in the tool).
 Its interrupt (a contracts `Interrupt`) has the id `<run_id>.<attempt>.<n>`: it names its run,
 so `resume` needs nothing else. Once the pause is recorded, the notifiers are told
 (`notify.py`, in the background). With `RUNS_URL` every attempt's events also go to the run's

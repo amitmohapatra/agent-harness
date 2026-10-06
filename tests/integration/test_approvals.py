@@ -1,8 +1,9 @@
 """W5 approvals on every adapter, ``ReAct`` and Way 2: an approval rule in code — a
 ``before_tool`` hook asking by the call's arguments (whose it is, on its own screen), journaled,
 beside the tool's ``side_effects`` and the catalog's ``approve_when``; a reviewer's comment, kept
-with the decision; an approval remembered for the rest of the run, never for another; an
-external tool, whose result comes from outside the run."""
+with the decision; an approval remembered for the rest of the run, never for another; a result
+from outside the run, which an ``ask`` in the tool waits for and the model reads as the tool's
+output."""
 
 from __future__ import annotations
 
@@ -11,11 +12,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import TypeAdapter
 
 from tests.support.adapters import BUILDERS
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import Call
-from trellis import Ask, Harness, Hooks, Runtime, tool
+from trellis import Ask, Harness, Hooks, Runtime, current, tool
 from trellis.contracts import (
     ConfigurationError,
     InterruptReason,
@@ -38,12 +40,6 @@ def wire(amount: int) -> str:
     """Wire an amount."""
     refunded.append(amount)
     return f"wired {amount}"
-
-
-@tool(side_effects="write", external=True)
-def sign(contract: str) -> str:
-    """Have a contract signed: a person signs it in the e-signature system."""
-    raise AssertionError("an external tool's function never runs")
 
 
 @pytest.fixture(autouse=True)
@@ -263,56 +259,8 @@ async def test_only_an_approval_of_a_tool_call_is_remembered(harness: Harness) -
         await agent.resume(paused.interrupt.interrupt_id, "answer", reviewer="a", remember="run")
     with pytest.raises(ConfigurationError, match="of a tool call is remembered"):
         await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="a", remember="run")
-    with pytest.raises(ConfigurationError, match="name the decision"):
-        await agent.resume(paused.interrupt.interrupt_id, reviewer="a")
-    with pytest.raises(ConfigurationError, match="pass reviewer="):
-        await agent.resume(paused.interrupt.interrupt_id, "answer", answer="x")
     by_run = await agent.resume(paused.run_id, "answer", answer="that", reviewer="a")
     assert by_run.answer == "that"  # the run's id answers what it waits on
-
-
-# --------------------------------------------------------------------------- external results
-
-
-@pytest.mark.parametrize("framework", list(BUILDERS))
-async def test_an_external_tools_result_comes_from_outside_on_every_adapter(
-    harness: Harness, framework: str, tmp_path: Path
-) -> None:
-    plan: list[Call] = [("sign", {"contract": "c-1"})]
-    target, tools = await BUILDERS[framework](harness, [sign], tmp_path, plan)
-    agent = harness.wrap(target, id=f"signing-{framework}", tools=tools)
-    paused = await agent.run("get c-1 signed", user="ada")
-    asked = paused.interrupt
-    assert asked is not None and asked.reason is InterruptReason.QUESTION, paused
-    assert asked.tool_call is not None and asked.tool_call.tool == "sign"
-    assert asked.tool_call.args == {"contract": "c-1"}
-    assert asked.expects == {"type": "string"}  # the function's return annotation
-    with pytest.raises(ConfigurationError, match="does not fit"):
-        await agent.resume(paused.run_id, result=7)
-    with pytest.raises(ConfigurationError, match="a result answers the call"):
-        await agent.resume(paused.run_id, "approve", result="x")
-    done = await agent.resume(paused.run_id, result="signed by ada")
-    assert done.status is RunStatus.SUCCESS and done.answer == "Done. signed by ada", done
-
-
-async def test_a_refused_external_result_is_an_error_the_model_reads(harness: Harness) -> None:
-    @tool(external=True)
-    def scan(page: int):  # type: ignore[no-untyped-def]  # no annotation: any result
-        """Scan a page."""
-
-    async def fn(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call("scan", page=1)
-
-    agent = harness.wrap(fn, id="scanning", tools=[scan])
-    paused = await agent.run("scan", user="ada")
-    assert paused.interrupt is not None and paused.interrupt.expects is None
-    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="ops")
-    assert done.answer == "scan failed: scan was not done: its result was refused"
-
-
-async def test_an_external_tool_called_outside_a_run_says_so() -> None:
-    with pytest.raises(ToolError, match="is an external tool"):
-        await sign.tool.run({"contract": "c-1"})
 
 
 # --------------------------------------------------------------------------- a scripted reviewer
@@ -329,3 +277,64 @@ async def test_reviewer_answers_approvals_and_questions_by_script(harness: Harne
     done = await reviewer.run(agent, "go", user="ada")
     assert done.answer == "wired 50, b"
     assert reviewer.answered == [("wire", "APPROVE", None), ("Which plan?", "ANSWER", "b")]
+
+
+# --------------------------------------------------------------------------- results from outside
+
+
+@tool(side_effects="write")
+async def sign(contract: str) -> str:
+    """Have a contract signed: a person signs it in the e-signature system."""
+    runtime = current()
+    assert runtime is not None
+    return await runtime.ask(
+        f"Signed {contract}?",
+        expects=TypeAdapter(str).json_schema(),  # what this tool returns
+        component="e-signature",
+        props={"contract": contract},
+    )
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_a_result_from_outside_is_an_ask_in_the_tool_on_every_adapter(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """The run pauses inside the tool; the answer, checked against the tool's return type, is
+    what the tool returns and the model reads."""
+    plan: list[Call] = [("sign", {"contract": "c-1"})]
+    target, tools = await BUILDERS[framework](harness, [sign], tmp_path, plan)
+    agent = harness.wrap(target, id=f"signing-{framework}", tools=tools)
+    paused = await agent.run("get c-1 signed", user="ada")
+    asked = paused.interrupt
+    assert asked is not None and asked.reason is InterruptReason.QUESTION, paused
+    assert asked.expects == {"type": "string"}
+    assert (asked.component, asked.props) == ("e-signature", {"contract": "c-1"})
+    with pytest.raises(ConfigurationError, match="does not fit"):
+        await agent.resume(paused.run_id, "answer", answer=7, reviewer="esign")
+    done = await agent.resume(paused.run_id, "answer", answer="signed by ada", reviewer="esign")
+    assert done.status is RunStatus.SUCCESS and done.answer == "Done. signed by ada", done
+
+
+async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness: Harness) -> None:
+    @tool
+    async def scan(page: int) -> Any:
+        """Scan a page."""
+        runtime = current()
+        assert runtime is not None
+        result = await runtime.ask(f"The scan of page {page}?")  # any value
+        if result is False:  # rejected
+            raise ToolError(f"the scan of page {page} was refused", source="tools")
+        return result
+
+    async def fn(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("scan", page=1)
+
+    agent = harness.wrap(fn, id="scanning", tools=[scan])
+    paused = await agent.run("scan", user="ada")
+    assert paused.interrupt is not None and paused.interrupt.expects is None
+    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="ops")
+    assert done.answer == "scan failed: the scan of page 1 was refused"
+    again = await agent.run("scan", user="ada")
+    assert again.interrupt is not None
+    scanned = await Reviewer({"The scan of page 1?": {"pages": 1}}).settle(agent, again)
+    assert scanned.answer == {"pages": 1}
