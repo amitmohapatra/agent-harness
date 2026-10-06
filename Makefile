@@ -67,6 +67,14 @@ examples:  ## Run every example offline (scripted model, memory, gateway), sever
 examples-live:  ## Run every example with the environment as it is (the real services that are set)
 	$(PY) scripts/run_examples.py --live
 
+.PHONY: docs-check
+docs-check:  ## Every link and anchor resolves; every snippet parses and names only the real API
+	$(PY) scripts/check_docs.py
+
+.PHONY: docs-mermaid
+docs-mermaid:  ## Every Mermaid diagram parses (node; MERMAID_MODULES: a node_modules with mermaid, jsdom)
+	node scripts/check_mermaid.mjs $$(git ls-files --cached --others --exclude-standard '*.md' | grep -v '^\.claude/')
+
 .PHONY: clean
 clean:  ## Remove caches
 	rm -rf .pytest_cache .ruff_cache build typings **/__pycache__
