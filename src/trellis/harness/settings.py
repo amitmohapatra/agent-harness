@@ -70,6 +70,18 @@ class Settings(BaseModel):
     #: The image those sandboxes are made from, unless a ``SandboxSpec`` names one; unset: the
     #: provider's own (``DockerSandbox``: ``python:3.12-slim``).
     sandbox_image: str | None = None
+    #: A Slack incoming webhook told whenever a run pauses for a person (``notify.Slack``).
+    slack_webhook_url: str | None = None
+    #: An SMTP server that mails whoever a paused run waits for (``notify.Email``):
+    #: ``smtp://user:password@host:587`` (STARTTLS when offered) or ``smtps://…`` (TLS).
+    smtp_url: str | None = None
+    #: The address that mail is sent from (needed with ``smtp_url``).
+    smtp_from: str | None = None
+    #: Where mail about a question that is not assigned to an address goes (a role's).
+    smtp_to: str | None = None
+    #: Where paused runs are answered (the reference inbox ``h.serve_inbox`` serves, or your
+    #: own): a notification links to ``<inbox_url>#<interrupt id>``.
+    inbox_url: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -95,6 +107,11 @@ class Settings(BaseModel):
             judge_sample=get("TRELLIS_JUDGE_SAMPLE"),  # type: ignore[arg-type]
             sandbox=get("SANDBOX"),  # type: ignore[arg-type]
             sandbox_image=get("SANDBOX_IMAGE"),
+            slack_webhook_url=get("SLACK_WEBHOOK_URL"),
+            smtp_url=get("SMTP_URL"),
+            smtp_from=get("SMTP_FROM"),
+            smtp_to=get("SMTP_TO"),
+            inbox_url=get("TRELLIS_INBOX_URL"),
             **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]
         )
 
