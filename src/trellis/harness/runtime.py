@@ -405,17 +405,23 @@ class Runtime:
         )
         # calls made at once may each ask: the run pauses on the first, the others ask again
         # when it resumes
-        first = self.pending is None
         if self.pending is None:
             self.pending = Pending(key=key, interrupt=interrupt)
         if self.suspend is None:
             raise Paused(self.pending.interrupt)
-        value = self.suspend({MARKER: True, **interrupt.awaiting()})
-        resolution = InterruptResolution.model_validate(value)
-        if first:
-            self.pending = None
-        self.replay.record_answer(key, resolution)
-        return resolution
+        # the framework's own pause (LangGraph's ``interrupt``): its resume is answered from the
+        # journal, above (the attempt files the answer there first). LangGraph also hands a
+        # call's answers back by their position in it, and a call asks only what is still open:
+        # the earlier questions' answers it hands back are passed over until it pauses
+        filed = {
+            a.get("interrupt_id")
+            for answers in self.replay.journal.answers.values()
+            for a in answers
+        }
+        while True:
+            value = self.suspend({MARKER: True, **interrupt.awaiting()})
+            handed = InterruptResolution.model_validate(value)
+            assert handed.interrupt_id in filed, "a resume's answer is filed in the journal"
 
 
 #: The key an ``ask`` marks its LangGraph interrupt value with, telling it apart from a

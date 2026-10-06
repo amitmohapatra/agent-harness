@@ -49,7 +49,11 @@ from langchain.agents.middleware import (
     ModelRequest,
     ModelResponse,
 )
-from langchain.agents.middleware.types import ExtendedModelResponse, PrivateStateAttr
+from langchain.agents.middleware.types import (
+    ExtendedModelResponse,
+    PrivateStateAttr,
+    hook_config,
+)
 from langchain_core.messages import (
     AIMessage,
     AnyMessage,
@@ -260,13 +264,15 @@ def _named(tool: BaseTool | dict[str, Any]) -> str:
 
 # --------------------------------------------------------------------------- the model call
 class ModelHooks(AgentMiddleware):
-    """Around every model call: the run's model hooks (then ``hooks``), a ``chat`` span with
-    the usage, at most ``timeout`` seconds (and what is left of the run's time), and the
-    ``prompt`` of the harness's prompt sources (``"name"``, ``"name@version"``, a ``Prompt``),
-    pinned for the run: a stored prompt of the gateway is selected by every call (headers the
-    gateway reads: the model is a gateway model, ``ChatOpenAI``); any other is rendered
-    (``prompt_vars`` fill its ``{{variables}}``) into the instructions, before the system
-    prompt, its other messages before the conversation."""
+    """Around every model call: the task kept ahead of a summary (the conversation's leading
+    system messages, the pushed memory context among them, and its first user message), the
+    run's model hooks (then ``hooks``), a ``chat`` span with the usage, at most ``timeout``
+    seconds (and what is left of the run's time), and the ``prompt`` of the harness's prompt
+    sources (``"name"``, ``"name@version"``, a ``Prompt``), pinned for the run: a stored prompt
+    of the gateway is selected by every call (headers the gateway reads: the model is a gateway
+    model, ``ChatOpenAI``); any other is rendered (``prompt_vars`` fill its ``{{variables}}``)
+    into the instructions, before the system prompt, its other messages before the
+    conversation."""
 
     def __init__(
         self,
@@ -297,6 +303,7 @@ class ModelHooks(AgentMiddleware):
     ) -> ModelResponse[Any]:
         runtime = current()
         hooks = running(*self.given)
+        request = _with_task(request)
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
@@ -355,11 +362,40 @@ class ModelHooks(AgentMiddleware):
         own = [str(m["content"]) for m in rendered if m.get("role") == "system"]
         rest = [m for m in rendered if m.get("role") != "system"]
         system = request.system_message
-        text = "\n\n".join([*own, *([system.text] if system is not None else [])])
+        text = "\n\n".join(part for part in [*own, system.text if system else ""] if part)
         return request.override(
             system_message=SystemMessage(content=text),
             messages=[*cast(list[AnyMessage], convert_to_messages(rest)), *request.messages],
         )
+
+
+def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the task kept ahead of a summary: a summarization middleware (Deep
+    Agents', LangChain's) replaces the older turns by a summary, the run's task and its pushed
+    memory context among them — the conversation's leading system messages and first user
+    message are put back before it."""
+    messages = request.messages
+    if not messages or not _summary(messages[0]):
+        return request
+    state = list(request.state.get("messages", []))
+    head: list[AnyMessage] = []
+    for message in state:
+        if _summary(message):
+            break
+        head.append(message)
+        if isinstance(message, HumanMessage):
+            break
+    else:
+        return request
+    sent = {m.id for m in messages if m.id is not None}
+    kept = [m for m in head if m.id is None or m.id not in sent]
+    return request.override(messages=[*kept, *messages]) if kept else request
+
+
+def _summary(message: BaseMessage) -> bool:
+    return isinstance(message, HumanMessage) and (
+        message.additional_kwargs.get("lc_source") == "summarization"
+    )
 
 
 @contextlib.asynccontextmanager
@@ -506,7 +542,16 @@ class StepLimit(AgentMiddleware):
 class StallGuard(AgentMiddleware):
     """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
     in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed."""
+    consecutive steps in which every call failed. A step whose calls were all malformed (their
+    arguments not JSON) is not the end of the run: the model is asked again, and LangChain
+    tells it what was wrong."""
+
+    @hook_config(can_jump_to=["model"])
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        last = state["messages"][-1] if state.get("messages") else None
+        if isinstance(last, AIMessage) and last.invalid_tool_calls and not last.tool_calls:
+            return {"jump_to": "model"}
+        return None
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()
@@ -729,10 +774,8 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
             kept.append([checkpoint_id, task_id, index, channel, self._dumped(value), task_path])
 
     def delete_thread(self, thread_id: str) -> None:
+        """Forget a thread kept outside a run (a run's own goes with its journal)."""
         self._threads.pop(thread_id, None)
-        runtime = current()
-        if runtime is not None and runtime.run_id == thread_id:
-            runtime.replay.journal.graph = None
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         return self.get_tuple(config)

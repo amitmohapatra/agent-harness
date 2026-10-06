@@ -477,9 +477,11 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     re-run will ask for it (or left to the framework, when it resumes from its own state)."""
     pending = journal.pending
     if resolution is not None and pending is not None:
-        if pending.native_id or pending.native_state:
+        if pending.native_state:
             journal.pending = None
         else:
+            # a checkpointed graph is handed it by its framework too; filed here, a later
+            # question in the same call knows it was this one's (``Runtime.interrupt``)
             journal.answered(resolution)
     return Replay(journal)
 

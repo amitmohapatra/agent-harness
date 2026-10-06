@@ -17,7 +17,7 @@ from langchain.agents import create_agent
 
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
-from tests.support.models import ScriptedChat
+from tests.support.models import REACT_TOOLS, ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
@@ -90,11 +90,9 @@ async def test_push_injects_the_context_as_a_system_message(
     agent = memory_harness.wrap(ReAct(system="You answer stock questions.", model=model), id="s")
     result = await agent.run("how many a?", user="u1", thread="t1")
     assert result.answer == "7 units"
-    system = model.requests[0]["messages"][0]
-    assert system == {
-        "role": "system",
-        "content": f"You answer stock questions.\n\n{memory_service.context_text}",
-    }
+    instructions, context = model.requests[0]["messages"][:2]
+    assert instructions == {"role": "system", "content": "You answer stock questions."}
+    assert context == {"role": "system", "content": memory_service.context_text}
     [call] = memory_service.named("context")
     assert call.scope["user_id"] == "u1" and call.scope["thread_id"] == "t1"
     assert call.body["query"] == "how many a?" and call.body["token_budget"] == 2000
@@ -134,9 +132,9 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
 
     [context] = memory_service.named("context")
     assert context.body["tools"] == {"available": [f"t{i}" for i in range(6)], "k": 8}
-    assert "## Tools" in model.requests[0]["messages"][0]["content"]  # confidence/args/missing
+    assert "## Tools" in model.requests[0]["messages"][1]["content"]  # confidence/args/missing
     offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
-    memory_tools = MEMORY_TOOLS
+    memory_tools = [*MEMORY_TOOLS, *REACT_TOOLS]
     # the candidates and the memory tools, never all six, sorted by name
     assert offered[0] == sorted(["t1", "t3", *memory_tools])
     assert offered[1] == sorted(["t1", "t3", *memory_tools])
@@ -154,7 +152,8 @@ async def test_without_candidates_every_tool_is_offered(
     await memory_harness.wrap(ReAct(system="s", model=model), id="n", tools=many(6)).run(
         "x", user="u"
     )
-    assert len(model.requests[0]["tools"]) == 6 + len(MEMORY_TOOLS)  # all the agent's, memory's
+    # all the agent's, memory's (and ReAct's own)
+    assert len(model.requests[0]["tools"]) == 6 + len(MEMORY_TOOLS) + len(REACT_TOOLS)
 
 
 async def test_tool_search_answers_among_the_runs_tools_and_offers_them(
@@ -213,7 +212,7 @@ async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     result = await agent.run("how do I like to be contacted?", user="u1")
     assert result.answer == "email"
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
-    assert offered == sorted(MEMORY_TOOLS)
+    assert offered == sorted([*MEMORY_TOOLS, *REACT_TOOLS])
     [call] = memory_service.named("call_agent_tool")
     assert call.path["name"] == "memory_search" and call.body["args"] == {"query": "preferences"}
     await memory_harness.writes.drain()
@@ -564,8 +563,8 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     model = ScriptedChat(["I don't know your sister's name."])
     agent = memory_harness.wrap(ReAct(system="You help.", model=model), id="s")
     events = [e async for e in agent.stream("What is my sister's name?", user="u1")]
-    system = model.requests[0]["messages"][0]["content"]
-    assert system.startswith(f"You help.\n\n{memory_service.context_text}")
+    system = model.requests[0]["messages"][1]["content"]
+    assert system.startswith(memory_service.context_text)
     if note is None:
         assert "## Memory" not in system
     else:

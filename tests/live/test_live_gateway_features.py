@@ -3,7 +3,7 @@ bridge, model calls the gateway adds no tools to, stored prompts, skills, Virtua
 MCP call is for, Agent Mode tools left out, frameworks' own MCP clients and the key on /mcp.
 
 A small local model is slow and unreliable at choosing tools, so where a test needs a
-particular call it forces the model's tool choice (``Forced``): the model still writes the
+particular call it forces the model's tool choice (``Forced``, ``support.Forcing``): the model still writes the
 call, the gateway still answers it — the test only picks which tool, so it asserts what the
 harness did, not what the model would have chosen."""
 
@@ -28,7 +28,7 @@ from tests.live.conftest import (
     needs_gateway,
     needs_memory,
 )
-from tests.live.support import eventually, memory_scope
+from tests.live.support import Forcing, Sent, eventually, gateway_model, memory_scope
 from trellis import ReAct, Runtime
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.clients.bifrost import (
@@ -38,7 +38,6 @@ from trellis.harness.clients.bifrost import (
     code_mode_tools,
 )
 from trellis.harness.skills import LOAD_SKILL, READ_SKILL_FILE, SECTION
-from trellis.harness.tools.convert import openai_chat
 
 pytestmark = [pytest.mark.live, needs_gateway]
 
@@ -67,6 +66,21 @@ class Forced:
         return await self.gateway.complete(messages, model=MODEL, max_tokens=160, **body)
 
 
+def chat_tools(tools: list[Any]) -> list[dict[str, Any]]:
+    """Harness tools as chat-completions function definitions."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.spec.description or t.name,
+                "parameters": t.spec.input_schema or {"type": "object", "properties": {}},
+            },
+        }
+        for t in tools
+    ]
+
+
 def started(events: list[Any]) -> list[str]:
     return [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START]
 
@@ -87,7 +101,7 @@ async def test_a_code_mode_meta_tool_call_comes_back_under_the_harness_name(
     harness's name the call comes back to the caller."""
     async with live_harness(wikis_key) as h:
         assert h.gateway is not None
-        offered = openai_chat.convert(code_mode_tools(h.gateway, wikis))
+        offered = chat_tools(code_mode_tools(h.gateway, wikis))
         for spec in CODE_MODE_TOOLS[:3]:
             forced = Forced(h.gateway, [spec.name])
             reply = await forced.complete(
@@ -114,9 +128,12 @@ async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
     nested = f"{wikis[1]}-read_wiki_structure"
     async with live_harness(wikis_key) as h:
         assert h.gateway is not None
-        model = Forced(h.gateway, ["list_tool_files", "execute_tool_code", None])
+        forcing = Forcing(["list_tool_files", "execute_tool_code", None])
+        sent = Sent()
+        model = gateway_model(h, sent)
         agent = h.wrap(
-            ReAct(system="You read wikis with code.", model=model), id=f"live-cm-{suffix()}"
+            ReAct(system="You read wikis with code.", model=model, middleware=[forcing]),
+            id=f"live-cm-{suffix()}",
         )
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         names = [
@@ -139,7 +156,7 @@ async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
         # make a forced call twice in one step)
         calls = started(events)
         assert set(calls) == {"list_tool_files", "execute_tool_code"}
-        for request in model.requests:  # no gateway name is ever declared to the model
+        for request in sent.requests:  # no gateway name is ever declared to the model
             offered = {t["function"]["name"] for t in request["tools"]}
             assert {s.name for s in CODE_MODE_TOOLS} <= offered
             assert not offered & set(GATEWAY_NAMES.values())

@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
-import httpx
+import httpx2
 import openai
 import pytest
 from langchain.agents import create_agent
@@ -19,26 +19,23 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.planned import PlannedChatModel
 from trellis import Harness, Hooks, ModelCall, Settings, current, tool
 from trellis.contracts import ConfigurationError, ModelError, RunEventType, RunStatus
 from trellis.harness import telemetry
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
-from trellis.harness.clients.bifrost import PromptPin
 from trellis.harness.middleware import (
     LAST_STEP,
     READ_RESULT,
-    BoundedResults,
     HarnessTools,
     ModelHooks,
     RunCheckpointer,
     StallGuard,
     StepLimit,
-    Summarization,
     _HarnessToolsState,
     model_error,
+    read_result,
 )
-from trellis.harness.runs import LocalRuns
+from trellis.harness.prompts import PromptSources, ResolvedPrompt
 
 
 @pytest.fixture
@@ -202,15 +199,20 @@ async def test_a_pause_in_a_step_keeps_what_finished_and_the_later_writes_wait(
         call = interrupt.tool_call
         asked.append((interrupt.question, call.step if call else None))
         if call is None:
-            result = await agent.resume(interrupt.interrupt_id, "answer", answer="yes")
+            result = await agent.resume(
+                interrupt.interrupt_id, "answer", answer="yes", reviewer="r"
+            )
         else:
             assert ran.index("looked b") >= 0  # the read beside the pause finished
             result = await agent.resume(interrupt.interrupt_id, "approve", reviewer="r")
     assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
     # every question once; the calls numbered in the model's order
     assert sorted(asked, key=str) == sorted(
-        [("Is a right?", None), ("Approve ship? ship is irreversible.", 1)]
-        + [("Approve bill? bill is irreversible.", 4)],
+        [
+            ("Is a right?", None),
+            ("Approve ship? ship is irreversible.", 1),
+            ("Approve bill? bill is irreversible.", 4),
+        ],
         key=str,
     )
     assert ran.count("looked b") == 1 and ran.count("shipped c") == 1
@@ -235,8 +237,6 @@ async def test_without_a_checkpointer_a_pause_stops_the_later_writes_and_replays
         ran.append(f"shipped {item}")
         return f"shipped {item}"
 
-    model = PlannedChatModel(plan=[], final="done")
-    model.plan = []
     script = ScriptedChatModel(turns=[[("ship", {"item": "a"}), ("ship", {"item": "b"})], "done"])
     target = graph(script, HarnessTools())
     agent = harness.wrap(target, id="replayed", tools=[ship])
@@ -273,20 +273,28 @@ class Recording(Hooks):
 async def test_model_hooks_rewrite_the_call_and_the_span_carries_it_redacted(
     harness: Harness, spans: InMemorySpanExporter
 ) -> None:
+    @tool(side_effects="read")
+    def echo(text: str, api_key: str = "") -> str:
+        """Say it back."""
+        return text
+
     hooks = Recording()
+    secret = "sk-abcdefghijklmnopqrstu"
     model = ScriptedChatModel(
-        turns=[("note", {"text": "hi", "api_key": "sk-abcdefghijklmnopqrstu"}), "done"]
+        turns=[("echo", {"text": "hi", "api_key": "k1"}), ("echo", {"text": secret}), "done"]
     )
     target = graph(model, HarnessTools(), ModelHooks(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="hooked", tools=[note], hooks=[hooks])
-    await agent.run("my token is sk-abcdefghijklmnopqrstu", user="u")
-    assert [c.framework for c in hooks.calls] == ["langgraph", "langgraph"]
+    agent = harness.wrap(target, id="hooked", tools=[echo], hooks=[hooks])
+    await agent.run({"messages": [{"role": "user", "content": "go"}], "password": "pw"}, user="u")
+    assert [c.framework for c in hooks.calls] == ["langgraph"] * 3
     assert model.seen[0][-1].content == "be brief"  # the rewritten call was the one made
-    assert len(hooks.replies) == 2
+    assert len(hooks.replies) == 3
     chats = [s for s in spans.get_finished_spans() if s.name.startswith("chat ")]
-    assert [s.name for s in chats] == ["chat model", "chat model"]
+    assert [s.name for s in chats] == ["chat model"] * 3
     text = str([dict(s.attributes or {}) for s in chats])
-    assert "sk-abcdefghijklmnopqrstu" not in text  # the conversation, the call's arguments
+    # a call's arguments are kept structured, so the redactor sees each: a secret's name, a
+    # credential's value, as the model sent them and as the next call carries them
+    assert secret not in text and "k1" not in text
     assert "be brief" in text
 
 
@@ -296,7 +304,7 @@ async def test_a_chat_span_has_the_models_name_and_usage(spans: InMemorySpanExpo
 
         def _generate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
             result = super()._generate(messages, *args, **kwargs)
-            message = result.generations[0].message
+            message = cast(AIMessage, result.generations[0].message)
             message.usage_metadata = {"input_tokens": 9, "output_tokens": 2, "total_tokens": 11}
             message.response_metadata = {"model_name": "small", "finish_reason": "stop"}
             return result
@@ -341,10 +349,10 @@ async def test_the_run_time_left_bounds_a_model_call(harness: Harness) -> None:
 
 
 def test_the_model_clients_errors_say_whether_a_retry_may_pass() -> None:
-    request = httpx.Request("POST", "http://gateway/v1/chat/completions")
+    request = httpx2.Request("POST", "http://gateway/v1/chat/completions")
 
     def status(code: int) -> Exception:
-        response = httpx.Response(code, request=request, json={"error": {"message": "no"}})
+        response = httpx2.Response(code, request=request, json={"error": {"message": "no"}})
         return openai.APIStatusError("no", response=response, body=None)
 
     late = model_error(openai.APITimeoutError(request))
@@ -363,8 +371,8 @@ def test_the_model_clients_errors_say_whether_a_retry_may_pass() -> None:
 async def test_a_model_client_error_reaches_the_run_as_a_model_error(harness: Harness) -> None:
     class Limited(ScriptedChatModel):
         async def _agenerate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
-            request = httpx.Request("POST", "http://gateway/v1/chat/completions")
-            response = httpx.Response(429, request=request, json={})
+            request = httpx2.Request("POST", "http://gateway/v1/chat/completions")
+            response = httpx2.Response(429, request=request, json={})
             raise openai.RateLimitError("slow down", response=response, body=None)
 
     result = await harness.wrap(graph(Limited(turns=[]), ModelHooks()), id="limited").run(
@@ -374,20 +382,36 @@ async def test_a_model_client_error_reaches_the_run_as_a_model_error(harness: Ha
     assert result.error.code == "MODEL_ERROR" and "(429)" in result.error.message
 
 
-class Prompts:
+class Stored:
+    """A prompt source holding a stored prompt of the gateway and a text prompt."""
+
+    label = "test"
+
     def __init__(self) -> None:
         self.asked: list[str] = []
 
-    async def prompt(self, ref: str) -> PromptPin:
-        self.asked.append(ref)
-        return PromptPin(name="triage", id="p-1", version=len(self.asked) + 2)
+    async def resolve(self, name: str, version: str | None) -> ResolvedPrompt:
+        self.asked.append(name)
+        if name == "triage":
+            return ResolvedPrompt(
+                name="triage", version=str(len(self.asked) + 2), source="bifrost", selection="p-1"
+            )
+        return ResolvedPrompt(
+            name=name,
+            version="1",
+            source="test",
+            chat=(
+                {"role": "system", "content": "Answer as {{who}}."},
+                {"role": "user", "content": "An example."},
+            ),
+        )
 
 
 async def test_a_stored_prompt_is_pinned_for_the_run_sent_as_headers_and_journaled(
     harness: Harness, spans: InMemorySpanExporter
 ) -> None:
-    gateway = Prompts()
-    harness.gateway = gateway  # type: ignore[assignment]
+    source = Stored()
+    harness.prompts = PromptSources([source])
 
     @tool(side_effects="read")
     async def confirm(item: str) -> str:
@@ -401,27 +425,47 @@ async def test_a_stored_prompt_is_pinned_for_the_run_sent_as_headers_and_journal
     agent = harness.wrap(target, id="pinned", tools=[confirm])
     paused = await agent.run("x", user="u")
     assert paused.interrupt is not None
-    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes")
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="r")
     assert done.answer == "done"
-    assert gateway.asked == ["triage"]  # resolved once: the resume read the journal
+    assert source.asked == ["triage"]  # resolved once: the resume read the journal
     headers = [r["extra_headers"] for r in model.requests]
     assert headers == [{"x-bf-prompt-id": "p-1", "x-bf-prompt-version": "3"}] * 2
     chats = [dict(s.attributes or {}) for s in spans.get_finished_spans() if "chat" in s.name]
     assert {c["trellis.prompt.version"] for c in chats} == {3}
 
 
-async def test_a_stored_prompt_needs_a_run_and_a_gateway(harness: Harness) -> None:
-    with pytest.raises(ConfigurationError, match="h.model_headers"):
+async def test_any_other_prompt_is_rendered_into_the_instructions(harness: Harness) -> None:
+    harness.prompts = PromptSources([Stored()])
+    model = ScriptedChatModel(turns=["done"])
+    hooks = ModelHooks(prompt="persona", prompt_vars={"who": "a pirate"})
+    agent = harness.wrap(graph(model, hooks, system_prompt="You sell."), id="persona")
+    assert (await agent.run("x", user="u")).answer == "done"
+    sent = model.seen[0]
+    assert sent[0].content == "Answer as a pirate.\n\nYou sell."
+    assert [m.content for m in sent[1:]] == ["An example.", "x"]
+    stored = harness.wrap(graph(ScriptedChatModel(turns=["x"]), hooks_of("triage")), id="vars")
+    failed = await stored.run("x", user="u")
+    assert failed.error is not None and "no prompt_vars" in failed.error.message
+
+
+def hooks_of(prompt: str) -> ModelHooks:
+    return ModelHooks(prompt=prompt, prompt_vars={"who": "x"})
+
+
+async def test_a_prompt_needs_a_run_and_a_source(harness: Harness) -> None:
+    with pytest.raises(ConfigurationError, match=r"h\.model_headers"):
         await graph(ScriptedChatModel(turns=["x"]), ModelHooks(prompt="triage")).ainvoke(
             {"messages": [HumanMessage("x")]}
         )
     agent = harness.wrap(graph(ScriptedChatModel(turns=["x"]), ModelHooks(prompt="t")), id="np")
     result = await agent.run("x", user="u")
-    assert result.error is not None and "BIFROST_URL" in result.error.message
+    assert result.error is not None and "no prompt source" in result.error.message
     with pytest.raises(ConfigurationError, match="seconds"):
         ModelHooks(timeout=0)
     with pytest.raises(ConfigurationError):
-        ModelHooks(prompt="triage@x")
+        ModelHooks(prompt="triage@")
+    with pytest.raises(ConfigurationError, match="prompt_vars"):
+        ModelHooks(prompt_vars={"a": 1})
 
 
 # --------------------------------------------------------------------------- StepLimit
@@ -441,13 +485,15 @@ async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harnes
 
 async def test_a_step_limit_with_no_tools_and_a_last_call_without_an_answer() -> None:
     model = ScriptedChatModel(turns=[("nothing", {}), "the end"])
-    target = graph(model, StepLimit(1))
+    target = graph(model, HarnessTools(), StepLimit(1))
     state = await target.ainvoke({"messages": [HumanMessage("x")]})
     assert state["messages"][-1].content == "the end"
     assert "tool_choice" not in model.requests[-1] or model.requests[-1]["tool_choice"] is None
     stubborn = ScriptedChatModel(turns=[("nothing", {}), ("nothing", {})])
     with pytest.raises(ModelError, match="stopped after 1 model calls without an answer"):
-        await graph(stubborn, StepLimit(1)).ainvoke({"messages": [HumanMessage("x")]})
+        await graph(stubborn, HarnessTools(), StepLimit(1)).ainvoke(
+            {"messages": [HumanMessage("x")]}
+        )
     with pytest.raises(ConfigurationError):
         StepLimit(0)
 
@@ -490,10 +536,8 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
     assert model.turns == ["never"]
 
 
-# --------------------------------------------------------------------------- BoundedResults
-async def test_a_long_result_keeps_its_head_and_tail_and_read_result_reads_the_rest(
-    harness: Harness,
-) -> None:
+# --------------------------------------------------------------------------- read_result
+async def test_read_result_reads_a_result_of_the_conversation_in_parts(harness: Harness) -> None:
     @tool(side_effects="read")
     def dump() -> str:
         """A long result."""
@@ -503,73 +547,20 @@ async def test_a_long_result_keeps_its_head_and_tail_and_read_result_reads_the_r
         turns=[
             ("dump", {}),
             (READ_RESULT, {"id": "call_1_0", "offset": 10, "limit": 15}),
+            (READ_RESULT, {"id": "call_1_0", "offset": 90, "limit": 500}),
             (READ_RESULT, {"id": "nope"}),
-            (READ_RESULT, {"id": "call_2_0", "offset": 0}),
             "done",
         ]
     )
-    target = graph(model, BoundedResults(20), HarnessTools(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="cut", tools=[dump])
+    target = graph(model, HarnessTools(), tools=[read_result(30)], checkpointer=RunCheckpointer())
+    agent = harness.wrap(target, id="reader", tools=[dump])
     assert (await agent.run("x", user="u")).answer == "done"
     assert READ_RESULT in model.requests[0]["tools"]
-    [(_, cut)] = tool_messages(model, 1)
-    assert cut.startswith("0123456789\n…[cut: dump returned 100 characters, the first 10 and")
-    assert cut.endswith("…\n0123456789")
-    assert 'read_result(id="call_1_0", offset=10)' in cut
-    read = tool_messages(model, 2)[-1][1]
-    assert read.startswith("0123456789\n…[") or read.startswith("01234567890123")
-    assert read.split("\n")[0] == "01234567890123456789"[:20][:20][0:20][:20][:20][:20][:20][
-        :20
-    ][:20][0:20][:20][:20][:20][:20][:20][:20][:20][:20][:20][:20][:20][:20][:20][:20][:20][
-        :20
-    ][:20][:20][:20][:20][0:15] or read.startswith("012345678901234")
-    assert "more characters: read_result(id=\"call_1_0\", offset=25)" in read
-    assert tool_messages(model, 3)[-1][1] == "there is no result 'nope' to read"
-    # any result of the conversation, by its call's id (a cleared one, say)
-    assert tool_messages(model, 4)[-1][1].startswith("01234")
-    with pytest.raises(ConfigurationError):
-        BoundedResults(1)
-
-
-# --------------------------------------------------------------------------- Summarization
-def _summarizer(model: Any) -> Summarization:
-    return Summarization(model, trigger=("messages", 6), keep=("messages", 2))
-
-
-@pytest.mark.parametrize("asynchronous", [True, False])
-async def test_a_summary_keeps_the_context_and_the_task_ahead_of_it(asynchronous: bool) -> None:
-    summarizer = ScriptedChatModel(turns=["the summary"])
-    model = ScriptedChatModel(turns=[("look", {"item": str(n)}) for n in range(3)] + ["done"])
-    from langchain_core.tools import tool as lc_tool
-
-    @lc_tool
-    def look(item: str) -> str:
-        """Look."""
-        return f"{item} found"
-
-    target = graph(model, _summarizer(summarizer), tools=[look])
-    given = {"messages": [SystemMessage("context"), HumanMessage("the task")]}
-    if asynchronous:
-        state = await target.ainvoke(given)
-    else:
-        state = await asyncio.to_thread(target.invoke, given)
-    messages = state["messages"]
-    assert [type(m).__name__ for m in messages[:3]] == [
-        "SystemMessage",
-        "HumanMessage",
-        "HumanMessage",
-    ]
-    assert messages[1].content == "the task"
-    assert "the summary" in str(messages[2].content)
-    assert len(summarizer.seen) == 1
-    assert "the task" not in str(summarizer.seen[0])  # only what follows the task
-
-
-async def test_a_short_conversation_is_not_summarized() -> None:
-    summarizer = ScriptedChatModel(turns=[])
-    target = graph(ScriptedChatModel(turns=["hi"]), _summarizer(summarizer))
-    state = await target.ainvoke({"messages": [HumanMessage("x")]})
-    assert state["messages"][-1].content == "hi" and summarizer.seen == []
+    assert tool_messages(model, 2)[-1][1] == (
+        '012345678901234\n…[75 more characters: read_result(id="call_1_0", offset=25)]'
+    )
+    assert tool_messages(model, 3)[-1][1] == "0123456789"  # at most what is left
+    assert tool_messages(model, 4)[-1][1] == "there is no result 'nope' to read"
 
 
 # --------------------------------------------------------------------------- RunCheckpointer
@@ -606,39 +597,6 @@ def test_writes_are_kept_once_per_task_and_index_and_the_special_ones_replaced()
     assert [(w[3], saver._loaded(w[4])) for w in writes] == [("messages", "a"), ("__error__", "y")]
 
 
-class Flaky(ScriptedChatModel):
-    """Fails its second call once, as a gateway that went away for a moment."""
-
-    failed: bool = False
-
-    async def _agenerate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
-        if len(self.seen) == 1 and not self.failed:
-            self.failed = True
-            request = httpx.Request("POST", "http://gateway/v1/chat/completions")
-            raise openai.APIConnectionError(request=request)
-        return self._generate(messages, *args, **kwargs)
-
-
-async def test_a_queued_run_after_an_error_that_may_pass_continues_where_it_stopped(
-    harness: Harness,
-) -> None:
-    model = Flaky(turns=[("look", {"item": "a"}), "done"])
-    target = graph(model, HarnessTools(), ModelHooks(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="again", tools=[look])
-    handle = await agent.start("x", user="u")
-    worker = harness.worker([agent])
-    while await worker.run_once():
-        await asyncio.sleep(0)
-        record = await harness.runs.get(handle.run_id)
-        if record is not None and record.status is RunStatus.QUEUED:
-            await harness.runs.requeue_now(handle.run_id) if hasattr(
-                harness.runs, "requeue_now"
-            ) else None
-    result = await handle.result(timeout=10)
-    assert result.answer == "done", result.error
-    assert len(model.seen) == 2  # the first step was not asked again
-
-
 async def test_a_pause_resumes_in_place_in_another_process(harness: Harness) -> None:
     @tool(side_effects="irreversible")
     def ship(item: str) -> str:
@@ -666,12 +624,54 @@ async def test_a_pause_resumes_in_place_in_another_process(harness: Harness) -> 
     assert tool_messages(second_model, 0) == [("call_1_0", "shipped a")]
 
 
-def test_local_runs_is_the_store_shared_here() -> None:
-    assert isinstance(LocalRuns(), LocalRuns)
-
-
 def test_a_middleware_state_never_reaches_the_graphs_input_or_output() -> None:
-    target = graph(ScriptedChatModel(turns=[]), HarnessTools(), StepLimit(), BoundedResults())
+    target = graph(ScriptedChatModel(turns=[]), HarnessTools(), StepLimit())
     schema = target.get_input_jsonschema()
     assert set(schema["properties"]) == {"messages"}
-    assert AIMessage  # the message types the tests read
+
+
+async def test_a_tool_that_asks_twice_is_answered_once_each(harness: Harness) -> None:
+    @tool(side_effects="read")
+    async def interview(name: str) -> str:
+        """Ask two questions."""
+        runtime = current()
+        assert runtime is not None
+        first = await runtime.ask("First?")
+        second = await runtime.ask("Second?")
+        return f"{first} then {second}"
+
+    model = ScriptedChatModel(turns=[("interview", {"name": "a"}), "done"])
+    target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
+    agent = harness.wrap(target, id="twice", tools=[interview])
+    paused = await agent.run("x", user="u")
+    assert paused.interrupt is not None and paused.interrupt.question == "First?"
+    again = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="one", reviewer="r")
+    # LangGraph hands the first answer back to the second question: it is passed over
+    assert again.interrupt is not None and again.interrupt.question == "Second?"
+    done = await agent.resume(again.interrupt.interrupt_id, "answer", answer="two", reviewer="r")
+    assert done.answer == "done"
+    assert tool_messages(model, 1) == [("call_1_0", "one then two")]
+
+
+def test_the_helpers_read_what_they_are_given() -> None:
+    from langchain.agents.middleware import ModelRequest, ModelResponse
+
+    from trellis.harness.middleware import _named, _replied, _with_task
+
+    assert _named({"type": "function", "function": {"name": "x"}}) == "x"
+    assert _named({"name": "y"}) == "y"
+    summary = HumanMessage("the summary", additional_kwargs={"lc_source": "summarization"})
+
+    def request(messages: list[Any], state: list[Any]) -> Any:
+        return ModelRequest(
+            model=ScriptedChatModel(turns=[]), messages=messages, state={"messages": state}
+        )
+
+    # no user message to keep: nothing is put back; a summary in the state ends the head
+    bare = request([summary], [SystemMessage("context", id="c")])
+    assert _with_task(bare) is bare
+    earlier = request([summary], [summary, HumanMessage("task", id="t")])
+    assert _with_task(earlier) is earlier
+    kept = request([summary], [SystemMessage("context", id="c"), HumanMessage("task", id="t")])
+    assert [m.content for m in _with_task(kept).messages] == ["context", "task", "the summary"]
+    _replied(None, ModelResponse(result=[]))  # nothing the model said: nothing on the span

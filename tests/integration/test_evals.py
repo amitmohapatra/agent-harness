@@ -15,6 +15,7 @@ import respx
 from pydantic import BaseModel
 
 from tests.support.memory import FakeMemoryService
+from tests.support.models import Script, ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import telemetry
@@ -40,25 +41,40 @@ GW = "http://gw.test/v1"
 
 
 def judge_reply(content: str) -> dict[str, Any]:
-    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+    return Script([content]).reply({"messages": []})
 
 
-class JudgeOrAnswer:
-    """A scripted chat model that answers as the agent, or — asked by the judge — with the
-    next scripted verdict."""
-
-    def __init__(self, verdicts: list[str], answer: str = "Paris") -> None:
+class _Judging(Script):
+    def __init__(self, verdicts: list[str], answer: str) -> None:
+        super().__init__([])
         self.verdicts = list(verdicts)
         self.answer = answer
         self.judged: list[list[dict[str, Any]]] = []
         self.bodies: list[dict[str, Any]] = []
 
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+    def next(self, body: dict[str, Any]) -> Any:
+        messages = body["messages"]
         if "strict evaluator" in str(messages[0].get("content")):
             self.judged.append([dict(m) for m in messages])
-            self.bodies.append(body)
-            return judge_reply(self.verdicts.pop(0))
-        return judge_reply(self.answer)
+            self.bodies.append({k: v for k, v in body.items() if k != "messages"})
+            return self.verdicts.pop(0)
+        return self.answer
+
+
+class JudgeOrAnswer(ScriptedChat):
+    """A scripted chat model that answers as the agent, or — asked by the judge — with the
+    next scripted verdict."""
+
+    def __init__(self, verdicts: list[str], answer: str = "Paris") -> None:
+        super().__init__(script=_Judging(verdicts, answer))
+
+    @property
+    def judged(self) -> list[list[dict[str, Any]]]:
+        return self.script.judged
+
+    @property
+    def bodies(self) -> list[dict[str, Any]]:
+        return self.script.bodies
 
 
 def langfuse_harness(service: FakeMemoryService | None = None, **settings: Any) -> Harness:
@@ -558,8 +574,10 @@ async def test_the_judge_asks_the_judge_model_through_bifrost_with_the_judge_key
 
 @respx.mock
 async def test_without_a_judge_key_or_model_the_agents_are_used(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("BIFROST_URL", GW)
+    monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "agent-key")
     respx.post(f"{GW.rsplit('/v1', 1)[0]}/mcp").mock(
         return_value=httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
     )
@@ -598,11 +616,13 @@ async def test_a_judge_with_no_model_to_ask_is_an_evaluator_failure(harness: Har
     assert "BIFROST_URL" in report.items[0].failed["llm_judge"]
 
 
-async def test_a_judge_falls_back_to_a_react_agents_own_model_object(harness: Harness) -> None:
-    model = JudgeOrAnswer(['{"score": 0.6, "reasoning": "fine"}'])
+async def test_a_react_with_a_model_object_gives_the_judge_no_model_to_fall_back_on(
+    harness: Harness,
+) -> None:
+    model = JudgeOrAnswer([])
     agent = harness.wrap(ReAct(system="s", model=model), id="geo")
     report = await harness.evaluate(agent, [{"input": "France"}], [llm_judge("ok?")])
-    assert report.summary["llm_judge"].mean == 0.6
+    assert "TRELLIS_JUDGE_MODEL" in report.items[0].failed["llm_judge"]
 
 
 # --------------------------------------------------------------------------- judge, services
@@ -656,7 +676,8 @@ async def test_a_wrapped_agent_judges_with_the_harness_services_and_its_own_mode
     async with langfuse_harness() as h:
         agent = h.wrap(ReAct(system="s", model=model), id="geo")
         assert agent.evals is agent.evals  # one per agent
-        assert agent.evals.langfuse is h.evals.langfuse and agent.evals.fallback_model is model
+        assert agent.evals.langfuse is h.evals.langfuse
+        assert agent.evals.fallback_model is None  # a model object names no gateway model
         assert h.wrap(capital, id="c").evals.fallback_model is None
 
 

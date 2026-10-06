@@ -2,7 +2,8 @@
 the harness calls, answered in the shapes the running gateway answers with.
 
 * ``/v1/chat/completions`` — each request recorded (:attr:`FakeGateway.completions`) and
-  answered by :attr:`FakeGateway.chat`, a ``ScriptedChat`` (``tests/support/models.py``);
+  answered by :attr:`FakeGateway.chat`'s script (``tests/support/models.py``): the judge's
+  calls, and a ``ReAct`` gateway model's once :meth:`FakeGateway.serve_models` routes them;
 * ``/api/prompt-repo/prompts`` and ``/api/prompt-repo/prompts/{id}/versions`` —
   :attr:`FakeGateway.prompts`, by name: each a list of committed versions (their messages);
 * ``/api/skills``, ``/api/skills/{id}``, ``/api/skills/serve/{name}/files/{path}`` —
@@ -24,6 +25,7 @@ from typing import Any
 from urllib.parse import unquote
 
 import httpx
+import pytest
 from bifrost_sdk import Bifrost
 from bifrost_sdk.admin import Admin
 
@@ -63,6 +65,23 @@ class FakeGateway:
         bifrost = Bifrost(URL, api_key="vk", client=http, admin_client=api, max_retries=0)
         return Gateway(URL, "vk", client=bifrost, admin=Admin(URL, client=api))
 
+    def serve_models(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A gateway model ``ReAct`` builds (``ChatOpenAI`` on ``BIFROST_URL``) is answered
+        here, as the gateway's other routes are."""
+        import langchain_openai
+
+        monkeypatch.setenv("BIFROST_URL", URL)
+        monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
+        handle = self.handle
+
+        class Served(langchain_openai.ChatOpenAI):
+            def __init__(self, **kwargs: Any) -> None:
+                transport = httpx.MockTransport(handle)
+                kwargs["http_async_client"] = httpx.AsyncClient(transport=transport)
+                super().__init__(**kwargs)
+
+        monkeypatch.setattr(langchain_openai, "ChatOpenAI", Served)
+
     def asked(self, path: str) -> int:
         return sum(1 for r in self.requests if r.url.path == path)
 
@@ -74,8 +93,7 @@ class FakeGateway:
         path = unquote(request.url.path)
         if path == "/v1/chat/completions":
             self.completions.append(request)
-            body = json.loads(request.content)
-            return httpx.Response(200, json=await self.chat.complete(**body))
+            return self.chat.script.handle(request)
         if path.startswith("/mcp"):
             return self._rpc(
                 path.removeprefix("/mcp").removeprefix("/"), json.loads(request.content)

@@ -4,7 +4,9 @@ whose memory service is the in-process fake."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
+import httpx
 import pytest
 from agents import set_tracing_disabled
 
@@ -24,6 +26,23 @@ def memory_contract() -> Iterator[None]:
     violations = [v for fake in fake_memory.MADE for v in fake.violations]
     fake_memory.MADE.clear()
     assert not violations, "\n".join(violations)
+
+
+@pytest.fixture(autouse=True)
+def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``ChatOpenAI`` a test builds (``ReAct`` with a gateway model name) sends through httpx,
+    where ``respx`` mocks the gateway (the openai client's own transport is its httpx fork).
+    Live tests talk to the real gateway as they are."""
+    if request.node.get_closest_marker("live") is not None:
+        return
+    import langchain_openai
+
+    class OnHttpx(langchain_openai.ChatOpenAI):
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs.setdefault("http_async_client", httpx.AsyncClient())
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", OnHttpx)
 
 
 @pytest.fixture

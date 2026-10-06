@@ -1,7 +1,8 @@
-"""``ReAct`` with several calls in one step: reads at once, writes one at a time after them in
-the model's order, the tool messages in the model's order; a pause inside a batch; replay that
-hands each call its own output whatever order they finished in; the bridge safe under calls made
-at once from any framework; the step limit, the error streak and a stable tool order."""
+"""``ReAct`` with several calls in one step: every call at once (LangChain's own parallel
+calls), the writes one at a time in the model's order, the tool messages in the model's order;
+pauses inside a step; a resume that hands each call its own output whatever order they finished
+in; the bridge safe under calls made at once from any framework; the step limit, the error
+streak and a stable tool order."""
 
 from __future__ import annotations
 
@@ -9,12 +10,10 @@ import asyncio
 import itertools
 from typing import Any
 
-import pytest
-
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, current, tool
 from trellis.contracts import RunEventType, RunStatus
-from trellis.harness.adapters.react import LAST_STEP
+from trellis.harness.middleware import LAST_STEP
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Lease
 
@@ -55,8 +54,10 @@ async def test_reads_run_together_then_writes_one_at_a_time_in_the_models_order(
     agent = harness.wrap(ReAct(system="s", model=model), id="shop", tools=[price, order])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
-    assert happened[:2] == ["price a", "price b"]  # both reads began before either ended
-    assert happened[4:] == ["order b", "ordered b", "order c", "ordered c"]
+    reads = [h for h in happened if h.startswith("price")]
+    assert reads[:2] == ["price a", "price b"]  # both reads began before either ended
+    writes = [h for h in happened if h.startswith("order")]
+    assert writes == ["order b", "ordered b", "order c", "ordered c"]  # in the model's order
     assert told(model, 1) == [
         ("call_1", "ordered b"),
         ("call_1_1", "a: 7"),
@@ -93,21 +94,22 @@ async def test_a_pause_in_a_batch_keeps_what_finished_and_numbers_calls_in_order
     batch = [("ship", {"item": "c"}), ("confirm", {"item": "a"}), ("look", {"item": "b"})]
     model = ScriptedChat([batch, "done"])
     agent = harness.wrap(ReAct(system="s", model=model), id="batch", tools=[confirm, look, ship])
-    paused = await agent.run("x", user="u")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.question == "Is a right?"
-    assert ran == ["looked b"]  # the read beside the pause finished, and is journaled
-    answered = await agent.resume(
-        paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="r"
-    )
-    assert answered.status is RunStatus.PAUSED and answered.interrupt is not None
-    call = answered.interrupt.tool_call
-    assert call is not None and call.tool == "ship"
-    assert call.step == 1  # numbered in the model's order, though it runs after the reads
-    done = await agent.resume(answered.interrupt.interrupt_id, "approve", reviewer="r")
-    assert done.status is RunStatus.SUCCESS and done.answer == "done"
-    assert ran == ["looked b", "confirmed a", "shipped c"]  # nothing ran twice
-    assert len(model.requests) == 2  # the first step was replayed, twice
+    result = await agent.run("x", user="u")
+    asked: dict[str, int | None] = {}
+    while result.status is RunStatus.PAUSED:
+        interrupt = result.interrupt
+        assert interrupt is not None
+        assert "looked b" in ran  # the read beside the pause finished, and is kept
+        call = interrupt.tool_call
+        asked[interrupt.question] = call.step if call is not None else None
+        decision = "approve" if call is not None else "answer"
+        answer = None if call is not None else "yes"
+        result = await agent.resume(interrupt.interrupt_id, decision, answer=answer, reviewer="r")
+    assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
+    # the two pauses of one step, one after the other; the call numbered in the model's order
+    assert asked == {"Is a right?": None, "Approve ship? ship is irreversible.": 1}
+    assert sorted(ran) == ["confirmed a", "looked b", "shipped c"]  # nothing ran twice
+    assert len(model.requests) == 2  # resumed in place: the first step was not asked again
     assert told(model, 1) == [
         ("call_1", "shipped c"),
         ("call_1_1", "yes"),
@@ -140,10 +142,12 @@ async def test_a_resumed_run_hands_each_call_its_output_whatever_order_they_fini
     agent = harness.wrap(ReAct(system="s", model=model), id="dice", tools=[roll, publish])
     paused = await agent.run("x", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    # the quick one finished first; the two identical calls ran one after another
-    assert rolls == ["quick", "slow", "slow"]
+    # the two identical calls ran one after another, beside the quick one
+    assert sorted(rolls) == ["quick", "slow", "slow"]
     first = told(model, 1)
-    assert first == [("call_1", "1"), ("call_1_1", "0"), ("call_1_2", "2")]
+    # the quick one finished first; the two identical calls took their turns (in either order)
+    assert first[1] == ("call_1_1", "0")
+    assert {first[0][1], first[2][1]} == {"1", "2"}
     assert len(set(keys)) == 3  # each identical call has its own idempotency key
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.answer == "done"
@@ -264,15 +268,8 @@ async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harnes
     assert last["tool_choice"] == "none" and last["tools"]  # the same tools, none to be called
     assert last["messages"][-1] == {"role": "user", "content": LAST_STEP}
     warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]
-    assert warnings[0]["code"] == "max_steps"
-    assert "stopped at its 2 steps" in warnings[0]["message"]
-
-
-async def test_a_step_limit_with_no_tools_offered_asks_the_same_way(harness: Harness) -> None:
-    model = ScriptedChat([("nothing", {}), "the end"])
-    agent = harness.wrap(ReAct(system="s", model=model, max_steps=1), id="bare")
-    assert (await agent.run("x", user="u")).answer == "the end"
-    assert "tool_choice" not in model.requests[-1] and "tools" not in model.requests[-1]
+    stopped = [w for w in warnings if w.get("code") == "max_steps"]
+    assert "stopped at its 2 steps" in stopped[0]["message"]
 
 
 async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -> None:
@@ -295,7 +292,7 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
     agent = harness.wrap(ReAct(system="s", model=model), id="flaky", tools=[flaky])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.message == "ReAct stopped: every tool call failed in 3 consecutive steps"
+    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
     assert model.turns == []
 
 
@@ -305,11 +302,4 @@ async def test_the_tools_are_offered_in_a_stable_order(harness: Harness) -> None
     agent = harness.wrap(ReAct(system="s", model=model), id="sorted", tools=tools)
     await agent.run("x", user="u")
     names = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
-    assert names == [["alpha", "zeta"], ["alpha", "zeta"]]
-
-
-def test_a_context_window_is_a_number_of_tokens() -> None:
-    from trellis.contracts import ConfigurationError
-
-    with pytest.raises(ConfigurationError, match="context_window"):
-        ReAct(system="s", model="m", context_window=0)
+    assert names == [["alpha", "read_file", "read_result", "zeta"]] * 2

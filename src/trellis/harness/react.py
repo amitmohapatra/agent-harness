@@ -104,7 +104,8 @@ def ReAct(
         raise ConfigurationError("model_timeout is a number of seconds over 0")
     if context_window is not None and context_window <= 0:
         raise ConfigurationError("context_window is a number of tokens over 0")
-    window = context_window or _window(model) or CONTEXT_WINDOW
+    known = context_window or _window(model)
+    window = known or CONTEXT_WINDOW
     chat = _gateway_model(model, timeout=model_timeout, window=window)
     backend = StateBackend()
     defaults = [
@@ -137,7 +138,9 @@ def ReAct(
         name="react",
     )
     named = model if isinstance(model, str) else None
-    return graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
+    # what the harness reads of the graph: the judge's fallback model, the window when known
+    # (the pushed memory context's budget is a share of it)
+    return graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: known})
 
 
 def stacked(defaults: Sequence[Any], given: Sequence[Any]) -> list[Any]:

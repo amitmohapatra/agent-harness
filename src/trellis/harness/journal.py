@@ -229,7 +229,3 @@ class Replay:
         run's task, which every call repeats)."""
         step = (call.model_copy(update={"task": None}), outcome.model_copy())
         self.journal.trajectory.append(step)
-
-    def record_answer(self, key: str, resolution: InterruptResolution) -> None:
-        self.journal.answers.setdefault(key, []).append(resolution.model_dump(mode="json"))
-        self._seen[f"a:{key}"] += 1
