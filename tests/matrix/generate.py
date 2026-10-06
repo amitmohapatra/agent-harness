@@ -29,7 +29,14 @@ from tests.matrix.model import (
     Selection,
     cell_id,
 )
-from tests.matrix.world import MemoryContract, UnclosedToolCall
+from tests.matrix.world import (
+    MemoryContract,
+    NoEnding,
+    NotTimedOut,
+    OffButCalled,
+    OffButOffered,
+    UnclosedToolCall,
+)
 
 #: Why a way does not apply to an adapter (whatever the feature).
 NOT_BLOCKS: Final = NA(
@@ -49,28 +56,21 @@ def _on(*switches: str) -> Callable[[str, str, str, str, Selection], bool]:
     return lambda feature, adapter, way, mode, selection: set(switches) <= selection.on
 
 
-#: The real failures this matrix found: where each holds (feature ids, adapters, ways, modes,
+#: The real failures this matrix found (BUG-1, Claude running a call the CLI made after a pause,
+#: was fixed by the Claude session and governance work merged since; it is not listed): where each holds (feature ids, adapters, ways, modes,
 #: and a test on the selection), the bug, and how it fails (``raises``: any other failure of
 #: the cell is still a failure). The reproduction of each is its cell's id
 #: (``pytest tests/matrix -k <cell>``) and the script in the bug's ``why``. Remove an entry
 #: when its bug is fixed: its cells then XPASS and fail the suite until it is.
 KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
     (
-        {"adapters": {"claude"}, "ways": {"way1"}, "modes": {"elsewhere"}},
-        Bug(
-            "BUG-1",
-            "Claude: a tool call the CLI makes after another call paused the run still runs "
-            "(before the approval) and runs again on resume; its events come after RUN_FINISHED",
-            strict=False,
-        ),
-    ),
-    (
-        {"features": {"F09"}, "modes": {"worker", "elsewhere"}},
+        {"features": {"F09", "F09r"}, "modes": {"worker", "elsewhere"}},
         Bug(
             "BUG-7",
-            "a queued run past its time limit ends CANCELLED (no error), not TIMEOUT: the runs "
-            "SDK Worker's own timeout (G34) cancels the attempt first",
-            raises=AssertionError,
+            "a queued run past its time limit: the runs SDK Worker's own timeout (G34) cancels "
+            "the attempt first: it ends CANCELLED (no error), or TIMEOUT with no RUN_FINISHED "
+            "on its event stream",
+            raises=(NotTimedOut, NoEnding, UnclosedToolCall),
         ),
     ),
     (
@@ -82,7 +82,18 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
         ),
     ),
     (
-        {"features": {"F36", "F05", "F09"}},
+        # Claude: whether the time limit falls inside a tool call or between two is a race
+        {"features": {"F09", "F09r"}, "adapters": {"claude"}},
+        Bug(
+            "BUG-2",
+            "a tool call cut short by the run's time limit never ends on the event stream "
+            "(Claude: when the limit falls inside a call)",
+            raises=UnclosedToolCall,
+            strict=False,
+        ),
+    ),
+    (
+        {"features": {"F36", "F05", "F09", "F09r"}},
         Bug(
             "BUG-2",
             "a tool call cut short (an ask inside it, a cancel, the run's time limit) never "
@@ -106,6 +117,28 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
             "ReAct's chat spans carry the conversation unredacted (tool-call arguments are "
             "JSON text the redactor does not parse; tool results as they are)",
             raises=AssertionError,
+        ),
+    ),
+    (
+        {
+            "features": {"F42"},
+            "adapters": {"langgraph", "deepagents"},
+            "when": lambda f, a, w, m, s: "memory" in s.on and "memory_pull" not in s.on,
+        },
+        Bug(
+            "BUG-10",
+            "LangGraph/Deep Agents: without={'memory_pull'} still offers the memory tools "
+            "h.tools() bound into the graph (a call is refused: 'off in this run')",
+            raises=OffButOffered,
+        ),
+    ),
+    (
+        {"when": lambda f, a, w, m, s: "gateway" in s.on and "mcp" not in s.on},
+        Bug(
+            "BUG-9",
+            "without={'mcp'}: the toolbox still lists the key's MCP tools from the gateway "
+            "(and publishes them to the catalog) though none is offered",
+            raises=OffButCalled,
         ),
     ),
     (

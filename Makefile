@@ -2,8 +2,9 @@
 UV ?= uv
 PY ?= .venv/bin/python
 PYTEST ?= $(PY) -m pytest
-#: the matrix runs in this many shards at once (MATRIX_SHARD=i/n each)
-MATRIX_SHARDS ?= 4
+#: the matrix runs in this many shards at once (MATRIX_SHARD=i/n each): its cells mostly
+#: wait (time limits, surfaces), so more shards than cores
+MATRIX_SHARDS ?= 8
 
 .DEFAULT_GOAL := help
 
