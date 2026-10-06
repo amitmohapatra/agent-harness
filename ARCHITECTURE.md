@@ -393,9 +393,14 @@ Agent Mode is never used.
 
 ## Pauses and resumes
 
-`Runtime.ask` is the one pause. Its interrupt (a contracts `Interrupt`) has the id
-`<run_id>.<attempt>.<n>`: it names its run, so `resume` needs nothing else. How a run
-continues:
+`Runtime.ask` is the one pause (built as a `Question`, `asking.py`, which Way 2 and a graph's
+own `interrupt(value)` use too; an approval is the same pause, and so is a result from outside
+the run, which is an `ask` in the tool).
+Its interrupt (a contracts `Interrupt`) has the id `<run_id>.<attempt>.<n>`: it names its run,
+so `resume` needs nothing else. Telling people a run waits is agent-runs' (its `run.paused`
+webhook), not the harness's. With `RUNS_URL` every attempt's events also go to the run's
+event log in agent-runs (`runlog.py`), the last ones before the pause or the ending is recorded.
+How a run continues:
 
 * **LangGraph with a checkpointer**: `ask` *is* `langgraph.types.interrupt`; the resume is
   `Command(resume={<LangGraph interrupt id>: resolution})` and the graph continues where it stopped.

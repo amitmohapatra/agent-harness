@@ -349,3 +349,44 @@ async def test_the_a2a_routes_are_in_the_openapi_document_and_still_served_by_th
     bare = Starlette()
     agent.serve_a2a(bare, URL)  # a plain Starlette app: served, nothing to document
     assert len(bare.router.routes) == 2
+
+
+async def test_an_answer_carries_a_comment_and_an_approval_remembered_for_the_run() -> None:
+    from trellis import tool
+
+    @tool(side_effects="irreversible")
+    def deploy(region: str) -> str:
+        """Deploy to a region."""
+        return f"deployed to {region}"
+
+    async def deployer(input: Any, agent: Runtime) -> Any:
+        return [await agent.tools.call("deploy", region=r) for r in ("eu", "us")]
+
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    harness.wrap(deployer, id="deployer", tools=[deploy]).serve_a2a(app, URL)
+    async with asgi(app) as http:
+        client = await connect(http)
+        paused = await send(client, "deploy")
+        assert states(paused)[-1] == TaskState.TASK_STATE_INPUT_REQUIRED
+        asked = [
+            MessageToDict(p.data)
+            for r in paused
+            if r.WhichOneof("payload") == "status_update"
+            for p in r.status_update.status.message.parts
+            if p.WhichOneof("content") == "data"
+        ]
+        assert asked[-1]["tool_call"]["tool"] == "deploy"  # the call under approval
+        task_id = task_id_of(paused)
+        done = await send(
+            client,
+            "approve",
+            task_id=task_id,
+            data={"comment": "both regions today", "remember": "run"},
+        )
+    assert artifacts(done) == [["deployed to eu", "deployed to us"]]  # asked once
+    record = await harness.runs.get(task_id)
+    assert record is not None and record.last_resolution is not None
+    assert record.last_resolution.comment == "both regions today"
+    assert record.last_resolution.remember == "run"
+    await harness.aclose()

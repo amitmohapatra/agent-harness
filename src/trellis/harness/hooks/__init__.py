@@ -67,10 +67,14 @@ class Deny:
 @dataclass(frozen=True, slots=True)
 class Ask:
     """The call waits for a person's approval (``assignee``: whose; else anyone's), asked
-    ``question`` — as a governance approval: approve, edit, reject or cancel."""
+    ``question`` — as a governance approval: approve, edit, reject or cancel. ``component``
+    names your own review screen and ``props`` its data (``Interrupt.component``/``props``,
+    passed as they are; a surface without that screen shows the approval)."""
 
     question: str
     assignee: str | None = None
+    component: str | None = None
+    props: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

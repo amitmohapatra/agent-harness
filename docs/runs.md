@@ -129,11 +129,68 @@ after the run ends). A resume reads the journal before it answers the run, so a 
 cannot be read leaves the run waiting. With no `RUNS_URL` the store is this process's memory:
 it bounds nothing, and the same reference is kept there with the run.
 
+## Queue order and busy conversations
+
+**What.** `agent.start(..., priority=0, concurrency_key=None)`: among the tenant's queued runs a
+higher `priority` (-1000 to 1000) is claimed first, then the oldest; runs sharing a
+`concurrency_key` run one at a time (agent-runs' limit, one unless its operator says
+otherwise), the others wait `QUEUED`.
+
+**When.** `priority` for an urgent run; `concurrency_key` for anything that must not run twice
+at once (one customer's account, one repository).
+
+**Automatic: a second message to a busy conversation waits.** A queued run of a conversation
+(`thread=`) gets `concurrency_key="thread:<thread>"` unless you name one: a second message sent
+while the first run works is answered after it, never beside it (both would write the same
+thread). The same holds in process: a run of a conversation started with `run`, `stream`,
+`serve_chat` or `serve_a2a` (or resumed) waits while another run of the same agent and
+conversation works in this process, in order. A run with no `thread` is its own conversation.
+`LocalRuns` claims the same way agent-runs does. A sub-agent's run and a worker's are not held
+in process (the queue holds a worker's).
+
+**On failure.** A priority outside -1000..1000 or a key over 200 characters is refused by the
+contract (`ValidationError`). A conversation's runs waiting in process across replicas are not
+held across them: queue them (`start`) for that.
+
+## A run's events from anywhere
+
+**What.** With `RUNS_URL`, every attempt appends its events (the `RunEvent`s `stream` yields)
+to the run's event log in agent-runs as they happen, so any replica streams any run:
+`agent.events(run_id, *, after=0)` yields them — those past position `after`, then each as it
+is appended, until the run ends (a paused run's stream stays open for its next attempt) —
+wherever the run executes (a worker, another replica). `serve_chat`'s reconnect route reads a
+run this process did not serve from there too ([surfaces.md](surfaces.md)).
+
+**Automatic.** Batched (at most 500 an append), in order, one append at a time, in the
+background: the run never waits for it except at its end, when its last events (`INTERRUPT`,
+`RUN_ERROR`, `RUN_FINISHED`) are appended before the pause or the ending is recorded (the log
+takes nothing after) — and whoever watches in process hears `RUN_FINISHED` only once it is
+recorded. A worker's appends name it (fenced by its lease). Without `RUNS_URL` nothing is kept:
+`agent.events` follows the run's attempts in this process from now on.
+
+**On failure.** Best-effort: events agent-runs refuses or cannot take (after its SDK's retries)
+are dropped with one `warning` event (`events_undelivered`, logged, counted
+`trellis.run_events.undelivered`); the run goes on. A lost lease stops the log.
+
+## Admission: agent-runs' rate limit
+
+A call agent-runs refuses with `429` (the tenant's request budget) is retried by its SDK after
+the `Retry-After` it sends (at most 3 times, each wait at most 30 s). When it still refuses,
+`run`, `stream`, `start`, `resume` and `schedule` raise `trellis.harness.agent.Throttled`: a
+contracts error (`RUNS_RATE_LIMITED`, category `RATE_LIMIT`, `retryable=True`,
+`details["retry_after"]` the seconds asked for), counted (`trellis.runs.rate_limited`). The
+harness does not retry it again (one retry layer, the SDK's); `serve_chat` answers `429`
+(`RATE_LIMIT`) with `Retry-After`. A tenant over agent-runs' cap of running runs is not refused:
+its queued runs wait.
+
 ## Schedules
 
 `agent.schedule` is one `runs.schedules.create(spec)` (`POST /v1/schedules`): agent-runs upserts
 on `(tenant, agent, on_behalf_of, cadence, sha256 of the canonical input)`, so scheduling the
-same thing again (a redeploy) answers the schedule that exists, unchanged. The cadence is a cron
+same thing again (a redeploy) answers the schedule that exists, unchanged. The schedule carries
+the agent's `timeout` and `version` (`ScheduleSpec.timeout_seconds`, `agent_version`), which
+every fired run copies (agent-runs and `LocalRuns` alike). A schedule has no priority or
+concurrency key of its own (the contract's `ScheduleSpec` names none). The cadence is a cron
 expression or one of `hourly`, `daily`, `weekly`, `weekdays`, `manual`. Pause and resume a
 schedule with `RunsClient`: `await runs.schedules.update(schedule_id,
 ScheduleUpdate(enabled=False))` (or `True`). In process, a due schedule fires when a worker asks
@@ -159,7 +216,9 @@ answers only as one of them, a run assigned to that person or to nobody, never a
 Notifications (a run paused, escalated or finished) are agent-runs' tenant webhook
 subscriptions (`RunsClient.webhooks.create`, `POST /v1/webhooks`), not a harness setting; a
 receiver checks each delivery with `trellis.runs.webhooks.verify_signature`
-([blocks/runs.md](blocks/runs.md#webhooks)).
+([blocks/runs.md](blocks/runs.md#webhooks), [interrupts.md](interrupts.md#telling-people)).
+Runs kept in process (no `RUNS_URL`) have no webhooks: nothing is told unless a run hook of
+yours tells it.
 
 ## agent-runs wire
 

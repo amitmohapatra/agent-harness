@@ -82,6 +82,10 @@ class Journal(BaseModel):
     calls: dict[str, list[Any]] = Field(default_factory=dict)
     #: the tools the run has called (they stay offered to the model after a pause)
     used: list[str] = Field(default_factory=list)
+    #: the tools a reviewer approved for the rest of the run (``remember="run"``; ``"<tool> for
+    #: <assignee>"`` when the approval was asked of someone): their later calls asked of the
+    #: same are not asked about again in this run
+    remembered: list[str] = Field(default_factory=list)
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)

@@ -19,6 +19,7 @@ worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.canc
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -48,13 +49,15 @@ from trellis.harness import sandbox
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
-from trellis.harness.events import RunEvents
+from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
-from trellis.harness.runtime import RunCancelled, Runtime, _call, _current, interrupt_id
-from trellis.harness.telemetry import RunTrace, agent_span, metrics, output
+from trellis.harness.runlog import RunLog, event_log
+from trellis.harness.runtime import Runtime, _call, _current, interrupt_id
+from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
@@ -140,7 +143,44 @@ async def attempt(
     lease's length (progress checkpoints extend it) and the working time it says is left (else
     ``remaining``). ``observe`` is told the memory context the run was given (an offline
     evaluation's evaluators read it). ``parent`` is the run in whose tool call this one works
-    (a sub-agent's run: its progress is the parent's, its spans in the parent's trace)."""
+    (a sub-agent's run: its progress is the parent's, its spans in the parent's trace).
+
+    A run of a conversation (its thread) waits while another run of the same conversation and
+    agent works in this process: a second message to a busy conversation is answered after
+    the first, never beside it (queued runs wait the same way in the run store, by their
+    ``concurrency_key``). A sub-agent's run and a worker's are not held here."""
+    if job is not None or parent is not None:
+        turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
+    else:
+        turn = agent.turns.taken(f"{record.tenant_id}:{record.thread_id or record.run_id}")
+    async with turn:
+        return await _attempt(
+            agent,
+            record,
+            input,
+            journal=journal,
+            resolution=resolution,
+            listener=listener,
+            job=job,
+            remaining=remaining,
+            observe=observe,
+            parent=parent,
+        )
+
+
+async def _attempt(
+    agent: Agent,
+    record: RunRecord,
+    input: Any,
+    *,
+    journal: Journal | None,
+    resolution: InterruptResolution | None,
+    listener: Callable[[RunEvent], None] | None,
+    job: Job | None,
+    remaining: float | None,
+    observe: Callable[[PromptContext | None], None] | None,
+    parent: Runtime | None,
+) -> Result:
     identity, without = Identity.of(record), run_without(record)
     if job is not None:
         remaining = job.remaining_seconds
@@ -148,9 +188,7 @@ async def attempt(
     journal = journal or Journal()
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
-    events = RunEvents(identity.context(), record.attempt)
-    if listener is not None:
-        events.listen(listener)
+    events = _emitter(agent, identity, record.attempt, listener, job)
     runtime = Runtime(
         identity=identity,
         agent=agent,
@@ -169,8 +207,7 @@ async def attempt(
         parent=parent,
         running_in=asyncio.current_task(),
     )
-    events.emit(RunEventType.RUN_STARTED, data={"agent_id": identity.agent_id})
-    _versioned(agent, runtime, record.agent_version)
+    decision = _started(agent, runtime, record, resolution)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
     error: Exception | None = None
@@ -180,6 +217,8 @@ async def attempt(
     agent.running[identity.run_id] = runtime
     try:
         with agent_span(_traced(runtime), runtime.task) as span:
+            if decision is not None:
+                decided(span, decision)
             async with clock:
                 extracted, pushed = await _worked(
                     agent,
@@ -290,11 +329,12 @@ async def _concluded(
             code="LEASE_LOST",
             status=409,
         )
-    if (
-        runtime.cancelled is None
-        and timed_out is None
-        and (paused := _pause(runtime, extracted, error)) is not None
-    ):
+    try:
+        stopped = runtime.cancelled is not None or timed_out is not None
+        paused = None if stopped else _pause(runtime, extracted, error)
+    except ConfigurationError as exc:  # a graph's interrupt asks what cannot be asked
+        paused, error = None, exc
+    if paused is not None:
         await sandbox.paused(runtime)
         return await _paused(agent, runtime, journal, paused, extracted)
     if runtime.cancelled is not None:
@@ -338,6 +378,61 @@ def _versioned(agent: Agent, runtime: Runtime, started_on: str | None) -> None:
     )
     log.warning("%s", message)
     runtime.events.warning("agent_version", message)
+
+
+def _emitter(
+    agent: Agent,
+    identity: Identity,
+    attempt: int,
+    listener: Callable[[RunEvent], None] | None,
+    job: Job | None,
+) -> RunEvents:
+    """The attempt's events: to ``listener``, and — agent-runs keeping runs' events — to the
+    run's log, so any replica streams them (``runlog.py``)."""
+    events = RunEvents(identity.context(), attempt)
+    if listener is not None:
+        events.listen(listener)
+    store = event_log(agent.harness.runs)
+    if store is not None:
+        worker = None if job is None else job.worker_id
+        log_ = RunLog(
+            store, identity.run_id, tenant=identity.tenant, worker_id=worker, events=events
+        )
+        events.record(log_)
+    return events
+
+
+def _started(
+    agent: Agent,
+    runtime: Runtime,
+    record: RunRecord,
+    resolution: InterruptResolution | None,
+) -> dict[str, Any] | None:
+    """The attempt begins: whoever follows the run here (``agent.events``) listens, its
+    ``RUN_STARTED``, the person's decision it goes on with (returned, for its span), and a
+    warning when another version of the agent started it."""
+    events = runtime.events
+    for watching in agent.watchers(runtime.run_id):
+        events.listen(watching)
+    events.emit(RunEventType.RUN_STARTED, data={"agent_id": runtime.agent_id})
+    decision = _decision(resolution)
+    if decision is not None:
+        events.custom(DECISION, **decision)
+    _versioned(agent, runtime, record.agent_version)
+    return decision
+
+
+def _decision(resolution: InterruptResolution | None) -> dict[str, Any] | None:
+    """A person's decision an attempt goes on with, as its ``decision`` event says it."""
+    if resolution is None:
+        return None
+    return {
+        "interrupt_id": resolution.interrupt_id,
+        "decision": resolution.decision.value,
+        "reviewer": resolution.reviewer,
+        "comment": resolution.comment,
+        "remember": resolution.remember,
+    }
 
 
 async def _unheld(
@@ -467,13 +562,13 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
     value = native.value
     if is_hitl(value):
         return _middleware_approval(runtime, ident, native)
-    question = value.get("question") if isinstance(value, dict) else None
+    asked = Question.described(value)  # what ask(...) takes, mapped the one way ask maps it
     interrupt = Interrupt(
         interrupt_id=ident,
         tenant_id=runtime.tenant,
         run_id=runtime.run_id,
-        question=str(question or value),
         payload=value if isinstance(value, dict) else {"value": value},
+        **asked.fields(),
     )
     return Pending(key=FOREIGN, interrupt=interrupt, native_id=native.native_id)
 
@@ -520,17 +615,24 @@ async def _paused(
         worker_id=runtime.worker_id,
         tenant=runtime.tenant,
     )
-    await _recorded(
-        agent,
-        runtime.run_id,
-        runtime.tenant,
-        lambda: agent.harness.runs.pause(
-            interrupt, checkpoint=checkpoint, worker_id=runtime.worker_id
+    events = runtime.events
+
+    def last() -> None:
+        events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
+        events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
+
+    await events.settle(
+        last,
+        lambda: _recorded(
+            agent,
+            runtime.run_id,
+            runtime.tenant,
+            lambda: agent.harness.runs.pause(
+                interrupt, checkpoint=checkpoint, worker_id=runtime.worker_id
+            ),
+            lambda r: r.awaiting is not None and r.awaiting.interrupt_id == interrupt.interrupt_id,
         ),
-        lambda r: r.awaiting is not None and r.awaiting.interrupt_id == interrupt.interrupt_id,
     )
-    runtime.events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
-    runtime.events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)
     await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
     return Result(run_id=runtime.run_id, status=RunStatus.PAUSED, interrupt=interrupt)
@@ -546,9 +648,13 @@ async def _failed(
 ) -> Result:
     """The run ended ``ERROR`` — or ``TIMEOUT``, out of time — with ``error``."""
     outcome = RunOutcome.TIMEOUT if status is RunStatus.TIMEOUT else RunOutcome.ERROR
-    await _ended(agent, runtime, status, error=error)
-    runtime.events.emit(RunEventType.RUN_ERROR, error=error)
-    runtime.events.finished(outcome, error=error)
+    events = runtime.events
+
+    def last() -> None:
+        events.emit(RunEventType.RUN_ERROR, error=error)
+        events.finished(outcome, error=error)
+
+    await events.settle(last, lambda: _ended(agent, runtime, status, error=error))
     metrics.run_finished(runtime.agent_id, outcome.value)
     await agent.recorded_run(runtime, _transcript(runtime, extracted))
     await agent.recorded_outcome(runtime, status, error.message)
@@ -559,8 +665,10 @@ async def _succeeded(
     agent: Agent, runtime: Runtime, extracted: Extracted, pushed: PromptContext | None
 ) -> Result:
     answer = extracted.answer
-    await _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer))
-    runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer))
+    await runtime.events.settle(
+        lambda: runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer)),
+        lambda: _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer)),
+    )
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
     await agent.recorded_run(runtime, _transcript(runtime, extracted))
     await agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
@@ -624,19 +732,21 @@ async def _settle_cancelled(
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log), and
     say whether it was ended here (not ended, or taken over, elsewhere already)."""
-    ended = True
-    try:
-        await agent.harness.runs.finish(
-            identity.run_id, RunStatus.CANCELLED, worker_id=worker_id, tenant=identity.tenant
-        )
-    except (LeaseLostError, ConflictError):
-        log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)
-        ended = False
+
+    async def write() -> bool:
+        try:
+            await agent.harness.runs.finish(
+                identity.run_id, RunStatus.CANCELLED, worker_id=worker_id, tenant=identity.tenant
+            )
+        except (LeaseLostError, ConflictError):
+            log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)
+            return False
+        return True
+
     if reason is not None:
         log.info("run %s was cancelled: %s", identity.run_id, reason)
-        events.finished(RunOutcome.CANCELLED, reason=reason)
-    else:
-        events.finished(RunOutcome.CANCELLED)
+    said: dict[str, Any] = {} if reason is None else {"reason": reason}
+    ended = await events.settle(lambda: events.finished(RunOutcome.CANCELLED, **said), write)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
     return ended
 

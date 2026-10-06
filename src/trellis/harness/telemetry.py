@@ -110,6 +110,19 @@ _undelivered = _meter.create_counter(
     "trellis.writes.undelivered",
     description="background writes given up by this process, by outcome (spooled or lost)",
 )
+_queue_wait = _meter.create_histogram(
+    "trellis.runs.queue_wait",
+    unit="s",
+    description="how long a queued run waited for a worker to claim it",
+)
+_rate_limited = _meter.create_counter(
+    "trellis.runs.rate_limited",
+    description="calls agent-runs refused with 429 (its rate limit) after the SDK's retries",
+)
+_events_lost = _meter.create_counter(
+    "trellis.run_events.undelivered",
+    description="run events agent-runs' event log did not take",
+)
 
 
 class _Metrics:
@@ -130,6 +143,18 @@ class _Metrics:
     @staticmethod
     def write_undelivered(label: str, outcome: str) -> None:
         _undelivered.add(1, {"write": label, "outcome": outcome})
+
+    @staticmethod
+    def queue_waited(agent_id: str, seconds: float) -> None:
+        _queue_wait.record(max(0.0, seconds), {"agent": agent_id})
+
+    @staticmethod
+    def rate_limited(operation: str) -> None:
+        _rate_limited.add(1, {"operation": operation})
+
+    @staticmethod
+    def events_undelivered(count: int) -> None:
+        _events_lost.add(count)
 
 
 metrics = _Metrics()
@@ -419,6 +444,16 @@ def retrieval_span(query: str) -> Iterator[trace.Span]:
         yield current
 
 
+def decided(span: trace.Span, decision: Mapping[str, Any]) -> None:
+    """A person's decision the attempt goes on with (its kind, reviewer, comment and reach),
+    as the attempt span's ``decision`` event and ``trellis.decision.*`` attributes."""
+    if span.is_recording():
+        found = {f"trellis.decision.{k}": v for k, v in decision.items() if v is not None}
+        attributes = redact_attributes(found)
+        span.set_attributes(attributes)
+        span.add_event("decision", attributes)
+
+
 def attribute(name: str, value: str) -> None:
     """An attribute of the span current now (the run's span, in its pipeline)."""
     span = trace.get_current_span()
@@ -586,10 +621,19 @@ class Langfuse:
 # --------------------------------------------------------------------------- export
 
 
+#: The OTLP/HTTP metrics path, appended to ``OTEL_EXPORTER_OTLP_ENDPOINT``.
+METRICS_PATH: Final = "/v1/metrics"
+#: How often the counters and histograms are exported.
+METRICS_EXPORT_MILLIS: Final = 60_000
+
+
 def configure(settings: Settings) -> bool:
-    """Install an OTLP exporter when the deployment asked for one. Returns whether it did."""
+    """Install an OTLP exporter when the deployment asked for one (and one for the metrics,
+    unless the endpoint is Langfuse's, which takes traces only). Returns whether the traces'
+    exporter was installed."""
     if not settings.otlp_endpoint:
         return False
+    _measured(settings.otlp_endpoint, settings.otlp_headers)
     if not isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider):
         log.info("an OpenTelemetry tracer provider is already installed; keeping it")
         return False
@@ -614,6 +658,34 @@ def configure(settings: Settings) -> bool:
     return True
 
 
+def _measured(endpoint: str, headers: Mapping[str, str]) -> bool:
+    """Export the counters and histograms over OTLP/HTTP to ``<endpoint>/v1/metrics``, every
+    :data:`METRICS_EXPORT_MILLIS` — unless the endpoint is Langfuse's (no metrics there), the
+    application installed a meter provider itself (kept), or the extra is not installed."""
+    if LANGFUSE_OTLP_PATH in endpoint:
+        return False
+    # the API's default stands in until a provider is set (its class is private to it)
+    if type(otel_metrics.get_meter_provider()).__name__ != "_ProxyMeterProvider":
+        log.info("an OpenTelemetry meter provider is already installed; keeping it")
+        return False
+    try:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (  # noqa: PLC0415
+            OTLPMetricExporter,
+        )
+        from opentelemetry.sdk.metrics import MeterProvider  # noqa: PLC0415
+        from opentelemetry.sdk.metrics.export import (  # noqa: PLC0415
+            PeriodicExportingMetricReader,
+        )
+        from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
+    except ImportError:
+        return False  # configure() says how to install the extra
+    exporter = OTLPMetricExporter(endpoint=metrics_url(endpoint), headers=dict(headers))
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=METRICS_EXPORT_MILLIS)
+    resource = Resource.create({"service.name": "trellis-harness"})
+    otel_metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+    return True
+
+
 #: How long closing the harness waits for the spans still queued to be exported.
 FLUSH_TIMEOUT_MS: Final = 5_000
 
@@ -622,13 +694,19 @@ async def flush() -> None:
     """Export the spans still queued (the batch processor sends every few seconds): closing
     the harness - a worker's shutdown, a script's end - must not leave the last runs' traces
     behind. The export blocks, so it runs off the event loop."""
-    provider = trace.get_tracer_provider()
-    force_flush = getattr(provider, "force_flush", None)
-    if force_flush is not None:
-        await asyncio.to_thread(force_flush, FLUSH_TIMEOUT_MS)
+    for provider in (trace.get_tracer_provider(), otel_metrics.get_meter_provider()):
+        force_flush = getattr(provider, "force_flush", None)
+        if force_flush is not None:
+            await asyncio.to_thread(force_flush, FLUSH_TIMEOUT_MS)
 
 
 def traces_url(endpoint: str) -> str:
     """The traces URL an OTLP/HTTP base endpoint means (a full ``…/v1/traces`` is kept)."""
     base = endpoint.rstrip("/")
     return base if base.endswith(TRACES_PATH) else base + TRACES_PATH
+
+
+def metrics_url(endpoint: str) -> str:
+    """The metrics URL an OTLP/HTTP base endpoint means (a traces URL's base, too)."""
+    base = endpoint.rstrip("/").removesuffix(TRACES_PATH)
+    return base if base.endswith(METRICS_PATH) else base + METRICS_PATH

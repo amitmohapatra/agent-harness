@@ -3,6 +3,7 @@ scripted chat model. Deep Agents has its own file."""
 
 from __future__ import annotations
 
+import re
 from typing import Any, NotRequired, TypedDict
 
 import pytest
@@ -14,7 +15,7 @@ from langgraph.types import interrupt
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, current, tool
-from trellis.contracts import ConfigurationError, RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
 
 executed: list[str] = []
 
@@ -315,3 +316,106 @@ async def test_a_lost_checkpoint_fails_a_graphs_own_pause(harness: Harness) -> N
     )
     assert failed.status is RunStatus.ERROR and failed.error is not None
     assert "no longer holds the pause" in failed.error.message
+
+
+# --------------------------------------------------------------------------- a graph's own interrupt
+
+
+class Picked(TypedDict):
+    topic: str
+    picked: NotRequired[Any]
+
+
+def asking_graph(value: Any) -> Any:
+    """A hand-built graph whose node asks with ``interrupt(value)``, checkpointed."""
+
+    def ask(state: Picked) -> Picked:
+        return {"topic": state["topic"], "picked": interrupt(value)}
+
+    graph = StateGraph(Picked)
+    graph.add_node("ask", ask)
+    graph.add_edge(START, "ask")
+    graph.add_edge("ask", END)
+    return graph.compile(checkpointer=InMemorySaver())
+
+
+def picked(graph: Any, thread: str) -> Any:
+    return graph.get_state({"configurable": {"thread_id": thread}}).values["picked"]
+
+
+async def test_a_graphs_interrupt_offers_labelled_options_and_several_picks(
+    harness: Harness,
+) -> None:
+    value = {
+        "question": "Which plans?",
+        "options": [{"value": "a", "label": "Plan A", "description": "small"}, "b"],
+        "multiple": True,
+        "assignee": "role:sales",
+    }
+    graph = asking_graph(value)
+    agent = harness.wrap(graph, id="plans")
+    paused = await agent.run({"topic": "x"}, user="u1", thread="g1")
+    asked = paused.interrupt
+    assert asked is not None and asked.reason.value == "CHOICE" and asked.ui == "choice"
+    assert asked.option_values == ["a", "b"] and asked.multiple
+    assert asked.options[0] == Option(value="a", label="Plan A", description="small")
+    assert asked.assignee == "role:sales" and asked.payload == value
+    with pytest.raises(ConfigurationError, match="not among the options"):
+        await agent.resume(asked.interrupt_id, "answer", answer=["a", "z"], reviewer="u1")
+    done = await agent.resume(asked.interrupt_id, "answer", answer=["a", "b"], reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    # Command(resume=answer): the node got the answer as given
+    assert picked(graph, "g1") == ["a", "b"]
+
+
+async def test_a_graphs_interrupt_asks_for_a_form_its_expects_describes(harness: Harness) -> None:
+    form = {
+        "type": "object",
+        "properties": {"street": {"type": "string"}, "zip": {"type": "integer"}},
+        "required": ["street", "zip"],
+    }
+    value = {
+        "question": "Where to?",
+        "expects": form,
+        "ui_schema": {"street": {"ui:widget": "textarea"}},
+    }
+    graph = asking_graph(value)
+    agent = harness.wrap(graph, id="shipping")
+    paused = await agent.run({"topic": "x"}, user="u1", thread="g2")
+    asked = paused.interrupt
+    assert asked is not None and asked.ui == "form" and asked.expects == form
+    assert asked.ui_schema == {"street": {"ui:widget": "textarea"}}
+    with pytest.raises(ConfigurationError, match="does not fit"):
+        await agent.resume(asked.interrupt_id, "answer", answer={"street": "x"}, reviewer="u1")
+    address = {"street": "Main 1", "zip": 10115}
+    done = await agent.resume(asked.interrupt_id, "answer", answer=address, reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and picked(graph, "g2") == address
+
+
+async def test_a_graphs_interrupt_names_its_own_screen(harness: Harness) -> None:
+    value = {"question": "Review?", "component": "draft-review", "props": {"draft": 3}}
+    graph = asking_graph(value)
+    agent = harness.wrap(graph, id="screens")
+    paused = await agent.run({"topic": "x"}, user="u1", thread="g3")
+    asked = paused.interrupt
+    assert asked is not None
+    assert (asked.component, asked.props) == ("draft-review", {"draft": 3})
+    done = await agent.resume(asked.interrupt_id, "answer", answer={"ok": True}, reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and picked(graph, "g3") == {"ok": True}
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ({"question": "Which?", "props": {"a": 1}}, "props are a component's"),
+        ({"question": "Which?", "options": "a,b"}, "options are not a list"),
+        ({"question": "Which?", "options": [{"label": "no value"}]}, "an option that is not one"),
+        ({"question": "Which?", "expects": {"type": 3}}, "not a valid JSON Schema"),
+    ],
+)
+async def test_a_graphs_interrupt_that_cannot_be_asked_fails_the_run_saying_why(
+    harness: Harness, value: dict[str, Any], why: str
+) -> None:
+    result = await harness.wrap(asking_graph(value), id="bad").run({"topic": "x"}, user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert re.search(why, result.error.message), result.error.message

@@ -4,16 +4,17 @@ the agents).
 
 SIGTERM and SIGINT stop it gracefully: no new claims, the runs it holds finish (or, past the
 grace period, are released for another worker), the memory writes drain, and it exits ``0``.
-A second signal releases the runs at once."""
+A second signal releases the runs at once. It logs JSON lines to stderr, or text when stderr is
+a terminal (``trellis.harness.logs``)."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import importlib
-import logging
 import sys
 
+from trellis.harness import logs
 from trellis.harness.harness import Harness
 
 USAGE = "python -m trellis.harness.worker module:harness_attribute [--concurrency N]"
@@ -52,7 +53,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if args.concurrency is not None and args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
-    logging.basicConfig(level=logging.INFO)
+    logs.configure(sys.stderr)  # JSON lines unless a terminal reads them
     harness = load(args.target)
     try:
         asyncio.run(serve(harness, concurrency=args.concurrency))

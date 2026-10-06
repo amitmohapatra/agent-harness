@@ -151,14 +151,31 @@ def _finished(event: RunEvent, base: dict[str, Any]) -> AGUIEvent:
     )
 
 
+#: What of an interrupt an AG-UI client gets under ``metadata``: the control and the
+#: options, several picks, the form's widget hints, the asker's own screen and its data, the
+#: data shown (inline or by reference), the call under approval, and whose it is by when.
+SHOWN: Final = (
+    "ui",
+    "options",
+    "multiple",
+    "ui_schema",
+    "component",
+    "props",
+    "payload",
+    "payload_ref",
+    "tool_call",
+    "assignee",
+    "deadline",
+)
+
+
 def interrupt_entry(raw: dict[str, Any]) -> InterruptEntry:
     """A contracts ``Interrupt`` (as ``awaiting()`` spells it) as the protocol's entry: the
     reason lower-cased, the question as the message, ``expects`` as the response schema,
-    the tool call's id, and the rest under ``metadata``."""
+    the tool call's id, and the rest under ``metadata`` — what a client renders, as it is
+    (:data:`SHOWN`)."""
     call = raw.get("tool_call") or {}
-    metadata = {
-        k: raw[k] for k in ("payload", "payload_ref", "tool_call") if raw.get(k) is not None
-    }
+    metadata = {k: raw[k] for k in SHOWN if raw.get(k) not in (None, [], False)}
     return InterruptEntry(
         id=str(raw.get("interrupt_id")),
         reason=str(raw.get("reason", "QUESTION")).lower(),

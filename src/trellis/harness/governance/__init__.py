@@ -254,8 +254,9 @@ def governed(
     ``hooks`` (``trellis.harness.hooks``) run around each call as around a harness tool call:
     ``before_tool`` first — a ``Deny`` raises :class:`Denied`, a ``Rewrite`` changes the
     arguments governance checks and the call gets, an ``Ask`` asks (``on_ask``) whatever
-    governance says —, ``on_error("tool", ...)`` when it fails, ``after_tool`` on its outcome
-    (the call returns that outcome's output)."""
+    governance says (the decision carries the ``Ask``'s ``assignee``, ``component`` and
+    ``props``) —, ``on_error("tool", ...)`` when it fails, ``after_tool`` on its outcome (the
+    call returns that outcome's output)."""
     tool = Tool(
         ToolSpec(name=name or fn.__name__, side_effects=side_effects),
         lambda args: invoked(fn, **args),
@@ -272,7 +273,12 @@ def governed(
         args = hooked.args
         decision = await governance.check(tool.name, args, side_effects=side_effects)
         if verdict is not None:
-            decision = decision.asking(verdict.question)
+            decision = decision.asking(
+                verdict.question,
+                assignee=verdict.assignee,
+                component=verdict.component,
+                props=verdict.props,
+            )
         if decision.asks:
             answer = await _settled(on_ask(decision))
             if answer is False:

@@ -40,7 +40,9 @@ ACTIONS: Final[dict[str, Action]] = {
 class Decision:
     """One call's action, and why (``reason``: what an approver reads). ``risk`` is the tool's
     as governance saw it (the catalog's over the tool's own) and ``rule`` its approval rule,
-    if any."""
+    if any. A call your code asks about (a ``before_tool`` hook's ``Ask``) also
+    says whose it is (``assignee``) and the screen it is reviewed on (``component``,
+    ``props``)."""
 
     tool: str
     args: Mapping[str, Any]
@@ -48,6 +50,9 @@ class Decision:
     reason: str
     risk: str
     rule: str | None = None
+    assignee: str | None = None
+    component: str | None = None
+    props: Mapping[str, Any] | None = None
 
     @property
     def asks(self) -> bool:
@@ -66,9 +71,30 @@ class Decision:
         """What a person is asked when the call waits for approval."""
         return f"Approve {self.tool}? {self.reason}"
 
-    def asking(self, reason: str) -> Decision:
-        """This call waiting for a person, for ``reason`` (a hook's ``Ask``)."""
-        return dataclasses.replace(self, action=Action.ASK, reason=reason)
+    def asking(
+        self,
+        reason: str,
+        *,
+        assignee: str | None = None,
+        component: str | None = None,
+        props: Mapping[str, Any] | None = None,
+    ) -> Decision:
+        """This call waiting for a person, for ``reason`` (a hook's ``Ask``: whose it is, and
+        the screen it is reviewed on)."""
+        return dataclasses.replace(
+            self,
+            action=Action.ASK,
+            reason=reason,
+            assignee=assignee,
+            component=component,
+            props=props,
+        )
+
+    def approved(self, why: str) -> Decision:
+        """This call approved without asking, for ``why`` (a reviewer approved the tool for
+        the rest of the run): it runs, announced unless it only reads."""
+        action = Action.RUN if self.risk == "read" else Action.ANNOUNCE
+        return dataclasses.replace(self, action=action, reason=why)
 
 
 def decide(tool: str, risk: str, rule: str | None, args: Mapping[str, Any]) -> Decision:

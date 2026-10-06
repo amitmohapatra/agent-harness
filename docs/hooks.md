@@ -11,7 +11,7 @@ need; every method does nothing by default.
 | `on_run_end(run, result)` | each attempt, once its outcome is recorded (`SUCCESS`, `PAUSED`, `ERROR`, `TIMEOUT`, `CANCELLED`) | observe (what it raises is logged) |
 | `before_model(call) -> ModelCall \| None` | before each model call | return a changed call (its `messages`, its `system`): the call made instead, where the framework allows it |
 | `after_model(call, reply)` | after each model call, with the framework's own reply | observe |
-| `before_tool(call) -> None \| Deny \| Ask \| Rewrite` | before each harness tool call, before governance | `Deny(reason)`: not run, the model reads `"<tool> was not run: <reason>"`; `Ask(question, assignee=None)`: a person approves it first, as a governance approval (approve, edit, reject, cancel); `Rewrite(args)`: run with these arguments (governance decides on them; the next hook sees them) |
+| `before_tool(call) -> None \| Deny \| Ask \| Rewrite` | before each harness tool call, before governance | `Deny(reason)`: not run, the model reads `"<tool> was not run: <reason>"`; `Ask(question, assignee=None, component=None, props=None)`: a person approves it first, as a governance approval (approve, edit, reject, cancel), on your own screen when `component` names one; `Rewrite(args)`: run with these arguments (governance decides on them; the next hook sees them) |
 | `after_tool(call, outcome) -> outcome` | after each harness tool call ran | return another outcome: what the model reads, journaled and recorded |
 | `on_error(stage, error)` | a run that failed or ran out of time (`"run"`), a model call that failed (`"model"`), a tool call that failed or timed out (`"tool"`) | observe (what it raises is logged) |
 

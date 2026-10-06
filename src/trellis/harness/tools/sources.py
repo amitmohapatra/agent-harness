@@ -124,7 +124,8 @@ def tool(
     same idempotency key (``trellis.current().idempotency_key``) has its effect once, so it is
     retried like a read and run again after a crash. ``timeout``: the most one call may take,
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
-    is dropped).
+    is dropped). A result that comes from outside the run (a person, another system) is an
+    ``ask`` in the function: ``return await trellis.current().ask(question, expects=...)``.
     """
     made = functools.partial(
         FunctionTool,

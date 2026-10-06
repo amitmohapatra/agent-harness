@@ -105,6 +105,18 @@ async with RunsClient() as runs:
   (`ValidationError`, `422`, saying why); `trellis.runs.answers.answer_problem(interrupt,
   resolution)` is that check, to run before sending. A tool call's edited arguments are yours
   to check against the tool's schema: the interrupt does not carry it.
+* The same question a wrapped agent's `ask` asks: `trellis.harness.asking.Question(question,
+  options=[Option(...)], multiple=, expects= | form=Model, ui_schema=, component=, props=,
+  assignee=, ...)`; `question.interrupt(tenant=, run_id=)` is the `Interrupt` to pause on, and
+  `question.answer(record.last_resolution)` the answer read back (into `form`)
+  ([interrupts.md](../interrupts.md#asking)). `trellis.testing.Reviewer(script).resolution(interrupt)`
+  answers it the same way every time, for tests.
+* `resolution.comment` keeps the reviewer's remark with the decision (in the resolution history,
+  and in `to_feedback`); `remember="run"` on an approval of a tool call is yours to keep (your
+  code sees the calls).
+* `runs.append_events(run_id, events)` while the run is `RUNNING` (your `RunEvent`s), and any
+  process reads them: `runs.events(run_id, after=)` or `runs.stream_events(run_id)`, as a
+  wrapped agent's are (Way 1 appends them by itself).
 * `deadline` and `escalate_to` on the `Interrupt`: when the deadline passes, agent-runs' ticker
   hands the question to `escalate_to` once, or ends the run `TIMEOUT`.
 * Something too large for the question (a table, a diff) is an artifact:

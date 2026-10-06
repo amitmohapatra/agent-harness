@@ -52,7 +52,19 @@ PROGRESS_EVENTS: Final = frozenset(
 )
 RESULT_ARTIFACT: Final = "result"
 #: What a caller is told about a pause: never the whole (unredacted) interrupt.
-ASKED_FIELDS: Final = ("interrupt_id", "reason", "ui", "options", "expects", "payload")
+ASKED_FIELDS: Final = (
+    "interrupt_id",
+    "reason",
+    "ui",
+    "options",
+    "multiple",
+    "expects",
+    "ui_schema",
+    "component",
+    "props",
+    "payload",
+    "tool_call",
+)
 
 
 @dataclass(frozen=True, slots=True)
