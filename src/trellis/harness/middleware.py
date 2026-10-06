@@ -259,6 +259,21 @@ def _ran(step: str, call_id: str) -> str:
     return content_key("ran", step, call_id)
 
 
+def _offered(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
+    """The request without the harness tools of the parts the run is without: a graph's are
+    bound when it is built (``h.tools``), and a part turned off afterwards (``h.wrap(without=)``,
+    a run's ``without=``) would still be offered (a call of it is refused: it is off)."""
+    if runtime is None:
+        return request
+    kept = [
+        t
+        for t in request.tools
+        if (feature := (getattr(t, "metadata", None) or {}).get(converted.FEATURE)) is None
+        or runtime.uses(feature)
+    ]
+    return request if len(kept) == len(request.tools) else request.override(tools=kept)
+
+
 def _named(tool: BaseTool | dict[str, Any]) -> str:
     if isinstance(tool, dict):
         return str((tool.get("function") or tool).get("name", ""))
@@ -306,7 +321,7 @@ class ModelHooks(AgentMiddleware):
     ) -> ModelResponse[Any]:
         runtime = current()
         hooks = running(*self.given)
-        request = _with_task(request)
+        request = _with_task(_offered(request, runtime))
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)

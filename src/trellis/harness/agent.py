@@ -687,7 +687,7 @@ class Agent:
         box = self._toolboxes.get(tenant)
         if box is None:
             box = self._toolboxes[tenant] = self.harness.toolbox(
-                self.sources, tenant=tenant, mcp=self.mcp
+                self.sources, tenant=tenant, mcp=self.mcp, without=self.without
             )
         return box
 

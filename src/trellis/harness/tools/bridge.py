@@ -36,6 +36,7 @@ take their turn (``Replay.exclusive``), and the journal's progress saves go one 
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Final
 
@@ -70,6 +71,16 @@ from trellis.harness.tools.base import (
 #: the outcome's ``error_class``.
 FIX_ARGUMENTS: Final = "Call it again with arguments that fit its schema."
 INVALID_ARGUMENTS: Final = "InvalidArguments"
+#: The ``TOOL_CALL_RESULT`` ``status`` of a call that asked a person, and ended with its
+#: attempt (the other calls cut short: ``cancelled``, ``timeout``; docs/observability.md).
+PAUSED: Final = "paused"
+CANCELLED: Final = ToolStatus.CANCELLED.value
+#: What that result's ``output`` says, by its ``status``.
+CUT: Final = {
+    PAUSED: "{tool} paused: the run waits on a person, and the call runs again when it resumes",
+    CANCELLED: "{tool} was cut short: the run was cancelled",
+    ToolStatus.TIMEOUT.value: "{tool} was cut short: the run ran out of time",
+}
 
 
 async def call(
@@ -146,9 +157,41 @@ async def _called(
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
         return rejected
+    _started(runtime, ref, tool.name, tool_call.args)
+    try:
+        outcome = await _ran(
+            runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key
+        )
+    except asyncio.CancelledError:
+        # the run was cancelled, or ran out of time, while the call was under way
+        out = runtime.cancelled is None and runtime.remaining() == 0
+        _cut(runtime, ref, tool.name, ToolStatus.TIMEOUT.value if out else CANCELLED)
+        raise
+    except Exception as cut:
+        # it asked a person (the harness's pause, or LangGraph's), or the run was cancelled
+        cancelled = isinstance(cut, RunCancelled)
+        if cancelled or is_pause_signal(cut):
+            _cut(runtime, ref, tool.name, CANCELLED if cancelled else PAUSED)
+        raise
+    _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)
+    await _record(runtime, tool_call, outcome, decision, key=key)
+    return outcome
+
+
+async def _ran(
+    runtime: Runtime,
+    tool: Tool,
+    tool_call: ToolCall,
+    decision: Decision,
+    *,
+    key: str,
+    ref: str,
+    idem: str,
+) -> ToolOutcome:
+    """The call, started on the stream, under way: saved as started (one that does more than
+    read), executed (``idem``: the key the tool hands its service), and its outcome as the
+    ``after_tool`` hooks leave it. A pause (it asked a person) or a cancellation propagates."""
     args = tool_call.args
-    runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool.name)
-    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)
     runtime.used_code_mode |= tool.feature == "code_mode"
     runtime.used.add(tool.name)
     reads = decision.risk == "read"
@@ -159,7 +202,7 @@ async def _called(
     started = time.perf_counter()
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
-        within = runtime.limited(tool.timeout, key=idempotency_key)
+        within = runtime.limited(tool.timeout, key=idem)
         outcome, error = await execute(tool, args, reads=reads, within=within)
         if isinstance(error, RunCancelled) or (error is not None and is_pause_signal(error)):
             if not reads:
@@ -171,7 +214,6 @@ async def _called(
         await hooks.failed("tool", error)
     outcome = await hooks.done(tool_call, outcome)
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
-    await _record(runtime, tool_call, outcome, decision, key=key, ref=ref)
     return outcome
 
 
@@ -204,10 +246,9 @@ async def _record(
     decision: Decision,
     *,
     key: str,
-    ref: str,
 ) -> None:
-    """A call that ran: journaled (or, failed, run again by a later attempt), saved, on the
-    stream, counted and recorded."""
+    """A call that ran (and ended on the stream): journaled (or, failed, run again by a later
+    attempt), saved, counted and recorded."""
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
         runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
     elif decision.risk != "read":
@@ -215,14 +256,6 @@ async def _record(
     runtime.replay.record_step(call, outcome)
     # a call with side effects is saved at once: a crash after it does not repeat it
     await runtime.progress(now=not decision.runs)
-    runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=call.tool)
-    runtime.events.tool(
-        RunEventType.TOOL_CALL_RESULT,
-        ref,
-        tool=call.tool,
-        status=outcome.status.value,
-        output=outcome.output,
-    )
     metrics.tool_called(call.tool, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
 
@@ -324,14 +357,44 @@ def _replayed(tool: str, recorded: Any) -> ToolOutcome:
 
 def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) -> None:
     """A call that did not execute still appears on the stream, so a UI sees every step."""
-    runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=call.tool)
-    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=call.args)
-    runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=call.tool)
-    runtime.events.tool(
-        RunEventType.TOOL_CALL_RESULT,
+    _started(runtime, ref, call.tool, call.args)
+    _ended(
+        runtime,
         ref,
-        tool=call.tool,
+        call.tool,
         status=outcome.status.value,
         cached=outcome.cached,
         output=outcome.output,
     )
+
+
+def _cut(runtime: Runtime, ref: str, tool: str, status: str) -> None:
+    """A call cut short — it asked a person (``paused``: it runs again on resume), the run was
+    ``cancelled``, or ran out of time (``timeout``) — still ends on the stream; it has no
+    output of its own: its result says why."""
+    _ended(runtime, ref, tool, status=status, output=CUT[status].format(tool=tool))
+
+
+def unended(runtime: Runtime, *, timed_out: bool) -> None:
+    """The calls still under way as the attempt ends, ended on its stream before it does
+    (:func:`_cut`): a framework that runs its tools in tasks of its own (an MCP server's
+    handler, Claude's) may stop them only later, and their end is not the stream's then."""
+    status = ToolStatus.TIMEOUT.value if timed_out else CANCELLED
+    for ref, tool in list(runtime.open_calls.items()):
+        _cut(runtime, ref, tool, PAUSED if runtime.pending is not None else status)
+
+
+def _started(runtime: Runtime, ref: str, tool: str, args: dict[str, Any]) -> None:
+    """A call's start on the stream: ``TOOL_CALL_START``, then its ``TOOL_CALL_ARGS``."""
+    runtime.open_calls[ref] = tool
+    runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool)
+    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)
+
+
+def _ended(runtime: Runtime, ref: str, tool: str, **result: Any) -> None:
+    """A call's end on the stream, once: ``TOOL_CALL_END``, then its ``TOOL_CALL_RESULT``
+    (nothing for one the attempt's end has ended already: :func:`unended`)."""
+    if runtime.open_calls.pop(ref, None) is None:
+        return
+    runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=tool)
+    runtime.events.tool(RunEventType.TOOL_CALL_RESULT, ref, tool=tool, **result)

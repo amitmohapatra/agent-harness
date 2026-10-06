@@ -55,7 +55,7 @@ async def test_reads_run_together_then_writes_one_at_a_time_in_the_models_order(
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     reads = [h for h in happened if h.startswith("price")]
-    assert reads[:2] == ["price a", "price b"]  # both reads began before either ended
+    assert sorted(reads[:2]) == ["price a", "price b"]  # both reads began before either ended
     writes = [h for h in happened if h.startswith("order")]
     assert writes == ["order b", "ordered b", "order c", "ordered c"]  # in the model's order
     assert told(model, 1) == [

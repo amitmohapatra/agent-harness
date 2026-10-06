@@ -56,6 +56,11 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "NotebookEdit": "write",
     "Bash": "irreversible",
 }
+#: The most one message from the CLI may be (the SDK's ``max_buffer_size``: 1 MiB unless the
+#: options say): a tool's result comes back from the CLI in one, and a run keeps results as large
+#: as an agent-runs artifact (50 MiB: a journal over a checkpoint's size travels as one) —
+#: escaped as JSON, twice that at most.
+CLI_MESSAGE_BYTES: Final = 2 * 50 * 1024 * 1024
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -221,7 +226,10 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
             "permission check as can_use_tool (the harness asks it after governance), not "
             "permission_prompt_tool_name"
         )
-    changes: dict[str, Any] = {"can_use_tool": _permission(options.can_use_tool)}
+    changes: dict[str, Any] = {
+        "can_use_tool": _permission(options.can_use_tool),
+        "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
+    }
     if context:
         changes["system_prompt"] = _with_context(options.system_prompt, context)
     if run.native_tools is not None:

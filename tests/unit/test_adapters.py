@@ -29,6 +29,7 @@ from trellis.contracts import (
 from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
 from trellis.harness.adapters.claude import (
+    CLI_MESSAGE_BYTES,
     ClaudeAdapter,
     ClaudeRunError,
     _with_context,
@@ -197,10 +198,12 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     items = [i async for i in adapter.stream(options, native, run)]
     assert items[:-1] == ["done"]
     assert isinstance(items[-1], Output) and items[-1].value == messages
-    # no context and no harness tools: the options as they were, the permission check added
+    # no context and no harness tools: the options as they were, the permission check and
+    # the room for a large tool result added
     [sent] = seen
     assert sent.can_use_tool is not None and sent.resume is None
-    assert dataclasses.replace(sent, can_use_tool=None) == options
+    assert sent.max_buffer_size == CLI_MESSAGE_BYTES
+    assert dataclasses.replace(sent, can_use_tool=None, max_buffer_size=None) == options
 
 
 # --------------------------------------------------------------------------- LangGraph

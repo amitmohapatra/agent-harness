@@ -32,6 +32,7 @@ from trellis.harness.evals import (
     grounding_score,
     judge,
     llm_judge,
+    verified,
 )
 
 LF = "https://lf.test"
@@ -265,6 +266,31 @@ async def test_a_callable_returning_its_memory_context_is_graded_for_grounding(
     [verified] = memory_service.named("verify")
     assert verified.body["answer"] == "France: Paris" and verified.scope["agent_id"] == "mine"
     assert report.run_name.startswith("Graph-")
+
+
+async def test_a_long_answer_is_grounded_on_the_head_verify_takes(
+    memory_service: FakeMemoryService,
+) -> None:
+    """``/v1/verify`` takes 8000 characters of an answer: of a longer one, the sentences that
+    end within them are checked (a run's sampled check and ``grounding()`` alike)."""
+    sentence = "The refund for order o1 was approved. "
+    long = sentence * 300
+
+    async def answers(input: str, agent: Runtime) -> str:
+        return long
+
+    settings = Settings(grounding_sample=1.0)
+    async with Harness(config=settings, memory=memory_service.client()) as h:
+        assert (await h.wrap(answers, id="long").run("refunds?", user="u")).answer == long
+        await h.writes.drain()
+        assert h.writes.failed == 0
+    [checked] = memory_service.named("verify")
+    head = checked.body["answer"]
+    assert head == verified(long) and len(head) <= 8000 < len(long)
+    assert head == (sentence * (8000 // len(sentence))).rstrip()
+    assert verified("x" * 9000) == "x" * 8000  # no sentence ends within: cut at the limit
+    assert verified("\n" + "x" * 9000) == "\n" + "x" * 7999  # nothing but a blank before it
+    assert verified(sentence) == sentence
 
 
 # --------------------------------------------------------------------------- offline, Langfuse

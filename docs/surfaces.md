@@ -123,9 +123,11 @@ carries the interrupt's `interrupt_id`, `reason`, `ui`, `options`, `multiple`, `
 cannot be read, or that does not fit the question or the tool
 ([interrupts.md](interrupts.md#answering)), keeps the task waiting and says why. A message to
 a task that has ended, or is still working, is refused (`InvalidRequestError`), and a new task
-never takes the id of an existing run. `CancelTask` cancels a working run, or ends a paused
-one `CANCELLED`; the terminal state is sent once, whichever of the stream and the cancel gets
-there first.
+never takes the id of an existing run. A new task is saved before its run starts, so a
+`CancelTask` (or `GetTask`) naming it finds it at once. `CancelTask` cancels the run as
+`agent.cancel` does: a working run stops (its tool call cut short) and ends `CANCELLED` with the
+reason `cancelled by <user> (A2A)`; a paused one ends `CANCELLED` at once; the terminal state is
+sent once, whichever of the stream and the cancel gets there first.
 
 Push notifications go only to public https addresses — no credentials or fragment in the URL,
 never `localhost` or a `.local`/`.internal`/`.localhost` name, every address the host resolves

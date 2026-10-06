@@ -151,6 +151,12 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
   elsewhere the query runs again from its prompt (above).
 * A `system_prompt` given as a prompt file is read by the CLI; the context has no place in it
   and is not added (use a string or a preset with `append`).
+* Large results: a tool's result comes back from the CLI in one message (as the model reads it),
+  which the SDK reads into a buffer of `max_buffer_size` bytes (1 MiB by default: a message
+  over it fails the run with `CLIJSONDecodeError`). The harness runs the options with 100 MiB unless they name their own —
+  room for any result a run keeps (an agent-runs artifact holds at most 50 MiB), escaped as
+  JSON. The result is not cut first: what the model reads of a long one is Claude Code's to
+  decide (only `ReAct` cuts long results itself, [react.md](react.md)).
 
 ## Run it
 
