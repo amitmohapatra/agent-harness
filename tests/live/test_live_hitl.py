@@ -18,6 +18,7 @@ import pytest
 
 import trellis
 from tests.live.conftest import MODEL, live_harness, needs_gateway, needs_memory, needs_runs
+from tests.live.support import Forcing
 from trellis import Ask, Hooks, ReAct, Runtime, tool
 from trellis.contracts import (
     InterruptDecision,
@@ -183,6 +184,9 @@ async def test_a_react_agent_through_the_gateway_reads_a_result_from_outside() -
             "the user gives, then reply with what it returned.",
             model=MODEL,
             max_steps=3,
+            # the call, then the answer from its result: a small model told to "always call"
+            # may call again after the result instead of replying
+            middleware=[Forcing(["sign", None])],
         )
         agent = h.wrap(target, id=f"live-signer-{uuid.uuid4().hex[:8]}", tools=[sign])
         paused = await agent.run("Get contract c-42 signed.", user="live-user")
