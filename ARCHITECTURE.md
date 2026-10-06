@@ -118,7 +118,8 @@ src/trellis/
                        mechanism (LangChain's are middleware.ModelHooks)
     middleware.py      LangChain v1 middleware for any create_agent or Deep Agents graph:
                        HarnessTools (the run's tools per model call, through the bridge),
-                       ModelHooks (hooks, chat span, model timeout, pinned prompt), StepLimit,
+                       ModelHooks (the without= parts' tools left out, hooks, chat span, model
+                       timeout, pinned prompt), StepLimit, ReadTools,
                        StallGuard, read_result, RunCheckpointer (the graph's checkpoint in
                        the run's journal)
     react.py           ReAct(...): a create_agent graph with the native middleware (context
