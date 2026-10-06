@@ -16,12 +16,15 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
 )
 
-Turn = str | tuple[str, dict[str, Any]] | list[tuple[str, dict[str, Any]]]
+#: a call's arguments: an object, or the text the model wrote (which may not be JSON)
+Args = dict[str, Any] | str
+Turn = str | tuple[str, Args] | list[tuple[str, Args]]
 
 
 class ScriptedModel(Model):
-    """Each call answers with the next turn: text, ``(tool, args)`` for a tool call, or a list
-    of them for several calls in one response."""
+    """Each call answers with the next turn: text, ``(tool, args)`` for a tool call (``args``
+    as text: the arguments exactly as written), or a list of them for several calls in one
+    response."""
 
     def __init__(self, turns: list[Turn]) -> None:
         self.turns = list(turns)
@@ -51,7 +54,7 @@ class ScriptedModel(Model):
                 call_id=f"call_{len(self.inputs)}" + (f"_{n}" if n else ""),
                 type="function_call",
                 name=name,
-                arguments=json.dumps(args),
+                arguments=args if isinstance(args, str) else json.dumps(args),
                 status="completed",
             )
             for n, (name, args) in enumerate(calls)

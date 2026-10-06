@@ -58,6 +58,13 @@ agent = h.wrap(triage, id="support")
 Their calls go through the harness like any other — governed by the catalog as it is at each
 call, approvals, journal, records.
 
+**Arguments that are not JSON.** The SDK hands a tool the arguments as the model wrote them. A
+harness tool called with text that is not a JSON object does not run: the model reads "`<tool>`
+was not run: its arguments are not valid JSON (...). Call it again with arguments that fit its
+schema." as the tool's output and the run goes on, as with the SDK's own `function_tool`s (and
+`ReAct`). An SDK `needs_approval` tool pauses before its arguments are read: the person sees
+them as written (`{"arguments": "<the text>"}`).
+
 **`Runner.run` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 Outside a harness run, a harness tool refuses to run (`ToolError`: "runs inside a Harness run"),
 which the SDK hands the model as the tool's error. `Runner.run`'s own arguments are
