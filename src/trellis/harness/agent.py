@@ -14,6 +14,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Collection,
+    Mapping,
     Sequence,
 )
 from datetime import UTC, datetime
@@ -45,7 +46,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline, sandbox, skills
 from trellis.harness.adapters import detect
-from trellis.harness.adapters.base import context_window
+from trellis.harness.adapters.base import FRAMEWORK_OPTIONS, context_window
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.adapters.react import ReAct
 from trellis.harness.clients.memory import RunMemory, context_budget
@@ -85,6 +86,9 @@ log = logging.getLogger("trellis.run")
 TOOL_HINTS_MIN: Final = 5
 #: Everything a run does with the memory service: without all of it, a run has no memory scope.
 MEMORY: Final = frozenset(COVERS["memory"])
+#: Whether this trellis-contracts' schedules carry a queue order (``ScheduleSpec.priority``,
+#: ``concurrency_key``: 0.6.1 on).
+SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.model_fields)
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
 #: What the model is told when memory has nothing for the question (``evidence_status``
@@ -118,6 +122,7 @@ class Agent:
         timeout: float | None = None,
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
+        framework_options: Mapping[str, Any] | None = None,
     ):
         if timeout is not None and timeout <= 0:
             raise ConfigurationError(f"{id}: a timeout is a number of seconds over 0")
@@ -134,6 +139,10 @@ class Agent:
         #: the hooks around its runs, model calls and tool calls: the harness's, then its own
         self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)
+        #: the framework's own options for every run's call (``h.wrap(framework_options=)``):
+        #: a run's own go over them
+        self.framework_options = dict(framework_options or {})
+        self.adapter.check_options(self.framework_options)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))
         given = [n for n, v in (("tools", tools), ("mcp", mcp), ("skills", skills)) if v]
@@ -177,12 +186,17 @@ class Agent:
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
+        framework_options: Mapping[str, Any] | None = None,
     ) -> Result:
         """Run to its end (or its first pause) and return how it ended. ``timeout``: the most
         working time the run may take, in seconds (not counting a pause; else the agent's,
         ``h.wrap(timeout=)``), and ``deadline`` when it must have ended; past either it ends
         ``TIMEOUT``. ``without``: what the harness does not do for this run, besides what the
-        agent's ``without`` says (``trellis.harness.features``)."""
+        agent's ``without`` says (``trellis.harness.features``). ``framework_options``: the
+        framework's own options for this run's call, over the agent's
+        (``h.wrap(framework_options=)``; each framework's page says where they go). The run
+        keeps the JSON ones with its record, for its later attempts (a resume); a value that
+        is not JSON (an object) is this call's only."""
         record = await self._opened(
             input,
             user=user,
@@ -191,6 +205,7 @@ class Agent:
             timeout=timeout,
             deadline=deadline,
             without=without,
+            framework_options=framework_options,
         )
         return await pipeline.attempt(self, record, input)
 
@@ -204,9 +219,11 @@ class Agent:
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
+        framework_options: Mapping[str, Any] | None = None,
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
-        early cancels the run. ``timeout``, ``deadline`` and ``without`` as for :meth:`run`."""
+        early cancels the run. ``timeout``, ``deadline``, ``without`` and
+        ``framework_options`` as for :meth:`run`."""
         record = await self._opened(
             input,
             user=user,
@@ -215,6 +232,7 @@ class Agent:
             timeout=timeout,
             deadline=deadline,
             without=without,
+            framework_options=framework_options,
         )
         async for event in self._events(
             lambda listen: pipeline.attempt(self, record, input, listener=listen)
@@ -231,12 +249,15 @@ class Agent:
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
+        framework_options: Mapping[str, Any] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
     ) -> RunHandle:
         """Queue the run for a worker (``h.worker([...]).run()``); it outlives this process.
-        ``timeout``, ``deadline`` and ``without`` as for :meth:`run`: the working time counts
-        across every worker that runs it, a crash included. ``priority`` (-1000 to 1000):
+        ``timeout``, ``deadline``, ``without`` and ``framework_options`` as for :meth:`run`: the
+        working time counts across every worker that runs it, a crash included; the framework
+        options are kept with the run, so they are JSON (an object goes on
+        ``h.wrap(framework_options=)``). ``priority`` (-1000 to 1000):
         a higher one is claimed first among the tenant's queued runs. ``concurrency_key``:
         runs sharing it run one at a time (the run store's limit) — by default the
         conversation's (``thread:<thread>``, when ``thread`` is given), so a second message to
@@ -245,6 +266,7 @@ class Agent:
             json.dumps(input)
         except (TypeError, ValueError) as exc:
             raise ConfigurationError("a queued run's input must be JSON") from exc
+        _kept_as_json(framework_options)
         start = await self._start(
             input,
             user=user,
@@ -253,6 +275,7 @@ class Agent:
             timeout=timeout,
             deadline=deadline,
             without=without,
+            framework_options=framework_options,
             priority=priority,
             concurrency_key=concurrency_key or (f"thread:{thread}" if thread else None),
         )
@@ -329,13 +352,29 @@ class Agent:
         on_behalf_of: str,
         tz: str = "UTC",
         tenant: str | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - each fired run's limit
+        without: Collection[Feature] = (),
+        framework_options: Mapping[str, Any] | None = None,
+        priority: int = 0,
+        concurrency_key: str | None = None,
     ) -> Schedule:
         """Queue a run of this agent on ``cron`` (evaluated in ``tz``), acting for
         ``on_behalf_of``. Workers run them. Idempotent: the same agent, person, cadence and
         input are one schedule (agent-runs answers the existing one), so a redeploy adds none.
-        Each fired run is bounded by the agent's ``timeout`` and records its ``version``.
-        Pause or resume it with ``trellis.runs.RunsClient``: ``schedules.update(id,
+        Each fired run records the agent's ``version`` and takes what :meth:`start` takes for
+        one run: ``timeout`` (else the agent's), ``without``, ``framework_options`` (JSON),
+        ``priority`` and ``concurrency_key`` — kept with the schedule (its ``metadata``, under
+        the keys a started run keeps them under) and copied into every run it fires. Pause or
+        resume it with ``trellis.runs.RunsClient``: ``schedules.update(id,
         ScheduleUpdate(enabled=…))``."""
+        _kept_as_json(framework_options)
+        queued = {"priority": priority or None, "concurrency_key": concurrency_key}
+        ordered = {name: value for name, value in queued.items() if value is not None}
+        if ordered and not SCHEDULES_QUEUE:
+            raise ConfigurationError(
+                f"schedule({', '.join(f'{n}=' for n in ordered)}) needs trellis-contracts "
+                "0.6.1 or later: this one's ScheduleSpec has no priority or concurrency_key"
+            )
         spec = ScheduleSpec(
             tenant_id=await self.harness.tenant(tenant),
             agent_id=self.id,
@@ -344,8 +383,10 @@ class Agent:
             timezone=tz,
             on_behalf_of=on_behalf_of,
             input=input,
-            timeout_seconds=self.timeout,
+            timeout_seconds=self.timeout if timeout is None else timeout,
             agent_version=self.version,
+            metadata=self._metadata(without, framework_options),
+            **ordered,
         )
         return await admitted(self.harness.runs.schedules.create(spec), "schedule")
 
@@ -785,6 +826,7 @@ class Agent:
             bundle_id=pushed.bundle_id if pushed is not None else None,
             context=runtime.context,
             memory=memory.ctx if memory is not None else None,
+            trajectory=list(runtime.replay.journal.trajectory),
         )
         services, events = self.evals, runtime.events
         for evaluator in judges:
@@ -833,10 +875,12 @@ class Agent:
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
+        framework_options: Mapping[str, Any] | None = None,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
-        from (``pipeline.attempt``). (Surfaces pass their own ``run_id`` when the protocol
-        names the run.)"""
+        from (``pipeline.attempt``) — with its framework options as given, where the stored
+        record keeps their JSON. (Surfaces pass their own ``run_id`` when the protocol names
+        the run.)"""
         start = await self._start(
             input,
             user=user,
@@ -847,9 +891,14 @@ class Agent:
             timeout=timeout,
             deadline=deadline,
             without=without,
+            framework_options=framework_options,
         )
         await admitted(self.harness.runs.start(start), "start")
-        return RunRecord.from_start(start)
+        record = RunRecord.from_start(start)
+        if not framework_options:
+            return record
+        given = {**record.metadata, FRAMEWORK_OPTIONS: dict(framework_options)}
+        return record.model_copy(update={"metadata": given})
 
     async def _start(
         self,
@@ -864,18 +913,19 @@ class Agent:
         deadline: datetime | None = None,
         parent: str | None = None,
         without: Collection[Feature] = (),
+        framework_options: Mapping[str, Any] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
         the agent's version, the run it is a sub-agent's run of (``parent``), what it is
-        ``without``, and how a queued run waits its turn (``priority``, ``concurrency_key``)
-        go with it when there are any."""
+        ``without``, its framework options that are JSON, and how a queued run waits its turn
+        (``priority``, ``concurrency_key``) go with it when there are any."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
-        turned_off = sorted(features(without))
+        metadata = self._metadata(without, framework_options)
         given = {
             "timeout_seconds": self.timeout if timeout is None else timeout,
             "deadline": deadline,
@@ -891,9 +941,25 @@ class Agent:
             thread_id=thread or run_id,  # a run with no conversation is its own thread
             user_id=user,
             input=pipeline.jsonable(input) if record_input else input,
-            metadata={WITHOUT: turned_off} if turned_off else {},
+            metadata=metadata,
             **{name: value for name, value in given.items() if value is not None},
         )
+
+    def _metadata(
+        self, without: Collection[Feature], framework_options: Mapping[str, Any] | None
+    ) -> dict[str, Any]:
+        """What a run keeps of its own choices (``RunStart.metadata``; a schedule's, copied
+        into each run it fires): what it is ``without``, and its framework options — checked
+        against the adapter, over the agent's — that are JSON."""
+        own = dict(framework_options or {})
+        if own:
+            self.adapter.check_options({**self.framework_options, **own})
+        turned_off = sorted(features(without))
+        metadata: dict[str, Any] = {WITHOUT: turned_off} if turned_off else {}
+        kept = {key: value for key, value in own.items() if _json(value)}
+        if kept:
+            metadata[FRAMEWORK_OPTIONS] = kept
+        return metadata
 
 
 class Throttled(HarnessError):
@@ -958,6 +1024,26 @@ def graded(answer: Any) -> str:
     if answer is None or isinstance(answer, str):
         return answer or ""
     return json.dumps(pipeline.jsonable(answer), default=str)
+
+
+def _kept_as_json(framework_options: Mapping[str, Any] | None) -> None:
+    """A queued or scheduled run keeps its framework options with it: each is JSON."""
+    objects = [key for key, value in (framework_options or {}).items() if not _json(value)]
+    if objects:
+        raise ConfigurationError(
+            f"a queued run keeps its framework_options as JSON, and "
+            f"{', '.join(map(repr, objects))} is not: give it on h.wrap(framework_options=), "
+            "which every worker's agent has"
+        )
+
+
+def _json(value: Any) -> bool:
+    """Whether ``value`` is JSON (what a run's record keeps of it)."""
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _redacted(call: ToolCall, outcome: ToolOutcome) -> tuple[ToolCall, ToolOutcome]:

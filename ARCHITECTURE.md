@@ -320,7 +320,7 @@ the bridge runs is.
 
 ## The adapter contract
 
-Four functions per framework, nothing else (`adapters/base.py`):
+Four functions per framework, and one check (`adapters/base.py`):
 
 * `prepare_input(target, input, context)` — the framework's input, the memory context as a
   system message (or appended to the system prompt);
@@ -330,7 +330,12 @@ Four functions per framework, nothing else (`adapters/base.py`):
   reported itself (LangGraph's `interrupt`, an OpenAI Agents `needs_approval`);
 * `resume_input(target, native_input, pending, resolution)` — what continues a pause:
   `Command(resume=...)` for a checkpointed graph, the SDK's `RunState` for its approvals,
-  otherwise the original input (a re-run).
+  otherwise the original input (a re-run);
+* `check_options(options)` — refuses `framework_options=` its run call cannot take (a key it
+  does not know, one the harness sets itself; a function and `ReAct` take none), at wrap and
+  call time. The options themselves reach `invoke`/`stream` as `runtime.framework_options` — the
+  agent's with the run's own over them, kept with the run's record — and go to the framework's
+  run call unchanged ([configuration.md](docs/configuration.md#the-frameworks-own-run-options)).
 
 Per-run harness tools reach the adapter already converted (`tools/convert/<format>.py`). An
 adapter with fixed tools (a compiled graph) refuses `tools=` at wrap time; its tools come from

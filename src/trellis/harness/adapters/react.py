@@ -64,7 +64,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Protocol
 
@@ -78,6 +78,7 @@ from trellis.harness.adapters.base import (
     Output,
     ToolFormat,
     context_window,
+    no_options,
 )
 from trellis.harness.clients.bifrost import PromptPin
 from trellis.harness.hooks import ModelCall
@@ -285,6 +286,9 @@ class ReActAdapter:
         resolution: InterruptResolution,
     ) -> Any:
         return native_input
+
+    def check_options(self, options: Mapping[str, Any]) -> None:
+        no_options(options, "ReAct", "the harness runs its loop; set its model's on ReAct(...)")
 
 
 @dataclass(slots=True)

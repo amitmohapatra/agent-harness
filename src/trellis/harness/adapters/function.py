@@ -8,11 +8,18 @@ message list); tools are called with ``await agent.tools.call(name, **args)``; a
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, ClassVar
 
 from trellis.contracts import InterruptResolution
-from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
+from trellis.harness.adapters.base import (
+    Extracted,
+    Invocation,
+    Narrowing,
+    Output,
+    ToolFormat,
+    no_options,
+)
 from trellis.harness.journal import Pending
 
 
@@ -50,3 +57,6 @@ class FunctionAdapter:
         resolution: InterruptResolution,
     ) -> Any:
         return native_input
+
+    def check_options(self, options: Mapping[str, Any]) -> None:
+        no_options(options, "a function target", "it reads what it needs from its input")

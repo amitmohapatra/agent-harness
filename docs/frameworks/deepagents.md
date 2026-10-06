@@ -82,6 +82,10 @@ needed) is the graph's own question: a dict `value` carries `options` (several p
 `Interrupt` as `ask(...)` does, the answer is checked the same way, and the tool gets it as
 given ([the table](langgraph.md#approvals-and-pauses)).
 
+A Deep Agent is a graph: `framework_options=` goes into its run's config as for any graph
+(`recursion_limit`, `configurable` keys; the harness's `thread_id` wins —
+[langgraph.md](langgraph.md#the-graphs-own-run-options)).
+
 ## Limits
 
 * Deep Agents' built-in tools (files, `execute`, `task`, `write_todos`) are not the harness's

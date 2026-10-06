@@ -130,6 +130,19 @@ answered by the checkpointer: resumed where it does not hold them, the run fails
 those may be resumed in another process, give every process a shared, durable checkpointer
 (`langgraph-checkpoint-postgres`'s `AsyncPostgresSaver`).
 
+## The graph's own run options
+
+`framework_options=` (on `h.wrap`, or a run's own on `run`/`stream`/`start`) goes into the config
+the harness calls `ainvoke`/`astream` with: `recursion_limit`, `configurable` keys your nodes
+read, `tags`, `metadata`, `callbacks`. The run's thread is the harness's: its
+`configurable.thread_id` wins over one given. Another key is refused when you wrap or run
+([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+
+```python
+agent = h.wrap(graph, id="triage", framework_options={"recursion_limit": 40})
+await agent.run(question, user="ada", framework_options={"configurable": {"region": "eu"}})
+```
+
 ## Streaming
 
 `agent.stream(...)` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`, text deltas
