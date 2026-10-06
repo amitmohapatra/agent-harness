@@ -4,7 +4,8 @@ unset or unreachable is skipped, never failed.
 
 Two variables of its own pick what it runs against: ``TRELLIS_LIVE_MODEL``, the gateway model
 its agents use (default :data:`DEFAULT_MODEL`), and ``TRELLIS_LIVE_MCP_URL``, the wiki MCP
-server (default the public DeepWiki, :data:`DEEPWIKI_URL`).
+server (default the public DeepWiki, :data:`DEEPWIKI_URL`). The sandbox tests need only the
+Docker daemon (its socket), and make their sandboxes of ``SANDBOX_IMAGE`` when it is set.
 
 The gateway gets MCP clients of that server for the session, under :data:`WIKIS` names, and
 virtual keys that allow some of their tools: an agent's MCP tools are exactly what its key
@@ -32,6 +33,7 @@ from bifrost_sdk.admin import Admin
 
 from trellis import Harness, Settings
 from trellis.harness.evals import Evaluator
+from trellis.harness.sandbox.docker import DOCKER_SOCKET
 from trellis.memory import MemoryClient
 
 #: How long a memory call may take here (a deployment keeps the SDK's 10 s).
@@ -64,6 +66,15 @@ def _reachable(url: str | None, path: str) -> bool:
         return False
 
 
+def _docker_up() -> bool:
+    """Whether the Docker daemon answers on its socket (the sandbox tests' provider)."""
+    try:
+        with httpx.Client(transport=httpx.HTTPTransport(uds=DOCKER_SOCKET)) as client:
+            return client.get("http://docker/_ping", timeout=3.0).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
 BIFROST_URL = _env("BIFROST_URL")
 MODEL = _env("TRELLIS_LIVE_MODEL") or DEFAULT_MODEL
 MCP_URL = _env("TRELLIS_LIVE_MCP_URL") or DEEPWIKI_URL
@@ -78,6 +89,9 @@ RUNS_UP = _reachable(RUNS_URL, "/health/live")
 needs_gateway = pytest.mark.skipif(not GATEWAY_UP, reason="needs a Bifrost gateway (BIFROST_URL)")
 needs_memory = pytest.mark.skipif(not MEMORY_UP, reason="needs the memory service (MEMORY_URL)")
 needs_runs = pytest.mark.skipif(not RUNS_UP, reason="needs agent-runs (RUNS_URL)")
+needs_docker = pytest.mark.skipif(
+    not _docker_up(), reason=f"needs a Docker daemon ({DOCKER_SOCKET})"
+)
 
 
 def settings(**changes: object) -> Settings:

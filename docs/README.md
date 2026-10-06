@@ -21,7 +21,9 @@ for you.
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
 | [gateway.md](gateway.md) | the Bifrost gateway: stored prompts (`prompt=`), skills (`skills=`), Virtual MCPs (`mcp=`), who an MCP call is for, what the gateway never does for a run (no injected tools, no Agent Mode, Code Mode through the bridge), frameworks' own MCP clients |
 | [subagents.md](subagents.md) | `agent.as_tool()`: an agent as another agent's tool — child runs, their pauses answered through the parent, crashes, cancel, time |
+| [sandbox.md](sandbox.md) | `sandbox()`: commands and files in a sandbox of the run's own (Docker; how E2B, Daytona, Modal plug in) — its life, pauses, crashes, timeouts, governance; the frameworks' own sandboxes or ours |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
+| [hooks.md](hooks.md) | your code around runs, model calls and tool calls: guardrails (deny, ask, rewrite), redaction of your own, audit — where each hook fires on each adapter |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts |
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, schedules, the inbox, the agent-runs wire |
@@ -43,6 +45,7 @@ retries, tenancy), and how it relates to Way 1.
 | [blocks/governance.md](blocks/governance.md) | `trellis.harness.governance`: `Governance.check` and `governed` on your own tools, `publish`, `decided` |
 | [blocks/evaluation.md](blocks/evaluation.md) | `trellis.harness.evals`: `evaluate` on any async function, `judge` on one run, `EvalServices.from_env` |
 | [blocks/a2a.md](blocks/a2a.md) | `trellis.harness.a2a.remote`: call any A2A agent (serving is Way 1) |
+| [sandbox.md](sandbox.md#way-2-without-a-harness) | `trellis.harness.sandbox`: a provider (`DockerSandbox`) and its sandboxes, your commands governed with `governed` |
 | [blocks/contracts.md](blocks/contracts.md) | `trellis.contracts`: which records each block takes and returns, and why they are shared |
 
 **Recipes**, end to end with the framework's own pause and state: an unmodified agent with
@@ -79,11 +82,11 @@ h = Harness(runs=runs, memory=False, governance=Governance())
 agent = h.wrap(ReAct(system="You handle refunds.", model="provider/model"), id="refunds")
 ```
 
-`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, judges=())`:
-`runs` a `RunStore` (`trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or
+`Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, judges=(),
+hooks=())`: `runs` a `RunStore` (`trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or
 your own with the same calls), `memory` a `trellis.memory.MemoryClient`, `gateway` a
 `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`, `governance` a `Governance` (used
-for every tenant). Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
+for every tenant); `hooks` the [hooks](hooks.md) of every agent it wraps. Runnable: [examples/react_with_blocks.py](../examples/react_with_blocks.py)
 (its own run store, its own scheduler loop, governance, no memory).
 
 ## Mixing both ways
@@ -173,9 +176,11 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | an HTTP API with an OpenAPI document | `openapi(spec, only=[...])` | the method (GET read … DELETE irreversible), and the catalog |
 | another agent served elsewhere | `a2a(url)` | `write`, and the catalog |
 | another agent this harness wraps (a sub-agent) | `agent.as_tool()` in `tools=[...]` or `h.tools(...)` ([subagents.md](subagents.md)) | `read` when every tool it declares reads, else `write`; and the catalog |
+| code the model writes and runs, away from the host | `sandbox()` in `tools=[...]` or `h.tools(...)`, `SANDBOX=docker` ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` write, `sandbox_read` reads; and the catalog |
 | shared across agents, owned by a platform team | an MCP server in Bifrost, allowed on the agent's virtual key — nothing in code | the server's annotations, and the catalog |
 | the agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write |
-| a framework's own tool (`function_tool`, Deep Agents' file tools, Claude's `Bash`) | as the framework does | the framework's permissions, not the harness's |
+| a framework's own tool (`function_tool`, Deep Agents' file tools) | as the framework does | the framework's permissions, not the harness's |
+| Claude Code's built-in tools (`Bash`, `Write`, `Read`...) | as the CLI does | governance by risk (`Bash` asks, writes announced, reads run) and your hooks, through the SDK's permission callback; then your own `can_use_tool` |
 
 ### Approvals and pauses
 
@@ -185,6 +190,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | some calls approved, decided by an administrator without a deploy | the catalog's `approve_when` (`amount > 10000`) |
 | the framework's own gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`) | keep it: it becomes the same approval — gate each tool in one place |
 | the same decisions for tools of an agent you do not wrap | `Governance.from_env(...)` with `check` or `governed(...)` ([blocks/governance.md](blocks/governance.md)) |
+| a rule only your code knows: deny a call, rewrite its arguments, ask someone | a hook: `before_tool` returning `Deny`, `Rewrite` or `Ask` ([hooks.md](hooks.md)) |
 | a question, a choice, a table or diff to review | `trellis.current().ask(...)` (or a graph's own `interrupt()`) |
 | someone else to answer, by a deadline | `ask(..., assignee="role:…", deadline=..., escalate_to=...)` and `h.inbox(...)` |
 | to answer | `agent.resume(id, "approve" \| "reject" \| "edit" \| "answer" \| "cancel", answer=..., reviewer=...)` |
@@ -211,6 +217,36 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | quality on live traffic | `Harness(judges=[...])`, sampled by `TRELLIS_JUDGE_SAMPLE` |
 | the same for an agent you do not wrap | `evaluate(my_agent, dataset, [...])` and `judge(case, [...], services=...)` ([blocks/evaluation.md](blocks/evaluation.md)) |
 
+### What is on, and how to turn it off
+
+Everything the deployment configures is on for every agent — nothing to set. One switch turns
+parts of it off: `without={...}`.
+
+```python
+agent = h.wrap(graph, id="triage", without={"judges"})  # every run of this agent
+await agent.run(question, user="ada", without={"memory"})  # this run: no memory at all
+```
+
+| Feature (`without=` name) | On when | What it is | Turned off |
+|---|---|---|---|
+| `memory` | `MEMORY_URL` | `memory_push`, `memory_pull` and `records` together | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
+| `memory_push` | `MEMORY_URL` | the memory context pushed into the framework's input (and the tool hints with it) | no context, no `/v1/context` call |
+| `memory_pull` | `MEMORY_URL` | the memory tools (`memory_search`, `tool_search`, ...) | not offered (a graph's, bound at build, answer that they are off) |
+| `records` | `MEMORY_URL` | the transcript, every tool call, the outcome, decisions as feedback | nothing written to memory about the run |
+| `hints` | `MEMORY_URL`, from 5 tools | the tool hints narrow the tools the model is offered | every tool offered |
+| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_GROUNDING_SAMPLE`) | the answer checked against the context it was given | not checked |
+| `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_JUDGE_SAMPLE`) | the online judges | not judged |
+| `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools (`mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
+| `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
+| `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
+
+`without=` on `h.wrap` turns them off for every run of the agent; on `agent.run`, `stream` and
+`start` for that run, on top of the agent's — kept with the run's record, so its resume, the
+worker that continues it and its sub-agents' runs are without them too. A name not in the table
+is refused (`ConfigurationError`, naming them). Not switchable, because they are automatic and
+deterministic: governance and approvals, the journal and replay, retries and time limits,
+tracing and redaction, the run record.
+
 ### What each environment variable turns on
 
 | Variable | Turns on |
@@ -224,5 +260,6 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | `TRELLIS_AGENT_VERSION` | the agents' version, recorded with every run they start |
 | `TRELLIS_GROUNDING_SAMPLE` | the share of runs checked for grounding |
 | `TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`, `TRELLIS_JUDGE_SAMPLE` | the judge's model, its budget, and the share of runs online judges score |
+| `SANDBOX` (+ `SANDBOX_IMAGE`) | the sandboxes `sandbox()` makes when given no provider: `docker`, of that image |
 
 Details: [configuration.md](configuration.md).

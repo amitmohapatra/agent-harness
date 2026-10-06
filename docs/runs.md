@@ -74,8 +74,10 @@ as its next attempt for another worker — no waiting for the lease to lapse, an
 call with side effects it completed). A second signal releases the runs at once. Then the
 memory write queue drains (at most 10 s; what is left is spooled or counted lost —
 [memory.md](memory.md)) and the process exits `0`. Give the container at least 40 s to stop
-(e.g. a termination grace period of 45 s). Cancelling `worker.run()` instead cancels the runs
-it holds: they end `CANCELLED`.
+(e.g. a termination grace period of 45 s). Cancelling `worker.run()` instead stops the runs
+it holds without writing anything: their leases lapse and agent-runs queues them again. A
+worker's run ends `CANCELLED` only when someone asked (`agent.cancel`: its heartbeat says
+`cancel_requested`), and `TIMEOUT` when its working time is used up — the worker writes that.
 
 A worker runs any target. Build it the same way in every worker process (at import, in the
 module the worker loads); a LangGraph graph's own `interrupt()` (or HITL middleware) pause needs a

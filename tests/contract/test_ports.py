@@ -42,15 +42,21 @@ async def test_the_harness_runs_on_agent_runs_when_it_is_configured() -> None:
 def test_the_public_api_is_the_documented_one() -> None:
     assert trellis.__all__ == [
         "Agent",
+        "Ask",
+        "Deny",
         "Harness",
+        "Hooks",
+        "ModelCall",
         "ReAct",
         "Result",
+        "Rewrite",
         "RunHandle",
         "Runtime",
         "Settings",
         "a2a",
         "current",
         "openapi",
+        "sandbox",
         "skills",
         "tool",
     ]

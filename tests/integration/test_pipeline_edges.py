@@ -111,7 +111,7 @@ class Script:
         async def run(args: dict[str, Any]) -> Any:
             return "printed"
 
-        return [Tool(spec, run, code_mode=True)]
+        return [Tool(spec, run, feature="code_mode")]
 
 
 class LoggingGateway:
@@ -232,7 +232,7 @@ async def test_a_handle_on_a_run_that_does_not_exist_says_so(harness: Harness) -
 @pytest.mark.parametrize(
     ("use", "message"),
     [
-        ("memory", "memory is off in this deployment"),
+        ("memory", "memory is off for this run: set MEMORY_URL"),
         ("hints", "tool hints come from the memory service"),
         ("unknown tool", "no tool 'nope' in this run"),
     ],

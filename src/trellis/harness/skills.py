@@ -76,7 +76,7 @@ class Skills:
             },
             side_effects="read",
         )
-        return [Tool(load, _load), Tool(read, _read)]
+        return [Tool(load, _load, feature="skills"), Tool(read, _read, feature="skills")]
 
 
 def skills(*refs: str) -> Skills:

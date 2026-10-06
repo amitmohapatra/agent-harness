@@ -7,7 +7,7 @@ import dataclasses
 import functools
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
@@ -29,7 +29,7 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import pipeline, skills
+from trellis.harness import pipeline, sandbox, skills
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
@@ -44,6 +44,8 @@ from trellis.harness.evals import (
     name_of,
     sampled,
 )
+from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
+from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.redaction import DEFAULT as REDACTOR
@@ -66,6 +68,8 @@ log = logging.getLogger("trellis.run")
 
 #: From this many tools, the tool hints are asked for and narrow what the model is offered.
 TOOL_HINTS_MIN: Final = 5
+#: Everything a run does with the memory service: without all of it, a run has no memory scope.
+MEMORY: Final = frozenset(COVERS["memory"])
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
 #: What the model is told when memory has nothing for the question (``evidence_status``
@@ -97,6 +101,8 @@ class Agent:
         mcp: Sequence[str] | None = None,
         skills: Sequence[str] = (),
         timeout: float | None = None,
+        without: Collection[Feature] = (),
+        hooks: Sequence[Hooks] = (),
     ):
         if timeout is not None and timeout <= 0:
             raise ConfigurationError(f"{id}: a timeout is a number of seconds over 0")
@@ -108,6 +114,10 @@ class Agent:
         #: the most working time one of its runs may take, in seconds, when the run names
         #: none (``None``: no limit)
         self.timeout = timeout
+        #: what the harness does not do for any of its runs (``h.wrap(without=)``)
+        self.without = features(without)
+        #: the hooks around its runs, model calls and tool calls: the harness's, then its own
+        self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))
@@ -147,13 +157,21 @@ class Agent:
         tenant: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
+        without: Collection[Feature] = (),
     ) -> Result:
         """Run to its end (or its first pause) and return how it ended. ``timeout``: the most
         working time the run may take, in seconds (not counting a pause; else the agent's,
         ``h.wrap(timeout=)``), and ``deadline`` when it must have ended; past either it ends
-        ``TIMEOUT``."""
+        ``TIMEOUT``. ``without``: what the harness does not do for this run, besides what the
+        agent's ``without`` says (``trellis.harness.features``)."""
         record = await self._opened(
-            input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
+            input,
+            user=user,
+            thread=thread,
+            tenant=tenant,
+            timeout=timeout,
+            deadline=deadline,
+            without=without,
         )
         return await pipeline.attempt(self, record, input)
 
@@ -166,11 +184,18 @@ class Agent:
         tenant: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
+        without: Collection[Feature] = (),
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
-        early cancels the run. ``timeout`` and ``deadline`` as for :meth:`run`."""
+        early cancels the run. ``timeout``, ``deadline`` and ``without`` as for :meth:`run`."""
         record = await self._opened(
-            input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
+            input,
+            user=user,
+            thread=thread,
+            tenant=tenant,
+            timeout=timeout,
+            deadline=deadline,
+            without=without,
         )
         async for event in self._events(
             lambda listen: pipeline.attempt(self, record, input, listener=listen)
@@ -186,16 +211,23 @@ class Agent:
         tenant: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
+        without: Collection[Feature] = (),
     ) -> RunHandle:
         """Queue the run for a worker (``h.worker([...]).run()``); it outlives this process.
-        ``timeout`` and ``deadline`` as for :meth:`run`: the working time counts across every
-        worker that runs it, a crash included."""
+        ``timeout``, ``deadline`` and ``without`` as for :meth:`run`: the working time counts
+        across every worker that runs it, a crash included."""
         try:
             json.dumps(input)
         except (TypeError, ValueError) as exc:
             raise ConfigurationError("a queued run's input must be JSON") from exc
         start = await self._start(
-            input, user=user, thread=thread, tenant=tenant, timeout=timeout, deadline=deadline
+            input,
+            user=user,
+            thread=thread,
+            tenant=tenant,
+            timeout=timeout,
+            deadline=deadline,
+            without=without,
         )
         await self.harness.runs.start(start, queue=True)
         return RunHandle(self, start.run_id, tenant=start.tenant_id)
@@ -211,8 +243,10 @@ class Agent:
         ``tenant`` is the run's, named by a platform key only."""
         tenant = await self.harness.tenant(tenant)
         runs = self.harness.runs
-        record = await runs.cancel(run_id, reason=reason, tenant=tenant)
         runtime = self.running.get(run_id)
+        # read first: its ending clears the checkpoint, which names the run's sandbox
+        held = await runs.get(run_id, tenant=tenant) if runtime is None else None
+        record = await runs.cancel(run_id, reason=reason, tenant=tenant)
         if runtime is not None:
             runtime.cancelled = reason or "cancelled"
             assert runtime.running_in is not None
@@ -221,6 +255,9 @@ class Agent:
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
+        elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
+            # (a journal kept as a run artifact is not read for it: the reaper deletes it)
+            await sandbox.ended(self, (held.checkpoint or {}).get("sandbox"), run_id)
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
 
@@ -380,6 +417,7 @@ class Agent:
                 reason=reason_of(resolution),
                 tenant=record.tenant_id,
             )
+            await sandbox.ended(self, journal.sandbox, record.run_id)
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
@@ -407,8 +445,13 @@ class Agent:
         # the store refuses (answered already, a stale interrupt) raises here, before
         # anything is sent, so approval patterns never learn from a decision that never was.
         resumed = await runs.resume(resolution, tenant=record.tenant_id)
-        run_memory = await self.run_memory(identity)
-        if feedback is not None and run_memory is not None and await self.harness.writes_memory():
+        without = run_without(record)
+        run_memory = await self.run_memory(identity, without)
+        if (
+            feedback is not None
+            and run_memory is not None
+            and "records" not in without | self.without
+        ):
             await self.harness.writes.submit(
                 "memory.feedback",
                 lambda: run_memory.feedback(feedback),
@@ -434,9 +477,7 @@ class Agent:
             record.input,
             journal=await Journal.read(record.checkpoint, artifacts, tenant=record.tenant_id),
             resolution=record.last_resolution,
-            worker_id=job.worker_id,
-            lease_seconds=job.lease_seconds,
-            remaining=job.remaining_seconds,
+            job=job,
         )
 
     async def _events(
@@ -458,23 +499,33 @@ class Agent:
                 task.cancel()
 
     # ------------------------------------------------------------------ used by the pipeline
-    async def run_memory(self, identity: Identity) -> RunMemory | None:
+    async def run_memory(
+        self, identity: Identity, without: frozenset[Feature] = frozenset()
+    ) -> RunMemory | None:
+        """The memory service in the run's scope — none with memory off, for the deployment or
+        for the run (``without=memory``: no push, no pull, no records)."""
         memory = self.harness.memory
-        if memory is None:
+        if memory is None or without | self.without >= MEMORY:
             return None
         await self.harness.registered(memory, identity)
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
-        tools — none, with a warning, when the memory service cannot list them."""
-        tools = await self._toolbox(runtime.tenant).tools()
-        if runtime.run_memory is not None and not self.adapter.fixed_tools:
+        tools — none, with a warning, when the memory service cannot list them — less the
+        tools of what the run is without (``without=``: its MCP tools, its skills...)."""
+        box = self._toolbox(runtime.tenant)
+        tools = await box.tools(code_mode=runtime.uses("code_mode"))
+        if (
+            runtime.run_memory is not None
+            and not self.adapter.fixed_tools
+            and runtime.uses("memory_pull")
+        ):
             try:
                 tools.extend(await self.harness.memory_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
-        return tools
+        return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
 
     def _toolbox(self, tenant: str) -> Toolbox:
         box = self._toolboxes.get(tenant)
@@ -489,7 +540,8 @@ class Agent:
         context (:meth:`remembered`), then the section of the skills the run pinned
         (``skills.pin``). The memory context, when there is one, is returned."""
         pushed = await self.remembered(runtime)
-        await skills.pin(runtime, self.sources)
+        if runtime.uses("skills"):
+            await skills.pin(runtime, self.sources)
         return pushed
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
@@ -497,10 +549,10 @@ class Agent:
         toolbox is large enough, whose candidates narrow the tools the model is offered. A
         failure is a warning."""
         memory = runtime.run_memory
-        if memory is None or not runtime.task:
+        if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
         own = runtime.tool_names()
-        hinted = len(own) >= TOOL_HINTS_MIN
+        hinted = len(own) >= TOOL_HINTS_MIN and runtime.uses("hints")
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
@@ -529,7 +581,7 @@ class Agent:
 
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
-        if memory is not None and runtime.writes_memory and call.tool not in _pull(self):
+        if memory is not None and runtime.uses("records") and call.tool not in _pull(self):
             call, outcome = _redacted(call, outcome)
             await self.harness.writes.submit(
                 "memory.record_tool",
@@ -545,7 +597,7 @@ class Agent:
     async def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
         """The attempt's transcript, whether the run succeeded, paused or failed."""
         memory = runtime.run_memory
-        if memory is not None and runtime.writes_memory and messages:
+        if memory is not None and runtime.uses("records") and messages:
             run_id, attempt = runtime.run_id, runtime.attempt
             await self.harness.writes.submit(
                 "memory.transcript",
@@ -564,7 +616,7 @@ class Agent:
         its outcome (the judge's and a person's override it in the memory service)."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
-        if memory is None or not runtime.writes_memory or verdict is None:
+        if memory is None or not runtime.uses("records") or verdict is None:
             return
         feedback = {
             "verdict": verdict,
@@ -589,6 +641,7 @@ class Agent:
             memory is None
             or pushed is None
             or not text
+            or not runtime.uses("grounding")
             or not sampled(runtime.run_id, self.harness.settings.grounding_sample)
         ):
             return
@@ -610,7 +663,7 @@ class Agent:
         judges = self.harness.judges
         rate = self.harness.judge_sample
         text = graded(answer)
-        if not judges or not text:
+        if not judges or not text or not runtime.uses("judges"):
             return
         if not sampled(f"{runtime.run_id}:judges", rate):
             return
@@ -637,7 +690,7 @@ class Agent:
 
     async def imported_code_mode_calls(self, runtime: Runtime) -> None:
         memory, gateway = runtime.run_memory, self.harness.gateway
-        if memory is None or gateway is None or not runtime.writes_memory:
+        if memory is None or gateway is None or not runtime.uses("records"):
             return
         run_id, since, task = runtime.run_id, runtime.started_at or datetime.now(UTC), runtime.task
 
@@ -670,6 +723,7 @@ class Agent:
         run_id: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
+        without: Collection[Feature] = (),
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``). (Surfaces pass their own ``run_id`` when the protocol
@@ -683,6 +737,7 @@ class Agent:
             record_input=True,
             timeout=timeout,
             deadline=deadline,
+            without=without,
         )
         await self.harness.runs.start(start)
         return RunRecord.from_start(start)
@@ -699,14 +754,16 @@ class Agent:
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
         parent: str | None = None,
+        without: Collection[Feature] = (),
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
-        the agent's version and the run it is a sub-agent's run of (``parent``) go with it when
-        there are any."""
+        the agent's version, the run it is a sub-agent's run of (``parent``) and what it is
+        ``without`` go with it when there are any."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
+        turned_off = sorted(features(without))
         given = {
             "timeout_seconds": self.timeout if timeout is None else timeout,
             "deadline": deadline,
@@ -720,6 +777,7 @@ class Agent:
             thread_id=thread or run_id,  # a run with no conversation is its own thread
             user_id=user,
             input=pipeline.jsonable(input) if record_input else input,
+            metadata={WITHOUT: turned_off} if turned_off else {},
             **{name: value for name, value in given.items() if value is not None},
         )
 

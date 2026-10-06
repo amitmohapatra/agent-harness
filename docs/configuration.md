@@ -5,7 +5,8 @@ The harness reads the environment and nothing else — no YAML. `Harness()` take
 blocks you pass instead of the environment's (`runs=`, `memory=`, `gateway=`, `governance=`; a
 block `False` is off: [docs/README.md](README.md#composition-a-harness-is-the-blocks-you-give-it)),
 the online judges (`judges=[...]`: code that says *what* to judge; which model judges, through
-which key and how often is the environment's). Unset means "not in this deployment". Every variable, with a one-line description, is in
+which key and how often is the environment's) and its hooks ([hooks.md](hooks.md)). Unset means
+"not in this deployment". Every variable, with a one-line description, is in
 [`.env.example`](../.env.example); `tests/unit/test_settings.py` checks the file lists exactly
 what is read.
 
@@ -24,6 +25,8 @@ what is read.
 | `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the judge's calls go through `BIFROST_VIRTUAL_KEY`, on the agents' budget. Set it to a **separate virtual key** so evaluation spend is budgeted, limited and reported on its own |
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |
+| `SANDBOX` | `sandbox()` given no provider has none: its tools tell the model so. `docker` makes each run's sandbox a container of the Docker daemon on this machine ([sandbox.md](sandbox.md)); any other value is refused (`ValidationError`) |
+| `SANDBOX_IMAGE` | those sandboxes are made from the provider's own image (`python:3.12-slim` for Docker) unless a `SandboxSpec(image=)` names one |
 | `TRELLIS_GROUNDING_SAMPLE` | 0.1: a tenth of the successful runs with an answer (a structured one as its JSON; memory on) are checked against the context they were given (`/v1/verify`, a score on the trace — [observability.md](observability.md#scores)); `0` turns it off, `1` checks every run. A number from 0 to 1, else `Settings` refuses it (`ValidationError`); the run id decides, so a run is either always or never sampled |
 
 `Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
@@ -46,11 +49,38 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `judge_model` | `TRELLIS_JUDGE_MODEL` |
 | `judge_virtual_key` | `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | `judge_sample` | `TRELLIS_JUDGE_SAMPLE` (0 to 1; `None`: 0.1 with judges) |
+| `sandbox` | `SANDBOX` (`"docker"` or `None`) |
+| `sandbox_image` | `SANDBOX_IMAGE` |
 
 `RUNS_URL` without `MEMORY_URL`, and `MEMORY_URL` without `TRELLIS_API_KEY`, are refused when the
 `Harness` is built (`ConfigurationError`). The names are the platform's: agent-runs reads the
 memory service at `MEMORY_URL` too, the memory SDK defaults to `MEMORY_URL` and
 `TRELLIS_API_KEY`, and the gateway is `BIFROST_URL` everywhere.
+
+## What is on, and how to turn it off
+
+The environment turns each part on for every agent; code turns parts off, per agent or per
+run, with one switch — `without=` (`trellis.harness.features.Feature`):
+
+| Feature (`without=` name) | On when | What it is | Turned off |
+|---|---|---|---|
+| `memory` | `MEMORY_URL` | `memory_push`, `memory_pull` and `records` together | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
+| `memory_push` | `MEMORY_URL` | the memory context pushed into the framework's input (and the tool hints with it) | no context, no `/v1/context` call |
+| `memory_pull` | `MEMORY_URL` | the memory tools (`memory_search`, `tool_search`, ...) | not offered (a graph's, bound at build, answer that they are off) |
+| `records` | `MEMORY_URL` | the transcript, every tool call, the outcome, decisions as feedback | nothing written to memory about the run |
+| `hints` | `MEMORY_URL`, from 5 tools | the tool hints narrow the tools the model is offered | every tool offered |
+| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_GROUNDING_SAMPLE`) | the answer checked against the context it was given | not checked |
+| `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_JUDGE_SAMPLE`) | the online judges | not judged |
+| `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools (`mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
+| `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
+| `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
+
+`without=` on `h.wrap` turns them off for every run of the agent; on `agent.run`, `stream` and
+`start` for that run, on top of the agent's — kept with the run's record, so its resume, the
+worker that continues it and its sub-agents' runs are without them too. A name not in the table
+is refused (`ConfigurationError`, naming them). Not switchable, because they are automatic and
+deterministic: governance and approvals, the journal and replay, retries and time limits,
+tracing and redaction, the run record.
 
 ## Who the deployment is
 

@@ -12,7 +12,7 @@ the [README](../README.md); how it works is in [ARCHITECTURE.md](../ARCHITECTURE
 |---|---|---|
 | A LangGraph graph, or a Deep Agent (`create_deep_agent`) | the compiled graph | Your graph keeps its control flow. Build it with `await h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`). Compile it with a checkpointer to resume in place. |
 | An OpenAI Agents SDK `Agent` | the `Agent` | Harness tools are added to a copy per run (your agent is not changed), narrowed per turn; the SDK's own `needs_approval` tools pause and resume from its `RunState`. |
-| A Claude Agent SDK setup | the `ClaudeAgentOptions` | Harness tools reach the CLI as one in-process MCP server (`mcp__trellis__*`, pre-allowed); the memory context is appended to your system prompt. |
+| A Claude Agent SDK setup | the `ClaudeAgentOptions` | Harness tools reach the CLI as one in-process MCP server (`mcp__trellis__*`); Claude Code's built-ins are governed through the SDK's permission callback; a pause resumes the CLI's session; the memory context is appended to your system prompt. |
 | No framework, but a model that should call tools | `ReAct(system=..., model="provider/model")` | The smallest tool-calling loop: native tool messages, a `chat` span per model call, the tools narrowed per call, `output=` for a pydantic answer. A model name needs `BIFROST_URL`; any object with `async complete(messages, **body)` works instead. |
 | Code that decides itself what happens (a workflow, a router, glue between agents) | an async function `(input, agent)` | No model of its own: call tools with `await agent.tools.call(...)`, ask with `await agent.ask(...)`, read `agent.context` and `agent.memory`. |
 

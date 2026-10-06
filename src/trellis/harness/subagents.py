@@ -13,7 +13,8 @@ sub-agent, inside the call:
   call's ``idempotency_key``), so the parent's re-run finds it again; its record names its
   parent (``parent_run_id``); it inherits the parent's tenant, user and thread, its deadline
   and what is left of its time (a child never works past its parent), and its spans are in the
-  parent's trace; its agent version is its own;
+  parent's trace; its agent version is its own, and so is its agent's ``without=`` (what the
+  parent's run is without, it is without too);
 * while it works its journal is kept in the parent's, so the parent's progress saves it: after
   a crash the parent's next attempt continues the child where it was (the tool is
   ``resumable``), repeating none of its side effects;
@@ -129,6 +130,7 @@ class SubAgent:
             timeout=parent.remaining(),
             deadline=parent.deadline,
             parent=parent.run_id,
+            without=parent.without,
         )
         result = await self._continued(parent, await child.harness.runs.start(start))
         while result.status is RunStatus.PAUSED:

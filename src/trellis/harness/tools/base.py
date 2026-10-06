@@ -32,6 +32,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.harness.features import Feature
 
 SideEffects = Literal["read", "write", "irreversible"]
 
@@ -72,8 +73,10 @@ OUTCOME_UNKNOWN: Final = "OutcomeUnknown"
 class Tool:
     spec: ToolSpec
     run: Runner = field(repr=False)
-    #: Bifrost Code Mode meta-tool: its nested calls are recorded from the gateway's log.
-    code_mode: bool = False
+    #: the part of what the harness does that this tool is (``without=`` turns it off): an
+    #: MCP tool, a Bifrost Code Mode meta-tool (its nested calls are recorded from the
+    #: gateway's log), a skill's or the memory service's tool; ``None``: the agent's own
+    feature: Feature | None = None
     #: The most one call may take, in seconds, retries included (``None``: no limit of its
     #: own; the run's time still bounds it).
     timeout: float | None = None

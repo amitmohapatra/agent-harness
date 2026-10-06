@@ -48,6 +48,7 @@ result = await agent.run("Refund order o-7.", user="ada", thread="ticket-7")
 | Planning (`TodoListMiddleware`, `write_todos`) | the plan lives in the graph's state (`state["todos"]`, read with `graph.aget_state(...)` on the thread); `write_todos` is Deep Agents' own tool, not a harness tool |
 | Built-in file tools (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `delete`, `execute`) and `task` | Deep Agents' own: they work on its backend (the graph state by default) and are not governed, journaled or recorded by the harness. Gate the ones that matter with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
 | `interrupt_on={tool: True \| InterruptOnConfig}` | LangChain's `HumanInTheLoopMiddleware`: an approval of the calls it holds, answered with `approve`, `edit`, `reject` (with a reason the model reads), `answer` ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)); needs a checkpointer |
+| Hooks | the tool and run hooks as for every target; the model hooks through the same LangChain middleware as `create_agent`: `create_deep_agent(..., middleware=[ModelHooks()])` ([hooks.md](../hooks.md)) |
 | Memory | the context as a leading system message of the main agent (sub-agents get the `task` description, as Deep Agents gives them); the memory tools are in `h.tools(...)` for the main agent and any sub-agent you give them to |
 
 Deep Agents' own `memory=[...]` (AGENTS.md files) and `skills=[...]` are prompts it loads from

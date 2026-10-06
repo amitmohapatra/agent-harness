@@ -1,6 +1,9 @@
 # Memory
 
-Memory is on exactly when `MEMORY_URL` is set; there is nothing to configure per agent. Every
+Memory is on when `MEMORY_URL` is set (or `Harness(memory=MemoryClient(...))`), for every
+agent; `without={"memory"}` — or one part: `memory_push`, `memory_pull`, `records` — turns it
+off for an agent (`h.wrap`) or a run (`agent.run`)
+([what is on, and how to turn it off](README.md#what-is-on-and-how-to-turn-it-off)). Every
 call the harness makes to the memory service is in `trellis/harness/clients/memory.py`, in the
 run's scope (tenant, user, agent, run, thread). With memory on, every run reads (push, pull)
 and records (transcript, tool calls, outcome); with it off there is no context, no memory

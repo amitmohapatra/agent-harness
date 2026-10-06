@@ -2,11 +2,20 @@
 
 * input: the prompt, and the memory context appended to the options' system prompt;
 * run: ``query(prompt, options)`` on a copy of the options that also carries the harness
-  tools as one in-process MCP server (``mcp__trellis__*``, pre-allowed: the bridge is the
-  permission check) beside the team's own servers — a ``mcp_servers`` given as a config file
-  or JSON text is read, since the SDK serves an in-process server only from a dict;
-* pause: ``trellis.current().ask`` inside a harness tool stops consuming the query (the CLI
-  process ends) and a resume re-runs it against the journal.
+  tools as one in-process MCP server (``mcp__trellis__*``) beside the team's own servers — a
+  ``mcp_servers`` given as a config file or JSON text is read, since the SDK serves an
+  in-process server only from a dict;
+* permissions: the SDK's own ``can_use_tool`` — a harness tool is let through (the bridge is
+  its check); any other tool the CLI asks about (Claude Code's built-ins: ``Bash``,
+  ``Write``...; a team's own MCP server's) is decided as a harness call is — the run's hooks,
+  governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`), a person when it asks — then by the
+  team's own ``can_use_tool``, when it has one;
+* pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
+  ends). The session the CLI kept (``ResultMessage.session_id``) is in the run's journal, and
+  the next attempt resumes it (``resume=``): Claude goes on from where it was — its built-in
+  tools are not run again — and calls the paused tool again, which the journal answers. A
+  session the CLI no longer holds (another machine, its store cleared) is a warning, and the
+  query runs again from its prompt against the journal.
 """
 
 from __future__ import annotations
@@ -15,11 +24,38 @@ import dataclasses
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
-from trellis.contracts import ConfigurationError, InterruptResolution
+from trellis.contracts import ConfigurationError, InterruptResolution, ToolOutcome, ToolSpec
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
 from trellis.harness.journal import Pending
+from trellis.harness.runtime import Paused
+from trellis.harness.tools import bridge
+from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
+
+#: What Claude Code's built-in tools do, as governance sees them (the tool catalog's word
+#: overrides it): reads run, writes run and are announced, ``Bash`` asks. Any other tool the
+#: CLI asks about is a write.
+BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
+    "Read": "read",
+    "Glob": "read",
+    "Grep": "read",
+    "LS": "read",
+    "WebFetch": "read",
+    "WebSearch": "read",
+    "TodoWrite": "read",
+    "Write": "write",
+    "Edit": "write",
+    "MultiEdit": "write",
+    "NotebookEdit": "write",
+    "Bash": "irreversible",
+}
+#: What a resumed session is told: the run goes on, and the call it paused on is made again.
+RESUMED: Final = (
+    "This task was paused (a person was asked, or the process stopped) and goes on now. If "
+    "your last tool call has no result yet, call that tool again with the same arguments: "
+    "it runs once. Then carry on with the task."
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -93,28 +129,99 @@ class ClaudeAdapter:
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncIterator[Any]:
+        """The query's messages — the session an earlier attempt kept resumed, when there is
+        one the CLI still holds; else from the prompt."""
+        from claude_agent_sdk import AssistantMessage, ResultMessage
+
+        runtime = run.runtime
+        journal = runtime.replay.journal
+        resumed, answered = journal.session, False
+        async for message in self._query(target, native_input, run, resumed):
+            if (
+                resumed is not None
+                and not answered
+                and isinstance(message, ResultMessage)
+                and message.is_error
+            ):
+                # the CLI could not continue the session: the query again, from its prompt
+                why = "; ".join(message.errors or []) or message.subtype
+                runtime.events.warning(
+                    "claude_session", f"session {resumed} was not resumed ({why}): run again"
+                )
+                journal.session = None
+                async for again in self._query(target, native_input, run, None):
+                    yield again
+                return
+            answered = answered or isinstance(message, AssistantMessage)
+            yield message
+
+    @staticmethod
+    async def _query(
+        target: Any, native_input: Any, run: Invocation, session: str | None
+    ) -> AsyncIterator[Any]:
+        """One query (``session``: the one it resumes); the session it runs in kept in the
+        journal as it goes."""
         from claude_agent_sdk import query
 
-        options = _options(target, native_input.context, run)
         runtime = run.runtime
-        async for message in query(prompt=native_input.prompt, options=options):
+        options = _options(target, native_input.context, run, session)
+        prompt = native_input.prompt if session is None else RESUMED
+        async for message in query(prompt=prompt, options=options):
+            found = getattr(message, "session_id", None)
+            if isinstance(found, str):
+                runtime.replay.journal.session = found
             yield message
             if runtime.pending is not None:
-                # a harness tool paused the run: stop here; the CLI process goes with it
+                # the run paused: stop here; the CLI process goes with it
                 return
 
 
-def _options(options: Any, context: str | None, run: Invocation) -> Any:
+def _options(options: Any, context: str | None, run: Invocation, session: str | None) -> Any:
     from trellis.harness.tools.convert import claude as convert
 
-    changes: dict[str, Any] = {}
+    if options.permission_prompt_tool_name:
+        raise ConfigurationError(
+            "the harness decides Claude's tool permissions with can_use_tool: give your own "
+            "permission check as can_use_tool (the harness asks it after governance), not "
+            "permission_prompt_tool_name"
+        )
+    changes: dict[str, Any] = {"can_use_tool": _permission(options.can_use_tool)}
     if context:
         changes["system_prompt"] = _with_context(options.system_prompt, context)
     if run.native_tools is not None:
         servers = configured_servers(options.mcp_servers)
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
-        changes["allowed_tools"] = [*options.allowed_tools, *convert.allowed_names(run.tools)]
-    return dataclasses.replace(options, **changes) if changes else options
+    if session is not None:
+        changes["resume"] = session
+    return dataclasses.replace(options, **changes)
+
+
+def _permission(own: Any) -> Any:
+    """The options' ``can_use_tool``: a harness tool runs (the bridge decides about it); any
+    other is the run's decision (``bridge.permitted``: hooks, governance, a person), then
+    ``own``'s, the team's callback, with the arguments as they were decided."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    from trellis.harness.tools.convert.claude import SERVER, WAITING
+
+    async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
+        if name.startswith(f"mcp__{SERVER}__"):
+            return PermissionResultAllow()
+        side_effects = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+        try:
+            decided = await bridge.permitted(ToolSpec(name=name, side_effects=side_effects), args)
+        except Paused:
+            return PermissionResultDeny(message=WAITING, interrupt=True)
+        if isinstance(decided, ToolOutcome):
+            return PermissionResultDeny(message=str(decided.output))
+        if own is None:
+            return PermissionResultAllow(updated_input=decided.args)
+        verdict = await own(name, decided.args, context)
+        if isinstance(verdict, PermissionResultAllow) and verdict.updated_input is None:
+            return dataclasses.replace(verdict, updated_input=decided.args)
+        return verdict
+
+    return can_use_tool
 
 
 def configured_servers(configured: Any) -> dict[str, Any]:

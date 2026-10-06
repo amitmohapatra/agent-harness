@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, Final, Literal, TypeVar
 
 from bifrost_sdk import NO_GATEWAY_TOOLS
@@ -29,9 +29,11 @@ from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
+from trellis.harness.features import Feature
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
+from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
@@ -101,7 +103,9 @@ class Harness:
     agent-runs off (runs kept in this process) even where the environment names them.
 
     ``judges`` are the online evaluators every sampled successful run is scored by
-    (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background."""
+    (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
+    (``trellis.harness.hooks.Hooks``) run around every run, model call and tool call of every
+    agent it wraps, before each agent's own."""
 
     def __init__(
         self,
@@ -112,6 +116,7 @@ class Harness:
         gateway: Gateway | Literal[False] | None = None,
         governance: Governance | None = None,
         judges: Sequence[Evaluator] = (),
+        hooks: Sequence[Hooks] = (),
     ) -> None:
         self.settings = config or Settings.from_env()
         s = self.settings
@@ -138,6 +143,8 @@ class Harness:
         self.evals = EvalServices.of(s, gateway=self.gateway)
         #: the online judges, and the share of runs they score
         self.judges: list[Evaluator] = list(judges)
+        #: the hooks of every agent wrapped here
+        self.hooks: list[Hooks] = list(hooks)
         self.judge_sample = (
             s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
         )
@@ -180,6 +187,8 @@ class Harness:
         mcp: Sequence[str] | None = None,
         skills: Sequence[str] = (),
         timeout: float | None = None,
+        without: Collection[Feature] = (),
+        hooks: Sequence[Hooks] = (),
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
@@ -191,7 +200,11 @@ class Harness:
         recorded with each run it starts: a run resumed on another version goes on, with a
         warning naming both. ``timeout`` is the most working time one of its runs may take, in
         seconds, when the run names none (``run``/``stream``/``start(timeout=)`` override it):
-        on every entry — ``serve_chat``, ``serve_a2a``, ``h.evaluate``, scheduled runs too."""
+        on every entry — ``serve_chat``, ``serve_a2a``, ``h.evaluate``, scheduled runs too.
+        ``without`` turns parts of what the harness does off for every run of the agent
+        (``trellis.harness.features``: ``memory``, ``judges``, ``mcp``...); everything
+        configured is on otherwise. ``hooks`` run around its runs, model calls and tool calls,
+        after the harness's (``trellis.harness.hooks``)."""
         agent = Agent(
             self,
             target,
@@ -201,6 +214,8 @@ class Harness:
             mcp=mcp,
             skills=skills,
             timeout=timeout,
+            without=without,
+            hooks=hooks,
         )
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
@@ -477,12 +492,6 @@ class Harness:
         self._made.append(client)
         return client
 
-    async def writes_memory(self) -> bool:
-        """Whether runs record their transcript, tool calls and outcome: memory is on. What
-        a run may write is the memory service's to decide, per scope (its relationship checks,
-        not the key's role): a write it refuses is a reported warning, never a failed run."""
-        return self.memory is not None
-
     # ------------------------------------------------------------------ used by agents
     def governance(self, tenant: str) -> Governance:
         """Governance in ``tenant``: the one given (``Harness(governance=)``), else one per
@@ -527,7 +536,10 @@ class Harness:
 
     async def memory_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
-        return [Tool(spec, _memory_call(spec)) for spec in await run_memory.agent_tools()]
+        return [
+            Tool(spec, _memory_call(spec), feature="memory_pull")
+            for spec in await run_memory.agent_tools()
+        ]
 
     async def registered(self, memory: Memory, identity: Identity) -> None:
         """Register ``BIFROST_VIRTUAL_KEY`` as the agent's memory model key, once per process
@@ -579,7 +591,9 @@ def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:
     async def run(args: dict[str, Any]) -> Any:
         runtime = current()
         if runtime is None or runtime.run_memory is None:
-            raise ConfigurationError(f"{spec.name} needs a run with memory on (MEMORY_URL)")
+            raise ConfigurationError(
+                f"{spec.name} needs a run with memory on (MEMORY_URL, not without=memory)"
+            )
         if spec.name == TOOL_SEARCH:  # among the tools this run can actually call
             hints = await runtime.tools.hints(str(args.get("task", "")))
             # what the model reads: each tool's confidence, arguments and gaps, and the plan

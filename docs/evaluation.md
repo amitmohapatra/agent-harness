@@ -47,7 +47,8 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
   a sampled share is judged (`TRELLIS_JUDGE_SAMPLE`, [Online](#online-judges) below).
   Nothing to call.
 * **`h.evaluate`** runs each item through the normal pipeline — memory, tools, governance and
-  approvals — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
+  approvals, the agent's time limit (`h.wrap(timeout=)`: a hung item ends `TIMEOUT`, an
+  `error` item) — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
 * What it reaches is `h.evals`, an `EvalServices` the harness builds from its settings (sharing
   its gateway and Langfuse client); each agent has its own copy, `agent.evals`, whose judge
   falls back to a `ReAct` target's own model when `TRELLIS_JUDGE_MODEL` is unset.

@@ -103,7 +103,11 @@ async def test_run_starts_the_background_writes_and_drains_them_when_stopped(
     assert calls == ["start", "drain"]
 
 
-async def test_cancelling_a_running_worker_cancels_the_runs_it_holds(harness: Harness) -> None:
+async def test_cancelling_a_running_worker_leaves_the_runs_it_holds_to_their_leases(
+    harness: Harness,
+) -> None:
+    """Nobody asked to cancel the runs: the worker went away, so their leases lapse and
+    agent-runs queues them again (``job.cancel_requested`` is what ends a run CANCELLED)."""
     started = asyncio.Event()
 
     async def forever(input: str, agent: Runtime) -> str:
@@ -118,7 +122,54 @@ async def test_cancelling_a_running_worker_cancels_the_runs_it_holds(harness: Ha
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+    assert (await handle.status()).status is RunStatus.RUNNING  # nothing written
+
+
+async def test_a_worker_run_someone_cancelled_ends_cancelled(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent.cancel`` of a run a worker holds: its heartbeat says ``cancel_requested``, the
+    worker stops the handler, and the run ends ``CANCELLED``."""
+    started = asyncio.Event()
+
+    async def forever(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    async def soon(seconds: float) -> None:  # the heartbeat's wait, cut short
+        await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(claim_loop, "_sleep", soon)
+    agent = harness.wrap(forever, id="forever")
+    handle = await agent.start("x", user="u")
+    working = asyncio.create_task(harness.worker([agent]).run_once())
+    await started.wait()
+    await handle.cancel(reason="not needed")
+    assert await working is True
     assert (await handle.status()).status is RunStatus.CANCELLED
+
+
+async def test_a_stream_closed_after_its_run_ended_elsewhere_writes_nothing(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    started = asyncio.Event()
+
+    async def forever(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    stream = harness.wrap(forever, id="forever").stream("x", user="u")
+    first = await anext(stream)
+    await started.wait()
+    await harness.runs.finish(first.run_id, RunStatus.ERROR)  # ended by someone else
+    with caplog.at_level(logging.INFO):
+        await stream.aclose()  # the caller goes away: the run's task is cancelled
+        await asyncio.sleep(0.05)
+    assert "was ended or taken over elsewhere; nothing written" in caplog.text
+    record = await harness.runs.get(first.run_id)
+    assert record is not None and record.status is RunStatus.ERROR
 
 
 async def test_a_released_run_writes_nothing(harness: Harness) -> None:
@@ -167,7 +218,6 @@ async def test_a_lease_another_worker_took_stops_the_run_and_writes_nothing(
     record = await handle.status()
     assert record.status is RunStatus.RUNNING  # the other worker's run, untouched
     assert f"lease on {handle.run_id} lost" in caplog.text
-    assert "ended or taken over elsewhere; nothing written" in caplog.text
 
 
 # --------------------------------------------------------------------------- the CLI
