@@ -2,11 +2,10 @@
 
 identity → (the run record, written by the caller) → tools → memory push (with the tool
 hints that narrow what the model is offered) → the adapter → the outcome recorded (paused
-with its journal as the run's checkpoint, finished with its answer or error) → background
-writes (transcript, the run's ``system`` outcome, the sampled grounding check, the sampled
-online judges). The adapter is
-the only part that knows the framework. Each attempt is one ``invoke_agent`` span in the run's
-trace.
+with its journal as the run's checkpoint, finished with its answer or error; the run's sandbox
+paused or deleted with it) → background writes (transcript, the run's ``system`` outcome, the
+sampled grounding check, the sampled online judges). The adapter is the only part that knows
+the framework. Each attempt is one ``invoke_agent`` span in the run's trace.
 
 :func:`attempt` is the one way an attempt starts — ``agent.run``/``stream``, a resume, a
 worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``serve_a2a`` and
@@ -45,6 +44,7 @@ from trellis.contracts import (
     RunStatus,
     ToolCall,
 )
+from trellis.harness import sandbox
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
@@ -202,8 +202,9 @@ async def attempt(
         # is the worker's to end — CANCELLED here only when someone asked (its heartbeat said
         # so); stopped for its lease, its working time or a release, the worker ends it
         if runtime.cancelled is None or task.uncancel():
-            if job is None or (job.cancel_requested and RELEASED not in exc.args):
-                await _settle_cancelled(agent, identity, events, runtime.worker_id)
+            settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
+            if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
+                await sandbox.ended(agent, journal.sandbox, identity.run_id)
             raise
     except Exception as exc:
         # a framework may wrap or swallow the pause: the runtime is what says it paused
@@ -279,7 +280,9 @@ async def _concluded(
     error: Exception | None,
     timed_out: AgentError | None,
 ) -> Result:
-    """Record how the attempt ended: cancelled, out of time, paused, failed or answered."""
+    """Record how the attempt ended: cancelled, out of time, paused, failed or answered. The
+    run's sandbox is paused with the run, and deleted when the run ends — unless agent-runs
+    runs it again (:func:`_again`)."""
     if runtime.lease_lost:
         # another worker may hold the run now (a framework may have swallowed the error)
         raise LeaseLostError(
@@ -287,26 +290,41 @@ async def _concluded(
             code="LEASE_LOST",
             status=409,
         )
+    if (
+        runtime.cancelled is None
+        and timed_out is None
+        and (paused := _pause(runtime, extracted, error)) is not None
+    ):
+        await sandbox.paused(runtime)
+        return await _paused(agent, runtime, journal, paused, extracted)
     if runtime.cancelled is not None:
         await _settle_cancelled(
             agent, runtime.identity, runtime.events, runtime.worker_id, reason=runtime.cancelled
         )
         await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
-        return Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
-    if timed_out is not None:
+        result = Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
+    elif timed_out is not None:
         log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)
         await agent.hooks.failed("run", TimeoutError(timed_out.message))
-        return await _failed(agent, runtime, timed_out, extracted, status=RunStatus.TIMEOUT)
-    paused = _pause(runtime, extracted, error)
-    if paused is not None:
-        return await _paused(agent, runtime, journal, paused, extracted)
-    if error is not None:
+        result = await _failed(agent, runtime, timed_out, extracted, status=RunStatus.TIMEOUT)
+    elif error is not None:
         failure = AgentError.of(error, source=agent.adapter.name)
         log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
         await agent.hooks.failed("run", error)
-        return await _failed(agent, runtime, failure, extracted)
-    assert extracted is not None
-    return await _succeeded(agent, runtime, extracted, pushed)
+        result = await _failed(agent, runtime, failure, extracted)
+    else:
+        assert extracted is not None
+        result = await _succeeded(agent, runtime, extracted, pushed)
+    if not _again(runtime, result):
+        await sandbox.ended(agent, journal.sandbox, runtime.run_id)
+    return result
+
+
+def _again(runtime: Runtime, result: Result) -> bool:
+    """Whether agent-runs runs the run again after this attempt: a queued run (a worker's)
+    that failed with an error that may pass."""
+    error = result.error
+    return runtime.worker_id is not None and error is not None and error.retryable
 
 
 def _versioned(agent: Agent, runtime: Runtime, started_on: str | None) -> None:
@@ -602,21 +620,25 @@ async def _settle_cancelled(
     worker_id: str | None,
     *,
     reason: str | None = None,
-) -> None:
+) -> bool:
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
-    ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log)."""
+    ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log), and
+    say whether it was ended here (not ended, or taken over, elsewhere already)."""
+    ended = True
     try:
         await agent.harness.runs.finish(
             identity.run_id, RunStatus.CANCELLED, worker_id=worker_id, tenant=identity.tenant
         )
     except (LeaseLostError, ConflictError):
         log.info("run %s was ended or taken over elsewhere; nothing written", identity.run_id)
+        ended = False
     if reason is not None:
         log.info("run %s was cancelled: %s", identity.run_id, reason)
         events.finished(RunOutcome.CANCELLED, reason=reason)
     else:
         events.finished(RunOutcome.CANCELLED)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
+    return ended
 
 
 def jsonable(value: Any) -> Any:

@@ -21,6 +21,7 @@ for you.
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
 | [gateway.md](gateway.md) | the Bifrost gateway: stored prompts (`prompt=`), skills (`skills=`), Virtual MCPs (`mcp=`), who an MCP call is for, what the gateway never does for a run (no injected tools, no Agent Mode, Code Mode through the bridge), frameworks' own MCP clients |
 | [subagents.md](subagents.md) | `agent.as_tool()`: an agent as another agent's tool — child runs, their pauses answered through the parent, crashes, cancel, time |
+| [sandbox.md](sandbox.md) | `sandbox()`: commands and files in a sandbox of the run's own (Docker; how E2B, Daytona, Modal plug in) — its life, pauses, crashes, timeouts, governance; the frameworks' own sandboxes or ours |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed, and what the harness does with each decision |
 | [hooks.md](hooks.md) | your code around runs, model calls and tool calls: guardrails (deny, ask, rewrite), redaction of your own, audit — where each hook fires on each adapter |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
@@ -44,6 +45,7 @@ retries, tenancy), and how it relates to Way 1.
 | [blocks/governance.md](blocks/governance.md) | `trellis.harness.governance`: `Governance.check` and `governed` on your own tools, `publish`, `decided` |
 | [blocks/evaluation.md](blocks/evaluation.md) | `trellis.harness.evals`: `evaluate` on any async function, `judge` on one run, `EvalServices.from_env` |
 | [blocks/a2a.md](blocks/a2a.md) | `trellis.harness.a2a.remote`: call any A2A agent (serving is Way 1) |
+| [sandbox.md](sandbox.md#way-2-without-a-harness) | `trellis.harness.sandbox`: a provider (`DockerSandbox`) and its sandboxes, your commands governed with `governed` |
 | [blocks/contracts.md](blocks/contracts.md) | `trellis.contracts`: which records each block takes and returns, and why they are shared |
 
 **Recipes**, end to end with the framework's own pause and state: an unmodified agent with
@@ -174,6 +176,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | an HTTP API with an OpenAPI document | `openapi(spec, only=[...])` | the method (GET read … DELETE irreversible), and the catalog |
 | another agent served elsewhere | `a2a(url)` | `write`, and the catalog |
 | another agent this harness wraps (a sub-agent) | `agent.as_tool()` in `tools=[...]` or `h.tools(...)` ([subagents.md](subagents.md)) | `read` when every tool it declares reads, else `write`; and the catalog |
+| code the model writes and runs, away from the host | `sandbox()` in `tools=[...]` or `h.tools(...)`, `SANDBOX=docker` ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` write, `sandbox_read` reads; and the catalog |
 | shared across agents, owned by a platform team | an MCP server in Bifrost, allowed on the agent's virtual key — nothing in code | the server's annotations, and the catalog |
 | the agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write |
 | a framework's own tool (`function_tool`, Deep Agents' file tools) | as the framework does | the framework's permissions, not the harness's |
@@ -257,5 +260,6 @@ tracing and redaction, the run record.
 | `TRELLIS_AGENT_VERSION` | the agents' version, recorded with every run they start |
 | `TRELLIS_GROUNDING_SAMPLE` | the share of runs checked for grounding |
 | `TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`, `TRELLIS_JUDGE_SAMPLE` | the judge's model, its budget, and the share of runs online judges score |
+| `SANDBOX` (+ `SANDBOX_IMAGE`) | the sandboxes `sandbox()` makes when given no provider: `docker`, of that image |
 
 Details: [configuration.md](configuration.md).
