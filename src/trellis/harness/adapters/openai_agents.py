@@ -11,17 +11,21 @@
   reviewer's reason (``rejection_message``, the text the model reads); an answer is a reject
   whose message is the answer; an edit is a reject telling the model to call the tool again
   with the edited arguments — and that call, when the model makes it with exactly those
-  arguments, is approved in the same attempt instead of asking again.
+  arguments, is approved in the same attempt instead of asking again;
+* framework options: keyword arguments of ``Runner.run``/``run_streamed`` (``max_turns``,
+  ``run_config``, ``context``...), except the ones the harness gives itself
+  (:data:`OWN_ARGUMENTS`), which are refused.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
-from trellis.contracts import InterruptDecision, InterruptResolution
+from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution
 from trellis.harness.adapters.base import (
     Extracted,
     Invocation,
@@ -33,6 +37,9 @@ from trellis.harness.adapters.base import (
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import reason_of
 
+#: ``Runner.run``'s arguments the harness gives itself: the agent (a clone carrying the harness
+#: tools), its input (with the memory context, or the resumed state) and the run's hooks.
+OWN_ARGUMENTS: Final = ("starting_agent", "input", "hooks")
 #: The raw streaming event that carries a text delta.
 TEXT_DELTA = "response.output_text.delta"
 #: What the model reads for a call a reviewer edited (the SDK cannot run it with other
@@ -78,22 +85,26 @@ class OpenAIAgentsAdapter:
         from agents import Runner
 
         agent, hooks = self._agent(target, run), _hooks(run)
-        result = await Runner.run(agent, await self._input(agent, native_input), hooks=hooks)
+        options = run.runtime.framework_options
+        given = await self._input(agent, native_input)
+        result = await Runner.run(agent, given, hooks=hooks, **options)
         state = _edited_call(result, native_input)
         if state is not None:  # the model called the edited tool as told: it runs, approved
-            result = await Runner.run(agent, state, hooks=hooks)
+            result = await Runner.run(agent, state, hooks=hooks, **options)
         return result
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from agents import Runner
 
         agent, hooks = self._agent(target, run), _hooks(run)
-        result = Runner.run_streamed(agent, await self._input(agent, native_input), hooks=hooks)
+        options = run.runtime.framework_options
+        given = await self._input(agent, native_input)
+        result = Runner.run_streamed(agent, given, hooks=hooks, **options)
         async for delta in _deltas(result):
             yield delta
         state = _edited_call(result, native_input)
         if state is not None:
-            result = Runner.run_streamed(agent, state, hooks=hooks)
+            result = Runner.run_streamed(agent, state, hooks=hooks, **options)
             async for delta in _deltas(result):
                 yield delta
         yield Output(result)
@@ -145,6 +156,23 @@ class OpenAIAgentsAdapter:
             message = answer if isinstance(answer, str) else json.dumps(answer, default=str)
             return _Continue(state, call_id, approve=False, message=message)
         return _Continue(state, call_id, approve=False, message=reason_of(resolution))
+
+    def check_options(self, options: Mapping[str, Any]) -> None:
+        from agents import Runner
+
+        own = [key for key in options if key in OWN_ARGUMENTS]
+        if own:
+            raise ConfigurationError(
+                f"framework_options {', '.join(map(repr, own))}: the harness gives Runner.run "
+                "its agent, its input and its hooks itself (hooks go on h.wrap(hooks=))"
+            )
+        taken = inspect.signature(Runner.run).parameters
+        unknown = [key for key in options if key not in taken]
+        if unknown:
+            raise ConfigurationError(
+                f"framework_options {', '.join(map(repr, unknown))}: Runner.run takes no such "
+                f"argument (it takes {', '.join(k for k in taken if k not in OWN_ARGUMENTS)})"
+            )
 
     # ------------------------------------------------------------------ internals
     @staticmethod

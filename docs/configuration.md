@@ -91,6 +91,29 @@ is refused (`ConfigurationError`, naming them). Not switchable, because they are
 deterministic: governance and approvals, the journal and replay, retries and time limits,
 tracing and redaction, the run record.
 
+## The framework's own run options
+
+`framework_options=` hands the framework's own options to its run call, unchanged: on `h.wrap`
+for every run of the agent (`serve_chat`, `serve_a2a` and `h.evaluate` have these), on
+`agent.run`, `stream`, `start` and `schedule` for that run (each run a schedule fires) — merged
+over the agent's, key by key
+(a key the run gives replaces the agent's, a `configurable` dict included).
+
+| Target | Where they go | The harness keeps for itself |
+|---|---|---|
+| LangGraph, Deep Agents | the `config` of `ainvoke`/`astream` (`RunnableConfig` keys: `recursion_limit`, `configurable`, `tags`, `metadata`, `callbacks`, `max_concurrency`, `run_name`) | `configurable.thread_id`: the run's thread wins over one given |
+| OpenAI Agents | keyword arguments of `Runner.run`/`run_streamed` (`max_turns`, `run_config`, `context`, `session`...) | `starting_agent`, `input`, `hooks`: refused |
+| Claude Agent SDK | `ClaudeAgentOptions` fields set on the run's copy of the options | `resume`, `continue_conversation`, `permission_prompt_tool_name`: refused; `system_prompt`, `can_use_tool` and `mcp_servers` merged (the context appended, the callback asked after governance, the `trellis` server added beside — a server of that name refused) |
+| a function, `ReAct` | — (no framework run call) | any: refused |
+
+An option the framework cannot take (a key it does not know, one the harness keeps) is refused
+when the agent is wrapped or the run is called (`ConfigurationError`, naming it), never in the
+middle of a run. A run keeps its own options with its record (`RunStart.metadata`, as
+`without=`; a schedule's in its `ScheduleSpec.metadata`, copied into each run it fires), so its
+resume and a worker that continues it run with the same: a queued or scheduled run's must be JSON and an object (a `RunConfig`, a callback) is refused there — give it on
+`h.wrap`, which every worker's agent has; on `run`/`stream` an object reaches that call only, and
+the record keeps the JSON ones.
+
 ## Who the deployment is
 
 Not configured: the memory service says it about `TRELLIS_API_KEY`

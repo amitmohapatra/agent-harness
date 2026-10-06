@@ -71,6 +71,9 @@ is a target too. Wrapping a function is also how code on its own framework gets 
 A2A servers, which serve wrapped agents only: wrap the function that calls your graph or runner
 ([surfaces.md](../surfaces.md#surfaces)).
 
+`framework_options=` does not apply: a function has no framework run call to hand them to, so
+they are refused (`ConfigurationError`) — the function reads what it needs from its input.
+
 ## Run it
 
 * [`examples/cowork.py`](../../examples/cowork.py), [`examples/schedule.py`](../../examples/schedule.py),

@@ -130,6 +130,10 @@ class Runtime:
     #: what this run turned off itself (``agent.run(without=)``, kept with its record; its
     #: sub-agents' runs inherit it) — its agent's are ``agent.without``
     without: frozenset[Feature] = frozenset()
+    #: the framework's own run options, as its adapter hands them to its run call: the agent's
+    #: (``h.wrap(framework_options=)``) with the run's own over them (``agent.run(
+    #: framework_options=)``, kept with its record)
+    framework_options: dict[str, Any] = field(default_factory=dict)
     started_at: datetime | None = None
     #: when the run must stop working (``time.monotonic``): what was left of its time limit
     #: and its deadline when the attempt began (``None``: neither)

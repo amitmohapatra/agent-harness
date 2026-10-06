@@ -114,6 +114,23 @@ resumed where the CLI does not hold the session (another worker's machine) gets 
 event (`claude_session`) and runs the query again from its prompt, against the journal — the
 harness calls already made are not made again; the built-ins run again.
 
+## The run's own options
+
+`framework_options=` sets `ClaudeAgentOptions` fields on the run's copy of the options (on
+`h.wrap` for every run, on `run`/`stream`/`start` for one, over the agent's): `max_turns`,
+`model`, `permission_mode`, `cwd`... before the harness's own changes, which merge with them —
+a `system_prompt` gets the memory context appended, a `can_use_tool` is asked after governance
+as the target's would be, and `mcp_servers` get the harness's `trellis` server beside them (one
+of that name is refused). The session is the harness's (`resume`, `continue_conversation`) and so
+is the permission prompt (`permission_prompt_tool_name`): both refused, as is a name that is not
+a field ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+
+```python
+await agent.run(
+    "Tidy the repo", user="ada", framework_options={"max_turns": 30, "cwd": "/srv/repo"}
+)
+```
+
 ## Streaming
 
 `agent.stream(...)` yields each assistant text block as a text delta, the harness tool calls as

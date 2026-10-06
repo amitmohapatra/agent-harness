@@ -88,6 +88,9 @@ runs once. `agent.stream(...)` yields each step's text and the tool events. `sta
 target; `llm_judge` falls back to the agent's own model when `TRELLIS_JUDGE_MODEL` is unset (and
 says so once — set a stronger model).
 
+`framework_options=` does not apply: the harness runs ReAct's loop, so they are refused
+(`ConfigurationError`); its model's settings are given on `ReAct(...)`.
+
 ## Run it
 
 * [`examples/react_agent.py`](../../examples/react_agent.py) — a tool, then a structured answer.

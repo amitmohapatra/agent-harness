@@ -208,6 +208,27 @@ harness's, except where the framework asks permission (below).
 The two can coexist (a framework's sandbox for its own tools, `sandbox()` for the harness's),
 but they are two sandboxes that do not share files; prefer one.
 
+A framework's own sandbox runs under `h.wrap` too: its configuration is the framework's run
+options. An OpenAI `SandboxAgent` needs `RunConfig(sandbox=...)` on `Runner.run`, so give it as
+`framework_options` on `h.wrap` — an object, kept in code and built again in every process
+([openai-agents.md](frameworks/openai-agents.md#using-an-existing-openai-agents-project)):
+
+```python
+from agents import RunConfig
+from agents.sandbox import SandboxAgent, SandboxRunConfig
+from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+box = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+agent = h.wrap(
+    SandboxAgent(name="analyst", instructions="..."),
+    id="analyst",
+    framework_options={"run_config": box},
+)
+```
+
+Claude's `sandbox=SandboxSettings(...)` is a `ClaudeAgentOptions` field: on the options you
+wrap, or a run's own `framework_options={"sandbox": ...}`.
+
 ## Other providers: E2B, Daytona, Modal
 
 Only Docker is implemented here: a hosted provider's client is a new dependency and needs an
