@@ -81,7 +81,7 @@ text.
 |---|---|---|
 | a harness tool that asks (`irreversible`, a catalog `approve_when`) | LangGraph's `interrupt` inside the tool node; `resume` is `Command(resume=...)` — the graph continues in place, the model is not asked again | the run re-runs from its input as the next attempt; the journal returns the tool calls already made and the answer given (the model *is* asked again) |
 | `trellis.current().ask(...)` in a node or tool | the same | the same |
-| the graph's own `interrupt(value)` | a question (`value["question"]` or the value), resumed with the raw answer | refused: the run fails saying the graph needs a checkpointer |
+| the graph's own `interrupt(value)` | a question (`value["question"]` or the value); a dict `value` also carries `options` (strings or `{"value", "label", "description"}`), `multiple`, `expects`, `ui_schema`, `component`, `props` and `assignee` onto the `Interrupt` exactly as `ask(...)` does (the same code: `Question.described`), refused as `ask` refuses them (the run fails saying why); the answer is checked as any answer is (`answer_problem`: an option's value, a list of them with `multiple`, a fit to `expects`) and resumed raw, `Command(resume=answer)` | refused: the run fails saying the graph needs a checkpointer |
 | `HumanInTheLoopMiddleware(interrupt_on=...)` | an approval of the calls it holds (the first in `tool_call`, the whole request in `payload`), answered with the middleware's own decisions | needs a checkpointer |
 
 ```mermaid
@@ -91,6 +91,24 @@ flowchart LR
     native --> inplace["resume: Command(resume=...)<br/>the graph continues in place"]
     cp -- no --> journal["the attempt ends;<br/>the journal is the run's checkpoint"]
     journal --> rerun["resume: the graph runs again from its input;<br/>the journal replays calls and answers"]
+```
+
+```python
+from langgraph.types import interrupt
+
+
+def pick(state: State) -> dict:
+    plans = interrupt(
+        {
+            "question": "Which plans?",
+            "options": [{"value": "a", "label": "Plan A"}, "b"],
+            "multiple": True,
+            "component": "plan-picker",  # your own screen, where a surface has it
+            "props": {"customer": state["customer"]},
+            "assignee": "role:sales",
+        }
+    )
+    return {"plans": plans}  # ["a", "b"]: the answer as given, checked against the options
 ```
 
 Every pause is a contracts `Interrupt` in the run store (agent-runs with `RUNS_URL`), in the

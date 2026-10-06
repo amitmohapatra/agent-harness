@@ -25,8 +25,8 @@ this: `remote(url, tenant=, user=)` works from any code ([blocks/a2a.md](blocks/
 
 | Route | |
 |---|---|
-| `POST {path}/run` | An AG-UI `RunAgentInput`. A new run (the client's `runId`, or one the harness names) executes in the background and its events stream as SSE, each with an `id:` numbered per run. A `resume` entry answers the interrupt a paused run on the thread waits on: `payload` is the answer (`true`/`false`/edited arguments for an approval), `status: "cancelled"` cancels, `decision` names a contracts decision outright. |
-| `GET {path}/runs/{run_id}/events` | Reconnect: the run's events after `Last-Event-ID` (or `?after=`), then live until it finishes. Only the run's own user sees it. |
+| `POST {path}/run` | An AG-UI `RunAgentInput`. A new run (the client's `runId`, or one the harness names) executes in the background and its events stream as SSE, each with an `id:` numbered per run. A `resume` entry answers the interrupt a paused run on the thread waits on: `payload` is the answer (`true`/`false`/edited arguments for an approval), `status: "cancelled"` cancels, `decision` names a contracts decision outright, `comment` is the reviewer's remark and `remember: "run"` approves the tool's later calls in the run. |
+| `GET {path}/runs/{run_id}/events` | Reconnect: the run's events after `Last-Event-ID` (or `?after=`), then live until it finishes. Only the run's own user sees it. A run another replica served is read from agent-runs' event log (with `RUNS_URL`), its events numbered by their position there. |
 | `GET {path}/runs/{run_id}/artifacts/{artifact_id}` | Data the interrupt the run waits on carries by reference (`payload_ref`: a large `ask` table or diff), read from agent-runs. |
 
 What the agent is asked: the latest `user` message's text, or the input's `state` when there is
@@ -35,7 +35,7 @@ runs the least recently used finished run is dropped, never a live one), and a r
 counting where its first attempt stopped, so warnings from background writes after the finish
 are still there on replay. A pause arrives as `RUN_FINISHED` with an `interrupt` outcome
 (`interrupts[0]`: `id`, `reason` lower-cased, `message` the question, `toolCallId`,
-`responseSchema` = `expects`, and `payload`/`payload_ref`/`tool_call` under `metadata`); a
+`responseSchema` = `expects`, and under `metadata` what a client renders as it is: `ui`, `options` (strings or `{value, label, description}`), `multiple`, `ui_schema`, `component`, `props`, `payload`/`payload_ref`, `tool_call`, `assignee`, `deadline`); a
 failure as `RUN_ERROR`; a cancellation as `RUN_FINISHED` with a `cancelled` outcome. A tool
 call's arguments (`TOOL_CALL_ARGS`) and output (`TOOL_CALL_RESULT`) and `CUSTOM` events arrive
 redacted; the answer and the interrupt as they are ([observability.md](observability.md#redaction)).
@@ -58,6 +58,7 @@ application's key unless every person's runs are assigned to that person.
 | `401` `AUTHENTICATION` | `identity(request)` named nobody |
 | `404` `NOT_FOUND` | a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
 | `409` `CONFLICT` (`detail` `BAD_RESUME: …`) | a resume that cannot be read as a decision (an approval answered with neither `true`, `false` nor arguments), or that the run refuses (it waits on another interrupt, it is not paused), or an answer that does not fit the question or the tool ([interrupts.md](interrupts.md#answering)) |
+| `429` `RATE_LIMIT` (`Retry-After`, `retryable: true`) | agent-runs refused the run's start for the tenant's rate limit, after its SDK's retries ([runs.md](runs.md#admission-agent-runs-rate-limit)) |
 | `422` `VALIDATION` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here) |
 | `422` (FastAPI's validation error) | a body that is not a `RunAgentInput`: a `decision` outside `answer`/`approve`/`reject`/`edit`/`cancel` (any case), a message `role` outside AG-UI's (`developer`, `system`, `assistant`, `user`, `tool`, `activity`, `reasoning`) |
 | `RUN_ERROR` `RUN_ABORTED` | the run ended without telling its client (the harness itself failed, e.g. agent-runs refused a write) |
@@ -73,11 +74,13 @@ has not named itself (FastAPI's default title) is titled `"<agent id> agent"`, w
 description and the harness's version.
 
 **Several replicas.** A run's events are buffered in the process that serves it
-(`agui/hub.py`), so a reconnect (`GET …/events`) must reach that replica: route a thread's
-requests — keyed by the `threadId`, or the session cookie — to one replica (sticky sessions at the load balancer). A
-resume may land anywhere (it reads the run from agent-runs), and so may an artifact read; a
-reconnect that lands elsewhere is a `404`, after which the client can read the run's outcome
-from agent-runs or start the next turn.
+(`agui/hub.py`) and, with `RUNS_URL`, kept in the run's event log in agent-runs: a reconnect
+(`GET …/events`) that lands on another replica reads them from there, from the position its
+`Last-Event-ID` names (ids there are log positions; an id the first replica numbered is never
+larger than its event's position, so a failover may repeat events, never skip one), live until
+the run ends. A resume may land anywhere (it reads the run from agent-runs), and so may an
+artifact read. Without agent-runs a reconnect must reach the replica that served the run (route
+a thread's requests to one replica: sticky sessions), else it is a `404`.
 
 Harness events map one to one onto AG-UI events (the contracts already use AG-UI's names):
 text and tool-call events carry their message and call ids, `CONTEXT_LOADED` becomes a
@@ -113,7 +116,11 @@ from a data part `{"decision": "approve"}` when present; else the words `cancel`
 `stop` cancel; an approval reads `approve`/`approved`/`yes`/`ok`/`allow` and
 `reject`/`rejected`/`no`/`deny`/`denied`, or a data object as the edited arguments (its
 `payload` field when it has one); anything else answers the question (a data part's `answer`,
-or the text). An answer that cannot be read, or that does not fit the question or the tool
+or the text). A data part's `comment` is the reviewer's remark and `"remember": "run"` approves
+the tool's later calls in the run (neither is an edited argument). The `input-required` status
+carries the interrupt's `interrupt_id`, `reason`, `ui`, `options`, `multiple`, `expects`,
+`ui_schema`, `component`, `props`, `payload` and `tool_call` as a data part. An answer that
+cannot be read, or that does not fit the question or the tool
 ([interrupts.md](interrupts.md#answering)), keeps the task waiting and says why. A message to
 a task that has ended, or is still working, is refused (`InvalidRequestError`), and a new task
 never takes the id of an existing run. `CancelTask` cancels a working run, or ends a paused
