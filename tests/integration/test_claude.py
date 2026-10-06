@@ -102,6 +102,28 @@ async def test_a_tool_whose_schema_declares_no_properties_takes_no_argument(
     assert _schema(replace(now, spec=now.spec.model_copy(update={"input_schema": kept}))) == kept
 
 
+async def test_a_tool_result_over_a_mebibyte_reaches_claude(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A tool's result comes back from the CLI in one message, which the SDK reads into a 1 MiB
+    buffer unless its options say more: the harness's options say enough for any result a run keeps
+    (a team's own ``max_buffer_size`` stands)."""
+
+    @tool(side_effects="read")
+    def export(rows: int) -> str:
+        """Export a report."""
+        return "x" * (1024 * 1024 + 1)
+
+    script = [{"tool": "export", "args": {"rows": 3}}, {"text": "exported"}]
+    agent = harness.wrap(options(tmp_path, script), id="exporter", tools=[export])
+    result = await agent.run("export", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "exported"
+    own = options(tmp_path, script, max_buffer_size=1024 * 1024)
+    refused = await harness.wrap(own, id="small", tools=[export]).run("export", user="u")
+    assert refused.status is RunStatus.ERROR and refused.error is not None
+    assert refused.error.code == "CLIJSONDecodeError"
+
+
 async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(
     harness: Harness, tmp_path: Path
 ) -> None:
