@@ -17,8 +17,8 @@ from and its config. ``version=None`` is the version the source serves now. Ship
   by number, a label by name, ``production`` by default; text and chat prompts), reached with
   ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` at ``LANGFUSE_HOST``;
 * Bifrost — :class:`BifrostPrompts`, the gateway's Prompt Repository (``BIFROST_URL``): where
-  the harness makes the model call (``ReAct``, the LLM judge) the stored prompt is *selected* —
-  the gateway prepends it — and elsewhere its messages are its text.
+  the harness sets the model call's headers (``ReAct``, the LLM judge) the stored prompt is
+  *selected* — the gateway prepends it — and elsewhere its messages are its text.
 
 Where a name is looked up (:class:`PromptSources`): the sources the code passes
 (``Harness(prompts=[...])``, ``[]`` for none) in their order, instead of the environment's;

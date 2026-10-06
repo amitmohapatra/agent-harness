@@ -29,7 +29,7 @@ was running when its worker died, has an unknown effect — the model is told so
 keeps what it was told, and it is never run again blind (unless its tool is idempotent, or
 continues where it was: a sub-agent's run).
 
-Calls may come at once (``ReAct``'s reads, the frameworks that run tools concurrently): their
+Calls may come at once (a ``ReAct`` step's, the frameworks that run tools concurrently): their
 steps are numbered as they arrive (or as the caller numbered them, ``step=``), identical calls
 take their turn (``Replay.exclusive``), and the journal's progress saves go one at a time.
 """

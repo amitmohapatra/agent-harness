@@ -94,7 +94,7 @@ scores.
 reads (its own, the MCP tools its key allows) and it has no tools the harness does not run (a
 framework's own: an OpenAI Agents agent's `function_tool`s or handoffs, a graph's tools not
 built with `h.tools`, Claude's built-in tools); otherwise it writes. In `ReAct` the reads run at
-once and the writes one at a time after them, in the model's order
+once and the writes one at a time, in the model's order
 ([react.md](frameworks/react.md)); governance treats the tool like any other (a write is
 announced; the catalog may say more).
 

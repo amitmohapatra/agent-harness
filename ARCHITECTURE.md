@@ -114,8 +114,16 @@ src/trellis/
     runtime.py         Runtime (trellis.current()), ask, the pause exception, interrupt ids
     features.py        without=: the features a run or an agent turns off (Feature)
     hooks/             Hooks (before/after run, model, tool; on_error) and how they chain;
-                       langchain (middleware) and openai_agents (RunHooks): the model hooks
-                       through each framework's own mechanism
+                       openai_agents (RunHooks): the model hooks through the SDK's own
+                       mechanism (LangChain's are middleware.ModelHooks)
+    middleware.py      LangChain v1 middleware for any create_agent or Deep Agents graph:
+                       HarnessTools (the run's tools per model call, through the bridge),
+                       ModelHooks (hooks, chat span, model timeout, pinned prompt), StepLimit,
+                       StallGuard, read_result, RunCheckpointer (the graph's checkpoint in
+                       the run's journal)
+    react.py           ReAct(...): a create_agent graph with the native middleware (context
+                       editing, Deep Agents' summarization and large-result files, patched
+                       tool calls) and the harness's
     journal.py         what a re-run needs: answers and tool outputs, keyed by content (and
                        the journals of the sub-agents' runs working inside its calls)
     subagents.py       agent.as_tool(): a wrapped agent as a tool, each call a child run
@@ -142,7 +150,7 @@ src/trellis/
                        running wrapped agents, the background writes around it; __main__:
                        python -m trellis.harness.worker module:harness
     adapters/          detect(target) and one adapter per framework (base, langgraph,
-                       openai_agents, claude, react, function)
+                       openai_agents, claude, function)
     governance/        the run / announce / ask decision, usable without Harness: decision
                        (Action, Decision, decide), catalog (Rule, the catalog kept fresh, failing
                        closed, publishing), Governance (check, rules, publish, decided,
@@ -200,10 +208,9 @@ flowchart TB
     langgraph["LangGraphAdapter"]
     openai["OpenAIAgentsAdapter"]
     claude["ClaudeAdapter"]
-    react["ReActAdapter"]
     function["FunctionAdapter"]
   end
-  adapters --> convert["tools.convert<br/>(langchain · openai_agents · claude · openai_chat)"]
+  adapters --> convert["tools.convert<br/>(langchain · openai_agents · claude)"]
   convert --> bridge["tools.bridge.call"]
   runtime --> bridge
   bridge --> governance["governance.Governance<br/>(check · decide · the catalog,<br/>through trellis.memory)"]
@@ -332,7 +339,7 @@ Four functions per framework, and one check (`adapters/base.py`):
   `Command(resume=...)` for a checkpointed graph, the SDK's `RunState` for its approvals,
   otherwise the original input (a re-run);
 * `check_options(options)` — refuses `framework_options=` its run call cannot take (a key it
-  does not know, one the harness sets itself; a function and `ReAct` take none), at wrap and
+  does not know, one the harness sets itself; a function takes none), at wrap and
   call time. The options themselves reach `invoke`/`stream` as `runtime.framework_options` — the
   agent's with the run's own over them, kept with the run's record — and go to the framework's
   run call unchanged ([configuration.md](docs/configuration.md#the-frameworks-own-run-options)).
@@ -527,8 +534,9 @@ of a wrapped run calls), `exact_match()`, `contains()` and `llm_judge(criteria)`
 is an `EvalServices`: Langfuse, and the judge's gateway and model — the deployment's
 (`TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`), never the code's. `EvalServices.from_env()`
 builds them for any code; a harness builds one (`h.evals`, sharing its gateway and Langfuse
-client) and each wrapped agent has its own copy (`agent.evals`), whose judge falls back to a
-`ReAct` target's model. `evaluate(target, ...)` runs a wrapped `Agent` through the pipeline
+client) and each wrapped agent has its own copy (`agent.evals`), whose judge falls back to the
+gateway model a `ReAct` target was built with when no judge model is set (`TRELLIS_JUDGE_MODEL`,
+or a judge's own `llm_judge(model=)`). `evaluate(target, ...)` runs a wrapped `Agent` through the pipeline
 (`h.evaluate` delegates to it) or calls any `async (input) -> answer` in a root span of its own;
 `judge(case, judges, services=)` scores one case on-line from any code, and is what a wrapped
 agent's online judges run. Every score goes on a trace through `EvalServices.score` (`h.score`
@@ -683,7 +691,7 @@ sequenceDiagram
 
 The OTel API only: an `invoke_agent` span per attempt in a trace whose id derives from the run
 id (every attempt, score and piece of feedback of a run in one trace), `execute_tool`,
-`chat` (the `ReAct` model calls) and `retrieve memory` spans with GenAI attributes and
+`chat` (the model calls of a graph built with `ModelHooks`, a `ReAct`'s included) and `retrieve memory` spans with GenAI attributes and
 Langfuse's trace attributes, `score` spans; counters `trellis.runs`, `trellis.tool_calls`,
 `trellis.writes.failed`. Attributes pass the redactor and are built only for a recording span;
 so do a tool call's arguments and output on the event stream (`events.py`: AG-UI, A2A, push)

@@ -37,7 +37,7 @@ journal replay, governance (run, announce, or pause for approval:
 [observability.md](observability.md#redaction) — and results previewed up to 2000 characters), then the
 record. A tool that raises becomes an error result the model reads (`"<tool> failed: ..."`); a
 pause is never swallowed. A harness tool called outside a run is refused. Calls may come at
-once (`ReAct`'s reads, a framework running tools concurrently): identical ones take their
+once (a step's reads in `ReAct`, a framework running tools concurrently): identical ones take their
 turn, each with its own journal entry and idempotency key, and the progress saves go one at a
 time ([reliability.md](reliability.md#calls-made-at-once)).
 
@@ -65,7 +65,7 @@ step, argument values found in memory, what is missing) and the `tools` that fit
 
 | Framework | Narrowing |
 |---|---|
-| `ReAct` | per model call (each request carries the tools offered at that moment, sorted by name; the set only grows within a run) |
+| `ReAct`, a graph with `HarnessTools` | per model call (each request carries the tools offered at that moment, sorted by name; the set only grows within a run) |
 | OpenAI Agents | per turn (`FunctionTool.is_enabled`); the team's own tools are untouched |
 | Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query) |
 | LangGraph / Deep Agents | none: a compiled graph binds its tools when it is built |

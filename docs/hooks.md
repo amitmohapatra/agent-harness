@@ -25,9 +25,9 @@ tools, and each framework's own mechanism (below) outside a harness run.
 
 | | Tool hooks | Run hooks | Model hooks |
 |---|---|---|---|
-| `ReAct` | the bridge | the pipeline | its own loop: every model call (a compaction too); a `before_model` call is the call sent |
+| `ReAct` | the bridge | the pipeline | its `ModelHooks` middleware: every model call of the loop (not a summarization's); a `before_model` call is the call sent |
 | plain function | the bridge | the pipeline | none: it makes no model call |
-| LangGraph, `create_agent` | the bridge | the pipeline | LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[ModelHooks()])` (`trellis.harness.hooks.langchain`); a `before_model` call is the request made. A hand-built `StateGraph` calls its model itself: none |
+| LangGraph, `create_agent` | the bridge | the pipeline | LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[ModelHooks()])` (`trellis.harness.middleware`); a `before_model` call is the request made. A hand-built `StateGraph` calls its model itself: none |
 | Deep Agents | the bridge | the pipeline | the same middleware: `create_deep_agent(..., middleware=[ModelHooks()])` |
 | OpenAI Agents SDK | the bridge | the pipeline | the SDK's own `RunHooks`, which the harness passes to `Runner.run` (`trellis.harness.hooks.openai_agents.ModelHooks`): every call reported, none rewritten (the SDK takes nothing back) |
 | Claude Agent SDK | the bridge (its harness tools); a built-in tool (`Bash`, `Write`...) that asks for permission: `before_tool` with governance, in the permission callback ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md)) | the pipeline | none: the CLI makes the model calls, and its hooks have no model-call event |
@@ -67,9 +67,8 @@ h = Harness(hooks=[Cards()])
 agent = h.wrap(target, id="support", hooks=[Refunds()])
 ```
 
-`call.messages` is in the framework's own form: chat-completions dicts for `ReAct`
-(`call.framework == "react"`), LangChain messages for a graph (`"langgraph"`, the system
-message in `call.system`), Responses input items for the OpenAI Agents SDK (`"openai_agents"`,
+`call.messages` is in the framework's own form: LangChain messages for a graph, a `ReAct`
+included (`call.framework == "langgraph"`, the system message in `call.system`), Responses input items for the OpenAI Agents SDK (`"openai_agents"`,
 the instructions in `call.system`).
 
 **Automatic.** Hooks run in order: the harness's, then the agent's; a `Rewrite` is the next
@@ -77,7 +76,7 @@ hook's call, and the first `Deny` or `Ask` decides (the hooks after it are not a
 `before_tool` decision is journaled with the call: a resumed run — after a pause or a crash —
 reads it instead of asking the hooks again, so an `Ask` approved once is not asked again, and a
 `Rewrite` holds. A call the journal already has (its output replayed) runs no hook; nor does a
-model step a resumed `ReAct` replays. The outcome `after_tool` returns is what is journaled,
+model step a resumed graph does not take again (its checkpoint has it). The outcome `after_tool` returns is what is journaled,
 recorded in memory and on the stream.
 
 **On failure.** A hook that raises fails what it hooks: in `before_tool`/`after_tool` the call

@@ -9,9 +9,9 @@ Spans (every attribute passes the redactor first):
   tenant, framework, attempt), and the run's input and output;
 * ``execute_tool <tool>`` — one per tool call (``gen_ai.tool.name``, ``gen_ai.tool.call.id``,
   ``gen_ai.tool.call.arguments``/``.result``);
-* ``chat <model>`` — one per model call the harness makes itself (the ``ReAct`` target:
-  ``gen_ai.request.model``, ``gen_ai.usage.input_tokens``/``output_tokens``...); a framework's
-  own model calls are its instrumentation's;
+* ``chat <model>`` — one per model call of a graph with ``middleware.ModelHooks`` (a
+  ``ReAct``'s: ``gen_ai.request.model``, ``gen_ai.usage.input_tokens``/``output_tokens``...);
+  a framework's other model calls are its instrumentation's;
 * ``retrieve memory`` — the pushed context;
 * ``score <name>`` — a grounding score, an evaluator's or a person's feedback, in the run's trace
   (or the trace a score names: a trace the team's own tracing made).
