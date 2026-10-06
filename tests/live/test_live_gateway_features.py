@@ -207,12 +207,19 @@ async def test_a_stored_prompt_reaches_every_model_call_of_a_react(admin: Admin)
         system = [{"role": "system", "content": "Answer every question with the single word ARRR."}]
         await admin.prompts.commit(prompt.id, system, model=MODEL)
         async with live_harness() as h:
+            sent = Sent()  # the model a model name builds, its requests seen on the wire
             agent = h.wrap(
-                ReAct(system="Be brief.", model=MODEL, prompt=name), id=f"live-p-{suffix()}"
+                ReAct(system="Be brief.", model=gateway_model(h, sent), prompt=name),
+                id=f"live-p-{suffix()}",
             )
             result = await agent.run("What is 2 + 2?", user="live")
             assert result.status is RunStatus.SUCCESS, result.error
-            assert "ARRR" in str(result.answer).upper()
+            assert "ARRR" in str(result.answer).upper()  # the gateway prepended it
+            # every model call selected the pinned version, through its request's headers
+            assert sent.headers and all(
+                (s["x-bf-prompt-id"], s["x-bf-prompt-version"]) == (prompt.id, "1")
+                for s in sent.headers
+            )
             assert h.gateway is not None
             assert (await h.gateway.prompt(name)).version == 1
             headers = await h.model_headers(prompt=f"{name}@1")

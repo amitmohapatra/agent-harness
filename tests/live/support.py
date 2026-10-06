@@ -139,15 +139,17 @@ def serving(app: Any, port: int) -> Iterator[None]:
 
 
 class Sent:
-    """What the live model was sent: each chat request's body, as the gateway got it (an
-    ``httpx`` request hook on the model client)."""
+    """What the live model was sent: each chat request's body and headers, as the gateway got
+    them (an ``httpx`` request hook on the model client)."""
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.headers: list[dict[str, str]] = []
 
     async def __call__(self, request: httpx.Request) -> None:
         if request.url.path.endswith("/chat/completions"):
             self.requests.append(json.loads(request.content))
+            self.headers.append(dict(request.headers))
 
 
 def gateway_model(h: Harness, sent: Sent, *, wait: float = 600.0, **kwargs: Any) -> Any:
