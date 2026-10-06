@@ -34,10 +34,13 @@ What keeps a run going when the model slips:
   the gateway's own retries included: past it the run fails with a ``ModelError`` that may be
   retried.
 
-``prompt=`` names a stored prompt of the gateway's Prompt Repository (``"triage"``, or
-``"triage@3"`` for that version): its id is resolved once (``Gateway.prompt``, kept fresh),
-the version is pinned for the run (journaled: a resumed run sends the same) and every model
-call selects it — the gateway prepends its messages — and says so on its ``chat`` span.
+``prompt=`` names a prompt (``"triage"``, ``"triage@3"`` for that version, or a ``Prompt``),
+looked up in the harness's prompt sources (``trellis.harness.prompts``) and pinned for the run
+(journaled: a resumed run sends the same, whatever the source holds by then). A stored prompt
+of the gateway's Prompt Repository is selected by every model call — the gateway prepends its
+messages; any other is rendered (``prompt_vars`` fill its ``{{variables}}``) and becomes the
+instructions, before ``system`` and the pushed context (a chat prompt's other messages follow
+the system message). Each ``chat`` span says which prompt, version and source.
 
 What keeps the conversation within the model's window (``context_window``: the target's, else
 the model object's, else :data:`CONTEXT_WINDOW`), estimated as :data:`CHARS_PER_TOKEN`
@@ -59,7 +62,6 @@ steps, so a resumed run reads exactly what the model read.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -77,9 +79,11 @@ from trellis.harness.adapters.base import (
     ToolFormat,
     context_window,
 )
-from trellis.harness.clients.bifrost import PromptPin, prompt_ref
+from trellis.harness.clients.bifrost import PromptPin
 from trellis.harness.hooks import ModelCall
 from trellis.harness.journal import Pending, content_key
+from trellis.harness.prompts import Prompt, ResolvedPrompt
+from trellis.harness.repository import pinned
 from trellis.harness.runtime import Runtime
 from trellis.harness.telemetry import model_span, usage
 from trellis.harness.telemetry import output as span_output
@@ -164,20 +168,21 @@ class ReAct:
     #: the model's context window in tokens, when the model object does not say
     #: (``None``: its ``context_window``, else :data:`CONTEXT_WINDOW`)
     context_window: int | None = field(default=None, kw_only=True)
-    #: a stored prompt of the gateway (``"name"``, ``"name@version"``) every model call selects
-    prompt: str | None = field(default=None, kw_only=True)
+    #: a prompt (``"name"``, ``"name@version"``, a ``Prompt``) from the prompt sources: the
+    #: instructions, or — a stored prompt of the gateway's — selected by every model call
+    prompt: str | Prompt | None = field(default=None, kw_only=True)
+    #: the values of the prompt's ``{{variables}}``
+    prompt_vars: dict[str, Any] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.model_timeout is not None and self.model_timeout <= 0:
             raise ConfigurationError("model_timeout is a number of seconds over 0")
         if self.context_window is not None and self.context_window <= 0:
             raise ConfigurationError("context_window is a number of tokens over 0")
-        if self.prompt is not None:
-            prompt_ref(self.prompt)
-            if not isinstance(self.model, str):
-                raise ConfigurationError(
-                    "prompt= needs a Bifrost model name: the gateway prepends the stored prompt"
-                )
+        if isinstance(self.prompt, str):
+            pinned(self.prompt)
+        if self.prompt_vars is not None and self.prompt is None:
+            raise ConfigurationError("prompt_vars= fills the variables of a prompt=")
 
 
 @dataclass(slots=True)
@@ -220,7 +225,11 @@ class ReActAdapter:
                     "schema": target.output.model_json_schema(),
                 },
             }
-        loop = _Loop(target, run, await _model(target, run), body, list(native_input))
+        model, prompt = await _model(target, run)
+        messages = list(native_input)
+        if prompt is not None and prompt.selection is None:
+            messages = _instructed(messages, prompt.messages(**(target.prompt_vars or {})))
+        loop = _Loop(target, run, model, body, messages, prompt=prompt)
         messages = loop.messages
         result = ReActResult(messages=messages)
         streaks: dict[str, int] = {}
@@ -287,6 +296,8 @@ class _Loop:
     model: Any
     body: dict[str, Any]
     messages: list[dict[str, Any]]
+    #: the prompt the run pinned (what each ``chat`` span names)
+    prompt: ResolvedPrompt | None = None
     #: every tool result in full, by its call id (what ``read_result`` reads)
     results: dict[str, str] = field(default_factory=dict)
     #: the results replaced by a placeholder, by call id
@@ -353,8 +364,7 @@ class _Loop:
             return dict(recorded)
         target = self.target.model
         name = target if isinstance(target, str) else type(target).__name__
-        prompt = self.model.prompt if isinstance(self.model, _Named) else None
-        extra = prompt.attributes() if prompt is not None else None
+        extra = self.prompt.attributes() if self.prompt is not None else None
         hooks = runtime.agent.hooks
         call = await hooks.model(ModelCall("react", messages, model=name))
         with model_span(name, call.messages, extra=extra) as span:
@@ -604,23 +614,38 @@ def _arguments(schema: dict[str, Any] | None, raw: Any) -> tuple[dict[str, Any] 
     return (None, problem) if problem else (args, "")
 
 
-async def _model(target: ReAct, run: Invocation) -> Any:
-    if not isinstance(target.model, str):
-        return target.model
+async def _model(target: ReAct, run: Invocation) -> tuple[Any, ResolvedPrompt | None]:
+    """The model every step asks, and the prompt the run pinned (journaled: a resumed run
+    reads the version, and the text, it started with)."""
     runtime = run.runtime
+    prompt = None
+    if target.prompt is not None:
+        prompts = runtime.agent.harness.prompts
+        prompt = await prompts.get(target.prompt, runtime=runtime, kind="react-prompt")
+    selected = prompt.pin() if prompt is not None else None
+    if selected is not None and (target.prompt_vars or not isinstance(target.model, str)):
+        raise ConfigurationError(
+            f"prompt= names {selected.name}, a stored prompt of the gateway: the gateway "
+            "prepends it as it is stored, to a Bifrost model name's calls (no prompt_vars=)"
+        )
+    if not isinstance(target.model, str):
+        return target.model, prompt
     gateway = runtime.agent.harness.gateway
     if gateway is None:
         raise ConfigurationError("ReAct with a model name needs BIFROST_URL")
-    if target.prompt is None:
-        return _Named(gateway, target.model)
-    # the version a resumed run pinned, else the one the gateway resolves now (journaled)
-    key = content_key("react-prompt", target.prompt)
-    replayed, recorded = runtime.replay.call(key)
-    if replayed:
-        return _Named(gateway, target.model, PromptPin(**recorded))
-    prompt = await gateway.prompt(target.prompt)
-    runtime.replay.record_call(key, dataclasses.asdict(prompt))
-    return _Named(gateway, target.model, prompt)
+    return _Named(gateway, target.model, selected), prompt
+
+
+def _instructed(
+    messages: list[dict[str, Any]], prompt: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The conversation with the prompt's instructions first in its system message (then
+    ``system`` and the pushed context), and the prompt's other messages after it."""
+    own = [m["content"] for m in prompt if m.get("role") == "system"]
+    rest = [m for m in prompt if m.get("role") != "system"]
+    first, *after = messages
+    text = "\n\n".join(str(part) for part in (*own, first.get("content")) if part)
+    return [{**first, "content": text}, *rest, *after]
 
 
 @dataclass(frozen=True, slots=True)

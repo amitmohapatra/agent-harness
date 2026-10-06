@@ -59,6 +59,9 @@ the tool fails instead of running unseen.
 
 **What.** A stored prompt of the gateway's Prompt Repository: messages the gateway prepends to
 a model call, committed in versions (1, 2, 3, ...) by whoever owns the prompt, not by a deploy.
+The gateway is one prompt source among others — code, `.md` files, Langfuse — asked last
+([prompts.md](prompts.md) has them all, and the order): a name the others do not have is the
+gateway's.
 
 **When.** The instructions change more often than the code, or are owned by someone else
 (a support lead's tone, a legal rubric for the judge).
@@ -88,15 +91,18 @@ version resolved then, for the client's life, not per run.
 
 **On failure.** A name the gateway does not have, a prompt with no committed version, a version
 past the latest, or two prompts of one name: `ConfigurationError`, saying which — `ReAct` and
-`llm_judge` refuse a malformed reference (`"triage@latest"`) and a model object (only a model
-name goes through the gateway) when they are built. A prompt that cannot be read at a run's
-first call (the gateway unreachable, never read before) fails the run with the gateway's error.
+`llm_judge` refuse a malformed reference (`"triage@"`) when they are built; a version that is
+not a number (`"triage@latest"`), a model object or `prompt_vars=` with a gateway prompt (only a
+model name's calls go through the gateway, which prepends the prompt as stored) fail the run.
+A prompt that cannot be read at a run's first call (the gateway unreachable, never read before)
+fails the run with the gateway's error.
 
 ## Skills
 
 **What.** [Agent Skills](https://agentskills.io) from the gateway's Skills Repository: a
 `SKILL.md` body of instructions and the files it refers to, published in immutable SemVer
-versions, one of them served.
+versions, one of them served. The gateway is one skill source among others — code, `SKILL.md`
+folders — asked last; skills of every source mix in one run ([skills.md](skills.md)).
 
 **When.** Instructions for kinds of task that most runs do not need: loading them all into
 every prompt costs tokens and attention; listing them and loading one when it fits does not.
@@ -128,8 +134,8 @@ another pinned version — `"refunds@1.2.0"` while 1.3.0 is served, or a run tha
 before a rollout — is an error the model reads, saying both versions; the body still loads. A
 skill the gateway does not have, or cannot be reached for and never was, is a
 `skills_unavailable` warning event and the run goes on without it (the last copy read stands
-while the gateway is down). Skills without `BIFROST_URL` fail the run with a
-`ConfigurationError`.
+while the gateway is down). Skills named with no skill source at all (no `BIFROST_URL`, no
+`SKILLS_DIR`, none passed) fail the run with a `ConfigurationError`.
 
 ## Virtual MCPs
 

@@ -35,9 +35,11 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
+from trellis.harness.prompts import Prompt, PromptSource, PromptSources
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
+from trellis.harness.skills import Skill, SkillSource, SkillSources
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.sources import as_source
@@ -55,7 +57,7 @@ from trellis.runs import RunsClient, RunSummary
 
 log = logging.getLogger("trellis.harness")
 
-_Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient)
+_Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient, PromptSources, SkillSources)
 
 Framework = Literal["langgraph", "deepagents", "openai_agents", "claude_agent_sdk"]
 #: The native tool format each framework's agents are built with, by the framework's adapter
@@ -101,6 +103,11 @@ class Harness:
     each is built from the environment (``RUNS_URL``, ``MEMORY_URL``, ``BIFROST_URL``; governance
     from the memory service's catalog per tenant); ``False`` leaves memory, the gateway or
     agent-runs off (runs kept in this process) even where the environment names them.
+    ``prompts`` and ``skills`` are the prompt and skill sources (``trellis.harness.prompts``,
+    ``trellis.harness.skills``: ``Prompt``, ``prompts_dir``, ``langfuse_prompts``, ``Skill``,
+    ``skills_dir``..., or a ``PromptSources``/``SkillSources``): given, they are the ones asked,
+    in their order; not given, the environment's (``PROMPTS_DIR``, Langfuse's keys,
+    ``SKILLS_DIR``, the gateway).
 
     ``judges`` are the online evaluators every sampled successful run is scored by
     (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
@@ -115,6 +122,8 @@ class Harness:
         memory: MemoryClient | Literal[False] | None = None,
         gateway: Gateway | Literal[False] | None = None,
         governance: Governance | None = None,
+        prompts: PromptSources | Sequence[PromptSource] | None = None,
+        skills: SkillSources | Sequence[SkillSource] | None = None,
         judges: Sequence[Evaluator] = (),
         hooks: Sequence[Hooks] = (),
     ) -> None:
@@ -174,6 +183,15 @@ class Harness:
         #: governance per tenant (:meth:`governance`), or the one given for every tenant
         self._governance: dict[str, Governance] = {}
         self._given_governance = governance
+        #: where prompts and skills are looked up: the sources given, as they are; else the
+        #: ones the environment names (``PROMPTS_DIR``, Langfuse, ``SKILLS_DIR``, the gateway)
+        if prompts is None:
+            prompts = self._making(PromptSources.of(s, gateway=self.gateway))
+        if skills is None:
+            skills = self._making(SkillSources.of(s, gateway=self.gateway))
+        self.prompts = prompts if isinstance(prompts, PromptSources) else PromptSources(prompts)
+        self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
+        self.evals.prompts = self.prompts
         telemetry.configure(s)
 
     # ------------------------------------------------------------------ attaching
@@ -185,7 +203,7 @@ class Harness:
         tools: Sequence[Source | Callable[..., Any]] = (),
         version: str | None = None,
         mcp: Sequence[str] | None = None,
-        skills: Sequence[str] = (),
+        skills: Sequence[str | Skill] = (),
         timeout: float | None = None,
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
@@ -194,8 +212,9 @@ class Harness:
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
         ``tools`` are the agent's own, run in this process (functions, ``a2a``, ``openapi``);
         its MCP tools are the ones the Bifrost virtual key allows — or, with ``mcp``, the tools
-        of those Virtual MCPs of the gateway (by slug). ``skills`` are skills of the gateway's
-        Skills Repository (``"name"``, ``"name@version"``: ``trellis.harness.skills``).
+        of those Virtual MCPs of the gateway (by slug). ``skills`` are skills by name
+        (``"name"``, ``"name@version"``, from the skill sources) or given (``Skill``):
+        ``trellis.harness.skills``.
         ``version`` is the version of the agent's code (else ``TRELLIS_AGENT_VERSION``),
         recorded with each run it starts: a run resumed on another version goes on, with a
         warning naming both. ``timeout`` is the most working time one of its runs may take, in
@@ -392,6 +411,18 @@ class Harness:
             limit=limit,
             user=user,
         )
+
+    async def prompt(self, ref: str | Prompt, /, **values: Any) -> str:
+        """The prompt ``ref`` names (``"name"``, ``"name@version"``, or a ``Prompt``), from the
+        first prompt source that has it, as text with ``values`` filled in — for a framework's
+        own instructions (LangGraph, OpenAI Agents, Claude, Deep Agents, a function). Inside a
+        run it is pinned: journaled, so a resumed run reads the same text."""
+        return await self.prompts.render(ref, **values)
+
+    async def prompt_messages(self, ref: str | Prompt, /, **values: Any) -> list[dict[str, Any]]:
+        """:meth:`prompt` as chat messages (a chat prompt's; a text prompt is one system
+        message)."""
+        return await self.prompts.messages(ref, **values)
 
     async def model_headers(self, *, prompt: str | None = None) -> dict[str, str]:
         """The headers to give a framework's own model client pointed at the gateway
