@@ -361,8 +361,8 @@ class Runtime:
 
     async def approve(self, call: ToolCall, decision: Decision) -> InterruptResolution:
         """Ask for approval of a tool call (the bridge's pause): the question is governance's
-        (``Decision.question``), whose it is and the screen it is reviewed on a hook's or an
-        approval function's ``Ask`` (else anyone's, the approval control)."""
+        (``Decision.question``), whose it is and the screen it is reviewed on a hook's ``Ask``
+        (else anyone's, the approval control)."""
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,

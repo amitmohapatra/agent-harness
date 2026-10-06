@@ -45,7 +45,7 @@ from trellis.harness.governance.catalog import (
     entry,
 )
 from trellis.harness.governance.decision import Action, Decision, decide
-from trellis.harness.hooks import Approval, Ask, Chain, Deny, Hooks, denied, ruled
+from trellis.harness.hooks import Chain, Deny, Hooks, denied
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
 from trellis.harness.tools.base import Tool, execute, invoked
@@ -239,7 +239,6 @@ def governed(
     on_ask: Callable[[Decision], Any],
     on_announce: Callable[[Decision], Any] | None = None,
     hooks: Sequence[Hooks] = (),
-    approval: Approval | None = None,
 ) -> Callable[..., Awaitable[Any]]:
     """``fn`` (sync or async) as an async callable whose every call — with keyword arguments,
     the tool's arguments — is checked first. A call that asks runs ``on_ask(decision)`` (sync
@@ -255,13 +254,9 @@ def governed(
     ``hooks`` (``trellis.harness.hooks``) run around each call as around a harness tool call:
     ``before_tool`` first — a ``Deny`` raises :class:`Denied`, a ``Rewrite`` changes the
     arguments governance checks and the call gets, an ``Ask`` asks (``on_ask``) whatever
-    governance says —, ``on_error("tool", ...)`` when it fails, ``after_tool`` on its outcome
-    (the call returns that outcome's output).
-
-    ``approval`` is the tool's approval function, as ``tool(approval=)``'s: ``fn(args)``
-    returning ``None`` (governance decides), ``True`` (approved: ``on_ask`` is not called) or
-    an ``Ask`` (``on_ask`` is called whatever governance says; the decision carries the
-    ``Ask``'s ``assignee``, ``component`` and ``props``). A hook's ``Ask`` comes first."""
+    governance says (the decision carries the ``Ask``'s ``assignee``, ``component`` and
+    ``props``) —, ``on_error("tool", ...)`` when it fails, ``after_tool`` on its outcome (the
+    call returns that outcome's output)."""
     tool = Tool(
         ToolSpec(name=name or fn.__name__, side_effects=side_effects),
         lambda args: invoked(fn, **args),
@@ -277,17 +272,13 @@ def governed(
             raise Denied(denied(hooked, verdict))
         args = hooked.args
         decision = await governance.check(tool.name, args, side_effects=side_effects)
-        rule = await ruled(approval, hooked) if verdict is None and approval is not None else None
-        asked = verdict if verdict is not None else rule
-        if isinstance(asked, Ask):
+        if verdict is not None:
             decision = decision.asking(
-                asked.question,
-                assignee=asked.assignee,
-                component=asked.component,
-                props=asked.props,
+                verdict.question,
+                assignee=verdict.assignee,
+                component=verdict.component,
+                props=verdict.props,
             )
-        elif rule is True and decision.asks:
-            decision = decision.approved()
         if decision.asks:
             answer = await _settled(on_ask(decision))
             if answer is False:

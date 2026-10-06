@@ -39,13 +39,12 @@ is logged.
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from trellis.contracts import ConfigurationError, ToolCall, ToolOutcome, ToolStatus
+from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
 from trellis.harness.runtime import current
 
 if TYPE_CHECKING:
@@ -87,10 +86,6 @@ class Rewrite:
 
 #: What ``before_tool`` decides.
 Verdict = Deny | Ask | Rewrite | None
-#: A tool's approval function (``tool(approval=fn)``): ``fn(args)``, sync or async, says
-#: ``None`` (governance decides), ``True`` (approved: it runs without asking) or an
-#: :class:`Ask` (a person approves it first, asked that).
-Approval = Callable[[dict[str, Any]], Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,41 +199,19 @@ def denied(call: ToolCall, deny: Deny) -> ToolOutcome:
     )
 
 
-async def ruled(approval: Approval, call: ToolCall) -> Ask | Literal[True] | None:
-    """What a tool's approval function says about ``call``: ``None``, ``True`` or an
-    :class:`Ask`; anything else is refused (``ConfigurationError``, saying what it returned)."""
-    said = approval(dict(call.args))
-    if inspect.isawaitable(said):
-        said = await said
-    if said is None or said is True or isinstance(said, Ask):
-        return said
-    raise ConfigurationError(
-        f"the approval function of {call.tool} returned {said!r}: return None (governance "
-        "decides), True (approved) or Ask(...) (a person approves it)"
-    )
-
-
-#: How the journal keeps an approval function's ``True``.
-APPROVED: Final = "Approved"
-
-
-def noted(verdict: Deny | Ask | bool | None) -> dict[str, Any] | None:
-    """A decision as the journal keeps it (``True``: approved by an approval function)."""
-    if verdict is None or verdict is False:
+def noted(verdict: Deny | Ask | None) -> dict[str, Any] | None:
+    """A decision as the journal keeps it."""
+    if verdict is None:
         return None
-    if verdict is True:
-        return {"kind": APPROVED}
     return {"kind": type(verdict).__name__, **dataclasses.asdict(verdict)}
 
 
-def read(note: dict[str, Any] | None) -> Deny | Ask | Literal[True] | None:
+def read(note: dict[str, Any] | None) -> Deny | Ask | None:
     """A decision the journal kept (:func:`noted`)."""
     if note is None:
         return None
-    if note["kind"] == APPROVED:
-        return True
     fields = {k: v for k, v in note.items() if k != "kind"}
     return Deny(**fields) if note["kind"] == "Deny" else Ask(**fields)
 
 
-__all__ = ["Approval", "Ask", "Deny", "Hooks", "ModelCall", "Rewrite", "Stage", "Verdict"]
+__all__ = ["Ask", "Deny", "Hooks", "ModelCall", "Rewrite", "Stage", "Verdict"]

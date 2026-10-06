@@ -7,7 +7,7 @@
 returns the answer.
 
 **When.** When only a person knows: a choice, a value, a correction, a sign-off. A tool call's
-approval needs no `ask` (governance, `approval=`, below).
+approval needs no `ask` (governance, an approval rule in a hook, below).
 
 **Where.** Any tool or node of any adapter (`ReAct`, a function, LangGraph — `interrupt()`
 in place with a checkpointer —, Deep Agents, OpenAI Agents, Claude); Way 2 builds the same
@@ -76,50 +76,60 @@ where `ask` returns, saying so.
 `question.answer(record.last_resolution)` reads the answer back (into `form`); agent-runs checks
 the answer when it is given.
 
-An approval (an `irreversible` tool, a catalog `approve_when` that holds, an approval
-function's `Ask`) is the same pause with `reason=APPROVAL` and the tool call attached.
+An approval (an `irreversible` tool, a catalog `approve_when` that holds, a hook's `Ask`) is
+the same pause with `reason=APPROVAL` and the tool call attached.
 
-## Approval rules in code: `tool(approval=fn)`
+## Approval rules in code: a `before_tool` hook
 
-**What.** Your rule for each call of a tool, ahead of governance:
-`fn(args) -> None | True | Ask(...)` (sync or async) — `None`: governance decides as for any
-tool; `True`: approved, it runs without asking (announced unless it only reads); `Ask(question,
-assignee=None, component=None, props=None)`: a person approves it first, asked that, on that
-screen.
+**What.** Your rule for when a call needs a person, by its arguments: a `before_tool` hook
+([hooks.md](hooks.md)) returns `Ask(question, assignee=None, component=None, props=None)` for
+the calls that need one — a person approves it first, asked that, on that screen — and `None`
+for the rest, which governance decides as for any tool.
 
 **When.** For a rule only your code can say: an amount, a customer, the time of day. A rule an
-administrator owns is the catalog's `approve_when` ([governance.md](governance.md)); a
-guardrail across tools is a hook ([hooks.md](hooks.md)).
+administrator owns is the catalog's `approve_when` ([governance.md](governance.md)), which also
+decides by the call's arguments (`amount > 20`).
 
-**Where.** `@tool(approval=fn)` / `tool(fn, approval=fn)`, every adapter (the bridge) and
-`ReAct`; Way 2: `governed(fn, gov, ..., approval=fn)`, whose `on_ask(decision)` gets the
+**Where.** `h.wrap(..., hooks=[...])` or `Harness(hooks=[...])`, every adapter (the bridge) and
+`ReAct`; Way 2: `governed(fn, gov, ..., hooks=[...])`, whose `on_ask(decision)` gets the
 decision with the `Ask`'s `assignee`, `component` and `props`.
 
 **How.**
 
 ```python
-def refund_rule(args):
-    if args["amount"] <= 20:
-        return True  # small: no person
-    if args["amount"] > 500:
-        return Ask(
-            f"Refund {args['amount']} EUR?",
-            assignee="role:finance",
-            component="refund-review",
-            props={"amount": args["amount"]},
-        )
-    return None  # governance: irreversible asks
+class RefundRule(Hooks):
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        amount = call.args.get("amount", 0) if call.tool == "refund" else 0
+        if amount <= 20:
+            return None  # small: governance decides (a write tool runs, announced)
+        if amount > 500:
+            return Ask(
+                f"Refund {amount} EUR?",
+                assignee="role:finance",
+                component="refund-review",
+                props={"amount": amount},
+            )
+        return Ask(f"Refund {amount} EUR?")
 
 
-@tool(side_effects="irreversible", approval=refund_rule)
+@tool(side_effects="write")
 def refund(order: str, amount: int) -> str: ...
+
+
+agent = h.wrap(target, id="refunds", tools=[refund], hooks=[RefundRule()])
 ```
 
-**Automatic.** The rule's answer is journaled with the call: a resumed run reads it instead of
-asking the function again. A hook's `Deny` or `Ask` comes first (the function is not asked).
+A hook asks; it never approves a call governance asks about. So the tool's `side_effects`
+decide what runs unasked: to approve small amounts without a person, declare the tool
+`"write"` (governance runs it, announced) and let the hook ask above the threshold, as above —
+or let the catalog's `approve_when` ask by the arguments. An `irreversible` tool, or one whose
+`approve_when` holds, is always asked about.
 
-**On failure.** A function that returns anything else, or raises, fails the call: the model
-reads why (`the approval function of refund returned 'yes': return None, True or Ask(...)`).
+**Automatic.** The hook's verdict is journaled with the call: a resumed run reads it instead of
+asking the hook again. An approval remembered for the run (`remember="run"`, below) covers the
+later calls a hook asks of the same `assignee`.
+
+**On failure.** A hook that raises fails the call (the framework sees the error).
 
 ## Comments, and approving for the rest of the run
 
@@ -141,9 +151,9 @@ it, and in the feedback record; a rejection's comment is what the model reads as
 reject carries no `answer`. A remembered approval is kept in the run's journal: every later
 call of that tool in the run — after a pause, a crash, on another worker — runs without asking,
 with a `decision` event (`remembered: true`); another run asks again. It covers the tool's
-later approvals asked of the same person or role (governance's; an approval function's or a
-hook's `Ask` with the same `assignee`): an `Ask` that names someone else — finance, for a large
-amount — still asks.
+later approvals asked of the same person or role (governance's, or a hook's `Ask` with the
+same `assignee`): an `Ask` that names someone else — finance, for a large amount — still
+asks.
 
 **On failure.** `remember="run"` on anything but an approval of a tool call is refused
 (`ConfigurationError`); a comment over 4000 characters too.
@@ -255,8 +265,8 @@ interrupt may decide. `reviewer.answer(agent, result)` answers one pause, `settl
 `runs.resume`. An interrupt the script does not cover raises `LookupError` naming it;
 `reviewer.answered` lists what was answered.
 
-**Example.** [`examples/approvals.py`](../examples/approvals.py): an approval function (a small
-refund approved by the rule, a large one asked on finance's screen), labelled options with
+**Example.** [`examples/approvals.py`](../examples/approvals.py): an approval rule in a hook (a
+small refund runs unasked, a large one is asked on finance's screen), labelled options with
 several picks, an external tool's result, answered by a `Reviewer`. Tests:
 `tests/integration/test_approvals.py`, `test_questions.py` and `test_inbox.py` (every adapter,
 Way 2), and against the services `tests/live/test_live_hitl.py`.

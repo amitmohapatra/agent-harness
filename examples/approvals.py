@@ -2,9 +2,9 @@
 outside, an approval remembered for the run, a comment — on a ``ReAct`` agent, answered by a
 scripted reviewer (``trellis.testing.Reviewer``) as a test would.
 
-* ``refund`` has an approval function: up to 20 it is approved by the rule (no person), over 500
-  it asks finance on its own screen (``Ask(..., component=, props=)``), else governance decides
-  (it is ``irreversible``: it asks);
+* ``refund`` has an approval rule in code, a ``before_tool`` hook: up to 20 it runs unasked (the
+  tool is ``write``: governance only announces it), over 500 it asks finance on its own screen
+  (``Ask(..., assignee=, component=, props=)``), anything between is asked of whoever answers;
 * ``pick_plans`` asks which plans to offer: labelled options, several picks;
 * ``sign`` is external: the run pauses with the call, and the signature system's answer is what
   the model reads (``agent.resume(run_id, result=...)``).
@@ -15,31 +15,33 @@ scripted reviewer (``trellis.testing.Reviewer``) as a test would.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from _offline import react_model
 
 import trellis
-from trellis import Ask, Harness, ReAct, tool
-from trellis.contracts import Option, RunStatus
+from trellis import Ask, Harness, Hooks, ReAct, tool
+from trellis.contracts import Option, RunStatus, ToolCall
 from trellis.testing import Decide, Reviewer
 
 
-def refund_rule(args: dict[str, Any]) -> Ask | bool | None:
-    amount = args["amount"]
-    if amount <= 20:
-        return True
-    if amount > 500:
-        return Ask(
-            f"Refund {amount} EUR?",
-            assignee="role:finance",
-            component="refund-review",
-            props={"amount": amount},
-        )
-    return None
+class RefundRule(Hooks):
+    """When a refund needs a person, by its amount."""
+
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        amount = call.args.get("amount", 0) if call.tool == "refund" else 0
+        if amount <= 20:
+            return None  # small: no person
+        if amount > 500:
+            return Ask(
+                f"Refund {amount} EUR?",
+                assignee="role:finance",
+                component="refund-review",
+                props={"amount": amount},
+            )
+        return Ask(f"Refund {amount} EUR?")
 
 
-@tool(side_effects="irreversible", approval=refund_rule)
+@tool(side_effects="write")
 def refund(order: str, amount: int) -> str:
     """Refund an order."""
     return f"refunded {amount} EUR on {order}"
@@ -80,6 +82,7 @@ async def main() -> None:
             ReAct(system="You handle accounts.", model=model),
             id="accounts",
             tools=[refund, pick_plans, sign],
+            hooks=[RefundRule()],
         )
         reviewer = Reviewer(
             {

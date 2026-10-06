@@ -3,7 +3,8 @@ is a strict xfail with the gap or plan item: the day the feature lands its probe
 suite fails on XPASS, and the row is turned into a real one (a scenario in ``features.py``,
 its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 
-* ``F34`` approval rule in code (W5): ``@tool(approval=fn)`` — landed, a real row now.
+* ``F34`` approval rule in code (W5): a ``before_tool`` hook asking by the call's arguments on a
+  ``write`` tool — a real row.
 * ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed; waits on BUG-2.
 * ``F70`` the framework's own run options (G13): ``agent.run(..., framework_options=...)``.
 * the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
@@ -19,20 +20,27 @@ from typing import Any, Final
 
 from tests.matrix.model import ADAPTERS, NA, Bug, Feature, Gap
 from tests.matrix.world import USER, UnclosedToolCall, World
-from trellis import Ask, tool
+from trellis import Ask, Hooks, tool
+from trellis.contracts import ToolCall
 
 
-async def approval_fn(w: World) -> None:
-    def big(args: dict[str, Any]) -> Ask | None:
-        return Ask("Over 100: pay it?") if args.get("amount", 0) > 100 else None
+class _OverHundred(Hooks):
+    """An approval rule in code: a payment over 100 asks; a smaller one runs unasked."""
 
-    @tool(side_effects="write", approval=big)
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        return Ask("Over 100: pay it?") if call.args.get("amount", 0) > 100 else None
+
+
+async def approval_rule(w: World) -> None:
+    @tool(side_effects="write")
     async def pay(amount: int) -> str:
         """Pay."""
         return f"paid {amount}"
 
-    o = (await w.go([pay], [("pay", {"amount": 500}), ("pay", {"amount": 50})])).succeeded()
+    plan = [("pay", {"amount": 500}), ("pay", {"amount": 50})]
+    o = (await w.go([pay], plan, hooks=[_OverHundred()])).succeeded()
     assert len(o.pauses) == 1, o.pauses  # the big payment asks; the small one runs
+    assert "Over 100: pay it?" in o.pauses[0].question, o.pauses
 
 
 async def hitl_v2(w: World) -> None:
@@ -82,9 +90,9 @@ EXTENSIONS: Final[list[Feature]] = [
         "F34",
         "an approval rule in code",
         audit="F34",
-        how="@tool(approval=fn) (W5)",
+        how="a before_tool hook returning Ask by the call's arguments; the tool write (W5)",
         gap=None,
-        probe=approval_fn,
+        probe=approval_rule,
     ),
     _pending(
         "F36v2",

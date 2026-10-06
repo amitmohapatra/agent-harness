@@ -119,11 +119,11 @@ through the harness's background writes, so they are kept on disk across an outa
   * `ask`: it pauses the run for approval (`InterruptReason.APPROVAL`, the call attached, the
     decision's `question`).
 
-  Your code comes first: a `before_tool` hook may deny or ask ([hooks.md](hooks.md)), and a
-  tool's approval function (`tool(approval=fn)`: `None`, `True` or an `Ask` with its own
-  screen) may approve a call governance would ask about, or ask about one it would run
-  ([interrupts.md](interrupts.md#approval-rules-in-code-toolapprovalfn)). A tool a reviewer
-  approved for the rest of the run (`remember="run"`) is not asked about again in it.
+  Your code comes first: a `before_tool` hook may deny a call, or ask about one governance
+  would run — by its arguments, of an `assignee`, on your own screen
+  ([interrupts.md](interrupts.md#approval-rules-in-code-a-before_tool-hook)); it never
+  approves one governance asks about. A tool a reviewer approved for the rest of the run
+  (`remember="run"`) is not asked about again in it.
 
 A call is looked up by its tool's name when it is made. So a rule set after a graph was compiled
 with `h.tools(...)` still decides its calls, within the 30 s the rules are kept. This also holds

@@ -21,7 +21,6 @@ import httpx
 from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
 
 from trellis.contracts import ToolCall, ToolError, ToolSpec
-from trellis.harness.hooks import Approval
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import (
     DEFAULT_SIDE_EFFECTS,
@@ -62,7 +61,6 @@ class FunctionTool:
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
         idempotent: bool = False,
         timeout: float | None = None,
-        approval: Approval | None = None,
         external: bool = False,
     ) -> None:
         self.fn = fn
@@ -78,7 +76,7 @@ class FunctionTool:
             side_effects=side_effects,
             idempotent=idempotent,
         )
-        self.tool = Tool(self.spec, self._run, timeout=timeout, approval=approval)
+        self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -128,7 +126,6 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     timeout: float | None = None,
-    approval: Approval | None = None,
     external: bool = False,
 ) -> FunctionTool: ...
 @overload
@@ -139,7 +136,6 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     timeout: float | None = None,
-    approval: Approval | None = None,
     external: bool = False,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
@@ -151,7 +147,6 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     timeout: float | None = None,
-    approval: Approval | None = None,
     external: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
@@ -163,10 +158,7 @@ def tool(
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped).
 
-    ``approval``: your rule for each call, ``fn(args)`` (sync or async) returning ``None``
-    (governance decides, as for any tool), ``True`` (approved: it runs without asking) or
-    ``Ask(question, assignee=, component=, props=)`` (a person approves it first, asked that);
-    its answer is journaled. ``external``: the call is done outside the run (a person, another
+    ``external``: the call is done outside the run (a person, another
     system): the run pauses with it and the result given from outside
     (``agent.resume(run_id, result=...)``) is what the model reads; the function is never
     run, its return annotation is the result's schema.
@@ -178,7 +170,6 @@ def tool(
         side_effects=side_effects,
         idempotent=idempotent,
         timeout=timeout,
-        approval=approval,
         external=external,
     )
     return made(fn) if fn is not None else made
