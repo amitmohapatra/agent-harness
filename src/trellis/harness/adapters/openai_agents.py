@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -89,13 +90,19 @@ class OpenAIAgentsAdapter:
 
         agent, hooks = self._agent(target, run), _hooks(run)
         result = Runner.run_streamed(agent, await self._input(agent, native_input), hooks=hooks)
-        async for delta in _deltas(result):
-            yield delta
-        state = _edited_call(result, native_input)
-        if state is not None:
-            result = Runner.run_streamed(agent, state, hooks=hooks)
+        try:
             async for delta in _deltas(result):
                 yield delta
+            state = _edited_call(result, native_input)
+            if state is not None:
+                result = Runner.run_streamed(agent, state, hooks=hooks)
+                async for delta in _deltas(result):
+                    yield delta
+        finally:
+            # cut short (cancelled, out of time), the SDK stops its run without waiting for
+            # it: its tool calls end (on the run's stream too) before the run does
+            assert result.run_loop_task is not None  # set by run_streamed
+            await asyncio.wait({result.run_loop_task})
         yield Output(result)
 
     def extract(self, target: Any, output: Any) -> Extracted:

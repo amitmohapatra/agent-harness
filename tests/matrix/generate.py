@@ -82,26 +82,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
         ),
     ),
     (
-        # Claude: whether the time limit falls inside a tool call or between two is a race
-        {"features": {"F09", "F09r"}, "adapters": {"claude"}},
-        Bug(
-            "BUG-2",
-            "a tool call cut short by the run's time limit never ends on the event stream "
-            "(Claude: when the limit falls inside a call)",
-            raises=UnclosedToolCall,
-            strict=False,
-        ),
-    ),
-    (
-        {"features": {"F36", "F05", "F09", "F09r"}},
-        Bug(
-            "BUG-2",
-            "a tool call cut short (an ask inside it, a cancel, the run's time limit) never "
-            "ends on the event stream: TOOL_CALL_START without TOOL_CALL_END/RESULT",
-            raises=UnclosedToolCall,
-        ),
-    ),
-    (
         {"features": {"F26"}, "adapters": {"react"}, "when": _on("grounding", "memory")},
         Bug(
             "BUG-3",

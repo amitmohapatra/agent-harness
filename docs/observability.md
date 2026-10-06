@@ -133,3 +133,17 @@ keep), `before_model` the messages masked ([hooks.md](hooks.md),
 `warning`), `INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. A failed background write is a `warning`
 event on the run's listeners, a log line and a `trellis.writes.failed` count — never silent,
 never raised into the run.
+
+Every tool call that starts on the stream (`TOOL_CALL_START`, `TOOL_CALL_ARGS`) ends there,
+before the attempt's `RUN_FINISHED`: `TOOL_CALL_END`, then `TOOL_CALL_RESULT` with the call's
+`status` (`ok`, `error`, `timeout`, `rejected`, `cancelled`) and `output`. A call the attempt
+ends inside, on every adapter, ends the same way, with no output of its own — the result says
+why:
+
+| What cut it short | `status` | `output` |
+|---|---|---|
+| it asked a person (`current().ask`, an approval inside it): the run pauses | `paused` | `<tool> paused: the run waits on a person, and the call runs again when it resumes` |
+| the run was cancelled (`agent.cancel`, A2A `tasks/cancel`, a person cancelling the question it asked) | `cancelled` | `<tool> was cut short: the run was cancelled` |
+| the run's time limit (`timeout=`, `deadline=`) | `timeout` | `<tool> was cut short: the run ran out of time` |
+
+A paused call runs again in the attempt that resumes the run: a new `TOOL_CALL_START` there.

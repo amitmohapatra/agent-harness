@@ -32,8 +32,9 @@ take their turn (``Replay.exclusive``), and the journal's progress saves go one 
 
 from __future__ import annotations
 
+import asyncio
 import time
-from typing import Any
+from typing import Any, Final
 
 from trellis.contracts import (
     InterruptDecision,
@@ -58,6 +59,17 @@ from trellis.harness.tools.base import (
     execute,
     interrupted,
 )
+
+#: The ``TOOL_CALL_RESULT`` ``status`` of a call that asked a person, and ended with its
+#: attempt (the other calls cut short: ``cancelled``, ``timeout``; docs/observability.md).
+PAUSED: Final = "paused"
+CANCELLED: Final = ToolStatus.CANCELLED.value
+#: What that result's ``output`` says, by its ``status``.
+CUT: Final = {
+    PAUSED: "{tool} paused: the run waits on a person, and the call runs again when it resumes",
+    CANCELLED: "{tool} was cut short: the run was cancelled",
+    ToolStatus.TIMEOUT.value: "{tool} was cut short: the run ran out of time",
+}
 
 
 async def call(
@@ -154,10 +166,17 @@ async def _called(
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
         within = runtime.limited(tool.timeout, key=idempotency_key)
-        outcome, error = await execute(tool, args, reads=reads, within=within)
+        try:
+            outcome, error = await execute(tool, args, reads=reads, within=within)
+        except asyncio.CancelledError:
+            # the run was cancelled, or ran out of time, while the call ran
+            out = runtime.cancelled is None and runtime.remaining() == 0
+            _cut(runtime, ref, tool.name, ToolStatus.TIMEOUT.value if out else CANCELLED)
+            raise
         if isinstance(error, Paused | RunCancelled):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
+            _cut(runtime, ref, tool.name, PAUSED if isinstance(error, Paused) else CANCELLED)
             raise error
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
     hooks = runtime.agent.hooks
@@ -186,14 +205,7 @@ async def _record(
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
     # a call with side effects is saved at once: a crash after it does not repeat it
     await runtime.progress(now=not decision.runs)
-    runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=call.tool)
-    runtime.events.tool(
-        RunEventType.TOOL_CALL_RESULT,
-        ref,
-        tool=call.tool,
-        status=outcome.status.value,
-        output=outcome.output,
-    )
+    _ended(runtime, ref, call.tool, status=outcome.status.value, output=outcome.output)
     metrics.tool_called(call.tool, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
 
@@ -281,12 +293,24 @@ def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) ->
     """A call that did not execute still appears on the stream, so a UI sees every step."""
     runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=call.tool)
     runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=call.args)
-    runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=call.tool)
-    runtime.events.tool(
-        RunEventType.TOOL_CALL_RESULT,
+    _ended(
+        runtime,
         ref,
-        tool=call.tool,
+        call.tool,
         status=outcome.status.value,
         cached=outcome.cached,
         output=outcome.output,
     )
+
+
+def _cut(runtime: Runtime, ref: str, tool: str, status: str) -> None:
+    """A call cut short — it asked a person (``paused``: it runs again on resume), the run was
+    ``cancelled``, or ran out of time (``timeout``) — still ends on the stream; it has no
+    output of its own: its result says why."""
+    _ended(runtime, ref, tool, status=status, output=CUT[status].format(tool=tool))
+
+
+def _ended(runtime: Runtime, ref: str, tool: str, **result: Any) -> None:
+    """A call's end on the stream: ``TOOL_CALL_END``, then its ``TOOL_CALL_RESULT``."""
+    runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=tool)
+    runtime.events.tool(RunEventType.TOOL_CALL_RESULT, ref, tool=tool, **result)

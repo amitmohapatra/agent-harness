@@ -19,10 +19,11 @@ from fastapi import FastAPI
 from tests.support.adapters import BUILDERS
 from tests.support.models import ScriptedChat
 from tests.support.planned import Call
-from trellis import Harness, ReAct, Runtime, Settings, tool
+from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunOutcome, RunStatus, ToolError
 from trellis.harness.a2a import remote
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.bridge import CUT
 from trellis.runs import ConflictError, Job, NotFoundError
 
 
@@ -366,3 +367,54 @@ async def test_a_cancelled_run_keeps_its_transcript_and_says_nothing_of_the_agen
     [batch] = memory_service.named("messages")
     assert [m["content"] for m in batch.body["messages"]] == ["reconcile March"]
     assert memory_service.named("feedback") == []  # no outcome: a cancel says nothing
+
+
+# --------------------------------------------------------------------------- a call cut short
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+@pytest.mark.parametrize("cut", ["paused", "cancelled", "timeout"])
+async def test_a_call_cut_short_still_ends_on_the_stream_on_every_adapter(
+    harness: Harness, framework: str, cut: str, tmp_path: Path
+) -> None:
+    """A call the run's attempt ends inside — it asked a person, the run was cancelled, or ran
+    out of time — ends on the stream before the run does: ``TOOL_CALL_END``, and a
+    ``TOOL_CALL_RESULT`` whose ``status`` says why."""
+    started = asyncio.Event()
+
+    @tool(side_effects="read")
+    async def wait(seconds: int) -> str:
+        """Wait a while (asking first, when the run is to pause)."""
+        started.set()
+        runtime = current()
+        if cut == "paused" and runtime is not None:
+            return str(await runtime.ask("Wait that long?"))
+        await asyncio.sleep(seconds)
+        return "waited"
+
+    plan: list[Call] = [("wait", {"seconds": 30})]
+    target, tools = await BUILDERS[framework](harness, [wait], tmp_path, plan)
+    agent = harness.wrap(target, id=f"cut-{framework}", tools=tools)
+    events: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.stream("wait", user="u", timeout=1 if cut == "timeout" else 30):
+            events.append(event)
+
+    watching = asyncio.create_task(watch())
+    await asyncio.wait_for(started.wait(), 20)
+    if cut == "cancelled":
+        await agent.cancel(events[0].run_id, reason="not needed")
+    await watching
+    kinds = [e.type for e in events]
+    ended = kinds.index(RunEventType.TOOL_CALL_END)
+    assert kinds[ended - 2 : ended + 2] == [
+        RunEventType.TOOL_CALL_START,
+        RunEventType.TOOL_CALL_ARGS,
+        RunEventType.TOOL_CALL_END,
+        RunEventType.TOOL_CALL_RESULT,
+    ], kinds
+    result = events[ended + 1]
+    assert result.data["status"] == cut and result.data["output"] == CUT[cut].format(tool="wait")
+    assert len({e.tool_call_id for e in events[ended - 2 : ended + 2]}) == 1
+    assert kinds[-1] is RunEventType.RUN_FINISHED
