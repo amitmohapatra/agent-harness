@@ -63,6 +63,12 @@ needs a checkpointer every worker can reach; a harness approval resumed there is
 the journal — [which checkpointer](langgraph.md#approvals-and-pauses)), `serve_chat`/`serve_a2a`
 serve it, and `h.evaluate`/judges score it (`llm_judge` needs `TRELLIS_JUDGE_MODEL`).
 
+A tool of the agent's own that asks with LangGraph's `interrupt(value)` (a checkpointer
+needed) is the graph's own question: a dict `value` carries `options` (several picks with
+`multiple`), `expects` with `ui_schema`, `component` with `props`, and `assignee` onto the
+`Interrupt` as `ask(...)` does, the answer is checked the same way, and the tool gets it as
+given ([the table](langgraph.md#approvals-and-pauses)).
+
 ## Limits
 
 * Deep Agents' built-in tools (files, `execute`, `task`, `write_todos`) are not the harness's

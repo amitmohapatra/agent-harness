@@ -50,9 +50,26 @@ person's feedback days later, lands on it without anything stored.
 | `trellis.runs` | `agent`, `outcome` (`success`, `error`, `timeout`, `interrupt`, `cancelled`) | an attempt ends |
 | `trellis.tool_calls` | `tool`, `status` (`ok`, `error`, `timeout`) | the bridge executed a call (a replayed or rejected call is not counted) |
 | `trellis.writes.failed` | `write` (the background write's label, e.g. `memory.transcript`) | a background write failed or the write queue was full |
+| `trellis.writes.undelivered` | `write`, `outcome` (`spooled`, `lost`) | a background write this process gave up on |
+| `trellis.runs.queue_wait` (histogram, seconds) | `agent` | a worker claimed a queued run: how long it waited (since it was queued, or since the answer that queued it again) |
+| `trellis.runs.rate_limited` | `operation` (`start`, `resume`, `schedule`) | agent-runs still answered `429` after its SDK's retries ([runs.md](runs.md#admission-agent-runs-rate-limit)) |
+| `trellis.run_events.undelivered` | | run events agent-runs' event log did not take |
+| `trellis.notifications` | `provider`, `outcome` (`sent`, `failed`) | a pause was told to a notifier ([interrupts.md](interrupts.md#telling-people)) |
 
-They go wherever the application's OTel meter provider sends them (the harness installs a
-tracer provider only).
+With `OTEL_EXPORTER_OTLP_ENDPOINT` set, `Harness()` also installs a meter provider exporting them
+over OTLP/HTTP to `<endpoint>/v1/metrics` every 60 s (and on close) — unless the endpoint is
+Langfuse's (it takes traces only) or the application installed a meter provider itself, which
+it keeps. Otherwise they go wherever the application's provider sends them. agent-runs' own
+Prometheus metrics (claims, rate-limited requests, the ticker) are at its `/metrics`.
+
+## Logs
+
+The harness logs through `logging` (`trellis.*` loggers; the run's id and the like as `extra`
+fields) and leaves the configuration to the application. The worker it starts itself
+(`python -m trellis.harness.worker`) logs JSON lines to stderr — `time`, `level`, `logger`,
+`message`, every `extra` field, `exception` — when stderr is not a terminal (a container, a
+service manager), and text when it is: nothing to set. An application installs the same
+formatter with `handler.setFormatter(trellis.harness.logs.JSONFormatter())`.
 
 ## Export
 
@@ -132,7 +149,12 @@ keep), `before_model` the messages masked ([hooks.md](hooks.md),
 
 `agent.stream` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`,
 `TEXT_MESSAGE_*`, `TOOL_CALL_*`, `CUSTOM` (`tool_notice`, `log` from `current().log(...)`,
-`warning`), `INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. A failed background write is a `warning`
+`warning`, `decision` — the person's decision an attempt goes on with: `decision`, `reviewer`,
+`comment`, `remember`; or a call approved because its tool was approved for the run —, and
+`notified`), `INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. The decision is also on the attempt's
+`invoke_agent` span (`trellis.decision.*` attributes and a `decision` span event). With
+`RUNS_URL` the events are also in agent-runs' event log, readable from any process
+(`agent.events`, [runs.md](runs.md#a-runs-events-from-anywhere)). A failed background write is a `warning`
 event on the run's listeners, a log line and a `trellis.writes.failed` count — never silent,
 never raised into the run.
 

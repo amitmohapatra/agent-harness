@@ -778,11 +778,9 @@ class World:
             assert not self.recorder.seen, "hooks off: a hook ran"
 
     def _timeout_and_version(self, record: RunRecord) -> None:
-        """The agent's version and time limit are recorded with each run it starts (a
-        scheduled run's record carries neither yet: G7, row F10)."""
+        """The agent's version and time limit are recorded with each run it starts,
+        scheduled ones included."""
         on = self.switched
-        if self.mode == "schedule":
-            return
         if "version" not in self.overrides:
             expected = VERSION if "version" in on else None
             assert record.agent_version == expected, ("version", record.agent_version)

@@ -148,7 +148,7 @@ async def test_an_item_the_harness_cannot_even_start_is_an_error(
 
 async def test_a_cancelled_run_is_reported_cancelled(harness: Harness) -> None:
     async def cancelled(input: str, agent: Runtime) -> str:
-        from trellis.harness.runtime import RunCancelled
+        from trellis.harness.asking import RunCancelled
 
         raise RunCancelled("no")
 

@@ -35,8 +35,9 @@ from trellis.harness.adapters.base import (
     Output,
     ToolFormat,
 )
+from trellis.harness.asking import answer_of
 from trellis.harness.journal import Pending
-from trellis.harness.runtime import MARKER, answer_of, reason_of
+from trellis.harness.runtime import MARKER, reason_of
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"

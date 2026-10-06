@@ -266,8 +266,7 @@ async def run_timeout(w: World) -> None:
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
     assert o.record.error is not None and o.record.error.code == "run_timeout"
-    if w.mode != "schedule":  # a scheduled run's record names no limit (G7, row F10)
-        assert o.record.timeout_seconds == 0.4
+    assert o.record.timeout_seconds == 0.4
 
 
 # --------------------------------------------------------------------------- sub-agents
@@ -1293,8 +1292,6 @@ async def versioned(w: World) -> None:
     from tests.matrix.world import AGENT_TIMEOUT, VERSION
 
     assert o.record.agent_version == (VERSION if w.on else None), o.record.agent_version
-    if w.mode == "schedule" and not w.on:
-        return  # a scheduled run carries no time limit either (G7: the version row holds it)
     limit = AGENT_TIMEOUT if "agent_timeout" in w.switched else None
     assert o.record.timeout_seconds == limit, o.record.timeout_seconds
 
@@ -1307,7 +1304,6 @@ FEATURES.append(
         "h.wrap(version=, timeout=) / TRELLIS_AGENT_VERSION",
         versioned,
         needs=frozenset({"version"}),
-        modes={"schedule": Gap("G7", "a scheduled run carries no agent_version or time limit")},
         way2=NA("RunStart.agent_version: your code sets it"),
     )
 )

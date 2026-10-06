@@ -3,21 +3,35 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Collection, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Sequence,
+)
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
+from pydantic import ValidationError as PydanticError
+
 from trellis.contracts import (
     ConfigurationError,
+    ErrorCategory,
+    HarnessError,
     Interrupt,
     InterruptDecision,
+    InterruptRemember,
     InterruptResolution,
     RunEvent,
     RunEventType,
+    RunOutcome,
     RunRecord,
     RunStart,
     RunStatus,
@@ -50,15 +64,16 @@ from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
+from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, reason_of, run_of
 from trellis.harness.skills import Skills
 from trellis.harness.subagents import SubAgent, asked_by, cancel_children
-from trellis.harness.telemetry import output, retrieval_span, trace_hex
+from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
-from trellis.runs import Job
+from trellis.runs import Job, RateLimitedError
 from trellis.runs.answers import answer_problem
 
 if TYPE_CHECKING:
@@ -85,6 +100,16 @@ ABSTAIN_NOTES: Final = {
         "you do not know rather than fill the gap."
     ),
 }
+
+
+class _NoResult:
+    """``resume(result=)`` not given (``None`` is a result)."""
+
+    def __repr__(self) -> str:
+        return "NO_RESULT"
+
+
+NO_RESULT: Final[Any] = _NoResult()
 
 
 class Agent:
@@ -139,6 +164,10 @@ class Agent:
         self._toolboxes: dict[str, Toolbox] = {}
         #: the runs an attempt of which runs in this process now, by id
         self.running: dict[str, Runtime] = {}
+        #: one run of a conversation at a time in this process (``pipeline.attempt``)
+        self.turns = Turns()
+        #: who follows a run's events in this process (``events``), by run id
+        self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
 
     @functools.cached_property
     def evals(self) -> EvalServices:
@@ -212,10 +241,16 @@ class Agent:
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
+        priority: int = 0,
+        concurrency_key: str | None = None,
     ) -> RunHandle:
         """Queue the run for a worker (``h.worker([...]).run()``); it outlives this process.
         ``timeout``, ``deadline`` and ``without`` as for :meth:`run`: the working time counts
-        across every worker that runs it, a crash included."""
+        across every worker that runs it, a crash included. ``priority`` (-1000 to 1000):
+        a higher one is claimed first among the tenant's queued runs. ``concurrency_key``:
+        runs sharing it run one at a time (the run store's limit) — by default the
+        conversation's (``thread:<thread>``, when ``thread`` is given), so a second message to
+        a busy conversation waits for the first run instead of running beside it."""
         try:
             json.dumps(input)
         except (TypeError, ValueError) as exc:
@@ -228,8 +263,10 @@ class Agent:
             timeout=timeout,
             deadline=deadline,
             without=without,
+            priority=priority,
+            concurrency_key=concurrency_key or (f"thread:{thread}" if thread else None),
         )
-        await self.harness.runs.start(start, queue=True)
+        await admitted(self.harness.runs.start(start, queue=True), "start")
         return RunHandle(self, start.run_id, tenant=start.tenant_id)
 
     async def cancel(
@@ -258,25 +295,51 @@ class Agent:
         elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
             # (a journal kept as a run artifact is not read for it: the reaper deletes it)
             await sandbox.ended(self, (held.checkpoint or {}).get("sandbox"), run_id)
+            self._unwatched(run_id)
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
 
     async def resume(
         self,
         interrupt_id: str,
-        decision: InterruptDecision | str,
+        decision: InterruptDecision | str | None = None,
         *,
         answer: Any = None,
-        reviewer: str,
+        result: Any = NO_RESULT,
+        reviewer: str | None = None,
+        comment: str | None = None,
+        remember: InterruptRemember = "once",
         tenant: str | None = None,
     ) -> Result:
-        """Answer the interrupt a run is paused on. A run started in process continues here;
-        a run that came from the queue goes back to it (``QUEUED``) and a worker continues it.
-        ``answer`` is the answer to a question, or the edited arguments of an ``EDIT``;
+        """Answer the interrupt a run is paused on (``interrupt_id``, or the run's id: what it
+        waits on now). A run started in process continues here; a run that came from the queue
+        goes back to it (``QUEUED``) and a worker continues it. ``answer`` is the answer to a
+        question, or the edited arguments of an ``EDIT``; ``result`` the result of an external
+        tool's call (``tool(external=True)``: an ``answer`` the model reads as the tool's
+        output, no ``decision`` or ``reviewer`` needed). ``reviewer`` is who decided;
+        ``comment`` their remark, kept with the decision (the run record, the ``decision``
+        event, the span, the feedback); ``remember="run"`` with an ``approve`` of a tool call
+        approves that tool's later calls in this run without asking (never another run's).
         ``tenant`` is the run's, named by a platform key only. A question a sub-agent asked is
         answered here, on its parent's run: the answer goes on to the sub-agent's run."""
+        if result is not NO_RESULT:
+            if decision not in (None, InterruptDecision.ANSWER, "answer", "ANSWER"):
+                raise ConfigurationError("a result answers the call: give no other decision")
+            decision, answer = InterruptDecision.ANSWER, result
+        if decision is None:
+            raise ConfigurationError(
+                "name the decision: answer, approve, reject, edit or cancel (or give result=)"
+            )
+        if reviewer is None and result is NO_RESULT:
+            raise ConfigurationError("a decision is somebody's: pass reviewer=")
         record, resolution = await self._resolution(
-            interrupt_id, decision, answer, reviewer, tenant=await self.harness.tenant(tenant)
+            interrupt_id,
+            decision,
+            answer,
+            reviewer,
+            tenant=await self.harness.tenant(tenant),
+            comment=comment,
+            remember=remember,
         )
         return await self._continue(record, resolution)
 
@@ -292,6 +355,7 @@ class Agent:
         """Queue a run of this agent on ``cron`` (evaluated in ``tz``), acting for
         ``on_behalf_of``. Workers run them. Idempotent: the same agent, person, cadence and
         input are one schedule (agent-runs answers the existing one), so a redeploy adds none.
+        Each fired run is bounded by the agent's ``timeout`` and records its ``version``.
         Pause or resume it with ``trellis.runs.RunsClient``: ``schedules.update(id,
         ScheduleUpdate(enabled=…))``."""
         spec = ScheduleSpec(
@@ -302,8 +366,10 @@ class Agent:
             timezone=tz,
             on_behalf_of=on_behalf_of,
             input=input,
+            timeout_seconds=self.timeout,
+            agent_version=self.version,
         )
-        return await self.harness.runs.schedules.create(spec)
+        return await admitted(self.harness.runs.schedules.create(spec), "schedule")
 
     def as_tool(
         self,
@@ -338,9 +404,11 @@ class Agent:
         interrupt_id: str,
         decision: InterruptDecision | str,
         answer: Any,
-        reviewer: str,
+        reviewer: str | None,
         *,
         tenant: str,
+        comment: str | None = None,
+        remember: InterruptRemember = "once",
     ) -> tuple[RunRecord, InterruptResolution]:
         run_id = run_of(interrupt_id)
         record = await self.harness.runs.get(run_id, tenant=tenant)
@@ -348,6 +416,8 @@ class Agent:
             raise ConfigurationError(f"no run {run_id} of agent {self.id}")
         if record.status is not RunStatus.PAUSED or record.awaiting is None:
             raise ConfigurationError(f"run {run_id} is {record.status.value}, not paused")
+        if interrupt_id == run_id:  # the run's id: what it waits on now
+            interrupt_id = record.awaiting.interrupt_id
         if record.parent_run_id is not None:
             raise ConfigurationError(
                 f"run {run_id} is a sub-agent's run: answer the question its parent run "
@@ -359,14 +429,20 @@ class Agent:
             )
         chosen = InterruptDecision(str(decision).upper())
         edited = chosen is InterruptDecision.EDIT
-        resolution = InterruptResolution(
-            interrupt_id=interrupt_id,
-            run_id=run_id,
-            decision=chosen,
-            answer=None if edited else answer,
-            payload=answer if edited else None,
-            reviewer=reviewer,
-        )
+        try:
+            resolution = InterruptResolution(
+                interrupt_id=interrupt_id,
+                run_id=run_id,
+                decision=chosen,
+                answer=None if edited else answer,
+                payload=answer if edited else None,
+                reviewer=reviewer,
+                comment=comment,
+                remember=remember,
+            )
+        except PydanticError as exc:
+            reasons = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())
+            raise ConfigurationError(f"not an answer to {interrupt_id}: {reasons}") from exc
         problem = answer_problem(record.awaiting, resolution) or await self._edit_problem(
             record.awaiting, resolution, tenant=tenant
         )
@@ -418,6 +494,7 @@ class Agent:
                 tenant=record.tenant_id,
             )
             await sandbox.ended(self, journal.sandbox, record.run_id)
+            self._unwatched(record.run_id)
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
@@ -444,7 +521,7 @@ class Agent:
         # The run store first: a decision is feedback only once it took effect. A resume
         # the store refuses (answered already, a stale interrupt) raises here, before
         # anything is sent, so approval patterns never learn from a decision that never was.
-        resumed = await runs.resume(resolution, tenant=record.tenant_id)
+        resumed = await admitted(runs.resume(resolution, tenant=record.tenant_id), "resume")
         without = run_without(record)
         run_memory = await self.run_memory(identity, without)
         if (
@@ -470,6 +547,11 @@ class Agent:
         record = job.record
         if record.agent_id != self.id:
             raise ConfigurationError(f"run {record.run_id} is {record.agent_id}'s, not {self.id}'s")
+        queued = record.created_at if record.attempt == 1 else None
+        if record.last_resolution is not None:  # queued again when a person answered
+            queued = record.last_resolution.resolved_at
+        if queued is not None:
+            metrics.queue_waited(self.id, (datetime.now(UTC) - queued).total_seconds())
         artifacts = self.harness.runs.artifacts
         return await pipeline.attempt(
             self,
@@ -497,6 +579,55 @@ class Agent:
         finally:
             if not task.done():
                 task.cancel()
+
+    async def events(
+        self, run_id: str, *, after: int = 0, tenant: str | None = None
+    ) -> AsyncIterator[RunEvent]:
+        """A run's events, until it ends (a paused run's stay open: its next attempt's
+        follow). With agent-runs (``RUNS_URL``) every event of the run past position ``after``
+        in its log, then each as it is appended — wherever the run is executed (a worker, a
+        replica). In process (no ``RUNS_URL``), the events of its attempts run in this process
+        from now on (``after`` is not used: nothing is kept). ``tenant`` is the run's, named by
+        a platform key only."""
+        tenant = await self.harness.tenant(tenant)
+        store = event_log(self.harness.runs)
+        if store is not None:
+            async for entry in store.stream_events(run_id, after=after, tenant=tenant):
+                yield entry.event
+            return
+        record = await self.harness.runs.get(run_id, tenant=tenant)
+        if record is None or record.agent_id != self.id:
+            raise ConfigurationError(f"no run {run_id} of agent {self.id}")
+        if record.final:
+            return
+        queue: asyncio.Queue[RunEvent | None] = asyncio.Queue()
+        watchers = self._watching.setdefault(run_id, [])
+        watchers.append(queue.put_nowait)
+        runtime = self.running.get(run_id)
+        if runtime is not None:  # the attempt running now
+            runtime.events.listen(queue.put_nowait)
+        try:
+            while (event := await queue.get()) is not None:
+                yield event
+                if event.type is RunEventType.RUN_FINISHED and event.outcome not in (
+                    RunOutcome.INTERRUPT,
+                    None,
+                ):
+                    return
+        finally:
+            watchers.remove(queue.put_nowait)
+            if not watchers:
+                del self._watching[run_id]
+
+    def watchers(self, run_id: str) -> list[Callable[[RunEvent], None]]:
+        """Who follows ``run_id``'s events in this process (``events``)."""
+        return list(self._watching.get(run_id, ()))
+
+    def _unwatched(self, run_id: str) -> None:
+        """The run ended with no attempt to say so (cancelled while it waited): whoever
+        follows its events here is done."""
+        for watcher in self._watching.get(run_id, ()):
+            watcher(None)
 
     # ------------------------------------------------------------------ used by the pipeline
     async def run_memory(
@@ -739,7 +870,7 @@ class Agent:
             deadline=deadline,
             without=without,
         )
-        await self.harness.runs.start(start)
+        await admitted(self.harness.runs.start(start), "start")
         return RunRecord.from_start(start)
 
     async def _start(
@@ -755,11 +886,14 @@ class Agent:
         deadline: datetime | None = None,
         parent: str | None = None,
         without: Collection[Feature] = (),
+        priority: int = 0,
+        concurrency_key: str | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
-        the agent's version, the run it is a sub-agent's run of (``parent``) and what it is
-        ``without`` go with it when there are any."""
+        the agent's version, the run it is a sub-agent's run of (``parent``), what it is
+        ``without``, and how a queued run waits its turn (``priority``, ``concurrency_key``)
+        go with it when there are any."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
@@ -769,6 +903,8 @@ class Agent:
             "deadline": deadline,
             "agent_version": self.version,
             "parent_run_id": parent,
+            "priority": priority or None,
+            "concurrency_key": concurrency_key,
         }
         return RunStart(
             run_id=run_id,
@@ -780,6 +916,57 @@ class Agent:
             metadata={WITHOUT: turned_off} if turned_off else {},
             **{name: value for name, value in given.items() if value is not None},
         )
+
+
+class Throttled(HarnessError):
+    """agent-runs refused a call with ``429`` (the tenant's rate limit) and its SDK already
+    waited the ``Retry-After`` it asked for, as often as it retries: try again after
+    ``retry_after`` seconds (``details["retry_after"]``). Not retried by the harness — one
+    retry layer, the SDK's."""
+
+    code = "RUNS_RATE_LIMITED"
+    category = ErrorCategory.RATE_LIMIT
+    retryable = True
+
+    def __init__(self, message: str, *, retry_after: float | None) -> None:
+        super().__init__(message, details={"retry_after": retry_after}, source="agent-runs")
+        self.retry_after = retry_after
+
+
+async def admitted[T](call: Awaitable[T], operation: str) -> T:
+    """``call`` to the run store; a ``429`` it still answers after the SDK's retries is a
+    :class:`Throttled`, counted (``trellis.runs.rate_limited``)."""
+    try:
+        return await call
+    except RateLimitedError as exc:
+        metrics.rate_limited(operation)
+        after = f" after {exc.retry_after:g}s" if exc.retry_after is not None else " later"
+        raise Throttled(
+            f"agent-runs is rate limiting this tenant ({operation}): try again{after}",
+            retry_after=exc.retry_after,
+        ) from exc
+
+
+class Turns:
+    """One run of a conversation at a time in this process: the others wait their turn, in
+    order (``pipeline.attempt``)."""
+
+    def __init__(self) -> None:
+        self._held: dict[str, tuple[asyncio.Lock, int]] = {}
+
+    @contextlib.asynccontextmanager
+    async def taken(self, key: str) -> AsyncIterator[None]:
+        lock, waiting = self._held.get(key) or (asyncio.Lock(), 0)
+        self._held[key] = (lock, waiting + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, waiting = self._held[key]
+            if waiting == 1:
+                del self._held[key]
+            else:
+                self._held[key] = (lock, waiting - 1)
 
 
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
@@ -839,4 +1026,4 @@ class RunHandle:
                 await asyncio.sleep(POLL_SECONDS)
 
 
-__all__ = ["Agent", "RunHandle"]
+__all__ = ["NO_RESULT", "Agent", "RunHandle", "Throttled"]

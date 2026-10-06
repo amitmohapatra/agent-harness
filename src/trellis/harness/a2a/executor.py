@@ -142,8 +142,16 @@ class RunExecutor(AgentExecutor):
         interrupt = record.awaiting
         try:
             decision, answer = _decision(interrupt.reason, context.message)
+            _, data = text_and_data(context.message)
+            comment = data.get("comment")
             record, resolution = await self.agent._resolution(
-                interrupt.interrupt_id, decision, answer, reviewer=user, tenant=tenant
+                interrupt.interrupt_id,
+                decision,
+                answer,
+                reviewer=user,
+                tenant=tenant,
+                comment=comment if isinstance(comment, str) else None,
+                remember="run" if data.get("remember") == "run" else "once",
             )
         except (ValueError, ConfigurationError) as exc:
             await self._ask_again(event_queue, task_id, context_id, str(exc), interrupt.question)
@@ -276,9 +284,13 @@ def _decision(reason: InterruptReason, message: Message | None) -> tuple[Interru
         answer = (
             dict(payload)
             if isinstance(payload, Mapping)
-            else {k: v for k, v in data.items() if k != DECISION_KEY}
+            else {k: v for k, v in data.items() if k not in SAID_KEYS}
         )
     return decision, answer
+
+
+#: What a data part says about a decision rather than as its edited arguments.
+SAID_KEYS: Final = frozenset({DECISION_KEY, "comment", "remember"})
 
 
 __all__ = ["RunExecutor"]
