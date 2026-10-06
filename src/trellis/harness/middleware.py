@@ -560,16 +560,27 @@ class StepLimit(AgentMiddleware):
 class StallGuard(AgentMiddleware):
     """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
     in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed. A step whose calls were all malformed (their
-    arguments not JSON) is not the end of the run: the model is asked again, and LangChain
-    tells it what was wrong."""
+    consecutive steps in which every call failed. A malformed call (its arguments not JSON) is
+    answered with what was wrong, and a step of malformed calls only is not the end of the
+    run: the model is asked again."""
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         last = state["messages"][-1] if state.get("messages") else None
-        if isinstance(last, AIMessage) and last.invalid_tool_calls and not last.tool_calls:
-            return {"jump_to": "model"}
-        return None
+        if not isinstance(last, AIMessage) or not last.invalid_tool_calls:
+            return None
+        told = [
+            ToolMessage(
+                f"Tool call {c.get('name') or 'unknown'} with id {c['id']} could not be "
+                "executed - arguments were malformed or truncated.",
+                name=c.get("name") or "unknown",
+                tool_call_id=c["id"],
+                status="error",
+            )
+            for c in last.invalid_tool_calls
+            if c.get("id")
+        ]
+        return {"messages": told} | ({} if last.tool_calls else {"jump_to": "model"})
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()

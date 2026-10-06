@@ -29,11 +29,11 @@ dependencies = [
 [project.optional-dependencies]
 # `create_agent` and its middleware (HumanInTheLoopMiddleware, TodoListMiddleware) are
 # the `langchain` package: LangChain v1 agents are LangGraph graphs.
-langgraph = ["langgraph>=1.2,<2", "langchain-core>=1.6,<2", "langchain>=1.4.3,<2"]
-deepagents = ["trellis-harness[langgraph]", "deepagents>=0.7.22,<0.8"]
+langgraph = ["langgraph>=1.2,<2", "langchain-core>=1.6,<2", "langchain>=1.4,<2"]
+deepagents = ["trellis-harness[langgraph]", "deepagents>=0.7.19,<0.8"]
 # ``ReAct(...)``: a LangChain ``create_agent`` graph with Deep Agents' context middleware
 # (eviction, summarization, dangling-call repair), its model a ``ChatOpenAI`` on the gateway.
-react = ["trellis-harness[langgraph]", "langchain-openai>=1.0", "deepagents>=0.7.22,<0.8"]
+react = ["trellis-harness[langgraph]", "langchain-openai>=1.0", "deepagents>=0.7.19,<0.8"]
 openai-agents = ["openai-agents>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
 agui = ["fastapi>=0.115"]
@@ -57,6 +57,8 @@ dev = [
   "ruff>=0.16",
   "pyright>=1.1.414",
   "uvicorn>=0.30",
+  # Examples point LangGraph at Bifrost's OpenAI-compatible endpoint with this.
+  "langchain-openai>=1.0",
 ]
 
 [build-system]
