@@ -59,6 +59,8 @@ async def test_older_results_are_cleared_past_half_the_window_and_read_back(
     results = [c for c in contents(model, first) if str(c).startswith(("page", "[result"))]
     assert results[0] == CLEARED
     assert all(r.startswith("page") for r in results[-3:])  # the last three stay
+    offered = [{t["function"]["name"] for t in r["tools"]} for r in model.requests]
+    assert ["read_result" in o for o in offered[: first + 1]] == [False] * first + [True]
     read = [n for n, r in enumerate(model.requests) if "read_result" in str(r["messages"][-2])]
     assert contents(model, read[0])[-1].startswith("page 1 ")  # read back in full
     asked = len(model.requests)

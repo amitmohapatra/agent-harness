@@ -92,6 +92,7 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 | `StepLimit` | after `max_steps` model calls the model is asked once more, with `tool_choice: "none"`, for its best answer with what it has; a `warning` event (`max_steps`) and a log line say so. No answer then fails the run |
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed (no such tool, arguments that do not fit, an error, a timeout), stop the run with a `ModelError`; a step of malformed calls only is answered and the model asked again |
 | `read_result` (a tool) | reads a cleared tool result again, by its call's id, in pieces |
+| `ReadTools` | `read_file` offered only once there is a file to read, `read_result` once a result was cleared: a small model offered them from the start reads nothing, again and again (both stay callable) |
 | `RunCheckpointer` | the graph's checkpoint kept in the run's journal, the latest only: a resume — after a pause, a crash or a requeue — continues the graph where it stopped |
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, placed before `ModelHooks` (so its span
@@ -109,7 +110,7 @@ shows what the model is sent). Each works the same in any `create_agent` or Deep
 
 The harness middleware in a graph of your own: `HarnessTools()` makes the run's tools the
 graph's (`tools=[]` is then enough), `ModelHooks()` gives the hooks and the spans, and
-`StepLimit`, `StallGuard`, `read_result()` and `RunCheckpointer()` work as above.
+`StepLimit`, `StallGuard`, `read_result()`, `ReadTools` and `RunCheckpointer()` work as above.
 
 ```python
 from langchain.agents import create_agent

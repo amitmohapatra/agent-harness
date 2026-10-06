@@ -302,4 +302,4 @@ async def test_the_tools_are_offered_in_a_stable_order(harness: Harness) -> None
     agent = harness.wrap(ReAct(system="s", model=model), id="sorted", tools=tools)
     await agent.run("x", user="u")
     names = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
-    assert names == [["alpha", "read_file", "read_result", "zeta"]] * 2
+    assert names == [["alpha", "zeta"]] * 2

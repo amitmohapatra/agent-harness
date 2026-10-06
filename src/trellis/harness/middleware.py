@@ -680,6 +680,32 @@ def read_result(most: int = READ_LIMIT) -> BaseTool:
     return StructuredTool.from_function(coroutine=read, name=READ_RESULT)
 
 
+class ReadTools(AgentMiddleware):
+    """``read_file`` offered once the graph's state has a file to read (a large result saved, a
+    summarized history: Deep Agents' ``StateBackend``), ``read_result`` once a result reads as
+    ``placeholder`` (cleared): a small model offered them from the start reads nothing, again
+    and again. Both stay callable."""
+
+    def __init__(self, placeholder: str) -> None:
+        super().__init__()
+        self.placeholder = placeholder
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        unused = set()
+        if not request.state.get("files"):
+            unused.add("read_file")
+        if not any(
+            isinstance(m, ToolMessage) and m.content == self.placeholder for m in request.messages
+        ):
+            unused.add(READ_RESULT)
+        kept = [t for t in request.tools if _named(t) not in unused]
+        return await handler(request.override(tools=kept))
+
+
 # --------------------------------------------------------------------------- checkpoints
 class RunCheckpointer(BaseCheckpointSaver[int]):
     """A checkpointer that keeps the latest checkpoint only — and, in a harness run whose
@@ -858,6 +884,7 @@ def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfi
 __all__ = [
     "HarnessTools",
     "ModelHooks",
+    "ReadTools",
     "RunCheckpointer",
     "StallGuard",
     "StepLimit",

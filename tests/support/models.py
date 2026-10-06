@@ -16,8 +16,6 @@ Call = tuple[str, dict[str, Any]]
 Turn = str | Call | list[Call] | dict[str, Any]
 #: Where the scripted endpoint pretends to be (nothing is sent anywhere).
 BASE_URL = "http://scripted.test/v1"
-#: The tools every ``ReAct`` graph offers of its own: a large result's file, a cleared result.
-REACT_TOOLS = ["read_file", "read_result"]
 
 
 class Script:

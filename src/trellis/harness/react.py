@@ -19,9 +19,9 @@ the loop is the harness's. What it is built with:
   tools per model call, sorted; writes in the model's order), :class:`~.ModelHooks` (the
   hooks, the ``chat`` span, ``model_timeout`` and the run's time left, the ``prompt`` pinned
   for the run), :class:`~.StepLimit` (``max_steps``, then one answer without tools),
-  :class:`~.StallGuard` (``max_repeats``), :func:`~.read_result` (a cleared result read back)
-  and :class:`~.RunCheckpointer` (the graph's checkpoint in the run: a resume continues in
-  place);
+  :class:`~.StallGuard` (``max_repeats``), :func:`~.read_result` (a cleared result read back,
+  :class:`~.ReadTools` offering the read tools once they have something to read) and
+  :class:`~.RunCheckpointer` (the graph's checkpoint in the run: a resume continues in place);
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware (planning, the full
   filesystem, sub-agents, approvals, call limits, PII...), placed before ``ModelHooks``; one
   named as a default one (``SummarizationMiddleware``, ``FilesystemMiddleware``...) replaces it.
@@ -126,6 +126,7 @@ def ReAct(
             ]
         ),
         create_summarization_middleware(_profiled(chat, window), backend),
+        ours.ReadTools(CLEARED),
         ours.ModelHooks(timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars),
     ]
     graph = create_agent(

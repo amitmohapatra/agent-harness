@@ -56,7 +56,7 @@ async def test_react_is_a_create_agent_graph_the_langgraph_adapter_runs(harness:
     first, second = model.requests
     assert first["messages"][0]["role"] == "system"
     assert first["messages"][0]["content"].startswith("You answer stock questions.")
-    assert names(first) == ["read_file", "read_result", "stock"]  # sorted: the cache holds
+    assert names(first) == ["stock"]  # the read tools: once there is something to read
     assert second["messages"][-2]["tool_calls"][0]["function"]["name"] == "stock"
     assert second["messages"][-1] == {"role": "tool", "tool_call_id": "call_1", "content": "7"}
 
@@ -358,6 +358,8 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
     assert "saved in the filesystem at this path: /large_tool_results/call_1" in told
     assert len(told) < 10_000  # a preview, not the result
     assert "0123456789" in model.requests[2]["messages"][-1]["content"]
+    offered = [[t["function"]["name"] for t in r.get("tools", [])] for r in model.requests]
+    assert offered == [["dump"], ["dump", "read_file"], ["dump", "read_file"]]  # once saved
 
 
 async def test_the_same_call_over_and_over_is_a_stall(harness: Harness) -> None:
