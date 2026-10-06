@@ -163,9 +163,9 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 
 ## Run it
 
-* [`examples/openai_agents_agent.py`](../../examples/openai_agents_agent.py) — harness tools
+* [`examples/02_way1_openai_agents/agent.py`](../../examples/02_way1_openai_agents/agent.py) — harness tools
   added per run, an irreversible call approved.
-* [`examples/openai_agents_handoff.py`](../../examples/openai_agents_handoff.py) — a handoff to a
+* [`examples/02_way1_openai_agents/handoff.py`](../../examples/02_way1_openai_agents/handoff.py) — a handoff to a
   specialist built with `h.tools`, its call approved.
 * Tests: `tests/integration/test_openai_agents.py` (`needs_approval`: approve, reject with a
   reason, answer, edit), and against the real services `tests/live/test_live_matrix.py`

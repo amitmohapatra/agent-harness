@@ -83,12 +83,14 @@ stop.
 
 ## Model timeouts
 
-**What.** The most one model call of `ReAct` may take.
+**What.** The most one model call of a `ReAct` — or of any `create_agent` or Deep Agents graph
+built with the harness's `ModelHooks(timeout=)` middleware — may take.
 
 **When.** A model that sometimes hangs, or a run that must not spend its whole budget on one
 call.
 
-**Where.** `ReAct(..., model_timeout=seconds)`. A framework's own model clients (LangChain's
+**Where.** `ReAct(..., model_timeout=seconds)`; in a graph of your own,
+`create_agent(..., middleware=[ModelHooks(timeout=seconds)])`. A framework's own model clients (LangChain's
 `ChatOpenAI(timeout=)`, the OpenAI Agents SDK's) are configured on the client, as before; the
 run's own limit still bounds them.
 
@@ -403,7 +405,7 @@ line naming both versions.
 
 ## Run it
 
-* [`examples/reliability.py`](../examples/reliability.py) — a read retried, a write past its
+* [`examples/02_way1_function/reliability.py`](../examples/02_way1_function/reliability.py) — a read retried, a write past its
   timeout of unknown effect, a run past its time limit, a cancel.
 * Tests: `tests/integration/test_reliability.py` (every adapter), `test_run_limits.py`,
   `test_progress.py` (crashes), and against the real services `tests/live/test_live_reliability.py`.

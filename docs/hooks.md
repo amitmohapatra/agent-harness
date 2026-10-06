@@ -84,7 +84,7 @@ recorded in memory and on the stream.
 `on_run_start` the attempt (`ERROR`). `on_run_end` and `on_error` run once the outcome is
 decided: what they raise is logged (`trellis.hooks`), and the run's outcome stands.
 
-**Example.** [`examples/hooks.py`](../examples/hooks.py): a guardrail (deny, ask, rewrite)
+**Example.** [`examples/02_way1_react/hooks_guardrails.py`](../examples/02_way1_react/hooks_guardrails.py): a guardrail (deny, ask, rewrite)
 and redaction of card numbers on a `ReAct` agent. Tests:
 `tests/integration/test_hooks.py` (every adapter, Way 2), and against the real services
 `tests/live/test_live_hooks.py`.

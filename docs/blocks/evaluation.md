@@ -171,7 +171,7 @@ report = await evaluate(
 
 Each recipe ends with `judge` on the run it just finished: [LangGraph](langgraph.md),
 [OpenAI Agents SDK](openai-agents.md), [Claude Agent SDK](claude-agent-sdk.md).
-[`examples/blocks_evaluate.py`](../../examples/blocks_evaluate.py) runs `evaluate` on a plain
+[`examples/03_way2_evals/evaluate_and_judge.py`](../../examples/03_way2_evals/evaluate_and_judge.py) runs `evaluate` on a plain
 function over a dataset and `judge` on one run, with a judge of its own and a judge model.
 
 ## With Way 1

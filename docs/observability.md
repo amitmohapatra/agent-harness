@@ -1,11 +1,11 @@
-# Observability and evaluation
+# Observability
 
-Langfuse is the eval system of record: scores, datasets and dataset runs, human annotation
-queues and dashboards — per agent and per request, through the trace attributes below. The
-harness emits OpenTelemetry with the GenAI semantic conventions, puts the memory service's
-grounding score and people's feedback on the run's trace, and runs evaluations into Langfuse —
-offline over a dataset, online on sampled runs ([evaluation.md](evaluation.md)). Datadog gets
-every span end to end through a collector.
+The harness emits OpenTelemetry with the GenAI semantic conventions: one trace per run, a span
+per attempt, tool call and model call, with Langfuse's trace attributes, every attribute
+redacted; the memory service's grounding score and people's feedback go on the run's trace.
+Langfuse reads the traces and is where scores, datasets and dashboards live; Datadog gets every
+span end to end through a collector. Evaluation — offline over a dataset, online on sampled
+runs — is [evaluation.md](evaluation.md).
 
 ## Spans
 
@@ -110,11 +110,9 @@ The harness uses the credentials the OTLP headers already carry — no extra var
 | an evaluator's name (`exact_match`, `llm_judge`, ...) | `h.evaluate` or `evaluate` (every item of a dataset), an online judge (`Harness(judges=[...])`, a sampled share of runs), or `judge(...)` from code you do not wrap — [evaluation.md](evaluation.md), [blocks/evaluation.md](blocks/evaluation.md) | 0..1 (`NUMERIC`), a bool (`BOOLEAN`), or a category (`CATEGORICAL`); the evaluator's comment (a judge's reasoning) |
 | `feedback` | `h.feedback(run_id, verdict, correction=None)` — also the run's `human` feedback in the memory service, which outranks the judge's and the run's own | confirm/approve 1.0, edit 0.5, correct/reject 0.0; the correction as the comment |
 
-LLM-as-judge on the traces and dataset runs against an agent are the harness's
-(`Harness(judges=[...])`, `h.evaluate`, and `judge`, `evaluate` for code that is not wrapped —
-[evaluation.md](evaluation.md)); annotation queues and
-datasets built from traces are configured in Langfuse. Whether the *harness* got slower is `make bench`
-(`tests/performance`, against the committed `benchmark-results.json`).
+How evaluators and judges produce the evaluator scores is [evaluation.md](evaluation.md).
+Whether the *harness* got slower is `make bench` (`tests/performance`, against the committed
+`benchmark-results.json`).
 
 ## Redaction
 
@@ -142,7 +140,7 @@ become `<n bytes>`, anything else its JSON or its text. The redactor is the cont
 Redaction of your own — a domain's identifiers, what the model itself must not read — is a
 hook: `after_tool` returns the outcome masked (what the model reads, the journal and memory
 keep), `before_model` the messages masked ([hooks.md](hooks.md),
-[`examples/hooks.py`](../examples/hooks.py)).
+[`examples/02_way1_react/hooks_guardrails.py`](../examples/02_way1_react/hooks_guardrails.py)).
 
 ## Events
 
@@ -173,3 +171,6 @@ A paused call runs again in the attempt that resumes the run: a new `TOOL_CALL_S
 A call its framework still runs when the attempt ends (one run in a task of the framework's
 own, as Claude's in-process MCP server does, stopped only later) is ended then, before
 `RUN_FINISHED`, the same way; its later stop adds nothing to the stream.
+
+Runnable: [examples/05_features/tracing_and_redaction.py](../examples/05_features/tracing_and_redaction.py)
+— a run's spans exported to a provider of your own, a secret dropped and an e-mail masked.

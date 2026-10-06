@@ -157,7 +157,7 @@ too. So does answering a child's question with `cancel` on the parent.
 
 ## Run it
 
-* [`examples/react_subagents.py`](../examples/react_subagents.py) — a planner delegating to two
+* [`examples/05_features/subagents.py`](../examples/05_features/subagents.py) — a planner delegating to two
   agents at once, one of which asks a person.
 * Tests: `tests/integration/test_subagents.py` (every adapter as a child, two at once, a child
   that asks, a worker killed inside a child, cancel, time), and against the real services

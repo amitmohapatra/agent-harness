@@ -60,10 +60,20 @@ check: lint typecheck test  ## Everything CI runs, except the benchmark
 	@echo "all gates passed"
 
 .PHONY: examples
-examples:  ## Run every example with no services
-	@for f in examples/*.py; do case $$f in */_*) continue;; esac; \
-	  env -u BIFROST_URL -u MEMORY_URL -u RUNS_URL -u TRELLIS_API_KEY -u OTEL_EXPORTER_OTLP_ENDPOINT \
-	    $(PY) $$f >/dev/null && echo "$$f ok" || exit 1; done
+examples:  ## Run every example offline (scripted model, memory, gateway), several at once
+	$(PY) scripts/run_examples.py
+
+.PHONY: examples-live
+examples-live:  ## Run every example with the environment as it is (the real services that are set)
+	$(PY) scripts/run_examples.py --live
+
+.PHONY: docs-check
+docs-check:  ## Every link and anchor resolves; every snippet parses and names only the real API
+	$(PY) scripts/check_docs.py
+
+.PHONY: docs-mermaid
+docs-mermaid:  ## Every Mermaid diagram parses (node; MERMAID_MODULES: a node_modules with mermaid, jsdom)
+	node scripts/check_mermaid.mjs $$(git ls-files --cached --others --exclude-standard '*.md' | grep -v '^\.claude/')
 
 .PHONY: clean
 clean:  ## Remove caches

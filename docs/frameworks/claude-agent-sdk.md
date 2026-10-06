@@ -160,7 +160,7 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
 
 ## Run it
 
-* [`examples/claude_agent_sdk_agent.py`](../../examples/claude_agent_sdk_agent.py) — offline it
+* [`examples/02_way1_claude/agent.py`](../../examples/02_way1_claude/agent.py) — offline it
   drives a scripted stand-in for the CLI (`tests/support/fake_claude_cli.py`); with
   `BIFROST_URL` the real `claude` CLI through Bifrost.
 * Tests: `tests/integration/test_claude.py`, and against the real services

@@ -37,8 +37,11 @@ where it cannot, and so does its answer.
 ## Workers
 
 ```python
-await h.worker([agent_a, agent_b]).run()                  # until stopped; CPU count runs at a time
-python -m trellis.harness.worker app.agents:h             # every agent the Harness `h` wraps
+await h.worker([agent_a, agent_b]).run()  # until stopped; CPU count runs at a time
+```
+
+```bash
+python -m trellis.harness.worker app.agents:h                  # every agent the Harness `h` wraps
 python -m trellis.harness.worker app.agents:h --concurrency 8
 ```
 
@@ -53,7 +56,9 @@ memory and time limit: the one thing a worker does with a wrapped agent's run. A
 it: `trellis.runs.Worker(runs, agent.execute, [agent.id])`, or your own around
 `runs.claim(worker_id, [agent.id])` (`job` is a `trellis.runs.Job`: the claimed record, the
 worker's id, the lease's length). A job of another agent is refused (`ConfigurationError`).
-[examples/react_with_blocks.py](../examples/react_with_blocks.py) runs one with a loop of its own.
+[examples/05_features/own_scheduler.py](../examples/05_features/own_scheduler.py) runs one with a loop of its own;
+[examples/05_features/priority_and_concurrency.py](../examples/05_features/priority_and_concurrency.py)
+shows the queue order (`priority`, `concurrency_key`).
 
 `h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
 at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and

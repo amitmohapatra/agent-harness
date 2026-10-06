@@ -1,6 +1,6 @@
 """The documentation keeps up with the code: every public name, every setting and every example
 is documented, every framework has its page (Way 1) and every block its page (Way 2), and the
-docs index links each page."""
+docs index links each page. (Links, anchors and snippets: ``make docs-check``.)"""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from trellis import Settings
 ROOT = Path(__file__).resolve().parents[2]
 README = (ROOT / "README.md").read_text()
 DOCS = ROOT / "docs"
+API = (DOCS / "api.md").read_text()
+EXAMPLES = ROOT / "examples"
 #: one page per kind of target, under docs/frameworks/
 FRAMEWORK_PAGES = (
     "langgraph.md",
@@ -32,7 +34,6 @@ BLOCK_PAGES = (
     "governance.md",
     "evaluation.md",
     "a2a.md",
-    "contracts.md",
     "langgraph.md",
     "openai-agents.md",
     "claude-agent-sdk.md",
@@ -41,8 +42,8 @@ BLOCK_PAGES = (
 
 
 @pytest.mark.parametrize("name", trellis.__all__)
-def test_every_public_name_is_in_the_readme(name: str) -> None:
-    assert re.search(rf"`{re.escape(name)}[`(\[ ]", README), name
+def test_every_public_name_is_in_the_api_reference(name: str) -> None:
+    assert re.search(rf"`{re.escape(name)}[`(\[ ]", API), name
 
 
 @pytest.mark.parametrize("field", list(Settings.model_fields))
@@ -52,12 +53,17 @@ def test_every_setting_is_in_the_configuration_page(field: str) -> None:
 
 @pytest.mark.parametrize(
     "example",
-    sorted(p.name for p in (ROOT / "examples").glob("*.py") if not p.name.startswith("_")),
+    sorted(p.relative_to(EXAMPLES).as_posix() for p in EXAMPLES.glob("[0-9][0-9]_*/*.py")),
 )
 def test_every_example_is_listed_and_linked_from_a_page(example: str) -> None:
-    assert f"`{example}`" in README, example
+    assert f"]({example})" in (EXAMPLES / "README.md").read_text(), example
     pages = [*DOCS.glob("*.md"), *DOCS.glob("frameworks/*.md"), *DOCS.glob("blocks/*.md")]
     assert any(f"examples/{example}" in page.read_text() for page in pages), example
+
+
+def test_the_examples_are_numbered_groups_and_nothing_else() -> None:
+    loose = [p.name for p in EXAMPLES.glob("*.py")]
+    assert loose == [], "an example lives in a numbered group: examples/NN_group/name.py"
 
 
 @pytest.mark.parametrize("page", FRAMEWORK_PAGES)

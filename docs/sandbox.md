@@ -231,7 +231,7 @@ wrap, or a run's own `framework_options={"sandbox": ...}`.
 
 ## Other providers: E2B, Daytona, Modal
 
-Only Docker is implemented here: a hosted provider's client is a new dependency and needs an
+*A design note: none of these providers is built.* Only Docker is implemented here: a hosted provider's client is a new dependency and needs an
 account key, so none ships with this repository. One plugs in by implementing the interface —
 nothing in the harness changes:
 
@@ -250,7 +250,7 @@ nothing in the harness changes:
 | `network` hosts | `network={"allow_out": [...]}` | CIDRs only: refuse hosts | `outbound_domain_allowlist` |
 
 Its `SandboxRef` holds the sandbox's id and the labels only; the key stays in the provider
-object (from its own environment variable). `examples/sandbox.py` has a provider of its own (a
+object (from its own environment variable). [`examples/05_features/sandbox.py`](../examples/05_features/sandbox.py) has a provider of its own (a
 temporary directory, with no isolation) that shows the whole interface working.
 
 ## Limits
@@ -271,7 +271,7 @@ temporary directory, with no isolation) that shows the whole interface working.
 
 ## Run it
 
-* [`examples/sandbox.py`](../examples/sandbox.py) — a `ReAct` analyst writing and running a
+* [`examples/05_features/sandbox.py`](../examples/05_features/sandbox.py) — a `ReAct` analyst writing and running a
   script in its sandbox (Docker with `SANDBOX=docker`, else a provider of the example's own),
   then the provider governed without a harness (Way 2).
 * Tests: `tests/integration/test_sandbox.py` (every adapter, calls at once, a pause, a lost

@@ -11,7 +11,7 @@ the blocks plugged in by your own code:
 | evaluation ([evaluation.md](evaluation.md)) | the answer is judged on the run's trace |
 
 The runnable version, offline and deterministic, is
-[`examples/blocks_openai_agents.py`](../../examples/blocks_openai_agents.py); the snippets
+[`examples/03_way2_governance/openai_agents_recipe.py`](../../examples/03_way2_governance/openai_agents_recipe.py); the snippets
 below are from it. Wrapping the same `Agent` instead (Way 1):
 [frameworks/openai-agents.md](../frameworks/openai-agents.md).
 

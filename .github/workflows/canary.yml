@@ -1,0 +1,91 @@
+name: canary
+
+# Weekly: the latest release of every framework the harness supports, unpinned, through the
+# tests and the feature matrix. It never blocks a pull request (it runs on a schedule and on
+# demand only); its report says which framework releases the next harness release must handle
+# (docs/versioning.md, docs/adr/0001-version-policy.md).
+on:
+  schedule:
+    - cron: "17 5 * * 1"  # Mondays, 05:17 UTC
+  workflow_dispatch:
+
+jobs:
+  latest-frameworks:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash  # -eo pipefail: a failing make before a tee fails the step
+        working-directory: agent-harness
+    env:
+      TRELLIS_MEMORY_OPENAPI: ${{ github.workspace }}/agent-memory-service/docs/openapi.json
+      TRELLIS_RUNS_OPENAPI: ${{ github.workspace }}/agent-runs/docs/openapi.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agent-harness
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-contracts
+          path: agent-contracts
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/bifrost-sdk
+          path: bifrost-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-memory-service
+          path: agent-memory-service
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-runs
+          path: agent-runs
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install, then the latest frameworks over the lock
+        run: |
+          uv sync --all-extras
+          uv pip install --python .venv/bin/python --upgrade \
+            langgraph langchain langchain-core langchain-openai deepagents \
+            openai-agents claude-agent-sdk 'a2a-sdk[http-server]'
+      - name: Versions against the tested ranges
+        run: |
+          mkdir -p build
+          .venv/bin/python - <<'PY' | tee build/canary.md
+          from trellis.harness import compat
+
+          print("| Distribution | Tested range | Latest | In range |")
+          print("|---|---|---|---|")
+          for name, (low, high) in compat.TESTED.items():
+              found = compat.installed(name) or "not installed"
+              ok = "yes" if compat.tested(name, found) else "**no**"
+              print(f"| `{name}` | `>={low},<{high}` | {found} | {ok} |")
+          PY
+      - name: Tests
+        id: tests
+        continue-on-error: true
+        run: make test 2>&1 | tee build/canary-tests.log
+      - name: Feature matrix
+        id: matrix
+        continue-on-error: true
+        run: make matrix
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo
+            echo "make test: ${{ steps.tests.outcome }}"
+            echo "make matrix: ${{ steps.matrix.outcome }}"
+          } | tee -a build/canary.md
+          cat build/canary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary
+          path: |
+            agent-harness/build/canary.md
+            agent-harness/build/canary-tests.log
+            agent-harness/build/matrix.md
+            agent-harness/build/matrix-*.xml
+          if-no-files-found: ignore
