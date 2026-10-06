@@ -67,6 +67,10 @@ description=None, metadata=None, concurrency=4, limit=None) -> EvalReport`:
 * To be graded for grounding, return `EvalOutput(answer, bundle_id, memory)`: the answer, the
   `bundle_id` of the memory context it was given, and the `MemoryContext` (`trellis.memory`) it
   was built in.
+* To be graded on what it did (`called`, `tool_sequence`, an evaluator of yours reading
+  `case.trajectory`), return `EvalOutput(answer, trajectory=[(ToolCall, ToolOutcome), ...])`:
+  the tool calls it made, in order (contracts types). Returned none, the case's trajectory is
+  `None` and those evaluators give no score ([evaluation.md](../evaluation.md#trajectories)).
 * An item whose call raises is `error`, never fatal; only `success` items are scored.
 * `services` defaults to `EvalServices.from_env()`, opened and closed by the call.
 

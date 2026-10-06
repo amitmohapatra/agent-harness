@@ -316,7 +316,8 @@ h = Harness(judges=[llm_judge("Polite and correct.")])  # online: sampled runs, 
 
 The evaluation names are imported from `trellis.harness.evals`: the evaluators `grounding()`
 (against the run's memory context), `exact_match()` and `contains()` (against `expected`),
-`llm_judge(criteria, *, name="llm_judge", prompt=None)` and your own (any `async (EvalCase) -> EvalScore |
+`called(tool, *, before=None, args=None)` and `tool_sequence([...], exact=False)` (against the
+run's tool calls, `EvalCase.trajectory`), `llm_judge(criteria, *, name="llm_judge", prompt=None)` and your own (any `async (EvalCase) -> EvalScore |
 None`), and `EvalItem`, `EvalReport`. The same module evaluates and judges code that is not
 wrapped ([docs/blocks/evaluation.md](docs/blocks/evaluation.md)).
 

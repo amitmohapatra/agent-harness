@@ -826,6 +826,7 @@ class Agent:
             bundle_id=pushed.bundle_id if pushed is not None else None,
             context=runtime.context,
             memory=memory.ctx if memory is not None else None,
+            trajectory=list(runtime.replay.journal.trajectory),
         )
         services, events = self.evals, runtime.events
         for evaluator in judges:

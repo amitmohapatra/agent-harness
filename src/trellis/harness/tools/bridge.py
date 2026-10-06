@@ -13,9 +13,10 @@ record.
 4. **execution** — inside a span, with ``TOOL_CALL_*`` events around it (the stream gets the
    arguments and the output redacted; the tool and the model get them as they are); the
    ``after_tool`` hooks may change the outcome the model reads;
-5. **record** — journaled for a later resume (and, in a worker, saved as the run's progress
-   checkpoint: at once after a call with side effects), counted, and (memory on) sent,
-   redacted, to the memory service's tool records in the background.
+5. **record** — journaled for a later resume (and on the run's trajectory, which evaluators
+   read; in a worker, saved as the run's progress checkpoint: at once after a call with side
+   effects), counted, and (memory on) sent, redacted, to the memory service's tool records in
+   the background.
 
 Execution is bounded: a call takes at most its tool's ``timeout`` and what is left of the
 run's time; a call that only reads (or is idempotent) is tried again after an error that may
@@ -185,6 +186,7 @@ async def _record(
         runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
+    runtime.replay.record_step(call, outcome)
     # a call with side effects is saved at once: a crash after it does not repeat it
     await runtime.progress(now=not decision.runs)
     runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=call.tool)
@@ -273,6 +275,7 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
         metadata={UNKNOWN: True},
     )
     runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
+    runtime.replay.record_step(call, outcome)
     await runtime.progress(now=True)
     _events(runtime, ref, call, outcome)
     await runtime.agent.record_tool(runtime, call, outcome)

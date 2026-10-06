@@ -214,6 +214,7 @@ started with `start` or a schedule goes back to the queue and any worker continu
 | an answer graded by a model against criteria | `llm_judge("criteria")` — offline in `h.evaluate`, online in `judges=` |
 | an exact or partial match against an expected answer | `exact_match()`, `contains()` (offline: they need `expected`) |
 | grounding as an explicit evaluator in a report | `grounding()` |
+| which tools a run called, in what order, with what arguments | `called("lookup", before="refund")`, `tool_sequence([...])`, or your own reading `case.trajectory` ([evaluation.md](evaluation.md#trajectories)) |
 | quality on live traffic | `Harness(judges=[...])`, sampled by `TRELLIS_JUDGE_SAMPLE` |
 | the same for an agent you do not wrap | `evaluate(my_agent, dataset, [...])` and `judge(case, [...], services=...)` ([blocks/evaluation.md](blocks/evaluation.md)) |
 
