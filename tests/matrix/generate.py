@@ -29,11 +29,6 @@ from tests.matrix.model import (
     Selection,
     cell_id,
 )
-from tests.matrix.world import (
-    NoEnding,
-    NotTimedOut,
-    UnclosedToolCall,
-)
 
 #: Why a way does not apply to an adapter (whatever the feature).
 NOT_BLOCKS: Final = NA(
@@ -60,16 +55,6 @@ def _on(*switches: str) -> Callable[[str, str, str, str, Selection], bool]:
 #: (``pytest tests/matrix -k <cell>``) and the script in the bug's ``why``. Remove an entry
 #: when its bug is fixed: its cells then XPASS and fail the suite until it is.
 KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
-    (
-        {"features": {"F09", "F09r"}, "modes": {"worker", "elsewhere", "schedule"}},
-        Bug(
-            "BUG-7",
-            "a queued run past its time limit: the runs SDK Worker's own timeout (G34) cancels "
-            "the attempt first: it ends CANCELLED (no error), or TIMEOUT with no RUN_FINISHED "
-            "on its event stream",
-            raises=(NotTimedOut, NoEnding, UnclosedToolCall),
-        ),
-    ),
     (
         {"features": {"F12"}, "adapters": {"claude"}},
         Bug(

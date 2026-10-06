@@ -212,6 +212,7 @@ async def _attempt(
     pushed: PromptContext | None = None
     error: Exception | None = None
     clock = asyncio.timeout(None if budget is None else budget.seconds)
+    stopped = False  # by its worker, out of working time
     # a sub-agent's run works inside its parent's tool call: not in that call, in its own run
     tokens = (_current.set(runtime), _call.set(None))
     agent.running[identity.run_id] = runtime
@@ -239,8 +240,11 @@ async def _attempt(
         # ``agent.cancel`` ends the run CANCELLED with its reason, and its task goes on;
         # otherwise the caller went away (a closed stream): the run ends here. A worker's run
         # is the worker's to end — CANCELLED here only when someone asked (its heartbeat said
-        # so); stopped for its lease, its working time or a release, the worker ends it
-        if runtime.cancelled is None or task.uncancel():
+        # so); stopped for its lease or a release, the worker ends it. Stopped by its worker
+        # at the end of its working time (the worker's clock and the attempt's end together,
+        # the worker's first), it ends TIMEOUT here, as when the attempt's own clock ends it
+        stopped = _out_of_time(job, exc)
+        if not stopped and (runtime.cancelled is None or task.uncancel()):
             settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
             if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
                 await sandbox.ended(agent, journal.sandbox, identity.run_id)
@@ -253,7 +257,7 @@ async def _attempt(
         _call.reset(tokens[1])
         _current.reset(tokens[0])
         agent.running.pop(identity.run_id, None)
-    timed_out = budget.error if budget is not None and clock.expired() else None
+    timed_out = budget.error if budget is not None and (clock.expired() or stopped) else None
     result = await _concluded(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
@@ -292,6 +296,17 @@ async def _worked(
         streaming=streaming,
     )
     return extracted, pushed
+
+
+def _out_of_time(job: Job | None, cancelled: asyncio.CancelledError) -> bool:
+    """Whether a worker stopped the attempt (``cancelled``) because the run's working time is
+    up — not because someone cancelled it, its lease was lost or the worker released it."""
+    return (
+        job is not None
+        and not job.cancel_requested
+        and RELEASED not in cancelled.args
+        and job.remaining_seconds == 0
+    )
 
 
 def _traced(runtime: Runtime) -> RunTrace:
