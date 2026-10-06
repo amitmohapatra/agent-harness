@@ -28,7 +28,7 @@ the lock's (`uv.lock`), against which `make test`, `make matrix` and `make examp
 |---|---|---|---|
 | `trellis-contracts` | `>=0.6.1,<0.7` | 0.6.1 | — |
 | `trellis-memory` | `>=0.4` | 0.4.0 | agent-memory-service 0.3.0 (`docs/openapi.json`) |
-| `trellis-runs` | `>=0.4.0` | 0.4.0 | agent-runs 0.4.0 (`docs/openapi.json`) |
+| `trellis-runs` | `>=0.4.0` | 0.4.1 | agent-runs 0.4.0 (`docs/openapi.json`) |
 | `bifrost-sdk` | `>=0.3` | 0.3.0 | the Bifrost gateway |
 
 `trellis-contracts` 0.6.1 is the floor because schedules carry the run options in their
