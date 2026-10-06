@@ -450,19 +450,6 @@ class SkillSources(Chain[ResolvedSkill]):
             await self._gateway.aclose()
 
 
-async def resolve_skill(
-    ref: str | Skill, *, sources: SkillSources | Sequence[SkillSource]
-) -> ResolvedSkill:
-    """The skill ``ref`` names (``"name"``, ``"name@version"``, a :class:`Skill`), as the first
-    of ``sources`` that has it gives it — its body, and ``read(path)`` for its files — for code
-    with no ``Harness`` (Way 2). ``SkillSources.from_env()`` is the environment's (close it when
-    done: its files are read through it)."""
-    if isinstance(ref, Skill):
-        return await ref.resolve(ref.name, ref.version)
-    name, version = pinned(ref)
-    return await SkillSources.given(sources).find(name, version)
-
-
 # --------------------------------------------------------------------------- in a run
 
 

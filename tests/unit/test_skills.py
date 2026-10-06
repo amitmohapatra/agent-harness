@@ -19,7 +19,6 @@ from trellis.harness.skills import (
     Skill,
     SkillSources,
     refs_of,
-    resolve_skill,
     skills_dir,
 )
 
@@ -255,17 +254,3 @@ async def test_from_env_names_the_environments_sources_and_closes_its_gateway(
     assert sources.labels == ["code", f"skills_dir({tmp_path})", "Bifrost"]
     await sources.aclose()
     assert SkillSources.from_env({}).labels == []
-
-
-async def test_plain_code_resolves_a_skill_and_reads_its_files(tmp_path: Path) -> None:
-    write_skill(tmp_path, "sql", "name: sql\ndescription: Reviews SQL.", "Body.", **{"a.md": "A"})
-    folder = skills_dir(tmp_path)
-    sql = await resolve_skill("sql", sources=[folder])
-    assert sql.body == "Body." and await sql.read("a.md") == "A"
-    pinned = await resolve_skill(f"sql@{sql.version}", sources=SkillSources([folder]))
-    assert pinned == sql
-    tone = await resolve_skill(TONE, sources=[])
-    assert await tone.read("words.md") == "Use: refund."
-    env = SkillSources.from_env({"SKILLS_DIR": str(tmp_path)})
-    assert (await resolve_skill("sql", sources=env)).description == "Reviews SQL."
-    await env.aclose()

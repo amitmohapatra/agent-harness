@@ -60,9 +60,6 @@ To add a source of your own to the environment's, pass them all:
 
 ## Where
 
-Way 2, with no `Harness`: [blocks/prompts-and-skills.md](blocks/prompts-and-skills.md).
-
-
 Way 1, every adapter: `ReAct(prompt=)` renders it into the instructions (or, for the gateway's,
 selects it); LangGraph, Deep Agents, OpenAI Agents, the Claude Agent SDK and a function read it
 with `await h.prompt(ref, **vars)` (text) or `await h.prompt_messages(ref, **vars)` (chat
