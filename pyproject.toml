@@ -87,6 +87,7 @@ filterwarnings = ["error::DeprecationWarning:trellis.*"]
 markers = [
   "live: needs running services (BIFROST_URL / MEMORY_URL / RUNS_URL); skipped otherwise",
   "performance: harness overhead benchmark (writes build/benchmark-results.json)",
+  "matrix: the generated feature matrix (make matrix): run apart from make test",
 ]
 
 [tool.ruff]
