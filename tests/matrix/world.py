@@ -432,8 +432,11 @@ class World:
         mcp: Sequence[str] | None,
     ) -> tuple[Any, list[Any]]:
         adapter = "claude_agent_sdk" if adapter == "claude" else adapter
-        if adapter in FIXED and mcp is not None:
-            native = await h.tools(*tools, framework=adapter, mcp=list(mcp))  # type: ignore[arg-type]
+        if adapter in FIXED and (mcp is not None or self.without):
+            # a graph's tools are bound when it is built: built without what the agent goes
+            # without
+            bundles = None if mcp is None else list(mcp)
+            native = await h.tools(*tools, framework=adapter, mcp=bundles, without=self.without)  # type: ignore[arg-type]
             model = PlannedChatModel(plan=plan)
             if adapter == "langgraph":
                 return create_agent(model, tools=native), []
@@ -766,8 +769,9 @@ class World:
         listed = [r for r in self.fake_gateway.requests if r.url.path == "/mcp"]
         if "gateway" not in on:
             assert not self.fake_gateway.requests, "gateway off: the gateway was called"
-        elif "mcp" not in on and listed:
-            raise OffButCalled("the key's MCP tools off: they were listed")
+        elif "mcp" not in on:
+            if listed:
+                raise OffButCalled("the key's MCP tools off: they were listed")
         elif self.outcomes and self.feature.id not in NO_KEY_LISTING:
             assert listed, "gateway on: the key's MCP tools were never listed"
         if "judges" not in on:

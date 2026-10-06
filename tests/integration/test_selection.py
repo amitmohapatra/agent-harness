@@ -4,6 +4,7 @@ agent's, kept with the run across a pause, a worker and its sub-agents' runs).""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -176,6 +177,32 @@ async def test_a_graphs_bound_tool_of_a_feature_turned_off_is_refused(
     agent = harness.wrap(graph, id="graph", without={"skills"})
     result = await agent.run("review", user="u")
     assert result.answer == "read: load_skill is off in this run (without skills)"
+
+
+async def test_without_mcp_the_gateway_is_not_asked_for_the_keys_tools(
+    memory_service: FakeMemoryService,
+) -> None:
+    """``without={"mcp"}``: the key's MCP tools are neither listed nor published to the
+    catalog — for a wrapped agent, and for a graph's tools built so (``h.tools``)."""
+
+    async def fn(input: str, agent: Runtime) -> list[str]:
+        return sorted(agent.toolbox)
+
+    stub = StubGateway([Def("wiki-search", "wiki")])
+    async with Harness(
+        config=Settings(), memory=memory_service.client(), gateway=cast("Gateway", stub)
+    ) as h:
+        agent = h.wrap(fn, id="local", tools=[stock], without={"mcp"})
+        local = (await agent.run("q", user="u")).answer
+        assert "stock" in local and "wiki-search" not in local
+        built = await h.tools(stock, framework="langgraph", without={"mcp", "memory_pull"})
+        assert [t.name for t in built] == ["stock"]
+        await h.writes.drain()
+        assert stub.listed == 0
+        published = json.dumps([c.body for c in memory_service.named("put_catalog")])
+        assert "stock" in published and "wiki-search" not in published
+        assert "wiki-search" in (await h.wrap(fn, id="all").run("q", user="u")).answer
+        assert stub.listed == 1
 
 
 async def test_a_runs_own_without_adds_to_the_agents_and_holds_across_a_resume(

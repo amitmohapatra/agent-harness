@@ -36,7 +36,7 @@ from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.events import NOTIFIED, RunEvents
-from trellis.harness.features import Feature
+from trellis.harness.features import Feature, features
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
@@ -240,26 +240,31 @@ class Harness:
         *sources: Source | Callable[..., Any],
         framework: Framework,
         mcp: Sequence[str] | None = None,
+        without: Collection[Feature] = (),
     ) -> Any:
         """The toolbox as ``framework``'s own tools (by its adapter's name), for building an
         agent with them before wrapping it: LangChain tools (``langgraph``, ``deepagents``),
         ``FunctionTool``\\ s (``openai_agents``), or one in-process MCP server
         (``claude_agent_sdk``); another name is refused, naming these. It holds ``sources``
         (``skills(...)`` among them), the MCP tools the virtual key allows (or the Virtual MCPs
-        ``mcp`` names hold) and — memory on — the memory service's agent tools. Every call is
-        still the harness's: governance, approval, record."""
+        ``mcp`` names hold) and — memory on — the memory service's agent tools, less the parts
+        ``without`` names (``mcp``: the gateway is not asked; ``memory_pull``...): a graph's
+        tools are bound when it is built, so build it without what its agent goes without
+        (the harness's LangChain middleware, ``ModelHooks``, hides a part turned off later).
+        Every call is still the harness's: governance, approval, record."""
         tool_format = FORMATS.get(framework)
         if tool_format is None:
             raise ConfigurationError(
                 f"no framework {framework!r}: name one of {', '.join(FORMATS)}"
             )
         mine = [as_source(s) for s in sources]
+        off = features(without)
         bundles = None if mcp is None else list(mcp)
         tenant = await self.tenant()
         number = len(self._built)
         self._built[number] = (mine, bundles)
-        tools = await self.resolve(mine, tenant=tenant, mcp=bundles)
-        if self.memory is not None:
+        tools = await self.resolve(mine, tenant=tenant, mcp=bundles, without=off)
+        if self.memory is not None and "memory_pull" not in off:
             scope = self.memory.scoped(tenant)
             tools.extend(await self.memory_tools(scope))
         native = convert(tool_format, tools)
@@ -568,18 +573,31 @@ class Harness:
         return Governance(MemoryCatalog(scope.ctx), submit=submit, tenant=tenant)
 
     def toolbox(
-        self, sources: Sequence[Source], *, tenant: str, mcp: Sequence[str] | None = None
+        self,
+        sources: Sequence[Source],
+        *,
+        tenant: str,
+        mcp: Sequence[str] | None = None,
+        without: Collection[Feature] = (),
     ) -> Toolbox:
         """A toolbox of ``sources`` and the MCP tools in ``tenant`` (the key's, or those of
-        the Virtual MCPs ``mcp`` names), published to its catalog and kept fresh
-        (``tools/toolbox.py``)."""
-        return Toolbox(sources, gateway=self.gateway, governance=self.governance(tenant), mcp=mcp)
+        the Virtual MCPs ``mcp`` names; none ``without`` ``mcp``: the gateway is not asked),
+        published to its catalog and kept fresh (``tools/toolbox.py``)."""
+        gateway = None if "mcp" in without else self.gateway
+        return Toolbox(sources, gateway=gateway, governance=self.governance(tenant), mcp=mcp)
 
     async def resolve(
-        self, sources: Sequence[Source], *, tenant: str, mcp: Sequence[str] | None = None
+        self,
+        sources: Sequence[Source],
+        *,
+        tenant: str,
+        mcp: Sequence[str] | None = None,
+        without: frozenset[Feature] = frozenset(),
     ) -> list[Tool]:
-        """The toolbox once: ``sources`` and the MCP tools."""
-        return await self.toolbox(sources, tenant=tenant, mcp=mcp).tools()
+        """The toolbox once: ``sources`` and the MCP tools, less the parts ``without`` names."""
+        box = self.toolbox(sources, tenant=tenant, mcp=mcp, without=without)
+        tools = await box.tools(code_mode="code_mode" not in without)
+        return [t for t in tools if t.feature not in without]
 
     def _replay(self, record: dict[str, Any]) -> Callable[[], Awaitable[object]] | None:
         """A memory write an earlier process spooled, as a write again (memory on)."""

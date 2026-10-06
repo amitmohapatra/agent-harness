@@ -32,7 +32,6 @@ from tests.matrix.model import (
 from tests.matrix.world import (
     NoEnding,
     NotTimedOut,
-    OffButCalled,
     OffButOffered,
     UnclosedToolCall,
 )
@@ -83,15 +82,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
             "LangGraph/Deep Agents: without={'memory_pull'} still offers the memory tools "
             "h.tools() bound into the graph (a call is refused: 'off in this run')",
             raises=OffButOffered,
-        ),
-    ),
-    (
-        {"when": lambda f, a, w, m, s: "gateway" in s.on and "mcp" not in s.on},
-        Bug(
-            "BUG-9",
-            "without={'mcp'}: the toolbox still lists the key's MCP tools from the gateway "
-            "(and publishes them to the catalog) though none is offered",
-            raises=OffButCalled,
         ),
     ),
     (
