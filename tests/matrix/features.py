@@ -1385,7 +1385,7 @@ FEATURES.extend(
             "tools=[sandbox(provider)] (h.tools for a graph); SANDBOX=docker",
             sandboxed,
             way2=NA(
-                "sandbox tools are harness tools: they run in a harness run (Way 1, ReAct with blocks)"
+                "sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)"
             ),
         ),
     ]

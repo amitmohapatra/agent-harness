@@ -152,7 +152,7 @@ def render(found: dict[str, Result], seconds: float | None = None) -> str:
             out.append(_row([feature, *(_summary(by[("fm", feature, way, m)]) for m in MODES)]))
         out.append("")
     out += ["## Selections (every feature and mode)", ""]
-    for way in ("way1", "react_with_blocks"):
+    for way in ("way1", "with_blocks"):
         out += [f"### {way}", "", _row(["selection", "on", *ADAPTERS]), _rule(len(ADAPTERS) + 2)]
         for selection in SELECTIONS:
             on = ", ".join(sorted(selection.on)) if selection.pending is None else "(pending)"

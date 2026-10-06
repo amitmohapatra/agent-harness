@@ -263,7 +263,7 @@ class World:
         self.monkeypatch = monkeypatch
         #: whether the feature under test is on in this selection
         self.on = feature.needs <= self.switched or (
-            way == "react_with_blocks" and feature.id in ON_WITH_BLOCKS
+            way == "with_blocks" and feature.id in ON_WITH_BLOCKS
         )
         self.store = MatrixRuns()
         #: the parts the selection turns off while their service is on (``without=``)
@@ -275,7 +275,7 @@ class World:
         self.recorder = Recorder()
         self.memory_service = FakeMemoryService(candidates=[])  # no narrowing unless asked
         self.fake_gateway = MatrixGateway(bundles={"": [KEY_TOOL]})
-        #: the team's own approval rules (``react_with_blocks``: its governance block)
+        #: the team's own approval rules (``with_blocks``: its governance block)
         self.team_catalog = FakeCatalog()
         self.judged: list[EvalCase] = []
         self.tap: list[RunEvent] = []
@@ -343,7 +343,7 @@ class World:
         memory = self.memory_service.client() if "memory" in on else False
         gateway = self.fake_gateway.gateway() if "gateway" in on else False
         governance: Governance | None = None
-        if self.way == "react_with_blocks":
+        if self.way == "with_blocks":
             governance = Governance(self.team_catalog)
         return Harness(
             config=settings,
@@ -352,12 +352,12 @@ class World:
             gateway=gateway,
             governance=governance,
             judges=[self.judge] if "judges" in on else (),
-            hooks=[self.recorder] if "hooks" in on and self.way == "react_with_blocks" else (),
+            hooks=[self.recorder] if "hooks" in on and self.way == "with_blocks" else (),
         )
 
     def rules(self, rules: dict[str, Rule]) -> None:
         """Approval rules for the tools: the memory service's catalog (Way 1), the team's own
-        governance block (ReAct with blocks)."""
+        governance block (the with_blocks way)."""
         self.memory_service.catalog = {
             name: {"side_effects": rule.risk, "approve_when": rule.approve_when}
             for name, rule in rules.items()
@@ -414,7 +414,7 @@ class World:
             wrap.setdefault("timeout", AGENT_TIMEOUT)
         if self.without:
             wrap["without"] = {*self.without, *wrap.get("without", ())}
-        if "hooks" in self.switched and self.way != "react_with_blocks":
+        if "hooks" in self.switched and self.way != "with_blocks":
             wrap["hooks"] = [*wrap.get("hooks", ()), self.recorder]
         if name is None:
             self._agents += 1
@@ -604,10 +604,10 @@ class World:
 
     async def _work(self, agent: Agent) -> None:
         """The process's worker: claims and executes until nothing is queued
-        (``react_with_blocks``: the team's own ``trellis.runs.Worker`` around
+        (``with_blocks``: the team's own ``trellis.runs.Worker`` around
         ``agent.execute``)."""
         h = agent.harness
-        if self.way == "react_with_blocks":
+        if self.way == "with_blocks":
             loop = RunsWorker(self.store, agent.execute, [agent.id])
             while await loop.run_once():
                 pass

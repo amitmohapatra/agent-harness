@@ -48,7 +48,8 @@ from trellis.harness.adapters.openai_agents import (
     _arguments,
     _Continue,
 )
-from trellis.harness.adapters.react import ReAct, ReActAdapter, ReActResult, _unfenced
+from trellis.harness.adapters.react import ReAct, ReActAdapter, ReActResult
+from trellis.harness.evals import _unfenced
 from trellis.harness.journal import Journal, Pending
 
 # --------------------------------------------------------------------------- the query

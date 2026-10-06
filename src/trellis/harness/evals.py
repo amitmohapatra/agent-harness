@@ -50,10 +50,9 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trellis.contracts import ConfigurationError, RunStatus, new_id
+from trellis.contracts import ConfigurationError, ModelError, RunStatus, new_id
 from trellis.harness import pipeline, telemetry
-from trellis.harness.adapters.react import _message, _Named, _unfenced
-from trellis.harness.clients.bifrost import Gateway, prompt_ref
+from trellis.harness.clients.bifrost import Gateway, PromptPin, prompt_ref
 from trellis.harness.identity import Identity
 from trellis.harness.settings import Settings
 
@@ -491,6 +490,38 @@ def _verdict(content: Any) -> tuple[tuple[float, str] | None, str]:
         return None, "score must be a number from 0 to 1"
     reasoning = verdict.get("reasoning")
     return (float(score), reasoning if isinstance(reasoning, str) else ""), ""
+
+
+@dataclass(frozen=True, slots=True)
+class _Named:
+    """A Bifrost model name, asked through ``gateway`` (with the stored ``prompt`` every call
+    selects)."""
+
+    gateway: Any
+    model: str
+    prompt: PromptPin | None = None
+
+    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+        return await self.gateway.complete(messages, model=self.model, prompt=self.prompt, **body)
+
+
+def _message(reply: dict[str, Any]) -> dict[str, Any]:
+    """The assistant message of a chat-completions response."""
+    try:
+        message = dict(reply["choices"][0]["message"])
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ModelError(f"the model returned no message: {str(reply)[:300]}") from exc
+    message.setdefault("role", "assistant")
+    return {k: v for k, v in message.items() if v is not None}
+
+
+def _unfenced(text: str) -> str:
+    """``text`` without the code fence a model may wrap JSON in."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+        stripped = stripped.rsplit("```", 1)[0]
+    return stripped.strip()
 
 
 # --------------------------------------------------------------------------- running them

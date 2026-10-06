@@ -215,6 +215,26 @@ async def test_a_failing_tool_is_shown_to_the_agent_not_raised(harness: Harness)
     assert result.answer == "flaky failed: timeout upstream"
 
 
+async def test_arguments_that_do_not_fit_the_schema_are_told_not_run(harness: Harness) -> None:
+    calls.clear()
+
+    async def worker(input: str, agent: Runtime) -> list[Any]:
+        return [
+            await agent.tools.call("refund", order="o1"),
+            await agent.tools.call("lookup", order=7),
+        ]
+
+    agent = harness.wrap(worker, id="bad-args", tools=[refund, lookup])
+    result = await agent.run("x", user="u1")
+    assert result.answer == [
+        "refund was not run: missing required argument(s): amount. Call it again with "
+        "arguments that fit its schema.",
+        "lookup was not run: order must be of type string. Call it again with arguments that "
+        "fit its schema.",
+    ]
+    assert calls == []  # neither ran, and nothing asked for the refund's approval
+
+
 async def test_streaming_and_closing_the_stream_cancels_the_run(harness: Harness) -> None:
     async def asker(input: str, agent: Runtime) -> str:
         agent.log("thinking", step=1)

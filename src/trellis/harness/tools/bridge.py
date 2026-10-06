@@ -3,7 +3,10 @@ record.
 
 1. **replay** — a call the journal already has (a resumed run re-planning the same step)
    returns its recorded output and runs nothing; a tool of a feature the run is without
-   (``without=``: a graph's tools are bound when it is built) is an error the model reads;
+   (``without=``: a graph's tools are bound when it is built) is an error the model reads, and
+   so are arguments that do not fit the tool's schema (``tools.base.arguments_problem``: a
+   required field missing, a basic type wrong, an unknown field where none are allowed) —
+   whichever framework made the call, the tool does not run and the model can correct it;
 2. **hooks** — the run's ``before_tool`` hooks (``trellis.harness.hooks``) may deny the call,
    rewrite its arguments or ask a person about it; their decision is journaled;
 3. **governance** — the run's tenant's :class:`~trellis.harness.governance.Governance` decides,
@@ -33,7 +36,7 @@ take their turn (``Replay.exclusive``), and the journal's progress saves go one 
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Final
 
 from trellis.contracts import (
     InterruptDecision,
@@ -56,9 +59,15 @@ from trellis.harness.tools.base import (
     OUTCOME_UNKNOWN,
     UNKNOWN,
     Tool,
+    arguments_problem,
     execute,
     interrupted,
 )
+
+#: What the model is told after the arguments of its call did not fit the tool's schema, and
+#: the outcome's ``error_class``.
+FIX_ARGUMENTS: Final = "Call it again with arguments that fit its schema."
+INVALID_ARGUMENTS: Final = "InvalidArguments"
 
 
 async def call(
@@ -117,16 +126,10 @@ async def _called(
         outcome = _replayed(tool.name, output)
         _events(runtime, ref, tool_call, outcome)
         return outcome
-    if tool.feature is not None and not runtime.uses(tool.feature):
-        # a tool the framework was built with, of a feature this run is without
-        off = ToolOutcome(
-            tool=tool.name,
-            status=ToolStatus.ERROR,
-            output=f"{tool.name} is off in this run (without {tool.feature})",
-            error_class="FeatureOff",
-        )
-        _events(runtime, ref, tool_call, off)
-        return off
+    refused = _refused(runtime, tool, args)
+    if refused is not None:
+        _events(runtime, ref, tool_call, refused)
+        return refused
     if runtime.replay.interrupted(key) and not (tool.spec.idempotent or tool.resumable):
         # its worker died while it ran: it is not run again blind (an idempotent tool is,
         # with the same key, below, and so is one that continues where it was)
@@ -168,6 +171,28 @@ async def _called(
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     await _record(runtime, tool_call, outcome, decision, key=key, ref=ref)
     return outcome
+
+
+def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any]) -> ToolOutcome | None:
+    """Why a call is not run at all, as the model reads it: a tool the framework was built
+    with of a feature this run is without, or arguments that do not fit its schema (nothing
+    runs, nothing is journaled: the model corrects them)."""
+    if tool.feature is not None and not runtime.uses(tool.feature):
+        return ToolOutcome(
+            tool=tool.name,
+            status=ToolStatus.ERROR,
+            output=f"{tool.name} is off in this run (without {tool.feature})",
+            error_class="FeatureOff",
+        )
+    problem = arguments_problem(tool.spec.input_schema or {}, args)
+    if problem is None:
+        return None
+    return ToolOutcome(
+        tool=tool.name,
+        status=ToolStatus.ERROR,
+        output=f"{tool.name} was not run: {problem}. {FIX_ARGUMENTS}",
+        error_class=INVALID_ARGUMENTS,
+    )
 
 
 async def _record(

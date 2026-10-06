@@ -218,8 +218,9 @@ def interrupted(tool: str) -> str:
 def arguments_problem(schema: dict[str, Any], args: dict[str, Any]) -> str | None:
     """Why ``args`` do not fit a tool's input ``schema``, or ``None``: a light check — required
     fields, the basic types of the declared ones, unknown fields where none are allowed; the
-    tool itself validates the rest (a local tool through pydantic). What a model's call is
-    checked with (``ReAct``), and a reviewer's edited arguments (``Agent.resume``)."""
+    tool itself validates the rest (a local tool through pydantic). What every call is checked
+    with before it runs (``tools.bridge``), and a reviewer's edited arguments
+    (``Agent.resume``)."""
     missing = [name for name in schema.get("required") or [] if name not in args]
     if missing:
         return f"missing required argument(s): {', '.join(missing)}"

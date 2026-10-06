@@ -353,6 +353,8 @@ class _Loop:
             return dict(recorded)
         target = self.target.model
         name = target if isinstance(target, str) else type(target).__name__
+        from trellis.harness.evals import _message, _Named
+
         prompt = self.model.prompt if isinstance(self.model, _Named) else None
         extra = prompt.attributes() if prompt is not None else None
         hooks = runtime.agent.hooks
@@ -600,11 +602,13 @@ def _arguments(schema: dict[str, Any] | None, raw: Any) -> tuple[dict[str, Any] 
             return None, f"its arguments are not valid JSON ({exc})"
     if not isinstance(args, dict):
         return None, "its arguments must be a JSON object"
-    problem = arguments_problem(schema or {}, args)
+    problem = arguments_problem(schema, args) if schema is READ_RESULT_SCHEMA else None
     return (None, problem) if problem else (args, "")
 
 
 async def _model(target: ReAct, run: Invocation) -> Any:
+    from trellis.harness.evals import _Named
+
     if not isinstance(target.model, str):
         return target.model
     runtime = run.runtime
@@ -623,36 +627,10 @@ async def _model(target: ReAct, run: Invocation) -> Any:
     return _Named(gateway, target.model, prompt)
 
 
-@dataclass(frozen=True, slots=True)
-class _Named:
-    gateway: Any
-    model: str
-    #: the stored prompt every call selects
-    prompt: PromptPin | None = None
-
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
-        return await self.gateway.complete(messages, model=self.model, prompt=self.prompt, **body)
-
-
-def _message(reply: dict[str, Any]) -> dict[str, Any]:
-    try:
-        message = dict(reply["choices"][0]["message"])
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ModelError(f"the model returned no message: {str(reply)[:300]}") from exc
-    message.setdefault("role", "assistant")
-    return {k: v for k, v in message.items() if v is not None}
-
-
 def _answer(target: ReAct, content: Any) -> Any:
     if target.output is None:
         return content
+    from trellis.harness.evals import _unfenced
+
     text = content if isinstance(content, str) else json.dumps(content)
     return target.output.model_validate_json(_unfenced(text))
-
-
-def _unfenced(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
-        stripped = stripped.rsplit("```", 1)[0]
-    return stripped.strip()
