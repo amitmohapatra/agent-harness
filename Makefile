@@ -60,10 +60,12 @@ check: lint typecheck test  ## Everything CI runs, except the benchmark
 	@echo "all gates passed"
 
 .PHONY: examples
-examples:  ## Run every example with no services
-	@for f in examples/*.py; do case $$f in */_*) continue;; esac; \
-	  env -u BIFROST_URL -u MEMORY_URL -u RUNS_URL -u TRELLIS_API_KEY -u OTEL_EXPORTER_OTLP_ENDPOINT \
-	    $(PY) $$f >/dev/null && echo "$$f ok" || exit 1; done
+examples:  ## Run every example offline (scripted model, memory, gateway), several at once
+	$(PY) scripts/run_examples.py
+
+.PHONY: examples-live
+examples-live:  ## Run every example with the environment as it is (the real services that are set)
+	$(PY) scripts/run_examples.py --live
 
 .PHONY: clean
 clean:  ## Remove caches

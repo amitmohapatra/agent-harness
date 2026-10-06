@@ -1,5 +1,5 @@
 """Way 2: the blocks without a Harness, each used the way the docs show (``docs/blocks``,
-``examples/blocks_*.py``): ``governed`` around a tool, the run store and ``trellis.runs.Worker``,
+``examples/03_way2_governance/*_recipe.py``): ``governed`` around a tool, the run store and ``trellis.runs.Worker``,
 the memory SDK, ``judge``/``grounding``, ``remote()``, the redactor. A block is framework-neutral
 — your code calls it whatever the framework — so these run as the ``function`` adapter (the
 framework recipes are the ``W2R`` row)."""
