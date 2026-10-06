@@ -19,7 +19,9 @@ pause and hands it to whichever worker resumes the run, so a resume on another m
 no question and no side effect. A journal larger than a checkpoint may be is stored as a run
 artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journal.read`). A
 sub-agent's run working inside one of the run's tool calls keeps its journal in the run's
-(``children``), so the run's progress saves the child's too.
+(``children``), so the run's progress saves the child's too; the run's sandbox is named here as
+soon as it exists (``sandbox``), so every later attempt works in that one
+(``trellis.harness.sandbox``).
 
 Calls made at once (a framework running several tools together) take their occurrences in the
 order they asked: identical calls run one after another (:meth:`Replay.exclusive`), so each has
@@ -88,6 +90,9 @@ class Journal(BaseModel):
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None
+    #: the sandbox the run's sandbox tools work in, as its reference (``sandbox.SandboxRef``):
+    #: recorded as soon as it exists, so every later attempt works in the same one
+    sandbox: dict[str, Any] | None = None
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence

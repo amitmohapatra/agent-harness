@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite
     from trellis.harness.result import Result
     from trellis.harness.runtime import Runtime, current
+    from trellis.harness.sandbox import sandbox
     from trellis.harness.settings import Settings
     from trellis.harness.skills import skills
     from trellis.harness.tools.sources import a2a, openapi, tool
@@ -42,6 +43,7 @@ _EXPORTS = {
     "a2a": "trellis.harness.tools.sources",
     "openapi": "trellis.harness.tools.sources",
     "skills": "trellis.harness.skills",
+    "sandbox": "trellis.harness.sandbox",
     "ReAct": "trellis.harness.adapters.react",
     "current": "trellis.harness.runtime",
     "Agent": "trellis.harness.agent",
@@ -67,6 +69,7 @@ __all__ = [
     "a2a",
     "current",
     "openapi",
+    "sandbox",
     "skills",
     "tool",
 ]

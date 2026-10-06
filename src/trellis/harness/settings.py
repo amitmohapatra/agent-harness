@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from typing import Literal
 from urllib.parse import unquote
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -63,6 +64,12 @@ class Settings(BaseModel):
     #: The share of successful runs the online judges (``Harness(judges=[...])``) score, 0 to
     #: 1, chosen by the run id; unset: 0.1 when there are judges.
     judge_sample: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: Where ``sandbox()`` makes the sandboxes its tools work in when it is given no provider:
+    #: ``docker``, the Docker daemon on this machine (``trellis.harness.sandbox``); unset: none.
+    sandbox: Literal["docker"] | None = None
+    #: The image those sandboxes are made from, unless a ``SandboxSpec`` names one; unset: the
+    #: provider's own (``DockerSandbox``: ``python:3.12-slim``).
+    sandbox_image: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -86,6 +93,8 @@ class Settings(BaseModel):
             judge_model=get("TRELLIS_JUDGE_MODEL"),
             judge_virtual_key=get("TRELLIS_JUDGE_VIRTUAL_KEY"),
             judge_sample=get("TRELLIS_JUDGE_SAMPLE"),  # type: ignore[arg-type]
+            sandbox=get("SANDBOX"),  # type: ignore[arg-type]
+            sandbox_image=get("SANDBOX_IMAGE"),
             **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]
         )
 

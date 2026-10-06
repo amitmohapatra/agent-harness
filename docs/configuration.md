@@ -25,6 +25,8 @@ what is read.
 | `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the judge's calls go through `BIFROST_VIRTUAL_KEY`, on the agents' budget. Set it to a **separate virtual key** so evaluation spend is budgeted, limited and reported on its own |
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |
+| `SANDBOX` | `sandbox()` given no provider has none: its tools tell the model so. `docker` makes each run's sandbox a container of the Docker daemon on this machine ([sandbox.md](sandbox.md)); any other value is refused (`ValidationError`) |
+| `SANDBOX_IMAGE` | those sandboxes are made from the provider's own image (`python:3.12-slim` for Docker) unless a `SandboxSpec(image=)` names one |
 | `TRELLIS_GROUNDING_SAMPLE` | 0.1: a tenth of the successful runs with an answer (a structured one as its JSON; memory on) are checked against the context they were given (`/v1/verify`, a score on the trace — [observability.md](observability.md#scores)); `0` turns it off, `1` checks every run. A number from 0 to 1, else `Settings` refuses it (`ValidationError`); the run id decides, so a run is either always or never sampled |
 
 `Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
@@ -47,6 +49,8 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `judge_model` | `TRELLIS_JUDGE_MODEL` |
 | `judge_virtual_key` | `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | `judge_sample` | `TRELLIS_JUDGE_SAMPLE` (0 to 1; `None`: 0.1 with judges) |
+| `sandbox` | `SANDBOX` (`"docker"` or `None`) |
+| `sandbox_image` | `SANDBOX_IMAGE` |
 
 `RUNS_URL` without `MEMORY_URL`, and `MEMORY_URL` without `TRELLIS_API_KEY`, are refused when the
 `Harness` is built (`ConfigurationError`). The names are the platform's: agent-runs reads the

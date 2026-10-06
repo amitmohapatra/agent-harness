@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from trellis.harness.agent import Agent
     from trellis.harness.clients.memory import RunMemory
+    from trellis.harness.sandbox.base import Sandbox
     from trellis.harness.tools.base import Tool
     from trellis.memory import MemoryContext
     from trellis.memory.models import ToolHints
@@ -114,6 +115,8 @@ class Runtime:
     used: set[str] = field(default_factory=set)
     #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
     skills: dict[str, Skill] = field(default_factory=dict)
+    #: the sandbox this attempt's sandbox tools work in, once one of them ran (``sandbox``)
+    sandbox: Sandbox | None = None
     #: set by an adapter whose framework can suspend itself (LangGraph ``interrupt``)
     suspend: Suspend | None = None
     #: the pause this attempt ended on
