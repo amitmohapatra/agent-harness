@@ -206,17 +206,18 @@ def _mapping(lines: list[str], where: str, *, first: int) -> dict[str, Any]:
         if match is None:
             problem = f"{line.strip()!r} is not key: value"
             raise ConfigurationError(f"{where}: line {first + n}: {problem}")
-        key, value = match.group(1), match.group(2).strip()
+        key, value, at = match.group(1), match.group(2).strip(), first + n
         nested = []
         n += 1
         while n < len(lines) and (not lines[n].strip() or lines[n][:1] in (" ", "\t")):
             nested.append(lines[n])
             n += 1
-        found[key] = _value(value, nested, where, first + n - len(nested))
+        found[key] = _value(value, nested, where, at)
     return found
 
 
-def _value(value: str, nested: list[str], where: str, first: int) -> Any:
+def _value(value: str, nested: list[str], where: str, at: int) -> Any:
+    """A key's value: on its line (``at``), or the indented lines under it."""
     indented = [line for line in nested if line.strip()]
     if value in _BLOCK:
         width = min((len(line) - len(line.lstrip()) for line in indented), default=0)
@@ -227,12 +228,12 @@ def _value(value: str, nested: list[str], where: str, first: int) -> Any:
     if not indented:
         return _scalar(value)
     if value:
-        raise ConfigurationError(f"{where}: line {first}: a value, then indented lines")
+        raise ConfigurationError(f"{where}: line {at}: a value, then indented lines")
     items = [_ITEM.match(line.strip()) for line in indented]
     if all(items):
         return [_scalar(item.group(1)) for item in items if item is not None]
     width = min(len(line) - len(line.lstrip()) for line in indented)
-    return _mapping([line[width:] for line in nested], where, first=first)
+    return _mapping([line[width:] for line in nested], where, first=at + 1)
 
 
 def _scalar(value: str) -> str:

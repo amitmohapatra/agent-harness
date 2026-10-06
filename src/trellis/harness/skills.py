@@ -211,11 +211,8 @@ class SkillsDir:
             raise NotFound(f"{name!r} is not a folder name inside it (refused)")
         if not (folder / SKILL_MD).is_file():
             raise NotFound(f"it has no {name}/{SKILL_MD}")
-        files = sorted(
-            p.relative_to(folder).as_posix()
-            for p in folder.rglob("*")
-            if p.is_file() and p != folder / SKILL_MD
-        )
+        listed = (p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
+        files = sorted(p for p in listed if p != SKILL_MD and inside(folder, p) is not None)
         raw = (folder / SKILL_MD).read_bytes()
         where = str(folder / SKILL_MD)
         meta, body = front_matter(raw.decode("utf-8", errors="replace"), where=where)
@@ -397,18 +394,20 @@ class SkillSources(Chain[ResolvedSkill]):
         result's ``problems``, not an error; a name with no source at all to ask is a
         ``ConfigurationError``."""
         parsed = refs_of(refs)
-        if not self.sources and any(own is None for _, _, own in parsed):
+        kept = dict(recorded or {})
+        asked = [n for n, _, own in parsed if own is None and not isinstance(kept.get(n), Mapping)]
+        if asked and not self.sources:
             raise ConfigurationError(f"no skill source: {self.hint}")
         found = PinnedSkills()
         for name, version, own in parsed:
-            kept = (recorded or {}).get(name)
+            entry = kept.get(name)
             try:
-                if isinstance(kept, Mapping):
-                    skill = self._restored(kept, own)
+                if isinstance(entry, Mapping):
+                    skill = self._restored(entry, own)
                 elif own is not None:
                     skill = await own.resolve(name, version)
                 else:  # a version an earlier harness journaled, or none: resolve it now
-                    skill = await self.find(name, kept if isinstance(kept, str) else version)
+                    skill = await self.find(name, entry if isinstance(entry, str) else version)
             except Exception as exc:
                 found.problems[name] = str(exc)
                 continue

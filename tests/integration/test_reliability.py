@@ -11,9 +11,9 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 import httpx
 import pytest
@@ -71,51 +71,125 @@ class Ledger:
 
 
 PLAN: Final[list[Call]] = [("quote", {"sku": "A-1"}), ("transfer", {"amount": 5})]
+SYSTEM: Final = "You pay."
 
 Built = tuple[Any, list[Any]]
-Builder = Callable[[Harness, list[Any], Path], Awaitable[Built]]
 
 
-async def _function(h: Harness, tools: list[Any], tmp: Path) -> Built:
+class Builder(Protocol):
+    """Builds one framework's target that makes the ``plan``'s calls, then answers
+    :data:`FINAL`, told ``system``; the model (or, for Claude, the file its CLI records what
+    it was started with in) is appended to ``seen``."""
+
+    def __call__(
+        self,
+        h: Harness,
+        tools: list[Any],
+        tmp: Path,
+        *,
+        plan: list[Call] = ...,
+        system: str = ...,
+        seen: list[Any] | None = ...,
+    ) -> Awaitable[Built]: ...
+
+
+async def _function(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    *,
+    plan: list[Call] = PLAN,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+) -> Built:
     async def follow(input: Any, agent: Runtime) -> str:
-        results = [text_of(await agent.tools.call(name, **args)) for name, args in PLAN]
+        results = [text_of(await agent.tools.call(name, **args)) for name, args in plan]
         return FINAL.replace("{last}", results[-1])
 
     return follow, tools
 
 
-async def _react(h: Harness, tools: list[Any], tmp: Path) -> Built:
-    return ReAct(system="You pay.", model=PlannedChat(PLAN)), tools
+async def _react(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    *,
+    plan: list[Call] = PLAN,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+) -> Built:
+    model = PlannedChat(plan)
+    _saw(seen, model)
+    return ReAct(system=system, model=model), tools
 
 
-async def _langgraph(h: Harness, tools: list[Any], tmp: Path) -> Built:
-    graph = create_agent(
-        PlannedChatModel(plan=PLAN), tools=await h.tools(*tools, framework="langgraph")
-    )
-    return graph, []
+async def _langgraph(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    *,
+    plan: list[Call] = PLAN,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+) -> Built:
+    model = PlannedChatModel(plan=plan)
+    _saw(seen, model)
+    built = await h.tools(*tools, framework="langgraph")
+    return create_agent(model, tools=built, system_prompt=system), []
 
 
-async def _deepagents(h: Harness, tools: list[Any], tmp: Path) -> Built:
-    graph = create_deep_agent(
-        model=PlannedChatModel(plan=PLAN), tools=await h.tools(*tools, framework="langgraph")
-    )
-    return graph, []
+async def _deepagents(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    *,
+    plan: list[Call] = PLAN,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+) -> Built:
+    model = PlannedChatModel(plan=plan)
+    _saw(seen, model)
+    built = await h.tools(*tools, framework="langgraph")
+    return create_deep_agent(model=model, tools=built, system_prompt=system), []
 
 
-async def _openai_agents(h: Harness, tools: list[Any], tmp: Path) -> Built:
-    return OpenAIAgent(name="payer", instructions="You pay.", model=PlannedModel(PLAN)), tools
+async def _openai_agents(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    *,
+    plan: list[Call] = PLAN,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+) -> Built:
+    model = PlannedModel(plan)
+    _saw(seen, model)
+    return OpenAIAgent(name="payer", instructions=system, model=model), tools
 
 
-async def _claude(h: Harness, tools: list[Any], tmp: Path) -> Built:
-    script = [{"tool": name, "args": args} for name, args in PLAN] + [{"text": FINAL}]
+async def _claude(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    *,
+    plan: list[Call] = PLAN,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+) -> Built:
+    script = [{"tool": name, "args": args} for name, args in plan] + [{"text": FINAL}]
+    record = tmp / f"cli-{uuid.uuid4().hex[:6]}.json"
+    _saw(seen, record)
     options = ClaudeAgentOptions(
         cli_path=CLI,
-        env={
-            "FAKE_CLAUDE_SCRIPT": json.dumps(script),
-            "FAKE_CLAUDE_RECORD": str(tmp / f"cli-{uuid.uuid4().hex[:6]}.json"),
-        },
+        system_prompt=system,
+        env={"FAKE_CLAUDE_SCRIPT": json.dumps(script), "FAKE_CLAUDE_RECORD": str(record)},
     )
     return options, tools
+
+
+def _saw(seen: list[Any] | None, model: Any) -> None:
+    if seen is not None:
+        seen.append(model)
 
 
 BUILDERS: Final[dict[str, Builder]] = {
