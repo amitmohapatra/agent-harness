@@ -19,28 +19,31 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
+from pydantic import BaseModel
+
 from trellis.contracts import (
     AgentPaused,
     ConfigurationError,
     Interrupt,
-    InterruptDecision,
     InterruptReason,
     InterruptResolution,
+    Option,
     ToolCall,
     ToolError,
 )
+from trellis.harness.asking import Question, answer_of
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
 from trellis.runs import LeaseLostError
-from trellis.runs.answers import schema_problem
 
 if TYPE_CHECKING:
     from bifrost_sdk.admin import Skill
 
     from trellis.harness.agent import Agent
     from trellis.harness.clients.memory import RunMemory
+    from trellis.harness.governance.decision import Decision
     from trellis.harness.sandbox.base import Sandbox
     from trellis.harness.tools.base import Tool
     from trellis.memory import MemoryContext
@@ -83,10 +86,6 @@ class Paused(AgentPaused):
     def __init__(self, interrupt: Interrupt) -> None:
         super().__init__(interrupt.question, expects=interrupt.expects, payload=interrupt.payload)
         self.interrupt = interrupt
-
-
-class RunCancelled(Exception):
-    """A person cancelled the run while answering it."""
 
 
 Suspend = Callable[[dict[str, Any]], Any]
@@ -315,65 +314,81 @@ class Runtime:
         question: str,
         *,
         expects: dict[str, Any] | None = None,
+        form: type[BaseModel] | None = None,
         table: Sequence[dict[str, Any]] | None = None,
         diff: tuple[Any, Any] | None = None,
-        options: Sequence[str] | None = None,
+        options: Sequence[Option | str] | None = None,
+        multiple: bool = False,
+        ui_schema: dict[str, Any] | None = None,
+        component: str | None = None,
+        props: dict[str, Any] | None = None,
         assignee: str | None = None,
         deadline: datetime | None = None,
         escalate_to: str | None = None,
     ) -> Any:
         """Ask a person and wait for the answer: the run pauses here, and on resume this call
-        returns what they answered (the edited value for a review). A cancellation ends the
-        run.
+        returns what they answered (the edited value for a review; a list of values with
+        ``multiple``; an instance of ``form``, a pydantic model whose JSON Schema is
+        ``expects``). A cancellation ends the run.
 
-        What the person sees follows from what is asked: ``options`` a choice, ``table`` a
-        table, ``diff=(before, after)`` a diff, otherwise a form (``expects`` its schema). A
+        What the person sees follows from what is asked (``trellis.harness.asking.Question``):
+        ``options`` (strings or ``Option(value, label, description)``) a choice, ``table`` a
+        table, ``diff=(before, after)`` a diff, otherwise a form (``expects`` or ``form`` its
+        schema, ``ui_schema`` its widget hints). ``component`` names your own screen and
+        ``props`` its data: a surface that has it renders it, any other the control above. A
         table or diff with ``expects`` is a review. It is the run's user's to answer unless
-        ``assignee`` names someone else (``user:…``, ``role:…``). An ``expects`` that is not a
-        JSON Schema is refused here (``ConfigurationError``, saying why); an answer must fit
-        it (``Agent.resume``)."""
-        if problem := schema_problem(expects):
-            raise ConfigurationError(f"cannot ask {question!r}: {problem}")
-        ui = "choice" if options else "diff" if diff else "table" if table is not None else "form"
-        reason = (
-            InterruptReason.CHOICE
-            if options
-            else InterruptReason.REVIEW
-            if ui in ("diff", "table") and expects is not None
-            else InterruptReason.QUESTION
-        )
-        payload: dict[str, Any] | None = None
-        if table is not None:
-            payload = {"table": list(table)}
-        elif diff is not None:
-            payload = {"diff": {"before": diff[0], "after": diff[1]}}
-        resolution = await self.interrupt(
-            content_key("ask", question, ui, list(options or [])),
-            payload=payload,
-            reason=reason,
-            question=question,
-            ui=ui,
+        ``assignee`` names someone else (``user:…``, ``role:…``). A question that cannot be
+        asked as given (an ``expects`` that is not a JSON Schema, ``props`` without a
+        ``component``...) is refused here (``ConfigurationError``, saying why); an answer
+        must fit it (``Agent.resume``)."""
+        asked = Question(
+            question,
             expects=expects,
+            form=form,
+            table=table,
+            diff=diff,
             options=list(options or []),
+            multiple=multiple,
+            ui_schema=ui_schema,
+            component=component,
+            props=props,
             assignee=assignee or principal(self.user),
             deadline=deadline,
             escalate_to=escalate_to,
         )
-        return answer_of(resolution)
+        resolution = await self.interrupt(asked.key, payload=asked.payload, **asked.fields())
+        return asked.answer(resolution)
 
-    async def approve(
-        self, call: ToolCall, question: str, *, assignee: str | None = None
-    ) -> InterruptResolution:
-        """Ask for approval of a tool call (the bridge's pause): ``question`` is governance's
-        (``Decision.question``), ``assignee`` whose it is (a hook's ``Ask``; else anyone's)."""
+    async def approve(self, call: ToolCall, decision: Decision) -> InterruptResolution:
+        """Ask for approval of a tool call (the bridge's pause): the question is governance's
+        (``Decision.question``), whose it is and the screen it is reviewed on a hook's or an
+        approval function's ``Ask`` (else anyone's, the approval control)."""
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,
-            question=question,
+            question=decision.question,
             ui="approve",
             tool_call=call,
-            assignee=assignee,
+            assignee=decision.assignee,
+            component=decision.component,
+            props=None if decision.props is None else dict(decision.props),
         )
+
+    async def external(self, call: ToolCall, expects: dict[str, Any] | None) -> Any:
+        """The result of a tool call made outside the run (``tool(external=True)``): the run
+        pauses with the call (``reason=QUESTION``, ``tool_call`` attached, ``expects`` the
+        result's schema when the tool says), and on resume this returns the result given
+        (``agent.resume(run_id, result=...)``). A reject is ``False``; a cancel ends the
+        run."""
+        resolution = await self.interrupt(
+            content_key("external", call.tool, call.args),
+            reason=InterruptReason.QUESTION,
+            question=f"The result of {call.tool}?",
+            ui="form",
+            expects=expects,
+            tool_call=call,
+        )
+        return answer_of(resolution)
 
     async def interrupt(
         self, key: str, *, payload: dict[str, Any] | None = None, **fields: Any
@@ -428,24 +443,13 @@ def run_of(interrupt_id_: str) -> str:
     return interrupt_id_.rsplit(".", 2)[0]
 
 
-def answer_of(resolution: InterruptResolution) -> Any:
-    decision = resolution.decision
-    if decision is InterruptDecision.CANCEL:
-        raise RunCancelled(f"cancelled by {resolution.reviewer or 'the reviewer'}")
-    if decision is InterruptDecision.APPROVE:
-        return True
-    if decision is InterruptDecision.REJECT:
-        return False
-    if decision is InterruptDecision.EDIT:
-        return resolution.payload
-    return resolution.answer
-
-
 def reason_of(resolution: InterruptResolution) -> str | None:
-    """The reviewer's reason given with a decision (``resume(..., "reject", answer="why")``):
-    what the model is told about a rejected call."""
-    answer = resolution.answer
-    return answer.strip() if isinstance(answer, str) and answer.strip() else None
+    """The reviewer's reason given with a decision (``resume(..., "reject", answer="why")``,
+    else the decision's ``comment``): what the model is told about a rejected call."""
+    for given in (resolution.answer, resolution.comment):
+        if isinstance(given, str) and given.strip():
+            return given.strip()
+    return None
 
 
 @dataclass(frozen=True, slots=True)
