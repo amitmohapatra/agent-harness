@@ -2,46 +2,264 @@
 
 ## Asking
 
+**What.** `trellis.current().ask(...)` asks a person and waits: the run pauses
+(`Result.status == PAUSED`, `Result.interrupt` a contracts `Interrupt`) and, on resume, the call
+returns the answer.
+
+**When.** When only a person knows: a choice, a value, a correction, a sign-off. A tool call's
+approval needs no `ask` (governance, `approval=`, below).
+
+**Where.** Any tool or node of any adapter (`ReAct`, a function, LangGraph — `interrupt()`
+in place with a checkpointer —, Deep Agents, OpenAI Agents, Claude); Way 2 builds the same
+question (`Question`, below).
+
+**How.**
+
 ```python
-answer = await trellis.current().ask(
-    "Which supplier?",
-    options=["ACME", "Globex"],
-    assignee="role:procurement",
+from trellis.contracts import Option
+
+plans = await trellis.current().ask(
+    "Which plans?",
+    options=[Option(value="basic", label="Basic, 10 EUR", description="up to 3 seats"), "pro"],
+    multiple=True,  # the answer is a list of values: ["basic", "pro"]
+    component="plan-picker",  # your own screen, where a surface has it
+    props={"customer": "acme"},  # its data, passed as it is
+    assignee="role:sales",
     deadline=tomorrow,
-    escalate_to="role:procurement-leads",
+    escalate_to="role:sales-leads",
 )
+address = await trellis.current().ask(
+    "Where to?", form=Address, ui_schema={"street": {"ui:widget": "textarea"}}
+)  # an Address: the form is Address's JSON Schema
 ```
 
-The run pauses (`Result.status == PAUSED`, `Result.interrupt` a contracts `Interrupt`) and, on
-resume, the call returns the answer. What the person is shown follows from what is asked:
+What the person is shown follows from what is asked:
 
 | Arguments | `ui` | `reason` | `payload` |
 |---|---|---|---|
-| `options=` | `choice` | `CHOICE` | |
+| `options=` (strings or `Option(value, label, description)`; `multiple=True` for several picks) | `choice` | `CHOICE` | |
 | `table=rows` | `table` | `QUESTION` (`REVIEW` with `expects=`) | `{"table": rows}` |
 | `diff=(before, after)` | `diff` | `QUESTION` (`REVIEW` with `expects=`) | `{"diff": {"before", "after"}}` |
-| anything else | `form` (`expects=` its schema) | `QUESTION` | |
+| anything else | `form` (`expects=` its JSON Schema, or `form=` a pydantic model; `ui_schema=` its widget hints, react-jsonschema-form's `uiSchema`) | `QUESTION` | |
 
-The question is the run's user's to answer (`assignee="user:<user>"`) unless `assignee` names
-someone else (`user:…`, `role:…`); it is in their inbox (`h.inbox(assignee)`). `escalate_to`
+`component=` names your own screen and `props=` its data: a surface that has that screen
+renders it with the props as they are (the reference inbox's `window.trellisComponents`, your
+AG-UI client from the interrupt's `metadata`), any other renders `ui`. Everything goes on the
+contracts' `Interrupt` as it is. An answer carries option values, never labels; with `form=`
+it is read back into the model.
+
+The whole signature: `await trellis.current().ask(question, *, expects=None, form=None,
+table=None, diff=None, options=None, multiple=False, ui_schema=None, component=None,
+props=None, assignee=None, deadline=None, escalate_to=None)`.
+
+**Automatic.** The question is the run's user's to answer (`assignee="user:<user>"`) unless
+`assignee` names someone else (`user:…`, `role:…`); it is in their inbox
+(`h.inbox(assignee)`), and whoever waits is told ([below](#telling-people)). `escalate_to`
 needs a `deadline`: when it passes, agent-runs hands the question to `escalate_to` (once), or
 ends the run `TIMEOUT` when nobody is named. Runs kept in process (no `RUNS_URL`) do neither.
+The same question asked again in one run (same text, kind and options) is the same entry in
+the journal: a re-run gets the answer it was given, in order. A payload up to 16 KiB of JSON
+travels in the interrupt; a larger one is stored as a run artifact in agent-runs (`POST
+/v1/runs/{id}/artifacts`, up to 50 MiB, kept 7 days after the run ends) and travels as
+`payload_ref`; `serve_chat` serves it at `{path}/runs/{run_id}/artifacts/{artifact_id}` from
+whichever process is asked, while the run waits on it. The run's checkpoint stays small.
 
-The whole signature: `await trellis.current().ask(question, *, expects=None, table=None,
-diff=None, options=None, assignee=None, deadline=None, escalate_to=None)`. An `expects` that is
-not a JSON Schema is refused where it is asked (`ConfigurationError: cannot ask 'How many?':
-expects is not a valid JSON Schema: …`), not when someone answers. The same question
-asked again in one run (same text, same kind, same options) is the same entry in the journal:
-a re-run gets the answer it was given, in order.
+**On failure.** A question that cannot be asked as given is refused where it is asked
+(`ConfigurationError`, saying why: an `expects` that is not a JSON Schema, `form=` and
+`expects=` both, `props` without a `component`, two options with one value, `multiple` with
+nothing to pick, `escalate_to` without a `deadline`). An answer that does not fit is refused at
+`resume` (below). An answer that fits `form`'s schema but not its own validators fails the run
+where `ask` returns, saying so.
 
-A payload up to 16 KiB of JSON travels in the interrupt. A larger one is stored as a run
-artifact in agent-runs (`POST /v1/runs/{id}/artifacts`, up to 50 MiB, kept 7 days after the
-run ends) and travels as `payload_ref`; `serve_chat` serves it at
-`{path}/runs/{run_id}/artifacts/{artifact_id}` from whichever process is asked, while the run
-waits on it. The run's checkpoint stays small.
+**Way 2.** `trellis.harness.asking.Question` takes the same arguments and is what `ask` builds:
+`question.interrupt(tenant=, run_id=)` is the `Interrupt` to `runs.pause`, and
+`question.answer(record.last_resolution)` reads the answer back (into `form`); agent-runs checks
+the answer when it is given.
 
-An approval (an `irreversible` tool, a catalog `approve_when` that holds) is the same pause
-with `reason=APPROVAL` and the tool call attached.
+An approval (an `irreversible` tool, a catalog `approve_when` that holds, an approval
+function's `Ask`) is the same pause with `reason=APPROVAL` and the tool call attached.
+
+## Approval rules in code: `tool(approval=fn)`
+
+**What.** Your rule for each call of a tool, ahead of governance:
+`fn(args) -> None | True | Ask(...)` (sync or async) — `None`: governance decides as for any
+tool; `True`: approved, it runs without asking (announced unless it only reads); `Ask(question,
+assignee=None, component=None, props=None)`: a person approves it first, asked that, on that
+screen.
+
+**When.** For a rule only your code can say: an amount, a customer, the time of day. A rule an
+administrator owns is the catalog's `approve_when` ([governance.md](governance.md)); a
+guardrail across tools is a hook ([hooks.md](hooks.md)).
+
+**Where.** `@tool(approval=fn)` / `tool(fn, approval=fn)`, every adapter (the bridge) and
+`ReAct`; Way 2: `governed(fn, gov, ..., approval=fn)`, whose `on_ask(decision)` gets the
+decision with the `Ask`'s `assignee`, `component` and `props`.
+
+**How.**
+
+```python
+def refund_rule(args):
+    if args["amount"] <= 20:
+        return True  # small: no person
+    if args["amount"] > 500:
+        return Ask(
+            f"Refund {args['amount']} EUR?",
+            assignee="role:finance",
+            component="refund-review",
+            props={"amount": args["amount"]},
+        )
+    return None  # governance: irreversible asks
+
+
+@tool(side_effects="irreversible", approval=refund_rule)
+def refund(order: str, amount: int) -> str: ...
+```
+
+**Automatic.** The rule's answer is journaled with the call: a resumed run reads it instead of
+asking the function again. A hook's `Deny` or `Ask` comes first (the function is not asked).
+
+**On failure.** A function that returns anything else, or raises, fails the call: the model
+reads why (`the approval function of refund returned 'yes': return None, True or Ask(...)`).
+
+## Comments, and approving for the rest of the run
+
+**What.** `agent.resume(..., comment="Fine this once; over 500 needs finance")` keeps the
+reviewer's remark with the decision; `remember="run"` on an `approve` of a tool call approves
+that tool's later calls in the same run without asking.
+
+**When.** A comment whenever a decision needs its why (it reaches the feedback approval
+patterns are learned from). `remember="run"` when a reviewer trusts the rest of this run with
+the tool (a batch of refunds of one customer).
+
+**Where.** `agent.resume`, the AG-UI resume entry (`"comment"`, `"remember"`), an A2A answer's
+data part (`{"comment": ..., "remember": "run"}`), the reference inbox; every adapter and
+`ReAct`. Way 2: `InterruptResolution(comment=, remember=)`.
+
+**Automatic.** The comment is on the run record (`last_resolution`, agent-runs' resolution
+history), on the `decision` event and the span attributes of the attempt that goes on after
+it, and in the feedback record; a rejection's comment is what the model reads as why, when the
+reject carries no `answer`. A remembered approval is kept in the run's journal: every later
+call of that tool in the run — after a pause, a crash, on another worker — runs without asking,
+with a `decision` event (`remembered: true`); another run asks again. It covers the tool's
+later approvals asked of the same person or role (governance's; an approval function's or a
+hook's `Ask` with the same `assignee`): an `Ask` that names someone else — finance, for a large
+amount — still asks.
+
+**On failure.** `remember="run"` on anything but an approval of a tool call is refused
+(`ConfigurationError`); a comment over 4000 characters too.
+
+## External results: `tool(external=True)`
+
+**What.** A tool whose call is done outside the run — a person signing in an e-signature
+system, a batch job, a human operator: the run pauses with the call, and the result given
+from outside is what the model reads as the tool's output.
+
+**When.** When the work takes as long as it takes and nothing in the process can do it.
+
+**Where.** `@tool(external=True)` on every adapter and `ReAct` (the bridge); Way 2: pause with
+a `Question(..., expects=...)` whose interrupt your code builds with the call, and hand the
+answer to your framework as the tool's result.
+
+**How.**
+
+```python
+@tool(side_effects="write", external=True)
+def sign(contract: str) -> str:
+    """Have a contract signed (a person signs it)."""  # never runs
+
+
+paused = await agent.run("get c-7 signed", user="ada")  # paused on the call
+await agent.resume(paused.run_id, result="signed by ada, 10:42")
+```
+
+**Automatic.** The interrupt is a `QUESTION` with the call in `tool_call` and, from the
+function's return annotation, `expects` (here `{"type": "string"}`); governance still decides
+first (an `irreversible` external tool is approved, then asked for its result). The result is
+journaled like any call's output. The answer also comes as agent-runs' `ANSWER` resolution of
+the interrupt (any client), or as an AG-UI or A2A answer.
+
+**On failure.** A result that does not fit `expects` is refused at `resume`; a `reject` is an
+error the model reads (`sign was not done: its result was refused`); a `cancel` ends the run.
+
+## Telling people
+
+**What.** When a run pauses for a person, every notifier is told: the question (redacted),
+whose it is, by when, the call under approval, and where to answer.
+
+**When.** Whenever people should not have to watch an inbox.
+
+**Where.** Automatic for every agent of the harness: Slack with `SLACK_WEBHOOK_URL` (an
+incoming webhook), email with `SMTP_URL` and `SMTP_FROM` (to the assignee when it is an
+address, `user:ada@example.com`, else to `SMTP_TO`); your own with
+`Harness(notifiers=[...])`: anything with `async notify(interrupt, link)`. The link is
+`TRELLIS_INBOX_URL#<interrupt id>` when set ([configuration.md](configuration.md)).
+
+```python
+class Pager:
+    async def notify(self, interrupt: Interrupt, link: str | None) -> None:
+        await page(interrupt.assignee, interrupt.question, link)
+
+
+h = Harness(notifiers=[Pager()])
+```
+
+**Automatic.** After the pause is recorded, in the background (the run is not held). A
+notifier gets the interrupt redacted as everything leaving the process is (the question, the
+payload, the props, the call's arguments; not whose it is). A sub-agent's question is told
+once, as its parent's run's. A `notified` event says who was told.
+
+**On failure.** Best-effort: a notifier that fails or takes over 10 s is a `warning` event on
+the run (`notify_failed`, logged, counted `trellis.notifications{outcome="failed"}`), never a
+failed run, and is not retried. For delivery that is retried and signed, for every run of the
+tenant (wrapped or not), use agent-runs' webhooks (`run.paused`, `run.escalated`,
+`run.finished`: [runs.md](runs.md#the-inbox), [blocks/runs.md](blocks/runs.md#webhooks)).
+
+## The reference inbox
+
+`h.serve_inbox(app, *, path="/inbox", identity=None)` serves a small page (static HTML and
+JavaScript, no dependencies) that lists the paused runs of the agents wrapped by the harness
+and answers them: labelled options (checkboxes with `multiple`), a form built from `expects`
+with `ui_schema`'s `ui:widget`/`ui:title`/`ui:help`/`ui:placeholder`/`ui:order`, a table or a
+diff, an approval with the call's arguments (approve, approve edited, reject, and "approve for
+the rest of this run"), a comment, and cancel. A question naming a `component` is rendered by
+your screen when the page has it: `window.trellisComponents = {"refund-review": (element,
+props, interrupt, submit) => ...}`. It is a reference: copy it, or answer from your own screens
+through its routes — `GET {path}/runs?assignee=` (the paused runs with their interrupts) and
+`POST {path}/runs/{run_id}/resume` (`{"interrupt_id", "decision", "answer", "comment",
+"remember"}`: checked first, `409` with why when it does not fit; then `202`, and the run goes
+on in the background). `identity(request)` names the reviewer (else `anonymous`, with a
+warning). Point `TRELLIS_INBOX_URL` at it and notifications link to each question.
+
+## Testing: `trellis.testing.Reviewer`
+
+```python
+from trellis.testing import Decide, Reviewer
+
+reviewer = Reviewer(
+    {
+        "refund": "approve",
+        "Which plans?": ["basic", "pro"],
+        "sign": "signed",
+        "plan-picker": Decide("cancel"),
+    }
+)
+result = await reviewer.run(agent, "settle acme", user="ada")  # every pause answered
+```
+
+An entry is found by the tool the interrupt asks about, its `component`, its question, then
+`"*"`. For an approval: `"approve"`, `"reject"`, `"cancel"`, `True`/`False`, or a dict (the
+edited arguments); otherwise the answer itself (an external tool's result too).
+`Decide(decision, answer=None, comment=None, remember="once")` says it all; a function of the
+interrupt may decide. `reviewer.answer(agent, result)` answers one pause, `settle` all of them
+(at most 50), and `reviewer.resolution(interrupt)` is the `InterruptResolution` for Way 2's
+`runs.resume`. An interrupt the script does not cover raises `LookupError` naming it;
+`reviewer.answered` lists what was answered.
+
+**Example.** [`examples/approvals.py`](../examples/approvals.py): an approval function (a small
+refund approved by the rule, a large one asked on finance's screen), labelled options with
+several picks, an external tool's result, answered by a `Reviewer`. Tests:
+`tests/integration/test_approvals.py`, `test_questions.py` and `test_inbox.py` (every adapter,
+Way 2), and against the services `tests/live/test_live_hitl.py`.
 
 ## Answering
 
@@ -52,7 +270,12 @@ await agent.resume(interrupt_id, "edit", answer={"amount": 9000}, reviewer="cfo"
 await agent.resume(interrupt_id, "reject", reviewer="cfo")
 await agent.resume(interrupt_id, "reject", answer="over budget", reviewer="cfo")  # with a reason
 await agent.resume(interrupt_id, "cancel", reviewer="cfo")
+await agent.resume(interrupt_id, "approve", reviewer="cfo", comment="ok today", remember="run")
+await agent.resume(run_id, result="signed by ada")  # an external tool's result; the run's id
 ```
+
+The run's id answers whatever it waits on now. `reviewer` is required for a decision (not for
+a `result=`).
 
 What `ask` returns: the answer; `True`/`False` for approve/reject; the edited value for edit;
 cancel ends the run `CANCELLED` (so does `agent.cancel(run_id, reason=...)`, which needs no

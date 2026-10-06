@@ -174,11 +174,14 @@ async def test_a_score_is_posted_on_the_runs_trace_idempotently() -> None:
 def installed(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     """The global tracer provider, as configure() sees and sets it (never really set: a
     process gets one, and an exporter must not try the network)."""
-    from opentelemetry import trace
+    from opentelemetry import metrics, trace
 
     providers: list[object] = []
     monkeypatch.setattr(trace, "get_tracer_provider", trace.ProxyTracerProvider)
     monkeypatch.setattr(trace, "set_tracer_provider", providers.append)
+    proxy = metrics.get_meter_provider()  # the API's stand-in: no provider is installed
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: proxy)
+    monkeypatch.setattr(metrics, "set_meter_provider", providers.append)
     return providers
 
 
@@ -187,8 +190,11 @@ def test_an_otlp_endpoint_installs_one_exporter_to_its_traces_url(installed: lis
         otlp_endpoint="http://collector:4318/", otlp_headers={"authorization": "Basic x"}
     )
     assert telemetry.configure(settings) is True
-    [provider] = installed
+    meters, provider = installed
     assert isinstance(provider, TracerProvider)
+    [reader] = meters._metric_readers  # type: ignore[attr-defined]
+    assert reader._exporter._endpoint == "http://collector:4318/v1/metrics"  # type: ignore[attr-defined]
+    meters.shutdown()  # type: ignore[attr-defined]
     [processor] = provider._active_span_processor._span_processors  # type: ignore[attr-defined]
     exporter = processor.span_exporter  # type: ignore[attr-defined]
     assert exporter._endpoint == "http://collector:4318/v1/traces"
@@ -200,13 +206,27 @@ def test_an_otlp_endpoint_installs_one_exporter_to_its_traces_url(installed: lis
 def test_an_application_provider_is_kept(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from opentelemetry import trace
+    from opentelemetry import metrics, trace
+    from opentelemetry.sdk.metrics import MeterProvider
 
     own = TracerProvider()
+    meters = MeterProvider()
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
+    monkeypatch.setattr(metrics, "get_meter_provider", lambda: meters)
     with caplog.at_level("INFO", logger="trellis.telemetry"):
         assert telemetry.configure(Settings(otlp_endpoint="http://c:4318")) is False
-    assert "already installed; keeping it" in caplog.text
+    assert "meter provider is already installed; keeping it" in caplog.text
+    assert "tracer provider is already installed; keeping it" in caplog.text
+
+
+def test_langfuse_takes_traces_only(installed: list[object]) -> None:
+    settings = Settings(otlp_endpoint="https://cloud.langfuse.com/api/public/otel")
+    assert telemetry.configure(settings) is True
+    [provider] = installed  # no meter provider: Langfuse has no metrics endpoint
+    assert isinstance(provider, TracerProvider)
+    provider.shutdown()
+    assert telemetry.metrics_url("http://c:4318/v1/traces") == "http://c:4318/v1/metrics"
+    assert telemetry.metrics_url("http://c:4318/v1/metrics/") == "http://c:4318/v1/metrics"
 
 
 def test_otlp_without_the_extra_installed_says_how_to_get_it(
@@ -215,6 +235,7 @@ def test_otlp_without_the_extra_installed_says_how_to_get_it(
     import sys
 
     monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http.trace_exporter", None)
+    monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http.metric_exporter", None)
     with caplog.at_level("WARNING", logger="trellis.telemetry"):
         assert telemetry.configure(Settings(otlp_endpoint="http://c:4318")) is False
     assert "pip install 'trellis-harness[otel]'" in caplog.text

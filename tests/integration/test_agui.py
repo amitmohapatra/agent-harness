@@ -550,3 +550,47 @@ def test_an_app_that_named_itself_keeps_its_name(monkeypatch: pytest.MonkeyPatch
     unnamed = FastAPI()
     harness.wrap(agent_fn, id="other").serve_chat(unnamed, identity=user_of)
     assert unnamed.version == "0"
+
+
+async def test_a_resume_entry_carries_a_comment_and_the_interrupt_what_to_render() -> None:
+    @tool(side_effects="irreversible")
+    def deploy(region: str) -> str:
+        """Deploy to a region."""
+        return f"deployed to {region}"
+
+    async def deployer(input: Any, agent: Runtime) -> Any:
+        which = await agent.ask(
+            "Where?",
+            options=["eu", "us"],
+            multiple=True,
+            component="region-map",
+            props={"zoom": 2},
+        )
+        return [await agent.tools.call("deploy", region=r) for r in which]
+
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    harness.wrap(deployer, id="deployer", tools=[deploy]).serve_chat(app, identity=user_of)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://agui", headers={"x-user": "u1"}
+    ) as http:
+        events = await post(http, body("go"))
+        [entry] = finished(events)["outcome"]["interrupts"]
+        assert {k: entry["metadata"][k] for k in ("ui", "options", "multiple", "component")} == {
+            "ui": "choice",
+            "options": ["eu", "us"],
+            "multiple": True,
+            "component": "region-map",
+        }
+        assert entry["metadata"]["props"] == {"zoom": 2}
+        resume = {"interruptId": entry["id"], "payload": ["eu", "us"], "comment": "both"}
+        events = await post(http, body(resume=[resume]))
+        [approval] = finished(events)["outcome"]["interrupts"]
+        resume = {"interruptId": approval["id"], "payload": True, "remember": "run"}
+        done = finished(await post(http, body(resume=[resume])))
+    assert done["result"] == ["deployed to eu", "deployed to us"]  # the second call not asked
+    record = await harness.runs.get(entry["id"].rsplit(".", 2)[0])
+    assert record is not None and record.last_resolution is not None
+    assert record.last_resolution.remember == "run"
+    await harness.aclose()

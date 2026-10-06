@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
-from trellis.contracts import InterruptDecision
+from trellis.contracts import InterruptDecision, InterruptRemember
 
 
 class AGUIEventType(StrEnum):
@@ -132,6 +132,14 @@ class Resume(_Wire):
         default=None,
         description="the contracts decision outright (any case): answer, approve, reject, "
         "edit or cancel",
+    )
+    comment: str | None = Field(
+        default=None, max_length=4000, description="the reviewer's remark on the decision"
+    )
+    remember: InterruptRemember = Field(
+        default="once",
+        description="run: an approval of a tool call approves that tool's later calls in the "
+        "run without asking",
     )
 
     @field_validator("decision", mode="before")

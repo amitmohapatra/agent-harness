@@ -103,9 +103,9 @@ async def test_the_agents_time_limit_holds_on_every_entry(harness: Harness) -> N
     )
     assert await harness.worker([agent]).run_once() is True
     [fired] = [r for r in runs._runs.values() if r.metadata.get("schedule_id")]
-    assert fired.timeout_seconds is None  # a schedule names no limit: the agent's applies
+    assert fired.timeout_seconds == 0.1  # the schedule carries the agent's limit
     assert fired.status is RunStatus.TIMEOUT and fired.error is not None
-    assert fired.error.message == limit
+    assert fired.error.code == "run_timeout"  # the worker or the attempt, whichever first
     timed_out = [r for r in runs._runs.values() if r.status is RunStatus.TIMEOUT]
     assert len(timed_out) == 4  # the chat run, the A2A task, the item and the scheduled run
 

@@ -184,7 +184,7 @@ them bounds them.
 | Bifrost SDK (models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | `model_timeout`, the run's time |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
-| runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt | nothing: a pause or an ending must land |
+| runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |
 | harness tool retries | a read (or idempotent) tool after an error that may pass | 3 attempts, 0.5 s doubling, random | the tool's timeout, the run's time |
 | background writes | memory writes, judges, the grounding check | 3 attempts, 0.5 s doubling, full jitter; then the spool | the drain bound (10 s) at shutdown |
 | agent-runs: run retries | a queued run its worker ended `ERROR` with a retryable error | 3 more attempts, after 10 s, 20 s, 40 s (jittered, ≤ 10 min) | the run's `timeout` and `deadline` |
