@@ -27,7 +27,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel
 
@@ -300,14 +300,21 @@ async def _worked(
     return extracted, pushed
 
 
+#: What a worker's clock may leave of the working time as it stops an attempt: asyncio runs a
+#: timer that is due within the clock's resolution (a nanosecond) early.
+STOPPED_EARLY: Final = 1e-6
+
+
 def _out_of_time(job: Job | None, cancelled: asyncio.CancelledError) -> bool:
     """Whether a worker stopped the attempt (``cancelled``) because the run's working time is
     up — not because someone cancelled it, its lease was lost or the worker released it."""
+    left = None if job is None else job.remaining_seconds
     return (
         job is not None
         and not job.cancel_requested
         and RELEASED not in cancelled.args
-        and job.remaining_seconds == 0
+        and left is not None
+        and left <= STOPPED_EARLY
     )
 
 
