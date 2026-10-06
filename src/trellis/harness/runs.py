@@ -8,10 +8,12 @@ interchangeable. Both behave the same way:
 * a pause keeps the interrupt; a resume continues the run as its next attempt — ``QUEUED``
   again when it ever came from the queue, ``RUNNING`` for the process that resumes it — and
   a ``CANCEL`` ends it;
-* a worker claims a queued run under a lease, heartbeats it, and names itself on the pause
-  and the finish so a worker whose lease lapsed cannot write over another's run; each lease
-  says the working time the run has left; a stopping worker releases the runs it holds back
-  to the queue;
+* a worker claims a queued run under a lease — the highest ``priority`` first, then the
+  oldest, among the runs with room under their ``concurrency_key`` (one running at a time per
+  key and tenant) —, heartbeats it, and names itself on the pause and the finish so a worker
+  whose lease lapsed cannot write over another's run; each lease says the working time the
+  run has left; a stopping worker releases the runs it holds back to the queue;
+* a schedule's fire copies its ``timeout_seconds`` and ``agent_version`` into the run;
 * a cancel ends a queued or paused run (or one kept in its caller's process) at once, and asks
   the worker holding a running one to stop: its heartbeats say ``cancel_requested``, and the
   run is cancelled when its lease runs out.
@@ -239,17 +241,32 @@ class LocalRuns:
             self._fire_due(now)
             self._expire_leases(now)
             wanted = set(agent_ids)
-            for run_id in self._queue:
-                record = self._runs[run_id]
-                if (
-                    record.agent_id in wanted
-                    and record.status is RunStatus.QUEUED
-                    and tenant in (None, record.tenant_id)
-                ):
-                    self._queue.remove(run_id)
-                    lease = self._lease(run_id, worker_id, lease_seconds)
-                    return Claimed(run=self._move(record, RunStatus.RUNNING), lease=lease)
-            return None
+            ready = [
+                record
+                for record in (self._runs[run_id] for run_id in self._queue)
+                if record.agent_id in wanted
+                and record.status is RunStatus.QUEUED
+                and tenant in (None, record.tenant_id)
+                and self._room(record)
+            ]
+            if not ready:
+                return None
+            # the highest priority, then the oldest (the queue's order: max keeps the first)
+            record = max(ready, key=lambda r: r.priority)
+            self._queue.remove(record.run_id)
+            lease = self._lease(record.run_id, worker_id, lease_seconds)
+            return Claimed(run=self._move(record, RunStatus.RUNNING), lease=lease)
+
+    def _room(self, record: RunRecord) -> bool:
+        """Whether a queued run may run now: no run of its tenant sharing its
+        ``concurrency_key`` is running (agent-runs' default limit, one)."""
+        key = record.concurrency_key
+        return key is None or not any(
+            r.status is RunStatus.RUNNING
+            and r.concurrency_key == key
+            and r.tenant_id == record.tenant_id
+            for r in self._runs.values()
+        )
 
     async def heartbeat(
         self,
@@ -470,6 +487,8 @@ class LocalRuns:
                 on_behalf_of=schedule.on_behalf_of,
                 workspace_id=schedule.workspace_id,
                 input=schedule.input,
+                timeout_seconds=schedule.timeout_seconds,
+                agent_version=schedule.agent_version,
                 metadata={"schedule_id": schedule.schedule_id},
             )
             record = self._start(start, RunStatus.QUEUED)
