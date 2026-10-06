@@ -38,8 +38,12 @@ def _one(tool: Tool) -> Any:
         content = [{"type": "text", "text": text_of(outcome.output)}]
         return {"content": content, "is_error": not outcome.ok}
 
-    return sdk_tool(
-        tool.name,
-        tool.spec.description or tool.name,
-        tool.spec.input_schema or {"type": "object", "properties": {}},
-    )(handler)
+    return sdk_tool(tool.name, tool.spec.description or tool.name, _schema(tool))(handler)
+
+
+def _schema(tool: Tool) -> dict[str, Any]:
+    """The tool's input schema as the SDK takes a JSON schema: with a ``type`` and
+    ``properties`` — any other dict it reads as a map of argument names to Python types, and
+    an MCP tool without arguments declares only ``{"type": "object"}``."""
+    schema = tool.spec.input_schema or {}
+    return {**schema, "type": "object", "properties": schema.get("properties") or {}}

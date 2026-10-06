@@ -5,7 +5,7 @@ its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 
 * ``F34`` approval rule in code (W5): a ``before_tool`` hook asking by the call's arguments on a
   ``write`` tool — a real row.
-* ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed; waits on BUG-2.
+* ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed, a real row now.
 * the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
   one selection cell each.
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from tests.matrix.model import ADAPTERS, NA, Bug, Feature, Gap
-from tests.matrix.world import UnclosedToolCall, World
+from tests.matrix.world import World
 from trellis import Ask, Hooks, tool
 from trellis.contracts import ToolCall
 
@@ -92,11 +92,7 @@ EXTENSIONS: Final[list[Feature]] = [
         "HITL v2: options with labels, several answers",
         audit="F36 (W5)",
         how="ask(options=[Option], multiple=True)",
-        gap=Bug(
-            "BUG-2",
-            "the ask inside the tool pauses it: its tool call never ends on the event stream",
-            raises=UnclosedToolCall,
-        ),
+        gap=None,
         probe=hitl_v2,
     ),
 ]

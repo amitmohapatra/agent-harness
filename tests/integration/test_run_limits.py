@@ -19,10 +19,19 @@ from fastapi import FastAPI
 from tests.support.adapters import BUILDERS
 from tests.support.models import ScriptedChat
 from tests.support.planned import Call
-from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import ConfigurationError, RunEventType, RunOutcome, RunStatus, ToolError
+from trellis import Harness, ReAct, Runtime, Settings, current, tool
+from trellis.contracts import (
+    ConfigurationError,
+    RunEvent,
+    RunEventType,
+    RunOutcome,
+    RunStatus,
+    ToolError,
+)
 from trellis.harness.a2a import remote
+from trellis.harness.events import RunEvents
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.bridge import CUT
 from trellis.runs import ConflictError, Job, NotFoundError
 
 
@@ -105,9 +114,45 @@ async def test_the_agents_time_limit_holds_on_every_entry(harness: Harness) -> N
     [fired] = [r for r in runs._runs.values() if r.metadata.get("schedule_id")]
     assert fired.timeout_seconds == 0.1  # the schedule carries the agent's limit
     assert fired.status is RunStatus.TIMEOUT and fired.error is not None
-    assert fired.error.code == "run_timeout"  # the worker or the attempt, whichever first
+    assert fired.error.code == "run_timeout" and fired.error.message == limit
     timed_out = [r for r in runs._runs.values() if r.status is RunStatus.TIMEOUT]
     assert len(timed_out) == 4  # the chat run, the A2A task, the item and the scheduled run
+
+
+async def test_a_queued_run_past_its_time_limit_ends_timeout_with_its_events(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker's clock for the run's working time and the attempt's end together (the
+    worker's armed first, at the claim): stopped by it, the attempt still ends the run
+    TIMEOUT itself — its error, its call cut short and its RUN_FINISHED on its events."""
+    events: list[RunEvent] = []
+    original = RunEvents.__init__
+
+    def listening(self: RunEvents, *args: Any, **kwargs: Any) -> None:
+        original(self, *args, **kwargs)
+        self.listen(events.append)
+
+    monkeypatch.setattr(RunEvents, "__init__", listening)
+
+    @tool(side_effects="read")
+    async def wait(seconds: float) -> str:
+        """Wait a while."""
+        await asyncio.sleep(seconds)
+        return "waited"
+
+    async def waits(input: Any, agent: Runtime) -> Any:
+        return await agent.tools.call("wait", seconds=5)
+
+    agent = harness.wrap(waits, id="queued", tools=[wait], timeout=0.3)
+    handle = await agent.start("x", user="u")
+    assert await harness.worker([agent]).run_once() is True
+    record = await handle.status()
+    assert record.status is RunStatus.TIMEOUT and record.error is not None
+    assert record.error.message == "the run worked past its time limit of 0.3s"
+    kinds = [e.type for e in events]
+    assert kinds[-1] is RunEventType.RUN_FINISHED and events[-1].outcome is RunOutcome.TIMEOUT
+    [result] = [e for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert result.data["status"] == "timeout"
 
 
 def test_an_agents_time_limit_is_a_number_of_seconds_over_zero(harness: Harness) -> None:
@@ -366,3 +411,127 @@ async def test_a_cancelled_run_keeps_its_transcript_and_says_nothing_of_the_agen
     [batch] = memory_service.named("messages")
     assert [m["content"] for m in batch.body["messages"]] == ["reconcile March"]
     assert memory_service.named("feedback") == []  # no outcome: a cancel says nothing
+
+
+# --------------------------------------------------------------------------- a call cut short
+
+
+async def test_a_call_cut_short_before_it_runs_still_ends_on_the_stream(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call that does more than read is saved as started before it runs: cut short while
+    that save waits (or, after it ran, while its hooks or its own save do), it ends on the
+    stream all the same."""
+    saving = asyncio.Event()
+
+    async def progress(self: Runtime, *, now: bool) -> None:
+        if now:
+            saving.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(Runtime, "progress", progress)
+
+    @tool(side_effects="write")
+    def note(text: str) -> str:
+        """Note something."""
+        return text
+
+    async def notes(input: Any, agent: Runtime) -> Any:
+        return await agent.tools.call("note", text="x")
+
+    agent = harness.wrap(notes, id="noting", tools=[note])
+    events: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.stream("x", user="u"):
+            events.append(event)
+
+    watching = asyncio.create_task(watch())
+    await saving.wait()
+    await agent.cancel(events[0].run_id)
+    await watching
+    kinds = [e.type for e in events if e.tool_call_id is not None]
+    assert kinds == [
+        RunEventType.TOOL_CALL_START,
+        RunEventType.TOOL_CALL_ARGS,
+        RunEventType.TOOL_CALL_END,
+        RunEventType.TOOL_CALL_RESULT,
+    ]
+    assert events[-2].data["status"] == "cancelled" and events[-1].outcome is RunOutcome.CANCELLED
+
+
+async def test_a_call_a_framework_leaves_running_ends_with_the_attempt(harness: Harness) -> None:
+    """A framework may run a tool in a task of its own and stop it only after the attempt
+    ended (Claude's MCP server does): the attempt's end ends the call on the stream, once."""
+    started = asyncio.Event()
+    left: list[asyncio.Task[Any]] = []
+
+    @tool(side_effects="read")
+    async def wait(seconds: int) -> str:
+        """Wait a while."""
+        started.set()
+        await asyncio.sleep(seconds)
+        return "waited"
+
+    async def leaves(input: Any, agent: Runtime) -> Any:
+        left.append(asyncio.create_task(agent.tools.call("wait", seconds=30)))
+        await asyncio.sleep(30)
+
+    agent = harness.wrap(leaves, id="leaving", tools=[wait], timeout=0.3)
+    events = [e async for e in agent.stream("x", user="u")]
+    assert started.is_set()
+    left[0].cancel()  # the framework stops it at last: nothing more on the stream
+    with pytest.raises(asyncio.CancelledError):
+        await left[0]
+    kinds = [e.type for e in events]
+    assert kinds.count(RunEventType.TOOL_CALL_END) == 1 and kinds[-1] is RunEventType.RUN_FINISHED
+    [result] = [e for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert result.data["status"] == "timeout"
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+@pytest.mark.parametrize("cut", ["paused", "cancelled", "timeout"])
+async def test_a_call_cut_short_still_ends_on_the_stream_on_every_adapter(
+    harness: Harness, framework: str, cut: str, tmp_path: Path
+) -> None:
+    """A call the run's attempt ends inside — it asked a person, the run was cancelled, or ran
+    out of time — ends on the stream before the run does: ``TOOL_CALL_END``, and a
+    ``TOOL_CALL_RESULT`` whose ``status`` says why."""
+    started = asyncio.Event()
+
+    @tool(side_effects="read")
+    async def wait(seconds: int) -> str:
+        """Wait a while (asking first, when the run is to pause)."""
+        started.set()
+        runtime = current()
+        if cut == "paused" and runtime is not None:
+            return str(await runtime.ask("Wait that long?"))
+        await asyncio.sleep(seconds)
+        return "waited"
+
+    plan: list[Call] = [("wait", {"seconds": 30})]
+    target, tools = await BUILDERS[framework](harness, [wait], tmp_path, plan)
+    agent = harness.wrap(target, id=f"cut-{framework}", tools=tools)
+    events: list[Any] = []
+
+    async def watch() -> None:
+        async for event in agent.stream("wait", user="u", timeout=1 if cut == "timeout" else 30):
+            events.append(event)
+
+    watching = asyncio.create_task(watch())
+    await asyncio.wait_for(started.wait(), 20)
+    if cut == "cancelled":
+        await agent.cancel(events[0].run_id, reason="not needed")
+    await watching
+    kinds = [e.type for e in events]
+    ended = kinds.index(RunEventType.TOOL_CALL_END)
+    assert kinds[ended - 2 : ended + 2] == [
+        RunEventType.TOOL_CALL_START,
+        RunEventType.TOOL_CALL_ARGS,
+        RunEventType.TOOL_CALL_END,
+        RunEventType.TOOL_CALL_RESULT,
+    ], kinds
+    result = events[ended + 1]
+    assert result.data["status"] == cut and result.data["output"] == CUT[cut].format(tool="wait")
+    assert len({e.tool_call_id for e in events[ended - 2 : ended + 2]}) == 1
+    assert kinds[-1] is RunEventType.RUN_FINISHED

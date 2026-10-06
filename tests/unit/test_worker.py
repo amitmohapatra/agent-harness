@@ -11,15 +11,17 @@ import runpy
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
+from trellis.harness.pipeline import STOPPED_EARLY, _out_of_time
 from trellis.harness.runs import LocalRuns
 from trellis.harness.worker.__main__ import main, serve
-from trellis.runs import Job
+from trellis.runs import RELEASED, Job
 from trellis.runs import worker as claim_loop
 
 
@@ -294,3 +296,19 @@ def test_running_the_module_without_a_target_prints_its_usage(
     assert exited.value.code == 2
     usage = "usage: python -m trellis.harness.worker module:harness_attribute"
     assert usage in capsys.readouterr().err
+
+
+def test_a_worker_stopping_an_attempt_out_of_working_time_is_told_from_its_other_stops() -> None:
+    """asyncio runs a timer that is due within the clock's resolution early: the worker's
+    clock for the working time may stop an attempt with a hair of it left."""
+
+    def job(left: float | None, *, cancelled: bool = False) -> Any:
+        return SimpleNamespace(remaining_seconds=left, cancel_requested=cancelled)
+
+    stop = asyncio.CancelledError()
+    assert _out_of_time(job(0.0), stop) and _out_of_time(job(STOPPED_EARLY / 1000), stop)
+    assert not _out_of_time(job(0.5), stop)  # a lost lease, the worker cancelled
+    assert not _out_of_time(job(None), stop)  # no working time to run out of
+    assert not _out_of_time(job(0.0, cancelled=True), stop)  # someone cancelled it
+    assert not _out_of_time(job(0.0), asyncio.CancelledError(RELEASED))  # released
+    assert not _out_of_time(None, stop)  # not a worker's run

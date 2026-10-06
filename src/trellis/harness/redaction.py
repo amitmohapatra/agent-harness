@@ -2,9 +2,10 @@
 push notifications: ``events.py``), and the tool records sent to the memory service.
 
 The rules are deliberately boring: drop anything whose *name* looks like a secret, drop
-anything whose value looks like a credential, mask e-mail addresses, and cut long values. A
-redactor never raises — a redaction bug must not break a run — and unknown types are
-stringified before truncation.
+anything whose value looks like a credential, mask e-mail addresses, and cut long values. Text
+that is a JSON object or array (a model's tool-call arguments, a tool result as the model
+reads it) is redacted as what it holds, and stays JSON text. A redactor never raises — a
+redaction bug must not break a run — and unknown types are stringified before truncation.
 """
 
 from __future__ import annotations
@@ -124,7 +125,10 @@ class Redactor:
             # (rather than a JSON string) is what lets a backend filter on them.
             return [self._scalar(v, depth + 1) for v in value]
         text = value if isinstance(value, str) else _stringify(value)
-        if any(p.match(text) for p in _VALUE_PATTERNS):
+        held = _json(text)
+        if held is not None:
+            text = _stringify(self._payload(held, depth + 1))
+        elif any(p.match(text) for p in _VALUE_PATTERNS):
             return REDACTED
         return _truncate(_EMAIL.sub("[email]", text), MAX_VALUE_CHARS)
 
@@ -158,6 +162,17 @@ def _sensitive(key: str) -> bool:
 def _segments(key: str) -> tuple[str, ...]:
     """Lower-case word segments of an attribute name (``X-Api-Key`` -> ``x``/``api``/``key``)."""
     return tuple(part for part in _SEGMENT.split(key.lower()) if part)
+
+
+def _json(text: str) -> dict[str, Any] | list[Any] | None:
+    """The object or array ``text`` is the JSON of, or ``None``."""
+    if not text.lstrip().startswith(("{", "[")):
+        return None
+    try:
+        held = json.loads(text)
+    except ValueError:
+        return None
+    return held if isinstance(held, dict | list) else None
 
 
 def _stringify(value: Any) -> str:

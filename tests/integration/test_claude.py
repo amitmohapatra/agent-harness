@@ -5,6 +5,7 @@ in-process MCP tool calls included."""
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,10 @@ from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, Permissi
 
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, tool
-from trellis.contracts import RunEventType, RunStatus, ToolCall
+from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolSpec
 from trellis.harness.adapters.claude import RESUMED
+from trellis.harness.tools.base import Tool
+from trellis.harness.tools.convert.claude import _schema
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 refunds: list[str] = []
@@ -65,6 +68,60 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     assert cli["permission_prompt_tool"] == "stdio"  # the harness's can_use_tool decides
     assert cli["system_prompt"] == "You refund."
     assert target.mcp_servers == {}  # the team's options are untouched
+
+
+asked: list[dict[str, Any]] = []
+
+
+class NoArguments:
+    """An MCP server's tool that takes no argument: its schema is ``{"type": "object"}``."""
+
+    async def resolve(self) -> list[Tool]:
+        spec = ToolSpec(name="now", description="The time.", input_schema={"type": "object"})
+
+        async def run(args: dict[str, Any]) -> Any:
+            asked.append(args)
+            return "noon"
+
+        return [Tool(spec, run, feature="mcp")]
+
+
+async def test_a_tool_whose_schema_declares_no_properties_takes_no_argument(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The SDK reads a schema with no ``properties`` as a map of argument names to types:
+    the tool is offered as a JSON schema of an object without arguments."""
+    target = options(tmp_path, [{"tool": "now", "args": {}}, {"text": "it is noon"}])
+    asked.clear()
+    result = await harness.wrap(target, id="clock", tools=[NoArguments()]).run("time?", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "it is noon"
+    assert asked == [{}]  # offered with no argument, called with none
+    [now] = await NoArguments().resolve()
+    assert _schema(now) == {"type": "object", "properties": {}}
+    kept = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
+    assert _schema(replace(now, spec=now.spec.model_copy(update={"input_schema": kept}))) == kept
+
+
+async def test_a_tool_result_over_a_mebibyte_reaches_claude(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A tool's result comes back from the CLI in one message, which the SDK reads into a 1 MiB
+    buffer unless its options say more: the harness's options say enough for any result a run keeps
+    (a team's own ``max_buffer_size`` stands)."""
+
+    @tool(side_effects="read")
+    def export(rows: int) -> str:
+        """Export a report."""
+        return "x" * (1024 * 1024 + 1)
+
+    script = [{"tool": "export", "args": {"rows": 3}}, {"text": "exported"}]
+    agent = harness.wrap(options(tmp_path, script), id="exporter", tools=[export])
+    result = await agent.run("export", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "exported"
+    own = options(tmp_path, script, max_buffer_size=1024 * 1024)
+    refused = await harness.wrap(own, id="small", tools=[export]).run("export", user="u")
+    assert refused.status is RunStatus.ERROR and refused.error is not None
+    assert refused.error.code == "CLIJSONDecodeError"
 
 
 async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(

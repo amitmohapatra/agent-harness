@@ -133,7 +133,9 @@ shows them. The rules are the same everywhere and need no setting: names that lo
 JWTs, `sk-...`, long key-like blobs) become `[redacted]`, e-mail addresses are masked, long
 values are cut at 2000 characters. Names are matched by their words, not substrings
 (`gen_ai.usage.input_tokens` and `tokenizer` stay; `refresh-token` and `X-Api-Key` go), and a
-number is never treated as a credential. Mappings and lists are redacted recursively, bytes
+number is never treated as a credential. Mappings and lists are redacted recursively, and so
+is text that is a JSON object or array (a model's tool-call arguments, a tool result as the
+model read it, in a `chat` span's input and output): it stays JSON text, redacted. Bytes
 become `<n bytes>`, anything else its JSON or its text. The redactor is the contracts
 `TelemetryRedactor`; it never raises into a run.
 
@@ -154,3 +156,20 @@ keep), `before_model` the messages masked ([hooks.md](hooks.md),
 (`agent.events`, [runs.md](runs.md#a-runs-events-from-anywhere)). A failed background write is a `warning`
 event on the run's listeners, a log line and a `trellis.writes.failed` count — never silent,
 never raised into the run.
+
+Every tool call that starts on the stream (`TOOL_CALL_START`, `TOOL_CALL_ARGS`) ends there,
+before the attempt's `RUN_FINISHED`: `TOOL_CALL_END`, then `TOOL_CALL_RESULT` with the call's
+`status` (`ok`, `error`, `timeout`, `rejected`, `cancelled`) and `output`. A call the attempt
+ends inside, on every adapter, ends the same way, with no output of its own — the result says
+why:
+
+| What cut it short | `status` | `output` |
+|---|---|---|
+| it asked a person (`current().ask`, an approval inside it): the run pauses | `paused` | `<tool> paused: the run waits on a person, and the call runs again when it resumes` |
+| the run was cancelled (`agent.cancel`, A2A `tasks/cancel`, a person cancelling the question it asked) | `cancelled` | `<tool> was cut short: the run was cancelled` |
+| the run's time limit (`timeout=`, `deadline=`) | `timeout` | `<tool> was cut short: the run ran out of time` |
+
+A paused call runs again in the attempt that resumes the run: a new `TOOL_CALL_START` there.
+A call its framework still runs when the attempt ends (one run in a task of the framework's
+own, as Claude's in-process MCP server does, stopped only later) is ended then, before
+`RUN_FINISHED`, the same way; its later stop adds nothing to the stream.

@@ -223,14 +223,17 @@ def deepwiki(wikis: list[str]) -> str:
 
 
 def _virtual_key(name: str, mcp: list[dict[str, object]]) -> Iterator[str]:
-    """A virtual key for the session: every provider, and the ``mcp`` allow-list."""
+    """A virtual key for the session: every provider, and the ``mcp`` allow-list. Its name
+    is the session's own (``name`` and this process), so sessions running at the same time
+    against one gateway never delete each other's key."""
     url = BIFROST_URL
     assert url is not None
+    name = f"{name}-{os.getpid()}"
 
     async def create() -> tuple[str, str]:
         async with Admin(url) as admin:
             for existing in await admin.vk.list():
-                if existing.get("name") == name:
+                if existing.get("name") == name:  # left by a crashed session of this pid
                     await admin.vk.delete(existing["id"])
             made = await admin.vk.create(
                 name, provider_configs=[], mcp_configs=mcp, allow_all_providers=True

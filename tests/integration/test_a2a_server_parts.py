@@ -7,6 +7,7 @@ import asyncio
 import logging
 import socket
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -39,7 +40,9 @@ from tests.integration.test_a2a_server import (
     status_texts,
     task_id_of,
 )
-from trellis import Harness, Runtime, Settings
+from tests.support.adapters import BUILDERS
+from tests.support.planned import Call
+from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import (
     AgentError,
     AgentExecutionContext,
@@ -52,6 +55,7 @@ from trellis.contracts import (
 )
 from trellis.harness.a2a import executor as executor_module
 from trellis.harness.a2a import push
+from trellis.harness.a2a import tasks as tasks_module
 from trellis.harness.a2a.executor import RunExecutor
 from trellis.harness.a2a.identity import ANONYMOUS, HeaderIdentity, IdentityRefused, header
 from trellis.harness.a2a.push import (
@@ -400,7 +404,10 @@ async def waiter(input: Any, agent: Runtime) -> Any:
 
 
 @pytest.fixture
-async def executor() -> AsyncIterator[tuple[RunExecutor, Agent]]:
+async def executor(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[RunExecutor, Agent]]:
+    # nothing saves what the executor announces here (``Queue`` is not the SDK's): a new
+    # task's run does not wait for it
+    monkeypatch.setattr(tasks_module, "OPEN_SECONDS", 0)
     harness = Harness(config=Settings())
     await harness.key()  # what execute() asks first: the tenant the header is checked against
     agent = harness.wrap(waiter, id="waiter")
@@ -577,14 +584,49 @@ async def test_a_working_task_can_be_cancelled(wire: tuple[Client, Harness]) -> 
     WORKING.clear()
     # the in-process transport answers once the stream ends: the send runs in the background
     sent = asyncio.create_task(send(client, "wait"))
-    await WORKING.wait()
-    await asyncio.sleep(0.1)  # the SDK has stored the working task
+    await WORKING.wait()  # the task is saved before its run starts: a cancel finds it now
     [task_id] = list(harness.runs._runs)
     cancelled = await client.cancel_task(CancelTaskRequest(id=task_id), context=caller())
     assert cancelled.status.state == TaskState.TASK_STATE_CANCELED
     assert states(await sent)[-1] == TaskState.TASK_STATE_CANCELED
     record = await harness.runs.get(task_id)
     assert record is not None and record.status is RunStatus.CANCELLED
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_tasks_cancel_stops_a_working_run_on_every_adapter(
+    framework: str, tmp_path: Path
+) -> None:
+    """``tasks/cancel`` of a task whose run is in a tool call stops the run — CANCELLED with
+    the reason, the call cut short — as ``agent.cancel`` does."""
+    started, finished = asyncio.Event(), []
+
+    @tool(side_effects="read")
+    async def wait(seconds: int) -> str:
+        """Wait a while."""
+        started.set()
+        await asyncio.sleep(seconds)
+        finished.append(seconds)
+        return "waited"
+
+    harness = Harness(config=Settings())
+    plan: list[Call] = [("wait", {"seconds": 30})]
+    target, tools = await BUILDERS[framework](harness, [wait], tmp_path, plan)
+    app = FastAPI()
+    harness.wrap(target, id="greeter", tools=tools).serve_a2a(app, URL)
+    async with asgi(app) as http:
+        client = await connect(http)
+        sent = asyncio.create_task(send(client, "wait"))
+        await asyncio.wait_for(started.wait(), 20)
+        assert isinstance(harness.runs, LocalRuns)
+        [task_id] = list(harness.runs._runs)
+        cancelled = await client.cancel_task(CancelTaskRequest(id=task_id), context=caller())
+        assert cancelled.status.state == TaskState.TASK_STATE_CANCELED
+        assert states(await sent)[-1] == TaskState.TASK_STATE_CANCELED
+    record = await harness.runs.get(task_id)
+    assert record is not None and record.status is RunStatus.CANCELLED, record
+    assert finished == []  # stopped while it waited
+    await harness.aclose()
 
 
 async def test_a_cancel_word_answers_a_question_by_ending_the_run(

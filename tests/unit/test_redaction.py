@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 from trellis.contracts import TelemetryRedactor
@@ -57,6 +58,19 @@ def test_outbound_payloads_are_redacted_like_inbound_ones() -> None:
         "items": [{"note": REDACTED}, ["[email]", 3]],
     }
     assert DEFAULT.redact_input(None) is None
+
+
+def test_json_text_is_redacted_as_what_it_holds_and_stays_json() -> None:
+    """A model's tool-call arguments and a tool result as the model reads it are JSON text."""
+    arguments = json.dumps({"email": "ada@example.com", "api_key": "sk-live0123456789abcdef"})
+    shown = DEFAULT.redact_input({"function": {"name": "notify", "arguments": arguments}})
+    assert json.loads(shown["function"]["arguments"]) == {"email": "[email]", "api_key": REDACTED}
+    result = json.dumps([{"receipt": "sk-live0123456789abcdef"}, "Bearer abcdefghijklmnop"])
+    assert json.loads(redact_attributes({"output": result})["output"]) == [
+        {"receipt": REDACTED},
+        REDACTED,
+    ]
+    assert DEFAULT.redact_output("[not json") == "[not json"
 
 
 def test_attribute_values_of_any_type_are_kept_safe_and_bounded() -> None:

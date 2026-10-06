@@ -29,14 +29,6 @@ from tests.matrix.model import (
     Selection,
     cell_id,
 )
-from tests.matrix.world import (
-    MemoryContract,
-    NoEnding,
-    NotTimedOut,
-    OffButCalled,
-    OffButOffered,
-    UnclosedToolCall,
-)
 
 #: Why a way does not apply to an adapter (whatever the feature).
 NOT_BLOCKS: Final = NA(
@@ -56,111 +48,14 @@ def _on(*switches: str) -> Callable[[str, str, str, str, Selection], bool]:
     return lambda feature, adapter, way, mode, selection: set(switches) <= selection.on
 
 
-#: The real failures this matrix found (BUG-1, Claude running a call the CLI made after a pause,
-#: was fixed by the Claude session and governance work merged since; it is not listed): where each holds (feature ids, adapters, ways, modes,
-#: and a test on the selection), the bug, and how it fails (``raises``: any other failure of
+#: The real failures this matrix found and that are not fixed yet (none now: BUG-1, Claude
+#: running a call the CLI made after a pause, was fixed by the Claude session and governance
+#: work; BUG-2 to BUG-10 by their own commits): where each holds (feature ids, adapters, ways,
+#: modes, and a test on the selection — ``_on`` writes one), the bug, and how it fails (``raises``: any other failure of
 #: the cell is still a failure). The reproduction of each is its cell's id
 #: (``pytest tests/matrix -k <cell>``) and the script in the bug's ``why``. Remove an entry
 #: when its bug is fixed: its cells then XPASS and fail the suite until it is.
-KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
-    (
-        {"features": {"F09", "F09r"}, "modes": {"worker", "elsewhere", "schedule"}},
-        Bug(
-            "BUG-7",
-            "a queued run past its time limit: the runs SDK Worker's own timeout (G34) cancels "
-            "the attempt first: it ends CANCELLED (no error), or TIMEOUT with no RUN_FINISHED "
-            "on its event stream",
-            raises=(NotTimedOut, NoEnding, UnclosedToolCall),
-        ),
-    ),
-    (
-        {"features": {"F05"}, "modes": {"a2a"}},
-        Bug(
-            "BUG-5",
-            "A2A tasks/cancel of a working task: 'Task not found', or answered while the run "
-            "goes on to its end",
-        ),
-    ),
-    (
-        # Claude: whether the time limit falls inside a tool call or between two is a race
-        {"features": {"F09", "F09r"}, "adapters": {"claude"}},
-        Bug(
-            "BUG-2",
-            "a tool call cut short by the run's time limit never ends on the event stream "
-            "(Claude: when the limit falls inside a call)",
-            raises=UnclosedToolCall,
-            strict=False,
-        ),
-    ),
-    (
-        {"features": {"F36", "F05", "F09", "F09r"}},
-        Bug(
-            "BUG-2",
-            "a tool call cut short (an ask inside it, a cancel, the run's time limit) never "
-            "ends on the event stream: TOOL_CALL_START without TOOL_CALL_END/RESULT",
-            raises=UnclosedToolCall,
-        ),
-    ),
-    (
-        {"features": {"F26"}, "adapters": {"react"}, "when": _on("grounding", "memory")},
-        Bug(
-            "BUG-3",
-            "grounding sends answers over 8000 characters to /v1/verify (its maxLength): the "
-            "memory service refuses them",
-            raises=MemoryContract,
-        ),
-    ),
-    (
-        {"features": {"F61"}, "adapters": {"react"}, "when": _on("tracing")},
-        Bug(
-            "BUG-4",
-            "ReAct's chat spans carry the conversation unredacted (tool-call arguments are "
-            "JSON text the redactor does not parse; tool results as they are)",
-            raises=AssertionError,
-        ),
-    ),
-    (
-        {
-            "features": {"F42"},
-            "adapters": {"langgraph", "deepagents"},
-            "when": lambda f, a, w, m, s: "memory" in s.on and "memory_pull" not in s.on,
-        },
-        Bug(
-            "BUG-10",
-            "LangGraph/Deep Agents: without={'memory_pull'} still offers the memory tools "
-            "h.tools() bound into the graph (a call is refused: 'off in this run')",
-            raises=OffButOffered,
-        ),
-    ),
-    (
-        {"when": lambda f, a, w, m, s: "gateway" in s.on and "mcp" not in s.on},
-        Bug(
-            "BUG-9",
-            "without={'mcp'}: the toolbox still lists the key's MCP tools from the gateway "
-            "(and publishes them to the catalog) though none is offered",
-            raises=OffButCalled,
-        ),
-    ),
-    (
-        {"features": {"F12"}, "adapters": {"claude"}},
-        Bug(
-            "BUG-6",
-            "Claude: a tool result over 1 MiB fails the run (CLIJSONDecodeError: the SDK's "
-            "1 MiB buffer); nothing cuts it first (G8)",
-            raises=AssertionError,
-        ),
-    ),
-    (
-        {"features": {"F17", "F18"}, "adapters": {"claude"}, "when": _on("gateway")},
-        Bug(
-            "BUG-8",
-            "Claude: a tool whose input schema has no 'properties' ({'type': 'object'}, as MCP "
-            "servers declare an argument-less tool) is offered with a required 'type' argument "
-            "(the SDK reads it as a name -> type map): every call fails validation",
-            raises=AssertionError,
-        ),
-    ),
-]
+KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = []
 
 
 def _known(feature: str, adapter: str, way: str, mode: str, selection: Selection) -> Bug | None:
