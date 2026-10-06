@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import AbstractAsyncContextManager
 from typing import Any, Final
 
 from trellis.contracts import (
@@ -169,17 +170,10 @@ async def _called(
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
         within = runtime.limited(tool.timeout, key=idempotency_key)
-        try:
-            outcome, error = await execute(tool, args, reads=reads, within=within)
-        except asyncio.CancelledError:
-            # the run was cancelled, or ran out of time, while the call ran
-            out = runtime.cancelled is None and runtime.remaining() == 0
-            _cut(runtime, ref, tool.name, ToolStatus.TIMEOUT.value if out else CANCELLED)
-            raise
+        outcome, error = await _executed(runtime, ref, tool, args, reads=reads, within=within)
         if isinstance(error, Paused | RunCancelled):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
-            _cut(runtime, ref, tool.name, PAUSED if isinstance(error, Paused) else CANCELLED)
             raise error
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
     hooks = runtime.agent.hooks
@@ -189,6 +183,28 @@ async def _called(
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     await _record(runtime, tool_call, outcome, decision, key=key, ref=ref)
     return outcome
+
+
+async def _executed(
+    runtime: Runtime,
+    ref: str,
+    tool: Tool,
+    args: dict[str, Any],
+    *,
+    reads: bool,
+    within: AbstractAsyncContextManager[Any],
+) -> tuple[ToolOutcome, Exception | None]:
+    """The call executed (:func:`execute`); one cut short — the run cancelled or out of time
+    while it ran, or it asked a person — ends on the stream first (:func:`_cut`)."""
+    try:
+        outcome, error = await execute(tool, args, reads=reads, within=within)
+    except asyncio.CancelledError:
+        out = runtime.cancelled is None and runtime.remaining() == 0
+        _cut(runtime, ref, tool.name, ToolStatus.TIMEOUT.value if out else CANCELLED)
+        raise
+    if isinstance(error, Paused | RunCancelled):
+        _cut(runtime, ref, tool.name, PAUSED if isinstance(error, Paused) else CANCELLED)
+    return outcome, error
 
 
 async def _record(
