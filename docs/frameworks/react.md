@@ -11,7 +11,7 @@ Agents' middleware).
 (`Harness()`), or your own: `Harness(runs=..., governance=..., memory=False).wrap(ReAct(...))`,
 its queued runs continued by your own scheduler with `agent.execute(job)`
 ([composition](../README.md#composition-a-harness-is-the-blocks-you-give-it),
-[`examples/react_with_blocks.py`](../../examples/react_with_blocks.py)). A team with a loop of
+[`examples/05_features/own_scheduler.py`](../../examples/05_features/own_scheduler.py)). A team with a loop of
 its own that wants only some pieces uses the blocks instead
 ([docs/README.md](../README.md#way-2-pluggable-blocks-your-framework-our-pieces)); the harness
 middleware below also works in any `create_agent` or Deep Agents graph of its own.
@@ -43,7 +43,7 @@ agent = h.wrap(target, id="weather", tools=[temperature])
 result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answer: a Forecast
 ```
 
-```python
+```text
 ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None)
 ```
@@ -154,10 +154,13 @@ with a model object needs a judge model ([evaluation.md](../evaluation.md#the-ju
 
 ## Run it
 
-* [`examples/react_agent.py`](../../examples/react_agent.py) — a tool, then a structured answer.
-* [`examples/react_with_blocks.py`](../../examples/react_with_blocks.py) — your run store, your
+* [`examples/01_start/first_agent.py`](../../examples/01_start/first_agent.py) — two tools and an approval.
+* [`examples/02_way1_react/agent.py`](../../examples/02_way1_react/agent.py) — every piece on: memory, MCP
+  tools, an approval resumed in place, a hook, `timeout`, `framework_options`, `without=`.
+* [`examples/02_way1_react/structured_output.py`](../../examples/02_way1_react/structured_output.py) — a tool, then a structured answer.
+* [`examples/05_features/own_scheduler.py`](../../examples/05_features/own_scheduler.py) — your run store, your
   scheduler loop, your governance, memory off.
-* [`examples/react_subagents.py`](../../examples/react_subagents.py) — two sub-agents at once,
+* [`examples/05_features/subagents.py`](../../examples/05_features/subagents.py) — two sub-agents at once,
   one asking a person.
 * Tests: `tests/integration/test_react.py`, `test_react_parallel.py`, `test_react_context.py`,
   `test_middleware.py` (each middleware on a plain `create_agent`), and against the real

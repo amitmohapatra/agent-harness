@@ -155,5 +155,5 @@ stored, so `ReAct(prompt_vars=)` with one is refused.
 
 ## Example
 
-[`examples/prompts_and_skills.py`](../examples/prompts_and_skills.py): a folder of prompts and
+[`examples/05_features/skills_and_prompts.py`](../examples/05_features/skills_and_prompts.py): a folder of prompts and
 of skills, a prompt in code, a `ReAct` and a function reading them, with no services.

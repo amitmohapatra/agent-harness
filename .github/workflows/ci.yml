@@ -55,7 +55,19 @@ jobs:
         # every test except the benchmark and the live ones (they need running services)
         run: make test
       - name: Examples
+        # every example, offline (scripted model, memory service and gateway), in parallel
         run: make examples
+      - name: Docs check
+        # every relative link and anchor resolves; every snippet parses and names the real API
+        run: make docs-check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Mermaid diagrams
+        # every ```mermaid block parses, with the same mermaid GitHub renders (11.x)
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/mermaid" mermaid@11 jsdom@25
+          MERMAID_MODULES="$RUNNER_TEMP/mermaid/node_modules" make docs-mermaid
       - name: Feature matrix
         # every feature x adapter x way x mode x selection, scripted (tests/matrix), in shards
         # at once; build/matrix.md is the matrix as it ran

@@ -242,6 +242,34 @@ async def test_a_manual_schedule_never_fires_on_its_own() -> None:
     assert await runs.claim("w", ["a"]) is None
 
 
+async def test_a_schedule_is_fired_on_demand_as_agent_runs_fires_it() -> None:
+    runs = LocalRuns()
+    manual = await runs.schedules.create(
+        ScheduleSpec(
+            tenant_id="t", agent_id="a", name="m", cadence="manual", on_behalf_of="u", input="go"
+        )
+    )
+    fired = await runs.schedules.fire(manual.schedule_id, tenant="t")  # a manual one: now
+    assert fired.schedule.last_run_id == fired.run_id and fired.schedule.next_fire_at is None
+    assert fired.idempotency_key.startswith(f"{manual.schedule_id}@")
+    claimed = await runs.claim("w", ["a"])
+    assert claimed is not None and claimed.run.run_id == fired.run_id
+    tick = datetime(2026, 10, 6, 6, tzinfo=UTC)
+    first = await runs.schedules.fire(manual.schedule_id, at=tick)
+    again = await runs.schedules.fire(manual.schedule_id, at=tick)  # the same tick: the same run
+    assert again.run_id == first.run_id != fired.run_id and again.fire_time == tick
+    daily = await runs.schedules.create(
+        ScheduleSpec(tenant_id="t", agent_id="a", name="d", cadence="daily", on_behalf_of="u")
+    )
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    runs._schedules[daily.schedule_id] = daily.model_copy(update={"next_fire_at": due})
+    assert (await runs.schedules.fire(daily.schedule_id)).fire_time == due  # the tick it is due for
+    with pytest.raises(NotFoundError, match="no schedule"):
+        await runs.schedules.fire(manual.schedule_id, tenant="other")
+    with pytest.raises(NotFoundError, match="no schedule"):
+        await runs.schedules.fire("sch_missing")
+
+
 async def test_a_runs_working_time_grows_each_time_it_stops_running() -> None:
     runs = LocalRuns()
     await runs.start(start())

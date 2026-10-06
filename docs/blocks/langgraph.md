@@ -11,7 +11,9 @@ your own code:
 | evaluation ([evaluation.md](evaluation.md)) | the answer is judged on the run's trace, and graded against the memory context it was given |
 
 The runnable version, offline and deterministic, is
-[`examples/blocks_langgraph.py`](../../examples/blocks_langgraph.py); the snippets below are
+[`examples/03_way2_governance/langgraph_recipe.py`](../../examples/03_way2_governance/langgraph_recipe.py) (with no harness at all, only
+the SDKs: [`examples/04_no_harness/langgraph_sdks.py`](../../examples/04_no_harness/langgraph_sdks.py),
+[`examples/04_no_harness/deepagents_sdks.py`](../../examples/04_no_harness/deepagents_sdks.py)); the snippets below are
 from it. Wrapping the same graph instead (Way 1, no code for any of this):
 [frameworks/langgraph.md](../frameworks/langgraph.md).
 

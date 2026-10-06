@@ -44,7 +44,7 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import pipeline, sandbox, skills
+from trellis.harness import compat, pipeline, sandbox, skills
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -143,6 +143,8 @@ class Agent:
         #: the hooks around its runs, model calls and tool calls: the harness's, then its own
         self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)
+        # a framework outside the range this release was tested with: said once, never refused
+        compat.check(self.adapter.name)
         #: the framework's own options for every run's call (``h.wrap(framework_options=)``):
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})

@@ -249,3 +249,8 @@ The stored prompts, the skills, the MCP clients' Agent Mode lists and Code Mode'
 through the gateway's management API (`/api`) with the same key. A gateway with admin auth on
 closes `/api` to virtual keys: there a prompt fails its run with the gateway's refusal, skills
 are a warning, the Agent Mode lists go unchecked and Code Mode's nested calls are not recorded.
+
+Runnable: [examples/03_way2_gateway/mcp_and_model_headers.py](../examples/03_way2_gateway/mcp_and_model_headers.py)
+(the gateway's MCP tools and `NO_GATEWAY_TOOLS` with no harness), and
+[examples/06_scenarios/gateway_code_mode_governed_evals.py](../examples/06_scenarios/gateway_code_mode_governed_evals.py)
+(Code Mode, an `approve_when` rule, evaluation).

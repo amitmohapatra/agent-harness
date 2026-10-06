@@ -64,6 +64,7 @@ from trellis.contracts.ids import now
 from trellis.runs import (
     Claimed,
     ConflictError,
+    FireResult,
     Lease,
     LeaseLostError,
     NotFoundError,
@@ -96,6 +97,10 @@ class RunSchedules(Protocol):
     """``runs.schedules``: what ``Agent.schedule`` creates."""
 
     async def create(self, spec: ScheduleSpec) -> Schedule: ...
+
+    async def fire(
+        self, schedule_id: str, *, at: datetime | None = ..., tenant: str | None = ...
+    ) -> FireResult: ...
 
 
 @runtime_checkable
@@ -207,6 +212,8 @@ class LocalRuns:
         #: the running runs a worker holds that were asked to stop, and why
         self._cancelling: dict[str, str | None] = {}
         self._schedules: dict[str, Schedule] = {}
+        #: the run each schedule's tick queued, by ``<schedule_id>@<tick>``
+        self._fired: dict[str, str] = {}
         #: artifact id -> (tenant, bytes)
         self._artifacts: dict[str, tuple[str, bytes]] = {}
         self._lock = asyncio.Lock()
@@ -479,6 +486,14 @@ class LocalRuns:
         for schedule in list(self._schedules.values()):
             if not schedule.enabled or schedule.next_fire_at is None or schedule.next_fire_at > now:
                 continue
+            self._fire(schedule, now, now)
+
+    def _fire(self, schedule: Schedule, tick: datetime, now: datetime) -> FireResult:
+        """Queue ``schedule``'s run for ``tick`` (a repeated tick answers the run it queued)
+        and advance the schedule past ``now``."""
+        key = f"{schedule.schedule_id}@{tick.astimezone(UTC).isoformat()}"
+        run_id = self._fired.get(key)
+        if run_id is None:
             start = RunStart(
                 run_id=new_id("run_"),
                 tenant_id=schedule.tenant_id,
@@ -494,14 +509,21 @@ class LocalRuns:
                 priority=getattr(schedule, "priority", 0),
                 concurrency_key=getattr(schedule, "concurrency_key", None),
             )
-            record = self._start(start, RunStatus.QUEUED)
-            self._schedules[schedule.schedule_id] = schedule.model_copy(
+            run_id = self._fired[key] = self._start(start, RunStatus.QUEUED).run_id
+            schedule = self._schedules[schedule.schedule_id] = schedule.model_copy(
                 update={
                     "last_fired_at": now,
-                    "last_run_id": record.run_id,
+                    "last_run_id": run_id,
                     "next_fire_at": _next_fire(schedule, now),
                 }
             )
+        return FireResult(
+            schedule_id=schedule.schedule_id,
+            run_id=run_id,
+            fire_time=tick,
+            idempotency_key=key,
+            schedule=schedule,
+        )
 
 
 class LocalArtifacts:
@@ -554,6 +576,20 @@ class LocalSchedules:
         schedule = Schedule.from_spec(spec, next_fire_at=_next_fire(spec, datetime.now(UTC)))
         kept[schedule.schedule_id] = schedule
         return schedule
+
+    async def fire(
+        self, schedule_id: str, *, at: datetime | None = None, tenant: str | None = None
+    ) -> FireResult:
+        """Queue the schedule's run now, as agent-runs' ``schedules.fire`` does: for the tick
+        ``at`` (a repeat for it answers the same run), else for the tick it is due for, else
+        for now — a ``manual`` schedule's only way to run."""
+        schedule = self._runs._schedules.get(schedule_id)
+        if schedule is None or tenant not in (None, schedule.tenant_id):
+            raise NotFoundError(f"no schedule {schedule_id}", code="NOT_FOUND", status=404)
+        current = datetime.now(UTC)
+        due = schedule.next_fire_at
+        tick = at or (due if due is not None and due <= current else current)
+        return self._runs._fire(schedule, tick, current)
 
 
 def _conflict(message: str) -> ConflictError:

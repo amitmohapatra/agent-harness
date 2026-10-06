@@ -1,0 +1,200 @@
+[
+  {
+    "name": "memory_search",
+    "description": "Search what is remembered for this user, agent and conversation, and the documents they may read. Returns items with id, kind, text and observed_on.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "description": "what to look for",
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kinds": {
+          "description": "memory, chunk (document passages), summary, episode (earlier conversations), message (this conversation); default memory and chunk",
+          "items": {
+            "enum": [
+              "memory",
+              "chunk",
+              "summary",
+              "episode",
+              "message"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "time_from": {
+          "description": "observed since",
+          "format": "date-time",
+          "type": "string"
+        },
+        "time_to": {
+          "description": "observed until",
+          "format": "date-time",
+          "type": "string"
+        },
+        "as_of": {
+          "description": "what was true at this moment (includes replaced memories)",
+          "format": "date-time",
+          "type": "string"
+        },
+        "known_at": {
+          "description": "what had been learned by this moment",
+          "format": "date-time",
+          "type": "string"
+        },
+        "k": {
+          "default": 8,
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "memory_remember",
+    "description": "Remember a statement verbatim: facts, preferences and decisions worth keeping.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "description": "the statement",
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "default": "SEMANTIC",
+          "enum": [
+            "SEMANTIC",
+            "PREFERENCE",
+            "EPISODIC",
+            "PROCEDURAL",
+            "TASK",
+            "USER",
+            "TOOL",
+            "OUTCOME"
+          ],
+          "type": "string"
+        },
+        "scope": {
+          "default": "user",
+          "description": "who may read it: user, agent (this agent for this user), run, thread, group (the agent group), workspace",
+          "enum": [
+            "user",
+            "agent",
+            "run",
+            "thread",
+            "group",
+            "workspace"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "memory_update",
+    "description": "Replace a memory with a new statement; the old one stays in its history.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "a memory id, or its handle in the context ([m3] -> m3)",
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "content": {
+          "description": "the new statement",
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "memory_forget",
+    "description": "Forget a memory: it is no longer retrieved.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "a memory id, or its handle in the context ([m3] -> m3)",
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "profile_edit",
+    "description": "Edit a pinned profile block: replace the exact old text with the new text (empty old replaces the whole block). Profile blocks are part of every context.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "block": {
+          "description": "user, agent or workspace, optionally .<name>",
+          "maxLength": 60,
+          "type": "string"
+        },
+        "old": {
+          "default": "",
+          "description": "the exact text to replace; empty: all of it",
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "new": {
+          "maxLength": 4000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "block",
+        "new"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "tool_search",
+    "description": "Which of your tools fit a task, best first, each with a 0-1 confidence, the argument values already known and the ones still missing; the next step of the learned plan.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "task": {
+          "description": "the task, in words",
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "type": "object"
+    }
+  }
+]
