@@ -8,6 +8,8 @@ transitions are written here: the pipeline records the run.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Final
 
@@ -30,6 +32,8 @@ from trellis.harness.runs import RunStore
 
 #: The owner a refused call is scoped to: no real caller can be it.
 REFUSED_OWNER: Final = "\x00refused"
+#: How long a new task's run waits for the SDK to save the task it announced.
+OPEN_SECONDS: Final = 5.0
 
 TASK_STATES: Final[dict[RunStatus, TaskState]] = {
     RunStatus.QUEUED: TaskState.TASK_STATE_SUBMITTED,
@@ -71,17 +75,29 @@ class RunTaskStore(TaskStore):
         self._tenant = tenant
         self._owner = owner(user_of)
         self._store = InMemoryTaskStore(owner_resolver=self._owner)
-        #: tasks this process is creating: their run is being opened, not rebuilt
-        self._opening: set[str] = set()
+        #: tasks this process is creating (their run is being opened, not rebuilt), each set
+        #: once it is saved
+        self._opening: dict[str, asyncio.Event] = {}
 
     def opening(self, task_id: str) -> None:
         """This process is starting ``task_id``: until its first save, a lookup finds nothing
         (the run exists already, but the task is the new one the executor announces)."""
-        self._opening.add(task_id)
+        self._opening[task_id] = asyncio.Event()
+
+    async def opened(self, task_id: str) -> None:
+        """Wait until ``task_id``, announced, is saved (the SDK saves what the executor
+        announces; at most :data:`OPEN_SECONDS`): its run starts then, so a caller that knows
+        its id (``tasks/cancel``) finds it."""
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(OPEN_SECONDS):
+                await self._opening[task_id].wait()
+        del self._opening[task_id]
 
     async def save(self, task: Task, context: ServerCallContext) -> None:
-        self._opening.discard(task.id)
         await self._store.save(task, context)
+        saved = self._opening.get(task.id)
+        if saved is not None:
+            saved.set()
 
     async def get(self, task_id: str, context: ServerCallContext) -> Task | None:
         found = await self._store.get(task_id, context)

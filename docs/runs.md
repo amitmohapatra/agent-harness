@@ -77,7 +77,10 @@ memory write queue drains (at most 10 s; what is left is spooled or counted lost
 (e.g. a termination grace period of 45 s). Cancelling `worker.run()` instead stops the runs
 it holds without writing anything: their leases lapse and agent-runs queues them again. A
 worker's run ends `CANCELLED` only when someone asked (`agent.cancel`: its heartbeat says
-`cancel_requested`), and `TIMEOUT` when its working time is used up — the worker writes that.
+`cancel_requested`), and `TIMEOUT` when its working time is used up. The attempt writes that,
+as any run of it out of time does: its error (`run_timeout`, "the run worked past its time
+limit of …"), its tool call cut short and its `RUN_FINISHED` (outcome `timeout`) on its events
+— also when the worker's own clock for the working time, armed at the claim, stops it first.
 
 A worker runs any target. Build it the same way in every worker process (at import, in the
 module the worker loads); a LangGraph graph's own `interrupt()` (or HITL middleware) pause needs a
