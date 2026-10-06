@@ -58,6 +58,7 @@ from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
+from trellis.harness.tools import bridge
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
@@ -258,6 +259,7 @@ async def _attempt(
         _current.reset(tokens[0])
         agent.running.pop(identity.run_id, None)
     timed_out = budget.error if budget is not None and (clock.expired() or stopped) else None
+    bridge.unended(runtime, timed_out=timed_out is not None)
     result = await _concluded(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )

@@ -171,3 +171,6 @@ why:
 | the run's time limit (`timeout=`, `deadline=`) | `timeout` | `<tool> was cut short: the run ran out of time` |
 
 A paused call runs again in the attempt that resumes the run: a new `TOOL_CALL_START` there.
+A call its framework still runs when the attempt ends (one run in a task of the framework's
+own, as Claude's in-process MCP server does, stopped only later) is ended then, before
+`RUN_FINISHED`, the same way; its later stop adds nothing to the stream.

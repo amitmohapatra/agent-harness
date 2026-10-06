@@ -460,6 +460,35 @@ async def test_a_call_cut_short_before_it_runs_still_ends_on_the_stream(
     assert events[-2].data["status"] == "cancelled" and events[-1].outcome is RunOutcome.CANCELLED
 
 
+async def test_a_call_a_framework_leaves_running_ends_with_the_attempt(harness: Harness) -> None:
+    """A framework may run a tool in a task of its own and stop it only after the attempt
+    ended (Claude's MCP server does): the attempt's end ends the call on the stream, once."""
+    started = asyncio.Event()
+    left: list[asyncio.Task[Any]] = []
+
+    @tool(side_effects="read")
+    async def wait(seconds: int) -> str:
+        """Wait a while."""
+        started.set()
+        await asyncio.sleep(seconds)
+        return "waited"
+
+    async def leaves(input: Any, agent: Runtime) -> Any:
+        left.append(asyncio.create_task(agent.tools.call("wait", seconds=30)))
+        await asyncio.sleep(30)
+
+    agent = harness.wrap(leaves, id="leaving", tools=[wait], timeout=0.3)
+    events = [e async for e in agent.stream("x", user="u")]
+    assert started.is_set()
+    left[0].cancel()  # the framework stops it at last: nothing more on the stream
+    with pytest.raises(asyncio.CancelledError):
+        await left[0]
+    kinds = [e.type for e in events]
+    assert kinds.count(RunEventType.TOOL_CALL_END) == 1 and kinds[-1] is RunEventType.RUN_FINISHED
+    [result] = [e for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert result.data["status"] == "timeout"
+
+
 @pytest.mark.parametrize("framework", list(BUILDERS))
 @pytest.mark.parametrize("cut", ["paused", "cancelled", "timeout"])
 async def test_a_call_cut_short_still_ends_on_the_stream_on_every_adapter(

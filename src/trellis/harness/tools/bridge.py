@@ -155,8 +155,7 @@ async def _called(
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
         return rejected
-    runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool.name)
-    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=tool_call.args)
+    _started(runtime, ref, tool.name, tool_call.args)
     try:
         outcome = await _ran(
             runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key
@@ -349,8 +348,7 @@ def _replayed(tool: str, recorded: Any) -> ToolOutcome:
 
 def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) -> None:
     """A call that did not execute still appears on the stream, so a UI sees every step."""
-    runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=call.tool)
-    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=call.args)
+    _started(runtime, ref, call.tool, call.args)
     _ended(
         runtime,
         ref,
@@ -368,7 +366,26 @@ def _cut(runtime: Runtime, ref: str, tool: str, status: str) -> None:
     _ended(runtime, ref, tool, status=status, output=CUT[status].format(tool=tool))
 
 
+def unended(runtime: Runtime, *, timed_out: bool) -> None:
+    """The calls still under way as the attempt ends, ended on its stream before it does
+    (:func:`_cut`): a framework that runs its tools in tasks of its own (an MCP server's
+    handler, Claude's) may stop them only later, and their end is not the stream's then."""
+    status = ToolStatus.TIMEOUT.value if timed_out else CANCELLED
+    for ref, tool in list(runtime.open_calls.items()):
+        _cut(runtime, ref, tool, PAUSED if runtime.pending is not None else status)
+
+
+def _started(runtime: Runtime, ref: str, tool: str, args: dict[str, Any]) -> None:
+    """A call's start on the stream: ``TOOL_CALL_START``, then its ``TOOL_CALL_ARGS``."""
+    runtime.open_calls[ref] = tool
+    runtime.events.tool(RunEventType.TOOL_CALL_START, ref, tool=tool)
+    runtime.events.tool(RunEventType.TOOL_CALL_ARGS, ref, args=args)
+
+
 def _ended(runtime: Runtime, ref: str, tool: str, **result: Any) -> None:
-    """A call's end on the stream: ``TOOL_CALL_END``, then its ``TOOL_CALL_RESULT``."""
+    """A call's end on the stream, once: ``TOOL_CALL_END``, then its ``TOOL_CALL_RESULT``
+    (nothing for one the attempt's end has ended already: :func:`unended`)."""
+    if runtime.open_calls.pop(ref, None) is None:
+        return
     runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=tool)
     runtime.events.tool(RunEventType.TOOL_CALL_RESULT, ref, tool=tool, **result)

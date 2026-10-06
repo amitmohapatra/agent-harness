@@ -122,6 +122,9 @@ class Runtime:
     pending: Pending | None = None
     #: a Code Mode script ran: its nested calls are read back from the gateway's log
     used_code_mode: bool = False
+    #: the tool calls started on this attempt's stream and not ended there yet, by reference
+    #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
+    open_calls: dict[str, str] = field(default_factory=dict)
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None
