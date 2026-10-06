@@ -12,7 +12,7 @@
           "type": "string"
         },
         "kinds": {
-          "description": "memory, chunk (document passages), summary, episode (earlier conversations), message (this conversation's messages); default memory and chunk",
+          "description": "memory, chunk (document passages), summary, episode (earlier conversations), message (what was said, here and in earlier conversations); default memory and chunk",
           "items": {
             "enum": [
               "memory",
@@ -24,15 +24,6 @@
             "type": "string"
           },
           "type": "array"
-        },
-        "threads": {
-          "default": "current",
-          "description": "where message looks: current (this conversation) or all (every earlier conversation of this user)",
-          "enum": [
-            "current",
-            "all"
-          ],
-          "type": "string"
         },
         "time_from": {
           "description": "observed since",

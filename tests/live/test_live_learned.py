@@ -1,7 +1,7 @@
 """What memory learned, back in an agent's hands, against the running memory service:
 
 * **past conversations** - a run in a new thread finds what the user said in an earlier one
-  through the ``memory_search`` tool (``threads="all"``), and never what another user said;
+  through the ``memory_search`` tool (``kinds=["message"]``), and never what another user said;
 * **learned skills** - two successful runs make a procedure, the tenant's administrator
   publishes its draft as an Agent Skill, and a later run loads that skill by name like any
   other: from the folder the memory service publishes to (``SKILLS_DIR``, given to this suite
@@ -49,10 +49,7 @@ async def test_a_run_finds_what_its_user_said_in_an_earlier_conversation() -> No
 
     async def recall(input: str, agent: Runtime) -> str:
         query = f"locker {suffix} code"
-        found["all"] = await agent.tools.call(
-            "memory_search", query=query, kinds=["message"], threads="all"
-        )
-        found["here"] = await agent.tools.call("memory_search", query=query, kinds=["message"])
+        found["all"] = await agent.tools.call("memory_search", query=query, kinds=["message"])
         return "found"
 
     async with live_harness() as h:
@@ -70,7 +67,6 @@ async def test_a_run_finds_what_its_user_said_in_an_earlier_conversation() -> No
     every = _texts(found["all"])
     assert (f"USER: My {mine}.", old_thread) in every, every
     assert not any(theirs in text for text, _ in every), "another user's chat is never read"
-    assert not any(mine in text for text, _ in _texts(found["here"])), "this thread only"
 
 
 # the learning job is waited for up to 120 s after the runs it learns from

@@ -395,8 +395,8 @@ async def pull(w: World) -> None:
         if offered & set(MEMORY_TOOLS):
             raise OffButOffered(sorted(offered & set(MEMORY_TOOLS)))
         return
-    # every earlier conversation too: the service's own option, passed through as given
-    search = {"query": "contact", "kinds": ["memory", "message"], "threads": "all"}
+    # memories and what was said (here and in the user's earlier conversations), as given
+    search = {"query": "contact", "kinds": ["memory", "message"]}
     o = (await w.go([d.lookup()], [("memory_search", search)])).succeeded()
     assert "the user prefers email" in o.text, o.answer
     [searched] = w.memory_service.named("call_agent_tool")
