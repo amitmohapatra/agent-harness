@@ -28,6 +28,7 @@ from trellis.contracts import ConfigurationError, RunRecord, RunStatus
 from trellis.harness import telemetry
 from trellis.harness.runs import LocalRuns
 from trellis.harness.subagents import SUBAGENT
+from trellis.runs import Job
 
 done: list[str] = []
 
@@ -256,7 +257,9 @@ async def test_a_worker_killed_inside_a_child_repeats_none_of_its_side_effects(
     claimed = await store.claim(worker.worker_id, [parent.id])
     assert claimed is not None
     with pytest.raises(Crash):
-        await parent._claimed(claimed.run, worker.worker_id, lease_seconds=60)
+        await parent.execute(
+            Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
+        )
     held, _ = store._leases[handle.run_id]
     store._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
     [kid] = await children(harness, handle.run_id)

@@ -6,9 +6,10 @@ converters (``tools.convert``) wrap a ``Tool`` in the framework's own tool type,
 call goes through the bridge (governance, approval, journal, recording) before ``run``.
 
 How a call is run is the same for every source, wrapped (the bridge) or not (``governed``):
-at most its ``timeout``, a call that only reads (or is idempotent) tried again after an error
-that may pass (:func:`retried`), a sync function in a worker thread (:func:`invoked`), and a
-call that timed out told to the model as :func:`timed_out` says.
+one executor, :func:`execute` — at most its ``timeout``, a call that only reads (or is
+idempotent) tried again after an error that may pass (:func:`retried`), a sync function in a
+worker thread (:func:`invoked`), and a call that timed out told to the model as
+:func:`timed_out` says (for one that does more than read: its effect is unknown).
 """
 
 from __future__ import annotations
@@ -16,11 +17,22 @@ from __future__ import annotations
 import asyncio
 import inspect
 import random
+import time
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
-from trellis.contracts import AgentError, ConfigurationError, ErrorCategory, ToolError, ToolSpec
+from trellis.contracts import (
+    AgentError,
+    ConfigurationError,
+    ErrorCategory,
+    ToolError,
+    ToolOutcome,
+    ToolSpec,
+    ToolStatus,
+)
+from trellis.harness.features import Feature
 
 SideEffects = Literal["read", "write", "irreversible"]
 
@@ -47,14 +59,24 @@ JSON_TYPES: Final[dict[str, tuple[type, ...]]] = {
 #: than read runs once.
 READ_RETRIES: Final = 2
 RETRY_BACKOFF_SECONDS: Final = 0.5
+#: How long one call of a remote tool may take unless its ``timeout=`` says: an OpenAPI
+#: operation (and the fetch of its document) and an A2A exchange (``remote()`` too) alike.
+REMOTE_TIMEOUT_SECONDS: Final = 120.0
+#: The ``ToolOutcome.metadata`` flag of a call whose effect is not known: it does more than
+#: read, and timed out or was running when its worker died. Its ``error_class`` says so too
+#: (:data:`OUTCOME_UNKNOWN`), which the memory service's tool records keep.
+UNKNOWN: Final = "unknown"
+OUTCOME_UNKNOWN: Final = "OutcomeUnknown"
 
 
 @dataclass(frozen=True, slots=True)
 class Tool:
     spec: ToolSpec
     run: Runner = field(repr=False)
-    #: Bifrost Code Mode meta-tool: its nested calls are recorded from the gateway's log.
-    code_mode: bool = False
+    #: the part of what the harness does that this tool is (``without=`` turns it off): an
+    #: MCP tool, a Bifrost Code Mode meta-tool (its nested calls are recorded from the
+    #: gateway's log), a skill's or the memory service's tool; ``None``: the agent's own
+    feature: Feature | None = None
     #: The most one call may take, in seconds, retries included (``None``: no limit of its
     #: own; the run's time still bounds it).
     timeout: float | None = None
@@ -98,6 +120,55 @@ def retries_of(spec: ToolSpec, *, reads: bool) -> int:
     """How often a call is tried again: :data:`READ_RETRIES` for one that only ``reads`` (its
     risk as governance sees it) or is idempotent, none for anything else."""
     return READ_RETRIES if reads or spec.idempotent else 0
+
+
+async def execute(
+    tool: Tool,
+    args: dict[str, Any],
+    *,
+    reads: bool,
+    within: AbstractAsyncContextManager[Any] | None = None,
+) -> tuple[ToolOutcome, Exception | None]:
+    """One call of ``tool`` within its time — ``within`` (a run's call: ``Runtime.limited``,
+    the tool's ``timeout`` and the run's), else the tool's ``timeout`` — tried again after an
+    error that may pass when it ``reads`` (or is idempotent). The outcome, and what the call
+    raised: an error (``ERROR``), or out of time a :class:`ToolTimeout` (``TIMEOUT``: for a
+    call that does more than read, its effect is unknown — ``metadata["unknown"]``)."""
+    attempts = 0
+
+    async def once() -> Any:
+        nonlocal attempts
+        attempts += 1
+        return await tool.run(args)
+
+    began = time.monotonic()
+    try:
+        async with within or asyncio.timeout(tool.timeout):
+            output = await retried(once, retries=retries_of(tool.spec, reads=reads))
+    except Exception as exc:
+        if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
+            failed = ToolOutcome(
+                tool=tool.name,
+                status=ToolStatus.ERROR,
+                output=f"{tool.name} failed: {exc}",
+                error_class=type(exc).__name__,
+                attempts=attempts,
+            )
+            return failed, exc
+        took = time.monotonic() - began
+        text = timed_out(tool.name, took=took, limit=tool.timeout, unknown=not reads)
+        late = ToolOutcome(
+            tool=tool.name,
+            status=ToolStatus.TIMEOUT,
+            output=text,
+            error_class=type(exc).__name__ if reads else OUTCOME_UNKNOWN,
+            attempts=attempts,
+            metadata={} if reads else {UNKNOWN: True},
+        )
+        timeout = ToolTimeout(text, unknown=not reads)
+        timeout.__cause__ = exc
+        return late, timeout
+    return ToolOutcome(tool=tool.name, output=output, attempts=attempts), None
 
 
 async def retried(call: Callable[[], Awaitable[Any]], *, retries: int) -> Any:

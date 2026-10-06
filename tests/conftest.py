@@ -11,7 +11,6 @@ from agents import set_tracing_disabled
 from tests.support import memory as fake_memory
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
-from trellis.harness.clients.memory import Memory
 
 set_tracing_disabled(True)
 
@@ -40,6 +39,5 @@ def memory_service() -> FakeMemoryService:
 
 @pytest.fixture
 async def memory_harness(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
-    async with Harness(config=Settings(memory_url="http://memory.test", api_key="test")) as h:
-        h.memory = Memory("http://memory.test", None, client=memory_service.client())
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
         yield h

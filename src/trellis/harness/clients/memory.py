@@ -49,10 +49,8 @@ AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
 class Memory:
     """One memory service for the process."""
 
-    def __init__(
-        self, url: str, api_key: str | None, *, client: MemoryClient | None = None
-    ) -> None:
-        self.client = client or MemoryClient(url, api_key=api_key)
+    def __init__(self, client: MemoryClient) -> None:
+        self.client = client
         self._lister = self.client.bind()
         self._agent_tools = Fresh(
             self._list_agent_tools,
@@ -115,9 +113,6 @@ class Memory:
             case "publish_catalog":
                 return lambda: MemoryCatalog(run.ctx).publish(args["entries"])
         return None
-
-    async def aclose(self) -> None:
-        await self.client.aclose()
 
 
 class RunMemory:

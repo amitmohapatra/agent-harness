@@ -22,7 +22,6 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import telemetry
-from trellis.harness.clients.memory import Memory
 from trellis.harness.governance import catalog
 from trellis.memory.models import ToolHints
 
@@ -46,9 +45,7 @@ def many(n: int) -> list[Any]:
 
 
 def harness_with(service: FakeMemoryService, **settings: Any) -> Harness:
-    h = Harness(config=Settings(memory_url="http://m", api_key="test", **settings))
-    h.memory = Memory("http://m", None, client=service.client())
-    return h
+    return Harness(config=Settings(**settings), memory=service.client())
 
 
 # --------------------------------------------------------------------------- who we are
@@ -465,6 +462,20 @@ async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
     assert context.body["query"] == "contact?"
 
 
+async def test_a_structured_answer_is_verified_as_its_json(
+    memory_service: FakeMemoryService,
+) -> None:
+    async with harness_with(memory_service, grounding_sample=1.0) as h:
+
+        async def fn(input: str, agent: Runtime) -> dict[str, str]:
+            return {"contact": "email"}
+
+        await h.wrap(fn, id="judged").run("contact?", user="u")
+        await h.writes.drain()
+    [verified] = memory_service.named("verify")
+    assert verified.body["answer"] == '{"contact": "email"}'
+
+
 async def test_an_unsampled_run_is_not_verified(memory_service: FakeMemoryService) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return "answer"
@@ -665,7 +676,7 @@ async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
     billing = OpenAIAgent(
         name="billing",
         model=Model("b", [("pay", {"amount": 500}), ("pay", {"amount": 500}), "paid"]),
-        tools=await memory_harness.tools(pay, framework="openai-agents"),
+        tools=await memory_harness.tools(pay, framework="openai_agents"),
     )
     triage = OpenAIAgent(
         name="triage",

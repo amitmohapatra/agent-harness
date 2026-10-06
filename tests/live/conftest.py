@@ -31,7 +31,6 @@ from bifrost_sdk import Bifrost, MCPClientConfig, MCPConnection
 from bifrost_sdk.admin import Admin
 
 from trellis import Harness, Settings
-from trellis.harness.clients.memory import Memory
 from trellis.harness.evals import Evaluator
 from trellis.memory import MemoryClient
 
@@ -86,21 +85,30 @@ def settings(**changes: object) -> Settings:
     return Settings.from_env().model_copy(update=changes)
 
 
+class LiveHarness(Harness):
+    """A harness whose memory client is given (it waits longer than a deployment's would, since
+    the services share one development machine), and closed with it."""
+
+    async def aclose(self) -> None:
+        await super().aclose()
+        if self.memory is not None:
+            await self.memory.client.aclose()
+
+
 def live_harness(
     key: str | None = None, *, judges: Sequence[Evaluator] = (), **changes: object
 ) -> Harness:
     """A harness for the environment's deployment, with the virtual key ``key`` (a session
-    key from the fixtures; the environment's otherwise) and the online ``judges``; its memory
-    client waits longer than a deployment's would, since the services share one development
-    machine."""
+    key from the fixtures; the environment's otherwise) and the online ``judges``."""
     if key is not None:
         changes["bifrost_virtual_key"] = key
-    h = Harness(config=settings(**changes), judges=judges)
-    s = h.settings
-    if s.memory_url is not None:
-        client = MemoryClient(s.memory_url, api_key=s.api_key, timeout=LIVE_TIMEOUT)
-        h.memory = Memory(s.memory_url, s.api_key, client=client)
-    return h
+    s = settings(**changes)
+    memory = (
+        MemoryClient(s.memory_url, api_key=s.api_key, timeout=LIVE_TIMEOUT)
+        if s.memory_url is not None
+        else None
+    )
+    return LiveHarness(config=s, memory=memory, judges=judges)
 
 
 @pytest.fixture

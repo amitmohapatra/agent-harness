@@ -28,6 +28,7 @@ from trellis.harness.a2a import InputRequired, RemoteAgent, remote
 from trellis.harness.a2a import client as a2a_client
 from trellis.harness.identity import IDENTITY_HEADER
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 
 
 @pytest.fixture
@@ -202,8 +203,8 @@ async def test_a_remote_agent_opens_and_closes_its_own_client(
     assert len(opened) == 2 and opened[1].is_closed
     await harness.aclose()
     monkeypatch.undo()
-    async with a2a_client._http(a2a_client.TIMEOUT_SECONDS) as default:
-        assert default.timeout.read == a2a_client.TIMEOUT_SECONDS
+    async with a2a_client._http(REMOTE_TIMEOUT_SECONDS) as default:
+        assert default.timeout.read == REMOTE_TIMEOUT_SECONDS
 
 
 def test_a_reply_reduces_to_its_artifacts_or_its_text() -> None:

@@ -7,7 +7,7 @@ annotation queues live there. Trellis fills it two ways:
 |---|---|---|
 | What | an agent run over a dataset, every answer scored | live runs scored as they happen |
 | Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, evaluators)` | automatic: `Harness(judges=[...])`, and the sampled grounding check |
-| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with a text answer (`TRELLIS_JUDGE_SAMPLE`, or `sample=`) |
+| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (`TRELLIS_JUDGE_SAMPLE`, or `sample=`) |
 | When | now: the call returns an `EvalReport` | after the run — in the background writes queue, never on the request path, when wrapped |
 | Where the scores go | each run's trace (Langfuse scores, and a `score` span); a Langfuse dataset's runs are linked to the dataset run | each run's trace (or the trace a case names) |
 
@@ -47,7 +47,8 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
   a sampled share is judged (`TRELLIS_JUDGE_SAMPLE`, [Online](#online-judges) below).
   Nothing to call.
 * **`h.evaluate`** runs each item through the normal pipeline — memory, tools, governance and
-  approvals — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
+  approvals, the agent's time limit (`h.wrap(timeout=)`: a hung item ends `TIMEOUT`, an
+  `error` item) — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
 * What it reaches is `h.evals`, an `EvalServices` the harness builds from its settings (sharing
   its gateway and Langfuse client); each agent has its own copy, `agent.evals`, whose judge
   falls back to a `ReAct` target's own model when `TRELLIS_JUDGE_MODEL` is unset.
@@ -211,7 +212,7 @@ spans do.
 h = Harness(judges=[llm_judge("Polite, correct and concise.", name="quality"), cites_policy])
 ```
 
-After a successful run of a wrapped agent with a text answer, if the run falls in the sample,
+After a successful run of a wrapped agent with an answer (a structured one as its JSON), if the run falls in the sample,
 each judge is queued in the background writes (`judge.<name>`): the run has already returned
 when it runs. Each is one `judge(case, [that judge], services=agent.evals)`; the case is the
 run's question, answer, memory context and scope, and run id (no `expected`). Its score goes on

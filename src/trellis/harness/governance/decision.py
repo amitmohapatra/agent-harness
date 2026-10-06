@@ -12,6 +12,7 @@ evaluated on a call asks, and so does :data:`~trellis.harness.governance.catalog
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -64,6 +65,10 @@ class Decision:
     def question(self) -> str:
         """What a person is asked when the call waits for approval."""
         return f"Approve {self.tool}? {self.reason}"
+
+    def asking(self, reason: str) -> Decision:
+        """This call waiting for a person, for ``reason`` (a hook's ``Ask``)."""
+        return dataclasses.replace(self, action=Action.ASK, reason=reason)
 
 
 def decide(tool: str, risk: str, rule: str | None, args: Mapping[str, Any]) -> Decision:

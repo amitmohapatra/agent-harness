@@ -49,7 +49,7 @@ refunds = Agent(
     name="refunds",
     instructions="You refund orders.",
     model=model,
-    tools=await h.tools(refund, framework="openai-agents"),  # FunctionTools, still the harness's
+    tools=await h.tools(refund, framework="openai_agents"),  # FunctionTools, still the harness's
 )
 triage = Agent(name="triage", instructions="Route requests.", model=model, handoffs=[refunds])
 agent = h.wrap(triage, id="support")
@@ -72,6 +72,7 @@ which the SDK hands the model as the tool's error. The harness passes no
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used; your own tools are never narrowed |
 | Grounding, judges, tracing | as for every target ([evaluation.md](../evaluation.md), [observability.md](../observability.md)) |
+| Hooks | the tool and run hooks as for every target; the model hooks through the SDK's own `RunHooks`, which the harness passes to `Runner.run`: each call reported to `before_model`/`after_model`, none rewritten (the SDK takes nothing back) ([hooks.md](../hooks.md)) |
 
 The answer is the run's `final_output` (a pydantic `output_type` is kept as JSON in the run
 record).

@@ -85,6 +85,9 @@ class Journal(BaseModel):
     started: dict[str, int] = Field(default_factory=dict)
     #: the journals of the sub-agents' runs working inside the run's tool calls now, by run id
     children: dict[str, Journal] = Field(default_factory=dict)
+    #: the framework's own conversation, when it keeps one the next attempt continues (a
+    #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
+    session: str | None = None
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence

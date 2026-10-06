@@ -52,8 +52,12 @@ The inbox shows both kinds; answer each the way its run continues:
 ## Workers
 
 Harness workers (`h.worker([...])`, `python -m trellis.harness.worker`) and your own
-`trellis.runs.Worker`s claim from the same queue by agent id. Give each agent id to one kind of
-worker: a harness worker runs only wrapped agents, and your handler only your own.
+`trellis.runs.Worker`s claim from the same queue by agent id. A wrapped agent's run is
+continued by `agent.execute(job)`, so your own worker runs it too: hand it the agent's id and
+`agent.execute` as the handler (`Worker(runs, agent.execute, [agent.id])`), or call
+`agent.execute(job)` for the wrapped agents' jobs from a handler that also runs your own. What
+it must not do is run a wrapped agent's run with your own handler, or yours with
+`agent.execute` (it refuses another agent's job).
 
 ## Calling across
 

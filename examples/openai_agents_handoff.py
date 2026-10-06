@@ -1,6 +1,6 @@
 """OpenAI Agents SDK handoffs: ``wrap(tools=...)`` adds harness tools to the agent you wrap; a
 specialist reached by a handoff gets its harness tools when it is built, from
-``h.tools(..., framework="openai-agents")``. Every call is still the harness's — governance,
+``h.tools(..., framework="openai_agents")``. Every call is still the harness's — governance,
 approvals, the journal, the record — and a resume re-runs the whole conversation, handoff
 included, against the run's journal.
 
@@ -34,7 +34,7 @@ async def main() -> None:
             name="refunds",
             instructions="You refund orders.",
             model=openai_agents_model([call, call, "Refunded 40 EUR on o-7."]),
-            tools=await h.tools(refund, framework="openai-agents"),
+            tools=await h.tools(refund, framework="openai_agents"),
         )
         handoff = ("transfer_to_refunds", {})
         triage = Agent(

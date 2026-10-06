@@ -41,6 +41,7 @@ result = await agent.run({"order": "o-7", "amount": 40, "question": "Refund o-7"
 | `await agent.ask(question, ...)` | a pause for a person ([interrupts.md](../interrupts.md)); returns the answer on resume |
 | `agent.log(message, **fields)` | a log line and a `log` event on the stream |
 | `run_id`, `user`, `thread`, `tenant`, `attempt`, `task` | who and what the run is |
+| `agent.uses(feature)` | whether the run has a part of the harness on, or is `without=` it ([what is on](../README.md#what-is-on-and-how-to-turn-it-off)) |
 
 Memory is asked about the input's text: the input itself, the last user message of a list, or a
 dict's `query`/`question`/`input`/`prompt`/`text`/`message` field — a dict without one gets no

@@ -97,18 +97,14 @@ class RunExecutor(AgentExecutor):
         )
         payload = _payload(context.message)
         agent = self.agent
-        identity = await agent._opened(
+        record = await agent._opened(
             payload, user=user, thread=context_id, tenant=tenant, run_id=task_id
         )
         await self._stream(
             event_queue,
             task_id,
             context_id,
-            agent._events(
-                lambda listen: pipeline.attempt(
-                    agent, identity, payload, listener=listen, streaming=True
-                )
-            ),
+            agent._events(lambda listen: pipeline.attempt(agent, record, payload, listener=listen)),
         )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:

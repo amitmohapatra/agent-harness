@@ -146,5 +146,7 @@ Agents' `needs_approval`. A tool the framework gates should not also be `irrever
 an `approve_when` in the harness, or each call is approved twice.
 
 A framework's own tools are not harness tools, so governance does not see them. Examples are
-Deep Agents' file tools, Claude Code's built-ins and your own `function_tool`s
-([framework pages](README.md#which-target)).
+Deep Agents' file tools and your own `function_tool`s ([framework pages](README.md#which-target)).
+Claude Code's built-ins are the exception: the CLI asks the SDK's permission callback, and the
+harness's decides them by risk (`Bash` asks, `Write` is announced, `Read` runs)
+([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md#claude-codes-built-in-tools)).

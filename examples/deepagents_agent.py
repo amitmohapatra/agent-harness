@@ -35,7 +35,7 @@ async def main() -> None:
         )
         graph = create_deep_agent(
             model=model,
-            tools=await h.tools(refund, framework="langgraph"),
+            tools=await h.tools(refund, framework="deepagents"),
             system_prompt="You process refund requests. Plan, then refund.",
             middleware=[TodoListMiddleware()],
             checkpointer=InMemorySaver(),
