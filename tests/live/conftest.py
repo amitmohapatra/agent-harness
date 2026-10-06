@@ -160,8 +160,9 @@ def mcp_fixture() -> Iterator[str]:
 
 
 async def _connected(url: str) -> None:
-    """The gateway's clients of the local servers, reconnected when they were down when the
-    gateway started; skips when its ``config.json`` declares none."""
+    """The gateway's clients of the local servers, reconnected (or their tools refreshed) when
+    they were down when the gateway started, and waited for until their tools are listed;
+    skips when its ``config.json`` declares none."""
     async with Bifrost(url) as bf, httpx.AsyncClient(base_url=url.removesuffix("/v1")) as api:
         for _ in range(60):  # the servers start
             if _reachable(MCP_URL.rsplit("/", 1)[0], "/"):
@@ -170,9 +171,18 @@ async def _connected(url: str) -> None:
         declared = [c for c in await bf.mcp.clients() if c.config.name in (*WIKIS, OPS)]
         if not declared:
             pytest.skip("the gateway's config.json declares no client of the local MCP servers")
-        for client in declared:
-            if not client.tools:
-                await api.post(f"/api/mcp/client/{client.id}/reconnect")
+        stale = [c.id for c in declared if not c.tools]
+        for client_id in stale:
+            # a persistent client reconnects; one that connects per call (the gateway answers
+            # 400 to a reconnect) lists its tools again on refresh
+            reconnected = await api.post(f"/api/mcp/client/{client_id}/reconnect")
+            if reconnected.status_code == httpx.codes.BAD_REQUEST:
+                await api.post(f"/api/mcp/client/{client_id}/refresh-tools")
+        for _ in range(60):  # a reconnect lists the client's tools again in the background
+            listed = {c.id: c.tools for c in await bf.mcp.clients()}
+            if all(listed.get(client_id) for client_id in stale):
+                break
+            await asyncio.sleep(0.5)
         for _ in range(60):
             clients = await bf.mcp.clients()
             if all(c.tools for c in clients if c.config.name in (*WIKIS, OPS)):
