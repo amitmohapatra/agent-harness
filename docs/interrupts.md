@@ -43,8 +43,9 @@ What the person is shown follows from what is asked:
 | anything else | `form` (`expects=` its JSON Schema, or `form=` a pydantic model; `ui_schema=` its widget hints, react-jsonschema-form's `uiSchema`) | `QUESTION` | |
 
 `component=` names your own screen and `props=` its data: a surface that has that screen
-renders it with the props as they are (the reference inbox's `window.trellisComponents`, your
-AG-UI client from the interrupt's `metadata`), any other renders `ui`. Everything goes on the
+renders it with the props as they are (your AG-UI client from the interrupt's `metadata`, your
+own inbox from `h.inbox`'s interrupts: [below](#an-inbox-of-your-own)), any other renders
+`ui`. Everything goes on the
 contracts' `Interrupt` as it is. An answer carries option values, never labels; with `form=`
 it is read back into the model.
 
@@ -142,7 +143,7 @@ patterns are learned from). `remember="run"` when a reviewer trusts the rest of 
 the tool (a batch of refunds of one customer).
 
 **Where.** `agent.resume`, the AG-UI resume entry (`"comment"`, `"remember"`), an A2A answer's
-data part (`{"comment": ..., "remember": "run"}`), the reference inbox; every adapter and
+data part (`{"comment": ..., "remember": "run"}`), an inbox of your own; every adapter and
 `ReAct`. Way 2: `InterruptResolution(comment=, remember=)`.
 
 **Automatic.** The comment is on the run record (`last_resolution`, agent-runs' resolution
@@ -261,21 +262,63 @@ parent's, and both are delivered: answer the parent's (a receiver that reads the
 A run hook runs in process and is not retried: what it raises is logged, and the run's outcome
 stands.
 
-## The reference inbox
+## An inbox of your own
 
-`h.serve_inbox(app, *, path="/inbox", identity=None)` serves a small page (static HTML and
-JavaScript, no dependencies) that lists the paused runs of the agents wrapped by the harness
-and answers them: labelled options (checkboxes with `multiple`), a form built from `expects`
-with `ui_schema`'s `ui:widget`/`ui:title`/`ui:help`/`ui:placeholder`/`ui:order`, a table or a
-diff, an approval with the call's arguments (approve, approve edited, reject, and "approve for
-the rest of this run"), a comment, and cancel. A question naming a `component` is rendered by
-your screen when the page has it: `window.trellisComponents = {"refund-review": (element,
-props, interrupt, submit) => ...}`. It is a reference: copy it, or answer from your own screens
-through its routes — `GET {path}/runs?assignee=` (the paused runs with their interrupts) and
-`POST {path}/runs/{run_id}/resume` (`{"interrupt_id", "decision", "answer", "comment",
-"remember"}`: checked first, `409` with why when it does not fit; then `202`, and the run goes
-on in the background). `identity(request)` names the reviewer (else `anonymous`, with a
-warning).
+**What.** The paused runs waiting on a person, listed and answered from your own screen with
+two calls: `await h.inbox(assignee)` (the paused runs of the tenant waiting on that `user:…` or
+`role:…`, or on anyone with no argument — each a `RunSummary` with the interrupt it waits on in
+`awaiting`: the question, `options`, `multiple`, `expects`, `ui_schema`, `component` and
+`props`, the call under approval in `tool_call`) and `agent.resume(...)` ([below](#answering)).
+
+**When.** Whenever people answer outside the chat that started the run: an approvals queue, a
+back office, a review screen of your design.
+
+**Where.** Any process of the deployment (with agent-runs, any replica: `h.inbox` is
+`runs.iterate(status=PAUSED, assignee=...)`); Way 2: `RunsClient.iterate(...)` and
+`runs.resume(...)` ([runs.md](runs.md#the-inbox), [blocks/runs.md](blocks/runs.md#the-inbox)).
+A chat client answers its own runs with the AG-UI resume entry, `comment` and `remember`
+included ([surfaces.md](surfaces.md)).
+
+**How.** A route of your own on any web framework (FastAPI here):
+
+```python
+@app.get("/inbox")
+async def listing(assignee: str | None = None) -> list[dict]:
+    return [
+        {"run_id": s.run_id, "interrupt": s.awaiting.awaiting()}  # render it as asked
+        for s in await h.inbox(assignee)
+        if s.agent_id in h.agents and s.awaiting is not None
+    ]
+
+
+@app.post("/inbox/{run_id}")
+async def answer(run_id: str, request: Request) -> dict:
+    given = await request.json()
+    record = await h.runs.get(run_id)
+    if record is None or record.agent_id not in h.agents:
+        raise HTTPException(404, f"no run {run_id}")
+    try:
+        result = await h.agents[record.agent_id].resume(
+            run_id,  # the run's id answers what it waits on now
+            given["decision"],
+            answer=given.get("answer"),
+            comment=given.get("comment"),
+            remember=given.get("remember", "once"),
+            reviewer=await who_is(request),  # your identity
+        )
+    except ConfigurationError as exc:  # it does not fit: the run keeps waiting
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": result.status.value}
+```
+
+**Automatic.** The answer is checked before anything is recorded (as any `resume`), and a run
+of the queue goes back to it for a worker (`QUEUED`) while one started in process continues in
+the call (run it in a background task when the reviewer should not wait). A sub-agent's
+question is listed once, on its parent's run. With agent-runs, who may answer is its rule
+([below](#answering)).
+
+**On failure.** An answer that does not fit is a `ConfigurationError` saying why; an answer to
+a run that waits on another interrupt, or is not paused, too.
 
 ## Testing: `trellis.testing.Reviewer`
 

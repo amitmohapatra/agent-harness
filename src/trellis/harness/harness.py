@@ -289,17 +289,6 @@ class Harness:
         children = {named["run_id"] for named in asked if named is not None}
         return [s for s in waiting if s.run_id not in children]
 
-    def serve_inbox(self, app: Any, *, path: str = "/inbox", identity: Any = None) -> None:
-        """Mount the reference inbox on a FastAPI ``app``: a page at ``path`` listing the
-        paused runs of the agents wrapped here and answering them (options, several picks,
-        forms from ``expects`` with ``ui_schema``, a slot for your own ``component``), and the
-        JSON routes it calls. ``identity(request)`` names the reviewer (as for
-        ``serve_chat``). A reference: your own screens use the same routes, or
-        ``h.inbox`` and ``agent.resume``."""
-        from trellis.harness.inbox import mount  # noqa: PLC0415 - optional extra
-
-        mount(app, self, path=path, identity=identity)
-
     async def feedback(
         self,
         run_id: str,
