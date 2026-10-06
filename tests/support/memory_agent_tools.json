@@ -12,7 +12,7 @@
           "type": "string"
         },
         "kinds": {
-          "description": "memory, chunk (document passages), summary, episode (earlier conversations), message (this conversation); default memory and chunk",
+          "description": "memory, chunk (document passages), summary, episode (earlier conversations), message (what was said, here and in earlier conversations); default memory and chunk",
           "items": {
             "enum": [
               "memory",

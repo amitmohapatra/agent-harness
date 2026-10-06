@@ -23,6 +23,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- From the memory service, with no harness code: `memory_search` with `kinds: ["message"]`
+  finds what was said in this conversation and in the same user's earlier ones, and skills the
+  memory service learned and an administrator published load by name from `SKILLS_DIR` or the
+  gateway like any other ([memory.md](docs/memory.md#pull),
+  [skills.md](docs/skills.md#learned-skills)). The feature matrix's memory-pull cells send
+  message searches through every adapter and way; live tests cover both end to end against the
+  running service.
+
 - A warning, once per framework, when the installed version is outside the tested range
   (`trellis.harness.compat`).
 - `LocalRuns.schedules.fire(schedule_id, at=None)`: fire a schedule now, as agent-runs'

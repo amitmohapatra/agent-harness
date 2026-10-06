@@ -100,6 +100,28 @@ async def test_a_folder_of_agent_skills(tmp_path: Path) -> None:
         await source.resolve("sql-review", "9")
 
 
+async def test_a_skill_the_memory_service_learned_reads_as_any_folder_skill(
+    tmp_path: Path,
+) -> None:
+    """A learned skill the memory service published to ``SKILLS_DIR`` (its ``SKILL.md`` as that
+    service writes it: JSON-quoted values, the version in ``metadata``) is read like any other:
+    no reader of its own."""
+    (tmp_path / "refund-order").mkdir()
+    (tmp_path / "refund-order" / "SKILL.md").write_text(
+        "---\n"
+        "name: refund-order\n"
+        'description: "Refund an order. Use for tasks like: refund order {id}."\n'
+        "metadata:\n"
+        '  source: "trellis-memory"\n'
+        '  trellis_tenant: "acme"\n'
+        '  version: "1.1.0"\n'
+        "---\n\n# Refund an order\n\n## Steps\n\n1. `find_order`\n2. `refund`\n"
+    )
+    learned = await skills_dir(tmp_path).resolve("refund-order", "1.1.0")
+    assert learned.description == "Refund an order. Use for tasks like: refund order {id}."
+    assert learned.body.startswith("# Refund an order") and learned.files == ()
+
+
 async def test_a_folder_refuses_what_leaves_it_and_what_is_not_a_skill(tmp_path: Path) -> None:
     write_skill(tmp_path, "sql", "name: sql\ndescription: Reviews SQL.", "B", **{"a.md": "A"})
     write_skill(tmp_path, "wrong", "name: other\ndescription: D.", "B")

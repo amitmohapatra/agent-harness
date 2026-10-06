@@ -219,6 +219,25 @@ async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     assert memory_service.named("record_tool") == []  # the service logs its own tools
 
 
+async def test_an_agent_searches_what_was_said_as_the_service_offers_it(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """``kinds: ["message"]`` reads this conversation and the user's earlier ones (the memory
+    service's behaviour, described in its own schema); the harness passes the call through as
+    the model made it, in the run's scope, and adds nothing."""
+    args = {"query": "order number", "kinds": ["message"]}
+    model = ScriptedChat([("memory_search", args), "4471"])
+    agent = memory_harness.wrap(ReAct(system="s", model=model), id="recall")
+    result = await agent.run("what was my order number?", user="u1", thread="t-new")
+    assert result.answer == "4471"
+    [search] = [t for t in model.requests[0]["tools"] if t["function"]["name"] == "memory_search"]
+    kinds = search["function"]["parameters"]["properties"]["kinds"]["description"]
+    assert "earlier conversations" in kinds
+    [call] = memory_service.named("call_agent_tool")
+    assert call.body["args"] == args
+    assert call.body["scope"]["user_id"] == "u1" and call.body["scope"]["thread_id"] == "t-new"
+
+
 # --------------------------------------------------------------------------- records
 async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     memory_harness: Harness, memory_service: FakeMemoryService

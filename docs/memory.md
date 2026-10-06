@@ -45,7 +45,7 @@ the last listing stands, and a run when they were never listed goes without them
 
 | Tool | |
 |---|---|
-| `memory_search(query, kinds?, time_from?, time_to?, k?)` | memories, documents and — `kinds: ["message"]` — the conversation history |
+| `memory_search(query, kinds?, time_from?, time_to?, k?)` | memories, documents and — `kinds: ["message"]` — what was said: this conversation's messages first, then the same user's earlier conversations' (never another user's), each with its `thread_id` ([past conversations](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/guide/04-retrieval.md#past-conversations)); `kinds: ["episode"]` finds which earlier conversation, one summary each |
 | `memory_remember(...)` | store a memory verbatim |
 | `memory_update(id, content)` | replace a memory (an `[m1]` handle from the context works) |
 | `memory_forget(id)` | forget one |
