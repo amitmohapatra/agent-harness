@@ -1231,6 +1231,13 @@ async def run_options_timeout(w: World) -> None:
     assert o.record.timeout_seconds == 0.4
 
 
+async def run_options_queue(w: World) -> None:
+    d = Desk()
+    run = {"priority": 7, "concurrency_key": "nightly"}
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})], run=run)).succeeded()
+    assert (o.record.priority, o.record.concurrency_key) == (7, "nightly"), o.record
+
+
 async def run_options_without(w: World) -> None:
     d = Desk()
     o = (
@@ -1241,6 +1248,38 @@ async def run_options_without(w: World) -> None:
     assert [c.name for c in mine if c.name in ("messages", "record_tool", "context")] == [], [
         c.name for c in mine
     ]
+
+
+#: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
+#: what its error says), and set far above it.
+TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
+    "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
+    "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
+    "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
+    "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
+}
+ROOMY: Final[dict[str, dict[str, Any]]] = {
+    "langgraph": {"recursion_limit": 50},
+    "deepagents": {"recursion_limit": 50},
+    "openai_agents": {"max_turns": 20},
+    "claude": {"max_turns": 20},
+}
+
+
+async def framework_options(w: World) -> None:
+    """The framework's own limit reaches its run call: a run's own over its agent's (kept with
+    its record — a scheduled run's with its schedule — for a resume and a worker), or — a
+    surface — the agent's."""
+    tight, said = TIGHT[w.adapter]
+    d, plan = Desk(), [("lookup", {"topic": "x"})]
+    if w.mode in ("run", "stream", "worker", "elsewhere", "schedule"):
+        run = {"framework_options": tight}
+        o = await w.go([d.lookup()], plan, run=run, framework_options=ROOMY[w.adapter])
+        assert o.record.metadata.get("framework_options") == tight, o.record.metadata
+    else:
+        o = await w.go([d.lookup()], plan, framework_options=tight)
+    assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
+    assert said in o.record.error.message, o.record.error.message
 
 
 # --------------------------------------------------------------------------- sandboxes
@@ -1313,7 +1352,14 @@ PER_RUN: Final = only_modes(
     "stream",
     "worker",
     "elsewhere",
-    reason="the surface or the schedule takes no per-run option: the agent's own (h.wrap) applies",
+    "schedule",
+    reason="a surface takes no per-run option: the agent's own (h.wrap) applies",
+)
+QUEUED: Final = only_modes(
+    "worker",
+    "elsewhere",
+    "schedule",
+    reason="a queue order is a queued run's: start and schedule take it",
 )
 NO_MODEL_HOOKS: Final = NA(
     "no model call the harness can hook (a function makes none; the CLI's are its own)"
@@ -1361,12 +1407,21 @@ FEATURES.extend(
         ),
         Feature(
             "F09r",
-            "a run's own time limit: run/stream/start(timeout=)",
+            "a run's own time limit: run/stream/start/schedule(timeout=)",
             "F09",
             "agent.run(..., timeout=)",
             run_options_timeout,
             modes=PER_RUN,
             way2=NA("RunStart.timeout_seconds: your code sets it (F09's Way 2 row)"),
+        ),
+        Feature(
+            "F09q",
+            "a queued run's own queue order: start/schedule(priority=, concurrency_key=)",
+            "F09 (ADR 0006, 0007)",
+            "agent.start/schedule(..., priority=, concurrency_key=)",
+            run_options_queue,
+            modes=QUEUED,
+            way2=NA("RunStart/ScheduleSpec.priority: your code sets it (F09's Way 2 row)"),
         ),
         Feature(
             "F75r",
@@ -1377,6 +1432,18 @@ FEATURES.extend(
             needs=frozenset({"memory"}),
             modes=PER_RUN,
             way2=NA("Way 2 selects by import"),
+        ),
+        Feature(
+            "F70",
+            "the framework's own run options: a run's over its agent's, kept across attempts",
+            "F70 (G13)",
+            "h.wrap(framework_options=) / agent.run(..., framework_options=)",
+            framework_options,
+            adapters={
+                "function": NA("no framework run call: framework_options= is refused"),
+                "react": NA("the harness runs ReAct's loop: framework_options= is refused"),
+            },
+            way2=NA("Way 2 calls the framework itself, with its own options"),
         ),
         Feature(
             "F73",

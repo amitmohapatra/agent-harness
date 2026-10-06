@@ -23,13 +23,16 @@
 * a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
-  stopped, and it holds no conversation of its own (the memory service gives the recent turns).
+  stopped, and it holds no conversation of its own (the memory service gives the recent turns);
+* framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
+  ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; the harness's
+  ``configurable.thread_id`` wins over one given.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, ClassVar, Final
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution
@@ -159,14 +162,30 @@ class LangGraphAdapter:
             value = resolution.model_dump(mode="json")
         return Command(resume={pending.native_id: value})
 
+    def check_options(self, options: Mapping[str, Any]) -> None:
+        from langchain_core.runnables import RunnableConfig
+
+        known = list(RunnableConfig.__annotations__)
+        unknown = [key for key in options if key not in known]
+        if unknown:
+            raise ConfigurationError(
+                f"framework_options for a graph are RunnableConfig keys: "
+                f"{', '.join(map(repr, unknown))} is none of {', '.join(known)}"
+            )
+        if not isinstance(options.get("configurable", {}), Mapping):
+            raise ConfigurationError("framework_options' configurable is a dict")
+
     @staticmethod
     def _config(target: Any, run: Invocation) -> dict[str, Any]:
+        """The run's config: its framework options, the harness's thread id over theirs."""
         runtime = run.runtime
         if _checkpointed(target):
             from langgraph.types import interrupt
 
             runtime.suspend = interrupt
-        return {"configurable": {"thread_id": thread_of(target, runtime)}}
+        options = runtime.framework_options
+        thread = thread_of(target, runtime)
+        return {**options, "configurable": {**options.get("configurable", {}), "thread_id": thread}}
 
 
 def thread_of(target: Any, runtime: Any) -> str:

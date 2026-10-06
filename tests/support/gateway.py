@@ -3,8 +3,8 @@ the harness calls, answered in the shapes the running gateway answers with.
 
 * ``/v1/chat/completions`` — each request recorded (:attr:`FakeGateway.completions`) and
   answered by :attr:`FakeGateway.chat`, a ``ScriptedChat`` (``tests/support/models.py``);
-* ``/api/prompt-repo/prompts`` — :attr:`FakeGateway.prompts`, by name: each a list of
-  committed versions (their messages);
+* ``/api/prompt-repo/prompts`` and ``/api/prompt-repo/prompts/{id}/versions`` —
+  :attr:`FakeGateway.prompts`, by name: each a list of committed versions (their messages);
 * ``/api/skills``, ``/api/skills/{id}``, ``/api/skills/serve/{name}/files/{path}`` —
   :attr:`FakeGateway.skills`, by name: the versions (description, body, files) and the one
   served;
@@ -82,6 +82,10 @@ class FakeGateway:
             )
         if path == "/api/prompt-repo/prompts":
             return httpx.Response(200, json={"prompts": [self._prompt(n) for n in self.prompts]})
+        if path.startswith("/api/prompt-repo/prompts/p-"):
+            name = path.removeprefix("/api/prompt-repo/prompts/p-").removesuffix("/versions")
+            rows = [self._version(name, n) for n in range(1, len(self.prompts[name]) + 1)]
+            return httpx.Response(200, json={"versions": rows})
         if path == "/api/mcp/clients":
             return httpx.Response(200, json={"clients": self._clients(), "count": len(self.auto)})
         return self._skills(path, request)
@@ -112,18 +116,21 @@ class FakeGateway:
 
     def _prompt(self, name: str) -> dict[str, Any]:
         versions = self.prompts[name]
-        latest = None
-        if versions:
-            rows = [{"order_index": i, "message": m} for i, m in enumerate(versions[-1])]
-            latest = {
-                "id": len(versions),
-                "prompt_id": f"p-{name}",
-                "version_number": len(versions),
-                "messages": rows,
-                "provider": "local",
-                "model": "small",
-            }
+        latest = self._version(name, len(versions)) if versions else None
         return {"id": f"p-{name}", "name": name, "latest_version": latest}
+
+    def _version(self, name: str, number: int) -> dict[str, Any]:
+        rows = [
+            {"order_index": i, "message": m} for i, m in enumerate(self.prompts[name][number - 1])
+        ]
+        return {
+            "id": number,
+            "prompt_id": f"p-{name}",
+            "version_number": number,
+            "messages": rows,
+            "provider": "local",
+            "model": "small",
+        }
 
     def _skill(self, name: str, version: str | None = None) -> dict[str, Any]:
         skill = self.skills[name]

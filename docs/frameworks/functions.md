@@ -54,6 +54,14 @@ again from its input, and the journal returns the answers already given and the 
 already recorded — in order, by content. So: keep side effects in harness tools (a call through
 the bridge runs once), and code outside them runs again on each attempt.
 
+## Native or ours
+
+A function has no framework of its own to bring skills, prompts or a sandbox: use the
+harness's — `h.wrap(fn, skills=[...])`, `await h.prompt(...)`, `tools=[sandbox()]` — every call
+governed and journaled ([skills.md](../skills.md#native-or-ours),
+[prompts.md](../prompts.md#native-or-ours),
+[sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+
 ## Streaming, durable runs, surfaces, evaluation
 
 `stream` yields the tool events and `RUN_FINISHED` (a function has no text deltas). `start` +
@@ -62,6 +70,9 @@ for every target; `llm_judge` needs `TRELLIS_JUDGE_MODEL`. An object with an `as
 is a target too. Wrapping a function is also how code on its own framework gets the AG-UI and
 A2A servers, which serve wrapped agents only: wrap the function that calls your graph or runner
 ([surfaces.md](../surfaces.md#surfaces)).
+
+`framework_options=` does not apply: a function has no framework run call to hand them to, so
+they are refused (`ConfigurationError`) — the function reads what it needs from its input.
 
 ## Run it
 

@@ -16,7 +16,7 @@ catalog.
 | `agent.as_tool(*, name=None, description=None, side_effects=None)` | one: another agent wrapped by this harness, `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"`; `side_effects=` overrides it |
 | `openapi(spec, *, only=None, base_url=None, headers=None, timeout=120)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
 | `sandbox(provider=None, spec=None, *, timeout=120)` | `sandbox_exec`, `sandbox_read` and `sandbox_write`, in a sandbox of the run's own (`SANDBOX=docker`, or the provider given), made at its first call and deleted at its end ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` (idempotent) `"write"`, `sandbox_read` `"read"` |
-| `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills of the gateway's Skills Repository, their versions pinned per run ([gateway.md](gateway.md#skills)) | `"read"` |
+| `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills from code, `SKILLS_DIR` and the gateway's Skills Repository, each pinned per run ([skills.md](skills.md)) | `"read"` |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
 `tools=` takes only what runs in this process; which MCP tools an agent has is decided where

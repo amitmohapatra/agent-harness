@@ -6,12 +6,12 @@ its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 * ``F34`` approval rule in code (W5): a ``before_tool`` hook asking by the call's arguments on a
   ``write`` tool — a real row.
 * ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed; waits on BUG-2.
-* ``F70`` the framework's own run options (G13): ``agent.run(..., framework_options=...)``.
 * the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
   one selection cell each.
 
-Hooks (F71*), ``without=`` (the selection's switches, F75r), ``timeout=`` (F09, F09r) and the
-sandbox (F73) have landed: they are rows of ``features.py``.
+Hooks (F71*), ``without=`` (the selection's switches, F75r), ``timeout=`` (F09, F09r), the
+framework's own run options (F70, G13) and the sandbox (F73) have landed: they are rows of
+``features.py``.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from tests.matrix.model import ADAPTERS, NA, Bug, Feature, Gap
-from tests.matrix.world import USER, UnclosedToolCall, World
+from tests.matrix.world import UnclosedToolCall, World
 from trellis import Ask, Hooks, tool
 from trellis.contracts import ToolCall
 
@@ -64,13 +64,6 @@ async def hitl_v2(w: World) -> None:
     assert "S" in o.text
 
 
-async def framework_options(w: World) -> None:
-    agent = await w.agent([], [])
-    proposed: dict[str, Any] = {"framework_options": {"recursion_limit": 5}}
-    result = await agent.run("x", user=USER, **proposed)
-    assert result.status.value == "SUCCESS"
-
-
 def _pending(
     feature_id: str, title: str, *, audit: str, how: str, gap: Gap | Bug | None, probe: Any
 ) -> Feature:
@@ -105,13 +98,5 @@ EXTENSIONS: Final[list[Feature]] = [
             raises=UnclosedToolCall,
         ),
         probe=hitl_v2,
-    ),
-    _pending(
-        "F70",
-        "the framework's own run options",
-        audit="F70",
-        how="agent.run(..., framework_options=)",
-        gap=Gap("G13", "no way to pass the framework's own per-run options"),
-        probe=framework_options,
     ),
 ]

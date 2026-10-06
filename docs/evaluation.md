@@ -80,6 +80,7 @@ async def cites_policy(case: EvalCase) -> EvalScore | None:
 | `bundle_id`, `context` | the memory context pushed into the run (memory on) |
 | `memory` | the `MemoryContext` the context was built in, where `grounding` verifies (a wrapped run's own scope; a callable's `EvalOutput.memory`) |
 | `metadata` | the item's metadata |
+| `trajectory` | the harness tool calls the run made, in order across its attempts, each with its outcome: `(ToolCall, ToolOutcome)` pairs (contracts; `call.tool`, `call.args`, `outcome.status`, `outcome.output`) — the run's journal, never a second store. A wrapped run's always (empty when it called nothing); a callable's `EvalOutput.trajectory`, else `None` (not known) |
 
 `EvalScore(name, value, comment=None)`: `value` is a number from 0 to 1 (a Langfuse `NUMERIC`
 score), a bool (`BOOLEAN`: 1 or 0) or a string (`CATEGORICAL`); `comment` is shown with it.
@@ -94,7 +95,45 @@ Built in:
 | `grounding(name="grounding")` | the share of the answer's claims the run's memory context supports — `grounding_score(memory, answer, bundle_id)`: the memory service's `/v1/verify` with the case's `bundle_id` in its `memory` scope, the same function as the sampled check every wrapped run gets (which, in a run's scope, also records the run's `judge` feedback there). No score without a memory scope, without a pushed context, or for an answer with no checkable claim |
 | `exact_match(name="exact_match", case_sensitive=False)` | whether the answer is `expected` (text trimmed, case-blind by default; anything else compared as JSON); no score without `expected` |
 | `contains(name="contains", case_sensitive=False)` | whether the answer contains `expected` — each of them, for a list; the comment names what is missing |
-| `llm_judge(criteria, *, name="llm_judge", prompt=None)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `prompt`: a stored prompt of the gateway (`"name"`, `"name@version"`) the gateway prepends to the judge's messages — a rubric kept and versioned in the gateway's Prompt Repository ([gateway.md](gateway.md#prompts)); it needs a judge model name |
+| `called(tool, *, before=None, args=None, name="called:<tool>")` | whether the run called `tool` — with `args`, each equal to the call's (its other arguments not compared) — and, with `before`, before its first call of `before` (which it must have made); the comment says what was called instead. No score without a trajectory |
+| `tool_sequence(tools, *, exact=False, name="tool_sequence")` | whether the run called `tools` in this order (other calls between and around them allowed), or — `exact` — exactly these calls; the comment lists the calls made. No score without a trajectory |
+| `llm_judge(criteria, *, name="llm_judge", prompt=None)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `prompt`: a prompt (`"name"`, `"name@version"`, a `Prompt`) from the prompt sources — a rubric kept in code, a `.md` file, Langfuse or the gateway ([prompts.md](prompts.md)) — put before the judge's messages (a gateway prompt by the gateway, which needs a judge model name) |
+
+### Trajectories
+
+A run is judged by what it did, not only by what it answered: `case.trajectory` is every harness
+tool call the run made — offline in `h.evaluate`, online for the judges — in order, with its
+arguments and outcome:
+
+```python
+from trellis.harness.evals import EvalCase, EvalScore, called, tool_sequence
+
+
+async def no_failed_calls(case: EvalCase) -> EvalScore | None:
+    if case.trajectory is None:
+        return None
+    failed = [call.tool for call, outcome in case.trajectory if not outcome.ok]
+    return EvalScore("no_failed_calls", not failed, ", ".join(failed) or None)
+
+
+evaluators = [
+    called("lookup_order", before="refund"),  # looked the order up before refunding it
+    called("refund", args={"order": "o-17"}),
+    tool_sequence(["lookup_order", "refund", "notify"]),
+    no_failed_calls,
+]
+```
+
+It is the run's journal (`Journal.trajectory`): the calls that ran, each once — a resumed run's
+calls before its pause included, whether its framework went on where it stopped or ran again
+from its input (a call replayed from the journal is not made again, and not listed again).
+A call that did not run — denied by a hook, rejected by its approver, of a feature the run is
+`without=`, still waiting for its approval — is not on it, and neither are the calls a
+framework makes itself (Claude Code's built-ins, Deep Agents' file tools). The arguments and
+outputs are as the tool had them, not redacted: the trajectory stays in the process, with the
+evaluators. Code that is not wrapped returns its own as `EvalOutput(answer,
+trajectory=[(ToolCall, ToolOutcome), ...])`; a callable that returns none has `None`, and the
+trajectory evaluators give it no score.
 
 ### `llm_judge`
 
@@ -215,7 +254,8 @@ h = Harness(judges=[llm_judge("Polite, correct and concise.", name="quality"), c
 After a successful run of a wrapped agent with an answer (a structured one as its JSON), if the run falls in the sample,
 each judge is queued in the background writes (`judge.<name>`): the run has already returned
 when it runs. Each is one `judge(case, [that judge], services=agent.evals)`; the case is the
-run's question, answer, memory context and scope, and run id (no `expected`). Its score goes on
+run's question, answer, memory context and scope, trajectory (across all its attempts), and run
+id (no `expected`). Its score goes on
 the run's trace; a judge that fails is a `warning` event on the run's stream (`judge_failed`)
 and a log line.
 

@@ -17,8 +17,8 @@ the loop is the harness's. What it is built with:
   calls and ``response_format`` for ``output=``;
 * **the harness's** (``trellis.harness.middleware``) — :class:`~.HarnessTools` (the run's
   tools per model call, sorted; writes in the model's order), :class:`~.ModelHooks` (the
-  hooks, the ``chat`` span, ``model_timeout`` and the run's time left, the stored ``prompt``
-  pinned for the run), :class:`~.StepLimit` (``max_steps``, then one answer without tools),
+  hooks, the ``chat`` span, ``model_timeout`` and the run's time left, the ``prompt`` pinned
+  for the run), :class:`~.StepLimit` (``max_steps``, then one answer without tools),
   :class:`~.StallGuard` (``max_repeats``), :func:`~.read_result` (a cleared result read back)
   and :class:`~.RunCheckpointer` (the graph's checkpoint in the run: a resume continues in
   place);
@@ -42,7 +42,7 @@ from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import MODEL_METADATA, WINDOW_METADATA, context_window
-from trellis.harness.clients.bifrost import prompt_ref
+from trellis.harness.prompts import Prompt
 from trellis.harness.settings import Settings
 
 #: The window assumed when neither ``context_window`` nor the model says, in tokens.
@@ -73,7 +73,8 @@ def ReAct(
     max_repeats: int | None = None,
     model_timeout: float | None = None,
     context_window: int | None = None,
-    prompt: str | None = None,
+    prompt: str | Prompt | None = None,
+    prompt_vars: dict[str, Any] | None = None,
     middleware: Sequence[Any] = (),
     checkpointer: Any = None,
 ) -> Any:
@@ -81,8 +82,10 @@ def ReAct(
     or a LangChain chat model), its answer an ``output`` model when given. ``max_steps`` model
     calls with tools, then one without (:class:`~.StepLimit`); ``max_repeats`` steps repeating
     one call stop it (:class:`~.StallGuard`); a model call takes at most ``model_timeout``
-    seconds; ``prompt`` is a stored prompt of the gateway (``"name"``, ``"name@version"``)
-    every call selects; ``middleware`` adds or replaces middleware by name; ``checkpointer``
+    seconds; ``prompt`` is a prompt of the harness's prompt sources (``"name"``,
+    ``"name@version"``, a ``Prompt``) pinned for the run — a stored prompt of the gateway
+    selected by every call, any other rendered into the instructions (``prompt_vars`` fill its
+    ``{{variables}}``); ``middleware`` adds or replaces middleware by name; ``checkpointer``
     replaces the run's (:class:`~.RunCheckpointer`)."""
     try:
         from deepagents.backends import StateBackend
@@ -101,12 +104,6 @@ def ReAct(
         raise ConfigurationError("model_timeout is a number of seconds over 0")
     if context_window is not None and context_window <= 0:
         raise ConfigurationError("context_window is a number of tokens over 0")
-    if prompt is not None:
-        prompt_ref(prompt)
-        if not isinstance(model, str):
-            raise ConfigurationError(
-                "prompt= needs a gateway model name: the gateway prepends the stored prompt"
-            )
     window = context_window or _window(model) or CONTEXT_WINDOW
     chat = _gateway_model(model, timeout=model_timeout, window=window)
     backend = StateBackend()
@@ -128,7 +125,7 @@ def ReAct(
             ]
         ),
         create_summarization_middleware(_profiled(chat, window), backend),
-        ours.ModelHooks(timeout=model_timeout, prompt=prompt),
+        ours.ModelHooks(timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars),
     ]
     graph = create_agent(
         chat,

@@ -69,6 +69,20 @@ carry a `can_use_tool` of the harness's:
 * **Not recorded.** A built-in call is not journaled or recorded in memory (the CLI keeps its
   result in its session, below).
 
+## Native or ours: skills, prompts, sandbox
+
+* **Skills:** for `SKILL.md` folders the CLI discovers, use Claude's own:
+  `ClaudeAgentOptions(skills=["name", ...] | "all")` (the SDK then allows the `Skill` tool and,
+  `setting_sources` unset, loads the user's and the project's settings). Use the
+  harness's (`h.wrap(..., skills=[...])`, on the `trellis` server) for skills from Bifrost's
+  registry, or a version pinned per run and replayed ([skills.md](../skills.md#native-or-ours)).
+* **Sandbox:** prefer Claude's own `Bash` and file tools, confined with
+  `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))`; the harness decides each
+  call the CLI asks about (above), and a sandboxed `Bash` call is asked about only with
+  `autoAllowBashIfSandboxed` false ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+* **Prompts:** the options take text: `system_prompt=await h.prompt(...)` for a prompt from a
+  folder, Langfuse or Bifrost ([prompts.md](../prompts.md#native-or-ours)).
+
 ## What is automatic
 
 | | |
@@ -99,6 +113,23 @@ the call (the approved call runs once). Every decision works: `approve`, `reject
 resumed where the CLI does not hold the session (another worker's machine) gets a `warning`
 event (`claude_session`) and runs the query again from its prompt, against the journal — the
 harness calls already made are not made again; the built-ins run again.
+
+## The run's own options
+
+`framework_options=` sets `ClaudeAgentOptions` fields on the run's copy of the options (on
+`h.wrap` for every run, on `run`/`stream`/`start` for one, over the agent's): `max_turns`,
+`model`, `permission_mode`, `cwd`... before the harness's own changes, which merge with them —
+a `system_prompt` gets the memory context appended, a `can_use_tool` is asked after governance
+as the target's would be, and `mcp_servers` get the harness's `trellis` server beside them (one
+of that name is refused). The session is the harness's (`resume`, `continue_conversation`) and so
+is the permission prompt (`permission_prompt_tool_name`): both refused, as is a name that is not
+a field ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+
+```python
+await agent.run(
+    "Tidy the repo", user="ada", framework_options={"max_turns": 30, "cwd": "/srv/repo"}
+)
+```
 
 ## Streaming
 

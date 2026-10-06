@@ -1,4 +1,4 @@
-"""The adapter contract: four functions per framework, nothing else.
+"""The adapter contract: four functions per framework, and one check.
 
 * ``prepare_input(target, input, context)`` — the framework's input, with the pushed memory
   context as a system message (``keeps_conversation(target)``: the target holds the thread's
@@ -6,7 +6,9 @@
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
-* ``resume_input(target, native_input, pending, resolution)`` — what continues a paused run.
+* ``resume_input(target, native_input, pending, resolution)`` — what continues a paused run;
+* ``check_options(options)`` — refuses framework options (``framework_options=``) its run call
+  cannot take: they reach the framework's own run call unchanged (``runtime.framework_options``).
 
 ``run`` carries the per-run tools (already converted by ``tools.convert`` for the format the
 adapter names) and the runtime. Adapters never wrap models, never re-implement a loop, and
@@ -22,14 +24,18 @@ when it is built (any other LangGraph graph) or has no model (a function).
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Literal, Protocol
 
-from trellis.contracts import InterruptResolution
+from trellis.contracts import ConfigurationError, InterruptResolution
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime
 from trellis.harness.tools.base import Tool
+
+#: The ``RunStart.metadata`` key a run's own ``framework_options=`` is kept under (its JSON
+#: values: what a later attempt — a resume, a worker's — runs with).
+FRAMEWORK_OPTIONS: Final = "framework_options"
 
 ToolFormat = Literal["langchain", "openai_agents", "claude", "none"]
 Narrowing = Literal["turn", "run", "none"]
@@ -102,6 +108,17 @@ class Adapter(Protocol):
         pending: Pending,
         resolution: InterruptResolution,
     ) -> Any: ...
+
+    def check_options(self, options: Mapping[str, Any]) -> None: ...
+
+
+def no_options(options: Mapping[str, Any], target: str, why: str) -> None:
+    """``check_options`` of a target with no framework run call to hand options to."""
+    if options:
+        raise ConfigurationError(
+            f"framework_options= goes to a framework's own run call, which {target} does not "
+            f"have ({why}): {', '.join(map(repr, options))} cannot be passed"
+        )
 
 
 def query_of(input: Any) -> str:

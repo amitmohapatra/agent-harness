@@ -489,7 +489,10 @@ class LocalRuns:
                 input=schedule.input,
                 timeout_seconds=schedule.timeout_seconds,
                 agent_version=schedule.agent_version,
-                metadata={"schedule_id": schedule.schedule_id},
+                # as agent-runs fires it: the schedule's metadata, the fire's own keys over it
+                metadata={**schedule.metadata, "schedule_id": schedule.schedule_id},
+                priority=getattr(schedule, "priority", 0),
+                concurrency_key=getattr(schedule, "concurrency_key", None),
             )
             record = self._start(start, RunStatus.QUEUED)
             self._schedules[schedule.schedule_id] = schedule.model_copy(

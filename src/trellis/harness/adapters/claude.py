@@ -15,14 +15,20 @@
   the next attempt resumes it (``resume=``): Claude goes on from where it was — its built-in
   tools are not run again — and calls the paused tool again, which the journal answers. A
   session the CLI no longer holds (another machine, its store cleared) is a warning, and the
-  query runs again from its prompt against the journal.
+  query runs again from its prompt against the journal;
+* framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
+  before the harness's own changes. Merged with them: ``system_prompt`` (the memory context is
+  appended to it), ``can_use_tool`` (the harness asks it after governance, as the target's)
+  and ``mcp_servers`` (the harness's ``trellis`` server goes beside them; a server of that name
+  is refused). Refused: the fields that choose the session a query continues, and the
+  permission prompt tool (:data:`OWNED`).
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Final
 
@@ -50,6 +56,13 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "NotebookEdit": "write",
     "Bash": "irreversible",
 }
+#: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
+OWNED: Final[dict[str, str]] = {
+    "resume": "the harness resumes the run's own session after a pause",
+    "continue_conversation": "the harness resumes the run's own session after a pause",
+    "permission_prompt_tool_name": "the harness decides Claude's tool permissions with "
+    "can_use_tool (give your own check as can_use_tool)",
+}
 #: What a resumed session is told: the run goes on, and the call it paused on is made again.
 RESUMED: Final = (
     "This task was paused (a person was asked, or the process stopped) and goes on now. If "
@@ -70,9 +83,9 @@ class ClaudeRunError(RuntimeError):
 
 class ClaudeAdapter:
     name: ClassVar[str] = "claude_agent_sdk"
-    tool_format: ClassVar[ToolFormat] = "claude"
-    fixed_tools: ClassVar[bool] = False
-    narrows: ClassVar[Narrowing] = "run"
+    tool_format: ToolFormat = "claude"
+    fixed_tools: bool = False
+    narrows: Narrowing = "run"
 
     def keeps_conversation(self, target: Any) -> bool:
         return False
@@ -125,6 +138,27 @@ class ClaudeAdapter:
     ) -> Any:
         return native_input
 
+    def check_options(self, options: Mapping[str, Any]) -> None:
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        from trellis.harness.tools.convert.claude import SERVER
+
+        fields = [f.name for f in dataclasses.fields(ClaudeAgentOptions)]
+        unknown = [key for key in options if key not in fields]
+        if unknown:
+            raise ConfigurationError(
+                f"framework_options {', '.join(map(repr, unknown))}: no ClaudeAgentOptions field"
+            )
+        owned = [f"{key!r} ({OWNED[key]})" for key in options if key in OWNED]
+        if owned:
+            raise ConfigurationError(f"framework_options {'; '.join(owned)}")
+        servers = options.get("mcp_servers")
+        if isinstance(servers, Mapping) and SERVER in servers:
+            raise ConfigurationError(
+                f"framework_options' mcp_servers names {SERVER!r}: the harness's own server "
+                "(its tools) has that name"
+            )
+
     # ------------------------------------------------------------------ internals
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
@@ -164,6 +198,8 @@ class ClaudeAdapter:
         from claude_agent_sdk import query
 
         runtime = run.runtime
+        given = runtime.framework_options
+        target = dataclasses.replace(target, **given) if given else target
         options = _options(target, native_input.context, run, session)
         prompt = native_input.prompt if session is None else RESUMED
         async for message in query(prompt=prompt, options=options):

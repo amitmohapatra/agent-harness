@@ -37,12 +37,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import dataclasses
 import logging
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Final, NotRequired
+from typing import Annotated, Any, Final, NotRequired, cast
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -51,7 +50,15 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 from langchain.agents.middleware.types import ExtendedModelResponse, PrivateStateAttr
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    convert_to_messages,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import (
@@ -69,9 +76,10 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ModelError, ToolStatus
-from trellis.harness.clients.bifrost import PromptPin, prompt_ref
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
+from trellis.harness.prompts import Prompt, ResolvedPrompt
+from trellis.harness.repository import pinned
 from trellis.harness.runtime import DEFERRED, Runtime, current
 from trellis.harness.telemetry import model_span, usage
 from trellis.harness.telemetry import output as span_output
@@ -254,21 +262,33 @@ def _named(tool: BaseTool | dict[str, Any]) -> str:
 class ModelHooks(AgentMiddleware):
     """Around every model call: the run's model hooks (then ``hooks``), a ``chat`` span with
     the usage, at most ``timeout`` seconds (and what is left of the run's time), and the
-    stored ``prompt`` of the gateway (``"name"``, ``"name@version"``) pinned for the run and
-    selected by every call (a model client of the gateway's: ``ChatOpenAI``)."""
+    ``prompt`` of the harness's prompt sources (``"name"``, ``"name@version"``, a ``Prompt``),
+    pinned for the run: a stored prompt of the gateway is selected by every call (headers the
+    gateway reads: the model is a gateway model, ``ChatOpenAI``); any other is rendered
+    (``prompt_vars`` fill its ``{{variables}}``) into the instructions, before the system
+    prompt, its other messages before the conversation."""
 
     def __init__(
-        self, *hooks: Hooks, timeout: float | None = None, prompt: str | None = None
+        self,
+        *hooks: Hooks,
+        timeout: float | None = None,
+        prompt: str | Prompt | None = None,
+        prompt_vars: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
-        if prompt is not None:
-            prompt_ref(prompt)
+        if isinstance(prompt, str):
+            pinned(prompt)
+        if prompt_vars is not None and prompt is None:
+            raise ConfigurationError("prompt_vars= fills the variables of a prompt=")
         self.given = list(hooks)
         self.timeout = timeout
         self.prompt = prompt
-        self._pins: weakref.WeakKeyDictionary[Runtime, PromptPin] = weakref.WeakKeyDictionary()
+        self.prompt_vars = dict(prompt_vars or {})
+        self._prompts: weakref.WeakKeyDictionary[Runtime, ResolvedPrompt] = (
+            weakref.WeakKeyDictionary()
+        )
 
     async def awrap_model_call(
         self,
@@ -277,13 +297,9 @@ class ModelHooks(AgentMiddleware):
     ) -> ModelResponse[Any]:
         runtime = current()
         hooks = running(*self.given)
-        pin = await self._pinned(runtime)
-        if pin is not None:
-            sent = request.model_settings.get("extra_headers", {})
-            headers = {**sent, **pin.options().headers()}
-            request = request.override(
-                model_settings={**request.model_settings, "extra_headers": headers}
-            )
+        prompt = await self._pinned(runtime)
+        if prompt is not None:
+            request = self._prompted(request, prompt)
         name = _model_name(request.model)
         asked = ModelCall(
             "langgraph", list(request.messages), model=name, system=request.system_message
@@ -291,7 +307,7 @@ class ModelHooks(AgentMiddleware):
         call = await hooks.model(asked) if hooks else asked
         if call is not asked:
             request = request.override(messages=call.messages, system_message=call.system)
-        extra = pin.attributes() if pin is not None else None
+        extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", _said(request), extra=extra) as span:
             try:
                 async with _limited(runtime, self.timeout):
@@ -306,31 +322,44 @@ class ModelHooks(AgentMiddleware):
             _replied(span, reply)
         return reply
 
-    async def _pinned(self, runtime: Runtime | None) -> PromptPin | None:
-        """The stored prompt's version this run selects: the journal's (a resumed run sends the
-        same), else the one the gateway resolves now (journaled)."""
+    async def _pinned(self, runtime: Runtime | None) -> ResolvedPrompt | None:
+        """The prompt's version this run uses: the journal's (a resumed run uses the same),
+        else the one its source gives now (journaled)."""
         if self.prompt is None:
             return None
         if runtime is None:
             raise ConfigurationError(
-                "ModelHooks(prompt=) pins the prompt for a harness run: outside one, give the "
-                "model client h.model_headers(prompt=...)"
+                "ModelHooks(prompt=) pins the prompt for a harness run: outside one, render it "
+                "yourself (h.prompt_messages), or give the model client h.model_headers(prompt=)"
             )
-        found = self._pins.get(runtime)
-        if found is not None:
-            return found
-        key = content_key("prompt", self.prompt)
-        replayed, recorded = runtime.replay.call(key)
-        if replayed:
-            found = PromptPin(**recorded)
-        else:
-            gateway = runtime.agent.harness.gateway
-            if gateway is None:
-                raise ConfigurationError("a stored prompt is the gateway's: set BIFROST_URL")
-            found = await gateway.prompt(self.prompt)
-            runtime.replay.record_call(key, dataclasses.asdict(found))
-        self._pins[runtime] = found
+        found = self._prompts.get(runtime)
+        if found is None:
+            found = await runtime.agent.harness.prompts.get(self.prompt, runtime=runtime)
+            if found.pin() is not None and self.prompt_vars:
+                raise ConfigurationError(
+                    f"prompt= names {found.name}, a stored prompt of the gateway: the gateway "
+                    "prepends it as it is stored (no prompt_vars=)"
+                )
+            self._prompts[runtime] = found
         return found
+
+    def _prompted(self, request: ModelRequest[Any], prompt: ResolvedPrompt) -> ModelRequest[Any]:
+        pin = prompt.pin()
+        if pin is not None:
+            sent = request.model_settings.get("extra_headers", {})
+            headers = {**sent, **pin.options().headers()}
+            return request.override(
+                model_settings={**request.model_settings, "extra_headers": headers}
+            )
+        rendered = prompt.messages(**self.prompt_vars)
+        own = [str(m["content"]) for m in rendered if m.get("role") == "system"]
+        rest = [m for m in rendered if m.get("role") != "system"]
+        system = request.system_message
+        text = "\n\n".join([*own, *([system.text] if system is not None else [])])
+        return request.override(
+            system_message=SystemMessage(content=text),
+            messages=[*cast(list[AnyMessage], convert_to_messages(rest)), *request.messages],
+        )
 
 
 @contextlib.asynccontextmanager

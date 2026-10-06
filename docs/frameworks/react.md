@@ -38,14 +38,17 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 ```
 
 `ReAct(system, model, output=None, max_steps=12, *, max_result_chars=20000, max_repeats=3,
-model_timeout=None, context_window=None, prompt=None)`. `model` is a Bifrost model name, sent to
+model_timeout=None, context_window=None, prompt=None, prompt_vars=None)`. `model` is a Bifrost model name, sent to
 `BIFROST_URL` with the agent's virtual key, or any object with `async complete(messages, **body)
 -> dict` (a chat-completions response) — your own client, or a scripted model in a test.
 `model_timeout` is the most one model call may take, in seconds. `context_window` is the
 model's window in tokens, only when the model object does not say (its `context_window`
-attribute) and the 128k assumed is wrong for it. `prompt` names a stored prompt of the
-gateway's Prompt Repository (`"triage"`, or `"triage@3"` for that version) the gateway
-prepends to every model call — a model name only ([gateway.md](../gateway.md#prompts)).
+attribute) and the 128k assumed is wrong for it. `prompt` names a prompt (`"triage"`, `"triage@3"`
+for that version, or a `Prompt`) from the prompt sources — code, `PROMPTS_DIR`, Langfuse, the
+gateway ([prompts.md](../prompts.md)): it becomes the instructions, `prompt_vars` filling its
+`{{variables}}`, before `system` (which may then be `""`) and the pushed context; a stored
+prompt of the gateway's is instead selected by every model call, which the gateway prepends —
+a model name only ([gateway.md](../gateway.md#prompts)).
 
 ## What is automatic
 
@@ -64,10 +67,17 @@ prepends to every model call — a model name only ([gateway.md](../gateway.md#p
 | Stalls and failures | the same call in `max_repeats` consecutive steps stops the run; so do 3 consecutive steps in which every call failed (no such tool, arguments that do not fit, an error or a timeout: `ERROR_STREAK`) — a `ModelError` saying so |
 | Sub-agents | another wrapped agent in `tools=[agent.as_tool()]` is a call like any other: a child run that answers, pauses this run with its question, or is continued after a crash ([subagents.md](../subagents.md)) |
 | Slow models | a model call takes at most `model_timeout` (and what is left of the run's `timeout=`/`deadline=`), the gateway's own retries inside it; past it the run fails with a `ModelError` that may be retried (a queued run is queued again; its journaled steps are not asked again) — [reliability.md](../reliability.md#model-timeouts) |
-| Stored prompt | with `prompt=`: resolved once (kept fresh), its version pinned at the run's first model call and journaled, so every call of the run — a resume included — selects the same version; each `chat` span says which (`trellis.prompt.*`) |
-| Skills | with `h.wrap(..., skills=[...])`: their names and descriptions appended to `system` with the memory context, `load_skill` and `read_skill_file` in every request's `tools` ([gateway.md](../gateway.md#skills)) |
+| Prompt | with `prompt=`: looked up in the prompt sources at the run's start, its version and text pinned and journaled, so every call of the run — a resume included — reads the same instructions (or selects the same gateway version) whatever the source holds by then; a `prompt` event, and each `chat` span says which (`trellis.prompt.name`, `.version`, `.source`) ([prompts.md](../prompts.md)) |
+| Skills | with `h.wrap(..., skills=[...])`: their names and descriptions appended to `system` with the memory context, `load_skill` and `read_skill_file` in every request's `tools`; skills from code, `SKILLS_DIR` and the gateway ([skills.md](../skills.md)) |
 | Hooks | `before_model`/`after_model` around every model call of the loop (a `before_model` call is the call sent), the tool and run hooks as for every target ([hooks.md](../hooks.md)) |
 | Records, grounding, judges, tracing | as for every target; `chat` spans carry the model, usage and finish reasons |
+
+## Native or ours
+
+`ReAct` is the harness's own loop: its skills (`h.wrap(..., skills=[...])`), prompts
+(`prompt=`) and sandbox (`tools=[sandbox()]`) are the harness's, every call governed and
+journaled ([skills.md](../skills.md#native-or-ours), [prompts.md](../prompts.md#native-or-ours),
+[sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 
 ## Approvals, streaming, durable runs, surfaces, evaluation
 
@@ -77,6 +87,9 @@ runs once. `agent.stream(...)` yields each step's text and the tool events. `sta
 `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` tools and `h.evaluate` work as for every
 target; `llm_judge` falls back to the agent's own model when `TRELLIS_JUDGE_MODEL` is unset (and
 says so once — set a stronger model).
+
+`framework_options=` does not apply: the harness runs ReAct's loop, so they are refused
+(`ConfigurationError`); its model's settings are given on `ReAct(...)`.
 
 ## Run it
 

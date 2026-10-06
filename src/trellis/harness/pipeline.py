@@ -47,7 +47,14 @@ from trellis.contracts import (
 )
 from trellis.harness import sandbox
 from trellis.harness.adapters import convert
-from trellis.harness.adapters.base import Extracted, Invocation, NativePause, Output, query_of
+from trellis.harness.adapters.base import (
+    FRAMEWORK_OPTIONS,
+    Extracted,
+    Invocation,
+    NativePause,
+    Output,
+    query_of,
+)
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.events import DECISION, RunEvents
@@ -199,6 +206,7 @@ async def _attempt(
         lease_seconds=None if job is None else job.lease_seconds,
         run_memory=await agent.run_memory(identity, without),
         without=without,
+        framework_options={**agent.framework_options, **record.metadata.get(FRAMEWORK_OPTIONS, {})},
         used=set(journal.used),
         task=query_of(input),
         started_at=datetime.now(UTC),

@@ -460,7 +460,9 @@ class World:
         """Run the agent under test once, in the cell's mode, to its end: each pause answered
         with ``answer`` (by another process, in ``elsewhere``). ``during`` is called with the
         run's id while its first attempt is under way (to cancel it). ``run`` holds the run's
-        own options (``timeout=``, ``without=``: ``run``, ``stream`` and ``start`` take them)."""
+        own options (``timeout=``, ``without=``, ``framework_options=``: ``run``, ``stream``,
+        ``start`` and ``schedule`` take them; ``priority=``, ``concurrency_key=``: ``start`` and
+        ``schedule``)."""
         tools, plan = list(tools), list(plan)
         if self.mode == "elsewhere":
             tools, plan = [*tools, confirm], [CONFIRM, *plan]
@@ -569,7 +571,9 @@ class World:
             handle.run_id = started.run_id
             handle.task = asyncio.create_task(self._work(agent))
         elif mode == "schedule":
-            schedule = await agent.schedule("0 0 1 1 *", input, on_behalf_of=USER)
+            schedule = await agent.schedule(
+                "0 0 1 1 *", input, on_behalf_of=USER, **self._run_options
+            )
             self.store._schedules[schedule.schedule_id] = schedule.model_copy(
                 update={"next_fire_at": datetime.now(UTC) - timedelta(seconds=1)}
             )
