@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -216,6 +217,25 @@ def interrupted(tool: str) -> str:
         f"{tool} was interrupted by a crash; it may or may not have taken effect: check "
         "before calling it again"
     )
+
+
+#: What the model is told after the arguments of its call could not be used.
+FIX_ARGUMENTS: Final = "Call it again with arguments that fit its schema."
+
+
+def not_run(tool: str, problem: str) -> str:
+    """What the model reads about a call that was not run for its arguments' ``problem``."""
+    return f"{tool} was not run: {problem}. {FIX_ARGUMENTS}"
+
+
+def arguments_of(raw: str | None) -> dict[str, Any] | str:
+    """The arguments of a call, from the text the model wrote, as an object — or what is wrong
+    with them."""
+    try:
+        args = json.loads(raw) if raw else {}
+    except ValueError as exc:
+        return f"its arguments are not valid JSON ({exc})"
+    return args if isinstance(args, dict) else "its arguments must be a JSON object"
 
 
 def arguments_problem(schema: dict[str, Any], args: dict[str, Any]) -> str | None:

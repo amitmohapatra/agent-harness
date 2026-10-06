@@ -65,11 +65,10 @@ from trellis.harness.tools.base import (
     arguments_problem,
     execute,
     interrupted,
+    not_run,
 )
 
-#: What the model is told after the arguments of its call did not fit the tool's schema, and
-#: the outcome's ``error_class``.
-FIX_ARGUMENTS: Final = "Call it again with arguments that fit its schema."
+#: The ``error_class`` of a call whose arguments did not fit the tool's schema.
 INVALID_ARGUMENTS: Final = "InvalidArguments"
 #: The ``TOOL_CALL_RESULT`` ``status`` of a call that asked a person, and ended with its
 #: attempt (the other calls cut short: ``cancelled``, ``timeout``; docs/observability.md).
@@ -234,7 +233,7 @@ def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any]) -> ToolOutcome 
     return ToolOutcome(
         tool=tool.name,
         status=ToolStatus.ERROR,
-        output=f"{tool.name} was not run: {problem}. {FIX_ARGUMENTS}",
+        output=not_run(tool.name, problem),
         error_class=INVALID_ARGUMENTS,
     )
 

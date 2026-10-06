@@ -9,20 +9,19 @@ exception, which ends a run (the SDK raises everything a ``FunctionTool`` raises
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
-from typing import Any, Final
+from typing import Any
 
 from agents import FunctionTool
 from agents.tool_context import ToolContext
 
 from trellis.harness.runtime import current
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
 from trellis.harness.tools.convert import text_of
 
-#: What the model is told after arguments it cannot be called with (as ``ReAct`` tells it).
-FIX_ARGUMENTS: Final = "Call it again with arguments that fit its schema."
+# what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
+__all__ = ["FIX_ARGUMENTS", "arguments_of", "convert"]
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
@@ -33,7 +32,7 @@ def _one(tool: Tool) -> FunctionTool:
     async def invoke(context: ToolContext[Any], arguments: str) -> str:
         args = arguments_of(arguments)
         if isinstance(args, str):
-            return f"{tool.name} was not run: {args}. {FIX_ARGUMENTS}"
+            return not_run(tool.name, args)
         return text_of((await bridge.call(tool, args, call_id=context.tool_call_id)).output)
 
     return FunctionTool(
@@ -45,15 +44,6 @@ def _one(tool: Tool) -> FunctionTool:
         strict_json_schema=False,
         is_enabled=lambda _context, _agent: _offered(tool.name),
     )
-
-
-def arguments_of(raw: str | None) -> dict[str, Any] | str:
-    """The arguments of a call as an object, or what is wrong with them."""
-    try:
-        args = json.loads(raw) if raw else {}
-    except ValueError as exc:
-        return f"its arguments are not valid JSON ({exc})"
-    return args if isinstance(args, dict) else "its arguments must be a JSON object"
 
 
 def _offered(name: str) -> bool:

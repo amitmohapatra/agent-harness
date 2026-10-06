@@ -286,10 +286,11 @@ async def test_arguments_that_are_not_json_are_told_to_the_model(harness: Harnes
     agent = harness.wrap(ReAct(system="s", model=model), id="bad-json", tools=[stock])
     result = await agent.run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "7"
-    told = model.requests[1]["messages"][-1]["content"]
-    assert told == (
-        "Tool call stock with id c1 could not be executed - arguments were malformed or truncated."
-    )
+    sent = model.requests[1]["messages"]
+    assert sent[-1]["content"].startswith("stock was not run: its arguments are not valid JSON")
+    assert sent[-1]["content"].endswith("Call it again with arguments that fit its schema.")
+    # the broken arguments are not sent back: a strict server refuses such a history
+    assert sent[-2]["tool_calls"][0]["function"]["arguments"] == "{}"
 
 
 @pytest.mark.parametrize(

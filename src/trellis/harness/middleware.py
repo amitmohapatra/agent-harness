@@ -88,7 +88,7 @@ from trellis.harness.runtime import DEFERRED, Runtime, current
 from trellis.harness.telemetry import model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import Tool, arguments_of, not_run
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 
@@ -259,6 +259,29 @@ def _ran(step: str, call_id: str) -> str:
     return content_key("ran", step, call_id)
 
 
+def _malformed(call: Any) -> str:
+    """What is wrong with the arguments of a call the chat model could not parse."""
+    problem = arguments_of(call.get("args"))
+    return problem if isinstance(problem, str) else str(call.get("error") or "they are invalid")
+
+
+def _unbroken(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the arguments of the conversation's malformed calls sent as ``{}``: a
+    strict server refuses a history that holds them (the model reads what was wrong in the
+    call's answer)."""
+    if not any(isinstance(m, AIMessage) and m.invalid_tool_calls for m in request.messages):
+        return request
+    messages = [
+        m.model_copy(
+            update={"invalid_tool_calls": [{**c, "args": "{}"} for c in m.invalid_tool_calls]}
+        )
+        if isinstance(m, AIMessage) and m.invalid_tool_calls
+        else m
+        for m in request.messages
+    ]
+    return request.override(messages=messages)
+
+
 def _offered(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
     """The request without the harness tools of the parts the run is without: a graph's are
     bound when it is built (``h.tools``), and a part turned off afterwards (``h.wrap(without=)``,
@@ -314,6 +337,26 @@ class ModelHooks(AgentMiddleware):
             weakref.WeakKeyDictionary()
         )
 
+    @hook_config(can_jump_to=["model"])
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """A call whose arguments the chat model could not parse (``invalid_tool_calls``: not
+        JSON, not an object) is answered with what was wrong, as a call of the harness's is;
+        a step of such calls only asks the model again (LangChain would end the run)."""
+        last = state["messages"][-1] if state.get("messages") else None
+        if not isinstance(last, AIMessage) or not last.invalid_tool_calls:
+            return None
+        told = [
+            ToolMessage(
+                not_run(c.get("name") or "unknown", _malformed(c)),
+                name=c.get("name") or "unknown",
+                tool_call_id=c["id"],
+                status="error",
+            )
+            for c in last.invalid_tool_calls
+            if c.get("id")
+        ]
+        return {"messages": told} | ({} if last.tool_calls else {"jump_to": "model"})
+
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
@@ -321,7 +364,7 @@ class ModelHooks(AgentMiddleware):
     ) -> ModelResponse[Any]:
         runtime = current()
         hooks = running(*self.given)
-        request = _with_task(_offered(request, runtime))
+        request = _with_task(_unbroken(_offered(request, runtime)))
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
@@ -560,27 +603,7 @@ class StepLimit(AgentMiddleware):
 class StallGuard(AgentMiddleware):
     """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
     in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed. A malformed call (its arguments not JSON) is
-    answered with what was wrong, and a step of malformed calls only is not the end of the
-    run: the model is asked again."""
-
-    @hook_config(can_jump_to=["model"])
-    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        last = state["messages"][-1] if state.get("messages") else None
-        if not isinstance(last, AIMessage) or not last.invalid_tool_calls:
-            return None
-        told = [
-            ToolMessage(
-                f"Tool call {c.get('name') or 'unknown'} with id {c['id']} could not be "
-                "executed - arguments were malformed or truncated.",
-                name=c.get("name") or "unknown",
-                tool_call_id=c["id"],
-                status="error",
-            )
-            for c in last.invalid_tool_calls
-            if c.get("id")
-        ]
-        return {"messages": told} | ({} if last.tool_calls else {"jump_to": "model"})
+    consecutive steps in which every call failed (a malformed one among them)."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()
