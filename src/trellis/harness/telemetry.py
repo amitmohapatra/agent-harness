@@ -467,16 +467,23 @@ def output(span: trace.Span, value: Any, *, key: str = "langfuse.observation.out
         span.set_attributes(redact_attributes({key: _text(value)}))
 
 
-def usage(span: trace.Span, response: Mapping[str, Any]) -> None:
-    """A chat-completions response's model, usage and finish reasons, as GenAI attributes."""
+def usage(
+    span: trace.Span,
+    *,
+    model: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    finish_reasons: list[str],
+) -> None:
+    """A model reply's model, usage and finish reasons, as GenAI attributes."""
     if not span.is_recording():
         return
-    found: dict[str, Any] = {"gen_ai.response.model": response.get("model")}
-    counts = response.get("usage") or {}
-    found["gen_ai.usage.input_tokens"] = counts.get("prompt_tokens")
-    found["gen_ai.usage.output_tokens"] = counts.get("completion_tokens")
-    reasons = [c.get("finish_reason") for c in response.get("choices") or [] if c]
-    found["gen_ai.response.finish_reasons"] = [r for r in reasons if r]
+    found: dict[str, Any] = {
+        "gen_ai.response.model": model,
+        "gen_ai.usage.input_tokens": input_tokens,
+        "gen_ai.usage.output_tokens": output_tokens,
+        "gen_ai.response.finish_reasons": finish_reasons,
+    }
     span.set_attributes(redact_attributes({k: v for k, v in found.items() if v not in (None, [])}))
 
 

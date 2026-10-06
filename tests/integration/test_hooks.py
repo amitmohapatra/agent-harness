@@ -23,8 +23,8 @@ from tests.support.planned import Call, PlannedChat, PlannedChatModel, PlannedMo
 from trellis import Ask, Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, Runtime, Settings, tool
 from trellis.contracts import ModelError, RunEventType, RunStatus, ToolCall, ToolOutcome
 from trellis.harness.governance import Decision, Denied, Governance, governed
-from trellis.harness.hooks.langchain import ModelHooks as Middleware
 from trellis.harness.hooks.openai_agents import ModelHooks as RunHooks
+from trellis.harness.middleware import ModelHooks as Middleware
 from trellis.harness.result import Result
 
 paid: list[int] = []

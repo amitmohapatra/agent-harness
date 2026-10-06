@@ -22,7 +22,7 @@ hooks run in order — the harness's, then the agent's. Where they fire:
   them). The decision is journaled: a resumed run replays it instead of asking the hooks again.
   ``after_tool`` may return another outcome (what the model reads, journaled and recorded);
 * ``before_model(call)`` / ``after_model(call, reply)`` — every model call: ``ReAct``'s own;
-  LangChain's and Deep Agents' through their middleware (``hooks.langchain.ModelHooks``, given
+  LangChain's and Deep Agents' through their middleware (``middleware.ModelHooks``, given
   to ``create_agent(middleware=[...])``); the OpenAI Agents SDK's through its ``RunHooks``
   (``hooks.openai_agents.ModelHooks``, which the harness passes to ``Runner.run`` itself). A
   ``before_model`` that returns a call rewrites it where the framework lets it (``ReAct``,

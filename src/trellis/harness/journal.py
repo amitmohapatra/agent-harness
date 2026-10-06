@@ -21,7 +21,8 @@ artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journa
 sub-agent's run working inside one of the run's tool calls keeps its journal in the run's
 (``children``), so the run's progress saves the child's too; the run's sandbox is named here as
 soon as it exists (``sandbox``), so every later attempt works in that one
-(``trellis.harness.sandbox``).
+(``trellis.harness.sandbox``); a graph that checkpoints into the run
+(``middleware.RunCheckpointer``) keeps its latest checkpoint here (``graph``).
 
 Calls made at once (a framework running several tools together) take their occurrences in the
 order they asked: identical calls run one after another (:meth:`Replay.exclusive`), so each has
@@ -97,6 +98,9 @@ class Journal(BaseModel):
     #: the sandbox the run's sandbox tools work in, as its reference (``sandbox.SandboxRef``):
     #: recorded as soon as it exists, so every later attempt works in the same one
     sandbox: dict[str, Any] | None = None
+    #: the graph's latest checkpoint and its pending writes, by namespace, when the graph keeps
+    #: them in the run (``middleware.RunCheckpointer``): a resume continues where it stopped
+    graph: dict[str, Any] | None = None
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence

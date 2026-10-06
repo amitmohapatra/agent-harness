@@ -1204,7 +1204,7 @@ async def hook_models(w: World) -> None:
     d, guard = Desk(), _Guard()
 
     async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
-        from trellis.harness.hooks.langchain import ModelHooks
+        from trellis.harness.middleware import ModelHooks
 
         native = await h.tools(*tools, framework=w.adapter)  # type: ignore[arg-type]
         model = PlannedChatModel(plan=plan)

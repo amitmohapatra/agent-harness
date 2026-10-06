@@ -47,12 +47,13 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, content_key
-from trellis.harness.runtime import Paused, Runtime, current, reason_of
+from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import (
@@ -159,7 +160,7 @@ async def _called(
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
         within = runtime.limited(tool.timeout, key=idempotency_key)
         outcome, error = await execute(tool, args, reads=reads, within=within)
-        if isinstance(error, Paused | RunCancelled):
+        if isinstance(error, RunCancelled) or (error is not None and is_pause_signal(error)):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
             raise error

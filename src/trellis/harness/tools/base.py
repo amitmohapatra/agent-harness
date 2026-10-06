@@ -32,6 +32,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness.features import Feature
 
 SideEffects = Literal["read", "write", "irreversible"]
@@ -146,6 +147,8 @@ async def execute(
         async with within or asyncio.timeout(tool.timeout):
             output = await retried(once, retries=retries_of(tool.spec, reads=reads))
     except Exception as exc:
+        if is_pause_signal(exc):  # it asked a person: the caller lets it through
+            return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
         if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
             failed = ToolOutcome(
                 tool=tool.name,
@@ -179,7 +182,7 @@ async def retried(call: Callable[[], Awaitable[Any]], *, retries: int) -> Any:
         try:
             return await call()
         except Exception as exc:
-            if attempt == retries or not AgentError.of(exc).retryable:
+            if attempt == retries or is_pause_signal(exc) or not AgentError.of(exc).retryable:
                 raise
         await asyncio.sleep(random.uniform(0, RETRY_BACKOFF_SECONDS * 2**attempt))
         attempt += 1

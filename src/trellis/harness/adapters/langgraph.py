@@ -17,7 +17,13 @@
   holds, and the harness's decision is turned into the ``{"decisions": [...]}`` it resumes
   with (:func:`hitl_response`);
 * tools: fixed when the graph is compiled, so harness tools come from ``h.tools(...)`` at
-  build time.
+  build time — unless the graph takes them per model call (``middleware.HarnessTools``, as
+  ``ReAct(...)`` does): then ``h.wrap(tools=)`` gives them, every model call is offered the
+  tools the run offers at that moment (``narrows="turn"``), and the memory tools come with them;
+* a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
+  does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
+  run's journal, so a resume — in any process, after a pause or a crash — continues where it
+  stopped, and it holds no conversation of its own (the memory service gives the recent turns).
 """
 
 from __future__ import annotations
@@ -36,25 +42,33 @@ from trellis.harness.adapters.base import (
     ToolFormat,
 )
 from trellis.harness.asking import answer_of
-from trellis.harness.journal import Pending
-from trellis.harness.runtime import MARKER, reason_of
+from trellis.harness.journal import Journal, Pending
+from trellis.harness.runtime import DEFERRED, MARKER, reason_of
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"
 #: The journal key of a ``HumanInTheLoopMiddleware`` pause (Deep Agents' ``interrupt_on``).
 HITL: Final = "langchain_hitl"
+#: The state key a graph declares when it takes the run's tools per model call
+#: (``middleware.HarnessTools``; kept here so detecting it imports no LangChain).
+HARNESS_TOOLS: Final = "trellis_harness_tools"
 #: The id of the memory context message: one per thread, replaced every turn.
 CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
 
 
 class LangGraphAdapter:
     name: ClassVar[str] = "langgraph"
-    tool_format: ClassVar[ToolFormat] = "langchain"
-    fixed_tools: ClassVar[bool] = True
-    narrows: ClassVar[Narrowing] = "none"
+
+    def __init__(self, target: Any = None) -> None:
+        #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
+        #: converts them itself, so nothing is converted for it here
+        per_call = HARNESS_TOOLS in (getattr(target, "channels", None) or {})
+        self.tool_format: ToolFormat = "none" if per_call else "langchain"
+        self.fixed_tools = not per_call
+        self.narrows: Narrowing = "turn" if per_call else "none"
 
     def keeps_conversation(self, target: Any) -> bool:
-        return _checkpointed(target)
+        return _checkpointed(target) and not run_scoped(target)
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         from langchain_core.messages import SystemMessage
@@ -69,7 +83,9 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        return await target.ainvoke(native_input, self._config(target, run), version="v2")
+        return await target.ainvoke(
+            _continued(target, native_input, run), self._config(target, run), version="v2"
+        )
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from langchain_core.messages import AIMessage
@@ -78,7 +94,7 @@ class LangGraphAdapter:
         values: Any = None
         interrupts: tuple[Any, ...] = ()
         async for part in target.astream(
-            native_input,
+            _continued(target, native_input, run),
             self._config(target, run),
             stream_mode=["messages", "values"],
             version="v2",
@@ -105,17 +121,23 @@ class LangGraphAdapter:
                 answer = _last_ai_text(state.get("messages") or [])
         transcript = [("assistant", answer)] if isinstance(answer, str) and answer else []
         pause = None
-        if output.interrupts:
-            ours = [
-                i for i in output.interrupts if isinstance(i.value, dict) and i.value.get(MARKER)
-            ]
+        # a call waiting for its turn behind a pause asks nothing (``DEFERRED``)
+        raised = [
+            i
+            for i in output.interrupts
+            if not (isinstance(i.value, dict) and i.value.get(DEFERRED))
+        ]
+        if raised:
+            ours = [i for i in raised if isinstance(i.value, dict) and i.value.get(MARKER)]
             if not ours and not _checkpointed(target):
                 raise ConfigurationError(
                     "the graph called interrupt() without a checkpointer, so it cannot be "
                     "resumed: compile it with one, or ask through trellis.current().ask"
                 )
-            first = (ours or list(output.interrupts))[0]
-            pause = NativePause(value=first.value, native_id=first.id)
+            first = (ours or raised)[0]
+            # calls made at once may each have asked: the pause names each one's interrupt
+            ids = {i.value.get("interrupt_id"): i.id for i in ours}
+            pause = NativePause(value=first.value, native_id=first.id, ids=ids)
         return Extracted(answer=answer, transcript=transcript, pause=pause)  # type: ignore[arg-type]
 
     def resume_input(
@@ -144,15 +166,48 @@ class LangGraphAdapter:
             from langgraph.types import interrupt
 
             runtime.suspend = interrupt
-        return {"configurable": {"thread_id": runtime.thread or runtime.run_id}}
+        return {"configurable": {"thread_id": thread_of(target, runtime)}}
 
 
-async def holds(target: Any, thread: str, native_id: str) -> bool:
+def thread_of(target: Any, runtime: Any) -> str:
+    """The LangGraph thread a run of ``target`` runs on: the run's own for a graph that
+    checkpoints into its run, else the run's conversation (or the run)."""
+    return runtime.run_id if run_scoped(target) else runtime.thread or runtime.run_id
+
+
+async def holds(target: Any, thread: str, native_id: str, journal: Journal) -> bool:
     """Whether the graph's checkpointer still holds the pause ``native_id`` on ``thread`` —
     what a resume in place needs. An ``InMemorySaver`` holds it in the process that paused,
-    and nowhere else. (A pause with a native id is a checkpointed graph's.)"""
+    and nowhere else; a ``RunCheckpointer`` holds it in the run's journal, everywhere. (A
+    pause with a native id is a checkpointed graph's.)"""
+    if run_scoped(target):
+        return bool(journal.graph)
     state = await target.aget_state({"configurable": {"thread_id": thread}})
     return any(paused.id == native_id for paused in state.interrupts)
+
+
+def run_scoped(target: Any) -> bool:
+    """Whether the graph checkpoints into its run (``middleware.RunCheckpointer``)."""
+    if not _checkpointed(target):
+        return False
+    from trellis.harness.middleware import RunCheckpointer
+
+    return isinstance(target.checkpointer, RunCheckpointer)
+
+
+def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
+    """What the graph is run with: a graph whose checkpoint the run's journal holds, run again
+    without a decision to resume with (after a crash, or an error that may pass), continues
+    from it (``None``) rather than starting a new turn."""
+    from langgraph.types import Command
+
+    if (
+        not isinstance(native_input, Command)
+        and run_scoped(target)
+        and run.runtime.replay.journal.graph
+    ):
+        return None
+    return native_input
 
 
 def is_hitl(value: Any) -> bool:

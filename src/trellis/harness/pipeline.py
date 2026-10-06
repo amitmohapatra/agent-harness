@@ -450,7 +450,7 @@ async def _unheld(
         or pending is None
         or pending.native_id is None
         or pending.native_state is not None  # a serialised run (OpenAI Agents) travels along
-        or await holds(agent.target, identity.thread or identity.run_id, pending.native_id)
+        or await holds(agent.target, identity.thread or identity.run_id, pending.native_id, journal)
     ):
         return None
     if pending.key in (FOREIGN, HITL):
@@ -529,8 +529,11 @@ def _pause(
     native = extracted.pause if extracted is not None else None
     if runtime.pending is not None:
         if native is not None:
+            # the framework's handle of this pause (calls made at once may each have asked)
+            ids = native.ids or {}
+            native_id = ids.get(runtime.pending.interrupt.interrupt_id, native.native_id)
             return runtime.pending.model_copy(
-                update={"native_id": native.native_id, "native_state": native.state}
+                update={"native_id": native_id, "native_state": native.state}
             )
         return runtime.pending
     if native is None:

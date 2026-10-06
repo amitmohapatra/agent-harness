@@ -216,9 +216,12 @@ class Runtime:
         if self.offered is not None:
             self.offered.update(n for n in names if n in self.toolbox)
 
-    def next_step(self) -> int:
-        self._steps += 1
-        return self._steps
+    def next_step(self, count: int = 1) -> int:
+        """The number of the run's next call — the first of ``count`` calls made at once,
+        numbered in their order."""
+        first = self._steps + 1
+        self._steps += count
+        return first
 
     # ------------------------------------------------------------------ time
     @property
@@ -397,13 +400,17 @@ class Runtime:
         interrupt = Interrupt(
             interrupt_id=ident, tenant_id=self.tenant, run_id=self.run_id, **fields
         )
+        # calls made at once may each ask: the run pauses on the first, the others ask again
+        # when it resumes
+        first = self.pending is None
         if self.pending is None:
             self.pending = Pending(key=key, interrupt=interrupt)
         if self.suspend is None:
             raise Paused(self.pending.interrupt)
         value = self.suspend({MARKER: True, **interrupt.awaiting()})
         resolution = InterruptResolution.model_validate(value)
-        self.pending = None
+        if first:
+            self.pending = None
         self.replay.record_answer(key, resolution)
         return resolution
 
@@ -411,6 +418,10 @@ class Runtime:
 #: The key an ``ask`` marks its LangGraph interrupt value with, telling it apart from a
 #: graph's own ``interrupt(...)``.
 MARKER: Final = "trellis_interrupt"
+#: The key of the LangGraph interrupt a call waiting its turn ends its task with when an
+#: earlier call of the same model step paused (``middleware.HarnessTools``): no question —
+#: the call runs, in its turn, when the run resumes.
+DEFERRED: Final = "trellis_deferred"
 
 
 def interrupt_id(run_id: str, attempt: int, n: int) -> str:
