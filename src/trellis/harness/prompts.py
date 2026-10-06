@@ -518,3 +518,44 @@ class PromptSources(Chain[ResolvedPrompt]):
         await super().aclose()
         if self._gateway is not None:
             await self._gateway.aclose()
+
+
+# --------------------------------------------------------------------------- no harness
+
+
+async def resolve_prompt(
+    ref: str | Prompt,
+    /,
+    *,
+    sources: PromptSources | Sequence[PromptSource] | None = None,
+    **values: Any,
+) -> str:
+    """The prompt ``ref`` names, as text with ``values`` filled in, for code with no
+    ``Harness`` (Way 2): from ``sources`` (a ``PromptSources``, or the sources in order), else
+    from the ones the environment names (``PromptSources.from_env()``, closed after)."""
+    found = await _resolved(ref, sources)
+    return found.render(**values)
+
+
+async def resolve_prompt_messages(
+    ref: str | Prompt,
+    /,
+    *,
+    sources: PromptSources | Sequence[PromptSource] | None = None,
+    **values: Any,
+) -> list[dict[str, Any]]:
+    """:func:`resolve_prompt` as chat messages."""
+    found = await _resolved(ref, sources)
+    return found.messages(**values)
+
+
+async def _resolved(
+    ref: str | Prompt, sources: PromptSources | Sequence[PromptSource] | None
+) -> ResolvedPrompt:
+    if sources is not None:
+        return await PromptSources.given(sources).get(ref)
+    made = PromptSources.from_env()
+    try:
+        return await made.get(ref)
+    finally:
+        await made.aclose()

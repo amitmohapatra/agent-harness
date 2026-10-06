@@ -46,6 +46,7 @@ retries, tenancy), and how it relates to Way 1.
 | [blocks/runs.md](blocks/runs.md) | `trellis.runs`: durable runs, a pause with your framework's checkpoint, the inbox, resume, `Worker`, schedules, artifacts, webhooks and `verify_signature` |
 | [blocks/governance.md](blocks/governance.md) | `trellis.harness.governance`: `Governance.check` and `governed` on your own tools, `publish`, `decided` |
 | [blocks/evaluation.md](blocks/evaluation.md) | `trellis.harness.evals`: `evaluate` on any async function, `judge` on one run, `EvalServices.from_env` |
+| [blocks/prompts-and-skills.md](blocks/prompts-and-skills.md) | `trellis.harness.prompts` and `trellis.harness.skills`: `resolve_prompt`, `resolve_skill`, `PromptSources`, `SkillSources.pin` from plain code — a LangGraph and an OpenAI Agents snippet |
 | [blocks/a2a.md](blocks/a2a.md) | `trellis.harness.a2a.remote`: call any A2A agent (serving is Way 1) |
 | [sandbox.md](sandbox.md#way-2-without-a-harness) | `trellis.harness.sandbox`: a provider (`DockerSandbox`) and its sandboxes, your commands governed with `governed` |
 | [blocks/contracts.md](blocks/contracts.md) | `trellis.contracts`: which records each block takes and returns, and why they are shared |

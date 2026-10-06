@@ -79,6 +79,9 @@ repository (`SKILLS_DIR`), publish and roll them out in the gateway, or write on
 
 ## Where
 
+Way 2, with no `Harness`: [blocks/prompts-and-skills.md](blocks/prompts-and-skills.md).
+
+
 Way 1, every adapter: `h.wrap(..., skills=[...])` for a function, `ReAct`, OpenAI Agents and the
 Claude Agent SDK; `h.tools(skills(...), framework=...)` for a graph that binds its tools when it
 is built (LangGraph, Deep Agents). The `skills` feature covers skills of every source. Way 2,

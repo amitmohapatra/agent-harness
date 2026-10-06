@@ -24,6 +24,8 @@ from trellis.harness.prompts import (
     ResolvedPrompt,
     langfuse_prompts,
     prompts_dir,
+    resolve_prompt,
+    resolve_prompt_messages,
 )
 from trellis.harness.repository import TTL_SECONDS, NotFound
 
@@ -315,3 +317,26 @@ async def test_from_env_names_the_environments_sources_and_closes_its_gateway(
     assert sources.labels == ["code", f"prompts_dir({tmp_path})", "Bifrost"]
     await sources.aclose()
     assert PromptSources.from_env({}).labels == []
+
+
+# --------------------------------------------------------------------------- no harness
+async def test_plain_code_resolves_a_prompt_from_sources_or_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "triage.md").write_text("---\nversion: 3\n---\nTriage for {{team}}.")
+    folder = prompts_dir(tmp_path)
+    assert (await folder.resolve("triage", "3")).render(team="EU") == "Triage for EU."
+    assert await resolve_prompt("triage@3", sources=[folder], team="EU") == "Triage for EU."
+    chain = PromptSources([folder])
+    assert await resolve_prompt_messages("triage", sources=chain, team="EU") == [
+        {"role": "system", "content": "Triage for EU."}
+    ]
+    assert await resolve_prompt(Prompt("inline", "Hi {{x}}."), x=1) == "Hi 1."
+    monkeypatch.setenv("PROMPTS_DIR", str(tmp_path))
+    monkeypatch.delenv("BIFROST_URL", raising=False)
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    assert await resolve_prompt("triage", team="EU") == "Triage for EU."  # PromptSources.from_env()
+    monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")  # a gateway made, and closed after
+    assert await resolve_prompt_messages("triage", team="EU") == [
+        {"role": "system", "content": "Triage for EU."}
+    ]

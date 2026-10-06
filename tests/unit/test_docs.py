@@ -32,6 +32,7 @@ BLOCK_PAGES = (
     "governance.md",
     "evaluation.md",
     "a2a.md",
+    "prompts-and-skills.md",
     "contracts.md",
     "langgraph.md",
     "openai-agents.md",
