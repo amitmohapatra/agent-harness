@@ -2,6 +2,8 @@
 UV ?= uv
 PY ?= .venv/bin/python
 PYTEST ?= $(PY) -m pytest
+#: the matrix runs in this many shards at once (MATRIX_SHARD=i/n each)
+MATRIX_SHARDS ?= 4
 
 .DEFAULT_GOAL := help
 
@@ -21,7 +23,7 @@ typings:  ## Link trellis.contracts, trellis.memory and trellis.runs where pyrig
 
 .PHONY: test
 test:  ## Every test except the benchmark and the live ones, at 100% line and branch coverage
-	$(PYTEST) -q -m "not performance and not live" --cov=trellis.harness --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=100
+	$(PYTEST) -q -m "not performance and not live and not matrix" --cov=trellis.harness --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=100
 
 .PHONY: test-live
 test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, RUNS_URL, TRELLIS_API_KEY)
@@ -30,6 +32,18 @@ test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, R
 .PHONY: bench
 bench:  ## Harness overhead vs the committed baseline (writes build/benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s
+
+.PHONY: matrix
+matrix:  ## The generated feature matrix (feature x adapter x way x mode x selection), sharded, and its report (build/matrix.md)
+	@mkdir -p build && rm -f build/matrix-*.xml build/matrix-*.log
+	@pids=""; for i in $$(seq 1 $(MATRIX_SHARDS)); do \
+	  env -u BIFROST_URL -u MEMORY_URL -u RUNS_URL -u TRELLIS_API_KEY -u OTEL_EXPORTER_OTLP_ENDPOINT \
+	    MATRIX_SHARD=$$i/$(MATRIX_SHARDS) $(PYTEST) -q -m matrix tests/matrix -p no:cacheprovider \
+	    --junitxml=build/matrix-$$i.xml > build/matrix-$$i.log 2>&1 & pids="$$pids $$!"; \
+	done; status=0; for p in $$pids; do wait $$p || status=1; done; \
+	for i in $$(seq 1 $(MATRIX_SHARDS)); do tail -n 1 build/matrix-$$i.log; done; \
+	$(PY) -m tests.matrix.report build/matrix-*.xml --out build/matrix.md; \
+	if [ $$status -ne 0 ]; then grep -h "^FAILED\|^ERROR" build/matrix-*.log; fi; exit $$status
 
 .PHONY: lint
 lint:  ## Ruff

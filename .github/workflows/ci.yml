@@ -56,6 +56,18 @@ jobs:
         run: make test
       - name: Examples
         run: make examples
+      - name: Feature matrix
+        # every feature x adapter x way x mode x selection, scripted (tests/matrix), in shards
+        # at once; build/matrix.md is the matrix as it ran
+        run: make matrix
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: matrix
+          path: |
+            agent-harness/build/matrix.md
+            agent-harness/build/matrix-*.xml
+          if-no-files-found: ignore
       - name: Overhead benchmark
         # fails when the harness's own overhead doubles against benchmark-results.json
         run: make bench
