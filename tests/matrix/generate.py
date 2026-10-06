@@ -30,7 +30,6 @@ from tests.matrix.model import (
     cell_id,
 )
 from tests.matrix.world import (
-    MemoryContract,
     NoEnding,
     NotTimedOut,
     OffButCalled,
@@ -79,15 +78,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
             "BUG-5",
             "A2A tasks/cancel of a working task: 'Task not found', or answered while the run "
             "goes on to its end",
-        ),
-    ),
-    (
-        {"features": {"F26"}, "adapters": {"react"}, "when": _on("grounding", "memory")},
-        Bug(
-            "BUG-3",
-            "grounding sends answers over 8000 characters to /v1/verify (its maxLength): the "
-            "memory service refuses them",
-            raises=MemoryContract,
         ),
     ),
     (

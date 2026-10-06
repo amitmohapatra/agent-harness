@@ -83,6 +83,10 @@ JUDGE_RETRY: Final = (
 )
 #: How much of each part of the case the judge reads (characters).
 JUDGE_PART_CHARS: Final = 8000
+#: The longest answer ``/v1/verify`` checks (its ``answer``'s ``maxLength``): of a longer one,
+#: its head — up to the last sentence or line that ends within it — is checked (:func:`verified`).
+VERIFY_MAX_CHARS: Final = 8000
+_ENDS: Final = re.compile(r"[.!?](?=\s)|\n")
 _JSON_OBJECT: Final = re.compile(r"\{.*\}", re.S)
 
 ItemStatus = Literal["success", "error", "interrupted", "cancelled"]
@@ -360,11 +364,24 @@ async def grounding_score(memory: MemoryContext, answer: str, bundle_id: str) ->
     """The share of ``answer``'s claims the context ``bundle_id`` supports (the memory service's
     ``/v1/verify``, in the scope ``memory`` built it in), or ``None`` for an answer with no
     checkable claim. In a run's scope the service records the verdict as the run's ``judge``
-    feedback itself; this is the same number, for the run's trace."""
-    report = await memory.verify(answer, bundle_id=bundle_id)
+    feedback itself; this is the same number, for the run's trace. A long answer is checked on
+    its head (:func:`verified`)."""
+    report = await memory.verify(verified(answer), bundle_id=bundle_id)
     if not report.claims:
         return None
     return round(1.0 - report.per_claim_hallucination_rate, 4)
+
+
+def verified(answer: str) -> str:
+    """What of ``answer`` grounding checks: all of it, or — longer than ``/v1/verify`` takes
+    (:data:`VERIFY_MAX_CHARS`) — its first :data:`VERIFY_MAX_CHARS` characters, cut back to the
+    last sentence or line that ends within them (when one does): the score is that part's."""
+    if len(answer) <= VERIFY_MAX_CHARS:
+        return answer
+    head = answer[:VERIFY_MAX_CHARS]
+    ends = [m.end() for m in _ENDS.finditer(head)]
+    cut = head[: ends[-1]].rstrip() if ends else ""
+    return cut or head
 
 
 @dataclass(frozen=True, slots=True)
