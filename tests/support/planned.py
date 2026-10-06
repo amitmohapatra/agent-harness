@@ -19,7 +19,7 @@ from langchain_core.messages import BaseMessage, ToolMessage
 from pydantic import Field
 
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.models import ScriptedChat
+from tests.support.models import Script, ScriptedChat
 from tests.support.openai_model import ScriptedModel
 
 Call = tuple[str, dict[str, Any]]
@@ -50,17 +50,22 @@ class PlannedChatModel(ScriptedChatModel):
         return "\n".join(_text(m.content) for call in self.seen for m in call)
 
 
-class PlannedChat(ScriptedChat):
-    """A chat-completions endpoint (``ReAct``)."""
-
-    def __init__(self, plan: Sequence[Call], final: str = FINAL) -> None:
+class _Planned(Script):
+    def __init__(self, plan: Sequence[Call], final: str) -> None:
         super().__init__([])
         self.plan, self.final = list(plan), final
 
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+    def next(self, body: dict[str, Any]) -> Any:
+        messages = body.get("messages") or []
         results = [_text(m.get("content")) for m in messages if m.get("role") == "tool"]
-        self.turns = [planned(self.plan, results, self.final)]
-        return await super().complete(messages, **body)
+        return planned(self.plan, results, self.final)
+
+
+class PlannedChat(ScriptedChat):
+    """A gateway model (``ReAct``: a ``ChatOpenAI`` on a scripted endpoint)."""
+
+    def __init__(self, plan: Sequence[Call], final: str = FINAL) -> None:
+        super().__init__(script=_Planned(plan, final))
 
     def said(self) -> str:
         return json.dumps([r["messages"] for r in self.requests], default=str)

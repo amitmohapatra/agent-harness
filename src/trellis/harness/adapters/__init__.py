@@ -16,19 +16,16 @@ from trellis.harness.adapters.claude import ClaudeAdapter
 from trellis.harness.adapters.function import FunctionAdapter
 from trellis.harness.adapters.langgraph import LangGraphAdapter
 from trellis.harness.adapters.openai_agents import OpenAIAgentsAdapter
-from trellis.harness.adapters.react import ReAct, ReActAdapter
 from trellis.harness.tools.base import Tool
 
 
 def detect(target: Any) -> Adapter:
-    if isinstance(target, ReAct):
-        return ReActAdapter()
     module = type(target).__module__
     if module.startswith("langgraph."):
         from langgraph.pregel import Pregel
 
         if isinstance(target, Pregel):
-            return LangGraphAdapter()
+            return LangGraphAdapter(target)
     if module.startswith("agents."):
         from agents import Agent
 
@@ -45,7 +42,7 @@ def detect(target: Any) -> Adapter:
         return FunctionAdapter()
     raise ConfigurationError(
         f"cannot wrap {type(target).__name__}: pass a compiled LangGraph graph (Deep Agents "
-        "included), an OpenAI Agents Agent, ClaudeAgentOptions, a ReAct(...), or an async "
+        "included, ReAct(...) among them), an OpenAI Agents Agent, ClaudeAgentOptions, or an async "
         "function (input, agent) -> answer"
     )
 
@@ -58,8 +55,6 @@ def convert(tool_format: ToolFormat, tools: Sequence[Tool]) -> Any:
         from trellis.harness.tools.convert import langchain as module
     elif tool_format == "openai_agents":
         from trellis.harness.tools.convert import openai_agents as module  # type: ignore[no-redef]
-    elif tool_format == "claude":
-        from trellis.harness.tools.convert import claude as module  # type: ignore[no-redef]
     else:
-        from trellis.harness.tools.convert import openai_chat as module  # type: ignore[no-redef]
+        from trellis.harness.tools.convert import claude as module  # type: ignore[no-redef]
     return module.convert(tools)
