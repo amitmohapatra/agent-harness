@@ -94,6 +94,15 @@ Instructions for kinds of task that most runs do not need: loading them all into
 costs tokens and attention; listing them and loading one when it fits does not. Keep them in the
 repository (`SKILLS_DIR`), publish and roll them out in the gateway, or write one in code.
 
+### Learned skills
+
+The memory service turns what agents keep doing successfully into skills: its active
+procedures are offered to the tenant's administrator as draft `SKILL.md` files, and a published
+one lands in `SKILLS_DIR` or the gateway's skills repository — the sources above. An agent
+loads it by name like any other (`skills=["refund-order"]`); the harness needs nothing new.
+How drafts are made, reviewed and versioned: the memory service's
+[learned skills](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/api/tools.md#learned-skills).
+
 ## Where
 
 Way 1, every adapter: `h.wrap(..., skills=[...])` for a function, `ReAct`, OpenAI Agents and the
