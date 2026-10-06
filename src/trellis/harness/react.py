@@ -167,6 +167,7 @@ def _gateway_model(model: Any, *, timeout: float | None, window: int) -> Any:
     deny-all MCP scope and the window as its profile); any other model as it is."""
     if not isinstance(model, str):
         return model
+    import openai
     from langchain_openai import ChatOpenAI
 
     settings = Settings.from_env()
@@ -181,6 +182,9 @@ def _gateway_model(model: Any, *, timeout: float | None, window: int) -> Any:
         max_retries=MODEL_RETRIES,
         stream_usage=True,
         profile={"max_input_tokens": window},
+        # a client of its own: langchain-openai shares one per gateway URL across the process,
+        # whose pooled connections break the models of a later event loop
+        http_async_client=openai.DefaultAsyncHttpxClient(),
     )
 
 

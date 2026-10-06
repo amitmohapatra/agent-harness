@@ -131,6 +131,24 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
     assert json.loads(request.content)["model"] == "provider/model"
 
 
+def test_each_gateway_model_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """langchain-openai's default client is one per gateway URL for the whole process: its
+    pooled connections would break a graph run in a later event loop."""
+    import openai
+
+    monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")
+    made: list[httpx.AsyncClient] = []
+
+    def client() -> httpx.AsyncClient:
+        made.append(httpx.AsyncClient())
+        return made[-1]
+
+    monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", client)
+    ReAct(system="s", model="provider/model")
+    ReAct(system="s", model="provider/model")
+    assert len(made) == 2 and made[0] is not made[1]
+
+
 def test_a_model_name_without_the_gateway_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BIFROST_URL", raising=False)
     with pytest.raises(ConfigurationError, match="BIFROST_URL"):

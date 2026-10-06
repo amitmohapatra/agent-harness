@@ -39,7 +39,8 @@ def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
 
     class OnHttpx(langchain_openai.ChatOpenAI):
         def __init__(self, **kwargs: Any) -> None:
-            kwargs.setdefault("http_async_client", httpx.AsyncClient())
+            if not isinstance(kwargs.get("http_async_client"), httpx.AsyncClient):
+                kwargs["http_async_client"] = httpx.AsyncClient()
             super().__init__(**kwargs)
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", OnHttpx)
