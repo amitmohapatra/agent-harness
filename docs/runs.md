@@ -103,7 +103,7 @@ worker — repeats no question and no tool call made before the pause.
 
 **Progress checkpoints: a worker that dies repeats no side effect.** While a worker runs it,
 the run also saves its journal — the tool calls completed and their outputs, the answers it
-was given, and `ReAct`'s model steps — as the run's checkpoint on a heartbeat
+was given, and a `ReAct`'s graph checkpoint — as the run's checkpoint on a heartbeat
 (`POST /v1/runs/{id}/heartbeat {worker_id, lease_seconds, checkpoint}`, which only the lease
 holder may send): at once after every completed call that does more than read (a `write` or
 `irreversible` tool, or one under a catalog rule), and after reads and model steps at most every

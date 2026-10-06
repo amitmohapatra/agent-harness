@@ -1,5 +1,6 @@
-"""``ReAct``: no framework — a tool-calling loop over chat completions, with the answer
-parsed into a pydantic model.
+"""``ReAct``: no framework of your own — LangChain's ``create_agent`` loop with the native
+context middleware and the harness's on top, its answer a pydantic model (structured output:
+offline the scripted model answers through the output's own tool).
 
     .venv/bin/python examples/react_agent.py
 """
@@ -31,11 +32,11 @@ async def main() -> None:
         model = react_model(
             [
                 ("temperature", {"city": "Oslo"}),
-                '{"city": "Oslo", "celsius": 4.0, "advice": "Take a coat."}',
+                ("Forecast", {"city": "Oslo", "celsius": 4.0, "advice": "Take a coat."}),
             ]
         )
         target = ReAct(
-            system="You give weather advice. Use the tool, then answer as JSON.",
+            system="You give weather advice. Use the tool, then answer.",
             model=model,
             output=Forecast,
         )

@@ -46,9 +46,13 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline, sandbox, skills
 from trellis.harness.adapters import detect
-from trellis.harness.adapters.base import FRAMEWORK_OPTIONS, context_window
+from trellis.harness.adapters.base import (
+    FRAMEWORK_OPTIONS,
+    MODEL_METADATA,
+    context_window,
+    metadata_of,
+)
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
-from trellis.harness.adapters.react import ReAct
 from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.evals import (
     EvalCase,
@@ -171,9 +175,11 @@ class Agent:
     @functools.cached_property
     def evals(self) -> EvalServices:
         """What this agent's runs are evaluated with: the harness's services, the judge falling
-        back to a ``ReAct`` target's own model when ``TRELLIS_JUDGE_MODEL`` is unset."""
-        model = self.target.model if isinstance(self.target, ReAct) else None
-        return dataclasses.replace(self.harness.evals, fallback_model=model)
+        back to the gateway model a ``ReAct`` target was named with when
+        ``TRELLIS_JUDGE_MODEL`` is unset."""
+        model = metadata_of(self.target).get(MODEL_METADATA)
+        named = model if isinstance(model, str) else None
+        return dataclasses.replace(self.harness.evals, fallback_model=named)
 
     # ------------------------------------------------------------------ running
     async def run(

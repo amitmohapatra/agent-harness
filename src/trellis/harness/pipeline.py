@@ -482,7 +482,7 @@ async def _unheld(
         or pending is None
         or pending.native_id is None
         or pending.native_state is not None  # a serialised run (OpenAI Agents) travels along
-        or await holds(agent.target, identity.thread or identity.run_id, pending.native_id)
+        or await holds(agent.target, identity.thread or identity.run_id, pending.native_id, journal)
     ):
         return None
     if pending.key in (FOREIGN, HITL):
@@ -501,9 +501,11 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     re-run will ask for it (or left to the framework, when it resumes from its own state)."""
     pending = journal.pending
     if resolution is not None and pending is not None:
-        if pending.native_id or pending.native_state:
+        if pending.native_state:
             journal.pending = None
         else:
+            # a checkpointed graph is handed it by its framework too; filed here, a later
+            # question in the same call knows it was this one's (``Runtime.interrupt``)
             journal.answered(resolution)
     return Replay(journal)
 
@@ -561,8 +563,11 @@ def _pause(
     native = extracted.pause if extracted is not None else None
     if runtime.pending is not None:
         if native is not None:
+            # the framework's handle of this pause (calls made at once may each have asked)
+            ids = native.ids or {}
+            native_id = ids.get(runtime.pending.interrupt.interrupt_id, native.native_id)
             return runtime.pending.model_copy(
-                update={"native_id": native.native_id, "native_state": native.state}
+                update={"native_id": native_id, "native_state": native.state}
             )
         return runtime.pending
     if native is None:

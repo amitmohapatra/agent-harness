@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from tests.live.conftest import MODEL, WIKI_TOOL, live_harness, needs_gateway
 from trellis import Deny, Hooks, ModelCall, ReAct, Rewrite, Runtime
@@ -71,7 +72,8 @@ class Steering(Hooks):
     async def before_model(self, call: ModelCall) -> ModelCall:
         self.calls.append(call)
         messages = [
-            {**m, "content": PROMPT} if m.get("role") == "user" else m for m in call.messages
+            m.model_copy(update={"content": PROMPT}) if isinstance(m, HumanMessage) else m
+            for m in call.messages
         ]
         return dataclasses.replace(call, messages=messages)
 
@@ -88,8 +90,8 @@ async def test_react_model_calls_through_the_gateway_go_through_the_hooks() -> N
         result = await agent.run("Tell me a long story about dragons.", user="live-user")
     assert result.status is RunStatus.SUCCESS, result.error
     assert steering.calls and len(steering.replies) == len(steering.calls)
-    assert all(c.framework == "react" and c.model == MODEL for c in steering.calls)
+    assert all(c.framework == "langgraph" and c.model == MODEL for c in steering.calls)
     for sent, reply in steering.replies:  # what the model was sent, and what came back
-        assert all(m["content"] == PROMPT for m in sent.messages if m.get("role") == "user")
-        assert reply["choices"][0]["message"]
+        assert all(m.content == PROMPT for m in sent.messages if isinstance(m, HumanMessage))
+        assert isinstance(reply.result[-1], AIMessage)
     assert isinstance(result.answer, str) and result.answer

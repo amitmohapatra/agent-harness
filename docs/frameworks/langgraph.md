@@ -71,7 +71,7 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 | Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
 | Tool hints | the context is asked for with the toolbox's names (5 or more); the graph's bound tools are not narrowed (`narrows="none"`) |
 | Grounding, judges | sampled successful runs with an answer ([evaluation.md](../evaluation.md)) |
-| Hooks | the tool and run hooks as for every target; the model hooks through LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[ModelHooks()])` (`from trellis.harness.hooks.langchain import ModelHooks`; a `before_model` call is the request made) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
+| Hooks | the tool and run hooks as for every target; the model hooks through LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[ModelHooks()])` (`from trellis.harness.middleware import ModelHooks`; a `before_model` call is the request made; the other harness middleware — the run's tools per model call, a step limit, stall detection, the checkpoint in the run — is in [react.md](react.md#the-middleware)) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per harness call, `retrieve memory`; LangChain's own instrumentation nests under it |
 
 The answer is the state's `structured_response` (a `response_format`) or the last AI message's
@@ -194,8 +194,12 @@ versions pinned per run. `sandbox()` governs and journals every command
   one is an error the model reads ("off in this run").
 * A tool call whose arguments the chat model could not parse (`AIMessage.invalid_tool_calls`,
   as langchain-openai reports broken JSON) is not a call to `create_agent` (or Deep Agents):
-  the run ends on that message, and the model is told nothing (OpenAI Agents and `ReAct` tell
-  it, and it calls again).
+  the run ends on that message, and the model is told nothing — unless the graph has the
+  harness's `ModelHooks()` middleware (as `ReAct` does): it answers each such call ("`<tool>`
+  was not run: its arguments are not valid JSON (...). Call it again with arguments that fit
+  its schema."), asks the model again, and sends the broken arguments back as `{}` (a strict
+  server refuses a history that holds them). Streamed, LangChain reads broken JSON leniently
+  (`{}`, or what it could parse), and the tool's schema check answers the call instead.
 * A custom state without `messages` gets no context message: read `trellis.current().context`.
 * An `InMemorySaver` pause resumes in place only in the process that paused; elsewhere a
   harness pause is a re-run from the journal and a graph's own pause fails (above).

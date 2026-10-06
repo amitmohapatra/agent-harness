@@ -19,12 +19,13 @@ from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from tests.support.adapters import BUILDERS
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call, PlannedChat, PlannedChatModel, PlannedModel
 from trellis import Ask, Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, Runtime, Settings, tool
 from trellis.contracts import ModelError, RunEventType, RunStatus, ToolCall, ToolOutcome
 from trellis.harness.governance import Decision, Denied, Governance, governed
-from trellis.harness.hooks.langchain import ModelHooks as Middleware
 from trellis.harness.hooks.openai_agents import ModelHooks as RunHooks
+from trellis.harness.middleware import ModelHooks as Middleware
 from trellis.harness.result import Result
 
 paid: list[int] = []
@@ -251,16 +252,16 @@ async def test_react_model_calls_go_through_the_hooks(harness: Harness) -> None:
     agent = harness.wrap(ReAct(system="s", model=model), id="r", tools=[quote], hooks=[hooks])
     result = await agent.run("card 4111: quote A", user="u")
     assert result.answer == "Done. A costs 7"
-    assert [c.framework for c in hooks.calls] == ["react", "react"]
-    assert hooks.calls[0].model == "PlannedChat" and len(hooks.replies) == 2
+    assert [c.framework for c in hooks.calls] == ["langgraph", "langgraph"]
+    assert hooks.calls[0].model == "scripted" and len(hooks.replies) == 2
     sent = model.said()
     assert "****" in sent and "4111" not in sent  # the model never read the card
 
-    class Failing:
-        async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+    class Failing(ScriptedChatModel):
+        async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
             raise ConnectionError("the model is down")
 
-    failing = harness.wrap(ReAct(system="s", model=Failing()), id="down", hooks=[hooks])
+    failing = harness.wrap(ReAct(system="s", model=Failing(turns=[])), id="down", hooks=[hooks])
     assert (await failing.run("q", user="u")).status is RunStatus.ERROR
     assert hooks.errors[-2:] == [("model", "ConnectionError"), ("run", "ConnectionError")]
 
@@ -268,13 +269,13 @@ async def test_react_model_calls_go_through_the_hooks(harness: Harness) -> None:
 async def test_a_react_model_call_out_of_time_is_a_model_error_the_hooks_see(
     harness: Harness,
 ) -> None:
-    class Slow:
-        async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+    class Slow(ScriptedChatModel):
+        async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
             await asyncio.sleep(5)
-            return {}
+            raise AssertionError("never")
 
     hooks = Redacting()
-    target = ReAct(system="s", model=Slow(), model_timeout=0.01)
+    target = ReAct(system="s", model=Slow(turns=[]), model_timeout=0.01)
     result = await harness.wrap(target, id="slow", hooks=[hooks]).run("q", user="u")
     assert result.status is RunStatus.ERROR
     assert hooks.errors[0] == ("model", ModelError.__name__)

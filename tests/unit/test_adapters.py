@@ -49,7 +49,7 @@ from trellis.harness.adapters.openai_agents import (
     _arguments,
     _Continue,
 )
-from trellis.harness.adapters.react import ReAct, ReActAdapter, ReActResult, _unfenced
+from trellis.harness.evals import _unfenced
 from trellis.harness.journal import Journal, Pending
 
 # --------------------------------------------------------------------------- the query
@@ -372,50 +372,23 @@ def test_each_harness_decision_is_one_middleware_decision_per_call() -> None:
         hitl_response(only_b, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
 
 
-# --------------------------------------------------------------------------- ReAct
+# --------------------------------------------------------------------------- judge replies
+def test_a_reply_without_a_message_is_a_model_error() -> None:
+    from trellis.contracts import ModelError
+    from trellis.harness.evals import _message
 
-
-def test_react_puts_its_system_prompt_and_the_context_first() -> None:
-    adapter = ReActAdapter()
-    target = ReAct(system="You help.", model="m")
-    listed = adapter.prepare_input(target, [{"role": "user", "content": "hi"}], "ctx")
-    assert listed[0] == {"role": "system", "content": "You help.\n\nctx"}
-    structured = adapter.prepare_input(target, {"n": 1}, None)
-    assert structured[1] == {"role": "user", "content": '{"n": 1}'}
-    pending = _pending()
-    answer = InterruptResolution(
-        interrupt_id="run_1.1.1", run_id="run_1", decision=InterruptDecision.ANSWER
-    )
-    assert adapter.resume_input(target, listed, pending, answer) is listed
-
-
-async def test_a_reply_without_a_message_is_a_model_error(harness: Any) -> None:
-    class Broken:
-        async def complete(self, messages: Any, **body: Any) -> dict[str, Any]:
-            return {"choices": []}
-
-    result = await harness.wrap(ReAct(system="s", model=Broken()), id="broken").run("q", user="u")
-    assert result.error is not None and "returned no message" in result.error.message
+    with pytest.raises(ModelError, match="returned no message"):
+        _message({"choices": []})
+    assert _message({"choices": [{"message": {"content": "hi", "tool_calls": None}}]}) == {
+        "content": "hi",
+        "role": "assistant",
+    }
 
 
 def test_a_fenced_json_answer_is_unfenced() -> None:
     assert _unfenced('```json\n{"n": 1}\n```') == '{"n": 1}'
     assert _unfenced("```") == ""
     assert _unfenced(' {"n": 1} ') == '{"n": 1}'
-
-
-def test_react_extracts_the_assistant_text_as_its_transcript() -> None:
-    result = ReActResult(
-        messages=[
-            {"role": "system", "content": "s"},
-            {"role": "assistant", "tool_calls": []},
-            {"role": "assistant", "content": "done"},
-        ],
-        answer="done",
-    )
-    assert ReActAdapter().extract(ReAct(system="s", model="m"), result).transcript == [
-        ("assistant", "done")
-    ]
 
 
 def test_the_context_window_is_read_where_a_target_says_it() -> None:
@@ -428,8 +401,11 @@ def test_the_context_window_is_read_where_a_target_says_it() -> None:
     assert context_window(SimpleNamespace(model=SimpleNamespace(max_input_tokens=32_000))) == 32_000
     profiled = SimpleNamespace(model=SimpleNamespace(profile={"max_input_tokens": 1_000_000}))
     assert context_window(profiled) == 1_000_000
-    assert context_window(SimpleNamespace(model="gpt-x", context_window=True)) is None
+    assert context_window(SimpleNamespace(model="provider/x", context_window=True)) is None
     assert context_window(object()) is None
+    stamped = SimpleNamespace(config={"metadata": {"trellis_context_window": 64_000}})
+    assert context_window(stamped) == 64_000  # what ReAct(...) says of its graph
+    assert context_window(SimpleNamespace(config={"metadata": None})) is None
     assert context_budget(None) == 2000
     assert context_budget(8_000) == 2000  # never less than the default
     assert context_budget(1_000_000) == 8000  # never more than the cap

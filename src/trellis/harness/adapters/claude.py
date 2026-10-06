@@ -88,9 +88,9 @@ class ClaudeRunError(RuntimeError):
 
 class ClaudeAdapter:
     name: ClassVar[str] = "claude_agent_sdk"
-    tool_format: ClassVar[ToolFormat] = "claude"
-    fixed_tools: ClassVar[bool] = False
-    narrows: ClassVar[Narrowing] = "run"
+    tool_format: ToolFormat = "claude"
+    fixed_tools: bool = False
+    narrows: Narrowing = "run"
 
     def keeps_conversation(self, target: Any) -> bool:
         return False

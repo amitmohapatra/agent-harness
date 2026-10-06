@@ -9,9 +9,9 @@ Spans (every attribute passes the redactor first):
   tenant, framework, attempt), and the run's input and output;
 * ``execute_tool <tool>`` — one per tool call (``gen_ai.tool.name``, ``gen_ai.tool.call.id``,
   ``gen_ai.tool.call.arguments``/``.result``);
-* ``chat <model>`` — one per model call the harness makes itself (the ``ReAct`` target:
-  ``gen_ai.request.model``, ``gen_ai.usage.input_tokens``/``output_tokens``...); a framework's
-  own model calls are its instrumentation's;
+* ``chat <model>`` — one per model call of a graph with ``middleware.ModelHooks`` (a
+  ``ReAct``'s: ``gen_ai.request.model``, ``gen_ai.usage.input_tokens``/``output_tokens``...);
+  a framework's other model calls are its instrumentation's;
 * ``retrieve memory`` — the pushed context;
 * ``score <name>`` — a grounding score, an evaluator's or a person's feedback, in the run's trace
   (or the trace a score names: a trace the team's own tracing made).
@@ -469,30 +469,45 @@ def output(span: trace.Span, value: Any, *, key: str = "langfuse.observation.out
         span.set_attributes(redact_attributes({key: _text(value)}))
 
 
-def usage(span: trace.Span, response: Mapping[str, Any]) -> None:
-    """A chat-completions response's model, usage and finish reasons, as GenAI attributes."""
+def usage(
+    span: trace.Span,
+    *,
+    model: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    finish_reasons: list[str],
+) -> None:
+    """A model reply's model, usage and finish reasons, as GenAI attributes."""
     if not span.is_recording():
         return
-    found: dict[str, Any] = {"gen_ai.response.model": response.get("model")}
-    counts = response.get("usage") or {}
-    found["gen_ai.usage.input_tokens"] = counts.get("prompt_tokens")
-    found["gen_ai.usage.output_tokens"] = counts.get("completion_tokens")
-    reasons = [c.get("finish_reason") for c in response.get("choices") or [] if c]
-    found["gen_ai.response.finish_reasons"] = [r for r in reasons if r]
+    found: dict[str, Any] = {
+        "gen_ai.response.model": model,
+        "gen_ai.usage.input_tokens": input_tokens,
+        "gen_ai.usage.output_tokens": output_tokens,
+        "gen_ai.response.finish_reasons": finish_reasons,
+    }
     span.set_attributes(redact_attributes({k: v for k, v in found.items() if v not in (None, [])}))
 
 
 def score_span(
-    trace_id: str, name: str, value: float | str, comment: str | None, *, run_id: str | None = None
+    trace_id: str,
+    name: str,
+    value: float | str,
+    comment: str | None,
+    *,
+    run_id: str | None = None,
+    model: str | None = None,
 ) -> None:
     """A score as a span in the trace ``trace_id`` (32 hex characters: a run's is
-    :func:`trace_hex`) — what every OTLP backend receives."""
+    :func:`trace_hex`) — what every OTLP backend receives; ``model``: the model that gave it
+    (a judge's)."""
     attributes = {
         "langfuse.observation.type": "evaluator",
         "trellis.run_id": run_id,
         "trellis.score.name": name,
         "trellis.score.value": value,
         "trellis.score.comment": comment,
+        "trellis.score.model": model,
     }
     parent = _parent(int(trace_id, 16), f"{run_id or trace_id}:root")
     with _tracer.start_as_current_span(

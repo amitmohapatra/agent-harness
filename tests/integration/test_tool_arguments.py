@@ -4,12 +4,13 @@ model reads (the call is not run), then the call made again, and the run goes on
 
 LangChain's agents (``create_agent``, Deep Agents) parse the arguments in the chat model
 (``AIMessage.invalid_tool_calls``) and end the run on a message whose calls all failed to
-parse, without a word to the model: theirs is marked, not hidden (``xfail``)."""
+parse, without a word to the model: the harness's middleware (``ModelHooks``, which a graph is
+given for its model hooks, and ``ReAct`` has) answers them and asks the model again."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from agents import Agent, function_tool
@@ -23,6 +24,7 @@ from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness.middleware import ModelHooks
 from trellis.harness.tools.convert.openai_agents import FIX_ARGUMENTS, arguments_of
 
 ran: list[str] = []
@@ -60,6 +62,11 @@ class _Openai:
 
 
 class _React:
+    #: streamed, LangChain reads the chunks of broken JSON leniently (``parse_partial_json``:
+    #: ``{}``), so the call reaches the harness, whose schema check refuses it (on the stream);
+    #: run, it is told what the JSON is (``test_react.py``)
+    streamed: ClassVar[dict[str, str]] = {"not json": "missing required argument(s): sku"}
+
     def __init__(self, raw: str) -> None:
         function = {"name": "stock", "arguments": raw}
         broken = {
@@ -111,22 +118,23 @@ class _LangChain:
 
 
 def _langgraph(raw: str) -> _LangChain:
-    return _LangChain(raw, lambda model, tools: create_agent(model, tools=tools))
+    return _LangChain(
+        raw, lambda model, tools: create_agent(model, tools=tools, middleware=[ModelHooks()])
+    )
 
 
 def _deepagents(raw: str) -> _LangChain:
-    return _LangChain(raw, lambda model, tools: create_deep_agent(model=model, tools=tools))
+    return _LangChain(
+        raw,
+        lambda model, tools: create_deep_agent(model=model, tools=tools, middleware=[ModelHooks()]),
+    )
 
 
-LANGCHAIN = pytest.mark.xfail(
-    strict=True,
-    reason="LangChain ends the run on calls it could not parse, telling the model nothing",
-)
 ADAPTERS = [
     pytest.param(_Openai, id="openai_agents"),
     pytest.param(_React, id="react"),
-    pytest.param(_langgraph, id="langgraph", marks=LANGCHAIN),
-    pytest.param(_deepagents, id="deepagents", marks=LANGCHAIN),
+    pytest.param(_langgraph, id="langgraph"),
+    pytest.param(_deepagents, id="deepagents"),
 ]
 
 
@@ -137,6 +145,8 @@ async def test_arguments_that_are_not_an_object_are_an_error_the_model_reads(
 ) -> None:
     raw, problem = BROKEN[broken]
     case = adapter(raw)
+    refused = broken in getattr(case, "streamed", {})
+    problem = getattr(case, "streamed", {}).get(broken, problem)
     target, tools = await case.target(harness)
     events = [
         e async for e in harness.wrap(target, id="args", tools=tools).stream("A-1?", user="u")
@@ -148,7 +158,7 @@ async def test_arguments_that_are_not_an_object_are_an_error_the_model_reads(
     assert ran == ["A-1"]  # the broken call never ran; the one made again did
     # only the call that ran is on the run's stream
     started = [e for e in events if e.type is RunEventType.TOOL_CALL_START]
-    assert [e.data["tool"] for e in started] == ["stock"]
+    assert [e.data["tool"] for e in started] == ["stock"] * (2 if refused else 1)
 
 
 def test_the_arguments_of_a_call_are_an_object_or_what_is_wrong_with_them() -> None:

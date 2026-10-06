@@ -483,7 +483,7 @@ async def model_hooks(w: World) -> None:
     from langchain_core.tools import tool as langchain_tool
 
     from tests.support.planned import PlannedChatModel
-    from trellis.harness.hooks.langchain import ModelHooks
+    from trellis.harness.middleware import ModelHooks
 
     seen: list[str] = []
 

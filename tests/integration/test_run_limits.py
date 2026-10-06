@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 
 from tests.support.adapters import BUILDERS
-from tests.support.models import ScriptedChat
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import (
@@ -230,24 +230,24 @@ async def test_a_call_may_take_what_is_left_of_its_own_time_and_the_runs(
 # --------------------------------------------------------------------------- model calls
 
 
-class Slow(ScriptedChat):
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+class Slow(ScriptedChatModel):
+    async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
         await asyncio.sleep(5)
-        return await super().complete(messages, **body)
+        raise AssertionError("never")
 
 
-class GivesUp(ScriptedChat):
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+class GivesUp(ScriptedChatModel):
+    async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
         raise TimeoutError("the model's own client gave up")
 
 
 async def test_a_model_call_past_its_timeout_fails_the_run_retryably(harness: Harness) -> None:
-    agent = harness.wrap(ReAct(system="s", model=Slow(["hi"]), model_timeout=0.05), id="slow")
+    agent = harness.wrap(ReAct(system="s", model=Slow(turns=[]), model_timeout=0.05), id="slow")
     result = await agent.run("q", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert result.error.code == "MODEL_ERROR" and result.error.retryable
     assert result.error.message == "the model did not answer within 0.05s"
-    gives_up = harness.wrap(ReAct(system="s", model=GivesUp([])), id="gives-up")
+    gives_up = harness.wrap(ReAct(system="s", model=GivesUp(turns=[])), id="gives-up")
     failed = await gives_up.run("q", user="u")
     assert failed.error is not None and failed.error.message == "the model did not answer"
 

@@ -17,8 +17,8 @@ feature is off until an agent names it (`prompt=`, `skills=`, `mcp=`).
 
 ## What the gateway never does for a run
 
-**Automatic.** Every model call the harness makes (`ReAct`, the judge) goes through
-bifrost-sdk, which sends the gateway's deny-all MCP scope (`x-bf-mcp-include-clients` and
+**Automatic.** Every model call the harness makes (a `ReAct` built with a model name, the
+judge) sends the gateway's deny-all MCP scope (`x-bf-mcp-include-clients` and
 `x-bf-mcp-include-tools`, empty): the gateway adds none of the key's MCP tools to the request
 and runs none itself (Agent Mode). A framework's own model client pointed at the gateway gets
 the same headers from `await h.model_headers()`:

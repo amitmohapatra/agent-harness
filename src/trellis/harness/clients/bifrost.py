@@ -1,5 +1,5 @@
 """The Bifrost gateway, as the harness uses it: MCP tools (normal, Code Mode, and through a
-Virtual MCP), their execution log, chat completions for the ``ReAct`` target and the LLM judge,
+Virtual MCP), their execution log, chat completions for the LLM judge,
 and the gateway's repositories of stored prompts and Agent Skills.
 
 Agent Mode (the gateway running tools itself) is never used: every call comes back to the

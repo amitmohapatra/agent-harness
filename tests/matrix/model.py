@@ -17,17 +17,17 @@ if TYPE_CHECKING:
 
 #: The targets, as the adapters name themselves (``claude`` is the Claude Agent SDK).
 ADAPTERS: Final = ("react", "function", "langgraph", "deepagents", "openai_agents", "claude")
-#: Way 1 (``h.wrap`` on a deployment), Way 2 (the blocks, no Harness), ReAct with the team's
+#: Way 1 (``h.wrap`` on a deployment), Way 2 (the blocks, no Harness), with blocks: the team's
 #: own blocks (``Harness(runs=, memory=, gateway=, governance=).wrap(ReAct(...))`` and its own
-#: worker around ``agent.execute``).
-WAYS: Final = ("way1", "way2", "react_with_blocks")
+#: worker around ``agent.execute``; ReAct only, so far).
+WAYS: Final = ("way1", "way2", "with_blocks")
 #: How a run is driven: ``run``; ``stream``; ``worker`` (``start`` + a worker); ``elsewhere``
 #: (queued, paused, resumed and continued by another process's worker on the same run store);
 #: ``schedule`` (a schedule fires it, a worker runs it); ``agui`` (``serve_chat``); ``a2a``
 #: (``serve_a2a``).
 MODES: Final = ("run", "stream", "worker", "elsewhere", "schedule", "agui", "a2a")
 
-Way = Literal["way1", "way2", "react_with_blocks"]
+Way = Literal["way1", "way2", "with_blocks"]
 
 
 @dataclass(frozen=True, slots=True)

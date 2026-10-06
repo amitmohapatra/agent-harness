@@ -2160,6 +2160,7 @@ all = [
     { name = "fastapi" },
     { name = "langchain" },
     { name = "langchain-core" },
+    { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "openai-agents" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -2186,6 +2187,13 @@ otel = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
 ]
+react = [
+    { name = "deepagents" },
+    { name = "langchain" },
+    { name = "langchain-core" },
+    { name = "langchain-openai" },
+    { name = "langgraph" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -2209,11 +2217,13 @@ requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude-agent-sdk'", specifier = ">=0.2.160,<0.3" },
     { name = "croniter", specifier = ">=6" },
     { name = "deepagents", marker = "extra == 'deepagents'", specifier = ">=0.7.19,<0.8" },
+    { name = "deepagents", marker = "extra == 'react'", specifier = ">=0.7.19,<0.8" },
     { name = "fastapi", marker = "extra == 'a2a'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'agui'", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "langchain", marker = "extra == 'langgraph'", specifier = ">=1.4,<2" },
     { name = "langchain-core", marker = "extra == 'langgraph'", specifier = ">=1.6,<2" },
+    { name = "langchain-openai", marker = "extra == 'react'", specifier = ">=1.0" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.2,<2" },
     { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.22.3,<0.23" },
     { name = "opentelemetry-api", specifier = ">=1.44" },
@@ -2222,11 +2232,12 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "trellis-contracts", editable = "../agent-contracts" },
     { name = "trellis-harness", extras = ["langgraph"], marker = "extra == 'deepagents'" },
-    { name = "trellis-harness", extras = ["langgraph", "deepagents", "openai-agents", "claude-agent-sdk", "agui", "a2a", "otel"], marker = "extra == 'all'" },
+    { name = "trellis-harness", extras = ["langgraph"], marker = "extra == 'react'" },
+    { name = "trellis-harness", extras = ["langgraph", "deepagents", "react", "openai-agents", "claude-agent-sdk", "agui", "a2a", "otel"], marker = "extra == 'all'" },
     { name = "trellis-memory", editable = "../agent-memory-service/sdk/python" },
     { name = "trellis-runs", editable = "../agent-runs/sdk/python" },
 ]
-provides-extras = ["langgraph", "deepagents", "openai-agents", "claude-agent-sdk", "agui", "a2a", "otel", "all"]
+provides-extras = ["langgraph", "deepagents", "react", "openai-agents", "claude-agent-sdk", "agui", "a2a", "otel", "all"]
 
 [package.metadata.requires-dev]
 dev = [

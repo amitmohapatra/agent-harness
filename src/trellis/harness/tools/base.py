@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -32,6 +33,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness.features import Feature
 
 SideEffects = Literal["read", "write", "irreversible"]
@@ -146,6 +148,8 @@ async def execute(
         async with within or asyncio.timeout(tool.timeout):
             output = await retried(once, retries=retries_of(tool.spec, reads=reads))
     except Exception as exc:
+        if is_pause_signal(exc):  # it asked a person: the caller lets it through
+            return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
         if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
             failed = ToolOutcome(
                 tool=tool.name,
@@ -179,7 +183,7 @@ async def retried(call: Callable[[], Awaitable[Any]], *, retries: int) -> Any:
         try:
             return await call()
         except Exception as exc:
-            if attempt == retries or not AgentError.of(exc).retryable:
+            if attempt == retries or is_pause_signal(exc) or not AgentError.of(exc).retryable:
                 raise
         await asyncio.sleep(random.uniform(0, RETRY_BACKOFF_SECONDS * 2**attempt))
         attempt += 1
@@ -215,11 +219,31 @@ def interrupted(tool: str) -> str:
     )
 
 
+#: What the model is told after the arguments of its call could not be used.
+FIX_ARGUMENTS: Final = "Call it again with arguments that fit its schema."
+
+
+def not_run(tool: str, problem: str) -> str:
+    """What the model reads about a call that was not run for its arguments' ``problem``."""
+    return f"{tool} was not run: {problem}. {FIX_ARGUMENTS}"
+
+
+def arguments_of(raw: str | None) -> dict[str, Any] | str:
+    """The arguments of a call, from the text the model wrote, as an object — or what is wrong
+    with them."""
+    try:
+        args = json.loads(raw) if raw else {}
+    except ValueError as exc:
+        return f"its arguments are not valid JSON ({exc})"
+    return args if isinstance(args, dict) else "its arguments must be a JSON object"
+
+
 def arguments_problem(schema: dict[str, Any], args: dict[str, Any]) -> str | None:
     """Why ``args`` do not fit a tool's input ``schema``, or ``None``: a light check — required
     fields, the basic types of the declared ones, unknown fields where none are allowed; the
-    tool itself validates the rest (a local tool through pydantic). What a model's call is
-    checked with (``ReAct``), and a reviewer's edited arguments (``Agent.resume``)."""
+    tool itself validates the rest (a local tool through pydantic). What every call is checked
+    with before it runs (``tools.bridge``), and a reviewer's edited arguments
+    (``Agent.resume``)."""
     missing = [name for name in schema.get("required") or [] if name not in args]
     if missing:
         return f"missing required argument(s): {', '.join(missing)}"

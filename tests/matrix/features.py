@@ -59,9 +59,12 @@ from trellis.harness.tools.base import Tool
 
 # --------------------------------------------------------------------------- not applicable
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
-ONLY_REACT: Final = NA(
-    "the harness's own model loop (ReAct); the framework's own does this natively"
+#: What a LangChain graph is built with natively (ReAct's defaults), when it wants it.
+NATIVE_CONTEXT: Final = NA(
+    "native: ContextEditingMiddleware and Deep Agents' summarization, which ReAct is built "
+    "with (Deep Agents has its summarization by default; add them to create_agent)"
 )
+OWN_CONTEXT: Final = NA("the framework keeps its own context (its compaction, its trimming)")
 ONE_CALL_AT_A_TIME: Final = NA(
     "the scripted Claude CLI calls one tool at a time (the real CLI's concurrency is unverified)"
 )
@@ -339,8 +342,8 @@ async def parallel_writes(w: World) -> None:
 # --------------------------------------------------------------------------- context
 async def large_result(w: World) -> None:
     d = Desk()
-    o = (await w.go([d.report(30_000)], [("report", {"name": "q3"})])).succeeded()
-    assert "read_result" in o.text, f"the model read all {len(o.text)} characters"
+    o = (await w.go([d.report(100_000)], [("report", {"name": "q3"})])).succeeded()
+    assert "/large_tool_results/" in o.text, f"the model read all {len(o.text)} characters"
     assert len(o.text) < 25_000
 
 
@@ -349,12 +352,12 @@ async def context_management(w: World) -> None:
 
     async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
         model = PlannedChat(plan)
-        return ReAct(system="You read.", model=model, context_window=900), tools
+        return ReAct(system="You read.", model=model, context_window=6000), tools
 
-    plan: list[Call] = [("report", {"name": f"r{n}"}) for n in range(4)]
-    o = (await w.go([d.report(600)], plan, target=target)).succeeded()
+    plan: list[Call] = [("report", {"name": f"r{n}"}) for n in range(6)]
+    o = (await w.go([d.report(2000)], plan, target=target)).succeeded()
     assert "result cleared to keep the context small" in w.said(), "nothing was cleared"
-    assert len(d.ran("report")) == 4 and o.answer.startswith("Done. ")
+    assert len(d.ran("report")) == 6 and o.answer.startswith("Done. ")
 
 
 # --------------------------------------------------------------------------- memory
@@ -504,6 +507,7 @@ async def prompts(w: World) -> None:
 
         async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
             w.fake_gateway.chat = PlannedChat(plan)
+            w.fake_gateway.serve_models(w.monkeypatch)
             return ReAct(system="Tickets.", model="local/small", prompt="triage"), tools
 
         o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})], target=target)).succeeded()
@@ -875,24 +879,32 @@ FEATURES: Final[list[Feature]] = [
         adapters={
             "function": NA("a function target runs its own calls"),
             "claude": ONE_CALL_AT_A_TIME,
-            "langgraph": NA("native: the framework runs a turn's calls its own way (N3)"),
-            "deepagents": NA("native: the framework runs a turn's calls its own way (N3)"),
+            "langgraph": NA(
+                "native: the graph runs a turn's calls its own way (N3); HarnessTools orders "
+                "the writes (ReAct has it)"
+            ),
+            "deepagents": NA(
+                "native: the graph runs a turn's calls its own way (N3); HarnessTools orders "
+                "the writes (ReAct has it)"
+            ),
             "openai_agents": NA("native: the framework runs a turn's calls its own way (N3)"),
         },
         way2=NA("your framework runs its calls"),
     ),
     Feature(
         "F26",
-        "large results: head and tail kept, the rest read with read_result",
+        "large results: saved as a file, a head-and-tail preview read in pages (read_file)",
         "F26",
-        "automatic (max_result_chars)",
+        "automatic: Deep Agents' FilesystemMiddleware (ReAct's, Deep Agents' by default)",
         large_result,
         adapters={
             "function": NA("a function target gets the whole result: it has no context to fill"),
-            "langgraph": Gap("G8", "only ReAct cuts large results"),
-            "deepagents": Gap("G8", "only ReAct cuts large results"),
-            "openai_agents": Gap("G8", "only ReAct cuts large results"),
-            "claude": Gap("G8", "only ReAct cuts large results"),
+            "langgraph": NA(
+                "native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct "
+                "and Deep Agents have it by default)"
+            ),
+            "openai_agents": Gap("G8", "nothing cuts a large result before the model reads it"),
+            "claude": Gap("G8", "nothing cuts a large result before the model reads it"),
         },
         way2=way2.proposed("trellis.harness.blocks", "bounded"),
         way2_gap=Gap("G8", "no cut-and-keep block"),
@@ -901,12 +913,16 @@ FEATURES: Final[list[Feature]] = [
         "F65",
         "context management: older results cleared past the window's share",
         "F65",
-        "automatic (context_window=)",
+        "automatic in ReAct (native ContextEditingMiddleware, sized from context_window=)",
         context_management,
-        adapters=dict.fromkeys(
-            ("function", "langgraph", "deepagents", "openai_agents", "claude"), ONLY_REACT
-        ),
-        way2=NA("ReAct-only by design"),
+        adapters={
+            "function": NA("a function target has no model context"),
+            "langgraph": NATIVE_CONTEXT,
+            "deepagents": NATIVE_CONTEXT,
+            "openai_agents": OWN_CONTEXT,
+            "claude": OWN_CONTEXT,
+        },
+        way2=NA("native middleware: a graph is built with it"),
     ),
     Feature(
         "F41",
@@ -1204,7 +1220,7 @@ async def hook_models(w: World) -> None:
     d, guard = Desk(), _Guard()
 
     async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
-        from trellis.harness.hooks.langchain import ModelHooks
+        from trellis.harness.middleware import ModelHooks
 
         native = await h.tools(*tools, framework=w.adapter)  # type: ignore[arg-type]
         model = PlannedChatModel(plan=plan)
@@ -1253,12 +1269,14 @@ async def run_options_without(w: World) -> None:
 #: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
 #: what its error says), and set far above it.
 TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
+    "react": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
     "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
 }
 ROOMY: Final[dict[str, dict[str, Any]]] = {
+    "react": {"recursion_limit": 50},
     "langgraph": {"recursion_limit": 50},
     "deepagents": {"recursion_limit": 50},
     "openai_agents": {"max_turns": 20},
@@ -1400,7 +1418,7 @@ FEATURES.extend(
             "F71m",
             "hooks: before_model / after_model around every model call",
             "F71 (W6)",
-            "hooks=; LangChain: create_agent(middleware=[ModelHooks()]); OpenAI: automatic",
+            "hooks=; LangChain: middleware=[ModelHooks()] (ReAct's own); OpenAI: automatic",
             hook_models,
             adapters={"function": NO_MODEL_HOOKS, "claude": NO_MODEL_HOOKS},
             way2=way2.model_hooks,
@@ -1439,10 +1457,7 @@ FEATURES.extend(
             "F70 (G13)",
             "h.wrap(framework_options=) / agent.run(..., framework_options=)",
             framework_options,
-            adapters={
-                "function": NA("no framework run call: framework_options= is refused"),
-                "react": NA("the harness runs ReAct's loop: framework_options= is refused"),
-            },
+            adapters={"function": NA("no framework run call: framework_options= is refused")},
             way2=NA("Way 2 calls the framework itself, with its own options"),
         ),
         Feature(
@@ -1452,7 +1467,7 @@ FEATURES.extend(
             "tools=[sandbox(provider)] (h.tools for a graph); SANDBOX=docker",
             sandboxed,
             way2=NA(
-                "sandbox tools are harness tools: they run in a harness run (Way 1, ReAct with blocks)"
+                "sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)"
             ),
         ),
     ]

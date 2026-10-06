@@ -19,10 +19,11 @@ from tests.unit.test_toolbox import Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunStatus
+from trellis.harness import middleware
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.evals import EvalCase, EvalScore
 from trellis.harness.features import features
-from trellis.harness.hooks.langchain import ModelHooks
+from trellis.harness.middleware import ModelHooks
 from trellis.harness.skills import LOAD_SKILL, Skills
 
 #: The calls through which a run reaches the memory service.
@@ -239,7 +240,8 @@ async def test_a_graph_with_the_middleware_is_offered_only_the_tools_its_run_use
         pulled = h.wrap(graph, id="unpulled", without={"memory_pull"})
         assert (await pulled.run("A-1?", user="u")).answer == "Done. A-1: 7"
         assert model.offered[-1] == ["stock"]
-        await ModelHooks().awrap_model_call(cast("Any", Tools([])), _offered_to)  # no run: as is
+        request = cast("Any", Tools([]))
+        assert middleware._offered(request, None) is request  # no run: as is
 
 
 class Tools:
@@ -248,11 +250,6 @@ class Tools:
     def __init__(self, tools: list[Any]) -> None:
         self.tools = tools
         self.messages: list[Any] = []
-
-
-async def _offered_to(request: Any) -> Any:
-    assert request.tools == []
-    return "reply"
 
 
 async def test_a_runs_own_without_adds_to_the_agents_and_holds_across_a_resume(

@@ -276,7 +276,7 @@ async def test_feedback_with_memory_off_is_only_a_score(
     result = await harness.wrap(echo, id="echo").run("q", user="u")
     assert await harness.feedback(result.run_id, "edit", correction={"fixed": True}) is None
     trace = telemetry.trace_hex(result.run_id)
-    run = {"run_id": result.run_id}
+    run = {"run_id": result.run_id, "model": None}
     assert scored == [(trace, "feedback", 0.5, "{'fixed': True}", run)]
 
 

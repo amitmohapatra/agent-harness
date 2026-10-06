@@ -32,8 +32,8 @@ from tests.matrix.model import (
 
 #: Why a way does not apply to an adapter (whatever the feature).
 NOT_BLOCKS: Final = NA(
-    "ReAct with blocks is ReAct's way; another target with the team's blocks is Way 1 "
-    "(Harness(runs=, memory=, gateway=, governance=))"
+    "the team's own blocks (Harness(runs=, memory=, gateway=, governance=)) are composed "
+    "around a ReAct here; another target composed the same way is the same harness code"
 )
 WAY2_ADAPTER: Final = NA(
     "a block is framework-neutral (your code calls it whatever the framework): run once as "
@@ -84,7 +84,7 @@ class Cell:
 
 def _note(feature: Feature, adapter: str, way: str, mode: str) -> Note | None:
     """Why the cell does not run as a plain test, whatever the selection (None: it does)."""
-    if way == "react_with_blocks" and adapter != "react":
+    if way == "with_blocks" and adapter != "react":
         return NOT_BLOCKS
     if way == "way2":
         return _way2_note(feature, adapter, mode)
@@ -132,9 +132,7 @@ def _selections(feature: Feature) -> list[Selection]:
 def on_in(feature: Feature, way: str, selection: Selection) -> bool:
     from tests.matrix.world import ON_WITH_BLOCKS
 
-    return feature.needs <= selection.on or (
-        way == "react_with_blocks" and feature.id in ON_WITH_BLOCKS
-    )
+    return feature.needs <= selection.on or (way == "with_blocks" and feature.id in ON_WITH_BLOCKS)
 
 
 def cells() -> Iterator[Cell]:

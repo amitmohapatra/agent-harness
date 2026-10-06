@@ -15,10 +15,11 @@ adapter names) and the runtime. Adapters never wrap models, never re-implement a
 use only their framework's public API.
 
 ``narrows`` says how far the tool schemas sent to the model follow the tool hints
-(``Runtime.offers``): ``"turn"`` — every model call sees the tools offered at that moment
-(ReAct; OpenAI Agents through ``FunctionTool.is_enabled``); ``"run"`` — the tools offered when
-the run starts (Claude: the CLI lists an MCP server's tools once per query); ``"none"`` — the
-framework binds its tools when it is built (LangGraph) or has no model (a function).
+(``Runtime.offers``): ``"turn"`` — every model call sees the tools offered at that moment (a
+LangChain graph with ``middleware.HarnessTools``, ``ReAct`` among them; OpenAI Agents through
+``FunctionTool.is_enabled``); ``"run"`` — the tools offered when the run starts (Claude: the
+CLI lists an MCP server's tools once per query); ``"none"`` — the framework binds its tools
+when it is built (any other LangGraph graph) or has no model (a function).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from trellis.harness.tools.base import Tool
 #: values: what a later attempt — a resume, a worker's — runs with).
 FRAMEWORK_OPTIONS: Final = "framework_options"
 
-ToolFormat = Literal["langchain", "openai_agents", "claude", "openai_chat", "none"]
+ToolFormat = Literal["langchain", "openai_agents", "claude", "none"]
 Narrowing = Literal["turn", "run", "none"]
 Role = Literal["user", "assistant"]
 
@@ -60,6 +61,9 @@ class NativePause:
     #: the tool call waiting for approval, when that is what the framework paused on
     tool: str | None = None
     args: dict[str, Any] | None = None
+    #: the framework's handle of each harness pause raised at once (calls made together may
+    #: each ask), by the harness's interrupt id
+    ids: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,11 +85,11 @@ class Invocation:
 
 class Adapter(Protocol):
     name: ClassVar[str]
-    tool_format: ClassVar[ToolFormat]
+    tool_format: ToolFormat
     #: the target's tools are fixed when it is built (a compiled graph): ``tools=`` is refused
     #: at wrap time, and the harness tools come from ``h.tools(...)`` instead
-    fixed_tools: ClassVar[bool]
-    narrows: ClassVar[Narrowing]
+    fixed_tools: bool
+    narrows: Narrowing
 
     def keeps_conversation(self, target: Any) -> bool: ...
 
@@ -149,15 +153,28 @@ def query_of(input: Any) -> str:
 #: Where a target (or its ``model``) says how many tokens its model reads: an attribute of
 #: either name, or a LangChain chat model's ``profile["max_input_tokens"]``.
 WINDOW_ATTRIBUTES: Final = ("context_window", "max_input_tokens")
+#: What a graph ``ReAct(...)`` built says of itself in its config's metadata: its gateway
+#: model's name (when it was given one) and its context window.
+MODEL_METADATA: Final = "trellis_model"
+WINDOW_METADATA: Final = "trellis_context_window"
+
+
+def metadata_of(target: Any) -> dict[str, Any]:
+    """The metadata a compiled graph's config carries (``{}`` for any other target)."""
+    config = getattr(target, "config", None)
+    found = config.get("metadata") if isinstance(config, dict) else None
+    return found if isinstance(found, dict) else {}
 
 
 def context_window(target: Any) -> int | None:
     """The context window of the target's model, in tokens, when the target or its model
-    says (``None`` otherwise: a compiled graph, a model named by a string)."""
+    says, or the graph's metadata (``ReAct``) does (``None`` otherwise: a compiled graph of
+    your own, a model named by a string)."""
     for holder in (target, getattr(target, "model", None)):
         profile = getattr(holder, "profile", None)
         found = [getattr(holder, name, None) for name in WINDOW_ATTRIBUTES]
         found.append(profile.get("max_input_tokens") if isinstance(profile, dict) else None)
+        found.append(metadata_of(holder).get(WINDOW_METADATA))
         for value in found:
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 return value

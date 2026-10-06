@@ -13,7 +13,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Final
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import uvicorn
+from langchain.agents.middleware import AgentMiddleware
 
 from trellis import Harness
 from trellis.memory import MemoryContext
@@ -134,3 +136,53 @@ def serving(app: Any, port: int) -> Iterator[None]:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+class Sent:
+    """What the live model was sent: each chat request's body and headers, as the gateway got
+    them (an ``httpx`` request hook on the model client)."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.headers: list[dict[str, str]] = []
+
+    async def __call__(self, request: httpx.Request) -> None:
+        if request.url.path.endswith("/chat/completions"):
+            self.requests.append(json.loads(request.content))
+            self.headers.append(dict(request.headers))
+
+
+def gateway_model(h: Harness, sent: Sent, *, wait: float = 600.0, **kwargs: Any) -> Any:
+    """The live model as a ``ReAct`` builds it for a model name — the gateway, the virtual
+    key, the deny-all MCP scope — with ``sent`` recording what it is sent, short answers, and
+    as long a wait as the shared local model takes."""
+    from bifrost_sdk import NO_GATEWAY_TOOLS
+    from langchain_openai import ChatOpenAI
+
+    from tests.live.conftest import BIFROST_URL, MODEL
+
+    client = httpx.AsyncClient(timeout=wait, event_hooks={"request": [sent]})
+    return ChatOpenAI(
+        model=MODEL,
+        base_url=BIFROST_URL,
+        api_key=h.settings.bifrost_virtual_key or "none",  # type: ignore[arg-type]
+        default_headers=dict(NO_GATEWAY_TOOLS),
+        max_tokens=160,  # type: ignore[call-arg]
+        http_async_client=client,
+        **kwargs,
+    )
+
+
+class Forcing(AgentMiddleware):
+    """The model's tool choice forced at each step (``None``: answer, no tool): a small local
+    model is slow and unreliable at choosing tools, so a test that needs a particular call
+    picks it — the model still writes the call, the harness still runs it."""
+
+    def __init__(self, choices: list[str | None]) -> None:
+        super().__init__()
+        self.choices = list(choices)
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        choice = self.choices.pop(0) if self.choices else None
+        forced = {"type": "function", "function": {"name": choice}} if choice else "none"
+        return await handler(request.override(tool_choice=forced))

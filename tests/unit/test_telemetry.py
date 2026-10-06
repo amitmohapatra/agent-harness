@@ -87,14 +87,9 @@ def test_tool_and_model_spans_follow_the_genai_conventions(spans) -> None:
         action="run",
     ) as span:
         telemetry.output(span, {"units": 3}, key="gen_ai.tool.call.result")
-    with telemetry.model_span("openai/gpt-4.1-nano", [{"role": "user", "content": "hi"}]) as span:
+    with telemetry.model_span("provider/small", [{"role": "user", "content": "hi"}]) as span:
         telemetry.usage(
-            span,
-            {
-                "model": "gpt-4.1-nano",
-                "usage": {"prompt_tokens": 12, "completion_tokens": 3},
-                "choices": [{"finish_reason": "stop"}],
-            },
+            span, model="small", input_tokens=12, output_tokens=3, finish_reasons=["stop"]
         )
     tool_span, model_span = spans.get_finished_spans()
     tool = dict(tool_span.attributes or {})
@@ -106,9 +101,9 @@ def test_tool_and_model_spans_follow_the_genai_conventions(spans) -> None:
     assert "sk-abcdefghijklmnop" not in tool["gen_ai.tool.call.arguments"]
     assert json.loads(tool["gen_ai.tool.call.result"].replace("'", '"')) == {"units": 3}
     model = dict(model_span.attributes or {})
-    assert model_span.name == "chat openai/gpt-4.1-nano"
-    assert model["gen_ai.request.model"] == "openai/gpt-4.1-nano"
-    assert model["gen_ai.provider.name"] == "openai"
+    assert model_span.name == "chat provider/small"
+    assert model["gen_ai.request.model"] == "provider/small"
+    assert model["gen_ai.provider.name"] == "provider"
     assert model["gen_ai.usage.input_tokens"] == 12
     assert model["gen_ai.usage.output_tokens"] == 3
     assert model["gen_ai.response.finish_reasons"] == ("stop",)

@@ -67,9 +67,9 @@ class _Continue:
 
 class OpenAIAgentsAdapter:
     name: ClassVar[str] = "openai_agents"
-    tool_format: ClassVar[ToolFormat] = "openai_agents"
-    fixed_tools: ClassVar[bool] = False
-    narrows: ClassVar[Narrowing] = "turn"
+    tool_format: ToolFormat = "openai_agents"
+    fixed_tools: bool = False
+    narrows: Narrowing = "turn"
 
     def keeps_conversation(self, target: Any) -> bool:
         return False

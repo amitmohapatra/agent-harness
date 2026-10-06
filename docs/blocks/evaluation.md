@@ -29,7 +29,7 @@ async with EvalServices.from_env() as services:  # Langfuse and the judge: the d
 |---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | Langfuse's public API for scores, datasets and dataset runs ([Langfuse setup](../evaluation.md#langfuse-setup)); the endpoint also exports the spans, unless your application installed its own tracer provider |
 | `BIFROST_URL`, `TRELLIS_JUDGE_VIRTUAL_KEY` (else `BIFROST_VIRTUAL_KEY`) | the judge's gateway |
-| `TRELLIS_JUDGE_MODEL` | the judge's model; unset, `llm_judge` is a failure that says so (there is no agent model to fall back to) |
+| `TRELLIS_JUDGE_MODEL` | the judge's model, unless a judge names its own (`llm_judge(..., model="name")`); with neither, `llm_judge` is a failure that says so (there is no agent model to fall back to) |
 
 An unset variable leaves a service out: no Langfuse means scores are `score` spans only and a
 dataset must be given as items; no judge means only `llm_judge` fails.

@@ -21,10 +21,10 @@ from typing import TYPE_CHECKING, Any
 __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 
 if TYPE_CHECKING:
-    from trellis.harness.adapters.react import ReAct
     from trellis.harness.agent import Agent, RunHandle
     from trellis.harness.harness import Harness
     from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite
+    from trellis.harness.react import ReAct
     from trellis.harness.result import Result
     from trellis.harness.runtime import Runtime, current
     from trellis.harness.sandbox import sandbox
@@ -44,7 +44,7 @@ _EXPORTS = {
     "openapi": "trellis.harness.tools.sources",
     "skills": "trellis.harness.skills",
     "sandbox": "trellis.harness.sandbox",
-    "ReAct": "trellis.harness.adapters.react",
+    "ReAct": "trellis.harness.react",
     "current": "trellis.harness.runtime",
     "Agent": "trellis.harness.agent",
     "RunHandle": "trellis.harness.agent",

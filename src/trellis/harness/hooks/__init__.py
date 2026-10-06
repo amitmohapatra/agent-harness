@@ -21,13 +21,13 @@ hooks run in order — the harness's, then the agent's. Where they fire:
   governance's approvals) or :class:`Rewrite` (run with these arguments; the next hook sees
   them). The decision is journaled: a resumed run replays it instead of asking the hooks again.
   ``after_tool`` may return another outcome (what the model reads, journaled and recorded);
-* ``before_model(call)`` / ``after_model(call, reply)`` — every model call: ``ReAct``'s own;
-  LangChain's and Deep Agents' through their middleware (``hooks.langchain.ModelHooks``, given
+* ``before_model(call)`` / ``after_model(call, reply)`` — every model call: ``ReAct``'s,
+  LangChain's and Deep Agents' through their middleware (``middleware.ModelHooks``, given
   to ``create_agent(middleware=[...])``); the OpenAI Agents SDK's through its ``RunHooks``
   (``hooks.openai_agents.ModelHooks``, which the harness passes to ``Runner.run`` itself). A
-  ``before_model`` that returns a call rewrites it where the framework lets it (``ReAct``,
-  LangChain); the OpenAI Agents SDK reports its calls only. The Claude Agent SDK's model calls
-  are the CLI's, and a plain function makes none: no model hooks there;
+  ``before_model`` that returns a call rewrites it where the framework lets it (LangChain,
+  ``ReAct`` included); the OpenAI Agents SDK reports its calls only. The Claude Agent SDK's
+  model calls are the CLI's, and a plain function makes none: no model hooks there;
 * ``on_error(stage, error)`` — a run that failed or ran out of time (``"run"``), a model call
   that failed (``"model"``), a tool call that failed or timed out (``"tool"``).
 
@@ -91,8 +91,8 @@ Verdict = Deny | Ask | Rewrite | None
 @dataclass(frozen=True, slots=True)
 class ModelCall:
     """One model call as its framework makes it: ``framework`` (the adapter's name),
-    ``messages`` in that framework's own form (chat-completions dicts for ``react``, LangChain
-    messages for ``langgraph``, Responses input items for ``openai_agents``), the ``model`` when
+    ``messages`` in that framework's own form (LangChain messages for ``langgraph``, a ``ReAct``
+    included, Responses input items for ``openai_agents``), the ``model`` when
     it is named, and the ``system`` prompt where the framework keeps it apart (LangChain's
     ``SystemMessage``, the OpenAI Agents SDK's text)."""
 

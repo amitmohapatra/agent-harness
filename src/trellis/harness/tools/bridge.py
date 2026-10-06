@@ -3,7 +3,10 @@ record.
 
 1. **replay** — a call the journal already has (a resumed run re-planning the same step)
    returns its recorded output and runs nothing; a tool of a feature the run is without
-   (``without=``: a graph's tools are bound when it is built) is an error the model reads;
+   (``without=``: a graph's tools are bound when it is built) is an error the model reads, and
+   so are arguments that do not fit the tool's schema (``tools.base.arguments_problem``: a
+   required field missing, a basic type wrong, an unknown field where none are allowed) —
+   whichever framework made the call, the tool does not run and the model can correct it;
 2. **hooks** — the run's ``before_tool`` hooks (``trellis.harness.hooks``) may deny the call,
    rewrite its arguments or ask a person about it; their decision is journaled;
 3. **governance** — the run's tenant's :class:`~trellis.harness.governance.Governance` decides,
@@ -26,7 +29,7 @@ was running when its worker died, has an unknown effect — the model is told so
 keeps what it was told, and it is never run again blind (unless its tool is idempotent, or
 continues where it was: a sub-agent's run).
 
-Calls may come at once (``ReAct``'s reads, the frameworks that run tools concurrently): their
+Calls may come at once (a ``ReAct`` step's, the frameworks that run tools concurrently): their
 steps are numbered as they arrive (or as the caller numbered them, ``step=``), identical calls
 take their turn (``Replay.exclusive``), and the journal's progress saves go one at a time.
 """
@@ -46,22 +49,27 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, content_key
-from trellis.harness.runtime import Paused, Runtime, current, reason_of
+from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import (
     OUTCOME_UNKNOWN,
     UNKNOWN,
     Tool,
+    arguments_problem,
     execute,
     interrupted,
+    not_run,
 )
 
+#: The ``error_class`` of a call whose arguments did not fit the tool's schema.
+INVALID_ARGUMENTS: Final = "InvalidArguments"
 #: The ``TOOL_CALL_RESULT`` ``status`` of a call that asked a person, and ended with its
 #: attempt (the other calls cut short: ``cancelled``, ``timeout``; docs/observability.md).
 PAUSED: Final = "paused"
@@ -130,16 +138,10 @@ async def _called(
         outcome = _replayed(tool.name, output)
         _events(runtime, ref, tool_call, outcome)
         return outcome
-    if tool.feature is not None and not runtime.uses(tool.feature):
-        # a tool the framework was built with, of a feature this run is without
-        off = ToolOutcome(
-            tool=tool.name,
-            status=ToolStatus.ERROR,
-            output=f"{tool.name} is off in this run (without {tool.feature})",
-            error_class="FeatureOff",
-        )
-        _events(runtime, ref, tool_call, off)
-        return off
+    refused = _refused(runtime, tool, args)
+    if refused is not None:
+        _events(runtime, ref, tool_call, refused)
+        return refused
     if runtime.replay.interrupted(key) and not (tool.spec.idempotent or tool.resumable):
         # its worker died while it ran: it is not run again blind (an idempotent tool is,
         # with the same key, below, and so is one that continues where it was)
@@ -164,8 +166,11 @@ async def _called(
         out = runtime.cancelled is None and runtime.remaining() == 0
         _cut(runtime, ref, tool.name, ToolStatus.TIMEOUT.value if out else CANCELLED)
         raise
-    except (Paused, RunCancelled) as cut:
-        _cut(runtime, ref, tool.name, PAUSED if isinstance(cut, Paused) else CANCELLED)
+    except Exception as cut:
+        # it asked a person (the harness's pause, or LangGraph's), or the run was cancelled
+        cancelled = isinstance(cut, RunCancelled)
+        if cancelled or is_pause_signal(cut):
+            _cut(runtime, ref, tool.name, CANCELLED if cancelled else PAUSED)
         raise
     _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)
     await _record(runtime, tool_call, outcome, decision, key=key)
@@ -198,7 +203,7 @@ async def _ran(
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
         within = runtime.limited(tool.timeout, key=idem)
         outcome, error = await execute(tool, args, reads=reads, within=within)
-        if isinstance(error, Paused | RunCancelled):
+        if isinstance(error, RunCancelled) or (error is not None and is_pause_signal(error)):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
             raise error
@@ -209,6 +214,28 @@ async def _ran(
     outcome = await hooks.done(tool_call, outcome)
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     return outcome
+
+
+def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any]) -> ToolOutcome | None:
+    """Why a call is not run at all, as the model reads it: a tool the framework was built
+    with of a feature this run is without, or arguments that do not fit its schema (nothing
+    runs, nothing is journaled: the model corrects them)."""
+    if tool.feature is not None and not runtime.uses(tool.feature):
+        return ToolOutcome(
+            tool=tool.name,
+            status=ToolStatus.ERROR,
+            output=f"{tool.name} is off in this run (without {tool.feature})",
+            error_class="FeatureOff",
+        )
+    problem = arguments_problem(tool.spec.input_schema or {}, args)
+    if problem is None:
+        return None
+    return ToolOutcome(
+        tool=tool.name,
+        status=ToolStatus.ERROR,
+        output=not_run(tool.name, problem),
+        error_class=INVALID_ARGUMENTS,
+    )
 
 
 async def _record(

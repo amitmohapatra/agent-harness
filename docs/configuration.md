@@ -12,7 +12,7 @@ what is read.
 
 | Variable | Unset means |
 |---|---|
-| `BIFROST_URL` | no MCP tools, no `ReAct` model names |
+| `BIFROST_URL` | no MCP tools, no `ReAct` model names (`ReAct(model="name")` is refused when it is built) |
 | `BIFROST_VIRTUAL_KEY` | gateway calls without a key (the gateway's own policy decides); no memory model key registered |
 | `TRELLIS_API_KEY` | only allowed without `MEMORY_URL`: both services refuse a call without a key, so `Harness()` refuses `MEMORY_URL` (and `RUNS_URL`) without it (`ConfigurationError`), rather than a `401` at the first run |
 | `MEMORY_URL` | memory off: no context, no memory tools, no records, no catalog (the tools' own risks decide) |
@@ -22,7 +22,7 @@ what is read.
 | `TRELLIS_SPOOL_DIR` | memory writes this process cannot deliver are logged, counted and lost (set: kept in `<dir>/trellis-writes.jsonl` and replayed at the next start — [memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | `TRELLIS_WORKER_CONCURRENCY` | a worker executes as many runs at once as the machine has CPUs, from 1 to 8 (`--concurrency` on `python -m trellis.harness.worker` and `concurrency=` on `h.worker` win over it) |
 | `TRELLIS_AGENT_VERSION` | runs carry no agent version unless `h.wrap(..., version=)` names one. Set it to the release or deploy id: every run an agent starts records it (`RunStart.agent_version`), its spans carry it, and a run resumed on another version goes on with a `warning` event naming both ([reliability.md](reliability.md#agent-version)) |
-| `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the judged agent's own model (a `ReAct`'s), and logs once that the judge shares it; an agent with no model the harness knows, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and the judge asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#llm_judge)) |
+| `TRELLIS_JUDGE_MODEL` | `llm_judge` asks the gateway model a `ReAct` agent was built with (and logs once that the judge shares it), unless the judge names its own (`llm_judge(model=)`); any other agent, and code judged through `EvalServices.from_env()`, gets no judge score. Set it to a Bifrost model name — a **different, stronger model than the agent's** (a model grading itself is biased) — and every judge without a model of its own asks it through `BIFROST_URL` ([evaluation.md](evaluation.md#the-judges-model)) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the judge's calls go through `BIFROST_VIRTUAL_KEY`, on the agents' budget. Set it to a **separate virtual key** so evaluation spend is budgeted, limited and reported on its own |
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |
 | `PROMPTS_DIR` | no folder of prompts; set: `<name>.md` files there are a prompt source, unless the code passes `Harness(prompts=)` ([prompts.md](prompts.md)) |
@@ -101,10 +101,10 @@ over the agent's, key by key
 
 | Target | Where they go | The harness keeps for itself |
 |---|---|---|
-| LangGraph, Deep Agents | the `config` of `ainvoke`/`astream` (`RunnableConfig` keys: `recursion_limit`, `configurable`, `tags`, `metadata`, `callbacks`, `max_concurrency`, `run_name`) | `configurable.thread_id`: the run's thread wins over one given |
+| LangGraph, Deep Agents, `ReAct` | the `config` of `ainvoke`/`astream` (`RunnableConfig` keys: `recursion_limit`, `configurable`, `tags`, `metadata`, `callbacks`, `max_concurrency`, `run_name`) | `configurable.thread_id`: the run's thread wins over one given |
 | OpenAI Agents | keyword arguments of `Runner.run`/`run_streamed` (`max_turns`, `run_config`, `context`, `session`...) | `starting_agent`, `input`, `hooks`: refused |
 | Claude Agent SDK | `ClaudeAgentOptions` fields set on the run's copy of the options | `resume`, `continue_conversation`, `permission_prompt_tool_name`: refused; `system_prompt`, `can_use_tool` and `mcp_servers` merged (the context appended, the callback asked after governance, the `trellis` server added beside — a server of that name refused) |
-| a function, `ReAct` | — (no framework run call) | any: refused |
+| a function | — (no framework run call) | any: refused |
 
 An option the framework cannot take (a key it does not know, one the harness keeps) is refused
 when the agent is wrapped or the run is called (`ConfigurationError`, naming it), never in the

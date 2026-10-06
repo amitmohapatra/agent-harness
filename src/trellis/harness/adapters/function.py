@@ -25,9 +25,9 @@ from trellis.harness.journal import Pending
 
 class FunctionAdapter:
     name: ClassVar[str] = "function"
-    tool_format: ClassVar[ToolFormat] = "none"
-    fixed_tools: ClassVar[bool] = False
-    narrows: ClassVar[Narrowing] = "none"
+    tool_format: ToolFormat = "none"
+    fixed_tools: bool = False
+    narrows: Narrowing = "none"
 
     def keeps_conversation(self, target: Any) -> bool:
         return False

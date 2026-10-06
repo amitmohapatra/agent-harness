@@ -31,6 +31,9 @@ dependencies = [
 # the `langchain` package: LangChain v1 agents are LangGraph graphs.
 langgraph = ["langgraph>=1.2,<2", "langchain-core>=1.6,<2", "langchain>=1.4,<2"]
 deepagents = ["trellis-harness[langgraph]", "deepagents>=0.7.19,<0.8"]
+# ``ReAct(...)``: a LangChain ``create_agent`` graph with Deep Agents' context middleware
+# (eviction, summarization, dangling-call repair), its model a ``ChatOpenAI`` on the gateway.
+react = ["trellis-harness[langgraph]", "langchain-openai>=1.0", "deepagents>=0.7.19,<0.8"]
 openai-agents = ["openai-agents>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
 agui = ["fastapi>=0.115"]
@@ -38,7 +41,7 @@ a2a = ["a2a-sdk[http-server]>=1.1,<2", "fastapi>=0.115"]
 # OTLP export (Langfuse is reached through the same exporter; no Langfuse SDK).
 otel = ["opentelemetry-sdk>=1.44", "opentelemetry-exporter-otlp-proto-http>=1.44"]
 all = [
-  "trellis-harness[langgraph,deepagents,openai-agents,claude-agent-sdk,agui,a2a,otel]",
+  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,agui,a2a,otel]",
 ]
 
 [dependency-groups]
@@ -111,6 +114,8 @@ known-first-party = ["trellis"]
 "src/trellis/harness/tools/convert/**" = ["PLC0415"]
 "src/trellis/harness/a2a/**" = ["PLC0415"]
 "src/trellis/harness/agui/**" = ["PLC0415"]
+# ReAct imports its frameworks (the react extra) when it builds a graph.
+"src/trellis/harness/react.py" = ["PLC0415"]
 
 [tool.pyright]
 pythonVersion = "3.12"

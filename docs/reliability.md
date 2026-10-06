@@ -94,10 +94,11 @@ run's own limit still bounds them.
 
 **How.** `ReAct(system=..., model="provider/model", model_timeout=30)`.
 
-**Automatic.** The Bifrost SDK retries a completion on `429`/`5xx`/a dropped connection (3
-attempts in all, honouring `Retry-After`); those retries happen *inside* `model_timeout`, and
-each request is sent with what is left of it. Without `model_timeout` each attempt has the
-SDK's 60 s, and what is left of the run bounds them all.
+**Automatic.** The model client of a `ReAct` built with a model name retries a completion on a
+timeout, `408`/`409`/`429`/`5xx` or a dropped connection (3 attempts in all, honouring
+`Retry-After`); those retries happen *inside* `model_timeout`, and what is left of the run
+bounds them all. A model error left is a `ModelError`, retryable for those causes (a queued run
+is queued again, its graph continuing from its checkpoint).
 
 **On failure.** The run fails `ERROR` with a `ModelError` that says
 `"the model did not answer within 30s"`, `retryable` true: a queued run goes back on the
@@ -181,7 +182,8 @@ them bounds them.
 
 | Layer | What it retries | How often, how long | Bounded by |
 |---|---|---|---|
-| Bifrost SDK (models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | `model_timeout`, the run's time |
+| Bifrost SDK (the judge's models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | the run's time |
+| `ReAct`'s model client (`ChatOpenAI`) | a timeout, a dropped connection, `408/409/429/5xx` | 3 attempts, the openai client's backoff, `Retry-After` | `model_timeout`, the run's time |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
 | runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |
@@ -265,7 +267,7 @@ A worker holds a run under a 60 s lease, renewed every 20 s. When it dies the le
 agent-runs queues the run again (after 5 s, doubling per lapse; the fifth lapse ends it
 `ERROR`). The next attempt claims it with the last checkpoint — the journal — and replays it:
 questions answered are not asked again, tool calls completed return their recorded output,
-`ReAct`'s model steps are not asked again, a write that was in flight is [unknown](#unknown-outcomes)
+a `ReAct`'s model steps are not asked again (its graph continues from the checkpoint the journal holds), a write that was in flight is [unknown](#unknown-outcomes)
 (or re-run with its key when idempotent), the run's [sandbox](sandbox.md#automatic) is the one it
 had (attached, never replaced blindly), and the working time already spent still counts against
 `timeout`. Runs kept in process (`run`, `stream`) save no progress: nobody resumes them
@@ -275,8 +277,8 @@ same way.
 
 ## Calls made at once
 
-**What.** Tool calls that run at the same time in one run: `ReAct`'s reads (several calls in
-one step: the reads at once, then the writes one at a time in the model's order —
+**What.** Tool calls that run at the same time in one run: `ReAct`'s (several calls in
+one step: the reads at once, the writes one at a time in the model's order —
 [react.md](frameworks/react.md)), and the frameworks that run tools concurrently themselves
 (LangGraph's tool node, the OpenAI Agents SDK, a function's `asyncio.gather`).
 
@@ -287,7 +289,7 @@ one step: the reads at once, then the writes one at a time in the model's order 
 **Automatic.**
 
 * Each call's step is numbered as it arrives — `ReAct` numbers a step's calls in the model's
-  order before any runs — and is the call's `ToolCall.step` (an approval shows it).
+  order — and is the call's `ToolCall.step` (an approval shows it).
 * Identical calls (the same tool with the same arguments) made at once take their turn: one
   runs, then the next, in the order they were made, so each has its own occurrence in the
   journal and its own idempotency key; different calls run together.
@@ -373,7 +375,7 @@ line naming both versions.
 | an A2A exchange: `a2a(timeout=)`; `remote(timeout=)` (per request) | 120 s (the same) | the author |
 | a sandbox call: `sandbox(timeout=)` (a command killed past it) | 120 s (the same) | the author |
 | an MCP call | the run's remaining time, else the Bifrost SDK's 60 s | — |
-| a model call: `ReAct(model_timeout=)` | the Bifrost SDK's 60 s per attempt | the author |
+| a model call: `ReAct(model_timeout=)` | the model client's own (none for `ChatOpenAI`): the run's time bounds it | the author |
 | a sub-agent's run (`agent.as_tool()`) | what is left of its parent's time, and its parent's deadline | — |
 | an agent's runs' working time: `h.wrap(timeout=)` | none | the agent's author (every entry, scheduled runs too) |
 | a run's working time: `timeout=` | the agent's | the caller of `run`/`stream`/`start` |

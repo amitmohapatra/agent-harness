@@ -51,7 +51,8 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
   `error` item) — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
 * What it reaches is `h.evals`, an `EvalServices` the harness builds from its settings (sharing
   its gateway and Langfuse client); each agent has its own copy, `agent.evals`, whose judge
-  falls back to a `ReAct` target's own model when `TRELLIS_JUDGE_MODEL` is unset.
+  falls back to the gateway model a `ReAct` target was built with when no judge model is set
+  ([The judge's model](#the-judges-model)).
 
 This works for every target ([framework pages](README.md#which-target)).
 
@@ -97,7 +98,7 @@ Built in:
 | `contains(name="contains", case_sensitive=False)` | whether the answer contains `expected` — each of them, for a list; the comment names what is missing |
 | `called(tool, *, before=None, args=None, name="called:<tool>")` | whether the run called `tool` — with `args`, each equal to the call's (its other arguments not compared) — and, with `before`, before its first call of `before` (which it must have made); the comment says what was called instead. No score without a trajectory |
 | `tool_sequence(tools, *, exact=False, name="tool_sequence")` | whether the run called `tools` in this order (other calls between and around them allowed), or — `exact` — exactly these calls; the comment lists the calls made. No score without a trajectory |
-| `llm_judge(criteria, *, name="llm_judge", prompt=None)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `prompt`: a prompt (`"name"`, `"name@version"`, a `Prompt`) from the prompt sources — a rubric kept in code, a `.md` file, Langfuse or the gateway ([prompts.md](prompts.md)) — put before the judge's messages (a gateway prompt by the gateway, which needs a judge model name) |
+| `llm_judge(criteria, *, name="llm_judge", prompt=None, model=None)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `model`: this judge's Bifrost model name, over `TRELLIS_JUDGE_MODEL` ([The judge's model](#the-judges-model)). `prompt`: a prompt (`"name"`, `"name@version"`, a `Prompt`) from the prompt sources — a rubric kept in code, a `.md` file, Langfuse or the gateway ([prompts.md](prompts.md)) — put before the judge's messages (a gateway prompt by the gateway, which needs a judge model name) |
 
 ### Trajectories
 
@@ -145,21 +146,28 @@ answered once with what was wrong, and a second bad reply is no score and a warn
 the model of the services `evaluate` or `judge` was given; called on its own, outside them, it
 is a `ConfigurationError`.
 
-**Which model, and whose budget, is configuration — never code:**
+#### The judge's model
 
-| Variable | |
+**Which model, and whose budget, is configuration:**
+
+| | |
 |---|---|
-| `TRELLIS_JUDGE_MODEL` | the Bifrost model name the judge asks, through `BIFROST_URL` |
+| `llm_judge(criteria, model="name")` | this judge's own Bifrost model name: two judges of one run may ask two models |
+| `TRELLIS_JUDGE_MODEL` | else, the Bifrost model name every judge asks, through `BIFROST_URL` |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the virtual key the judge's calls go through; unset: `BIFROST_VIRTUAL_KEY` |
 
-Set `TRELLIS_JUDGE_MODEL` to a **different, stronger model than the agent's**: a model grading
-its own answers is biased towards them. Give the judge **its own virtual key**: its spend is then
-budgeted, rate-limited and reported in Bifrost apart from the agents' traffic. With
-`TRELLIS_JUDGE_MODEL` unset, a wrapped agent's judge falls back to its own model (a `ReAct`'s
-model, `agent.evals.fallback_model`), and the harness logs once per agent that the judge shares
-the agent's model; a judged agent with no model the harness knows (a graph, a function), and
-any code judged through `EvalServices.from_env()`, then gets no judge score, with the reason in
-the report's `failed` (`"llm_judge needs a model: set TRELLIS_JUDGE_MODEL"`).
+A judge model, once set, is always the one asked: the judge never silently becomes the agent's
+model. Each score says which model gave it — the comment ends `[judge: <model>]`, its `score`
+span carries `trellis.score.model`, and a log line names it.
+
+Set a **different, stronger model than the agent's**: a model grading its own answers is
+biased towards them. Give the judge **its own virtual key**: its spend is then budgeted,
+rate-limited and reported in Bifrost apart from the agents' traffic. With no judge model set,
+a wrapped `ReAct` built with a gateway model name is judged by that model
+(`agent.evals.fallback_model`), and the harness logs once per agent that the judge shares the
+agent's model. Any other judged agent — a `ReAct` given a model object, a graph, a function —
+and any code judged through `EvalServices.from_env()` then gets no judge score, with the reason
+in the report's `failed` (`"llm_judge needs a judge model: set TRELLIS_JUDGE_MODEL ..."`).
 
 **Cost.** Every judged answer is one judge model call (two when the first reply is malformed),
 with a prompt of the criteria plus the case — up to about 32 000 characters. Offline that is

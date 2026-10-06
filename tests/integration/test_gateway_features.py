@@ -41,7 +41,8 @@ def fake() -> FakeGateway:
 
 
 @pytest.fixture
-async def h(fake: FakeGateway) -> AsyncIterator[Harness]:
+async def h(fake: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
+    fake.serve_models(monkeypatch)
     settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
     async with Harness(config=settings, gateway=fake.gateway()) as made:
         yield made
@@ -93,33 +94,24 @@ async def test_every_model_call_selects_the_prompt_pinned_for_the_run(
 
 def test_a_prompt_is_a_name_or_name_at_version() -> None:
     with pytest.raises(ConfigurationError, match="is not a name"):
-        ReAct(system="s", model="local/small", prompt="triage@")
+        ReAct(system="s", model=ScriptedChat([]), prompt="triage@")
     with pytest.raises(ConfigurationError, match="is not a name"):
         llm_judge("Polite.", prompt="@1")
     with pytest.raises(ConfigurationError, match="fills the variables of a prompt"):
-        ReAct(system="s", model="local/small", prompt_vars={"x": 1})
+        ReAct(system="s", model=ScriptedChat([]), prompt_vars={"x": 1})
 
 
 @pytest.mark.parametrize(
-    ("target", "problem"),
+    ("prompt", "variables", "problem"),
     [
-        (
-            ReAct(system="s", model=ScriptedChat(["hi"]), prompt="triage"),
-            "a stored prompt of the gateway",
-        ),
-        (
-            ReAct(system="s", model="local/small", prompt="triage", prompt_vars={"x": 1}),
-            "no prompt_vars=",
-        ),
-        (
-            ReAct(system="s", model="local/small", prompt="triage@latest"),
-            "a stored prompt's version is a number from 1, not 'latest'",
-        ),
+        ("triage", {"x": 1}, "no prompt_vars="),
+        ("triage@latest", None, "a stored prompt's version is a number from 1, not 'latest'"),
     ],
 )
-async def test_a_stored_prompt_needs_a_model_name_no_vars_and_a_version_number(
-    h: Harness, target: ReAct, problem: str
+async def test_a_stored_prompt_takes_no_vars_and_a_version_number(
+    h: Harness, prompt: str, variables: dict[str, Any] | None, problem: str
 ) -> None:
+    target = ReAct(system="s", model="local/small", prompt=prompt, prompt_vars=variables)
     result = await h.wrap(target, id="triage").run("hi", user="ada")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert problem in result.error.message
@@ -277,12 +269,14 @@ async def test_a_react_model_reads_the_skills_section_and_is_offered_the_tools(
     result = await agent.run("can I get a refund?", user="ada")
     assert result.answer == "Refund within 30 days."
     first = fake.chat.requests[0]
-    assert first["messages"][0]["content"].endswith("- refunds: Handles refunds.")
-    offered = [t["function"]["name"] for t in first["tools"]]
-    assert offered == [LOAD_SKILL, READ_SKILL_FILE]
-    assert offered and first["tools"][0]["function"]["parameters"]["properties"]["name"][
-        "enum"
-    ] == ["refunds"]
+    # the pushed context (the skills section) is the system message after the instructions
+    assert first["messages"][1]["content"].endswith("- refunds: Handles refunds.")
+    offered = {t["function"]["name"]: t["function"] for t in first["tools"]}
+    assert [n for n in offered if n in (LOAD_SKILL, READ_SKILL_FILE)] == [
+        LOAD_SKILL,
+        READ_SKILL_FILE,
+    ]
+    assert offered[LOAD_SKILL]["parameters"]["properties"]["name"]["enum"] == ["refunds"]
 
 
 def test_skills_are_named_once_each() -> None:
