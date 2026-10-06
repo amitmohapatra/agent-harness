@@ -123,9 +123,6 @@ _events_lost = _meter.create_counter(
     "trellis.run_events.undelivered",
     description="run events agent-runs' event log did not take",
 )
-_notified = _meter.create_counter(
-    "trellis.notifications", description="notifications of a pause, by provider and outcome"
-)
 
 
 class _Metrics:
@@ -158,10 +155,6 @@ class _Metrics:
     @staticmethod
     def events_undelivered(count: int) -> None:
         _events_lost.add(count)
-
-    @staticmethod
-    def notified(provider: str, outcome: str) -> None:
-        _notified.add(1, {"provider": provider, "outcome": outcome})
 
 
 metrics = _Metrics()

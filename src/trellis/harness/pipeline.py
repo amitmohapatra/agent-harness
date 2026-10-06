@@ -634,8 +634,6 @@ async def _paused(
         ),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)
-    if runtime.parent is None:  # a sub-agent's question is its parent's to announce
-        await agent.harness.notified(interrupt, events)
     await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
     return Result(run_id=runtime.run_id, status=RunStatus.PAUSED, interrupt=interrupt)
 

@@ -54,7 +54,6 @@ person's feedback days later, lands on it without anything stored.
 | `trellis.runs.queue_wait` (histogram, seconds) | `agent` | a worker claimed a queued run: how long it waited (since it was queued, or since the answer that queued it again) |
 | `trellis.runs.rate_limited` | `operation` (`start`, `resume`, `schedule`) | agent-runs still answered `429` after its SDK's retries ([runs.md](runs.md#admission-agent-runs-rate-limit)) |
 | `trellis.run_events.undelivered` | | run events agent-runs' event log did not take |
-| `trellis.notifications` | `provider`, `outcome` (`sent`, `failed`) | a pause was told to a notifier ([interrupts.md](interrupts.md#telling-people)) |
 
 With `OTEL_EXPORTER_OTLP_ENDPOINT` set, `Harness()` also installs a meter provider exporting them
 over OTLP/HTTP to `<endpoint>/v1/metrics` every 60 s (and on close) — unless the endpoint is
@@ -148,8 +147,8 @@ keep), `before_model` the messages masked ([hooks.md](hooks.md),
 `agent.stream` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`,
 `TEXT_MESSAGE_*`, `TOOL_CALL_*`, `CUSTOM` (`tool_notice`, `log` from `current().log(...)`,
 `warning`, `decision` — the person's decision an attempt goes on with: `decision`, `reviewer`,
-`comment`, `remember`; or a call approved because its tool was approved for the run —, and
-`notified`), `INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. The decision is also on the attempt's
+`comment`, `remember`; or a call approved because its tool was approved for the run —),
+`INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. The decision is also on the attempt's
 `invoke_agent` span (`trellis.decision.*` attributes and a `decision` span event). With
 `RUNS_URL` the events are also in agent-runs' event log, readable from any process
 (`agent.events`, [runs.md](runs.md#a-runs-events-from-anywhere)). A failed background write is a `warning`

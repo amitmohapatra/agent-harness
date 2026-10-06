@@ -20,14 +20,8 @@ from typing import Any, Final, Literal, TypeVar
 
 from bifrost_sdk import NO_GATEWAY_TOOLS
 
-from trellis.contracts import (
-    ConfigurationError,
-    FeedbackVerdict,
-    Interrupt,
-    RunStatus,
-    ToolSpec,
-)
-from trellis.harness import notify, telemetry
+from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
+from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import ToolFormat
 from trellis.harness.agent import Agent
@@ -35,14 +29,12 @@ from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
-from trellis.harness.events import NOTIFIED, RunEvents
 from trellis.harness.features import Feature
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
-from trellis.harness.notify import Notifier
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
@@ -113,9 +105,7 @@ class Harness:
     ``judges`` are the online evaluators every sampled successful run is scored by
     (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
     (``trellis.harness.hooks.Hooks``) run around every run, model call and tool call of every
-    agent it wraps, before each agent's own. ``notifiers`` (``trellis.harness.notify``) are
-    told whenever a run pauses for a person, besides the ones the environment names (Slack
-    with ``SLACK_WEBHOOK_URL``, email with ``SMTP_URL``)."""
+    agent it wraps, before each agent's own."""
 
     def __init__(
         self,
@@ -127,7 +117,6 @@ class Harness:
         governance: Governance | None = None,
         judges: Sequence[Evaluator] = (),
         hooks: Sequence[Hooks] = (),
-        notifiers: Sequence[Notifier] = (),
     ) -> None:
         self.settings = config or Settings.from_env()
         s = self.settings
@@ -156,8 +145,6 @@ class Harness:
         self.judges: list[Evaluator] = list(judges)
         #: the hooks of every agent wrapped here
         self.hooks: list[Hooks] = list(hooks)
-        #: who is told when a run pauses for a person: the environment's, then the given
-        self.notifiers: list[Notifier] = [*notify.from_env(s), *notifiers]
         self.judge_sample = (
             s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
         )
@@ -312,33 +299,6 @@ class Harness:
         from trellis.harness.inbox import mount  # noqa: PLC0415 - optional extra
 
         mount(app, self, path=path, identity=identity)
-
-    async def notified(self, interrupt: Interrupt, events: RunEvents | None = None) -> None:
-        """Tell the notifiers that a run waits on ``interrupt`` (redacted), in the background:
-        one that fails is a ``warning`` on the run's events, never a failed run."""
-        if not self.notifiers:
-            return
-        told = notify.redacted(interrupt)
-        link = notify.link_of(self.settings, interrupt)
-        for notifier in self.notifiers:
-            name = notify.name_of(notifier)
-
-            async def send(notifier: Notifier = notifier, name: str = name) -> None:
-                try:
-                    async with asyncio.timeout(notify.NOTIFY_TIMEOUT_SECONDS):
-                        await notifier.notify(told, link)
-                except Exception as exc:
-                    telemetry.metrics.notified(name, "failed")
-                    message = f"{name} was not told about {interrupt.interrupt_id}: {exc}"
-                    log.warning("%s", message)
-                    if events is not None:
-                        events.warning("notify_failed", message)
-                    return
-                telemetry.metrics.notified(name, "sent")
-                if events is not None:
-                    events.custom(NOTIFIED, provider=name, interrupt_id=interrupt.interrupt_id)
-
-            await self.writes.submit(f"notify.{name}", send)
 
     async def feedback(
         self,

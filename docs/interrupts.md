@@ -54,7 +54,7 @@ props=None, assignee=None, deadline=None, escalate_to=None)`.
 
 **Automatic.** The question is the run's user's to answer (`assignee="user:<user>"`) unless
 `assignee` names someone else (`user:…`, `role:…`); it is in their inbox
-(`h.inbox(assignee)`), and whoever waits is told ([below](#telling-people)). `escalate_to`
+(`h.inbox(assignee)`), and agent-runs' webhooks tell whoever waits ([below](#telling-people)). `escalate_to`
 needs a `deadline`: when it passes, agent-runs hands the question to `escalate_to` (once), or
 ends the run `TIMEOUT` when nobody is named. Runs kept in process (no `RUNS_URL`) do neither.
 The same question asked again in one run (same text, kind and options) is the same entry in
@@ -201,36 +201,65 @@ client), or as an AG-UI or A2A answer.
 
 ## Telling people
 
-**What.** When a run pauses for a person, every notifier is told: the question (redacted),
-whose it is, by when, the call under approval, and where to answer.
+**What.** When a run pauses for a person, whoever waits is told — the question, whose it is,
+by when, the call under approval, and the run to answer — by agent-runs' webhooks: the tenant
+subscribes once to `run.paused` (and `run.escalated`, `run.finished`), and every pause of every
+run of the tenant, wrapped or not, is POSTed to its receiver, signed. The receiver posts to a
+channel, mails, pages.
 
 **When.** Whenever people should not have to watch an inbox.
 
-**Where.** Automatic for every agent of the harness: Slack with `SLACK_WEBHOOK_URL` (an
-incoming webhook), email with `SMTP_URL` and `SMTP_FROM` (to the assignee when it is an
-address, `user:ada@example.com`, else to `SMTP_TO`); your own with
-`Harness(notifiers=[...])`: anything with `async notify(interrupt, link)`. The link is
-`TRELLIS_INBOX_URL#<interrupt id>` when set ([configuration.md](configuration.md)).
+**Where.** With agent-runs (`RUNS_URL`): `runs.webhooks.create(url, [WebhookEvent.PAUSED])`
+([blocks/runs.md](blocks/runs.md#webhooks)). Without it (`LocalRuns`, no `RUNS_URL`) there are
+no webhooks, and nothing tells anyone on its own: a run hook that sees the pause
+(`on_run_end` with a `PAUSED` result, [hooks.md](hooks.md)) is the way in process.
+
+**How.**
 
 ```python
-class Pager:
-    async def notify(self, interrupt: Interrupt, link: str | None) -> None:
-        await page(interrupt.assignee, interrupt.question, link)
+from trellis.runs import WebhookEvent
+from trellis.runs.webhooks import SIGNATURE_HEADER, parse_delivery, verify_signature
+
+hook = await h.runs.webhooks.create("https://ops.example/hooks/trellis", [WebhookEvent.PAUSED])
+keep_secret(hook.secret)  # shown in this answer only
 
 
-h = Harness(notifiers=[Pager()])
+async def trellis_hook(request: Request) -> Response:  # your receiver (Starlette or FastAPI)
+    body = await request.body()
+    if not verify_signature(SECRET, request.headers.get(SIGNATURE_HEADER), body):
+        return Response(status_code=401)
+    run = parse_delivery(body).data.run  # a RunSummary; awaiting is the Interrupt
+    asked = run.awaiting
+    await post(f"{asked.question} (for {run.assignee}) https://ops.example/runs/{run.run_id}")
+    return Response(status_code=204)
 ```
 
-**Automatic.** After the pause is recorded, in the background (the run is not held). A
-notifier gets the interrupt redacted as everything leaving the process is (the question, the
-payload, the props, the call's arguments; not whose it is). A sub-agent's question is told
-once, as its parent's run's. A `notified` event says who was told.
+In process, without agent-runs:
 
-**On failure.** Best-effort: a notifier that fails or takes over 10 s is a `warning` event on
-the run (`notify_failed`, logged, counted `trellis.notifications{outcome="failed"}`), never a
-failed run, and is not retried. For delivery that is retried and signed, for every run of the
-tenant (wrapped or not), use agent-runs' webhooks (`run.paused`, `run.escalated`,
-`run.finished`: [runs.md](runs.md#the-inbox), [blocks/runs.md](blocks/runs.md#webhooks)).
+```python
+class Telling(Hooks):
+    async def on_run_end(self, run: Runtime, result: Result) -> None:
+        if result.status is RunStatus.PAUSED and run.parent is None:  # not a sub-agent's
+            await page(result.interrupt.assignee, result.interrupt.question, run.run_id)
+
+
+h = Harness(hooks=[Telling()])
+```
+
+**Automatic.** agent-runs writes the delivery with the pause (one transaction) and its ticker
+sends it within a tick (5 s), retried, with the same `event_id` on every retry (drop repeats by
+it). It carries the run's summary as agent-runs keeps it: `run_id`, `agent_id`, `assignee`,
+`deadline` and the interrupt itself (`awaiting`: the question, `options`, `expects`, `component`
+and `props`, the call under approval in `tool_call`) — as asked, not redacted: redact in the
+receiver what must not reach a channel. A sub-agent's question pauses its own run and its
+parent's, and both are delivered: answer the parent's (a receiver that reads the run with
+`runs.get` skips one with a `parent_run_id`; a run hook skips `run.parent`).
+
+**On failure.** A receiver that answers `408`, `429` or `5xx`, or cannot be reached, is retried
+(7 attempts, at most 10 min apart), then kept as a dead delivery to redeliver
+(`runs.webhooks.redeliver`); any other answer is final ([blocks/runs.md](blocks/runs.md#webhooks)).
+A run hook runs in process and is not retried: what it raises is logged, and the run's outcome
+stands.
 
 ## The reference inbox
 
@@ -246,7 +275,7 @@ through its routes — `GET {path}/runs?assignee=` (the paused runs with their i
 `POST {path}/runs/{run_id}/resume` (`{"interrupt_id", "decision", "answer", "comment",
 "remember"}`: checked first, `409` with why when it does not fit; then `202`, and the run goes
 on in the background). `identity(request)` names the reviewer (else `anonymous`, with a
-warning). Point `TRELLIS_INBOX_URL` at it and notifications link to each question.
+warning).
 
 ## Testing: `trellis.testing.Reviewer`
 

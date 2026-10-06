@@ -5,9 +5,7 @@ The harness reads the environment and nothing else — no YAML. `Harness()` take
 blocks you pass instead of the environment's (`runs=`, `memory=`, `gateway=`, `governance=`; a
 block `False` is off: [docs/README.md](README.md#composition-a-harness-is-the-blocks-you-give-it)),
 the online judges (`judges=[...]`: code that says *what* to judge; which model judges, through
-which key and how often is the environment's), its hooks ([hooks.md](hooks.md)) and notifiers
-of your own (`notifiers=[...]`, besides the Slack and email ones the environment names:
-[interrupts.md](interrupts.md#telling-people)). Unset means
+which key and how often is the environment's) and its hooks ([hooks.md](hooks.md)). Unset means
 "not in this deployment". Every variable, with a one-line description, is in
 [`.env.example`](../.env.example); `tests/unit/test_settings.py` checks the file lists exactly
 what is read.
@@ -29,10 +27,6 @@ what is read.
 | `TRELLIS_JUDGE_SAMPLE` | 0.1 when the harness has online judges (`Harness(judges=[...])`), nothing judged without; a number from 0 to 1 is the share of successful runs judged (by the run id) |
 | `SANDBOX` | `sandbox()` given no provider has none: its tools tell the model so. `docker` makes each run's sandbox a container of the Docker daemon on this machine ([sandbox.md](sandbox.md)); any other value is refused (`ValidationError`) |
 | `SANDBOX_IMAGE` | those sandboxes are made from the provider's own image (`python:3.12-slim` for Docker) unless a `SandboxSpec(image=)` names one |
-| `SLACK_WEBHOOK_URL` | no Slack notification. Set: every run that pauses for a person is posted to that incoming webhook — the question (redacted), whose it is, the call under approval, the link ([interrupts.md](interrupts.md#telling-people)) |
-| `SMTP_URL`, `SMTP_FROM` | no mail. Set (`smtp://user:password@host:587`, STARTTLS when the server offers it, or `smtps://host:465`; `SMTP_FROM` the sender, required with it): whoever a paused run waits for is mailed — the assignee when it is an address (`user:ada@example.com`), else `SMTP_TO` |
-| `SMTP_TO` | a question not assigned to an address (a role's, anyone's) is not mailed, and a `warning` event says so |
-| `TRELLIS_INBOX_URL` | notifications carry no link. Set it to where paused runs are answered (the page `h.serve_inbox` serves, or your own): they link to `<url>#<interrupt id>` |
 | `TRELLIS_GROUNDING_SAMPLE` | 0.1: a tenth of the successful runs with an answer (a structured one as its JSON; memory on) are checked against the context they were given (`/v1/verify`, a score on the trace — [observability.md](observability.md#scores)); `0` turns it off, `1` checks every run. A number from 0 to 1, else `Settings` refuses it (`ValidationError`); the run id decides, so a run is either always or never sampled |
 
 `Harness(config=Settings(...))` takes the same deployment as fields, for tests and for
@@ -57,11 +51,6 @@ mapping instead of `os.environ`, and blank values count as unset):
 | `judge_sample` | `TRELLIS_JUDGE_SAMPLE` (0 to 1; `None`: 0.1 with judges) |
 | `sandbox` | `SANDBOX` (`"docker"` or `None`) |
 | `sandbox_image` | `SANDBOX_IMAGE` |
-| `slack_webhook_url` | `SLACK_WEBHOOK_URL` |
-| `smtp_url` | `SMTP_URL` |
-| `smtp_from` | `SMTP_FROM` |
-| `smtp_to` | `SMTP_TO` |
-| `inbox_url` | `TRELLIS_INBOX_URL` |
 
 `RUNS_URL` without `MEMORY_URL`, and `MEMORY_URL` without `TRELLIS_API_KEY`, are refused when the
 `Harness` is built (`ConfigurationError`). The names are the platform's: agent-runs reads the

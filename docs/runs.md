@@ -216,7 +216,9 @@ answers only as one of them, a run assigned to that person or to nobody, never a
 Notifications (a run paused, escalated or finished) are agent-runs' tenant webhook
 subscriptions (`RunsClient.webhooks.create`, `POST /v1/webhooks`), not a harness setting; a
 receiver checks each delivery with `trellis.runs.webhooks.verify_signature`
-([blocks/runs.md](blocks/runs.md#webhooks)).
+([blocks/runs.md](blocks/runs.md#webhooks), [interrupts.md](interrupts.md#telling-people)).
+Runs kept in process (no `RUNS_URL`) have no webhooks: nothing is told unless a run hook of
+yours tells it.
 
 ## agent-runs wire
 
