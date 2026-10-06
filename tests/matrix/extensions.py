@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from tests.matrix.kit import Desk
-from tests.matrix.model import ADAPTERS, Feature, Gap
+from tests.matrix.model import ADAPTERS, NA, Feature, Gap
 from tests.matrix.world import USER, World
 from trellis import tool
 
@@ -93,7 +93,7 @@ def _pending(feature_id: str, title: str, *, audit: str, how: str, gap: Gap, pro
         how,
         probe,
         adapters=dict.fromkeys(ADAPTERS, gap),
-        way2=gap,
+        way2=NA("probed in Way 1; the plan names no Way 2 form yet"),
     )
 
 

@@ -17,6 +17,7 @@ import json
 from collections.abc import Sequence
 from typing import Any, Final
 
+import pytest
 from agents import Agent as OpenAIAgent
 from agents import function_tool
 from langchain.agents import create_agent
@@ -494,7 +495,9 @@ async def prompts(w: World) -> None:
         assert o.answer == "Done. facts about x"
         return
     # every other framework: its model client is given the prompt's headers; the run must pin
-    # the version it started with and say so (G10)
+    # the version it started with and say so on its agent span (G10)
+    if "tracing" not in w.switched:
+        pytest.skip("n.a.: a pinned prompt shows on the run's agent span, and tracing is off")
     headers = await w.harness().model_headers(prompt="triage")
     assert headers["x-bf-prompt-id"] == "p-triage"
     o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})])).succeeded()
@@ -682,7 +685,8 @@ FEATURES: Final[list[Feature]] = [
         "F60, F02, F01",
         "always on (a listener: stream, AG-UI, A2A)",
         events,
-        way2=Gap("G6", "Way 2 has no event block"),
+        way2=way2.proposed("trellis.harness.blocks", "events"),
+        way2_gap=Gap("G6", "Way 2 has no event block"),
     ),
     Feature(
         "F02",
@@ -692,7 +696,8 @@ FEATURES: Final[list[Feature]] = [
         streamed_text,
         adapters={"function": NO_MODEL},
         modes=STREAMING,
-        way2=Gap("G6", "Way 2 has no event block"),
+        way2=way2.proposed("trellis.harness.blocks", "events"),
+        way2_gap=Gap("G6", "Way 2 has no event block"),
     ),
     Feature(
         "F32",
@@ -736,7 +741,10 @@ FEATURES: Final[list[Feature]] = [
         adapters={
             "react": NA("ReAct's approvals are the harness's own (F32)"),
             "function": NA("a function target has no framework approvals"),
-            "claude": Gap("G5", "Claude's can_use_tool is not integrated in Way 1"),
+            "claude": NA(
+                "G5 (can_use_tool, session resume) concerns Claude's built-in tools, which "
+                "the scripted CLI cannot call: the live suite's"
+            ),
         },
         modes={
             "elsewhere": NA("the graph's in-memory checkpointer is the pausing process's own"),
@@ -790,7 +798,8 @@ FEATURES: Final[list[Feature]] = [
         "F22",
         "automatic (current().idempotency_key)",
         idempotency,
-        way2=Gap("G6", "no idempotency_key(run_id, call) block outside a run"),
+        way2=way2.proposed("trellis.runs", "idempotency_key"),
+        way2_gap=Gap("G6", "no idempotency_key(run_id, call) block outside a run"),
     ),
     Feature(
         "F05",
@@ -808,7 +817,7 @@ FEATURES: Final[list[Feature]] = [
         "F09",
         "h.wrap(timeout=) / run(timeout=)",
         run_timeout,
-        way2=Gap("G34", "the runs SDK Worker never stops a handler at remaining_seconds"),
+        way2=way2.run_timeout,
         way2_modes=("worker",),
     ),
     Feature(
@@ -817,7 +826,8 @@ FEATURES: Final[list[Feature]] = [
         "F30",
         "opt-in (agent.as_tool())",
         subagent_parent,
-        way2=Gap("G6", "no sub-agent block (use remote())"),
+        way2=way2.proposed("trellis.harness.blocks", "subagent"),
+        way2_gap=Gap("G6", "no sub-agent block (use remote())"),
     ),
     Feature(
         "F30c",
@@ -825,7 +835,8 @@ FEATURES: Final[list[Feature]] = [
         "F30",
         "opt-in (agent.as_tool())",
         subagent_child,
-        way2=Gap("G6", "no sub-agent block (use remote())"),
+        way2=way2.proposed("trellis.harness.blocks", "subagent"),
+        way2_gap=Gap("G6", "no sub-agent block (use remote())"),
     ),
     Feature(
         "F25r",
@@ -867,7 +878,8 @@ FEATURES: Final[list[Feature]] = [
             "openai_agents": Gap("G8", "only ReAct cuts large results"),
             "claude": Gap("G8", "only ReAct cuts large results"),
         },
-        way2=Gap("G8", "no cut-and-keep block"),
+        way2=way2.proposed("trellis.harness.blocks", "bounded"),
+        way2_gap=Gap("G8", "no cut-and-keep block"),
     ),
     Feature(
         "F65",
@@ -911,7 +923,8 @@ FEATURES: Final[list[Feature]] = [
         pull,
         needs=frozenset({"memory"}),
         adapters={"function": NA("a function target calls the memory tools like any other (F43)")},
-        way2=Gap("G6", "agent_tools() is raw: no conversion block"),
+        way2=way2.proposed("trellis.harness.blocks", "agent_tools"),
+        way2_gap=Gap("G6", "agent_tools() is raw: no conversion block"),
     ),
     Feature(
         "F43",
@@ -943,7 +956,8 @@ FEATURES: Final[list[Feature]] = [
             "langgraph": Gap("G12", "tools are bound when the graph is built"),
             "deepagents": Gap("G12", "tools are bound when the graph is built"),
         },
-        way2=Gap("G6", "memory.tool_hints is raw: no narrowing block"),
+        way2=way2.proposed("trellis.harness.blocks", "tool_hints"),
+        way2_gap=Gap("G6", "memory.tool_hints is raw: no narrowing block"),
     ),
     Feature(
         "F17",
@@ -979,7 +993,8 @@ FEATURES: Final[list[Feature]] = [
         "skills=[...] / skills(...) with the gateway",
         skills_,
         needs=frozenset({"gateway"}),
-        way2=Gap("G6", "no skills block (disclose(refs))"),
+        way2=way2.proposed("trellis.harness.skills", "disclose"),
+        way2_gap=Gap("G6", "no skills block (disclose(refs))"),
     ),
     Feature(
         "F49",
@@ -999,7 +1014,8 @@ FEATURES: Final[list[Feature]] = [
             ),
             "claude": Gap("G10", "model_headers resolves the prompt once, unpinned, unrecorded"),
         },
-        way2=Gap("G6", "no prompt_pin(ref) block"),
+        way2=way2.proposed("trellis.harness.blocks", "prompt_pin"),
+        way2_gap=Gap("G6", "no prompt_pin(ref) block"),
     ),
     Feature(
         "F55",
@@ -1026,7 +1042,8 @@ FEATURES: Final[list[Feature]] = [
         "OTEL_EXPORTER_OTLP_ENDPOINT (an OTel provider)",
         tracing,
         needs=frozenset({"tracing"}),
-        way2=Gap("G6", "no tracing block (agent_span/tool_span)"),
+        way2=way2.proposed("trellis.harness.tracing", "agent_span"),
+        way2_gap=Gap("G6", "no tracing block (agent_span/tool_span)"),
     ),
     Feature(
         "F61",

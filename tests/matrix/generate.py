@@ -183,7 +183,9 @@ def _way2_note(feature: Feature, adapter: str, mode: str) -> Note | None:
         return NO_WAY2
     if mode not in feature.way2_modes:
         return WAY2_MODE
-    return feature.way2 if isinstance(feature.way2, NA | Gap | Bug) else None
+    if isinstance(feature.way2, NA | Gap | Bug):
+        return feature.way2
+    return feature.way2_gap
 
 
 def _selections(feature: Feature) -> list[Selection]:

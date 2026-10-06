@@ -7,7 +7,9 @@ framework recipes are the ``W2R`` row)."""
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -356,3 +358,42 @@ async def remote_agent(w: World) -> None:
     finally:
         await http.aclose()
         await served.aclose()
+
+
+def proposed(module: str, name: str) -> Callable[[World], Awaitable[None]]:
+    """A probe of a block the plan proposes (``module.name``): it fails until the block is
+    there, then the cell XPASSes and its scenario is written (the names follow the audit
+    where it names one: G6 ``disclose``, ``prompt_pin``, ``idempotency_key``, a public tracing
+    module; ``trellis.harness.blocks`` stands for the others)."""
+
+    async def probe(w: World) -> None:
+        found = importlib.import_module(module)
+        assert hasattr(found, name), f"{module}.{name}"
+
+    return probe
+
+
+async def run_timeout(w: World) -> None:
+    """``trellis.runs.Worker`` stops a handler at the run's working time and ends it TIMEOUT
+    (G34)."""
+    started = asyncio.Event()
+
+    async def handle(job: Job) -> None:
+        started.set()
+        await asyncio.sleep(10)
+
+    run_id = new_id("run_")
+    start = RunStart(
+        run_id=run_id,
+        tenant_id=TENANT,
+        agent_id=AGENT,
+        thread_id=run_id,
+        user_id=USER,
+        input="x",
+        timeout_seconds=0.3,
+    )
+    await w.store.start(start, queue=True)
+    async with asyncio.timeout(5):
+        assert await RunsWorker(w.store, handle, [AGENT]).run_once()
+    record = await w.store.get(run_id)
+    assert started.is_set() and record is not None and record.status is RunStatus.TIMEOUT, record
