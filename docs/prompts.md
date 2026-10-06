@@ -47,8 +47,28 @@ given where a prompt is named is used as it is.
 | 2 | Langfuse | `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set |
 | 3 | the gateway's Prompt Repository | `BIFROST_URL` is set (or `Harness(gateway=)`) |
 
-To add a source of your own to the environment's, pass them all:
-`Harness(prompts=PromptSources.of(Settings.from_env(), gateway=gw, given=[Prompt(...)]))`.
+One rule: sources passed replace the environment's, whatever they are; `Harness(prompts=[])`
+is no prompt source. To keep one of the environment's beside your own, name it too:
+`Harness(prompts=[Prompt(...), prompts_dir("prompts"), langfuse_prompts(...)])`. A `Prompt`
+given where a prompt is named (`ReAct(prompt=Prompt(...))`, `h.prompt(Prompt(...))`) needs no
+source at all.
+
+## Native or ours
+
+Of the frameworks, only the OpenAI Agents SDK keeps prompts of its own:
+`Agent(prompt=Prompt(id=..., version=...))` (`agents.Prompt`, a `TypedDict` of `id`, `version`,
+`variables`), a prompt stored at OpenAI and applied by OpenAI's Responses API — the SDK says it
+is usable only with OpenAI models through that API. The harness passes it through (it runs a copy of your `Agent`) but
+does not read, pin or journal it. Deep Agents (`create_deep_agent(system_prompt=)`), LangChain
+(`create_agent(system_prompt=)`) and the Claude Agent SDK (`ClaudeAgentOptions(system_prompt=)`)
+take text.
+
+* **Theirs:** an OpenAI Agents agent on OpenAI's models whose prompts the team already manages
+  at OpenAI.
+* **Ours:** a central registry the deployment shares (Bifrost's Prompt Repository, Langfuse),
+  a folder reviewed with the code, a version pinned per run and the same text on every replay,
+  or a `ReAct` or plain-function agent — and any framework that takes text
+  (`await h.prompt(...)`).
 
 ## When
 

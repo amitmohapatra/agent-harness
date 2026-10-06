@@ -185,16 +185,12 @@ class Harness:
         self._given_governance = governance
         #: where prompts and skills are looked up: the sources given, as they are; else the
         #: ones the environment names (``PROMPTS_DIR``, Langfuse, ``SKILLS_DIR``, the gateway)
-        self.prompts = (
-            PromptSources.given(prompts)
-            if prompts is not None
-            else self._making(PromptSources.of(s, gateway=self.gateway))
-        )
-        self.skills = (
-            SkillSources.given(skills)
-            if skills is not None
-            else self._making(SkillSources.of(s, gateway=self.gateway))
-        )
+        if prompts is None:
+            prompts = self._making(PromptSources.of(s, gateway=self.gateway))
+        if skills is None:
+            skills = self._making(SkillSources.of(s, gateway=self.gateway))
+        self.prompts = prompts if isinstance(prompts, PromptSources) else PromptSources(prompts)
+        self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
         self.evals.prompts = self.prompts
         telemetry.configure(s)
 

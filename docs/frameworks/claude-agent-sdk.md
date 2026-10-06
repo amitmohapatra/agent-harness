@@ -69,6 +69,20 @@ carry a `can_use_tool` of the harness's:
 * **Not recorded.** A built-in call is not journaled or recorded in memory (the CLI keeps its
   result in its session, below).
 
+## Native or ours: skills, prompts, sandbox
+
+* **Skills:** for `SKILL.md` folders the CLI discovers, use Claude's own:
+  `ClaudeAgentOptions(skills=["name", ...] | "all")` (the SDK then allows the `Skill` tool and,
+  `setting_sources` unset, loads the user's and the project's settings). Use the
+  harness's (`h.wrap(..., skills=[...])`, on the `trellis` server) for skills from Bifrost's
+  registry, or a version pinned per run and replayed ([skills.md](../skills.md#native-or-ours)).
+* **Sandbox:** prefer Claude's own `Bash` and file tools, confined with
+  `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))`; the harness decides each
+  call the CLI asks about (above), and a sandboxed `Bash` call is asked about only with
+  `autoAllowBashIfSandboxed` false ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+* **Prompts:** the options take text: `system_prompt=await h.prompt(...)` for a prompt from a
+  folder, Langfuse or Bifrost ([prompts.md](../prompts.md#native-or-ours)).
+
 ## What is automatic
 
 | | |

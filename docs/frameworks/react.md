@@ -72,6 +72,13 @@ a model name only ([gateway.md](../gateway.md#prompts)).
 | Hooks | `before_model`/`after_model` around every model call of the loop (a `before_model` call is the call sent), the tool and run hooks as for every target ([hooks.md](../hooks.md)) |
 | Records, grounding, judges, tracing | as for every target; `chat` spans carry the model, usage and finish reasons |
 
+## Native or ours
+
+`ReAct` is the harness's own loop: its skills (`h.wrap(..., skills=[...])`), prompts
+(`prompt=`) and sandbox (`tools=[sandbox()]`) are the harness's, every call governed and
+journaled ([skills.md](../skills.md#native-or-ours), [prompts.md](../prompts.md#native-or-ours),
+[sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+
 ## Approvals, streaming, durable runs, surfaces, evaluation
 
 A tool that asks pauses the run; `agent.resume(...)` re-runs it from the journal — model steps

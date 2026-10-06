@@ -192,14 +192,18 @@ harness's.
 
 ## Native sandboxes: theirs or ours
 
-Some frameworks bring a sandbox of their own. Their tools are the framework's, so they do not
-pass the harness's bridge: no harness governance, journal, timeouts, records or lifecycle.
+Prefer the framework's own sandbox on the OpenAI Agents SDK, Deep Agents and the Claude Agent
+SDK: its tools are the ones the framework's model is built to use. `sandbox()` is for `ReAct`,
+plain-function and LangGraph agents, which have none, and wherever every command must be
+governed by the catalog and journaled (a replay does not run it again). A framework's own tools
+do not pass the harness's bridge: no catalog, journal, timeout, record or lifecycle of the
+harness's, except where the framework asks permission (below).
 
-| Framework | Its own | Use it when | Use `sandbox()` when |
-|---|---|---|---|
-| Deep Agents | backends (`StateBackend`, `FilesystemBackend`, sandbox backends for Daytona, Modal, Runloop...) behind its file tools (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`) and `execute` | its file-editing tools are what the agent needs, its `interrupt_on` is your gate, and a checkpointer resumes the graph in place | commands must be governed by the catalog, journaled (a re-run does not repeat them), bounded and killed, recorded, and deleted with the run |
-| OpenAI Agents SDK | `SandboxAgent` with `SandboxRunConfig(client=...)` (Unix-local, Docker, E2B, Modal, Daytona...): a manifest, mounts, `apply_patch`, its session state in the `RunState` | you build on its sandbox capabilities (manifest, mounts, memory) and its own approvals | the same sandbox semantics for every framework of the deployment, under the harness's governance and journal |
-| Claude Agent SDK | `ClaudeAgentOptions(sandbox=SandboxSettings(...))`: Claude's own `Bash` and file tools confined on the machine the CLI runs on (bubblewrap, Seatbelt; a network allowlist through a local proxy); and Anthropic's hosted code execution tool (no internet, container reuse) | Claude should use its built-in tools on a workspace, and the machine is the boundary you trust | each run needs a container of its own, the calls governed, journaled and recorded, and the sandbox deleted with the run |
+| Framework | Its own (in the installed package) | Under `h.wrap` |
+|---|---|---|
+| Deep Agents | a backend behind its file tools and `execute` (`create_deep_agent(backend=)`): `execute` runs commands when the backend implements `SandboxBackendProtocol` — `BaseSandbox` (`deepagents/backends/sandbox.py`: a subclass implements `execute` and `upload_files`), `LangSmithSandbox`, and `LocalShellBackend` (`deepagents/backends/local_shell.py`: the host's shell, with no isolation) | the graph runs as it is; gate `execute` with `interrupt_on`, which the harness turns into an approval ([frameworks/deepagents.md](frameworks/deepagents.md)) |
+| OpenAI Agents SDK | `SandboxAgent` (`agents/sandbox`) with capabilities `Filesystem`, `Shell` and `Compaction` by default, `Skills` and `Memory` on request; a session from `RunConfig(sandbox=SandboxRunConfig(client=...))`: `DockerSandboxClient`, `UnixLocalSandboxClient` (`agents/sandbox/sandboxes`: no OS isolation on Linux), and hosted clients under `agents.extensions.sandbox` (E2B, Modal, Daytona, Runloop, Vercel, Blaxel, Cloudflare) | not runnable: the harness passes no `RunConfig`, and the SDK refuses a `SandboxAgent` without one (`UserError`). Run it with `Runner.run(..., run_config=RunConfig(sandbox=...))` yourself and plug the blocks in ([blocks/openai-agents.md](blocks/openai-agents.md)) |
+| Claude Agent SDK | the CLI's `Bash` and file tools (`ClaudeAgentOptions(tools=[...])`), confined by `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))` on the machine the CLI runs on (macOS and Linux; a `network` setting of its own) | every built-in call the CLI asks about goes through the harness's `can_use_tool`: hooks, governance by risk, a person ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md)). With the sandbox on, the CLI approves a sandboxed `Bash` command itself (`SandboxSettings` `autoAllowBashIfSandboxed`, true by default): set it false so the CLI asks, and governance decides |
 
 The two can coexist (a framework's sandbox for its own tools, `sandbox()` for the harness's),
 but they are two sandboxes that do not share files; prefer one.

@@ -59,9 +59,10 @@ new version).
 
 **The order.** A `Skill` given where skills are named is its own. A name is looked up in the
 skill sources: like every block of a `Harness`, the ones passed (`Harness(skills=[...])`, or a
-`SkillSources`) are used as they are, in their order; not passed, they are the ones the
-environment names, in this order. The first that has the name — and the version named —
-answers.
+`SkillSources`) replace the environment's and are used as they are, in their order
+(`Harness(skills=[])` is none; to keep one of the environment's, name it too:
+`[skills_dir("skills"), ...]`); not passed, they are the ones the environment names, in this
+order. The first that has the name — and the version named — answers.
 
 | Order (from the environment) | Source | On when |
 |---|---|---|
@@ -70,6 +71,22 @@ answers.
 
 `without={"skills"}` (on `h.wrap` or a run) turns skills off whatever their source: no section,
 no tools, nothing pinned.
+
+## Native or ours
+
+Three frameworks read Agent Skills folders (`<name>/SKILL.md`) themselves:
+
+| Framework | Its own skills |
+|---|---|
+| Deep Agents | `create_deep_agent(skills=["/skills/project/"], backend=...)` adds `SkillsMiddleware(backend=, sources=)` (`deepagents/middleware/skills.py`): the skills' names and descriptions in the system prompt, each `SKILL.md` read through the backend (`FilesystemBackend(root_dir=)` for a folder on disk; the graph state by default), a later source overriding an earlier one, loaded once per thread. It is a LangChain `AgentMiddleware`, so `create_agent(..., middleware=[SkillsMiddleware(...)])` takes it too |
+| OpenAI Agents SDK | the `Skills` capability of a `SandboxAgent` (`agents.sandbox.capabilities`): `Skills(from_=LocalDir(src=...))`, `Skills(lazy_from=LocalDirLazySkillSource(...))` (with a `load_skill` tool) or `Skills(skills=[Skill(...)])`, copied into the sandbox's workspace (`skills_path`, `.agents` by default). A `SandboxAgent` runs only with `RunConfig(sandbox=...)`, which `h.wrap` does not pass: call `Runner.run` yourself ([blocks/openai-agents.md](blocks/openai-agents.md)) |
+| Claude Agent SDK | `ClaudeAgentOptions(skills=["sql-review"] \| "all")`: the skills the Claude Code CLI finds, enabled by name; the SDK adds `Skill(name)` to `allowed_tools` and, when `setting_sources` is unset, `["user", "project"]`. A filter on what the model is offered, not a sandbox |
+
+* **Theirs:** skills in a local folder, for a Deep Agents, LangChain `create_agent`, Claude or
+  OpenAI sandbox agent. No harness source is needed.
+* **Ours:** skills kept in a central registry (Bifrost's Skills Repository), a version pinned
+  per run and journaled with its body so a replay reads the same skill, or a `ReAct`,
+  plain-function or LangGraph agent with no skills of its own.
 
 ## When
 

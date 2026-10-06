@@ -166,23 +166,27 @@ async def test_skills_of_every_source_pin_together_the_first_source_wins(tmp_pat
             "refunds": SkillVersions({"2.0.0": ("Handles refunds.", "R", {})}, "2.0.0"),
         }
     )
-    code = Skill("sql", "From code.", "C")
-    sources = SkillSources.of(
-        Settings(skills_dir=str(tmp_path)), gateway=fake.gateway(), given=[code]
-    )
-    assert sources.labels == ["code", f"skills_dir({tmp_path})", "Bifrost"]
+    sources = SkillSources.of(Settings(skills_dir=str(tmp_path)), gateway=fake.gateway())
+    assert sources.labels == [f"skills_dir({tmp_path})", "Bifrost"]
     pinned = await sources.pin(["sql", "refunds", TONE, "ghost", "sql-old@9"])
     assert {n: s.description for n, s in pinned.skills.items()} == {
-        "sql": "From code.",  # found in three: the first in the order
+        "sql": "From the folder.",  # found in both: the first in the order
         "refunds": "Handles refunds.",
         "tone": "How we write.",  # given: its own, before any source
     }
-    assert pinned.versions == {"sql": "1", "refunds": "2.0.0", "tone": "1"}
+    assert pinned.versions["refunds"] == "2.0.0" and pinned.versions["tone"] == "1"
     assert pinned.section == "\n".join(
-        [SECTION, "- sql: From code.", "- refunds: Handles refunds.", "- tone: How we write."]
+        [
+            SECTION,
+            "- sql: From the folder.",
+            "- refunds: Handles refunds.",
+            "- tone: How we write.",
+        ]
     )
     assert set(pinned.problems) == {"ghost", "sql-old"}
-    assert pinned.problems["ghost"].startswith("no skill 'ghost' in any source (code: holds sql@1")
+    assert pinned.problems["ghost"].startswith(
+        f"no skill 'ghost' in any source (skills_dir({tmp_path})"
+    )
     assert "Bifrost: the gateway has no skill named 'ghost'" in pinned.problems["ghost"]
     await sources.aclose()
     await fake.gateway().aclose()

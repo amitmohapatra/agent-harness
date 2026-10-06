@@ -261,12 +261,11 @@ async def test_a_version_the_gateway_does_not_list_is_not_found() -> None:
 
 # --------------------------------------------------------------------------- the order
 @respx.mock
-async def test_the_order_is_the_codes_then_the_folder_then_langfuse_then_the_gateway(
+async def test_the_environments_order_is_the_folder_then_langfuse_then_the_gateway(
     tmp_path: Path, langfuse: lf.LangfusePrompts
 ) -> None:
     respx.get(url__startswith=lf.HOST + lf.PATH).mock(side_effect=langfuse.handle)
     (tmp_path / "triage.md").write_text("From the folder.")
-    (tmp_path / "only-here.md").write_text("Folder only.")
     fake = FakeGateway(prompts={"triage": [SYSTEM], "gw": [SYSTEM]})
     settings = Settings(
         prompts_dir=str(tmp_path),
@@ -274,23 +273,15 @@ async def test_the_order_is_the_codes_then_the_folder_then_langfuse_then_the_gat
         langfuse_public_key=lf.PUBLIC,
         langfuse_secret_key=lf.SECRET,
     )
-    sources = PromptSources.of(
-        settings, gateway=fake.gateway(), given=[Prompt("triage", "From code.")]
-    )
-    assert sources.labels == [
-        "code",
-        f"prompts_dir({tmp_path})",
-        f"Langfuse ({lf.HOST})",
-        "Bifrost",
-    ]
-    assert await sources.render("triage") == "From code."
-    assert await sources.render("only-here") == "Folder only."
+    sources = PromptSources.of(settings, gateway=fake.gateway())
+    assert sources.labels == [f"prompts_dir({tmp_path})", f"Langfuse ({lf.HOST})", "Bifrost"]
+    assert await sources.render("triage") == "From the folder."  # in all three: the first
     assert await sources.render("triage@2", team="EU") == "Triage for EU."  # Langfuse: v2
     assert await sources.messages("gw") == SYSTEM
     with pytest.raises(ConfigurationError) as raised:
         await sources.get("ghost")
     assert str(raised.value) == (
-        "no prompt 'ghost' in any source (code: holds triage@1 only; "
+        "no prompt 'ghost' in any source ("
         f"prompts_dir({tmp_path}): it has no ghost.md; Langfuse ({lf.HOST}): no prompt "
         "'ghost' labelled production; Bifrost: the gateway has no committed prompt named "
         "'ghost')"

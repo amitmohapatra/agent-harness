@@ -21,11 +21,13 @@ from and its config. ``version=None`` is the version the source serves now. Ship
   the gateway prepends it — and elsewhere its messages are its text.
 
 Where a name is looked up (:class:`PromptSources`): the sources the code passes
-(``Harness(prompts=[...])``), then ``PROMPTS_DIR``, then Langfuse (its keys set), then Bifrost
-(``BIFROST_URL`` set); the first that has it answers. A name none has is a
-``ConfigurationError`` naming each source tried. Inside a run what was resolved is pinned —
-journaled, so a resumed run reads the same text even after the source changed — and said: a
-``prompt`` event, and the ``trellis.prompt`` attribute of the span current then.
+(``Harness(prompts=[...])``, ``[]`` for none) in their order, instead of the environment's;
+not passed, ``PROMPTS_DIR``, then Langfuse (its keys set), then Bifrost (``BIFROST_URL`` set).
+The first that has it answers; a :class:`Prompt` given where a prompt is named is its own. A
+name none has is a ``ConfigurationError`` naming each source tried. Inside a run what was
+resolved is pinned — journaled, so a resumed run reads the same text even after the source
+changed — and said: a ``prompt`` event, and the ``trellis.prompt`` attribute of the span
+current then.
 
 A remote source keeps what it read (``repository.Kept``): while Langfuse cannot be reached the
 last copy read stands; a prompt never read is an error that says so.
@@ -418,8 +420,8 @@ class BifrostPrompts:
 
 
 class PromptSources(Chain[ResolvedPrompt]):
-    """The prompt sources, in the order they are asked: the code's, then ``PROMPTS_DIR``,
-    Langfuse and Bifrost as the deployment names them (:meth:`of`)."""
+    """The prompt sources, in the order they are asked: the ones passed, or the deployment's
+    (:meth:`of`: ``PROMPTS_DIR``, Langfuse, Bifrost)."""
 
     kind = "prompt"
     hint = "pass Harness(prompts=[...]), or set PROMPTS_DIR, the Langfuse keys or BIFROST_URL"
@@ -428,16 +430,10 @@ class PromptSources(Chain[ResolvedPrompt]):
         super().__init__(sources)
 
     @classmethod
-    def of(
-        cls,
-        settings: Settings,
-        *,
-        gateway: Gateway | None = None,
-        given: Sequence[PromptSource] = (),
-    ) -> PromptSources:
-        """``given``, then the sources ``settings`` name: ``prompts_dir``, Langfuse (both
-        keys set), the gateway (``gateway``)."""
-        sources = list(given)
+    def of(cls, settings: Settings, *, gateway: Gateway | None = None) -> PromptSources:
+        """The sources ``settings`` name, in this order: ``prompts_dir``, Langfuse (both keys
+        set), the gateway (``gateway``)."""
+        sources: list[PromptSource] = []
         if settings.prompts_dir:
             sources.append(prompts_dir(settings.prompts_dir))
         if settings.langfuse_public_key and settings.langfuse_secret_key:
@@ -450,13 +446,6 @@ class PromptSources(Chain[ResolvedPrompt]):
             )
         if gateway is not None:
             sources.append(BifrostPrompts(gateway))
-        return cls(sources)
-
-    @classmethod
-    def given(cls, sources: PromptSources | Sequence[PromptSource]) -> PromptSources:
-        """The sources a block was given, as they are (a chain, or the sources in order)."""
-        if isinstance(sources, PromptSources):
-            return sources
         return cls(sources)
 
     async def get(

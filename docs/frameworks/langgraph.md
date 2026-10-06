@@ -142,6 +142,15 @@ agent ([surfaces.md](../surfaces.md)); a remote A2A agent is a tool with `a2a(ur
 `trellis.harness.evals`); `llm_judge` needs `TRELLIS_JUDGE_MODEL` (the harness does not know a
 graph's model).
 
+## Native or ours: skills, prompts, sandbox
+
+A `StateGraph` of your own has no skills, prompt store or sandbox: use the harness's
+(`h.tools(skills(...), sandbox(), framework="langgraph")`, `await h.prompt(...)`). A LangChain
+`create_agent` can take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders instead
+([skills.md](../skills.md#native-or-ours)); the harness's skills are for Bifrost's registry and
+versions pinned per run. `sandbox()` governs and journals every command
+([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+
 ## Limits
 
 * Harness tools are fixed when the graph is compiled: the model is offered every bound tool

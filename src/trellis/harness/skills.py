@@ -16,9 +16,10 @@ skill's name, version, description, ``SKILL.md`` body and the paths of its other
 * Bifrost — :class:`BifrostSkills`, the gateway's Skills Repository (``BIFROST_URL``).
 
 Where a name is looked up (:class:`SkillSources`): a :class:`Skill` given is its own; a name is
-asked of the sources the code passes (``Harness(skills=[...])``), then ``SKILLS_DIR``, then
-Bifrost (``BIFROST_URL`` set) — the first that has it answers. Skills of every source mix in
-one run: one context section, the same two tools.
+asked of the sources the code passes (``Harness(skills=[...])``, ``[]`` for none) in their
+order, instead of the environment's; not passed, ``SKILLS_DIR``, then Bifrost (``BIFROST_URL``
+set) — the first that has it answers. Skills of every source mix in one run: one context
+section, the same two tools.
 
 Progressive disclosure: at the start of a run each skill is pinned — the version named
 (``name@version``), else the version its source serves — and its name and description go
@@ -343,8 +344,8 @@ def refs_of(refs: Sequence[str | Skill]) -> list[Ref]:
 
 
 class SkillSources(Chain[ResolvedSkill]):
-    """The skill sources, in the order they are asked: the code's, then ``SKILLS_DIR`` and
-    Bifrost as the deployment names them (:meth:`of`)."""
+    """The skill sources, in the order they are asked: the ones passed, or the deployment's
+    (:meth:`of`: ``SKILLS_DIR``, Bifrost)."""
 
     kind = "skill"
     hint = "pass Harness(skills=[...]) or Skill objects, or set SKILLS_DIR or BIFROST_URL"
@@ -353,26 +354,14 @@ class SkillSources(Chain[ResolvedSkill]):
         super().__init__(sources)
 
     @classmethod
-    def of(
-        cls,
-        settings: Settings,
-        *,
-        gateway: Gateway | None = None,
-        given: Sequence[SkillSource] = (),
-    ) -> SkillSources:
-        """``given``, then the sources ``settings`` name: ``skills_dir``, the gateway."""
-        sources = list(given)
+    def of(cls, settings: Settings, *, gateway: Gateway | None = None) -> SkillSources:
+        """The sources ``settings`` name, in this order: ``skills_dir``, the gateway
+        (``gateway``)."""
+        sources: list[SkillSource] = []
         if settings.skills_dir:
             sources.append(skills_dir(settings.skills_dir))
         if gateway is not None:
             sources.append(BifrostSkills(gateway))
-        return cls(sources)
-
-    @classmethod
-    def given(cls, sources: SkillSources | Sequence[SkillSource]) -> SkillSources:
-        """The sources a block was given, as they are (a chain, or the sources in order)."""
-        if isinstance(sources, SkillSources):
-            return sources
         return cls(sources)
 
     async def pin(
