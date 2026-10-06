@@ -28,14 +28,32 @@ from tests.matrix import way2
 from tests.matrix.kit import EMAIL, SECRET, UNKNOWN, Desk
 from tests.matrix.model import NA, Feature, Gap, Note
 from tests.matrix.models import GroupedChat, GroupedChatModel, GroupedModel, Step
-from tests.matrix.world import CONFIRM, KEY_TOOL, USER, World, approve_all
+from tests.matrix.world import (
+    CONFIRM,
+    KEY_TOOL,
+    USER,
+    NotTimedOut,
+    OffButOffered,
+    World,
+    approve_all,
+)
 from tests.support.gateway import SkillVersions
 from tests.support.memory import MEMORY_TOOLS
-from tests.support.planned import Call, PlannedChat
+from tests.support.planned import Call, PlannedChat, PlannedChatModel
+from tests.support.sandbox import PausingSandboxes
 from trellis import Harness, ReAct, Runtime, Settings, a2a, skills
-from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolSpec
+from trellis.contracts import (
+    InterruptReason,
+    RunEventType,
+    RunStatus,
+    ToolCall,
+    ToolOutcome,
+    ToolSpec,
+)
 from trellis.harness.a2a import client as a2a_client
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
+from trellis.harness.sandbox import sandbox
 from trellis.harness.skills import LOAD_SKILL
 from trellis.harness.tools.base import Tool
 
@@ -245,7 +263,8 @@ async def cancel(w: World) -> None:
 async def run_timeout(w: World) -> None:
     d = Desk()
     o = await w.go([d.wait()], [("wait", {"seconds": 30})], timeout=0.4)
-    assert o.status is RunStatus.TIMEOUT, (o.status, o.record.error)
+    if o.status is not RunStatus.TIMEOUT:
+        raise NotTimedOut((o.status, o.record.error))
     assert o.record.error is not None and o.record.error.code == "run_timeout"
     if w.mode != "schedule":  # a scheduled run's record names no limit (G7, row F10)
         assert o.record.timeout_seconds == 0.4
@@ -371,7 +390,8 @@ async def pull(w: World) -> None:
     if not w.on:
         o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})])).succeeded()
         offered = {n for names in w.models.offered() for n in names}
-        assert not offered & set(MEMORY_TOOLS), offered
+        if offered & set(MEMORY_TOOLS):
+            raise OffButOffered(sorted(offered & set(MEMORY_TOOLS)))
         return
     o = (await w.go([d.lookup()], [("memory_search", {"query": "contact"})])).succeeded()
     assert "the user prefers email" in o.text, o.answer
@@ -422,10 +442,7 @@ async def hints(w: World) -> None:
         d.parallel("t5", "read"),
     ]
     (await w.go(tools, [("lookup", {"topic": "x"})])).succeeded()
-    offered = w.models.offered() or [
-        (r.get("allowed_tools") or "").split(",") for r in w.claude_records()
-    ]
-    offered = [[n.removeprefix("mcp__trellis__") for n in names] for names in offered]
+    offered = w.models.offered() or w.claude_offered
     assert offered, "the model was never offered anything"
     narrowed = all("note" not in names for names in offered)
     if w.on:
@@ -516,7 +533,7 @@ class _Script:
         async def run(args: dict[str, Any]) -> Any:
             return "printed"
 
-        return [Tool(spec, run, code_mode=True)]
+        return [Tool(spec, run, feature="code_mode")]
 
 
 async def code_mode(w: World) -> None:
@@ -898,7 +915,7 @@ FEATURES: Final[list[Feature]] = [
         "F41",
         "the memory service (MEMORY_URL / Harness(memory=))",
         push,
-        needs=frozenset({"memory"}),
+        needs=frozenset({"memory", "memory_push"}),
         adapters={"function": NA("checked by F41f: a function target reads agent.context")},
         way2=way2.push,
     ),
@@ -908,7 +925,7 @@ FEATURES: Final[list[Feature]] = [
         "F41",
         "the memory service",
         push_function,
-        needs=frozenset({"memory"}),
+        needs=frozenset({"memory", "memory_push"}),
         adapters={
             a: NA("checked by F41 (what the model is sent)")
             for a in ("react", "langgraph", "deepagents", "openai_agents", "claude")
@@ -921,7 +938,7 @@ FEATURES: Final[list[Feature]] = [
         "F42",
         "the memory service",
         pull,
-        needs=frozenset({"memory"}),
+        needs=frozenset({"memory", "memory_pull"}),
         adapters={"function": NA("a function target calls the memory tools like any other (F43)")},
         way2=way2.proposed("trellis.harness.blocks", "agent_tools"),
         way2_gap=Gap("G6", "agent_tools() is raw: no conversion block"),
@@ -932,7 +949,7 @@ FEATURES: Final[list[Feature]] = [
         "F43",
         "the memory service",
         records,
-        needs=frozenset({"memory"}),
+        needs=frozenset({"memory", "records"}),
         way2=way2.records,
     ),
     Feature(
@@ -941,7 +958,7 @@ FEATURES: Final[list[Feature]] = [
         "F40",
         "the memory service",
         decisions_fed_back,
-        needs=frozenset({"memory"}),
+        needs=frozenset({"memory", "records"}),
         way2=way2.decided,
     ),
     Feature(
@@ -950,7 +967,7 @@ FEATURES: Final[list[Feature]] = [
         "F28",
         "automatic from 5 tools, with memory",
         hints,
-        needs=frozenset({"memory"}),
+        needs=frozenset({"memory", "memory_push", "hints"}),
         adapters={
             "function": NO_MODEL,
             "langgraph": Gap("G12", "tools are bound when the graph is built"),
@@ -965,7 +982,7 @@ FEATURES: Final[list[Feature]] = [
         "F17",
         "the gateway (BIFROST_URL / Harness(gateway=))",
         key_tools,
-        needs=frozenset({"gateway"}),
+        needs=frozenset({"gateway", "mcp"}),
         way2=way2.key_tools,
     ),
     Feature(
@@ -974,7 +991,7 @@ FEATURES: Final[list[Feature]] = [
         "F18",
         "mcp=[...] (wrap, or h.tools for a graph)",
         virtual_mcps,
-        needs=frozenset({"gateway"}),
+        needs=frozenset({"gateway", "mcp"}),
         way2=way2.virtual_mcps,
     ),
     Feature(
@@ -983,7 +1000,7 @@ FEATURES: Final[list[Feature]] = [
         "F19",
         "automatic with the gateway (and memory to record)",
         code_mode,
-        needs=frozenset({"gateway", "memory"}),
+        needs=frozenset({"gateway", "memory", "records", "mcp", "code_mode"}),
         way2=NA("Code Mode is the gateway's: Way 2 calls its meta-tools through bifrost-sdk"),
     ),
     Feature(
@@ -992,7 +1009,7 @@ FEATURES: Final[list[Feature]] = [
         "F50",
         "skills=[...] / skills(...) with the gateway",
         skills_,
-        needs=frozenset({"gateway"}),
+        needs=frozenset({"gateway", "skills"}),
         way2=way2.proposed("trellis.harness.skills", "disclose"),
         way2_gap=Gap("G6", "no skills block (disclose(refs))"),
     ),
@@ -1032,7 +1049,7 @@ FEATURES: Final[list[Feature]] = [
         "F54",
         "TRELLIS_GROUNDING_SAMPLE with memory",
         grounding,
-        needs=frozenset({"grounding", "memory"}),
+        needs=frozenset({"grounding", "memory", "memory_push"}),
         way2=way2.grounding,
     ),
     Feature(
@@ -1102,6 +1119,147 @@ FEATURES: Final[list[Feature]] = [
 ]
 
 
+# --------------------------------------------------------------------------- hooks
+class _Guard(Hooks):
+    """The hooks the scenarios give: deny refunds, rewrite notes, ask before lookups, replace
+    a quote's outcome; and every run and model call, noted."""
+
+    def __init__(
+        self, deny: bool = False, rewrite: bool = False, ask: bool = False, replace: bool = False
+    ) -> None:
+        self.deny, self.rewrite, self.ask, self.replace = deny, rewrite, ask, replace
+        self.runs: list[tuple[str, str, str | None]] = []
+        self.models: list[str] = []
+        self.errors: list[str] = []
+
+    async def on_run_start(self, run: Runtime) -> None:
+        self.runs.append(("start", run.run_id, None))
+
+    async def on_run_end(self, run: Runtime, result: Any) -> None:
+        self.runs.append(("end", run.run_id, result.status.value))
+
+    async def before_model(self, call: ModelCall) -> None:
+        self.models.append(f"before {call.framework}")
+
+    async def after_model(self, call: ModelCall, reply: Any) -> None:
+        self.models.append(f"after {call.framework}")
+
+    async def before_tool(self, call: ToolCall) -> Verdict:
+        if self.deny and call.tool == "refund":
+            return Deny("refunds are closed today")
+        if self.rewrite and call.tool == "note":
+            return Rewrite({"text": "[rewritten]"})
+        if self.ask and call.tool == "lookup":
+            return Ask("Look this up?")
+        return None
+
+    async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
+        if self.replace and call.tool == "lookup":
+            return outcome.model_copy(update={"output": "replaced by a hook"})
+        return outcome
+
+    async def on_error(self, stage: str, error: Exception) -> None:
+        self.errors.append(stage)
+
+
+async def hook_deny(w: World) -> None:
+    d, guard = Desk(), _Guard(deny=True)
+    o = (await w.go([d.refund()], [("refund", {"order": "o1"})], hooks=[guard])).succeeded()
+    assert d.ran("refund") == [] and not o.pauses, (d.done, o.pauses)  # never ran, never asked
+    assert "refunds are closed today" in o.text, o.answer
+
+
+async def hook_rewrite(w: World) -> None:
+    d, guard = Desk(), _Guard(rewrite=True)
+    o = (await w.go([d.note()], [("note", {"text": "secret"})], hooks=[guard])).succeeded()
+    assert d.ran("note") == [{"text": "[rewritten]"}], d.done
+    assert o.answer == "Done. noted [rewritten]", o.answer
+
+
+async def hook_ask(w: World) -> None:
+    d, guard = Desk(), _Guard(ask=True)
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})], hooks=[guard])).succeeded()
+    assert [p.question for p in o.pauses] == ["Approve lookup? Look this up?"] or (
+        len(o.pauses) == 1 and "Look this up?" in o.pauses[0].question
+    ), o.pauses
+    assert d.ran("lookup") == [{"topic": "x"}]  # once, after the approval
+
+
+async def hook_after(w: World) -> None:
+    d, guard = Desk(), _Guard(replace=True)
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})], hooks=[guard])).succeeded()
+    assert o.answer == "Done. replaced by a hook", o.answer
+
+
+async def hook_runs(w: World) -> None:
+    d, guard = Desk(), _Guard()
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})], hooks=[guard])).succeeded()
+    attempts = sorted({e.attempt for e in o.events})
+    starts = [r for r in guard.runs if r[:2] == ("start", o.run_id)]
+    ends = [r for r in guard.runs if r[:2] == ("end", o.run_id)]
+    assert len(starts) == len(ends) == len(attempts), (guard.runs, attempts)
+    assert ends[-1][2] == "SUCCESS"
+
+
+async def hook_models(w: World) -> None:
+    d, guard = Desk(), _Guard()
+
+    async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
+        from trellis.harness.hooks.langchain import ModelHooks
+
+        native = await h.tools(*tools, framework=w.adapter)  # type: ignore[arg-type]
+        model = PlannedChatModel(plan=plan)
+        if w.adapter == "deepagents":
+            from deepagents import create_deep_agent
+
+            return create_deep_agent(model=model, tools=native, middleware=[ModelHooks()]), []
+        return create_agent(model, tools=native, middleware=[ModelHooks()]), []
+
+    built = target if w.adapter in ("langgraph", "deepagents") else None
+    plan: list[Call] = [("lookup", {"topic": "x"})]
+    (await w.go([d.lookup()], plan, hooks=[guard], target=built)).succeeded()
+    assert guard.models, "no model call was hooked"
+    assert len([m for m in guard.models if m.startswith("before")]) >= 2, guard.models
+    assert len([m for m in guard.models if m.startswith("after")]) >= 2, guard.models
+
+
+# --------------------------------------------------------------------------- a run's own options
+async def run_options_timeout(w: World) -> None:
+    d = Desk()
+    o = await w.go([d.wait()], [("wait", {"seconds": 30})], run={"timeout": 0.4})
+    if o.status is not RunStatus.TIMEOUT:
+        raise NotTimedOut((o.status, o.record.error))
+    assert o.record.timeout_seconds == 0.4
+
+
+async def run_options_without(w: World) -> None:
+    d = Desk()
+    o = (
+        await w.go([d.lookup()], [("lookup", {"topic": "x"})], run={"without": ["memory"]})
+    ).succeeded()
+    assert not [e for e in o.events if e.type is RunEventType.CONTEXT_LOADED]
+    mine = [c for c in w.memory_service.calls if c.scope.get("agent_run_id") == o.run_id]
+    assert [c.name for c in mine if c.name in ("messages", "record_tool", "context")] == [], [
+        c.name for c in mine
+    ]
+
+
+# --------------------------------------------------------------------------- sandboxes
+async def sandboxed(w: World) -> None:
+    provider = PausingSandboxes()
+    plan: list[Call] = [
+        ("sandbox_write", {"path": "a.txt", "content": "hello"}),
+        ("refund", {"order": "o1"}),
+        ("sandbox_exec", {"command": "cat a.txt"}),
+    ]
+    d = Desk()
+    o = (await w.go([sandbox(provider), d.refund()], plan)).succeeded()
+    assert "hello" in o.text, o.answer
+    assert len(provider.made()) == 1, provider.calls  # one sandbox, kept across the pause
+    assert provider.calls[-1][0] == "delete" and not provider.boxes, provider.calls
+    assert [c for c, _ in provider.calls].count("attach") >= 1, provider.calls
+
+
 # --------------------------------------------------------------------------- the selection
 async def selection(w: World) -> None:
     """One run that does a bit of everything (a read retried, a write announced, an approval)
@@ -1152,4 +1310,87 @@ FEATURES.append(
         modes={"schedule": Gap("G7", "a scheduled run carries no agent_version or time limit")},
         way2=NA("RunStart.agent_version: your code sets it"),
     )
+)
+
+PER_RUN: Final = only_modes(
+    "run",
+    "stream",
+    "worker",
+    "elsewhere",
+    reason="the surface or the schedule takes no per-run option: the agent's own (h.wrap) applies",
+)
+NO_MODEL_HOOKS: Final = NA(
+    "no model call the harness can hook (a function makes none; the CLI's are its own)"
+)
+TOOL_HOOK_ROWS: Final = (
+    (
+        "F71d",
+        "hooks: before_tool denies a call (never run, the model reads why)",
+        hook_deny,
+        way2.hook_deny,
+    ),
+    ("F71w", "hooks: before_tool rewrites a call's arguments", hook_rewrite, way2.hook_rewrite),
+    ("F71a", "hooks: before_tool asks a person first", hook_ask, way2.hook_ask),
+    ("F71t", "hooks: after_tool replaces what the model reads", hook_after, way2.hook_after),
+)
+FEATURES.extend(
+    [
+        *(
+            Feature(
+                fid,
+                title,
+                "F71 (W6)",
+                "h.wrap(hooks=[...]) / Harness(hooks=); Way 2 governed(hooks=)",
+                scenario,
+                way2=block,
+            )
+            for fid, title, scenario, block in TOOL_HOOK_ROWS
+        ),
+        Feature(
+            "F71r",
+            "hooks: on_run_start / on_run_end around every attempt",
+            "F71 (W6)",
+            "h.wrap(hooks=[...]) / Harness(hooks=)",
+            hook_runs,
+            way2=NA("no run of the harness's in Way 2: your code has its own"),
+        ),
+        Feature(
+            "F71m",
+            "hooks: before_model / after_model around every model call",
+            "F71 (W6)",
+            "hooks=; LangChain: create_agent(middleware=[ModelHooks()]); OpenAI: automatic",
+            hook_models,
+            adapters={"function": NO_MODEL_HOOKS, "claude": NO_MODEL_HOOKS},
+            way2=way2.model_hooks,
+        ),
+        Feature(
+            "F09r",
+            "a run's own time limit: run/stream/start(timeout=)",
+            "F09",
+            "agent.run(..., timeout=)",
+            run_options_timeout,
+            modes=PER_RUN,
+            way2=NA("RunStart.timeout_seconds: your code sets it (F09's Way 2 row)"),
+        ),
+        Feature(
+            "F75r",
+            "a run's own without=: memory off for one run, kept across its attempts",
+            "F75 (G2)",
+            "agent.run(..., without={...})",
+            run_options_without,
+            needs=frozenset({"memory"}),
+            modes=PER_RUN,
+            way2=NA("Way 2 selects by import"),
+        ),
+        Feature(
+            "F73",
+            "sandbox: write, exec across a pause, one sandbox per run, deleted at its end",
+            "F73 (W7)",
+            "tools=[sandbox(provider)] (h.tools for a graph); SANDBOX=docker",
+            sandboxed,
+            way2=NA(
+                "sandbox tools are harness tools: they run in a harness run (Way 1, ReAct with blocks)"
+            ),
+        ),
+    ]
 )

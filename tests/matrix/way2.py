@@ -28,13 +28,16 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
     ScheduleSpec,
+    ToolCall,
+    ToolOutcome,
     new_id,
 )
 from trellis.harness.a2a import remote
 from trellis.harness.evals import EvalCase, EvalServices, judge
 from trellis.harness.evals import grounding as grounding_block
-from trellis.harness.governance import Decision, Governance, Rejected, governed
+from trellis.harness.governance import Decision, Denied, Governance, Rejected, governed
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.tools.base import ToolTimeout
 from trellis.runs import Job
@@ -397,3 +400,97 @@ async def run_timeout(w: World) -> None:
         assert await RunsWorker(w.store, handle, [AGENT]).run_once()
     record = await w.store.get(run_id)
     assert started.is_set() and record is not None and record.status is RunStatus.TIMEOUT, record
+
+
+# --------------------------------------------------------------------------- hooks
+class _Hooked(Hooks):
+    def __init__(self, verdict: Verdict = None, output: Any = None) -> None:
+        self.verdict, self.output = verdict, output
+
+    async def before_tool(self, call: ToolCall) -> Verdict:
+        return self.verdict
+
+    async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
+        if self.output is None:
+            return outcome
+        return outcome.model_copy(update={"output": self.output})
+
+
+async def hook_deny(w: World) -> None:
+    d = Desk()
+    refund = governed(
+        _fn(d.refund()),
+        Governance(),
+        side_effects="irreversible",
+        on_ask=lambda _: True,
+        hooks=[_Hooked(Deny("refunds are closed today"))],
+    )
+    with pytest.raises(Denied, match="refunds are closed today"):
+        await refund(order="o1")
+    assert d.ran("refund") == []
+
+
+async def hook_rewrite(w: World) -> None:
+    d = Desk()
+    note = governed(
+        _fn(d.note()),
+        Governance(),
+        on_ask=lambda _: True,
+        hooks=[_Hooked(Rewrite({"text": "[rewritten]"}))],
+    )
+    assert await note(text="secret") == "noted [rewritten]"
+
+
+async def hook_ask(w: World) -> None:
+    d = Desk()
+    asked: list[Decision] = []
+    lookup = governed(
+        _fn(d.lookup()),
+        Governance(),
+        side_effects="read",
+        on_ask=lambda x: asked.append(x) or True,
+        hooks=[_Hooked(Ask("Look this up?"))],
+    )
+    assert await lookup(topic="x") == "facts about x"
+    assert len(asked) == 1 and "Look this up?" in asked[0].question
+
+
+async def hook_after(w: World) -> None:
+    d = Desk()
+    lookup = governed(
+        _fn(d.lookup()),
+        Governance(),
+        side_effects="read",
+        on_ask=bool,
+        hooks=[_Hooked(output="replaced by a hook")],
+    )
+    assert await lookup(topic="x") == "replaced by a hook"
+
+
+async def model_hooks(w: World) -> None:
+    """A LangChain graph your code runs, its model calls hooked by ``ModelHooks(hooks)``."""
+    from langchain.agents import create_agent
+    from langchain_core.messages import HumanMessage
+    from langchain_core.tools import tool as langchain_tool
+
+    from tests.support.planned import PlannedChatModel
+    from trellis.harness.hooks.langchain import ModelHooks
+
+    seen: list[str] = []
+
+    class Noting(Hooks):
+        async def before_model(self, call: ModelCall) -> None:
+            seen.append("before")
+
+        async def after_model(self, call: ModelCall, reply: Any) -> None:
+            seen.append("after")
+
+    @langchain_tool
+    def lookup(topic: str) -> str:
+        """Look a topic up."""
+        return f"facts about {topic}"
+
+    model = PlannedChatModel(plan=[("lookup", {"topic": "x"})])
+    graph = create_agent(model, tools=[lookup], middleware=[ModelHooks(Noting())])
+    await graph.ainvoke({"messages": [HumanMessage("x")]})
+    assert seen == ["before", "after", "before", "after"], seen

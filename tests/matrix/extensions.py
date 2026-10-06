@@ -3,36 +3,23 @@ is a strict xfail with the gap or plan item: the day the feature lands its probe
 suite fails on XPASS, and the row is turned into a real one (a scenario in ``features.py``,
 its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 
-* ``F71`` hooks (W6, G4): ``h.wrap(..., hooks=[...])`` before/after/on_error around the run, the
-  model call and the tool call.
 * ``F34`` approval rule in code (W5, G9): ``@tool(approval=fn)``.
 * ``F36v2`` HITL v2 (W5, G9): ``ask(options=[Option(...)], multiple=True)``.
-* ``F73`` sandbox (W7): ``trellis.harness.sandbox`` — a provider whose ops are harness tools.
 * ``F70`` the framework's own run options (G13): ``agent.run(..., framework_options=...)``.
-* ``F75`` per-agent selection (G2): ``h.wrap(..., without={...})`` — the pending switches of
-  ``dimensions.PENDING`` (one selection cell each).
+* the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
+  one selection cell each.
+
+Hooks (F71*), ``without=`` (the selection's switches, F75r), ``timeout=`` (F09, F09r) and the
+sandbox (F73) have landed: they are rows of ``features.py``.
 """
 
 from __future__ import annotations
 
 from typing import Any, Final
 
-from tests.matrix.kit import Desk
 from tests.matrix.model import ADAPTERS, NA, Feature, Gap
 from tests.matrix.world import USER, World
 from trellis import tool
-
-
-async def hooks(w: World) -> None:
-    seen: list[str] = []
-
-    async def before_tool(call: Any) -> None:
-        seen.append(f"before {call.tool}")
-
-    d = Desk()
-    o = await w.go([d.lookup()], [("lookup", {"topic": "x"})], hooks=[before_tool])
-    o.succeeded()
-    assert seen == ["before lookup"], seen
 
 
 async def approval_fn(w: World) -> None:
@@ -71,13 +58,6 @@ async def hitl_v2(w: World) -> None:
     assert "S" in o.text
 
 
-async def sandbox(w: World) -> None:
-    import importlib
-
-    module = importlib.import_module("trellis.harness.sandbox")
-    assert hasattr(module, "SandboxProvider")  # landed: write its scenario in features.py
-
-
 async def framework_options(w: World) -> None:
     agent = await w.agent([], [])
     proposed: dict[str, Any] = {"framework_options": {"recursion_limit": 5}}
@@ -99,14 +79,6 @@ def _pending(feature_id: str, title: str, *, audit: str, how: str, gap: Gap, pro
 
 EXTENSIONS: Final[list[Feature]] = [
     _pending(
-        "F71",
-        "hooks around run, model and tool",
-        audit="F71",
-        how="h.wrap(..., hooks=[...]) (W6)",
-        gap=Gap("G4", "no hooks yet"),
-        probe=hooks,
-    ),
-    _pending(
         "F34",
         "an approval rule in code",
         audit="F34",
@@ -121,14 +93,6 @@ EXTENSIONS: Final[list[Feature]] = [
         how="ask(options=[Option], multiple=True)",
         gap=Gap("G9", "ask takes plain string options only"),
         probe=hitl_v2,
-    ),
-    _pending(
-        "F73",
-        "sandbox: a provider's ops as harness tools",
-        audit="F73 (W7)",
-        how="trellis.harness.sandbox",
-        gap=Gap("W7", "no sandbox yet"),
-        probe=sandbox,
     ),
     _pending(
         "F70",
