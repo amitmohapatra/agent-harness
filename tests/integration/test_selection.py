@@ -140,6 +140,8 @@ async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService
 async def test_without_hints_the_context_asks_for_no_tool_hints(
     memory_service: FakeMemoryService,
 ) -> None:
+    """Without hints the agent still asks with its tools (for the skills it learned), but no
+    hints come back and every tool is offered."""
     many = [tool(lambda sku: sku, name=f"t{i}", side_effects="read") for i in range(5)]
 
     async def fn(input: str, agent: Runtime) -> list[str]:
@@ -149,11 +151,12 @@ async def test_without_hints_the_context_asks_for_no_tool_hints(
         agent = h.wrap(fn, id="hinted", tools=many)
         await agent.run("q", user="u")
         [hinted] = memory_service.named("context")
-        assert hinted.body.get("tools")
+        assert hinted.body["tools"] == {"available": [f"t{i}" for i in range(5)], "k": 8}
         memory_service.calls.clear()
-        await h.wrap(fn, id="unhinted", tools=many, without={"hints"}).run("q", user="u")
+        offered = await h.wrap(fn, id="unhinted", tools=many, without={"hints"}).run("q", user="u")
         [unhinted] = memory_service.named("context")
-        assert not unhinted.body.get("tools")
+        assert unhinted.body["tools"]["hints"] is False
+        assert {f"t{i}" for i in range(5)} <= set(offered.answer), "every tool offered"
 
 
 async def test_without_skills_a_run_has_neither_the_section_nor_the_tools(

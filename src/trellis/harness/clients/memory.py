@@ -137,12 +137,16 @@ class RunMemory:
         *,
         tools: Sequence[str] | None,
         window: bool,
+        hints: bool = True,
         budget: int = CONTEXT_TOKEN_BUDGET,
     ) -> PromptContext:
-        """What the prompt gets (at most ``budget`` tokens), and the tools that fit the task
-        (``tools``, when ``tools`` are given). ``window=False`` when the framework keeps the
-        thread's messages itself: the service then leaves the recent conversation out."""
-        return await self.ctx.context(query, token_budget=budget, tools=tools, window=window)
+        """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
+        skills it learned for the task and - unless ``hints`` is off - the tools that fit.
+        ``window=False`` when the framework keeps the thread's messages itself: the service
+        then leaves the recent conversation out."""
+        return await self.ctx.context(
+            query, token_budget=budget, tools=tools, hints=hints, window=window
+        )
 
     # ------------------------------------------------------------------ pull
     async def agent_tools(self) -> list[ToolSpec]:

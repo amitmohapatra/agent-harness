@@ -2,12 +2,12 @@
 
 * **past conversations** - a run in a new thread finds what the user said in an earlier one
   through the ``memory_search`` tool (``kinds=["message"]``), and never what another user said;
-* **learned skills** - two successful runs make a procedure, the tenant's administrator
-  publishes its draft as an Agent Skill, and a later run loads that skill by name like any
-  other: from the folder the memory service publishes to (``SKILLS_DIR``, given to this suite
-  as ``TRELLIS_LIVE_SKILLS_DIR``) or from the gateway's skills repository.
+* **learned skills** - two successful runs of an agent make its learned skill, offered in the
+  context of its next run with nobody publishing anything: to the user whose runs taught it,
+  to the agent's other users once a second user's run agreed, never to another agent, and no
+  longer once the tenant's administrator dismisses it.
 
-Every step is the harness's own path (tools through the bridge, skills pinned at run start);
+Every step is the harness's own path (tools through the bridge, the context pushed at run start);
 nothing depends on what a model chooses."""
 
 from __future__ import annotations
@@ -22,13 +22,9 @@ from tests.live.conftest import live_harness, needs_memory
 from tests.live.support import eventually
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
-from trellis.harness.skills import LOAD_SKILL
 from trellis.memory import MemoryClient
 
 pytestmark = [pytest.mark.live, needs_memory]
-
-#: The folder the memory service publishes learned skills to, when it does (``SKILLS_DIR``).
-SKILLS_DIR = os.environ.get("TRELLIS_LIVE_SKILLS_DIR")
 
 
 def _texts(found: Any) -> list[tuple[str, str | None]]:
@@ -69,15 +65,17 @@ async def test_a_run_finds_what_its_user_said_in_an_earlier_conversation() -> No
     assert not any(theirs in text for text, _ in every), "another user's chat is never read"
 
 
-# the learning job is waited for up to 120 s after the runs it learns from
+# the learning job is waited for after the runs it learns from
 @pytest.mark.timeout(300)
-async def test_a_learned_procedure_published_as_a_skill_is_loaded_by_a_later_run() -> None:
+async def test_an_agent_learns_a_skill_from_its_runs_and_its_next_runs_are_offered_it() -> None:
     admin_key = os.environ.get("TRELLIS_ADMIN_KEY")
     if not admin_key:
         pytest.skip("TRELLIS_ADMIN_KEY (the tenant administrator's memory key) is not set")
     suffix = uuid.uuid4().hex[:8]
     find_name, refund_name = f"find_order_{suffix}", f"refund_{suffix}"
-    skill = f"live-learned-{suffix}"
+    agent_id = f"live-refunds-{suffix}"
+    ann, bob, cy = (f"live-{who}-{suffix}" for who in ("ann", "bob", "cy"))
+    learned = f"{find_name} -> {refund_name}"
 
     @tool(name=find_name, side_effects="read")
     def find_order(order: str) -> str:
@@ -89,55 +87,52 @@ async def test_a_learned_procedure_published_as_a_skill_is_loaded_by_a_later_run
         """Refund a payment."""
         return f"refunded {payment}"
 
+    seen: dict[str, str] = {}
+
     async def refunds(input: str, agent: Runtime) -> str:
+        seen[str(agent.user)] = agent.context or ""
         payment = await agent.tools.call(find_name, order="O-1")
         return await agent.tools.call(refund_name, payment=payment)
 
-    async with live_harness() as h:
-        agent = h.wrap(refunds, id=f"live-refunds-{suffix}", tools=[find_order, refund])
-        for n in range(2):
-            done = await agent.run(
-                "Refund order O-1", user=f"live-u-{suffix}", thread=f"live-r-{suffix}-{n}"
-            )
-            assert done.status is RunStatus.SUCCESS and done.answer == "refunded pay-O-1"
+    agents: dict[str, Any] = {}
+
+    async def run(h: Any, user: str, n: int, agent: str = agent_id) -> None:
+        if agent not in agents:
+            agents[agent] = h.wrap(refunds, id=agent, tools=[find_order, refund])
+        done = await agents[agent].run("Refund order O-1", user=user, thread=f"live-r-{suffix}-{n}")
+        assert done.status is RunStatus.SUCCESS and done.answer == "refunded pay-O-1", done
         await h.writes.drain()
+        assert h.writes.failed == 0
+
+    async with live_harness() as h:
         tenant = await h.tenant()
-        url = os.environ["MEMORY_URL"]
+        async with MemoryClient(os.environ["MEMORY_URL"], api_key=admin_key) as client:
+            admin = client.bind(tenant_id=tenant)
 
-    async with MemoryClient(url, api_key=admin_key) as client:
-        admin = client.bind(tenant_id=tenant)
+            async def skills() -> list[Any]:
+                return await admin.advanced.skills.list(agent=agent_id)
 
-        async def drafted() -> bool:
-            drafts = await admin.advanced.tools.skill_drafts()
-            return any(find_name in d.body and refund_name in d.body for d in drafts)
+            async def users(n: int) -> bool:
+                return any(s.status == "active" and s.users >= n for s in await skills())
 
-        assert await eventually(drafted, within=120, every=3)
-        [draft] = [d for d in await admin.advanced.tools.skill_drafts() if find_name in d.body]
-        assert draft.state == "new" and draft.support == 2
-        assert draft.body.index(find_name) < draft.body.index(refund_name), "steps in order"
-        decision = await admin.advanced.tools.publish_skill(draft.id, name=skill)
-        assert (decision.state, decision.name, decision.version) == ("published", skill, "1.0.0")
-        assert all(d.id != draft.id for d in await admin.advanced.tools.skill_drafts())
+            await run(h, ann, 0)
+            await run(h, ann, 1)
+            assert await eventually(lambda: users(1), within=120, every=3)
+            [skill] = await skills()
+            assert skill.steps == [find_name, refund_name] and skill.runs == 2
 
-    folder = None
-    if decision.destination == "skills_dir":
-        if not SKILLS_DIR:
-            pytest.skip("the memory service publishes to a folder: set TRELLIS_LIVE_SKILLS_DIR")
-        folder = SKILLS_DIR
-    else:
-        assert decision.destination == "bifrost"
-    loaded: dict[str, str] = {}
+            await run(h, ann, 2)  # Ann's next run: offered what her runs taught
+            assert "## Learned skills for this task" in seen[ann] and learned in seen[ann]
+            await run(h, bob, 3)  # Bob is not offered Ann's wording ...
+            assert learned not in seen[bob]
+            assert await eventually(lambda: users(2), within=120, every=3)
+            await run(h, cy, 4)  # ... and once Bob's run agreed, every user of the agent is
+            assert learned in seen[cy]
 
-    async def follows(input: str, agent: Runtime) -> str:
-        loaded["context"] = agent.context or ""
-        loaded["skill"] = await agent.tools.call(LOAD_SKILL, name=skill)
-        return "followed"
+            await run(h, cy, 5, agent=f"live-other-{suffix}")
+            assert learned not in seen[cy], "another agent never learns this one's skills"
 
-    async with live_harness(skills_dir=folder) if folder else live_harness() as h:
-        run = await h.wrap(follows, id=f"live-follows-{suffix}", skills=[skill]).run(
-            "Refund order O-2", user=f"live-u-{suffix}"
-        )
-    assert run.status is RunStatus.SUCCESS, run
-    assert f"- {skill}: " in loaded["context"]
-    assert loaded["skill"].startswith(f"# {skill} (version 1.0.0)")
-    assert f"`{find_name}`" in loaded["skill"] and f"`{refund_name}`" in loaded["skill"]
+            dismissed = await admin.advanced.skills.dismiss(skill.id)
+            assert dismissed.status == "dismissed"
+            await run(h, cy, 6)
+            assert learned not in seen[cy], "a dismissed skill is offered no more"

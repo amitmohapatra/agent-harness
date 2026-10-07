@@ -28,11 +28,12 @@ the grounding check verifies the answer against.
   a checkpointer): the service leaves the recent conversation out. Such a graph's context
   message has a fixed id (`trellis-memory-context`), so its thread holds one that each turn
   replaces.
-* With 5 or more tools of the run's own, the request carries their names: the context then
-  includes the procedures learned for the task and the tools section (next step, argument
-  values found in memory, what is missing), and its `tools` (`[{name, confidence}]`,
-  confidence 0–1) narrow the tools the model is offered ([tools.md](tools.md)). One call: the
-  harness asks for no hints of its own.
+* The request carries the run's own tool names: the context then includes the skills the agent
+  learned for the task ([skills.md](skills.md#learned-skills)) and, with 5 or more tools, the
+  tools section (next step, argument values found in memory, what is missing) and its `tools`
+  (`[{name, confidence}]`, confidence 0–1), which narrow the tools the model is offered
+  ([tools.md](tools.md)). One call: the harness asks for no hints of its own;
+  `without={"hints"}` keeps the learned skills and offers every tool.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
 it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.

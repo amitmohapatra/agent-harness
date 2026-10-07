@@ -7,6 +7,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- The memory context is always asked for with the run's own tools, so an agent with any number
+  of tools gets the skills it learned; the tool hints still come from five tools (now the
+  memory service's threshold), and `without={"hints"}` keeps the learned skills while offering
+  every tool.
 - The framework extras pin the minor range they were tested with: `langgraph>=1.2,<1.3`,
   `langchain>=1.4,<1.5`, `langchain-core>=1.6,<1.7`, `langchain-openai>=1.6,<1.7`,
   `deepagents>=0.7.19,<0.8`, `openai-agents>=0.22.3,<0.23`, `claude-agent-sdk>=0.2.160,<0.3`,
@@ -24,10 +28,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 ### Added
 
 - From the memory service, with no harness code: `memory_search` with `kinds: ["message"]`
-  finds what was said in this conversation and in the same user's earlier ones, and skills the
-  memory service learned and an administrator published load by name from `SKILLS_DIR` or the
-  gateway like any other ([memory.md](docs/memory.md#pull),
-  [skills.md](docs/skills.md#learned-skills)). The feature matrix's memory-pull cells send
+  finds what was said in this conversation and in the same user's earlier ones
+  ([memory.md](docs/memory.md#pull)), and every run is offered the skills its agent learned
+  from its successful runs, across all of the agent's users, in its memory context
+  ([skills.md](docs/skills.md#learned-skills)). The feature matrix's memory-pull cells send
   message searches through every adapter and way; live tests cover both end to end against the
   running service.
 
