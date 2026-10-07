@@ -30,8 +30,10 @@ works inside its parent's tool call: its spans are in the parent's trace, under 
 
 Export: ``OTEL_EXPORTER_OTLP_ENDPOINT`` (+ ``OTEL_EXPORTER_OTLP_HEADERS``) installs an OTLP/HTTP
 exporter — Langfuse's endpoint, or a collector (``deploy/otel-collector.yaml``) that sends
-every span to Datadog and the GenAI spans to Langfuse. An application that configured OTel
-itself keeps its provider.
+every span to Datadog and the GenAI spans to Langfuse. Unset, Langfuse's own keys
+(``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, ``LANGFUSE_HOST``) stand for its endpoint
+and Basic auth (``Settings.from_env``). An application that configured OTel itself keeps its
+provider.
 
 Scores and datasets: Langfuse takes scores through its public API, not OTLP. When the OTLP
 headers carry Langfuse's ``Authorization: Basic`` credentials, and the endpoint is Langfuse's
@@ -62,15 +64,13 @@ from opentelemetry import trace
 from trellis.contracts import ConfigurationError
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.redaction import redact_attributes
-from trellis.harness.settings import Settings
+from trellis.harness.settings import LANGFUSE_OTLP_PATH, Settings
 
 log = logging.getLogger("trellis.telemetry")
 
 TRACER_NAME: Final = "trellis"
 #: The OTLP/HTTP traces path, appended to ``OTEL_EXPORTER_OTLP_ENDPOINT`` (the OTel spec).
 TRACES_PATH: Final = "/v1/traces"
-#: Langfuse's OTLP endpoint path, and so how its host is recognised in an endpoint.
-LANGFUSE_OTLP_PATH: Final = "/api/public/otel"
 #: The OTLP header that names Langfuse's host when traces go through a collector.
 LANGFUSE_HOST_HEADER: Final = "x-langfuse-host"
 LANGFUSE_SCORES_PATH: Final = "/api/public/scores"
@@ -536,8 +536,9 @@ ScoreType = Literal["NUMERIC", "BOOLEAN", "CATEGORICAL"]
 
 class Langfuse:
     """Langfuse's public API as far as the harness uses it — scores on a run's trace, datasets
-    and dataset runs, reached with the OTLP exporter's own credentials; prompts, reached with
-    the Langfuse keys (``prompts.py``)."""
+    and dataset runs, reached with the OTLP exporter's own credentials (which the Langfuse keys
+    give when the OTLP endpoint is unset); prompts, reached with the Langfuse keys
+    (``prompts.py``)."""
 
     def __init__(self, host: str, authorization: str, *, client: httpx.AsyncClient | None = None):
         self.host = host.rstrip("/")

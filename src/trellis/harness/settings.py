@@ -13,12 +13,21 @@ deployment is (its tenant) is not configured: the memory service says so about
 
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import Mapping
-from typing import Literal
+from typing import Final, Literal
 from urllib.parse import unquote
 
 from pydantic import BaseModel, ConfigDict, Field
+
+#: Langfuse's own defaults, as its SDK has them: its cloud, and where on a host it takes OTLP
+#: (and so how its host is recognised in an endpoint).
+LANGFUSE_CLOUD: Final = "https://cloud.langfuse.com"
+LANGFUSE_OTLP_PATH: Final = "/api/public/otel"
+#: The header Langfuse v4 (and its Cloud) processes the OTLP spans it is sent in real time with.
+LANGFUSE_INGESTION_HEADER: Final = "x-langfuse-ingestion-version"
+LANGFUSE_INGESTION_VERSION: Final = "4"
 
 
 class Settings(BaseModel):
@@ -37,9 +46,11 @@ class Settings(BaseModel):
     memory_url: str | None = None
     #: agent-runs: durable runs, the worker queue, the inbox and schedules (else in process).
     runs_url: str | None = None
-    #: OTLP/HTTP traces endpoint (Langfuse's, or a collector's).
+    #: OTLP/HTTP traces endpoint (Langfuse's, or a collector's); unset with the Langfuse keys
+    #: set: Langfuse's (``from_env``).
     otlp_endpoint: str | None = None
-    #: OTLP headers (``OTEL_EXPORTER_OTLP_HEADERS``, parsed).
+    #: OTLP headers (``OTEL_EXPORTER_OTLP_HEADERS``, parsed); unset with the Langfuse keys set:
+    #: Langfuse's Basic auth (``from_env``).
     otlp_headers: dict[str, str] = Field(default_factory=dict)
     #: A directory memory writes this process could not deliver are kept in, replayed at
     #: the next start (``writes.py``); unset: they are logged and counted, then lost.
@@ -71,8 +82,9 @@ class Settings(BaseModel):
     #: A folder of Agent Skills, one ``<name>/SKILL.md`` each (``skills.skills_dir``): a
     #: source of skills, unless the code passes ``Harness(skills=)``.
     skills_dir: str | None = None
-    #: Langfuse's prompt management (the names Langfuse's own SDK reads): prompts are read
-    #: from Langfuse when both keys are set, at ``langfuse_host`` (unset: Langfuse Cloud).
+    #: Langfuse (the names Langfuse's own SDK reads), at ``langfuse_host`` (unset: Langfuse
+    #: Cloud): with both keys set, prompts are read from Langfuse and — unless
+    #: ``OTEL_EXPORTER_OTLP_ENDPOINT`` says otherwise — the traces and scores go there too.
     langfuse_host: str | None = None
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
@@ -91,14 +103,21 @@ class Settings(BaseModel):
             value = env.get(name, "").strip()
             return value or None
 
+        otlp_endpoint = get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        otlp_headers = parse_headers(get("OTEL_EXPORTER_OTLP_HEADERS") or "")
+        langfuse_host = get("LANGFUSE_HOST")
+        public_key, secret_key = get("LANGFUSE_PUBLIC_KEY"), get("LANGFUSE_SECRET_KEY")
+        if otlp_endpoint is None and public_key and secret_key:
+            otlp_endpoint, derived = langfuse_otlp(langfuse_host, public_key, secret_key)
+            otlp_headers = {**derived, **otlp_headers}
         return cls(
             bifrost_url=get("BIFROST_URL"),
             bifrost_virtual_key=get("BIFROST_VIRTUAL_KEY"),
             api_key=get("TRELLIS_API_KEY"),
             memory_url=get("MEMORY_URL"),
             runs_url=get("RUNS_URL"),
-            otlp_endpoint=get("OTEL_EXPORTER_OTLP_ENDPOINT"),
-            otlp_headers=parse_headers(get("OTEL_EXPORTER_OTLP_HEADERS") or ""),
+            otlp_endpoint=otlp_endpoint,
+            otlp_headers=otlp_headers,
             spool_dir=get("TRELLIS_SPOOL_DIR"),
             worker_concurrency=get("TRELLIS_WORKER_CONCURRENCY"),  # type: ignore[arg-type]
             agent_version=get("TRELLIS_AGENT_VERSION"),
@@ -107,9 +126,9 @@ class Settings(BaseModel):
             judge_sample=get("TRELLIS_JUDGE_SAMPLE"),  # type: ignore[arg-type]
             prompts_dir=get("PROMPTS_DIR"),
             skills_dir=get("SKILLS_DIR"),
-            langfuse_host=get("LANGFUSE_HOST"),
-            langfuse_public_key=get("LANGFUSE_PUBLIC_KEY"),
-            langfuse_secret_key=get("LANGFUSE_SECRET_KEY"),
+            langfuse_host=langfuse_host,
+            langfuse_public_key=public_key,
+            langfuse_secret_key=secret_key,
             sandbox=get("SANDBOX"),  # type: ignore[arg-type]
             sandbox_image=get("SANDBOX_IMAGE"),
             **_given(grounding_sample=get("TRELLIS_GROUNDING_SAMPLE")),  # type: ignore[arg-type]
@@ -130,3 +149,19 @@ def parse_headers(text: str) -> dict[str, str]:
         if sep and key.strip():
             headers[key.strip().lower()] = unquote(value.strip())
     return headers
+
+
+def basic_auth(public_key: str, secret_key: str) -> str:
+    """The ``Authorization`` value Langfuse takes its key pair as: ``Basic base64(pk:sk)``."""
+    return "Basic " + base64.b64encode(f"{public_key}:{secret_key}".encode()).decode("ascii")
+
+
+def langfuse_otlp(host: str | None, public_key: str, secret_key: str) -> tuple[str, dict[str, str]]:
+    """The OTLP endpoint and headers Langfuse's keys mean, as its SDK exports to: the host's
+    ``/api/public/otel`` (``host`` unset: Langfuse Cloud) with Basic auth."""
+    endpoint = (host or LANGFUSE_CLOUD).rstrip("/") + LANGFUSE_OTLP_PATH
+    headers = {
+        "authorization": basic_auth(public_key, secret_key),
+        LANGFUSE_INGESTION_HEADER: LANGFUSE_INGESTION_VERSION,
+    }
+    return endpoint, headers

@@ -25,8 +25,8 @@ One page per framework says what to add to an existing project:
 [plain functions](docs/frameworks/functions.md).
 
 That is the whole integration. Each piece switches on when its service is configured
-(`MEMORY_URL`, `RUNS_URL`, `BIFROST_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`); with nothing set
-everything runs in this process. Run it now, with no services:
+(`MEMORY_URL`, `RUNS_URL`, `BIFROST_URL`, the Langfuse keys or `OTEL_EXPORTER_OTLP_ENDPOINT`);
+with nothing set everything runs in this process. Run it now, with no services:
 
 ```bash
 make install                         # uv sync (the sibling repositories are path sources)
@@ -56,7 +56,7 @@ make install                         # uv sync (the sibling repositories are pat
 | to call another agent | `h.wrap(target, id="a", tools=[a2a("https://...")])` | [surfaces.md](docs/surfaces.md) |
 | a score for a test set | `await h.evaluate(agent, dataset, [exact_match(), called("lookup")])` | [evaluation.md](docs/evaluation.md) |
 | quality on live traffic | `Harness(judges=[llm_judge("Polite and correct.")])` | [evaluation.md](docs/evaluation.md) |
-| traces in Langfuse | `export OTEL_EXPORTER_OTLP_ENDPOINT=... OTEL_EXPORTER_OTLP_HEADERS=...` | [observability.md](docs/observability.md) |
+| traces in Langfuse | `export LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=...` (`LANGFUSE_HOST=...` unless on Langfuse Cloud) | [observability.md](docs/observability.md) |
 | code run away from the host | `h.wrap(target, id="a", tools=[sandbox()])` with `SANDBOX=docker` | [sandbox.md](docs/sandbox.md) |
 | only one piece, in my own loop | `from trellis.memory import MemoryClient` (or runs, governance, evals) | [Way 2](#two-ways-to-use-trellis) |
 

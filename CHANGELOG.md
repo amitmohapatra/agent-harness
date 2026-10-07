@@ -27,6 +27,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- Langfuse is set up with its own three names alone: with `LANGFUSE_PUBLIC_KEY` and
+  `LANGFUSE_SECRET_KEY` set (at `LANGFUSE_HOST`, else Langfuse Cloud) and
+  `OTEL_EXPORTER_OTLP_ENDPOINT` unset, `Settings.from_env()` derives the OTLP export as
+  Langfuse's SDK does — `<host>/api/public/otel`, `Authorization: Basic base64(pk:sk)`,
+  `x-langfuse-ingestion-version: 4` — so traces, scores, datasets and prompts reach one project
+  from one set of credentials. A set `OTEL_EXPORTER_OTLP_ENDPOINT` still wins (a collector keeps
+  working), a header in `OTEL_EXPORTER_OTLP_HEADERS` wins over the derived one, and the explicit
+  `OTEL_*` form for Langfuse works as before.
 - `h.model_headers(prompt=)` is pinned per run, as `ReAct(prompt=)` is: every run of the
   harness pins each stored prompt handed out at its start (journaled, so a resume keeps it; a
   `prompt` event; `trellis.prompt.*` on the run's agent span), and the headers — a mapping read

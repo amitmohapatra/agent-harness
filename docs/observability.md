@@ -76,8 +76,16 @@ formatter with `handler.setFormatter(trellis.harness.logs.JSONFormatter())`.
 tracer provider with one OTLP/HTTP exporter (the `[otel]` extra) to `<endpoint>/v1/traces` —
 unless the application installed a provider itself, which it keeps. Two deployments:
 
-* **Straight to Langfuse** — `OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel`,
-  `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>,x-langfuse-ingestion-version=4`.
+* **Straight to Langfuse** — Langfuse's own three names, nothing else:
+  `LANGFUSE_PUBLIC_KEY=pk-lf-...`, `LANGFUSE_SECRET_KEY=sk-lf-...` and, unless the project is
+  on Langfuse Cloud, `LANGFUSE_HOST=https://langfuse.example.com`. With
+  `OTEL_EXPORTER_OTLP_ENDPOINT` unset the harness exports where Langfuse's SDK does:
+  `<LANGFUSE_HOST>/api/public/otel` with `Authorization: Basic base64(pk:sk)` and
+  `x-langfuse-ingestion-version: 4`. The same keys read its prompts
+  ([prompts.md](prompts.md)), post its scores and read its datasets. (The explicit form —
+  `OTEL_EXPORTER_OTLP_ENDPOINT=…/api/public/otel` with
+  `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>` — still works, for traces
+  and scores.)
 * **Through the collector** ([deploy/otel-collector.yaml](../deploy/otel-collector.yaml)) —
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`,
   `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>,x-langfuse-host=https://cloud.langfuse.com`.
@@ -86,7 +94,8 @@ unless the application installed a provider itself, which it keeps. Two deployme
   `langfuse.observation.type` — to Langfuse (a `filter` processor). It forwards the caller's
   `Authorization` header to Langfuse (`headers_setter`, batches keyed by it), so one collector
   serves several Langfuse projects. Collector env: `LANGFUSE_OTLP_ENDPOINT`, `DD_API_KEY`,
-  `DD_SITE`.
+  `DD_SITE`. A set `OTEL_EXPORTER_OTLP_ENDPOINT` always wins over the Langfuse keys, which then
+  only read prompts.
 
 Spans are exported in batches every few seconds; closing the harness (`async with Harness()`
 ending, `aclose()`, a worker's shutdown) first exports what is still queued, so a short script
@@ -95,9 +104,10 @@ or a stopping worker does not leave its last runs' traces behind.
 ## Scores
 
 Langfuse ingests scores through its public API (`POST /api/public/scores`), not through OTLP.
-The harness uses the credentials the OTLP headers already carry — no extra variable:
+The harness uses the credentials the OTLP headers already carry (derived from the Langfuse keys
+when they are all that is set) — no extra variable:
 
-* when `OTEL_EXPORTER_OTLP_HEADERS` has `Authorization=Basic …` **and** the endpoint is
+* when the OTLP headers have `Authorization=Basic …` **and** the endpoint is
   Langfuse's (`…/api/public/otel…`) or the headers name its host (`x-langfuse-host`, which the
   collector ignores), a score is posted to `<host>/api/public/scores` on the run's trace, with
   an idempotency id (`<run_id>:<name>`);

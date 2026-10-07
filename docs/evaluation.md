@@ -275,10 +275,11 @@ do not wrap samples the same way ([blocks/evaluation.md](blocks/evaluation.md#on
 
 ## Langfuse setup
 
-Nothing beyond the OTLP variables that already send the traces there
-([observability.md](observability.md#export)): `OTEL_EXPORTER_OTLP_HEADERS` with
-`Authorization=Basic <base64 public-key:secret-key>`, and the endpoint Langfuse's
-(`…/api/public/otel`) or the headers naming its host (`x-langfuse-host`, through a collector).
+Nothing beyond what already sends the traces there
+([observability.md](observability.md#export)): Langfuse's own `LANGFUSE_PUBLIC_KEY`,
+`LANGFUSE_SECRET_KEY` and `LANGFUSE_HOST` (unset: Langfuse Cloud) — or, through a collector,
+`OTEL_EXPORTER_OTLP_HEADERS` with `Authorization=Basic <base64 public-key:secret-key>` and the
+endpoint Langfuse's (`…/api/public/otel`) or the headers naming its host (`x-langfuse-host`).
 The same credentials reach its public API for scores, datasets and dataset runs — the harness's
 and `EvalServices.from_env()`'s alike. Without them, scores are `score` spans on the run's trace
 only (every OTLP backend gets those), and a dataset

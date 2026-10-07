@@ -154,7 +154,7 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 
 | You have | Set |
 |---|---|
-| Langfuse only | `OTEL_EXPORTER_OTLP_ENDPOINT=https://…/api/public/otel` and the Basic auth header: traces and scores go straight there |
+| Langfuse only | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` (and `LANGFUSE_HOST` unless on Langfuse Cloud): traces, scores, datasets and prompts all go straight there |
 | Langfuse and Datadog | the collector in `deploy/otel-collector.yaml`: every span to Datadog, the GenAI spans to Langfuse |
 | Your own OpenTelemetry setup | nothing: the harness uses the API, and an installed provider is kept |
 | A run to debug locally | `agent.stream(...)` events, and `trellis.current().log(...)` lines (also `log` events) |
