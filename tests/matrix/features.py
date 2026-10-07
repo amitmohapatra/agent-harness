@@ -387,6 +387,29 @@ async def push_function(w: World) -> None:
     assert (w.memory_service.context_text in o.text) is w.on, o.answer
 
 
+#: what the memory service learned for the task, as the context carries it
+LEARNED: Final = "- answer-a-lookup: lookup (worked 100% of 3 runs)"
+
+
+async def learned(w: World) -> None:
+    """The skills the agent learned reach it with the context, whatever its toolbox size: one
+    tool here, below the tool-hint threshold."""
+    w.memory_service.learned_skills = LEARNED
+    if w.adapter == "function":
+
+        async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
+            async def reads(input: str, agent: Runtime) -> str:
+                return str(agent.context)
+
+            return reads, tools
+
+        o = (await w.go([Desk().lookup()], [], target=target)).succeeded()
+        assert (LEARNED in o.text) is w.on, o.answer
+        return
+    (await w.go([Desk().lookup()], [("lookup", {"topic": "contact"})])).succeeded()
+    assert (LEARNED in w.said()) is w.on, "the learned skills never reached the model"
+
+
 async def pull(w: World) -> None:
     d = Desk()
     if not w.on:
@@ -948,6 +971,15 @@ FEATURES: Final[list[Feature]] = [
             for a in ("react", "langgraph", "deepagents", "openai_agents", "claude")
         },
         way2=NA("checked by F41"),
+    ),
+    Feature(
+        "F41s",
+        "learned skills: what the agent learned reaches it with the context",
+        "F41",
+        "the memory service (its learned skills)",
+        learned,
+        needs=frozenset({"memory", "memory_push"}),
+        way2=way2.learned,
     ),
     Feature(
         "F42",

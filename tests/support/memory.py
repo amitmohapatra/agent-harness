@@ -26,6 +26,9 @@ from tests.support.openapi import MEMORY_OPENAPI, OpenAPI
 from trellis.memory import MemoryClient
 
 URL: Final = "http://memory.test"
+#: The toolbox the service hints tools for (the memory service's ``TOOL_HINTS_MIN``); the
+#: learned skills come back for any toolbox.
+HINTS_MIN_TOOLS: Final = 5
 #: The memory service's committed OpenAPI document: every request the harness sends and every
 #: answer this fake gives is checked against it (``FakeMemoryService.violations``).
 CONTRACT: Final = OpenAPI.load(MEMORY_OPENAPI)
@@ -86,6 +89,8 @@ class FakeMemoryService:
     candidates: list[str] | None = None
     #: the context answers without a ``tools`` field at all
     omit_candidates: bool = False
+    #: the "Learned skills for this task" lines the context carries for an agent with tools
+    learned_skills: str = ""
     #: candidates for a particular task, over ``candidates``
     candidates_for: dict[str, list[str]] = field(default_factory=dict)
     #: the claims ``/v1/verify`` finds, and how many of them the evidence does not support
@@ -208,14 +213,23 @@ class FakeMemoryService:
 
     def _context(self, call: Call) -> dict[str, Any]:
         rendered = self.context_text
-        available = (call.body.get("tools") or {}).get("available")
+        requested = call.body.get("tools") or {}
+        available = requested.get("available")
         answer: dict[str, Any] = {
             "rendered": rendered,
             "bundle_id": f"bnd_{next(self._ids)}",
             "token_estimate": 0,
             "evidence_status": self.evidence_status,
         }
-        if available is not None:
+        if available is not None and self.learned_skills:
+            # the service offers what the agent learned to any agent with tools
+            rendered += "\n\n## Learned skills for this task\n" + self.learned_skills
+            answer["rendered"] = rendered
+        if (
+            available is not None
+            and requested.get("hints", True)
+            and len(available) >= HINTS_MIN_TOOLS
+        ):
             chosen = self._candidates("", available)
             rendered += "\n\n## Tools\n" + "\n".join(
                 f"- {n} (confidence {0.9 - i / 10:.2f})" for i, n in enumerate(chosen)
@@ -287,7 +301,7 @@ class FakeMemoryService:
         ]
         hints: dict[str, Any] = {"tools": tools}
         if chosen:
-            plan = {"id": "proc_1", "title": task or "the task", "steps": chosen}
+            plan = {"id": "proc_1", "name": task or "the task", "steps": chosen}
             hints["plan"] = plan | {"success_rate": 0.75, "runs": 4}
         return hints
 

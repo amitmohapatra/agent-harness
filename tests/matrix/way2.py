@@ -288,6 +288,19 @@ async def push(w: World) -> None:
     assert w.memory_service.context_text in pushed.rendered
 
 
+async def learned(w: World) -> None:
+    """Way 2 asks for the context with its own tools: the learned skills come with it."""
+    w.memory_service.learned_skills = "- answer-a-lookup: lookup (worked 100% of 3 runs)"
+    client = w.memory_service.client()
+    try:
+        scope = client.bind(tenant_id=TENANT, user_id=USER).agent(AGENT, agent_run_id="run_1")
+        pushed = await scope.context("look it up", tools=["lookup"], window=False)
+    finally:
+        await client.aclose()
+    assert "## Learned skills for this task" in pushed.rendered
+    assert "answer-a-lookup: lookup" in pushed.rendered
+
+
 async def records(w: World) -> None:
     client = w.memory_service.client()
     try:

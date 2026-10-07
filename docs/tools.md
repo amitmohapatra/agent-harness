@@ -53,10 +53,12 @@ should check, the journal keeps that, and the call is never run again blind.
 
 ## Tool hints: what the model is offered
 
-When the run's own tools (not the memory tools) number at least `TOOL_HINTS_MIN` (5), the
-memory context is asked for with their names: it comes back with the tools section (the next
-step, argument values found in memory, what is missing) and the `tools` that fit the task
-(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. The model is then offered:
+The memory context is asked for with the run's own tools (not the memory tools): it comes back
+with the skills the agent learned for the task ("Learned skills for this task", any number of
+tools) and, from five tools (the memory service's threshold), the tools section (the next step,
+argument values found in memory, what is missing) and the `tools` that fit the task
+(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With five or
+more tools, the model is then offered:
 
 * the memory tools,
 * the tools the service named (at most 8),

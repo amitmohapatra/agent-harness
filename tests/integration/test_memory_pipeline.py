@@ -97,8 +97,27 @@ async def test_push_injects_the_context_as_a_system_message(
     assert call.scope["user_id"] == "u1" and call.scope["thread_id"] == "t1"
     assert call.body["query"] == "how many a?" and call.body["token_budget"] == 2000
     assert call.body["window"] is True  # ReAct keeps no conversation of its own
-    assert "tools" not in call.body  # fewer than 5 tools: no hints
+    assert "tools" not in call.body  # no tools of its own: nothing learned to offer
     assert memory_service.named("tool_hints") == []
+
+
+async def test_a_small_toolbox_gets_its_learned_skills_and_every_tool(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """Below five tools the context still carries what the agent learned for the task; no
+    tool hints, so the model is offered every tool."""
+    memory_service.learned_skills = "- refund-an-order: t0 -> t1 (worked 100% of 3 runs)"
+    model = ScriptedChat(["done"])
+    agent = memory_harness.wrap(ReAct(system="s", model=model), id="refunds", tools=many(2))
+    result = await agent.run("refund order O-1", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    [context] = memory_service.named("context")
+    assert context.body["tools"] == {"available": ["t0", "t1"], "k": 8}
+    pushed = model.requests[0]["messages"][1]["content"]
+    assert "## Learned skills for this task\n- refund-an-order: t0 -> t1" in pushed
+    assert "## Tools" not in pushed
+    offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
+    assert {"t0", "t1"} <= set(offered), "no hints: every tool offered"
 
 
 async def test_a_memory_outage_is_a_warning_not_a_failure(
@@ -181,7 +200,7 @@ async def test_tool_search_answers_among_the_runs_tools_and_offers_them(
         ],
         "plan": {
             "id": "proc_1",
-            "title": "reorder",
+            "name": "reorder",
             "steps": ["t4"],
             "success_rate": 0.75,
             "runs": 4,

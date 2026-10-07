@@ -86,8 +86,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.run")
 
-#: From this many tools, the tool hints are asked for and narrow what the model is offered.
-TOOL_HINTS_MIN: Final = 5
 #: Everything a run does with the memory service: without all of it, a run has no memory scope.
 MEMORY: Final = frozenset(COVERS["memory"])
 #: Whether this trellis-contracts' schedules carry a queue order (``ScheduleSpec.priority``,
@@ -703,20 +701,22 @@ class Agent:
         return pushed
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
-        """The memory context for this run, in the runtime — with the tools section once the
-        toolbox is large enough, whose candidates narrow the tools the model is offered. A
-        failure is a warning."""
+        """The memory context for this run, in the runtime. Asked with the run's own tools,
+        it carries the skills the agent learned for the task, and - from five tools, the
+        service's threshold - the tools that fit, whose candidates narrow the tools the model
+        is offered (the ``hints`` feature). A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
         own = runtime.tool_names()
-        hinted = len(own) >= TOOL_HINTS_MIN and runtime.uses("hints")
+        hints = runtime.uses("hints")
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
                     runtime.task,
-                    tools=own if hinted else None,
+                    tools=own or None,
                     window=not self.adapter.keeps_conversation(self.target),
+                    hints=hints,
                     budget=self.context_budget,
                 )
             except Exception as exc:
@@ -725,7 +725,7 @@ class Agent:
             output(span, pushed.rendered)
         # candidates the model is offered; no candidates at all narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
-        if hinted and candidates and self.adapter.narrows != "none":
+        if hints and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
         status = pushed.evidence_status
         note = ABSTAIN_NOTES.get(status)

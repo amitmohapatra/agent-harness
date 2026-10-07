@@ -92,16 +92,30 @@ Three frameworks read Agent Skills folders (`<name>/SKILL.md`) themselves:
 
 Instructions for kinds of task that most runs do not need: loading them all into every prompt
 costs tokens and attention; listing them and loading one when it fits does not. Keep them in the
-repository (`SKILLS_DIR`), publish and roll them out in the gateway, or write one in code.
+repository (`SKILLS_DIR`), publish and roll them out in the gateway, or write one in code. What
+the agent learns on its own arrives in its memory context instead ([learned skills](#learned-skills)).
 
 ### Learned skills
 
-The memory service turns what agents keep doing successfully into skills: its active
-procedures are offered to the tenant's administrator as draft `SKILL.md` files, and a published
-one lands in `SKILLS_DIR` or the gateway's skills repository — the sources above. An agent
-loads it by name like any other (`skills=["refund-order"]`); the harness needs nothing new.
-How drafts are made, reviewed and versioned: the memory service's
-[learned skills](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/api/tools.md#learned-skills).
+An agent also learns skills of its own, with nothing to configure: the memory service mines
+the tool calls of its successful runs, across all of its users, and every later run of that
+agent finds what it learned in its memory context, in full and matched to the task:
+
+```text
+## Learned skills for this task
+- refund-an-order: find_order -> refund (worked 95% of 40 runs)
+  - if refund on AlreadyRefunded: stop and tell the user
+- adds to your skill refund-policy: find_order -> refund (worked 100% of 12 runs)
+```
+
+Nothing is published or loaded: the harness pushes the context before every run (any
+adapter, Way 1 or ReAct; Way 2 and no-harness code get it from the same `context()` call). A
+learned skill never replaces one of yours: when its runs opened your skill (`load_skill`, which
+the harness records like any call), it is shown as what they added to it, and your `SKILL.md` is
+never edited. Another user of the agent is offered a learned skill once two users produced it,
+another agent never. An administrator sees and dismisses them with the memory service's
+`GET /v1/skills` and `POST /v1/skills/{id}/dismiss`
+([learned skills](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/api/skills.md)).
 
 ## Where
 
