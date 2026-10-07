@@ -357,7 +357,7 @@ async def stats(scope: MemoryContext, name: str, **at_least: int) -> bool:
 
 
 async def outcome_of(scope: MemoryContext, run_id: str) -> list[Feedback]:
-    return [f for f in await scope.feedback.list_for("run", run_id) if f.source == "system"]
+    return [f for f in (await scope.feedback.page_for("run", run_id)).items if f.source == "system"]
 
 
 async def written_back(
@@ -915,7 +915,9 @@ async def test_feedback_waits_for_review_in_memory_and_is_scored() -> None:
             assert stored_feedback is not None and stored_feedback.source == "human"
             assert stored_feedback.review is not None and stored_feedback.review.state == "pending"
             scope = await memory_scope(h, user=case.user, agent_id=agent.id)
-            sources = {f.source for f in await scope.feedback.list_for("run", result.run_id)}
+            sources = {
+                f.source for f in (await scope.feedback.page_for("run", result.run_id)).items
+            }
             assert sources == {"system", "human"}
     [score] = [s for s in langfuse.posted("/api/public/scores") if s["name"] == "feedback"]
     assert score["value"] == 0.0 and score["comment"] == "Berlin"
