@@ -14,19 +14,19 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
-import pytest
 from agents import Agent as OpenAIAgent
 from agents import function_tool
+from bifrost_sdk import NO_GATEWAY_TOOLS
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 
 from tests.matrix import way2
 from tests.matrix.kit import EMAIL, SECRET, UNKNOWN, Desk
-from tests.matrix.model import NA, Feature, Gap, Note
+from tests.matrix.model import NA, Feature, Note
 from tests.matrix.models import GroupedChat, GroupedChatModel, GroupedModel, Step
 from tests.matrix.world import (
     CONFIRM,
@@ -41,7 +41,7 @@ from tests.support.gateway import SkillVersions
 from tests.support.memory import MEMORY_TOOLS
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
 from tests.support.sandbox import PausingSandboxes
-from trellis import Harness, ReAct, Runtime, Settings, a2a, skills
+from trellis import Harness, ReAct, Runtime, Settings, a2a, skills, tool
 from trellis.contracts import (
     InterruptReason,
     RunEventType,
@@ -51,6 +51,7 @@ from trellis.contracts import (
     ToolSpec,
 )
 from trellis.harness.a2a import client as a2a_client
+from trellis.harness.clients import bifrost
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
 from trellis.harness.sandbox import sandbox
@@ -539,17 +540,36 @@ async def prompts(w: World) -> None:
         assert {r.headers["x-bf-prompt-id"] for r in w.fake_gateway.completions} == {"p-triage"}
         assert o.answer == "Done. facts about x"
         return
-    # every other framework: its model client is given the prompt's headers; the run must pin
-    # the version it started with and say so on its agent span (G10)
-    if "tracing" not in w.switched:
-        pytest.skip("n.a.: a pinned prompt shows on the run's agent span, and tracing is off")
-    headers = await w.harness().model_headers(prompt="triage")
-    assert headers["x-bf-prompt-id"] == "p-triage"
-    o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})])).succeeded()
-    pinned = o.custom("prompt") or [
-        s for s in w.spans() if (s.attributes or {}).get("trellis.prompt.name") == "triage"
-    ]
-    assert pinned, "the run neither pinned nor recorded the prompt its model used"
+    # every other framework: its model client is given h.model_headers(prompt=), read per
+    # request; each run pins the version it started with (a resumed attempt keeps it), its
+    # requests select that one, and it says so (its event, its agent span)
+    w.monkeypatch.setattr(bifrost, "REPOSITORY_TTL_SECONDS", 0.0)  # every lookup reads again
+    made: list[Mapping[str, str]] = []
+    sent: list[dict[str, str]] = []
+
+    async def built(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
+        headers = await h.model_headers(prompt="triage")  # one model client per process
+        made.append(headers)
+        w.fake_gateway.prompts["triage"].append(system)  # a newer version since: 2, then 3
+
+        @tool(side_effects="read")
+        def model_request() -> str:
+            """What a model request made now sends."""
+            sent.append(dict(headers))
+            return "sent"
+
+        return await w._built(w.adapter, h, [*tools, model_request], plan, None)
+
+    o = (await w.go([d.lookup()], [("model_request", {})], target=built)).succeeded()
+    assert made[0]["x-bf-prompt-version"] == "1"  # outside a run: as resolved when made
+    pins = {(p["prompt"], p["version"]) for p in o.custom("prompt")}
+    assert pins == {("triage", "2")}, o.custom("prompt")  # every attempt: the run's start's
+    assert sent == [{**NO_GATEWAY_TOOLS, "x-bf-prompt-id": "p-triage", "x-bf-prompt-version": "2"}]
+    if "tracing" in w.switched:  # the run's agent span says it too
+        runs = [dict(s.attributes or {}) for s in w.spans()]
+        said = [a for a in runs if a.get("trellis.run_id") == o.run_id]
+        named = {(a.get("trellis.prompt.name"), a.get("trellis.prompt.version")) for a in said}
+        assert ("triage", 2) in named, named
 
 
 class _Script:
@@ -730,8 +750,9 @@ FEATURES: Final[list[Feature]] = [
         "F60, F02, F01",
         "always on (a listener: stream, AG-UI, A2A)",
         events,
-        way2=way2.proposed("trellis.harness.blocks", "events"),
-        way2_gap=Gap("G6", "Way 2 has no event block"),
+        way2=NA(
+            "by design: in Way 2 your code runs the agent, so its stream and events are its framework's own; the harness numbers the events of the runs it runs (Way 1)"
+        ),
     ),
     Feature(
         "F02",
@@ -741,8 +762,9 @@ FEATURES: Final[list[Feature]] = [
         streamed_text,
         adapters={"function": NO_MODEL},
         modes=STREAMING,
-        way2=way2.proposed("trellis.harness.blocks", "events"),
-        way2_gap=Gap("G6", "Way 2 has no event block"),
+        way2=NA(
+            "by design: in Way 2 your code runs the agent, so its stream and events are its framework's own; the harness numbers the events of the runs it runs (Way 1)"
+        ),
     ),
     Feature(
         "F32",
@@ -843,8 +865,9 @@ FEATURES: Final[list[Feature]] = [
         "F22",
         "automatic (current().idempotency_key)",
         idempotency,
-        way2=way2.proposed("trellis.runs", "idempotency_key"),
-        way2_gap=Gap("G6", "no idempotency_key(run_id, call) block outside a run"),
+        way2=NA(
+            "by design: outside a harness run your code names the key of its own write; the runs SDK and the memory SDK take idempotency_key="
+        ),
     ),
     Feature(
         "F05",
@@ -852,7 +875,6 @@ FEATURES: Final[list[Feature]] = [
         "F05",
         "agent.cancel / handle.cancel / A2A tasks/cancel",
         cancel,
-        modes={"agui": Gap("G29", "AG-UI has no cancel route")},
         way2=way2.cancel,
         way2_modes=("worker",),
     ),
@@ -871,8 +893,9 @@ FEATURES: Final[list[Feature]] = [
         "F30",
         "opt-in (agent.as_tool())",
         subagent_parent,
-        way2=way2.proposed("trellis.harness.blocks", "subagent"),
-        way2_gap=Gap("G6", "no sub-agent block (use remote())"),
+        way2=NA(
+            "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
+        ),
     ),
     Feature(
         "F30c",
@@ -880,8 +903,9 @@ FEATURES: Final[list[Feature]] = [
         "F30",
         "opt-in (agent.as_tool())",
         subagent_child,
-        way2=way2.proposed("trellis.harness.blocks", "subagent"),
-        way2_gap=Gap("G6", "no sub-agent block (use remote())"),
+        way2=NA(
+            "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
+        ),
     ),
     Feature(
         "F25r",
@@ -920,7 +944,8 @@ FEATURES: Final[list[Feature]] = [
         "F26",
         "large results: saved as a file, a head-and-tail preview read in pages (read_file)",
         "F26",
-        "automatic: Deep Agents' FilesystemMiddleware (ReAct's, Deep Agents' by default)",
+        "automatic: Deep Agents' FilesystemMiddleware (ReAct's, Deep Agents' by default); "
+        "OpenAI Agents and Claude: the same cut, kept in the run (tools.results)",
         large_result,
         adapters={
             "function": NA("a function target gets the whole result: it has no context to fill"),
@@ -928,11 +953,11 @@ FEATURES: Final[list[Feature]] = [
                 "native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct "
                 "and Deep Agents have it by default)"
             ),
-            "openai_agents": Gap("G8", "nothing cuts a large result before the model reads it"),
-            "claude": Gap("G8", "nothing cuts a large result before the model reads it"),
         },
-        way2=way2.proposed("trellis.harness.blocks", "bounded"),
-        way2_gap=Gap("G8", "no cut-and-keep block"),
+        way2=NA(
+            "by design: a Way 2 caller's own code receives the whole result and decides what "
+            "its model reads"
+        ),
     ),
     Feature(
         "F65",
@@ -989,8 +1014,9 @@ FEATURES: Final[list[Feature]] = [
         pull,
         needs=frozenset({"memory", "memory_pull"}),
         adapters={"function": NA("a function target calls the memory tools like any other (F43)")},
-        way2=way2.proposed("trellis.harness.blocks", "agent_tools"),
-        way2_gap=Gap("G6", "agent_tools() is raw: no conversion block"),
+        way2=NA(
+            "by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them"
+        ),
     ),
     Feature(
         "F43",
@@ -1017,13 +1043,10 @@ FEATURES: Final[list[Feature]] = [
         "automatic from 5 tools, with memory",
         hints,
         needs=frozenset({"memory", "memory_push", "hints"}),
-        adapters={
-            "function": NO_MODEL,
-            "langgraph": Gap("G12", "tools are bound when the graph is built"),
-            "deepagents": Gap("G12", "tools are bound when the graph is built"),
-        },
-        way2=way2.proposed("trellis.harness.blocks", "tool_hints"),
-        way2_gap=Gap("G6", "memory.tool_hints is raw: no narrowing block"),
+        adapters={"function": NO_MODEL},
+        way2=NA(
+            "by design: memory.tool_hints() ranks the tools; your code offers the ones it picks"
+        ),
     ),
     Feature(
         "F17",
@@ -1059,8 +1082,9 @@ FEATURES: Final[list[Feature]] = [
         "skills=[...] / skills(...) with the gateway",
         skills_,
         needs=frozenset({"gateway", "skills"}),
-        way2=way2.proposed("trellis.harness.skills", "disclose"),
-        way2_gap=Gap("G6", "no skills block (disclose(refs))"),
+        way2=NA(
+            "by design: your code reads the skills from Bifrost's skills API and puts them in its own prompt"
+        ),
     ),
     Feature(
         "F49",
@@ -1069,19 +1093,10 @@ FEATURES: Final[list[Feature]] = [
         "ReAct(prompt=) / model_headers(prompt=) with the gateway",
         prompts,
         needs=frozenset({"gateway"}),
-        adapters={
-            "function": NO_MODEL,
-            "langgraph": Gap("G10", "model_headers resolves the prompt once, unpinned, unrecorded"),
-            "deepagents": Gap(
-                "G10", "model_headers resolves the prompt once, unpinned, unrecorded"
-            ),
-            "openai_agents": Gap(
-                "G10", "model_headers resolves the prompt once, unpinned, unrecorded"
-            ),
-            "claude": Gap("G10", "model_headers resolves the prompt once, unpinned, unrecorded"),
-        },
-        way2=way2.proposed("trellis.harness.blocks", "prompt_pin"),
-        way2_gap=Gap("G6", "no prompt_pin(ref) block"),
+        adapters={"function": NO_MODEL},
+        way2=NA(
+            "by design: your code sends Bifrost's prompt headers itself (h.model_headers is the Way 1 form)"
+        ),
     ),
     Feature(
         "F55",
@@ -1108,8 +1123,9 @@ FEATURES: Final[list[Feature]] = [
         "OTEL_EXPORTER_OTLP_ENDPOINT (an OTel provider)",
         tracing,
         needs=frozenset({"tracing"}),
-        way2=way2.proposed("trellis.harness.tracing", "agent_span"),
-        way2_gap=Gap("G6", "no tracing block (agent_span/tool_span)"),
+        way2=NA(
+            "by design: OpenTelemetry is the block: your code's own spans, which the SDKs continue (traceparent)"
+        ),
     ),
     Feature(
         "F61",

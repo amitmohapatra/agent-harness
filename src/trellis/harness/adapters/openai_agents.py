@@ -188,7 +188,10 @@ class OpenAIAgentsAdapter:
     def _agent(target: Any, run: Invocation) -> Any:
         if not run.native_tools:
             return target
-        return target.clone(tools=[*target.tools, *run.native_tools])
+        # a tool the agent carries already (built with h.tools: read_file, say) is not added twice
+        carried = {getattr(t, "name", None) for t in target.tools}
+        added = [t for t in run.native_tools if t.name not in carried]
+        return target.clone(tools=[*target.tools, *added])
 
     @staticmethod
     async def _input(agent: Any, native_input: Any) -> Any:

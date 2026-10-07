@@ -694,10 +694,13 @@ class Agent:
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """What is pushed into the framework's input, in the runtime's context: the memory
         context (:meth:`remembered`), then the section of the skills the run pinned
-        (``skills.pin``). The memory context, when there is one, is returned."""
+        (``skills.pin``); and the stored prompts the harness handed to model clients
+        (``h.model_headers(prompt=)``) pinned for the run (``prompts.ModelPrompts.pin``). The
+        memory context, when there is one, is returned."""
         pushed = await self.remembered(runtime)
         if runtime.uses("skills"):
             await skills.pin(runtime, self.sources)
+        await self.harness.model_prompts.pin(runtime)
         return pushed
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:

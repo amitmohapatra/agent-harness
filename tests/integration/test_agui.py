@@ -38,6 +38,8 @@ async def agent_fn(input: Any, agent: Runtime) -> Any:
         return await agent.ask("Check these rows", table=rows)
     if input == "wait":
         await RELEASE.wait()
+    if input == "hold":
+        await asyncio.sleep(60)  # until cancelled
     return f"echo {input}"
 
 
@@ -153,6 +155,21 @@ async def test_a_reconnect_follows_a_live_run_to_its_end(client: httpx.AsyncClie
     followed = decode((await follower).text)
     assert followed == decode((await first).text)
     assert finished(followed)["result"] == "echo wait"
+
+
+async def test_the_runs_own_user_cancels_it_while_it_runs(client: httpx.AsyncClient) -> None:
+    first = asyncio.create_task(client.post(f"{PATH}/run", json=body("hold", runId="run-c")))
+    await asyncio.sleep(0.1)  # the run is open, holding
+    stranger = await client.post(f"{PATH}/runs/run-c/cancel", headers={"x-user": "u2"})
+    assert stranger.status_code == 404 and not first.done()
+    stopped = await client.post(f"{PATH}/runs/run-c/cancel")
+    assert stopped.status_code == 200
+    assert stopped.json() == {"runId": "run-c", "status": "CANCELLED"}
+    assert finished(decode((await first).text))["outcome"] == {"type": "cancelled"}
+    again = await client.post(f"{PATH}/runs/run-c/cancel")
+    assert again.status_code == 409 and again.json()["code"] == "CONFLICT"
+    missing = await client.post(f"{PATH}/runs/run-nope/cancel")
+    assert missing.status_code == 404
 
 
 async def test_a_large_table_travels_as_an_artifact(client: httpx.AsyncClient) -> None:
@@ -521,6 +538,8 @@ def test_the_routes_are_in_the_openapi_document() -> None:
     }
     events = doc["paths"][f"{PATH}/runs/{{run_id}}/events"]["get"]
     assert list(events["responses"]["200"]["content"]) == ["text/event-stream"]
+    cancel = doc["paths"][f"{PATH}/runs/{{run_id}}/cancel"]["post"]
+    assert list(cancel["responses"]["409"]["content"]) == ["application/problem+json"]
     artifact = doc["paths"][f"{PATH}/runs/{{run_id}}/artifacts/{{artifact_id}}"]["get"]
     assert "application/octet-stream" in artifact["responses"]["200"]["content"]
     schemas = doc["components"]["schemas"]

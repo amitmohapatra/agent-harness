@@ -6,7 +6,11 @@ options object is never changed.
 
 **Install:** `pip install 'trellis-harness[claude-agent-sdk]'`, and the Claude Code CLI the SDK
 drives. Through Bifrost: `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic",
-"ANTHROPIC_API_KEY": "<virtual key>"}` in the options.
+"ANTHROPIC_API_KEY": "<virtual key>"}` in the options. A stored prompt of the gateway: its
+headers as the CLI's `ANTHROPIC_CUSTOM_HEADERS` lines (`"\n".join(f"{k}: {v}" for k, v in
+(await h.model_headers(prompt="triage")).items())`) — the CLI reads them as it starts, and the
+run's copy of the options selects the version the run pinned at its start
+([gateway.md](../gateway.md#prompts)).
 
 This page is Way 1: the harness runs `query()`. To keep calling `query()` yourself and plug in
 the blocks (memory, `can_use_tool` from governance, the session as the run's checkpoint in
@@ -91,6 +95,7 @@ carry a `can_use_tool` of the harness's:
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
+| Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with the `trellis` server's `read_file` (listed from the start: the CLI lists a server's tools once) ([tools.md](../tools.md#large-results)) |
 | Grounding, judges, tracing | as for every target |
 
 The answer is the `ResultMessage`'s `structured_output` (an `output_format`) or its `result`; a
@@ -153,10 +158,10 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
   and is not added (use a string or a preset with `append`).
 * Large results: a tool's result comes back from the CLI in one message (as the model reads it),
   which the SDK reads into a buffer of `max_buffer_size` bytes (1 MiB by default: a message
-  over it fails the run with `CLIJSONDecodeError`). The harness runs the options with 100 MiB unless they name their own —
-  room for any result a run keeps (an agent-runs artifact holds at most 50 MiB), escaped as
-  JSON. The result is not cut first: what the model reads of a long one is Claude Code's to
-  decide (only `ReAct` cuts long results itself, [react.md](react.md)).
+  over it fails the run with `CLIJSONDecodeError`). A harness tool's large result is cut before
+  (above); a team's own MCP server's, or a built-in's, is not — what the model reads of it is
+  Claude Code's to decide — so the harness runs the options with 100 MiB unless they name their
+  own (an agent-runs artifact holds at most 50 MiB), escaped as JSON.
 
 ## Run it
 

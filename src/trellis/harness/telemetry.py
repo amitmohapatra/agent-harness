@@ -463,6 +463,13 @@ def attribute(name: str, value: str) -> None:
         span.set_attribute(name, value)
 
 
+def attributes(values: Mapping[str, Any]) -> None:
+    """Attributes of the span current now (the run's span, in its pipeline)."""
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attributes(values)
+
+
 def output(span: trace.Span, value: Any, *, key: str = "langfuse.observation.output") -> None:
     """Record what a span produced (redacted, bounded)."""
     if value is not None and span.is_recording():

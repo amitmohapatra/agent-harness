@@ -88,7 +88,7 @@ With the services configured, every wrapped agent gets all of this with no code.
 | **Governance** | Each call runs, runs and is announced, or asks a person: by the tool's risk — the MCP server's annotations or a local tool's declaration, overridden by the catalog's `risk`; the catalog's `approve_when` replaces that; a catalog that cannot be read fails closed; every tool is published to the catalog ([governance.md](governance.md)) |
 | **Tool hints** | The context comes back with the skills the agent learned for the task; from 5 tools on, also with the tools that fit, and the model is offered those, the memory tools and every tool the run already used ([tools.md](tools.md)) |
 | **Code Mode** | The read-only Code Mode servers, from 3 servers or 20 tools, become Code Mode meta-tools under the harness's names; their nested calls are recorded from the gateway's log |
-| **Prompts and skills** | A prompt or skill named once is looked up in code, the folder, Langfuse, the gateway; pinned and journaled per run ([prompts.md](prompts.md), [skills.md](skills.md)) |
+| **Prompts and skills** | A prompt or skill named once is looked up in code, the folder, Langfuse, the gateway; pinned and journaled per run — a stored prompt a framework's model client selects (`h.model_headers(prompt=)`) too ([prompts.md](prompts.md), [skills.md](skills.md)) |
 | **Outcome and grounding** | The run's ending is its `system` feedback; a sampled share is checked against its context, a score on its trace |
 | **People** | A pause is delivered to agent-runs' webhooks (`run.paused`), with the question and whose it is ([interrupts.md](interrupts.md#telling-people)) |
 | **Run events and queues** | With `RUNS_URL` every run's events go to agent-runs' event log, so any replica streams any run; a second message to a busy conversation waits for the first ([runs.md](runs.md)) |
@@ -116,7 +116,7 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 |---|---|---|---|
 | `memory` | `MEMORY_URL` | `memory_push`, `memory_pull` and `records` together | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
 | `memory_push` | `MEMORY_URL` | the memory context pushed into the framework's input (and the tool hints with it) | no context, no `/v1/context` call |
-| `memory_pull` | `MEMORY_URL` | the memory tools (`memory_search`, `tool_search`, ...) | not offered; a graph's, bound at build, are hidden by its `ModelHooks()` middleware (a `ReAct`'s included) and otherwise offered and answer that they are off; `h.tools(without=)` leaves them out |
+| `memory_pull` | `MEMORY_URL` | the memory tools (`memory_search`, `tool_search`, ...) | not offered; a graph's, bound at build, are hidden from a `create_agent` or Deep Agents graph's model calls (`ReAct` included); a hand-built `StateGraph` is offered them and they answer that they are off; `h.tools(without=)` leaves them out |
 | `records` | `MEMORY_URL` | the transcript, every tool call, the outcome, decisions as feedback | nothing written to memory about the run |
 | `hints` | `MEMORY_URL`, from 5 tools | the tool hints narrow the tools the model is offered | every tool offered (the learned skills stay) |
 | `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_GROUNDING_SAMPLE`) | the answer checked against the context it was given | not checked |
@@ -149,7 +149,7 @@ await agent.run(question, user="ada", framework_options={"tags": ["vip"]})
 |---|---|---|
 | LangGraph, Deep Agents, `ReAct` | the `config` of `ainvoke`/`astream` (`RunnableConfig` keys: `recursion_limit`, `configurable`, `tags`, `metadata`, `callbacks`, `max_concurrency`, `run_name`) | `configurable.thread_id`: the run's thread wins over one given |
 | OpenAI Agents | keyword arguments of `Runner.run`/`run_streamed` (`max_turns`, `run_config`, `context`, `session`...) | `starting_agent`, `input`, `hooks`: refused |
-| Claude Agent SDK | `ClaudeAgentOptions` fields set on the run's copy of the options (`max_turns`, `model`, `allowed_tools`...) | `resume`, `continue_conversation`, `permission_prompt_tool_name`: refused; `system_prompt`, `can_use_tool` and `mcp_servers` merged (the context appended, the callback asked after governance, the `trellis` server added beside — a server of that name refused) |
+| Claude Agent SDK | `ClaudeAgentOptions` fields set on the run's copy of the options (`max_turns`, `model`, `allowed_tools`...) | `resume`, `continue_conversation`, `permission_prompt_tool_name`: refused; `system_prompt`, `can_use_tool` and `mcp_servers` merged (the context appended, the callback asked after governance, the `trellis` server added beside — a server of that name refused); `env`'s `ANTHROPIC_CUSTOM_HEADERS` that select a stored prompt the run pinned (`h.model_headers(prompt=)`) select its pinned version |
 | a function | — (no framework run call) | any: refused |
 
 An option the framework cannot take (a key it does not know, one the harness keeps) is refused

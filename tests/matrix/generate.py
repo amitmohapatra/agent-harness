@@ -1,6 +1,7 @@
 """Every cell of the matrix, generated from the tables: FEATURES (and the selection row and the
-extension points) x ADAPTERS x WAYS x MODES x SELECTIONS, each a test that runs, a skip that
-says why it does not apply, or a strict xfail naming the gap or bug it waits on.
+extension points) x ADAPTERS x WAYS x MODES x SELECTIONS. A cell that applies is a test
+(``RUNNABLE``) that runs, or a strict xfail naming the bug it waits on; a cell that does not
+apply is no test at all: the report lists it with its reason, straight from the table.
 
 Which selections a feature runs under: everything on and nothing on; when it needs switches,
 those alone on and each of them alone off; the selection row (``SEL``) runs under every
@@ -113,12 +114,12 @@ def _way2_note(feature: Feature, adapter: str, mode: str) -> Note | None:
         return WAY2_MODE
     if isinstance(feature.way2, NA | Gap | Bug):
         return feature.way2
-    return feature.way2_gap
+    return None
 
 
 def _selections(feature: Feature) -> list[Selection]:
     if feature is SELECTION:
-        return [s for s in SELECTIONS if s.pending is None]
+        return list(SELECTIONS)
     chosen = ["all", "none"]
     if feature.needs:
         from tests.matrix.dimensions import closure
@@ -167,18 +168,8 @@ def cells() -> Iterator[Cell]:
                             selection,
                             held,
                         )
-    for selection in SELECTIONS:
-        if selection.pending is not None:
-            pending = selection.pending
-            yield Cell(
-                cell_id("SEL", "function", "way1", "run", selection.id),
-                SELECTION,
-                "function",
-                "way1",
-                "run",
-                selection,
-                Gap(pending.gap, f"no switch for {pending.title} (without=)"),
-            )
 
 
 CELLS: Final = list(cells())
+#: The cells that are tests: every one that applies.
+RUNNABLE: Final = [c for c in CELLS if not isinstance(c.note, NA)]

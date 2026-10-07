@@ -7,9 +7,7 @@ framework recipes are the ``W2R`` row)."""
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -383,19 +381,6 @@ async def remote_agent(w: World) -> None:
     finally:
         await http.aclose()
         await served.aclose()
-
-
-def proposed(module: str, name: str) -> Callable[[World], Awaitable[None]]:
-    """A probe of a block the plan proposes (``module.name``): it fails until the block is
-    there, then the cell XPASSes and its scenario is written (the names follow the audit
-    where it names one: G6 ``disclose``, ``prompt_pin``, ``idempotency_key``, a public tracing
-    module; ``trellis.harness.blocks`` stands for the others)."""
-
-    async def probe(w: World) -> None:
-        found = importlib.import_module(module)
-        assert hasattr(found, name), f"{module}.{name}"
-
-    return probe
 
 
 async def run_timeout(w: World) -> None:

@@ -98,14 +98,16 @@ these Virtual MCPs) and the memory tools; `without=` leaves features' tools out
 ```text
 await h.prompt(ref, /, **values) -> str
 await h.prompt_messages(ref, /, **values) -> list[dict]
-await h.model_headers(*, prompt=None) -> dict[str, str]
+await h.model_headers(*, prompt=None) -> Mapping[str, str]
 ```
 
 `prompt` is the prompt `ref` names (`"name"`, `"name@version"`, a `Prompt`) from the first
 prompt source that has it, its `{{variables}}` filled; inside a run it is pinned and journaled
 ([prompts.md](prompts.md)). `model_headers` are the headers for a framework's own model client
 pointed at the gateway: the deny-all MCP scope and, with `prompt=`, that stored prompt's
-selection ([gateway.md](gateway.md)).
+selection, pinned per run — every run of the harness pins it at its start, and the headers,
+read at each request, select the version the run executing pinned (outside a run: the one
+resolved when they were made) ([gateway.md](gateway.md#prompts)).
 
 ### h.worker
 

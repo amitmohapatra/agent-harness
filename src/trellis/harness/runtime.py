@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.governance.decision import Decision
+    from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
     from trellis.harness.skills import ResolvedSkill
     from trellis.harness.tools.base import Tool
@@ -113,6 +114,9 @@ class Runtime:
     used: set[str] = field(default_factory=set)
     #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
     skills: dict[str, ResolvedSkill] = field(default_factory=dict)
+    #: the prompts this attempt pinned (``PromptSources.pin``: a ``ReAct``'s ``prompt=``, the
+    #: stored prompts ``h.model_headers(prompt=)`` handed out), by their journal key
+    prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
     #: the sandbox this attempt's sandbox tools work in, once one of them ran (``sandbox``)
     sandbox: Sandbox | None = None
     #: set by an adapter whose framework can suspend itself (LangGraph ``interrupt``)

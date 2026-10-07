@@ -1,11 +1,13 @@
 """The matrix as Markdown, from what ran: ``python -m tests.matrix.report [junit.xml ...]
 [--out build/matrix.md]`` reads the junit files ``make matrix`` writes (one per shard) and
 writes feature x adapter x way, feature x mode and the selections, each cell pass, FAIL,
-n.a. (with its reason) or xfail (with its gap or bug) — "tested" means it ran: a cell the junit
-files do not hold is "not run".
+n.a. (with its reason) or xfail (with its gap or bug) — "tested" means it ran: a cell that
+applies and the junit files do not hold is "not run".
 
-Statuses come from the junit files alone; the tables (``generate.CELLS``) only add each
-feature's title, each selection's switches and the order.
+A cell that does not apply is no test: its n.a. and reason come from the tables
+(``generate.CELLS``), which also give each feature's title, each selection's switches and the
+order. Every other status comes from the junit files; a test skipped while it ran is a FAIL,
+since every cell that applies must run.
 """
 
 from __future__ import annotations
@@ -19,9 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from tests.matrix.dimensions import PENDING, SELECTIONS, SWITCHES, pair_rows
+from tests.matrix.dimensions import SELECTIONS, SWITCHES, pair_rows
 from tests.matrix.generate import CELLS
 from tests.matrix.model import ADAPTERS, MODES, WAYS, parse_cell
+from tests.matrix.model import NA as NotApplicable
 
 DEFAULT_JUNIT: Final = Path("build/matrix.xml")
 DEFAULT_OUT: Final = Path("build/matrix.md")
@@ -65,7 +68,7 @@ def _result(cell: str, case: ET.Element) -> Result:
         if skipped.get("type") == "pytest.xfail" or message.startswith("xfail"):
             reason = message.removeprefix("xfail").strip(": ").strip()
             return Result(cell, XFAIL, reason, seconds)
-        return Result(cell, NA, message.removeprefix("n.a.: ").strip(), seconds)
+        return Result(cell, FAIL, f"skipped while it ran: {message}"[:200], seconds)
     return Result(cell, PASS, "", seconds)
 
 
@@ -89,7 +92,12 @@ def _summary(results: Sequence[Result]) -> str:
 
 def render(found: dict[str, Result], seconds: float | None = None) -> str:
     expected = {c.id: c for c in CELLS}
-    results = {cid: found.get(cid) for cid in expected}
+    results = {
+        cid: Result(cid, NA, c.note.reason, 0.0)
+        if isinstance(c.note, NotApplicable)
+        else found.get(cid)
+        for cid, c in expected.items()
+    }
     ran = [r for r in results.values() if r is not None]
     counts = Counter(r.status for r in ran)
     missing = [cid for cid, r in results.items() if r is None]
@@ -123,11 +131,10 @@ def render(found: dict[str, Result], seconds: float | None = None) -> str:
         f"- adapters: {len(ADAPTERS)} ({', '.join(ADAPTERS)})",
         f"- ways: {len(WAYS)} ({', '.join(WAYS)})",
         f"- modes: {len(MODES)} ({', '.join(MODES)})",
-        f"- switches: {len(SWITCHES)} ({', '.join(s.id for s in SWITCHES)}); pending: "
-        f"{', '.join(f'{p.id} ({p.gap})' for p in PENDING)}",
+        f"- switches: {len(SWITCHES)} ({', '.join(s.id for s in SWITCHES)})",
         f"- selections: {len(SELECTIONS)} (all, none, only.*, without.*, "
         f"{len(pair_rows())} all-pairs rows of which "
-        f"{sum(1 for s in SELECTIONS if s.kind == 'pairs')} are new, pending.*)",
+        f"{sum(1 for s in SELECTIONS if s.kind == 'pairs')} are new)",
         "",
         "Cell values add up the modes and selections of a cell: `pass n` (every one ran and "
         "passed), `xfail G..` (a gap or bug the cell waits on), `n.a.` (see the reasons), "
@@ -155,7 +162,7 @@ def render(found: dict[str, Result], seconds: float | None = None) -> str:
     for way in ("way1", "with_blocks"):
         out += [f"### {way}", "", _row(["selection", "on", *ADAPTERS]), _rule(len(ADAPTERS) + 2)]
         for selection in SELECTIONS:
-            on = ", ".join(sorted(selection.on)) if selection.pending is None else "(pending)"
+            on = ", ".join(sorted(selection.on))
             cells = [_summary(by[("s", selection.id, a, way)]) for a in ADAPTERS]
             if all(c == NOT_RUN for c in cells):
                 continue

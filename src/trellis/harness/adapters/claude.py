@@ -16,6 +16,9 @@
   tools are not run again — and calls the paused tool again, which the journal answers. A
   session the CLI no longer holds (another machine, its store cleared) is a warning, and the
   query runs again from its prompt against the journal;
+* model headers: ``ANTHROPIC_CUSTOM_HEADERS`` in the options' ``env`` that select a stored
+  prompt the run pinned (``h.model_headers(prompt=)``) select the version it pinned — the CLI
+  reads them as it starts, once per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``system_prompt`` (the memory context is
   appended to it), ``can_use_tool`` (the harness asks it after governance, as the target's)
@@ -35,6 +38,7 @@ from typing import Any, ClassVar, Final
 from trellis.contracts import ConfigurationError, InterruptResolution, ToolOutcome, ToolSpec
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
 from trellis.harness.journal import Pending
+from trellis.harness.prompts import selected_env
 from trellis.harness.runtime import Paused
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
@@ -237,6 +241,9 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
     if session is not None:
         changes["resume"] = session
+    env = selected_env(options.env, run.runtime)
+    if env is not None:
+        changes["env"] = env
     return dataclasses.replace(options, **changes)
 
 

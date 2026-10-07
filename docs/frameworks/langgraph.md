@@ -8,7 +8,9 @@ too, with a page of its own ([deepagents.md](deepagents.md)).
 `langchain`, which has `create_agent` and its middleware). Your model is your own LangChain chat
 model — `ChatOpenAI(base_url=BIFROST_URL, default_headers=await h.model_headers(), ...)` to go
 through Bifrost (the headers keep the gateway from adding its MCP tools to the model's requests,
-and select a stored prompt with `prompt=`: [gateway.md](../gateway.md)); a prompt from any source
+and select a stored prompt with `prompt=`: [gateway.md](../gateway.md#prompts) — a chat model
+copies its headers when it is built, so with `create_agent(..., middleware=[ModelHooks()])`
+each call selects the version the run pinned); a prompt from any source
 — code, `.md` files, Langfuse, the gateway — is `system_prompt=await h.prompt("triage", ...)`
 ([prompts.md](../prompts.md)).
 
@@ -69,7 +71,7 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 | Memory pull | the memory tools are in `h.tools(...)` |
 | Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
-| Tool hints | the context is asked for with the toolbox's names (5 or more); the graph's bound tools are not narrowed (`narrows="none"`) |
+| Tool hints | the context is asked for with the toolbox's names (5 or more); a `create_agent` graph built with `h.tools` is then offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found — its own tools untouched (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`) |
 | Grounding, judges | sampled successful runs with an answer ([evaluation.md](../evaluation.md)) |
 | Hooks | the tool and run hooks as for every target; the model hooks through LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[ModelHooks()])` (`from trellis.harness.middleware import ModelHooks`; a `before_model` call is the request made; the other harness middleware — the run's tools per model call, a step limit, stall detection, the checkpoint in the run — is in [react.md](react.md#the-middleware)) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per harness call, `retrieve memory`; LangChain's own instrumentation nests under it |
@@ -184,14 +186,15 @@ versions pinned per run. `sandbox()` governs and journals every command
 
 ## Limits
 
-* Harness tools are fixed when the graph is compiled (hints shape the context, not the
-  schemas sent). Build it without what its agent goes without — `h.tools(...,
-  without={"mcp"})` neither lists the key's MCP tools nor binds them; `without={"memory_pull"}`
-  leaves the memory tools out. A part turned off after the graph was built (`h.wrap(without=)`,
-  a run's `without=`) stays bound: the harness's middleware, `create_agent(...,
-  middleware=[ModelHooks()])`, leaves its tools out of what each model call is offered; a graph
-  built without the middleware (or a hand-built `StateGraph`) is offered them, and a call of
-  one is an error the model reads ("off in this run").
+* Harness tools are fixed when the graph is compiled. Build it without what its agent goes
+  without — `h.tools(..., without={"mcp"})` neither lists the key's MCP tools nor binds them;
+  `without={"memory_pull"}` leaves the memory tools out. A part turned off after the graph was
+  built (`h.wrap(without=)`, a run's `without=`) stays bound, and so do the tools the hints
+  leave out: a `create_agent` graph's model calls are offered only what the run offers (the
+  harness runs it with one more `awrap_model_call` handler; `ModelHooks` does the same); a
+  hand-built `StateGraph` binds its model's tools in its own node code, which the harness
+  cannot reach, so it is offered every tool it bound — the hints shape its context only, and
+  a call of a part turned off is an error the model reads ("off in this run").
 * A tool call whose arguments the chat model could not parse (`AIMessage.invalid_tool_calls`,
   as langchain-openai reports broken JSON) is not a call to `create_agent` (or Deep Agents):
   the run ends on that message, and the model is told nothing — unless the graph has the

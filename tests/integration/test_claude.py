@@ -15,6 +15,7 @@ from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolSpec
 from trellis.harness.adapters.claude import RESUMED
+from trellis.harness.journal import content_key
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
 
@@ -64,7 +65,8 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     assert result.status is RunStatus.SUCCESS and result.answer == "refunded o1"
     assert refunds == ["o1"]
     cli = started_with(tmp_path)
-    assert cli["tools"] == ["refund"] and cli["allowed_tools"] is None
+    # read_file is listed from the start: the CLI lists a server's tools once
+    assert cli["tools"] == ["refund", "read_file"] and cli["allowed_tools"] is None
     assert cli["permission_prompt_tool"] == "stdio"  # the harness's can_use_tool decides
     assert cli["system_prompt"] == "You refund."
     assert target.mcp_servers == {}  # the team's options are untouched
@@ -102,26 +104,24 @@ async def test_a_tool_whose_schema_declares_no_properties_takes_no_argument(
     assert _schema(replace(now, spec=now.spec.model_copy(update={"input_schema": kept}))) == kept
 
 
-async def test_a_tool_result_over_a_mebibyte_reaches_claude(
+async def test_a_tool_result_over_a_mebibyte_reaches_claude_as_a_preview(
     harness: Harness, tmp_path: Path
 ) -> None:
     """A tool's result comes back from the CLI in one message, which the SDK reads into a 1 MiB
-    buffer unless its options say more: the harness's options say enough for any result a run keeps
-    (a team's own ``max_buffer_size`` stands)."""
+    buffer unless its options say more (the harness's say enough for a team's own MCP server's
+    result, or a built-in's): a harness tool's large result is cut before, so even a team's own
+    1 MiB buffer holds its preview."""
 
     @tool(side_effects="read")
     def export(rows: int) -> str:
         """Export a report."""
         return "x" * (1024 * 1024 + 1)
 
-    script = [{"tool": "export", "args": {"rows": 3}}, {"text": "exported"}]
-    agent = harness.wrap(options(tmp_path, script), id="exporter", tools=[export])
-    result = await agent.run("export", user="u")
-    assert result.status is RunStatus.SUCCESS and result.answer == "exported"
+    script = [{"tool": "export", "args": {"rows": 3}}, {"text": "{last}"}]
     own = options(tmp_path, script, max_buffer_size=1024 * 1024)
-    refused = await harness.wrap(own, id="small", tools=[export]).run("export", user="u")
-    assert refused.status is RunStatus.ERROR and refused.error is not None
-    assert refused.error.code == "CLIJSONDecodeError"
+    result = await harness.wrap(own, id="small", tools=[export]).run("export", user="u")
+    assert result.status is RunStatus.SUCCESS and "/large_tool_results/" in result.answer
+    assert len(result.answer) < 25_000
 
 
 async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(
@@ -262,7 +262,7 @@ async def test_the_hints_narrow_the_tools_for_the_run(
     memory_service.candidates = ["t2", "t5"]
     target = options(tmp_path, [{"text": "done"}])
     await memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)]).run("x", user="u1")
-    assert started_with(tmp_path)["tools"] == ["t2", "t5", *MEMORY_TOOLS]
+    assert started_with(tmp_path)["tools"] == ["t2", "t5", *MEMORY_TOOLS, "read_file"]
 
 
 async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: Path) -> None:
@@ -288,3 +288,44 @@ async def test_mcp_servers_the_team_configured_as_a_file_or_json_stay(
         assert (await agent.run("refund o9", user="u1")).answer == "done"
         servers = json.loads(started_with(tmp_path)["mcp_config"])["mcpServers"]
         assert servers["erp"] == erp and servers["trellis"]["type"] == "sdk"
+
+
+#: a result over ``tools.results.MAX_CHARS``, and where the run keeps it
+LONG = "\n".join(f"row {n}" for n in range(1, 30_001))
+KEPT = f"/large_tool_results/{content_key('result', LONG)}"
+
+
+@tool(side_effects="read")
+def dump() -> str:
+    """Dump every row."""
+    return LONG
+
+
+async def test_a_large_result_is_previewed_naming_where_the_run_keeps_it(
+    harness: Harness, tmp_path: Path
+) -> None:
+    script = [{"tool": "dump", "args": {}}, {"text": "{last}"}]
+    agent = harness.wrap(options(tmp_path, script), id="d", tools=[dump])
+    preview = (await agent.run("dump it", user="u1")).answer
+    assert f"saved in the filesystem at this path: {KEPT}" in preview and len(preview) < 25_000
+    assert "row 30000" in preview and "row 100" not in preview
+
+
+async def test_a_kept_result_is_read_in_pages_after_a_pause(
+    harness: Harness, tmp_path: Path
+) -> None:
+    refunds.clear()
+    script = [
+        {"tool": "dump", "args": {}},
+        {"tool": "refund", "args": {"order": "o1"}},
+        {"tool": "read_file", "args": {"file_path": KEPT, "offset": 10, "limit": 2}},
+        {"text": "{last}"},
+    ]
+    agent = harness.wrap(options(tmp_path, script), id="dumper", tools=[dump, refund])
+    paused = await agent.run("dump it", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert refunds == ["o1"]  # the session went on: read_file read the journal's copy
+    assert finished.answer == (
+        f'11  row 11\n12  row 12\n…[29988 more lines: read_file(file_path="{KEPT}", offset=12)]'
+    )

@@ -39,10 +39,13 @@ import asyncio
 import base64
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
+
+from bifrost_sdk import NO_GATEWAY_TOOLS
+from bifrost_sdk.headers import PROMPT_ID
 
 from trellis.contracts import ConfigurationError, HarnessError
 from trellis.harness import telemetry
@@ -454,15 +457,14 @@ class PromptSources(Chain[ResolvedPrompt]):
         """The prompt ``ref`` names (``"name"``, ``"name@version"``, or a :class:`Prompt`), as
         the first source that has it gives it. Inside a run (``runtime``) it is pinned: an
         earlier attempt's, from the journal, else resolved now and journaled."""
+        key = _key(ref, kind)
         if isinstance(ref, Prompt):
-            key = content_key(kind, [ref.name, ref.version])
 
             async def read() -> ResolvedPrompt:
                 return ref.resolved
 
         else:
             name, version = pinned(ref)
-            key = content_key(kind, ref)
 
             async def read() -> ResolvedPrompt:
                 return await self.find(name, version)
@@ -477,6 +479,20 @@ class PromptSources(Chain[ResolvedPrompt]):
             telemetry.attribute("trellis.prompt", found.ref)
         return found
 
+    async def pin(
+        self, ref: str | Prompt, runtime: Runtime, *, kind: str = EVENT
+    ) -> ResolvedPrompt:
+        """The prompt ``ref`` names as ``runtime``'s run uses it on every model call: pinned
+        once per attempt (:meth:`get`: the journal's, else resolved now and journaled; its
+        ``prompt`` event), kept on the runtime, and said on the span current then — the run's
+        agent span — as ``trellis.prompt.*`` (:meth:`ResolvedPrompt.attributes`)."""
+        key = _key(ref, kind)
+        found = runtime.prompts.get(key)
+        if found is None:
+            found = runtime.prompts[key] = await self.get(ref, runtime=runtime, kind=kind)
+            telemetry.attributes(found.attributes())
+        return found
+
     async def render(self, ref: str | Prompt, /, **values: Any) -> str:
         """The prompt's text, ``values`` filled in (pinned inside a run)."""
         return (await self.get(ref, runtime=current())).render(**values)
@@ -484,3 +500,131 @@ class PromptSources(Chain[ResolvedPrompt]):
     async def messages(self, ref: str | Prompt, /, **values: Any) -> list[dict[str, Any]]:
         """The prompt as chat messages, ``values`` filled in (pinned inside a run)."""
         return (await self.get(ref, runtime=current())).messages(**values)
+
+
+def _key(ref: str | Prompt, kind: str) -> str:
+    """Where the journal keeps ``ref``'s pinned version (and the runtime, for its attempt)."""
+    if isinstance(ref, Prompt):
+        return content_key(kind, [ref.name, ref.version])
+    return content_key(kind, ref)
+
+
+# --------------------------------------------------------------------------- model clients
+#: The journal's kind for a stored prompt a framework's model client selects
+#: (``h.model_headers(prompt=)``): the gateway's, whatever other source has the name.
+MODEL_PROMPT: Final = "model_prompt"
+#: The Claude Code CLI's own extra request headers (``Name: value`` lines), read as it starts.
+CUSTOM_HEADERS: Final = "ANTHROPIC_CUSTOM_HEADERS"
+
+
+class ModelPrompts:
+    """The gateway's stored prompts a framework's own model client selects
+    (``h.model_headers(prompt=)``): each run of the harness pins every one handed out at its
+    start (:meth:`pin`), and the headers handed out (:class:`ModelHeaders`) read, at each
+    request, the version the run executing pinned."""
+
+    def __init__(self, gateway: Gateway | None) -> None:
+        self.sources = None if gateway is None else PromptSources([BifrostPrompts(gateway)])
+        #: the references handed out, in order
+        self.refs: dict[str, None] = {}
+
+    async def headers(self, ref: str) -> ModelHeaders:
+        """The headers selecting ``ref`` (``"name"``, ``"name@version"``): inside a run of
+        this harness pinned now; outside one resolved now, which is what they say outside a
+        run."""
+        if self.sources is None:
+            raise ConfigurationError("a stored prompt is the gateway's: set BIFROST_URL")
+        runtime = self._running()
+        if runtime is not None:
+            found = await self.sources.pin(ref, runtime, kind=MODEL_PROMPT)
+        else:
+            found = await self.sources.get(ref)
+        self.refs[ref] = None
+        return ModelHeaders(self, ref, _selection(found))
+
+    async def pin(self, runtime: Runtime) -> None:
+        """At the start of a run's attempt: every prompt handed out pinned for it
+        (:meth:`PromptSources.pin`). One that cannot be is a ``prompt_unavailable`` warning —
+        the run may not use it — and its headers stay the ones resolved when they were
+        handed out."""
+        if self.sources is None:
+            return
+        for ref in list(self.refs):
+            try:
+                await self.sources.pin(ref, runtime, kind=MODEL_PROMPT)
+            except Exception as exc:
+                runtime.events.warning(
+                    "prompt_unavailable", f"the stored prompt {ref!r} was not pinned: {exc}"
+                )
+
+    def selection(self, ref: str) -> PromptPin | None:
+        """``ref`` as the run executing now pinned it (``None``: outside a run of this
+        harness, or not pinned)."""
+        runtime = self._running()
+        found = None if runtime is None else runtime.prompts.get(_key(ref, MODEL_PROMPT))
+        return None if found is None else found.pin()
+
+    def _running(self) -> Runtime | None:
+        runtime = current()
+        if runtime is None or runtime.agent.harness.model_prompts is not self:
+            return None
+        return runtime
+
+
+class ModelHeaders(Mapping[str, str]):
+    """``h.model_headers(prompt=)``: the gateway's deny-all MCP scope and a stored prompt's
+    selection (``x-bf-prompt-id``, ``x-bf-prompt-version``), read each time they are read — a
+    model client that keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends, on each
+    request, the version pinned by the run executing; outside a run, the one resolved when
+    they were handed out."""
+
+    def __init__(self, owner: ModelPrompts, ref: str, resolved: PromptPin) -> None:
+        self._owner = owner
+        self._ref = ref
+        self._resolved = resolved
+
+    def now(self) -> dict[str, str]:
+        """The headers as a request made now sends them."""
+        pin = self._owner.selection(self._ref) or self._resolved
+        return {**NO_GATEWAY_TOOLS, **pin.options().headers()}
+
+    def __getitem__(self, name: str) -> str:
+        return self.now()[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.now())
+
+    def __len__(self) -> int:
+        return len(self.now())
+
+    def __repr__(self) -> str:
+        return f"ModelHeaders({self._ref!r}: {self.now()!r})"
+
+
+def _selection(found: ResolvedPrompt) -> PromptPin:
+    pin = found.pin()
+    assert pin is not None  # the gateway's prompts are selected by their id
+    return pin
+
+
+def selected(runtime: Runtime, prompt_id: str | None) -> ResolvedPrompt | None:
+    """The stored prompt the run pinned whose id is ``prompt_id`` (what a model client's
+    headers select), if any."""
+    if not prompt_id:
+        return None
+    return next((p for p in runtime.prompts.values() if p.selection == prompt_id), None)
+
+
+def selected_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
+    """A Claude Code CLI's environment for the run, when its ``ANTHROPIC_CUSTOM_HEADERS``
+    select a stored prompt the run pinned (an ``x-bf-prompt-id`` line): that selection with
+    the version pinned (``None``: nothing to change)."""
+    lines = (env.get(CUSTOM_HEADERS) or "").splitlines()
+    named = {k.strip().lower(): v.strip() for k, _, v in (line.partition(":") for line in lines)}
+    found = selected(runtime, named.get(PROMPT_ID))
+    if found is None:
+        return None
+    pin = _selection(found).options().headers()
+    kept = [line for line in lines if line.partition(":")[0].strip().lower() not in pin]
+    text = "\n".join([*kept, *(f"{name}: {value}" for name, value in pin.items())])
+    return {**env, CUSTOM_HEADERS: text}

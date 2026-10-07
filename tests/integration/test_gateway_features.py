@@ -6,14 +6,26 @@ headers a framework's own model client is given."""
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import AsyncIterator, Iterator
-from typing import Any
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
+import httpx
+import langchain_openai
 import pytest
+from agents import Agent as OpenAIAgent
+from agents import OpenAIChatCompletionsModel
+from claude_agent_sdk import ClaudeAgentOptions
+from langchain.agents import create_agent
+from openai import AsyncOpenAI
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic import SecretStr
 
+from tests.support.adapters import CLI
 from tests.support.gateway import URL, FakeGateway, SkillVersions
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, skills, tool
@@ -21,6 +33,8 @@ from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import fresh, telemetry
 from trellis.harness.clients import bifrost
 from trellis.harness.evals import EvalCase, EvalServices, judge, llm_judge
+from trellis.harness.middleware import ModelHooks
+from trellis.harness.prompts import CUSTOM_HEADERS, ResolvedPrompt, selected_env
 from trellis.harness.skills import LOAD_SKILL, READ_SKILL_FILE, SECTION
 
 SYSTEM = [{"role": "system", "content": "You triage."}]
@@ -156,6 +170,130 @@ async def test_a_frameworks_model_client_gets_the_deny_all_scope_and_the_prompt(
         }
         with pytest.raises(ConfigurationError, match="BIFROST_URL"):
             await bare.model_headers(prompt="triage")
+
+
+def newer(fake: FakeGateway, clock: list[float]) -> None:
+    """A newer version of ``triage`` committed, and read once the kept one is stale."""
+    fake.prompts["triage"].append(SYSTEM)
+    clock[0] += bifrost.REPOSITORY_TTL_SECONDS + 1
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    now = [1000.0]
+    monkeypatch.setattr(fresh, "_now", lambda: now[0])
+    return now
+
+
+async def test_an_openai_client_selects_the_version_its_run_pinned_on_every_request(
+    h: Harness, fake: FakeGateway, spans: InMemorySpanExporter, clock: list[float]
+) -> None:
+    headers = await h.model_headers(prompt="triage")  # version 2, the latest now
+    client = AsyncOpenAI(
+        base_url=URL,
+        api_key="vk",
+        default_headers=headers,  # kept, and read at each request
+        http_client=cast(Any, httpx.AsyncClient(transport=httpx.MockTransport(fake.handle))),
+    )
+    model = OpenAIChatCompletionsModel(model="local/small", openai_client=client)
+    target = OpenAIAgent(name="triage", instructions="Tickets.", model=model)
+    agent = h.wrap(target, id="triage", tools=[close_ticket])
+    fake.chat.turns += [("close_ticket", {"ticket": "T-1"}), "closed it"]
+    newer(fake, clock)  # 3: committed after the client was built, before the run
+    events = [e async for e in agent.stream("close T-1", user="ada")]
+    paused = await h.runs.get(events[-1].run_id)
+    assert paused is not None
+    assert paused.awaiting is not None
+    newer(fake, clock)  # 4: committed while the run waits
+    done = await agent.resume(paused.awaiting.interrupt_id, "approve", reviewer="lead")
+    assert done.status is RunStatus.SUCCESS and done.answer == "closed it"
+    # the run's start's version on every request, the resume's too
+    assert [r.headers["x-bf-prompt-version"] for r in fake.completions] == ["3", "3"]
+    assert {r.headers["x-bf-prompt-id"] for r in fake.completions} == {"p-triage"}
+    assert events_of(events, "prompt") == [
+        {"name": "prompt", "prompt": "triage", "version": "3", "source": "Bifrost"}
+    ]
+    runs = [dict(s.attributes or {}) for s in spans.get_finished_spans()]
+    said = [a for a in runs if a.get("trellis.run_id") == done.run_id]
+    assert {a.get("trellis.prompt.version") for a in said} >= {3}
+    assert dict(headers)["x-bf-prompt-version"] == "2"  # outside a run: as resolved then
+    assert len(headers) == 4 and "ModelHeaders('triage'" in repr(headers)
+    await agent.run("hello", user="ada")  # a new run pins the newest
+    assert fake.completions[-1].headers["x-bf-prompt-version"] == "4"
+
+
+async def test_a_langchain_model_selects_it_through_the_harness_middleware(
+    h: Harness, fake: FakeGateway, spans: InMemorySpanExporter, clock: list[float]
+) -> None:
+    headers = await h.model_headers(prompt="triage")
+    model = langchain_openai.ChatOpenAI(
+        model="local/small", base_url=URL, api_key=SecretStr("vk"), default_headers=headers
+    )  # copied when built: version 2
+    agent = h.wrap(create_agent(model, middleware=[ModelHooks()]), id="graph")
+    fake.chat.turns.append("triaged")
+    newer(fake, clock)
+    assert (await agent.run("triage this", user="ada")).answer == "triaged"
+    [sent] = fake.completions
+    assert sent.headers["x-bf-prompt-version"] == "3"  # each call: the run's version
+    chats = [dict(s.attributes or {}) for s in spans.get_finished_spans() if "chat" in s.name]
+    assert [c["trellis.prompt.version"] for c in chats] == [3]
+
+
+async def test_model_headers_made_in_a_run_or_by_another_harness(
+    h: Harness, fake: FakeGateway, clock: list[float]
+) -> None:
+    async with Harness(config=Settings(), gateway=fake.gateway()) as other:
+        theirs = await other.model_headers(prompt="triage")
+        seen: list[dict[str, str]] = []
+
+        async def triage(question: str, agent: Runtime) -> str:
+            seen.append(dict(await h.model_headers(prompt="triage")))  # pinned now
+            seen.append(dict(theirs))  # not this harness's: as resolved then
+            return "ok"
+
+        agent = h.wrap(triage, id="triage")
+        newer(fake, clock)
+        assert (await agent.run("x", user="ada")).answer == "ok"
+        assert [s["x-bf-prompt-version"] for s in seen] == ["3", "2"]
+        # handed out now: the next run pins it at its start; one it cannot pin is a warning
+        del fake.prompts["triage"]
+        clock[0] += bifrost.REPOSITORY_TTL_SECONDS + 1
+        events = [e async for e in agent.stream("x", user="ada")]
+        [warning] = events_of(events, "warning")
+        assert warning["code"] == "prompt_unavailable" and "'triage'" in warning["message"]
+        assert events_of(events, "prompt") == []
+
+
+async def test_the_claude_cli_selects_the_version_its_run_pinned(
+    h: Harness, fake: FakeGateway, clock: list[float], tmp_path: Path
+) -> None:
+    headers = await h.model_headers(prompt="triage")
+    lines = "\n".join(f"{name}: {value}" for name, value in headers.items())
+    record = tmp_path / "cli.json"
+    env = {
+        "FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]),
+        "FAKE_CLAUDE_RECORD": str(record),
+        "ANTHROPIC_CUSTOM_HEADERS": f"x-team: eu\n{lines}",
+    }
+    agent = h.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="claude")
+    newer(fake, clock)
+    assert (await agent.run("x", user="ada")).answer == "ok"
+    sent = json.loads(record.read_text())["custom_headers"].splitlines()
+    assert sent[0] == "x-team: eu" and sent[-2:] == [
+        "x-bf-prompt-id: p-triage",
+        "x-bf-prompt-version: 3",
+    ]
+    assert lines.endswith("x-bf-prompt-version: 2")  # the options' own: unchanged
+
+
+def test_only_custom_headers_that_select_a_pinned_prompt_change() -> None:
+    pinned = ResolvedPrompt("triage", "3", "Bifrost", selection="p-triage")
+    runtime = cast(Runtime, SimpleNamespace(prompts={"k": pinned}))
+    assert selected_env({}, runtime) is None
+    assert selected_env({CUSTOM_HEADERS: "x-bf-prompt-id: p-other"}, runtime) is None
+    assert selected_env({CUSTOM_HEADERS: "X-Bf-Prompt-Id: p-triage"}, runtime) == {
+        CUSTOM_HEADERS: "x-bf-prompt-id: p-triage\nx-bf-prompt-version: 3"
+    }
 
 
 # --------------------------------------------------------------------------- skills

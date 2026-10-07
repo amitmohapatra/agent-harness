@@ -25,7 +25,10 @@ any ``create_agent`` or Deep Agents graph may take any of them:
   ``ContextEditingMiddleware`` placeholder points to (the state keeps the result whole);
 * :class:`RunCheckpointer` — a LangGraph checkpointer that keeps only the latest checkpoint,
   in the run's journal (``thread_id`` is the run): a resume — in any worker, after a pause or
-  a crash — continues where the graph stopped, without asking the model again.
+  a crash — continues where the graph stopped, without asking the model again;
+* :func:`narrowing` — not given by anyone: the harness runs a ``create_agent`` graph built
+  without :class:`HarnessTools` as a copy whose model calls are offered only the tools the run
+  offers (the tool hints, the parts it is without), as :class:`ModelHooks` does.
 
 The harness's middleware run inside a harness run (``trellis.current()``); outside one they
 step aside (:class:`ModelHooks` runs the hooks it was given, :class:`RunCheckpointer` keeps the
@@ -37,12 +40,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import logging
+import types
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, NotRequired, cast
 
+from bifrost_sdk.headers import PROMPT_ID
+from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
@@ -82,7 +89,7 @@ from langgraph.types import Command
 from trellis.contracts import ConfigurationError, ModelError, ToolStatus
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
-from trellis.harness.prompts import Prompt, ResolvedPrompt
+from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
 from trellis.harness.repository import pinned
 from trellis.harness.runtime import DEFERRED, Runtime, current
 from trellis.harness.telemetry import model_span, usage
@@ -112,6 +119,9 @@ LAST_STEP: Final = (
 )
 #: The tool outcomes that count as a failed call (in a streak; a ``ToolMessage``'s status).
 FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
+#: The free variable of ``create_agent``'s model node holding its composed ``awrap_model_call``
+#: handler (:func:`narrowing`).
+HANDLER: Final = "awrap_model_call_handler"
 #: The state key of :class:`StepLimit`: the model calls of this invocation.
 STEPS: Final = "trellis_steps"
 #: The openai client's statuses a call may pass after (its own retry rule).
@@ -283,18 +293,59 @@ def _unbroken(request: ModelRequest[Any]) -> ModelRequest[Any]:
 
 
 def _offered(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
-    """The request without the harness tools of the parts the run is without: a graph's are
-    bound when it is built (``h.tools``), and a part turned off afterwards (``h.wrap(without=)``,
-    a run's ``without=``) would still be offered (a call of it is refused: it is off)."""
+    """The request with only the harness tools the run offers now: a graph's are bound when it
+    is built (``h.tools``), so a part turned off afterwards (``h.wrap(without=)``, a run's
+    ``without=``) would still be offered (a call of it is refused: it is off), and so would the
+    tools the tool hints leave out (``Runtime.offers``). The graph's own tools stay."""
     if runtime is None:
         return request
-    kept = [
-        t
-        for t in request.tools
-        if (feature := (getattr(t, "metadata", None) or {}).get(converted.FEATURE)) is None
-        or runtime.uses(feature)
-    ]
+    kept = [t for t in request.tools if _offers(runtime, t)]
     return request if len(kept) == len(request.tools) else request.override(tools=kept)
+
+
+def _offers(runtime: Runtime, tool: BaseTool | dict[str, Any]) -> bool:
+    feature = (getattr(tool, "metadata", None) or {}).get(converted.FEATURE)
+    if feature is not None and not runtime.uses(feature):
+        return False
+    name = _named(tool)
+    return name not in runtime.toolbox or runtime.offers(name)
+
+
+async def _narrow(
+    request: ModelRequest[Any],
+    handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+) -> ModelResponse[Any]:
+    """A model call offered only the tools the run offers (:func:`_offered`)."""
+    return await handler(_offered(request, current()))
+
+
+def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
+    """A copy of a ``create_agent`` graph (Deep Agents' too) — ``node`` is its model node's
+    async function — whose every model call is offered only the tools the run offers
+    (:func:`_offered`: the tool hints' narrowing, the parts the run is without), or ``None``
+    when ``node`` is not of the shape this LangChain release builds.
+
+    ``create_agent`` composes its middleware's ``awrap_model_call`` into one handler when the
+    graph is built; the copy's model node composes the same handlers with :func:`_narrow`
+    innermost — what the model is finally offered — as a middleware given to ``create_agent``
+    would be. The graph itself is left as it is (run outside the harness, it offers every
+    tool); the harness runs graphs asynchronously, so only the async model node is changed."""
+    code = node.__code__
+    if HANDLER not in code.co_freevars:
+        return None
+    cells = dict(zip(code.co_freevars, node.__closure__ or (), strict=True))
+    given = cells[HANDLER].cell_contents
+    handler = _chain_async_model_call_handlers([*([given] if given else []), _narrow])
+    closure = tuple(
+        types.CellType(handler) if name == HANDLER else cell for name, cell in cells.items()
+    )
+    narrowed = types.FunctionType(code, node.__globals__, node.__name__, node.__defaults__, closure)
+    narrowed.__kwdefaults__ = node.__kwdefaults__
+    narrowed.__qualname__ = node.__qualname__
+    model = graph.nodes["model"]
+    runnable = copy.copy(model.bound)
+    runnable.afunc = narrowed
+    return graph.copy({"nodes": {**graph.nodes, "model": model.copy({"bound": runnable})}})
 
 
 def _named(tool: BaseTool | dict[str, Any]) -> str:
@@ -313,7 +364,9 @@ class ModelHooks(AgentMiddleware):
     of the gateway is selected by every call (headers the gateway reads: the model is a gateway
     model, ``ChatOpenAI``); any other is rendered (``prompt_vars`` fill its ``{{variables}}``)
     into the instructions, before the system prompt, its other messages before the
-    conversation."""
+    conversation. Without ``prompt``, a chat model whose own headers select a stored prompt
+    (``ChatOpenAI(default_headers=await h.model_headers(prompt=...))``) selects, on every call,
+    the version the run pinned."""
 
     def __init__(
         self,
@@ -333,9 +386,6 @@ class ModelHooks(AgentMiddleware):
         self.timeout = timeout
         self.prompt = prompt
         self.prompt_vars = dict(prompt_vars or {})
-        self._prompts: weakref.WeakKeyDictionary[Runtime, ResolvedPrompt] = (
-            weakref.WeakKeyDictionary()
-        )
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
@@ -365,7 +415,7 @@ class ModelHooks(AgentMiddleware):
         runtime = current()
         hooks = running(*self.given)
         request = _with_task(_unbroken(_offered(request, runtime)))
-        prompt = await self._pinned(runtime)
+        prompt = await self._pinned(runtime) or _selected(request, runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
         name = _model_name(request.model)
@@ -400,15 +450,12 @@ class ModelHooks(AgentMiddleware):
                 "ModelHooks(prompt=) pins the prompt for a harness run: outside one, render it "
                 "yourself (h.prompt_messages), or give the model client h.model_headers(prompt=)"
             )
-        found = self._prompts.get(runtime)
-        if found is None:
-            found = await runtime.agent.harness.prompts.get(self.prompt, runtime=runtime)
-            if found.pin() is not None and self.prompt_vars:
-                raise ConfigurationError(
-                    f"prompt= names {found.name}, a stored prompt of the gateway: the gateway "
-                    "prepends it as it is stored (no prompt_vars=)"
-                )
-            self._prompts[runtime] = found
+        found = await runtime.agent.harness.prompts.pin(self.prompt, runtime)
+        if found.pin() is not None and self.prompt_vars:
+            raise ConfigurationError(
+                f"prompt= names {found.name}, a stored prompt of the gateway: the gateway "
+                "prepends it as it is stored (no prompt_vars=)"
+            )
         return found
 
     def _prompted(self, request: ModelRequest[Any], prompt: ResolvedPrompt) -> ModelRequest[Any]:
@@ -428,6 +475,16 @@ class ModelHooks(AgentMiddleware):
             system_message=SystemMessage(content=text),
             messages=[*cast(list[AnyMessage], convert_to_messages(rest)), *request.messages],
         )
+
+
+def _selected(request: ModelRequest[Any], runtime: Runtime | None) -> ResolvedPrompt | None:
+    """The stored prompt the run pinned that the chat model's own headers select (a
+    ``ChatOpenAI(default_headers=await h.model_headers(prompt=...))``, which copied them when it
+    was built): each call then selects the version the run pinned."""
+    headers = getattr(request.model, "default_headers", None)
+    if runtime is None or not isinstance(headers, Mapping):
+        return None
+    return selected(runtime, headers.get(PROMPT_ID))
 
 
 def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:

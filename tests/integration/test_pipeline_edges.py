@@ -310,8 +310,10 @@ async def test_the_toolbox_for_openai_agents_is_function_tools(harness: Harness)
         """Units of a SKU."""
         return 1
 
-    [native] = await harness.tools(lookup, framework="openai_agents")
+    # with read_file, which pages a large result the run keeps (enabled once there is one)
+    [native, read_file] = await harness.tools(lookup, framework="openai_agents")
     assert isinstance(native, FunctionTool) and native.name == "lookup"
+    assert read_file.name == "read_file"
     assert harness.built_for([native]) == ([], None)  # only LangGraph tools name their toolbox
 
 

@@ -16,10 +16,11 @@ use only their framework's public API.
 
 ``narrows`` says how far the tool schemas sent to the model follow the tool hints
 (``Runtime.offers``): ``"turn"`` — every model call sees the tools offered at that moment (a
-LangChain graph with ``middleware.HarnessTools``, ``ReAct`` among them; OpenAI Agents through
+``create_agent`` graph, Deep Agents' and ``ReAct`` among them: ``middleware.HarnessTools``, or
+the handler ``middleware.narrowing`` adds to the copy the harness runs; OpenAI Agents through
 ``FunctionTool.is_enabled``); ``"run"`` — the tools offered when the run starts (Claude: the
-CLI lists an MCP server's tools once per query); ``"none"`` — the framework binds its tools
-when it is built (any other LangGraph graph) or has no model (a function).
+CLI lists an MCP server's tools once per query); ``"none"`` — the target binds its model's
+tools in its own code (a hand-written LangGraph graph) or has no model (a function).
 """
 
 from __future__ import annotations

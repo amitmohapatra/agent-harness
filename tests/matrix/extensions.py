@@ -6,8 +6,6 @@ its notes in its ``Feature``, its switch in ``dimensions.SWITCHES``).
 * ``F34`` approval rule in code (W5): a ``before_tool`` hook asking by the call's arguments on a
   ``write`` tool — a real row.
 * ``F36v2`` HITL v2 (W5): ``ask(options=[Option(...)], multiple=True)`` — landed, a real row now.
-* the switches ``without=`` does not name yet (``dimensions.PENDING``: governance, redaction),
-  one selection cell each.
 
 Hooks (F71*), ``without=`` (the selection's switches, F75r), ``timeout=`` (F09, F09r), the
 framework's own run options (F70, G13) and the sandbox (F73) have landed: they are rows of

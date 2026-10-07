@@ -35,7 +35,7 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
-from trellis.harness.prompts import Prompt, PromptSource, PromptSources
+from trellis.harness.prompts import ModelPrompts, Prompt, PromptSource, PromptSources
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
@@ -190,6 +190,8 @@ class Harness:
         if skills is None:
             skills = self._making(SkillSources.of(s, gateway=self.gateway))
         self.prompts = prompts if isinstance(prompts, PromptSources) else PromptSources(prompts)
+        #: the gateway's prompts handed to frameworks' model clients (``model_headers``)
+        self.model_prompts = ModelPrompts(self.gateway)
         self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
         self.evals.prompts = self.prompts
         telemetry.configure(s)
@@ -435,19 +437,25 @@ class Harness:
         message)."""
         return await self.prompts.messages(ref, **values)
 
-    async def model_headers(self, *, prompt: str | None = None) -> dict[str, str]:
+    async def model_headers(self, *, prompt: str | None = None) -> Mapping[str, str]:
         """The headers to give a framework's own model client pointed at the gateway
-        (``ChatOpenAI(default_headers=...)``, ``AsyncOpenAI(default_headers=...)``): the
+        (``AsyncOpenAI(default_headers=...)``, ``ChatOpenAI(default_headers=...)``): the
         gateway's deny-all MCP scope, so it neither adds the virtual key's MCP tools to the
         framework's requests nor runs any itself (the harness's tools are the framework's), and
         — ``prompt``, a stored prompt's name or ``name@version`` — that prompt's selection: the
-        gateway prepends it to every request (the version resolved now, not per run)."""
-        headers = dict(NO_GATEWAY_TOOLS)
-        if prompt is not None:
-            if self.gateway is None:
-                raise ConfigurationError("a stored prompt is the gateway's: set BIFROST_URL")
-            headers.update((await self.gateway.prompt(prompt)).options().headers())
-        return headers
+        gateway prepends it to every request.
+
+        With ``prompt`` they are pinned per run (``prompts.ModelHeaders``): every run of this
+        harness pins the prompt at its start — journaled, its ``prompt`` event, the
+        ``trellis.prompt.*`` attributes of its agent span — and the headers, read at each
+        request, select the version the run executing pinned (outside a run: the one resolved
+        now). An OpenAI client keeps them and reads them per request; a LangChain chat model
+        copies them when built, and the harness's ``ModelHooks`` middleware selects the run's
+        version on each call; the Claude Code CLI's ``ANTHROPIC_CUSTOM_HEADERS`` get it as the
+        CLI starts."""
+        if prompt is None:
+            return dict(NO_GATEWAY_TOOLS)
+        return await self.model_prompts.headers(prompt)
 
     async def aclose(self) -> None:
         """Finish the queued writes, export the queued spans and close the clients built here

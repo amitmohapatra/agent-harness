@@ -5,8 +5,7 @@
   xfail), ``Bug`` (a real failure this matrix found: xfail on its own exception).
 * ``features.py`` — the FEATURES table and each feature's scenario; ``way2.py`` the Way 2
   scenarios (the blocks without a Harness); ``extensions.py`` the features in flight.
-* ``dimensions.py`` — the SELECTION dimension: the switches, the pending ones (``without=``),
-  and the selections (all, none, each alone on, each alone off, all-pairs rows: ``allpairs.py``).
+* ``dimensions.py`` — the SELECTION dimension: the switches and the selections (all, none, each alone on, each alone off, all-pairs rows: ``allpairs.py``).
 * ``world.py`` — one cell's deployment (the switched blocks, over the suite's fakes), the agent
   under test (``tests.support.adapters.BUILDERS``), the run driven in the cell's mode, and
   ``World.verify``: off leaves no trace, on did its part, events are well formed.
@@ -25,8 +24,7 @@ Extending it
   mapped to ``NA(reason)`` or ``Gap(id, why)``; ``way2`` is its Way 2 scenario or a note.
 * **A feature that lands** (an extension point or a ``Gap``): its cells XPASS and fail the
   suite; remove the ``Gap`` (and turn an ``extensions.py`` probe into a real scenario).
-* **A switch** (``without=`` landing, hooks...): move it from ``dimensions.PENDING`` to
-  ``SWITCHES`` (with ``requires``), give it its effect in ``World._made``/``World.agent``,
+* **A switch**: add it to ``SWITCHES`` (with ``requires``), give it its effect in ``World._made``/``World.agent``,
   and its on/off checks in ``World.verify``. Every selection row picks it up, the all-pairs
   rows included.
 * **An adapter, way or mode**: add it to ``model.py``; a mode needs its driver in

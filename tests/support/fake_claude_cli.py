@@ -9,7 +9,8 @@ SDK's in-process MCP servers (the ``mcp_message`` control requests the real CLI 
 one of Claude Code's own (run here: a line in the ``FAKE_CLAUDE_BUILTINS`` file), ``{"text":
 "..."}`` answers (``{last}`` in it is the text of the last tool result, so an answer shows what
 the "model" read). ``FAKE_CLAUDE_RECORD`` names a file the CLI writes what it was started with
-(system prompt, allowed tools, the session it resumes, prompt) to.
+(system prompt, allowed tools, the session it resumes, prompt, its
+``ANTHROPIC_CUSTOM_HEADERS``) to.
 
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
 the temporary directory): the steps done so far — a tool call that failed or paused is not done.
@@ -134,6 +135,7 @@ class Cli:
                         "permission_prompt_tool": argument("--permission-prompt-tool"),
                         "resume": resumed,
                         "prompt": prompt,
+                        "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
                     },
                     handle,
                 )

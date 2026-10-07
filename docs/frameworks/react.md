@@ -76,7 +76,7 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 
 | Middleware | What it does |
 |---|---|
-| `FilesystemMiddleware(tools=["read_file"])` (Deep Agents) | a tool result over 20,000 tokens is saved as a file in the graph's state (`/large_tool_results/<call id>`), a head-and-tail preview in its place; `read_file` reads it by lines |
+| `FilesystemMiddleware(tools=["read_file"])` (Deep Agents) | a tool result over 20,000 tokens is saved as a file in the graph's state (`/large_tool_results/<call id>`), a head-and-tail preview in its place; `read_file` reads it by lines (OpenAI Agents and Claude get the same from the harness: [tools.md](../tools.md#large-results)) |
 | `ContextEditingMiddleware` + `ClearToolUsesEdit` (LangChain) | past half the window, the older tool results (all but the last 3) are cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a provider's prompt cache breaks rarely |
 | `create_summarization_middleware` (Deep Agents) | past 85% of the window, the older turns are summarized by one model call, the last 10% kept; the turns it replaced are saved where `read_file` reads them (`/conversation_history/...`); oversized tool arguments in older turns are truncated first; a context overflow is summarized and retried |
 | `PatchToolCallsMiddleware` (Deep Agents) | a tool call left with no answer (a crash, a cancel) gets one, so the conversation stays valid |
