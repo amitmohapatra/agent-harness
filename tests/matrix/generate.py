@@ -114,7 +114,7 @@ def _way2_note(feature: Feature, adapter: str, mode: str) -> Note | None:
         return WAY2_MODE
     if isinstance(feature.way2, NA | Gap | Bug):
         return feature.way2
-    return feature.way2_gap
+    return None
 
 
 def _selections(feature: Feature) -> list[Selection]:

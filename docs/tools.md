@@ -51,6 +51,25 @@ time reads `"<tool> timed out after 20s"`; a write out of time, or one running w
 died, has an *unknown* effect: the model reads that it may or may not have taken effect and
 should check, the journal keeps that, and the call is never run again blind.
 
+## Large results
+
+A result longer than 80,000 characters (20,000 tokens) is not what the model reads: it is
+saved as a file, and the model reads where (`/large_tool_results/<id>`) with a head-and-tail
+preview, then pages the rest with `read_file` (`file_path`, `offset` the line to start from,
+`limit` the most lines). One convention everywhere, automatic, nothing to configure:
+
+| Target | Who cuts | Where the whole result is kept |
+|---|---|---|
+| `ReAct`, Deep Agents | Deep Agents' `FilesystemMiddleware` (on by default: [react.md](frameworks/react.md#the-middleware)) | the graph's state |
+| a `create_agent` graph | add `FilesystemMiddleware(tools=["read_file"])` | the graph's state |
+| OpenAI Agents, Claude | the harness, as Deep Agents does (`tools/results.py`; Deep Agents is not needed) | the run's journal: it stays readable for the rest of the run, across a pause and on another worker |
+| a function target, Way 2 | nobody: your code gets the whole result and decides what its model reads | — |
+
+On OpenAI Agents `read_file` is offered once the run keeps a result (`FunctionTool.is_enabled`);
+on Claude it is on the `trellis` server from the start (the CLI lists a server's tools once).
+A page holds at most 20,000 characters and says where the next one starts; a line longer than
+5,000 characters reads as several, so a one-line JSON result pages too.
+
 ## Tool hints: what the model is offered
 
 The memory context is asked for with the run's own tools (not the memory tools): it comes back
@@ -70,7 +89,8 @@ more tools, the model is then offered:
 | `ReAct`, a graph with `HarnessTools` | per model call (each request carries the tools offered at that moment, sorted by name; the set only grows within a run) |
 | OpenAI Agents | per turn (`FunctionTool.is_enabled`); the team's own tools are untouched |
 | Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query) |
-| LangGraph / Deep Agents | none: a compiled graph binds its tools when it is built |
+| `create_agent` / Deep Agents graph built with `h.tools` | per model call: the harness runs a copy of the graph whose model calls go through one more `awrap_model_call` handler, offering the tools offered at that moment (your graph object is unchanged) |
+| hand-written LangGraph `StateGraph` | none: its own code binds the model's tools (`model.bind_tools(...)`) when it is built, out of the harness's reach |
 | function | n/a: it calls tools by name |
 
 A tool outside the offered set still runs if the model calls it. When the context call fails,
@@ -112,7 +132,8 @@ whose tools `wrap(tools=)` does not reach); `framework="claude_agent_sdk"` retur
 in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its tools,
 `mcp__trellis__<tool>`, in `allowed_tools`). Any other name is refused with the valid ones
 (`ConfigurationError`). A LangGraph agent's tool hints are asked for among
-these tools.
+these tools, and a `create_agent` or `create_deep_agent` graph's model calls are offered only
+those the run offers ([tool hints](#tool-hints-what-the-model-is-offered)).
 
 The tools are built once, but governed at each call: governance looks the call up by its tool's
 name in the catalog as it is *then*, so an administrator's rule reaches a graph compiled before

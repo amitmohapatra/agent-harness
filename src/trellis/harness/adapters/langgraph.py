@@ -19,7 +19,12 @@
 * tools: fixed when the graph is compiled, so harness tools come from ``h.tools(...)`` at
   build time — unless the graph takes them per model call (``middleware.HarnessTools``, as
   ``ReAct(...)`` does): then ``h.wrap(tools=)`` gives them, every model call is offered the
-  tools the run offers at that moment (``narrows="turn"``), and the memory tools come with them;
+  tools the run offers at that moment (``narrows="turn"``), and the memory tools come with them.
+  A ``create_agent`` graph (Deep Agents' too) built with ``h.tools`` narrows per model call
+  as well: the harness runs a copy of it whose model calls go through one more
+  ``awrap_model_call`` handler (``middleware.narrowing``), so the tool hints and a part turned
+  off reach the model; a hand-written graph binds its model's tools in its own code, which
+  the harness cannot reach (``narrows="none"``: every tool it bound is offered);
 * a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
@@ -57,6 +62,8 @@ HITL: Final = "langchain_hitl"
 HARNESS_TOOLS: Final = "trellis_harness_tools"
 #: The id of the memory context message: one per thread, replaced every turn.
 CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
+#: The qualified name of a ``create_agent`` graph's async model node (Deep Agents' too).
+MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
 
 
 class LangGraphAdapter:
@@ -68,7 +75,11 @@ class LangGraphAdapter:
         per_call = HARNESS_TOOLS in (getattr(target, "channels", None) or {})
         self.tool_format: ToolFormat = "none" if per_call else "langchain"
         self.fixed_tools = not per_call
-        self.narrows: Narrowing = "turn" if per_call else "none"
+        #: the graph run in its place: a ``create_agent`` graph whose model calls narrow its
+        #: bound tools to those the run offers (``None``: ``target`` itself is run)
+        self.narrowed = None if per_call else _narrowed(target)
+        per_turn = per_call or self.narrowed is not None
+        self.narrows: Narrowing = "turn" if per_turn else "none"
 
     def keeps_conversation(self, target: Any) -> bool:
         return _checkpointed(target) and not run_scoped(target)
@@ -86,7 +97,7 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        return await target.ainvoke(
+        return await self._graph(target).ainvoke(
             _continued(target, native_input, run), self._config(target, run), version="v2"
         )
 
@@ -96,7 +107,7 @@ class LangGraphAdapter:
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
-        async for part in target.astream(
+        async for part in self._graph(target).astream(
             _continued(target, native_input, run),
             self._config(target, run),
             stream_mode=["messages", "values"],
@@ -175,6 +186,10 @@ class LangGraphAdapter:
         if not isinstance(options.get("configurable", {}), Mapping):
             raise ConfigurationError("framework_options' configurable is a dict")
 
+    def _graph(self, target: Any) -> Any:
+        """The graph run for ``target``: its narrowing copy, when it has one."""
+        return target if self.narrowed is None else self.narrowed
+
     @staticmethod
     def _config(target: Any, run: Invocation) -> dict[str, Any]:
         """The run's config: its framework options, the harness's thread id over theirs."""
@@ -186,6 +201,18 @@ class LangGraphAdapter:
         options = runtime.framework_options
         thread = thread_of(target, runtime)
         return {**options, "configurable": {**options.get("configurable", {}), "thread_id": thread}}
+
+
+def _narrowed(target: Any) -> Any | None:
+    """``target`` narrowing its model's tools per call (``middleware.narrowing``), when it is
+    a ``create_agent`` graph (Deep Agents' too); else ``None``."""
+    model = (getattr(target, "nodes", None) or {}).get("model")
+    node: Any = getattr(getattr(model, "bound", None), "afunc", None)
+    if getattr(node, "__qualname__", None) != MODEL_NODE:
+        return None
+    from trellis.harness.middleware import narrowing
+
+    return narrowing(target, node)
 
 
 def thread_of(target: Any, runtime: Any) -> str:

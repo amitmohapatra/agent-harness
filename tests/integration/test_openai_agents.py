@@ -11,6 +11,7 @@ from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunStatus
+from trellis.harness.journal import content_key
 
 done: list[str] = []
 
@@ -270,3 +271,58 @@ async def test_an_edited_sdk_approval_streams_the_continued_run(harness: Harness
     assert result.answer == "sent o10" and shipped == ["o10"]
     deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
     assert "".join(deltas) == "sent o10"
+
+
+#: a result over ``tools.results.MAX_CHARS``, and where the run keeps it
+LONG = "\n".join(f"row {n}" for n in range(1, 30_001))
+KEPT = f"/large_tool_results/{content_key('result', LONG)}"
+
+
+@tool(side_effects="read")
+def dump() -> str:
+    """Dump every row."""
+    return LONG
+
+
+def outputs(model: ScriptedModel) -> list[str]:
+    """What each call's tool results read, by the model's turn."""
+    return [str(item["output"]) for item in model.inputs[-1] if "output" in item]
+
+
+async def test_a_large_result_is_previewed_and_read_in_pages_across_a_pause(
+    harness: Harness,
+) -> None:
+    @function_tool(needs_approval=True)
+    def send(order: str) -> str:
+        return "sent"
+
+    model = ScriptedModel(
+        [
+            ("dump", {}),
+            ("send", {"order": "o1"}),
+            ("read_file", {"file_path": KEPT, "offset": 10, "limit": 2}),
+            "done",
+        ]
+    )
+    agent = harness.wrap(Agent(name="d", model=model, tools=[send]), id="dumper", tools=[dump])
+    paused = await agent.run("dump it", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    preview = model.inputs[1][-1]["output"]
+    assert f"saved in the filesystem at this path: {KEPT}" in preview and len(preview) < 25_000
+    assert "row 30000" in preview and "row 100" not in preview
+    assert "read_file" not in model.tools[0] and "read_file" in model.tools[1]
+    finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert finished.answer == "done"  # the kept result came back with the run's journal
+    assert outputs(model)[-1] == (
+        f'11  row 11\n12  row 12\n…[29988 more lines: read_file(file_path="{KEPT}", offset=12)]'
+    )
+
+
+async def test_an_agent_built_with_h_tools_gets_read_file_once(harness: Harness) -> None:
+    model = ScriptedModel([("dump", {}), "done"])
+    target = Agent(
+        name="d", model=model, tools=await harness.tools(dump, framework="openai_agents")
+    )
+    agent = harness.wrap(target, id="dumper", tools=[ship])
+    assert (await agent.run("dump it", user="u1")).answer == "done"
+    assert model.tools[1].count("read_file") == 1

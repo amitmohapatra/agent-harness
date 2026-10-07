@@ -6,7 +6,9 @@ your agent that also carries the harness tools; your agent object is never chang
 **Install:** `pip install 'trellis-harness[openai-agents]'`. Your model is your own:
 `OpenAIChatCompletionsModel(model=..., openai_client=AsyncOpenAI(base_url=BIFROST_URL,
 default_headers=await h.model_headers(), ...))` to go through Bifrost (the headers keep the
-gateway from adding its MCP tools to the model's requests: [gateway.md](../gateway.md)). `agents.set_tracing_disabled(True)` keeps the SDK's own tracing (which goes to
+gateway from adding its MCP tools to the model's requests; `h.model_headers(prompt="triage")`
+also selects a stored prompt, the version each run pinned at its start, read by the client at
+every request: [gateway.md](../gateway.md#prompts)). `agents.set_tracing_disabled(True)` keeps the SDK's own tracing (which goes to
 OpenAI) off; the harness traces through OpenTelemetry.
 
 This page is Way 1: the harness runs the agent. To keep calling `Runner.run` yourself and plug
@@ -107,6 +109,7 @@ agent = h.wrap(
 | Memory pull | the memory tools are added to the copy per run |
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used; your own tools are never narrowed |
+| Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with `read_file`, enabled once there is something to read ([tools.md](../tools.md#large-results)) |
 | Grounding, judges, tracing | as for every target ([evaluation.md](../evaluation.md), [observability.md](../observability.md)) |
 | Hooks | the tool and run hooks as for every target; the model hooks through the SDK's own `RunHooks`, which the harness passes to `Runner.run`: each call reported to `before_model`/`after_model`, none rewritten (the SDK takes nothing back) ([hooks.md](../hooks.md)) |
 

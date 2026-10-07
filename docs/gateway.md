@@ -86,8 +86,21 @@ log does not record which prompt a request selected, so every `chat` span says i
 
 **Where.** `ReAct` and `llm_judge` call models themselves. Any other framework calls them
 through its own model client: `await h.model_headers(prompt="triage")` gives that client the
-prompt's headers (`x-bf-prompt-id`, `x-bf-prompt-version`) with the deny-all scope — the
-version resolved then, for the client's life, not per run.
+prompt's headers (`x-bf-prompt-id`, `x-bf-prompt-version`) with the deny-all scope, pinned per
+run as a `ReAct`'s is. Every run of the harness pins each prompt handed out this way at its
+start — journaled (a resume keeps it), a `prompt` event, and `trellis.prompt.name`,
+`trellis.prompt.id`, `trellis.prompt.version` on the run's agent span — and the headers are
+read at each request: inside a run they select the version that run pinned, outside one the
+version resolved when they were made. How each client reads them:
+
+| Client | Per request |
+|---|---|
+| an OpenAI client, `AsyncOpenAI(default_headers=headers)` (the OpenAI Agents SDK's `OpenAIChatCompletionsModel`) | the client keeps the mapping and reads it at each request |
+| a LangChain chat model, `ChatOpenAI(default_headers=headers)` (LangGraph, Deep Agents) | the model copies its headers when it is built: the harness's `ModelHooks()` middleware (`create_agent(..., middleware=[ModelHooks()])`) selects the run's version on each call, and its `chat` span says it; without it, the version resolved when the model was built |
+| the Claude Code CLI, `ANTHROPIC_CUSTOM_HEADERS` lines in the options' `env` | read as the CLI starts, once per attempt: the run's copy of the options selects the run's version |
+
+A prompt handed out that a run cannot pin at its start (deleted from the gateway since) is a
+`prompt_unavailable` warning event, and that run's headers stay as they were resolved.
 
 **On failure.** A name the gateway does not have, a prompt with no committed version, a version
 past the latest, or two prompts of one name: `ConfigurationError`, saying which — `ReAct` and

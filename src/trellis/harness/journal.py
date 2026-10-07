@@ -22,7 +22,8 @@ sub-agent's run working inside one of the run's tool calls keeps its journal in 
 (``children``), so the run's progress saves the child's too; the run's sandbox is named here as
 soon as it exists (``sandbox``), so every later attempt works in that one
 (``trellis.harness.sandbox``); a graph that checkpoints into the run
-(``middleware.RunCheckpointer``) keeps its latest checkpoint here (``graph``).
+(``middleware.RunCheckpointer``) keeps its latest checkpoint here (``graph``), and a large tool
+result the model read a preview of is kept whole here (``results``), for ``read_file``.
 
 Every call that ran is also on the run's trajectory (``trajectory``), in order: the calls and
 outcomes its tool records are made of, kept across its attempts for the evaluators
@@ -116,6 +117,9 @@ class Journal(BaseModel):
     #: the graph's latest checkpoint and its pending writes, by namespace, when the graph keeps
     #: them in the run (``middleware.RunCheckpointer``): a resume continues where it stopped
     graph: dict[str, Any] | None = None
+    #: the large tool results the model read a preview of, whole, by the path it reads them at
+    #: (``tools.results``: OpenAI Agents and Claude, which have no cut of their own)
+    results: dict[str, str] = Field(default_factory=dict)
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence

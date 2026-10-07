@@ -83,8 +83,11 @@ take text.
 Way 1, every adapter: `ReAct(prompt=)` renders it into the instructions (or, for the gateway's,
 selects it); LangGraph, Deep Agents, OpenAI Agents, the Claude Agent SDK and a function read it
 with `await h.prompt(ref, **vars)` (text) or `await h.prompt_messages(ref, **vars)` (chat
-messages) — once when the framework's agent is built, or inside a run (pinned for the run). The
-LLM judge: `llm_judge(criteria, prompt=)`.
+messages) — once when the framework's agent is built, or inside a run (pinned for the run). A
+stored prompt of the gateway is selected by the framework's own model client with
+`await h.model_headers(prompt="triage")`: every run pins it at its start and the headers,
+read per request, select that version ([gateway.md](gateway.md#prompts)). The LLM judge:
+`llm_judge(criteria, prompt=)`.
 
 ## How
 
@@ -128,12 +131,15 @@ stored, so `ReAct(prompt_vars=)` with one is refused.
 ## Automatic
 
 * **Pinned for the run.** Inside a run (a `ReAct`'s `prompt=`, `h.prompt` in a function or a
-  graph node) what was resolved — the text, the version, the source — is journaled: a resumed
+  graph node, the stored prompts `h.model_headers(prompt=)` handed to model clients, at the
+  run's start) what was resolved — the text, the version, the source — is journaled: a resumed
   run, after a pause or a crash, on this worker or another, reads the same text even after the
   file, the label or the commit changed. A new run reads the source again.
 * **Said.** A `prompt` event (`{"prompt": "triage", "version": "3", "source": "prompts_dir(prompts)"}`)
-  and the `trellis.prompt` attribute (`triage@3`) of the span current then; each `ReAct` `chat`
-  span carries `trellis.prompt.name`, `trellis.prompt.version` and `trellis.prompt.source`
+  and the `trellis.prompt` attribute (`triage@3`) of the span current then; a prompt pinned for
+  every model call (a `ReAct`'s, `h.model_headers(prompt=)`'s) also puts
+  `trellis.prompt.name`, `trellis.prompt.version` and `trellis.prompt.source` on the run's
+  agent span; each `ReAct` `chat` span carries `trellis.prompt.name`, `trellis.prompt.version` and `trellis.prompt.source`
   (and `trellis.prompt.id` for the gateway's).
 * **Kept.** Langfuse is read once per version and every 300 s per label; while it cannot be
   reached the last copy read stands (asked again after 30 s). The gateway's prompts are kept the

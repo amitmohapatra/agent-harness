@@ -161,6 +161,78 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     assert offered[2] == sorted(["t1", "t3", "t5", *memory_tools])
 
 
+async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A graph's tools are bound when it is built: the harness runs a copy of a
+    ``create_agent`` graph whose model calls offer only the tools the run offers — the
+    graph itself, run outside the harness, still offers every tool it was built with."""
+    from langchain_core.tools import tool as langchain_tool
+
+    @langchain_tool
+    def own(key: str) -> str:
+        """The graph's own tool, not the harness's."""
+        return key
+
+    memory_service.candidates = ["t3", "t1"]
+    memory_service.candidates_for = {"archive it": ["t5"]}
+    model = ScriptedChatModel(
+        turns=[("t3", {"key": "a"}), ("tool_search", {"task": "archive it"}), "done", "plain"]
+    )
+    tools = [*await memory_harness.tools(*many(6), framework="langgraph"), own]
+    graph = create_agent(model, tools=tools)
+    agent = memory_harness.wrap(graph, id="graph-hinted")
+    assert (agent.adapter.fixed_tools, agent.adapter.narrows) == (True, "turn")
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+
+    offered = [r["tools"] for r in model.requests]
+    kept = ["own", *MEMORY_TOOLS]  # the graph's own and the memory tools are not narrowed
+    assert sorted(offered[0]) == sorted(["t1", "t3", *kept])
+    assert sorted(offered[1]) == sorted(["t1", "t3", *kept])
+    assert sorted(offered[2]) == sorted(["t1", "t3", "t5", *kept])  # tool_search found t5
+    await graph.ainvoke({"messages": [{"role": "user", "content": "x"}]})
+    assert len(offered := model.requests[-1]["tools"]) == 6 + len(kept), offered  # as built
+
+
+async def test_the_hints_narrow_what_a_deep_agent_is_offered(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """Deep Agents' own tools stay; the harness tools are those the run offers."""
+    from deepagents import create_deep_agent
+
+    memory_service.candidates = ["t2"]
+    model = ScriptedChatModel(turns=[("t2", {"key": "b"}), "done"])
+    tools = await memory_harness.tools(*many(6), framework="deepagents")
+    graph = create_deep_agent(model=model, tools=tools)
+    result = await memory_harness.wrap(graph, id="deep-hinted").run("look up b", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    for names in (r["tools"] for r in model.requests):
+        assert "t2" in names and "write_file" in names and "task" in names, names
+        assert not {"t0", "t1", "t3", "t4", "t5"} & set(names), names
+
+
+def test_only_a_create_agent_model_node_is_narrowed() -> None:
+    """A function named as ``create_agent``'s model node but not holding its handler (another
+    LangChain release) leaves the graph as it is; a hand-built graph is run as it is."""
+    from langgraph.graph import START, MessagesState, StateGraph
+
+    from trellis.harness.adapters.langgraph import MODEL_NODE, LangGraphAdapter
+    from trellis.harness.middleware import narrowing
+
+    async def model(state: MessagesState) -> MessagesState:
+        return state
+
+    model.__qualname__ = MODEL_NODE
+    builder = StateGraph(MessagesState)
+    builder.add_node("model", model)
+    builder.add_edge(START, "model")
+    graph = builder.compile()
+    assert narrowing(graph, model) is None
+    adapter = LangGraphAdapter(graph)
+    assert (adapter.narrowed, adapter.narrows) == (None, "none")
+
+
 @pytest.mark.parametrize("omit", [True, False], ids=["no-candidates-field", "nothing-fits"])
 async def test_without_candidates_every_tool_is_offered(
     memory_harness: Harness, memory_service: FakeMemoryService, omit: bool

@@ -110,8 +110,6 @@ class Feature:
     modes: Mapping[str, Note] = field(default_factory=dict)
     ways: Mapping[str, Note] = field(default_factory=dict)
     way2: Scenario | Note | None = None
-    #: the gap a Way 2 scenario (a probe of the block the plan proposes) waits on
-    way2_gap: Gap | None = None
     way2_modes: tuple[str, ...] = ("run",)
     cells: Mapping[tuple[str | None, str | None, str | None], Note] = field(default_factory=dict)
 

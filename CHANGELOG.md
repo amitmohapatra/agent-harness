@@ -27,6 +27,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- `h.model_headers(prompt=)` is pinned per run, as `ReAct(prompt=)` is: every run of the
+  harness pins each stored prompt handed out at its start (journaled, so a resume keeps it; a
+  `prompt` event; `trellis.prompt.*` on the run's agent span), and the headers — a mapping read
+  at each request — select the version the run executing pinned (outside a run, the one
+  resolved when they were made). An OpenAI client (`AsyncOpenAI(default_headers=...)`, the
+  OpenAI Agents SDK) reads them per request; a LangChain chat model, which copies its headers,
+  selects the run's version through `ModelHooks()`; the Claude Code CLI's
+  `ANTHROPIC_CUSTOM_HEADERS` get it as the CLI starts. A prompt a run cannot pin is a
+  `prompt_unavailable` warning. With `prompt=` it returns that `Mapping[str, str]`, not a `dict`
+  ([gateway.md](docs/gateway.md#prompts)).
 - `serve_chat`: `POST {path}/runs/{run_id}/cancel` stops a chat run (the run's own user only),
   as A2A's `tasks/cancel` and `agent.cancel` do.
 - From the memory service, with no harness code: `memory_search` with `kinds: ["message"]`
@@ -44,6 +54,22 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 - `make docs-check` (links, anchors, snippets against the real API) and `make examples-live`.
 - A weekly canary workflow: the latest framework releases, unpinned, through `make test` and
   `make matrix`; it never blocks a pull request.
+- Large results on OpenAI Agents and Claude, automatically, as `ReAct` and Deep Agents already
+  had them: a harness tool's result over 80,000 characters is kept in the run's journal (across
+  a pause, on any worker), the model reads Deep Agents' head-and-tail preview naming
+  `/large_tool_results/<id>` and pages the rest with `read_file` — offered once there is
+  something to read on OpenAI Agents, listed on the `trellis` server from the start on Claude
+  ([tools.md](docs/tools.md#large-results)). Deep Agents is not needed. Closes matrix gap G8
+  (F26); Way 2 is n.a. by design (your code gets the whole result).
+- Tool hints narrow a `create_agent` or Deep Agents graph's model calls, automatically: its
+  tools are bound when it is built, so the harness runs a copy of it whose model calls go
+  through one more `awrap_model_call` handler, offering only the tools the run offers — the
+  hinted ones, the memory tools, those already used, what a `tool_search` found — and leaving
+  out a part turned off after the graph was built (`without=`), as `ModelHooks` does. Your
+  graph object is unchanged; its own tools (Deep Agents' `ls`, `task`, ...) are always offered.
+  A hand-written `StateGraph` binds its model's tools in its own code and is not narrowed
+  ([tools.md](docs/tools.md#tool-hints-what-the-model-is-offered)). Closes matrix gap G12
+  (F28).
 
 ## 0.4.0 — 2026-09-30 and since
 

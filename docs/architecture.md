@@ -410,7 +410,7 @@ adapter from the target's type, before anything is imported.
 ```mermaid
 flowchart LR
   target["target"] --> detect{"detect(target)<br/>by its type's module"}
-  detect -->|"langgraph.* Pregel<br/>(create_agent, Deep Agents, ReAct)"| lg["LangGraphAdapter<br/>tools: h.tools(...) at build<br/>narrows: per call with HarnessTools"]
+  detect -->|"langgraph.* Pregel<br/>(create_agent, Deep Agents, ReAct)"| lg["LangGraphAdapter<br/>tools: h.tools(...) at build<br/>narrows: per call (create_agent, Deep Agents)"]
   detect -->|"agents.Agent"| oa["OpenAIAgentsAdapter<br/>tools: added to a copy per run<br/>narrows: per turn"]
   detect -->|"ClaudeAgentOptions"| cl["ClaudeAdapter<br/>tools: the trellis MCP server<br/>narrows: per run"]
   detect -->|"async (input, agent)"| fn["FunctionAdapter<br/>tools: agent.tools.call"]
@@ -431,7 +431,7 @@ flowchart LR
 
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
-| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | per model call with `HarnessTools`, else no (bound at build) | leading system message, one per checkpointed thread |
+| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
 | `ReAct` (a `create_agent` graph) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
 | Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through `can_use_tool` | per run | appended to `system_prompt` |
