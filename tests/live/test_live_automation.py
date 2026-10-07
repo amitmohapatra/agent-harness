@@ -130,5 +130,5 @@ async def test_a_sampled_answer_is_verified_against_its_context() -> None:
         result = await agent.run("Where is my warehouse?", user=user)
         await h.writes.drain()
         assert h.writes.failed == 0
-        judged = await scope.feedback.list_for("run", result.run_id)
+        judged = (await scope.feedback.page_for("run", result.run_id)).items
         assert any(f.source == "judge" for f in judged), judged

@@ -90,7 +90,7 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
         # feedback on a run is stored with the run as a person's verdict, waiting for the
         # tenant administrator (the memory service's ADR 0028) beside the run's own
         # ``system`` outcome, which was applied as it arrived
-        stored = await scope.feedback.list_for("run", run_ids[0])
+        stored = (await scope.feedback.page_for("run", run_ids[0])).items
         [human] = [f for f in stored if f.source == "human"]
         assert human.verdict == "confirm" and human.review is not None
         assert human.review.state == "pending"

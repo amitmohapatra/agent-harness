@@ -175,7 +175,7 @@ async def test_the_graph_gets_memory_context_records_its_turn_and_takes_feedback
     given = await memory.feedback(
         "run", record.run_id, "confirm", reviewer=case.user, comment="the right supplier"
     )
-    listed = await memory.feedback.list_for("run", record.run_id)
+    listed = (await memory.feedback.page_for("run", record.run_id)).items
     assert given.feedback_id in [f.feedback_id for f in listed]
 
 
@@ -256,7 +256,7 @@ async def test_a_paused_graph_waits_in_the_inbox_and_resumes_from_its_checkpoint
     )
     memory = team.scope(case.user, run_id=record.run_id)
     target = content_key("call", case.tool, {"sku": case.sku, "qty": 500})
-    learned = await memory.feedback.list_for("tool_call", target)
+    learned = (await memory.feedback.page_for("tool_call", target)).items
     assert [(f.verdict, f.source, f.reviewer) for f in learned] == [
         ("approve", "interrupt", "live-lee")
     ]

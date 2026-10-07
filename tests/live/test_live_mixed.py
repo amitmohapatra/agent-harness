@@ -135,7 +135,7 @@ async def test_one_rule_gates_a_wrapped_agent_and_a_plain_graph() -> None:
                 target = content_key("call", name, args)
 
                 async def both_learned() -> bool:
-                    learned = await w_scope.feedback.list_for("tool_call", target)
+                    learned = (await w_scope.feedback.page_for("tool_call", target)).items
                     runs = {f.agent_run_id for f in learned if f.verdict == "approve"}
                     return runs == {w_done.run_id, record.run_id}
 
