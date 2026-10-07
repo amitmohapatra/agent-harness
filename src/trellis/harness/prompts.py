@@ -36,7 +36,6 @@ last copy read stands; a prompt never read is an error that says so.
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 import re
 from collections.abc import Iterator, Mapping, Sequence
@@ -65,15 +64,14 @@ from trellis.harness.repository import (
     pinned,
 )
 from trellis.harness.runtime import current
-from trellis.harness.settings import Settings
+from trellis.harness.settings import LANGFUSE_CLOUD, Settings, basic_auth
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
 
 #: The event (and the span attribute ``trellis.prompt``) a run's pinned prompt is said with.
 EVENT: Final = "prompt"
-#: Langfuse's own defaults: its cloud, and the label a prompt is served by.
-LANGFUSE_HOST: Final = "https://cloud.langfuse.com"
+#: Langfuse's own default label, the one a prompt is served by.
 PRODUCTION: Final = "production"
 #: A ``{{variable}}`` placeholder (Langfuse's syntax; spaces inside the braces allowed).
 VARIABLE: Final = re.compile(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}")
@@ -337,9 +335,8 @@ class LangfusePrompts:
         host: str | None = None,
         client: telemetry.Langfuse | None = None,
     ) -> None:
-        self.host = (host or LANGFUSE_HOST).rstrip("/")
-        token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
-        self.client = client or telemetry.Langfuse(self.host, f"Basic {token}")
+        self.host = (host or LANGFUSE_CLOUD).rstrip("/")
+        self.client = client or telemetry.Langfuse(self.host, basic_auth(public_key, secret_key))
         self._kept: Kept[tuple[str, str], dict[str, Any]] = Kept(
             self._read, what=lambda key: f"the Langfuse prompt {named(*key)!r}"
         )

@@ -5,9 +5,9 @@ Every attempt of a run is an ``invoke_agent`` span in one trace per run, with an
 attributes pass the redactor first: a value under a secret-looking name is dropped, a value
 that looks like a credential is dropped, an e-mail address is masked, a long value is cut.
 
-The harness uses the OTel API only. ``OTEL_EXPORTER_OTLP_ENDPOINT`` installs an exporter
-(Langfuse's endpoint, or a collector); here the example installs its own in-memory one first
-— the harness then leaves it alone — and prints what was exported.
+The harness uses the OTel API only. ``OTEL_EXPORTER_OTLP_ENDPOINT`` (a collector's), or
+Langfuse's own keys alone, install an exporter; here the example installs its own in-memory
+one first — the harness then leaves it alone — and prints what was exported.
 
     python -m examples.05_features.tracing_and_redaction
 """

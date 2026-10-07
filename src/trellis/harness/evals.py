@@ -272,9 +272,9 @@ class EvalServices:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> EvalServices:
-        """The services the environment names: Langfuse through the OTLP variables (which also
-        export the spans, unless the application installed its own tracer provider), the judge
-        through ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else
+        """The services the environment names: Langfuse through the OTLP variables, or its own
+        keys (which also export the spans, unless the application installed its own tracer
+        provider), the judge through ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else
         ``BIFROST_VIRTUAL_KEY``) and ``TRELLIS_JUDGE_MODEL``. Close them with :meth:`aclose`
         (or ``async with``)."""
         settings = Settings.from_env(environ)

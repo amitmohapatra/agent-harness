@@ -25,8 +25,8 @@ call.
 | `TRELLIS_API_KEY` | `api_key` | only allowed without `MEMORY_URL` and `RUNS_URL` (`ConfigurationError` otherwise) | `trk_...` | the tenant: the memory service says who the key is (`GET /v1/keys/self`) |
 | `MEMORY_URL` | `memory_url` | memory off: no context, no memory tools, no records, no catalog (the tools' own risks decide) | `http://localhost:8080` | memory push, pull and records; the tool catalog; grounding; documents; feedback in memory |
 | `RUNS_URL` | `runs_url` | runs, the queue and schedules kept in process (`LocalRuns`), lost on restart | `http://localhost:8090` | durable runs, workers across processes, the ticker's schedules and deadlines, artifacts, the event log (needs `MEMORY_URL`) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `otlp_endpoint` | no export (an application's own provider is still used) | `https://cloud.langfuse.com/api/public/otel` | an OTLP exporter, unless the application installed a provider |
-| `OTEL_EXPORTER_OTLP_HEADERS` | `otlp_headers` | no headers; no Langfuse scores API | `Authorization=Basic%20<base64 pk:sk>` | Langfuse's scores, datasets and dataset runs (parsed as the OTel spec writes it: `k1=v1,k2=v2`, URL-decoded, keys lower-cased) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `otlp_endpoint` | Langfuse's (`<LANGFUSE_HOST>/api/public/otel`) when both Langfuse keys are set; else no export (an application's own provider is still used) | `http://otel-collector:4318` | an OTLP exporter, unless the application installed a provider; set, it wins over the Langfuse keys (a collector, Datadog...) |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `otlp_headers` | Langfuse's Basic auth when the endpoint is derived from the Langfuse keys; else no headers, no Langfuse scores API | `Authorization=Basic%20<base64 pk:sk>,x-langfuse-host=https://cloud.langfuse.com` (Langfuse through a collector) | Langfuse's scores, datasets and dataset runs when the headers carry its Basic auth (parsed as the OTel spec writes it: `k1=v1,k2=v2`, URL-decoded, keys lower-cased); with a derived endpoint, a header set here wins over the derived one |
 | `TRELLIS_SPOOL_DIR` | `spool_dir` | a memory write this process cannot deliver is logged, counted and lost | `/var/spool/trellis` | undelivered writes kept in `<dir>/trellis-writes.jsonl`, replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | `TRELLIS_WORKER_CONCURRENCY` | `worker_concurrency` | the CPU count, from 1 to 8 | `4` | runs one worker process executes at once (`h.worker(concurrency=)` and `--concurrency` win) |
 | `TRELLIS_AGENT_VERSION` | `agent_version` | runs carry no version unless `h.wrap(version=)` names one | `2026.10.6-a1b2c3` | recorded with every run (`RunStart.agent_version`) and on its spans; a resume on another version warns ([reliability.md](reliability.md#agent-version)) |
@@ -36,8 +36,8 @@ call.
 | `TRELLIS_JUDGE_SAMPLE` | `judge_sample` | `0.1` when the harness has online judges | `1` | that share of successful runs scored by `Harness(judges=[...])`, by run id |
 | `PROMPTS_DIR` | `prompts_dir` | no folder of prompts | `./prompts` | `<name>.md` files there are a prompt source, unless the code passes `Harness(prompts=)` ([prompts.md](prompts.md)) |
 | `SKILLS_DIR` | `skills_dir` | no folder of skills | `./skills` | `<name>/SKILL.md` folders there are a skill source, unless the code passes `Harness(skills=)` ([skills.md](skills.md)) |
-| `LANGFUSE_HOST` | `langfuse_host` | Langfuse Cloud (`https://cloud.langfuse.com`), when the keys are set | `https://langfuse.example.com` | where Langfuse's prompt management is read |
-| `LANGFUSE_PUBLIC_KEY` | `langfuse_public_key` | prompts are not read from Langfuse | `pk-lf-...` | with the secret key: Langfuse's prompts are a source, after `PROMPTS_DIR` and before the gateway |
+| `LANGFUSE_HOST` | `langfuse_host` | Langfuse Cloud (`https://cloud.langfuse.com`), when the keys are set | `https://langfuse.example.com` | where Langfuse is: its prompts, and its traces, scores and datasets unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set |
+| `LANGFUSE_PUBLIC_KEY` | `langfuse_public_key` | nothing is sent to or read from Langfuse (unless the `OTEL_*` settings name it) | `pk-lf-...` | with the secret key, Langfuse is set up whole: its prompts are a source (after `PROMPTS_DIR`, before the gateway); and, with `OTEL_EXPORTER_OTLP_ENDPOINT` unset, traces go to `<LANGFUSE_HOST>/api/public/otel` with `Authorization: Basic base64(pk:sk)` (and `x-langfuse-ingestion-version: 4`), as Langfuse's SDK sends them, so scores, datasets and dataset runs reach it too |
 | `LANGFUSE_SECRET_KEY` | `langfuse_secret_key` | as above | `sk-lf-...` | as above |
 | `SANDBOX` | `sandbox` | `sandbox()` given no provider has none: its tools tell the model so | `docker` | each run's sandbox is a container of the Docker daemon on this machine ([sandbox.md](sandbox.md)); any other value is refused |
 | `SANDBOX_IMAGE` | `sandbox_image` | the provider's own image (`python:3.12-slim` for Docker) | `python:3.12-slim` | the image those sandboxes are made from, unless a `SandboxSpec(image=)` names one |
@@ -75,7 +75,14 @@ platform's: agent-runs reads the memory service at `MEMORY_URL` too, the memory 
 `MEMORY_URL` and `TRELLIS_API_KEY`, and the gateway is `BIFROST_URL` everywhere. The blocks read
 the same names: `MemoryClient()` `MEMORY_URL` and `TRELLIS_API_KEY`, `RunsClient()` `RUNS_URL`
 and `TRELLIS_API_KEY`, `Governance.from_env()` `MEMORY_URL` and `TRELLIS_API_KEY`,
-`EvalServices.from_env()` the OTLP variables, `BIFROST_URL` and the `TRELLIS_JUDGE_*` ones.
+`EvalServices.from_env()` the OTLP variables (or the Langfuse keys), `BIFROST_URL` and the
+`TRELLIS_JUDGE_*` ones. A team on Langfuse sets only Langfuse's own three names
+(`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` unless it is on Langfuse
+Cloud): `Settings.from_env()` derives the OTLP endpoint and headers from them, so prompts,
+traces, scores and datasets all reach the one project. `Settings(...)` in code takes the
+fields as given: pass `otlp_endpoint` and `otlp_headers` there yourself
+(`langfuse_otlp(host, public_key, secret_key)` from `trellis.harness.settings` gives
+Langfuse's).
 
 ## What is automatic
 

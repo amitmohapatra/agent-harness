@@ -134,12 +134,12 @@ flowchart LR
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts, the event log | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/release`, `/artifacts`, `/events`, `/v1/artifacts/{id}`, `/v1/schedules` (`runs.py`, `runlog.py`, through `trellis.runs.RunsClient`) |
 | Chat UI | runs and their events, resumes, reconnects, cancels, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `POST {path}/runs/{id}/cancel`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`agui`) |
 | Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)` and `remote(url)`: `SendStreamingMessage`, `CancelTask` (`a2a`) |
-| Langfuse / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces; grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
+| Langfuse (`LANGFUSE_*`) / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces; grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
 
 Unset variables remove a box: no `BIFROST_URL` means no MCP tools and no `ReAct` model names,
 no `MEMORY_URL` means no memory, no `RUNS_URL` keeps runs, the queue and schedules in this
-process (`runs.LocalRuns`), no `OTEL_EXPORTER_OTLP_ENDPOINT` means no export
-([configuration.md](configuration.md)).
+process (`runs.LocalRuns`), no `OTEL_EXPORTER_OTLP_ENDPOINT` (nor Langfuse keys) means no
+export ([configuration.md](configuration.md)).
 
 ## Modules
 
