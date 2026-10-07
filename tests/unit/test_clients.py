@@ -159,7 +159,7 @@ async def test_the_key_says_who_the_deployment_is() -> None:
 async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
     service = FakeMemoryService()
     run = memory(service).bind(identity())
-    pushed = await run.context("q", tools=["erp-get_stock"], window=False)
+    pushed = await run.context("q", tools=["erp-get_stock"], window=False, hints=True)
     assert pushed.rendered.startswith(service.context_text)
     assert pushed.bundle_id is not None and pushed.bundle_id.startswith("bnd_")
     [call] = service.named("context")

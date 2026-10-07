@@ -137,7 +137,7 @@ class RunMemory:
         *,
         tools: Sequence[str] | None,
         window: bool,
-        hints: bool = True,
+        hints: bool,
         budget: int = CONTEXT_TOKEN_BUDGET,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the

@@ -27,6 +27,7 @@ this: `remote(url, tenant=, user=)` works from any code ([blocks/a2a.md](blocks/
 |---|---|
 | `POST {path}/run` | An AG-UI `RunAgentInput`. A new run (the client's `runId`, or one the harness names) executes in the background and its events stream as SSE, each with an `id:` numbered per run. A `resume` entry answers the interrupt a paused run on the thread waits on: `payload` is the answer (`true`/`false`/edited arguments for an approval), `status: "cancelled"` cancels, `decision` names a contracts decision outright, `comment` is the reviewer's remark and `remember: "run"` approves the tool's later calls in the run. |
 | `GET {path}/runs/{run_id}/events` | Reconnect: the run's events after `Last-Event-ID` (or `?after=`), then live until it finishes. Only the run's own user sees it. A run another replica served is read from agent-runs' event log (with `RUNS_URL`), its events numbered by their position there. |
+| `POST {path}/runs/{run_id}/cancel` | Stop the run, whatever it is doing (`agent.cancel`): `200 {"runId", "status": "CANCELLED"}`, and its stream ends with `RUN_FINISHED` and a `cancelled` outcome. Only the run's own user (`404` for anyone else's); `409` once the run ended. |
 | `GET {path}/runs/{run_id}/artifacts/{artifact_id}` | Data the interrupt the run waits on carries by reference (`payload_ref`: a large `ask` table or diff), read from agent-runs. |
 
 What the agent is asked: the latest `user` message's text, or the input's `state` when there is

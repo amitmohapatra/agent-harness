@@ -27,6 +27,8 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- `serve_chat`: `POST {path}/runs/{run_id}/cancel` stops a chat run (the run's own user only),
+  as A2A's `tasks/cancel` and `agent.cancel` do.
 - From the memory service, with no harness code: `memory_search` with `kinds: ["message"]`
   finds what was said in this conversation and in the same user's earlier ones
   ([memory.md](docs/memory.md#pull)), and every run is offered the skills its agent learned

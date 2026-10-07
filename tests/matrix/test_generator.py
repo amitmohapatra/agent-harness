@@ -8,8 +8,8 @@ from pathlib import Path
 
 from tests.matrix.allpairs import allpairs, covered, required
 from tests.matrix.dimensions import SELECTIONS, SWITCHES, valid
-from tests.matrix.generate import CELLS
-from tests.matrix.model import parse_cell
+from tests.matrix.generate import CELLS, RUNNABLE
+from tests.matrix.model import NA, parse_cell
 from tests.matrix.report import read, render
 
 
@@ -45,12 +45,12 @@ def test_every_cell_is_unique_and_names_its_dimensions() -> None:
 
 
 def test_the_report_says_what_ran(tmp_path: Path) -> None:
-    ran, skipped, waiting, failed = (c.id for c in CELLS[:4])
+    ran, skipped, waiting, failed = (c.id for c in RUNNABLE[:4])
     junit = tmp_path / "matrix-1.xml"
     junit.write_text(
         '<testsuites><testsuite time="3.5">'
         f'<testcase name="test_cell[{ran}]" time="1"/>'
-        f'<testcase name="test_cell[{skipped}]"><skipped message="n.a.: no model"/></testcase>'
+        f'<testcase name="test_cell[{skipped}]"><skipped message="no model"/></testcase>'
         f'<testcase name="test_cell[{waiting}]"><skipped type="pytest.xfail" message="G8: cut"/>'
         "</testcase>"
         f'<testcase name="test_cell[{failed}]"><failure message="boom\nmore"/></testcase>'
@@ -60,10 +60,16 @@ def test_the_report_says_what_ran(tmp_path: Path) -> None:
     found = read([junit])
     assert [found[c].status for c in (ran, skipped, waiting, failed)] == [
         "pass",
-        "n.a.",
+        "FAIL",  # every cell that applies must run: a skip at run time fails it
         "xfail",
         "FAIL",
     ]
     text = render(found, 3.5)
-    assert f"- `{failed}`: boom" in text and "- no model: 1" in text and "- G8: cut: 1" in text
-    assert f"{len(CELLS) - 4} not run" in text
+    assert (
+        f"- `{failed}`: boom" in text and f"- `{skipped}`: skipped while it ran: no model" in text
+    )
+    assert "- G8: cut: 1" in text
+    assert f"{len(RUNNABLE) - 4} not run" in text  # a cell that does not apply is never "not run"
+    na = [c.note for c in CELLS if isinstance(c.note, NA)]
+    assert na and len(RUNNABLE) + len(na) == len(CELLS)
+    assert f"- {na[0].reason}: " in text  # its reason, from the table

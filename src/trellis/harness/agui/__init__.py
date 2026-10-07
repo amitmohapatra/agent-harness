@@ -7,6 +7,8 @@
   (or ``?after=``), then live until it finishes. A run this process did not serve is read
   from agent-runs' event log when ``RUNS_URL`` is set (its ids are then the log's positions):
   any replica serves any run.
+* ``POST {path}/runs/{run_id}/cancel`` — stop the run, whatever it is doing (``agent.cancel``):
+  it ends ``CANCELLED`` and its stream with ``RUN_FINISHED``. Only the run's own user.
 * ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
   waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
   agent-runs.
@@ -68,6 +70,7 @@ from trellis.harness.agui.translate import translate
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import run_of
+from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -80,6 +83,8 @@ ANONYMOUS: Final = "anonymous"
 #: ``RUN_ERROR`` codes the surface itself emits.
 BAD_RESUME: Final = "BAD_RESUME"
 RUN_ABORTED: Final = "RUN_ABORTED"
+#: The reason a run cancelled through the surface keeps.
+CANCELLED_BY_USER: Final = "cancelled by the user"
 #: The platform's problem code of each refusal the surface answers.
 PROBLEM_CODES: Final = {
     401: "AUTHENTICATION",
@@ -243,6 +248,20 @@ class _Surface:
         )
         return buffer, after
 
+    async def cancel(self, request: Request, run_id: str) -> RunStatus:
+        """Cancel the user's own run of this agent: 404 for anyone else's, 409 once it ended."""
+        user = await self.user(request)
+        agent = self.agent
+        tenant = await agent.harness.tenant()
+        record = await agent.harness.runs.get(run_id, tenant=tenant)
+        if record is None or record.agent_id != agent.id or record.user_id != user:
+            raise HTTPException(404, f"no run {run_id}")
+        try:
+            record = await agent.cancel(run_id, reason=CANCELLED_BY_USER, tenant=tenant)
+        except ConflictError as exc:
+            raise HTTPException(409, f"run {run_id} already ended") from exc
+        return record.status
+
     async def artifact(self, request: Request, run_id: str, artifact_id: str) -> Response:
         await self.user(request)
         agent = self.agent
@@ -368,6 +387,26 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         except HTTPException as exc:
             return _problem(exc, request)
         return EventStream(_sse(buffer, start))
+
+    @router.post(
+        "/runs/{run_id}/cancel",
+        summary="Cancel a run",
+        responses={
+            200: {
+                "description": 'the run stopped: `{"runId", "status"}`',
+                "content": {"application/json": {}},
+            },
+            **_refusals(401, 404, 409),
+        },
+    )
+    async def cancel(request: Request, run_id: str) -> Response:
+        """Stop the run, whatever it is doing: it ends `CANCELLED` and its event stream with
+        `RUN_FINISHED`. Only the run's own user; `409` once the run ended."""
+        try:
+            status = await surface.cancel(request, run_id)
+        except HTTPException as exc:
+            return _problem(exc, request)
+        return JSONResponse({"runId": run_id, "status": status.value})
 
     @router.get(
         "/runs/{run_id}/artifacts/{artifact_id}",

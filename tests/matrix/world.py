@@ -667,7 +667,7 @@ class World:
 
     async def cancel(self, run_id: str, reason: str) -> None:
         """Cancel the running run the way the cell's surface does: ``agent.cancel`` in
-        process, A2A's ``tasks/cancel``, AG-UI's cancel route (it has none yet: G29)."""
+        process, A2A's ``tasks/cancel``, AG-UI's cancel route."""
         handle = self._current
         assert handle is not None
         if self.mode == "a2a":

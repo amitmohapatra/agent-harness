@@ -78,25 +78,12 @@ class Switch:
 
 
 @dataclass(frozen=True, slots=True)
-class PendingSwitch:
-    """A switch that does not exist yet (``without=`` and the like): its selections are one
-    strict-xfail cell each, which ``probe`` tries to build (and fails while the gap is open)."""
-
-    id: str
-    title: str
-    gap: str
-    probe: Callable[[World], Awaitable[None]]
-
-
-@dataclass(frozen=True, slots=True)
 class Selection:
-    """What a user turned on: the switches in ``on``; ``pending`` names a switch that does not
-    exist yet (the selection is then one xfail cell)."""
+    """What a user turned on: the switches in ``on``."""
 
     id: str
     on: frozenset[str]
-    pending: PendingSwitch | None = None
-    kind: Literal["all", "none", "only", "without", "pairs", "pending"] = "all"
+    kind: Literal["all", "none", "only", "without", "pairs"] = "all"
 
 
 Scenario = Callable[["World"], Awaitable[None]]

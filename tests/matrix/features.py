@@ -730,8 +730,9 @@ FEATURES: Final[list[Feature]] = [
         "F60, F02, F01",
         "always on (a listener: stream, AG-UI, A2A)",
         events,
-        way2=way2.proposed("trellis.harness.blocks", "events"),
-        way2_gap=Gap("G6", "Way 2 has no event block"),
+        way2=NA(
+            "by design: in Way 2 your code runs the agent, so its stream and events are its framework's own; the harness numbers the events of the runs it runs (Way 1)"
+        ),
     ),
     Feature(
         "F02",
@@ -741,8 +742,9 @@ FEATURES: Final[list[Feature]] = [
         streamed_text,
         adapters={"function": NO_MODEL},
         modes=STREAMING,
-        way2=way2.proposed("trellis.harness.blocks", "events"),
-        way2_gap=Gap("G6", "Way 2 has no event block"),
+        way2=NA(
+            "by design: in Way 2 your code runs the agent, so its stream and events are its framework's own; the harness numbers the events of the runs it runs (Way 1)"
+        ),
     ),
     Feature(
         "F32",
@@ -843,8 +845,9 @@ FEATURES: Final[list[Feature]] = [
         "F22",
         "automatic (current().idempotency_key)",
         idempotency,
-        way2=way2.proposed("trellis.runs", "idempotency_key"),
-        way2_gap=Gap("G6", "no idempotency_key(run_id, call) block outside a run"),
+        way2=NA(
+            "by design: outside a harness run your code names the key of its own write; the runs SDK and the memory SDK take idempotency_key="
+        ),
     ),
     Feature(
         "F05",
@@ -852,7 +855,6 @@ FEATURES: Final[list[Feature]] = [
         "F05",
         "agent.cancel / handle.cancel / A2A tasks/cancel",
         cancel,
-        modes={"agui": Gap("G29", "AG-UI has no cancel route")},
         way2=way2.cancel,
         way2_modes=("worker",),
     ),
@@ -871,8 +873,9 @@ FEATURES: Final[list[Feature]] = [
         "F30",
         "opt-in (agent.as_tool())",
         subagent_parent,
-        way2=way2.proposed("trellis.harness.blocks", "subagent"),
-        way2_gap=Gap("G6", "no sub-agent block (use remote())"),
+        way2=NA(
+            "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
+        ),
     ),
     Feature(
         "F30c",
@@ -880,8 +883,9 @@ FEATURES: Final[list[Feature]] = [
         "F30",
         "opt-in (agent.as_tool())",
         subagent_child,
-        way2=way2.proposed("trellis.harness.blocks", "subagent"),
-        way2_gap=Gap("G6", "no sub-agent block (use remote())"),
+        way2=NA(
+            "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
+        ),
     ),
     Feature(
         "F25r",
@@ -989,8 +993,9 @@ FEATURES: Final[list[Feature]] = [
         pull,
         needs=frozenset({"memory", "memory_pull"}),
         adapters={"function": NA("a function target calls the memory tools like any other (F43)")},
-        way2=way2.proposed("trellis.harness.blocks", "agent_tools"),
-        way2_gap=Gap("G6", "agent_tools() is raw: no conversion block"),
+        way2=NA(
+            "by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them"
+        ),
     ),
     Feature(
         "F43",
@@ -1059,8 +1064,9 @@ FEATURES: Final[list[Feature]] = [
         "skills=[...] / skills(...) with the gateway",
         skills_,
         needs=frozenset({"gateway", "skills"}),
-        way2=way2.proposed("trellis.harness.skills", "disclose"),
-        way2_gap=Gap("G6", "no skills block (disclose(refs))"),
+        way2=NA(
+            "by design: your code reads the skills from Bifrost's skills API and puts them in its own prompt"
+        ),
     ),
     Feature(
         "F49",
@@ -1108,8 +1114,9 @@ FEATURES: Final[list[Feature]] = [
         "OTEL_EXPORTER_OTLP_ENDPOINT (an OTel provider)",
         tracing,
         needs=frozenset({"tracing"}),
-        way2=way2.proposed("trellis.harness.tracing", "agent_span"),
-        way2_gap=Gap("G6", "no tracing block (agent_span/tool_span)"),
+        way2=NA(
+            "by design: OpenTelemetry is the block: your code's own spans, which the SDKs continue (traceparent)"
+        ),
     ),
     Feature(
         "F61",
