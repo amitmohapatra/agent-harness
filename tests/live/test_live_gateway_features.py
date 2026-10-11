@@ -9,6 +9,7 @@ harness did, not what the model would have chosen."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -81,6 +82,33 @@ class Forced:
         return await self.gateway.complete(messages, model=MODEL, max_tokens=160, **body)
 
 
+async def gateway_requests(since: datetime, key: str) -> list[dict[str, Any]]:
+    """The gateway's own requests to the model under the virtual key named ``key`` since
+    ``since``, oldest first, from its request log (written a few seconds behind: read until it
+    settles). One completion of ours is one request, or more when the gateway's agent loop runs
+    a tool itself and asks the model again with the result (a ``tool`` message)."""
+    assert BIFROST_URL is not None
+    params = {"start_time": since.isoformat(), "limit": 100, "sort_by": "timestamp"}
+    seen: list[str] | None = None
+    found: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(base_url=BIFROST_URL.removesuffix("/v1"), timeout=10) as api:
+        for _ in range(30):
+            listed = (await api.get("/api/logs", params={**params, "order": "asc"})).json()
+            found = [e for e in listed.get("logs") or [] if e.get("virtual_key_name") == key]
+            ids = [e["id"] for e in found]
+            if found and ids == seen:
+                return found
+            seen = ids
+            await asyncio.sleep(2)
+    return found
+
+
+def ran_a_tool(request: dict[str, Any]) -> bool:
+    """The gateway sent the model a tool's result: it ran the tool itself."""
+    history = request.get("input_history") or []
+    return any(isinstance(m, dict) and m.get("role") == "tool" for m in history)
+
+
 def chat_tools(tools: list[Any]) -> list[dict[str, Any]]:
     """Harness tools as chat-completions function definitions."""
     return [
@@ -117,16 +145,22 @@ async def test_a_code_mode_meta_tool_call_comes_back_under_the_harness_name(
     wikis: list[str], wikis_key: str
 ) -> None:
     """The fact the design rests on: declared under the gateway's own name, the gateway runs
-    a meta-tool call itself (the completion comes back answered, no call in it); under the
-    harness's name the call comes back to the caller."""
+    a meta-tool call itself, in its own agent loop; under the harness's name the call comes
+    back to the caller, not run. Both read from the gateway's request log, not from the reply:
+    under the SDK's deny-all scope the gateway's own run lists no server, and the small model
+    may ask again until the loop's depth cap, which returns its last calls unrun."""
+    key = f"trellis-live-all-wikis-{os.getpid()}"  # the wikis_key's name (``_virtual_key``)
     async with live_harness(wikis_key) as h:
         assert h.gateway is not None
         offered = chat_tools(code_mode_tools(h.gateway, wikis))
         for spec in CODE_MODE_TOOLS[:3]:
             forced = Forced(h.gateway, [spec.name])
+            since = datetime.now(UTC) - timedelta(seconds=1)
             reply = await forced.complete(
                 [{"role": "user", "content": f"Call {spec.name}."}], tools=offered
             )
+            [asked] = await gateway_requests(since, key)  # one request: the gateway ran nothing
+            assert not ran_a_tool(asked)
             calls = reply["choices"][0]["message"]["tool_calls"]
             names = {c["function"]["name"] for c in calls}
             # back, not run: the forced call comes back under the harness's name, and so does
@@ -136,12 +170,14 @@ async def test_a_code_mode_meta_tool_call_comes_back_under_the_harness_name(
             assert names <= {s.name for s in CODE_MODE_TOOLS}, names
         gateway_name = GATEWAY_NAMES["list_tool_files"]
         declared = [{**offered[0], "function": {**offered[0]["function"], "name": gateway_name}}]
-        # the gateway's loop: three model calls in one request, one a full 160-token reply,
+        # the gateway's loop: several model calls in one request, one a full 160-token reply,
         # which at the ~1.5 token/s a shared CPU gives under load is past the client's 60 s
-        reply = await Forced(h.gateway, [gateway_name]).complete(
+        since = datetime.now(UTC) - timedelta(seconds=1)
+        await Forced(h.gateway, [gateway_name]).complete(
             [{"role": "user", "content": f"Call {gateway_name}."}], tools=declared, wait=240
         )
-        assert not reply["choices"][0]["message"].get("tool_calls")  # the gateway ran it
+        loop = await gateway_requests(since, key)
+        assert len(loop) >= 2 and any(ran_a_tool(r) for r in loop[1:]), loop  # the gateway ran it
 
 
 @needs_memory
