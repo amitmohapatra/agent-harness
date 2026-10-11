@@ -124,7 +124,11 @@ are gone. Since the 0.4.0 version was set:
   call (`mcp__trellis__<tool>`, or the built-in's name) to make again. It was told to repeat
   "your last tool call" if it had "no result yet", but the session holds that call's result as
   "Waiting for a person's approval.": the live model took it for a failure and called other
-  tools until the CLI's turn limit. A pause that names no call (an `ask`) keeps the old wording.
+  tools until the CLI's turn limit. A pause that names no call (an `ask`) keeps the old wording;
+  after a deny the session is told the call will not run.
+- Grounding (`grounding()`, the sampled check on a run) is no verdict and no score against a
+  context that held no evidence, as the memory service records none: it was 0.0 on the trace,
+  every claim "unsupported" against nothing, one the run's own tools returned too.
 
 ## 0.3.0 — 2026-09-28
 

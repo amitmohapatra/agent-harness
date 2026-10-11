@@ -378,8 +378,8 @@ def name_of(evaluator: Evaluator) -> str:
 class grounding:
     """The share of the answer's claims the run's memory context supports
     (:func:`grounding_score`: ``/v1/verify`` with the case's ``bundle_id``, in its ``memory``
-    scope); no score without memory, without a pushed context, or for an answer with no
-    checkable claim."""
+    scope); no score without memory, without a pushed context, for an answer with no
+    checkable claim, or against a context that held no evidence."""
 
     name: str = "grounding"
 
@@ -394,12 +394,14 @@ class grounding:
 
 async def grounding_score(memory: MemoryContext, answer: str, bundle_id: str) -> float | None:
     """The share of ``answer``'s claims the context ``bundle_id`` supports (the memory service's
-    ``/v1/verify``, in the scope ``memory`` built it in), or ``None`` for an answer with no
-    checkable claim. In a run's scope the service records the verdict as the run's ``judge``
-    feedback itself; this is the same number, for the run's trace. A long answer is checked on
-    its head (:func:`verified`)."""
+    ``/v1/verify``, in the scope ``memory`` built it in), or ``None`` - no verdict - for an
+    answer with no checkable claim or a context that held no evidence: against nothing every
+    claim is "unsupported", one the run's own tools returned too, so 0.0 would only say memory
+    was empty. The service records no verdict for either, and in a run's scope records the
+    others as the run's ``judge`` feedback itself; this is the same number, for the run's
+    trace. A long answer is checked on its head (:func:`verified`)."""
     report = await memory.verify(verified(answer), bundle_id=bundle_id)
-    if not report.claims:
+    if not report.claims or report.evidence_count == 0:
         return None
     return round(1.0 - report.per_claim_hallucination_rate, 4)
 

@@ -470,6 +470,10 @@ async def test_the_grounding_score_is_the_share_of_supported_claims_in_the_scope
     assert verified.body["bundle_id"] == "bnd_1" and verified.scope["user_id"] == "u"
     memory_service.claims = memory_service.unsupported = 0
     assert await grounding_score(scope, "hello", "bnd_1") is None  # no checkable claim
+    memory_service.claims, memory_service.unsupported, memory_service.evidence = 2, 2, 0
+    # against a context that held nothing every claim is unsupported: no verdict, not 0.0,
+    # as the service records none
+    assert await grounding_score(scope, "Refunded pay-O-1.", "bnd_1") is None
 
 
 async def test_grounding_gives_no_score_for_an_answer_with_no_claim(

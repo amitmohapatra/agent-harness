@@ -14,7 +14,7 @@ from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, Permissi
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolSpec
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL
+from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.journal import content_key
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
@@ -145,6 +145,24 @@ async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(
     # holds that call's result as "waiting", which is not "no result yet"
     assert resumed["resume"] is not None
     assert resumed["prompt"] == RESUMED_CALL.format(tool="mcp__trellis__refund")
+
+
+async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """After a deny the call does not run: the resumed session is told so, not told to call
+    again and expect its result."""
+    refunds.clear()
+    agent = harness.wrap(
+        options(tmp_path, [{"tool": "refund", "args": {"order": "o3"}}, {"text": "not refunded"}]),
+        id="refunds-denied",
+        tools=[refund],
+    )
+    paused = await agent.run("refund o3", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    finished = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS and refunds == []
+    assert started_with(tmp_path)["prompt"] == RESUMED_DENIED.format(tool="mcp__trellis__refund")
 
 
 @tool(side_effects="read")

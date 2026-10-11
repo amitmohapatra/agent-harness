@@ -116,7 +116,8 @@ precedence **human > judge > system**:
   (`TRELLIS_GROUNDING_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
-  the run's trace (`grounding`). An answer with no checkable claim is no verdict and no score.
+  the run's trace (`grounding`). An answer with no checkable claim, or a context that held no
+  evidence (every claim would be "unsupported" against nothing), is no verdict and no score.
 * **human** — `h.feedback(run_id, verdict, correction=None)`. The memory service stores a
   person's verdict as a vote that waits for the tenant administrator (`review.state ==
   "pending"`, its ADR 0028): it changes the run's outcome, and the confidence of what the run

@@ -37,6 +37,7 @@ from typing import Any, ClassVar, Final
 
 from trellis.contracts import (
     ConfigurationError,
+    InterruptDecision,
     InterruptResolution,
     ToolCall,
     ToolOutcome,
@@ -93,6 +94,13 @@ RESUMED_CALL: Final = (
     "the person has answered. Call {tool} again now with the same arguments: it runs once and "
     "returns its result. Then carry on with the task."
 )
+#: ... and after a person denied that call: it does not run, so it returns no result to wait
+#: for, and the session is told so instead of being told to expect one.
+RESUMED_DENIED: Final = (
+    "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
+    "the person denied it. That call will not run; do not make it again. Carry on with the "
+    "task without it."
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -101,6 +109,8 @@ class ClaudeInput:
     context: str | None
     #: the tool call a person answered about, when the run resumes from that pause
     answered: ToolCall | None = None
+    #: the person denied that call (``REJECT``): it does not run
+    denied: bool = False
 
 
 class ClaudeRunError(RuntimeError):
@@ -162,7 +172,11 @@ class ClaudeAdapter:
         pending: Pending,
         resolution: InterruptResolution,
     ) -> Any:
-        return dataclasses.replace(native_input, answered=pending.interrupt.tool_call)
+        return dataclasses.replace(
+            native_input,
+            answered=pending.interrupt.tool_call,
+            denied=resolution.decision is InterruptDecision.REJECT,
+        )
 
     def check_options(self, options: Mapping[str, Any]) -> None:
         from claude_agent_sdk import ClaudeAgentOptions
@@ -247,7 +261,8 @@ def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     if call is None:
         return RESUMED
     harness = any(t.name == call.tool for t in run.tools)
-    return RESUMED_CALL.format(tool=f"mcp__{SERVER}__{call.tool}" if harness else call.tool)
+    told = RESUMED_DENIED if native_input.denied else RESUMED_CALL
+    return told.format(tool=f"mcp__{SERVER}__{call.tool}" if harness else call.tool)
 
 
 def _options(options: Any, context: str | None, run: Invocation, session: str | None) -> Any:

@@ -197,11 +197,22 @@ async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
         tool_of = {
             e.tool_call_id: e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START
         }
-        # every call ran through the bridge and has its result; the forced ones succeed. A
-        # call the small model adds beside a forced one, with a script of its own making,
-        # may fail in the sandbox (an "error" result is the bridge's answer to it)
+        args_of = {
+            e.tool_call_id: e.data.get("args") or {}
+            for e in events
+            if e.type is RunEventType.TOOL_CALL_ARGS
+        }
+        # every call ran through the bridge and has its result, and every call succeeds but
+        # one the small model added beside a forced one with a script of its own making,
+        # which may fail in the sandbox (the bridge answers it "error"): the listing and the
+        # script it was given, however often it calls them, must succeed
         assert len(results) == len(calls)
-        assert {e.data["status"] for e in results} <= {"ok", "error"}
+        for result in results:
+            tool, args = tool_of.get(result.tool_call_id), args_of.get(result.tool_call_id, {})
+            given = str(args.get("code", "")).strip()
+            own_script = tool == "execute_tool_code" and given != SCRIPT.strip()
+            allowed = {"ok", "error"} if own_script else {"ok"}
+            assert result.data["status"] in allowed, (tool, args, result.data)
         ok = {tool_of.get(e.tool_call_id) for e in results if e.data["status"] == "ok"}
         assert ok == {"list_tool_files", "execute_tool_code"}, [e.data for e in results]
         listing = next(
