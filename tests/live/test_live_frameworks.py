@@ -48,7 +48,7 @@ from tests.live.proof import (
     recorded,
     streamed,
 )
-from tests.live.support import eventually, memory_scope
+from tests.live.support import eventually, memory_scope, seed
 from tests.support.adapters import BUILDERS
 from trellis import Agent, Harness, ReAct, Runtime, tool
 from trellis.contracts import RunEventType, RunOutcome
@@ -201,7 +201,7 @@ async def checked(h: Harness, name: str, built: Built, wiki: str, tenant: str) -
     proof = Proof()
     agent = h.wrap(built.target, id=f"live-{name}-{suffix}", tools=built.tools, hooks=[proof])
     scope = await memory_scope(h, user=user, agent_id=agent.id, thread=thread)
-    await scope.remember(f"The warehouse of {user} is in Berlin.", visibility="USER")
+    await seed(scope, f"The warehouse of {user} is in Berlin.", visibility="USER")
     decisions = governed(h, tenant)
     stream = agent.stream(
         QUESTION, user=user, thread=thread, timeout=RUN_SECONDS, framework_options=built.options

@@ -120,6 +120,11 @@ are gone. Since the 0.4.0 version was set:
   tools, a worker's stop out of working time is told in time, and others.
 - Tool calls whose arguments the model could not produce as JSON are an error the model reads
   (OpenAI Agents, LangChain).
+- Claude Agent SDK: a session resumed after a person answered about a tool call is told which
+  call (`mcp__trellis__<tool>`, or the built-in's name) to make again. It was told to repeat
+  "your last tool call" if it had "no result yet", but the session holds that call's result as
+  "Waiting for a person's approval.": the live model took it for a failure and called other
+  tools until the CLI's turn limit. A pause that names no call (an `ask`) keeps the old wording.
 
 ## 0.3.0 — 2026-09-28
 

@@ -34,7 +34,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command, interrupt
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
-from tests.live.support import StubLangfuse, eventually, free_port, serving
+from tests.live.support import StubLangfuse, eventually, free_port, seed, serving
 from tests.live.team import Team, graph
 from tests.support.planned import PlannedChatModel
 from trellis import Runtime
@@ -154,8 +154,10 @@ async def test_the_graph_gets_memory_context_records_its_turn_and_takes_feedback
 ) -> None:
     case = Case()
     supplier = f"SUP-{case.suffix}"
-    await team.scope(case.user).remember(
-        f"{case.user} buys steel only from Acme Steel, supplier id {supplier}.", visibility="USER"
+    await seed(
+        team.scope(case.user),
+        f"{case.user} buys steel only from Acme Steel, supplier id {supplier}.",
+        visibility="USER",
     )
     question = "Who do I buy steel from?"
     record = await team.start(question, user=case.user, thread=case.thread)
@@ -370,8 +372,10 @@ async def test_pauses_and_endings_are_signed_webhook_deliveries(
 async def test_a_fired_schedule_is_claimed_and_run_by_a_plain_worker(team: Team) -> None:
     case = Case()
     stock = f"check_stock_{case.suffix}"
-    await team.scope(case.user).remember(
-        f"{case.user} wants the stock digest for SKU {case.sku}.", visibility="USER"
+    await seed(
+        team.scope(case.user),
+        f"{case.user} wants the stock digest for SKU {case.sku}.",
+        visibility="USER",
     )
 
     def check_stock(sku: str) -> str:
@@ -453,7 +457,8 @@ class cites_supplier:
 async def test_evaluate_and_judge_score_the_graph_as_a_plain_callable(team: Team) -> None:
     case = Case()
     # unique per run: the memory SDK's default idempotency key leaves the user out
-    await team.scope(case.user).remember(
+    await seed(
+        team.scope(case.user),
         f"The Berlin office reorders steel from Acme Steel, supplier id SUP-40 ({case.suffix}).",
         visibility="USER",
     )

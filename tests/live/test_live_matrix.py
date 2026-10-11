@@ -56,7 +56,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.live.conftest import RUNS_URL, live_harness, needs_memory, needs_runs
-from tests.live.support import StubLangfuse, eventually, memory_scope
+from tests.live.support import StubLangfuse, eventually, memory_scope, seed
 from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
 from trellis import Agent, Harness, ReAct, Runtime, a2a, tool
 from trellis.contracts import (
@@ -392,7 +392,7 @@ async def test_memory_is_pushed_pulled_and_written_back(framework: str, tmp_path
         built = await build(case, plan)
         agent = h.wrap(built.target, id=case.agent_id, tools=built.tools)
         user_scope = await memory_scope(h, user=case.user, agent_id=agent.id)
-        await user_scope.remember(case.fact, visibility="USER")
+        await seed(user_scope, case.fact, visibility="USER")
 
         events = [e async for e in agent.stream(QUESTION, user=case.user, thread=case.thread)]
         finished = events[-1]
@@ -503,7 +503,7 @@ async def test_a_hand_built_graphs_own_interrupt_pauses_in_agent_runs(tmp_path: 
         native = await h.tools(*case.tools(), framework="langgraph")
         agent = h.wrap(state_graph(model, native, confirm=True), id=case.agent_id)
         scope = await memory_scope(h, user=case.user, agent_id=agent.id)
-        await scope.remember(case.fact, visibility="USER")
+        await seed(scope, case.fact, visibility="USER")
 
         paused = await agent.run(QUESTION, user=case.user, thread=case.thread)
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
@@ -609,7 +609,7 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) ->
     async with case.h as h:
         agent = h.wrap(billing, id=case.agent_id, tools=[charge])
         scope = await memory_scope(h, user=case.user, agent_id=agent.id)
-        await scope.remember(case.fact, visibility="USER")
+        await seed(scope, case.fact, visibility="USER")
         # the question memory is asked about is the input's text field (a dict's "question")
         question = "Charge order o-7 for my SKU A-1 stock from the warehouse."
         handle = await agent.start({"order": "o-7", "question": question}, user=case.user)
@@ -700,7 +700,7 @@ async def test_a_schedule_fires_through_the_ticker_to_a_worker(tmp_path: Path) -
 
         agent = h.wrap(briefing, id=case.agent_id)
         scope = await memory_scope(h, user=case.user, agent_id=agent.id)
-        await scope.remember(case.fact, visibility="USER")
+        await seed(scope, case.fact, visibility="USER")
         minute = (datetime.now(UTC) + timedelta(minutes=2)).minute  # agent-runs: one an hour
         schedule = await agent.schedule(f"{minute} * * * *", "briefing", on_behalf_of=case.user)
         worker = h.worker([agent], concurrency=1)
@@ -755,7 +755,7 @@ async def test_agui_runs_a_graph_pauses_resumes_and_replays(tmp_path: Path) -> N
         built = await build(case, [(case.reorder, {"sku": "A-1", "qty": 20})])
         agent = h.wrap(built.target, id=case.agent_id)
         scope = await memory_scope(h, user=case.user, agent_id=agent.id)
-        await scope.remember(case.fact, visibility="USER")
+        await seed(scope, case.fact, visibility="USER")
         app = FastAPI()
         agent.serve_chat(app, identity=_user_of)
         run_id = f"run_{uuid.uuid4().hex}"
@@ -976,7 +976,8 @@ async def test_offline_evaluation_scores_a_langfuse_dataset(spans: InMemorySpanE
             user = f"fv-eval-{suffix}"
             scope = await memory_scope(h, user=user, agent_id=agent.id)
             # unique per test: the memory SDK's default idempotency key leaves the user out
-            await scope.remember(
+            await seed(
+                scope,
                 f"The Berlin office buys its steel from Acme Steel, supplier id SUP-40 ({suffix}).",
                 visibility="USER",
             )
@@ -1032,9 +1033,7 @@ async def test_online_judges_score_every_sampled_run() -> None:
             agent = h.wrap(answer_from_table, id=f"fv-judged-{suffix}")
             user = f"fv-judged-{suffix}"
             scope = await memory_scope(h, user=user, agent_id=agent.id)
-            await scope.remember(
-                f"Acme Steel's supplier id is SUP-40 ({suffix}).", visibility="USER"
-            )
+            await seed(scope, f"Acme Steel's supplier id is SUP-40 ({suffix}).", visibility="USER")
             runs = [await agent.run(q, user=user) for q in ANSWERS]
             await h.writes.drain()
             assert all(r.status is RunStatus.SUCCESS for r in runs)

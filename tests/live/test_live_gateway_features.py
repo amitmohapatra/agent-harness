@@ -9,10 +9,15 @@ harness did, not what the model would have chosen."""
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -24,7 +29,9 @@ from tests.live.conftest import (
     BIFROST_URL,
     MODEL,
     WIKIS,
+    claude_cli_env,
     live_harness,
+    needs_claude_cli,
     needs_gateway,
     needs_memory,
 )
@@ -57,12 +64,20 @@ class Forced:
     choices: list[str | None]
     requests: list[dict[str, Any]] = field(default_factory=list)
 
-    async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
+    async def complete(
+        self, messages: list[dict[str, Any]], *, wait: float | None = None, **body: Any
+    ) -> dict[str, Any]:
+        """``wait``: the HTTP timeout of a request the gateway answers with several model
+        calls of its own (its Agent Mode loop), in place of the client's 60 s for one."""
         choice = self.choices.pop(0)
         body["tool_choice"] = (
             {"type": "function", "function": {"name": choice}} if choice else "none"
         )
         self.requests.append(body)
+        if wait is not None:
+            return await self.gateway.client.complete(
+                messages, model=MODEL, max_tokens=160, timeout=wait, **body
+            )
         return await self.gateway.complete(messages, model=MODEL, max_tokens=160, **body)
 
 
@@ -93,6 +108,11 @@ async def admin() -> AsyncIterator[Admin]:
 
 
 # --------------------------------------------------------------------------- Code Mode
+# Four completions, the last one the gateway's Agent Mode loop (three model calls, one of them a
+# full 160-token reply): ~40 s alone on the local CPU model, past the suite's 120 s while the
+# memory worker's LLM jobs share that CPU (one completion then takes up to ~50 s). 300 s, as the
+# other tests that make several gateway completions (test_live_hitl's ReAct, the matrix).
+@pytest.mark.timeout(300)
 async def test_a_code_mode_meta_tool_call_comes_back_under_the_harness_name(
     wikis: list[str], wikis_key: str
 ) -> None:
@@ -108,16 +128,28 @@ async def test_a_code_mode_meta_tool_call_comes_back_under_the_harness_name(
                 [{"role": "user", "content": f"Call {spec.name}."}], tools=offered
             )
             calls = reply["choices"][0]["message"]["tool_calls"]
-            assert {c["function"]["name"] for c in calls} == {spec.name}  # back, not run
+            names = {c["function"]["name"] for c in calls}
+            # back, not run: the forced call comes back under the harness's name, and so does
+            # any other the small model adds beside it in the same reply (it has added
+            # read_tool_file and list_tool_files to a forced get_tool_docs)
+            assert spec.name in names, names
+            assert names <= {s.name for s in CODE_MODE_TOOLS}, names
         gateway_name = GATEWAY_NAMES["list_tool_files"]
         declared = [{**offered[0], "function": {**offered[0]["function"], "name": gateway_name}}]
+        # the gateway's loop: three model calls in one request, one a full 160-token reply,
+        # which at the ~1.5 token/s a shared CPU gives under load is past the client's 60 s
         reply = await Forced(h.gateway, [gateway_name]).complete(
-            [{"role": "user", "content": f"Call {gateway_name}."}], tools=declared
+            [{"role": "user", "content": f"Call {gateway_name}."}], tools=declared, wait=240
         )
         assert not reply["choices"][0]["message"].get("tool_calls")  # the gateway ran it
 
 
 @needs_memory
+# Three gateway completions (two forced calls, then the answer) and the gateway's log read
+# back: past the suite's 120 s when the memory worker's LLM jobs share the CPU model (a
+# completion then runs at ~1.5 token/s). 300 s, as the meta-tool test above and the other tests
+# that make several gateway completions (test_live_hitl's ReAct, the matrix).
+@pytest.mark.timeout(300)
 async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
     wikis: list[str], wikis_key: str
 ) -> None:
@@ -160,12 +192,18 @@ async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
             offered = {t["function"]["name"] for t in request["tools"]}
             assert {s.name for s in CODE_MODE_TOOLS} <= offered
             assert not offered & set(GATEWAY_NAMES.values())
-        results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
-        assert [r["status"] for r in results] == ["ok"] * len(calls)
+        results = [e for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
         # a model may make both calls in one step, so their results arrive in either order
         tool_of = {
             e.tool_call_id: e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START
         }
+        # every call ran through the bridge and has its result; the forced ones succeed. A
+        # call the small model adds beside a forced one, with a script of its own making,
+        # may fail in the sandbox (an "error" result is the bridge's answer to it)
+        assert len(results) == len(calls)
+        assert {e.data["status"] for e in results} <= {"ok", "error"}
+        ok = {tool_of.get(e.tool_call_id) for e in results if e.data["status"] == "ok"}
+        assert ok == {"list_tool_files", "execute_tool_code"}, [e.data for e in results]
         listing = next(
             e.data["output"]
             for e in events
@@ -358,18 +396,114 @@ async def test_a_frameworks_own_mcp_client_works_on_the_gateway_ungoverned(
         assert "noted: direct" in str(result.content)
 
 
-def test_langchains_mcp_adapters_on_the_gateway() -> None:
-    pytest.skip(
-        "langchain-mcp-adapters (0.3) requires mcp<2 and this environment's mcp is 2.x "
-        "(the SDKs' MCP servers); docs/gateway.md shows the client"
+#: docs/gateway.md's LangChain client, as a program: it lists the key's tools and calls one.
+LANGCHAIN_MCP = """
+import asyncio, json, os
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+async def main():
+    client = MultiServerMCPClient(
+        {
+            "bifrost": {
+                "transport": "streamable_http",
+                "url": os.environ["GATEWAY_MCP"],
+                "headers": {"Authorization": f"Bearer {os.environ['VIRTUAL_KEY']}"},
+            }
+        }
     )
+    tools = {t.name: t for t in await client.get_tools()}
+    result = await tools[os.environ["CALL"]].ainvoke({"text": "langchain"})
+    print(json.dumps({"tools": sorted(tools), "result": str(result)}))
+
+asyncio.run(main())
+"""
 
 
-def test_the_claude_agent_sdks_mcp_servers_on_the_gateway() -> None:
-    pytest.skip(
-        "the Claude CLI needs an Anthropic model, and this gateway serves one local model "
-        "through the OpenAI format; docs/gateway.md shows mcp_servers"
+@pytest.mark.timeout(300)  # the first run installs the client into uv's cache
+def test_langchains_mcp_adapters_on_the_gateway(ops: str, ops_key: str, tmp_path: Path) -> None:
+    """langchain-mcp-adapters (0.3.2, the latest) requires mcp<2 and the harness has mcp 2, so
+    the docs' client runs in an environment of its own (``uv run --with``), not the harness's."""
+    assert BIFROST_URL is not None
+    uv = shutil.which("uv")
+    assert uv is not None, "needs uv (the harness's own installer: make install)"
+    env = {
+        **os.environ,
+        "GATEWAY_MCP": BIFROST_URL.removesuffix("/v1") + "/mcp",
+        "VIRTUAL_KEY": ops_key,
+        "CALL": f"{ops}-write_note",
+    }
+    for name in ("VIRTUAL_ENV", "PYTHONPATH"):  # not the harness's environment
+        env.pop(name, None)
+    command = [uv, "run", "--no-project", "--with", "langchain-mcp-adapters==0.3.2"]
+    done = subprocess.run(
+        [*command, "--with", "langchain-core", "python", "-I", "-c", LANGCHAIN_MCP],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=240,
+        check=False,
     )
+    assert done.returncode == 0, done.stderr[-2000:]
+    out = json.loads(done.stdout.strip().splitlines()[-1])
+    assert out["tools"] == sorted(f"{ops}-{t}" for t in ("delete_records", "whoami", "write_note"))
+    assert "noted: langchain" in out["result"]
+
+
+@needs_claude_cli
+@pytest.mark.timeout(300)
+async def test_the_claude_agent_sdks_mcp_servers_on_the_gateway(
+    ops: str, ops_key: str, cli_home: Path
+) -> None:
+    """docs/gateway.md's ``mcp_servers`` for the Claude Agent SDK, on the CLI the live model
+    drives through the gateway's Anthropic route (as test_live_claude): the CLI connects to
+    /mcp with the key, lists the key's tools and calls one, straight to the gateway."""
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        SystemMessage,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+        query,
+    )
+
+    assert BIFROST_URL is not None
+    note = f"mcp__bifrost__{ops}-write_note"
+    options = ClaudeAgentOptions(
+        model=MODEL,
+        system_prompt="You write notes with the write_note tool. Be brief.",
+        mcp_servers={
+            "bifrost": {
+                "type": "http",
+                "url": BIFROST_URL.removesuffix("/v1") + "/mcp",
+                "headers": {"Authorization": f"Bearer {ops_key}"},
+            }
+        },
+        tools=[],  # no built-in tools: the gateway's are the model's only ones
+        allowed_tools=[note],
+        max_turns=3,
+        cwd=cli_home,
+        env=claude_cli_env(),
+    )
+    listed: list[str] = []
+    servers: list[dict[str, Any]] = []
+    called: list[str] = []
+    results: list[str] = []
+    async for message in query(prompt="Write the note 'claude'.", options=options):
+        if isinstance(message, SystemMessage) and message.subtype == "init":
+            listed = [t for t in message.data["tools"] if t.startswith("mcp__bifrost__")]
+            servers = message.data["mcp_servers"]
+        elif isinstance(message, AssistantMessage):
+            called += [b.name for b in message.content if isinstance(b, ToolUseBlock)]
+        elif isinstance(message, UserMessage) and isinstance(message.content, list):
+            results += [str(b.content) for b in message.content if isinstance(b, ToolResultBlock)]
+    assert [(s["name"], s["status"]) for s in servers] == [("bifrost", "connected")]
+    assert sorted(listed) == sorted(
+        f"mcp__bifrost__{ops}-{t}" for t in ("delete_records", "whoami", "write_note")
+    )
+    assert note in called, f"the live model called {called}, not write_note"
+    assert any("noted: " in r for r in results), results  # the gateway ran it
 
 
 async def test_mcp_on_the_gateway_takes_the_key_and_refuses_no_key(ops_key: str) -> None:

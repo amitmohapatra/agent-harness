@@ -18,7 +18,7 @@ from tests.live.conftest import (
     needs_gateway,
     needs_memory,
 )
-from tests.live.support import StubLangfuse, memory_scope
+from tests.live.support import StubLangfuse, memory_scope, seed
 from trellis import Runtime
 from trellis.harness import telemetry
 from trellis.harness.evals import contains, grounding, llm_judge
@@ -70,7 +70,8 @@ async def test_a_langfuse_dataset_is_graded_for_grounding_by_the_memory_service(
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         # unique per run: the memory SDK's default idempotency key leaves the user out, so the
         # same content for another user in the tenant would be refused as a reused key
-        await scope.remember(
+        await seed(
+            scope,
             f"The Berlin office reorders steel from Acme Steel, supplier id SUP-40 ({suffix}).",
             visibility="USER",
         )
