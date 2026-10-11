@@ -96,6 +96,8 @@ class FakeMemoryService:
     #: the claims ``/v1/verify`` finds, and how many of them the evidence does not support
     claims: int = 5
     unsupported: int = 1
+    #: the items of the context the claims were checked against
+    evidence: int = 3
     #: names of the calls that answer 503 (DEPENDENCY_UNAVAILABLE)
     fail: set[str] = field(default_factory=set)
     #: names of the calls that answer 503 this many times, then succeed
@@ -393,6 +395,7 @@ class FakeMemoryService:
             "per_claim_hallucination_rate": (
                 self.unsupported / self.claims if self.claims else 0.0
             ),
+            "evidence_count": self.evidence,
             "feedback_id": self._id("fb"),
         }
 

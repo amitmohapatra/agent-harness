@@ -7,35 +7,25 @@ calls the tool at all is the model's (the test says so when it does not)."""
 
 from __future__ import annotations
 
-import os
-import shutil
 import uuid
 from pathlib import Path
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
 
-from tests.live.conftest import BIFROST_URL, MODEL, live_harness, needs_gateway, settings
+from tests.live.conftest import (
+    BIFROST_URL,
+    MODEL,
+    claude_cli_env,
+    live_harness,
+    needs_claude_cli,
+    needs_gateway,
+)
 from trellis import tool
 from trellis.contracts import RunStatus
 from trellis.harness.journal import Journal
 
-pytestmark = [
-    pytest.mark.live,
-    needs_gateway,
-    pytest.mark.skipif(shutil.which("claude") is None, reason="needs the Claude Code CLI"),
-]
-
-
-@pytest.fixture
-def cli_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """The CLI as a deployment runs it: none of this process's own Claude settings (a Claude
-    Code session's variables point a child CLI elsewhere), its sessions in a home of its own."""
-    for name in list(os.environ):
-        if name.startswith(("CLAUDE", "ANTHROPIC")):
-            monkeypatch.delenv(name)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    return tmp_path
+pytestmark = [pytest.mark.live, needs_gateway, needs_claude_cli]
 
 
 @pytest.mark.timeout(600)
@@ -49,17 +39,13 @@ async def test_claude_runs_through_the_gateway_and_resumes_its_session(cli_home:
         closed.append(ticket)
         return f"ticket {ticket} is closed"
 
-    key = settings().bifrost_virtual_key or "unused"
     options = ClaudeAgentOptions(
         model=MODEL,
         system_prompt="You close support tickets with the close_ticket tool. Be brief.",
         tools=[],  # no built-in tools: the model sees the harness's tool only
         max_turns=4,
-        env={
-            "ANTHROPIC_BASE_URL": f"{BIFROST_URL.removesuffix('/v1')}/anthropic",
-            "ANTHROPIC_API_KEY": key,
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        },
+        cwd=cli_home,
+        env=claude_cli_env(),
     )
     async with live_harness() as h:
         agent = h.wrap(options, id=f"live-claude-{uuid.uuid4().hex[:8]}", tools=[close_ticket])

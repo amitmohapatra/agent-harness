@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Iterator, Sequence
+from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -131,6 +133,41 @@ def live_harness(
 async def harness() -> AsyncIterator[Harness]:
     async with live_harness() as h:
         yield h
+
+
+#: The Claude Code CLI, which the Claude Agent SDK runs (its tests skip without it).
+needs_claude_cli = pytest.mark.skipif(
+    shutil.which("claude") is None, reason="needs the Claude Code CLI"
+)
+
+
+@pytest.fixture
+def cli_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """The CLI as a deployment runs it: none of this process's own Claude settings (a Claude
+    Code session's variables point a child CLI elsewhere), its sessions in a home of its own,
+    and that home its working directory (give it as the options' ``cwd``): from this
+    repository the CLI read the repository's CLAUDE.md and project settings into the model's
+    context, and the local model followed their instructions (it searched memory for
+    "gstack") instead of the task."""
+    for name in list(os.environ):
+        if name.startswith(("CLAUDE", "ANTHROPIC")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+def claude_cli_env() -> dict[str, str]:
+    """The CLI's environment for the live model: the gateway's Anthropic route, the key, and
+    replies capped at 512 tokens as the local server caps every other client's (its ``-n``).
+    The CLI asks for tens of thousands, which the server honours: a reply the small model
+    fell into repeating ran 2,100 tokens at ~4 token/s, past the test's ten minutes."""
+    assert BIFROST_URL is not None
+    return {
+        "ANTHROPIC_BASE_URL": f"{BIFROST_URL.removesuffix('/v1')}/anthropic",
+        "ANTHROPIC_API_KEY": settings().bifrost_virtual_key or "unused",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "512",
+    }
 
 
 @pytest.fixture(scope="session")

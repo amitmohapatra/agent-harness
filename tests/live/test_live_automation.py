@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
-from tests.live.support import memory_scope
+from tests.live.support import memory_scope, seed
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 
@@ -126,7 +126,7 @@ async def test_a_sampled_answer_is_verified_against_its_context() -> None:
     async with live_harness(grounding_sample=1.0) as h:
         agent = h.wrap(answer, id=f"live-grounded-{suffix}")
         scope = await memory_scope(h, user=user, agent_id=agent.id)
-        await scope.remember(f"The warehouse of {user} is in Berlin.", visibility="USER")
+        await seed(scope, f"The warehouse of {user} is in Berlin.", visibility="USER")
         result = await agent.run("Where is my warehouse?", user=user)
         await h.writes.drain()
         assert h.writes.failed == 0

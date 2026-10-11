@@ -12,9 +12,9 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
 
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
-from trellis import Deny, Harness, Hooks, Rewrite, tool
+from trellis import Deny, Harness, Hooks, Rewrite, current, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolSpec
-from trellis.harness.adapters.claude import RESUMED
+from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.journal import content_key
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
@@ -141,7 +141,51 @@ async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(
     assert finished.status is RunStatus.SUCCESS and finished.answer == "done"
     assert refunds == ["o2"]
     resumed = started_with(tmp_path)
-    assert resumed["resume"] is not None and resumed["prompt"] == RESUMED
+    # told which call the person answered about, by the name Claude calls it: the session
+    # holds that call's result as "waiting", which is not "no result yet"
+    assert resumed["resume"] is not None
+    assert resumed["prompt"] == RESUMED_CALL.format(tool="mcp__trellis__refund")
+
+
+async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """After a deny the call does not run: the resumed session is told so, not told to call
+    again and expect its result."""
+    refunds.clear()
+    agent = harness.wrap(
+        options(tmp_path, [{"tool": "refund", "args": {"order": "o3"}}, {"text": "not refunded"}]),
+        id="refunds-denied",
+        tools=[refund],
+    )
+    paused = await agent.run("refund o3", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    finished = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS and refunds == []
+    assert started_with(tmp_path)["prompt"] == RESUMED_DENIED.format(tool="mcp__trellis__refund")
+
+
+@tool(side_effects="read")
+async def pick_warehouse() -> str:
+    """Ask which warehouse ships."""
+    runtime = current()
+    assert runtime is not None
+    return f"ships from {await runtime.ask('Which warehouse?')}"
+
+
+async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A pause that is not an approval names no call: the resumed session is told to make
+    again the call that has no result yet."""
+    script = [{"tool": "pick_warehouse", "args": {}}, {"text": "{last}"}]
+    agent = harness.wrap(options(tmp_path, script), id="shipping", tools=[pick_warehouse])
+    asked = await agent.run("where does it ship from?", user="u1")
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+    assert asked.interrupt.tool_call is None
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="Leeds", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "ships from Leeds"
+    assert started_with(tmp_path)["prompt"] == RESUMED
 
 
 async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
@@ -164,6 +208,7 @@ async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
     )
     assert built_ins(tmp_path) == [{"tool": "Read", "args": {"file_path": "orders.csv"}}]
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert started_with(tmp_path)["prompt"] == RESUMED_CALL.format(tool="Bash")  # a built-in
     assert again.interrupt is not None and again.interrupt.tool_call is not None
     assert again.interrupt.tool_call.tool == "refund"
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")

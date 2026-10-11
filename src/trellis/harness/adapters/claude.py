@@ -13,9 +13,9 @@
 * pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
   ends). The session the CLI kept (``ResultMessage.session_id``) is in the run's journal, and
   the next attempt resumes it (``resume=``): Claude goes on from where it was — its built-in
-  tools are not run again — and calls the paused tool again, which the journal answers. A
-  session the CLI no longer holds (another machine, its store cleared) is a warning, and the
-  query runs again from its prompt against the journal;
+  tools are not run again — and, told which call a person answered about, calls that tool
+  again, which the journal answers. A session the CLI no longer holds (another machine, its
+  store cleared) is a warning, and the query runs again from its prompt against the journal;
 * model headers: ``ANTHROPIC_CUSTOM_HEADERS`` in the options' ``env`` that select a stored
   prompt the run pinned (``h.model_headers(prompt=)``) select the version it pinned — the CLI
   reads them as it starts, once per attempt;
@@ -35,7 +35,14 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Final
 
-from trellis.contracts import ConfigurationError, InterruptResolution, ToolOutcome, ToolSpec
+from trellis.contracts import (
+    ConfigurationError,
+    InterruptDecision,
+    InterruptResolution,
+    ToolCall,
+    ToolOutcome,
+    ToolSpec,
+)
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import selected_env
@@ -78,12 +85,32 @@ RESUMED: Final = (
     "your last tool call has no result yet, call that tool again with the same arguments: "
     "it runs once. Then carry on with the task."
 )
+#: What a session resumed after a person answered about one tool call is told: that call, by
+#: the name Claude knows it by. The session holds the call's result as "waiting for a person's
+#: approval", which :data:`RESUMED`'s "no result yet" does not describe: a model told only that
+#: took the waiting call for a failure and tried other tools instead.
+RESUMED_CALL: Final = (
+    "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
+    "the person has answered. Call {tool} again now with the same arguments: it runs once and "
+    "returns its result. Then carry on with the task."
+)
+#: ... and after a person denied that call: it does not run, so it returns no result to wait
+#: for, and the session is told so instead of being told to expect one.
+RESUMED_DENIED: Final = (
+    "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
+    "the person denied it. That call will not run; do not make it again. Carry on with the "
+    "task without it."
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class ClaudeInput:
     prompt: str
     context: str | None
+    #: the tool call a person answered about, when the run resumes from that pause
+    answered: ToolCall | None = None
+    #: the person denied that call (``REJECT``): it does not run
+    denied: bool = False
 
 
 class ClaudeRunError(RuntimeError):
@@ -145,7 +172,11 @@ class ClaudeAdapter:
         pending: Pending,
         resolution: InterruptResolution,
     ) -> Any:
-        return native_input
+        return dataclasses.replace(
+            native_input,
+            answered=pending.interrupt.tool_call,
+            denied=resolution.decision is InterruptDecision.REJECT,
+        )
 
     def check_options(self, options: Mapping[str, Any]) -> None:
         from claude_agent_sdk import ClaudeAgentOptions
@@ -210,7 +241,7 @@ class ClaudeAdapter:
         given = runtime.framework_options
         target = dataclasses.replace(target, **given) if given else target
         options = _options(target, native_input.context, run, session)
-        prompt = native_input.prompt if session is None else RESUMED
+        prompt = native_input.prompt if session is None else _resumed(native_input, run)
         async for message in query(prompt=prompt, options=options):
             found = getattr(message, "session_id", None)
             if isinstance(found, str):
@@ -219,6 +250,19 @@ class ClaudeAdapter:
             if runtime.pending is not None:
                 # the run paused: stop here; the CLI process goes with it
                 return
+
+
+def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
+    """What the resumed session is told: the call a person answered about, named as Claude
+    calls it (a harness tool through the ``trellis`` server, a built-in by its own name)."""
+    from trellis.harness.tools.convert.claude import SERVER
+
+    call = native_input.answered
+    if call is None:
+        return RESUMED
+    harness = any(t.name == call.tool for t in run.tools)
+    told = RESUMED_DENIED if native_input.denied else RESUMED_CALL
+    return told.format(tool=f"mcp__{SERVER}__{call.tool}" if harness else call.tool)
 
 
 def _options(options: Any, context: str | None, run: Invocation, session: str | None) -> Any:

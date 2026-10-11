@@ -37,6 +37,19 @@ async def eventually(
         await asyncio.sleep(every)
 
 
+async def seed(scope: MemoryContext, content: str, **options: Any) -> None:
+    """Remember ``content`` for a test and wait until it is findable. A memory is stored at
+    once and searchable when its index job lands (a fraction of a second; longer on a busy
+    worker): a run started in between is pushed a context without it, which is not what a test
+    that seeds a memory is about."""
+    await scope.remember(content, **options)
+
+    async def found() -> bool:
+        return any(item.text == content for item in await scope.search(content))
+
+    assert await eventually(found, every=0.2), f"{content!r} never became findable"
+
+
 async def memory_scope(
     h: Harness, *, user: str, agent_id: str, thread: str | None = None
 ) -> MemoryContext:

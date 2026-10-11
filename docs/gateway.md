@@ -214,7 +214,7 @@ The gateway is an MCP server itself: `/mcp` (every tool the key allows) and `/mc
 Virtual MCP), authenticated with the virtual key (`Authorization: Bearer <key>`).
 
 ```python
-# LangChain (langchain-mcp-adapters)
+# LangChain (langchain-mcp-adapters 0.3 needs mcp<2: an environment of its own)
 client = MultiServerMCPClient(
     {
         "bifrost": {
