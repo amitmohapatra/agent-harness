@@ -306,9 +306,14 @@ MCP_ITEMS: Final = [
 
 
 def untitled(schema: Any) -> Any:
-    """A JSON Schema without its ``title`` keywords."""
+    """A JSON Schema without its ``title`` keywords or an empty ``properties``, ``required`` in
+    name order: what the gateway normalizes (seen live) — the same schema."""
     if isinstance(schema, dict):
-        return {k: untitled(v) for k, v in schema.items() if k != "title"}
+        return {
+            k: sorted(v) if k == "required" else untitled(v)
+            for k, v in schema.items()
+            if k != "title" and not (k == "properties" and v == {})
+        }
     return [untitled(v) for v in schema] if isinstance(schema, list) else schema
 
 
@@ -353,8 +358,8 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
         assert own and set(own) <= set(sent_defs), set(own) - set(sent_defs)
         for name, tool in own.items():
             assert sent_defs[name]["description"] == tool.description, name
-            # the gateway drops JSON Schema "title"s (seen live); the rest is the server's
-            assert sent_defs[name]["parameters"] == untitled(tool.input_schema), name
+            # as the server lists it, but for what the gateway normalizes (``untitled``)
+            assert untitled(sent_defs[name]["parameters"]) == untitled(tool.input_schema), name
         # the check of the tool set finds what the servers left undescribed
         seen = [
             ToolSpec(name=n, description=d.get("description") or "", input_schema=d["parameters"])
