@@ -73,7 +73,7 @@ SETS: Final[dict[str, Set]] = {
         scenario.SCENARIOS,
         scenario.SYSTEM,
         scenario.CAN,
-        tuple(VARIANTS),
+        BOTH,
     ),
     "reproduction: store, 51 tools": (
         [*scenario.TOOLS, *scenario.UNRELATED],
