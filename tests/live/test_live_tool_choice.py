@@ -10,9 +10,10 @@ is and with ``tool_guidance`` and ``answer_check``.
 **MCP through Bifrost** — the local MCP servers (``mcp_fixture.py``, declared in the gateway):
 the definitions the model is sent are the servers' own (descriptions and schemas), the same
 tool on three servers is three names, and the check of the tool set finds what the servers
-left undescribed; a change asked of an MCP tool is scored the same way. (Code Mode needs the
-memory service's catalog to call the wikis read-only — ``test_live_code_mode.py`` — so it is
-not run here.)
+left undescribed; a change asked of an MCP tool is scored the same way. **Bifrost Code Mode**
+— the three wikis, declared read-only by a catalog of the test's own (governance given to the
+harness, no memory service), become the meta-tools: the model is sent them as the harness
+describes them, and a question is scored by whether its script ran.
 
 What is asserted is the harness's part (``tests/live/proof.py``): every item that ran is scored
 from its trajectory, a change that reached its approval counts as made, the guidance is in every
@@ -34,13 +35,17 @@ from typing import Any, Final
 
 import pytest
 
-from tests.live.conftest import MODEL, OPS, _virtual_key, live_harness, needs_gateway
+from tests.live.conftest import MODEL, OPS, _virtual_key, live_harness, needs_gateway, settings
 from tests.live.proof import MODEL_FAILURES, RUN_SECONDS
 from tests.live.support import Sent as Wire
 from tests.live.support import gateway_model
-from trellis import Hooks, ModelCall, ReAct, current
+from tests.support.catalog import FakeCatalog
+from trellis import Harness, Hooks, ModelCall, ReAct, current
 from trellis.contracts import ToolSpec
+from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.evals import EvalReport, tool_coverage
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.middleware import ANSWER_CHECK, TOOL_GUIDANCE
 from trellis.harness.tools.lint import lint
 
@@ -65,7 +70,7 @@ MAX_STEPS: Final = 8
 #: The tools whose every call fails (an error; a timeout after 2 s).
 FAILING: Final = {"supplier_eta", "transfer_status"}
 
-RUNS: Final = sum(len(v) for _, v in SETS.values()) * REPEATS * len(scenario.SCENARIOS) + 6
+RUNS: Final = sum(len(v) for _, v in SETS.values()) * REPEATS * len(scenario.SCENARIOS) + 10
 pytestmark = [pytest.mark.live, needs_gateway]
 
 
@@ -249,7 +254,7 @@ def definitions(wire: Wire) -> dict[str, dict[str, Any]]:
     }
 
 
-@pytest.mark.timeout(int(6 * RUN_SECONDS))
+@pytest.mark.timeout(int(10 * RUN_SECONDS))
 async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
     store_key: str, wikis: list[str]
 ) -> None:
@@ -291,5 +296,39 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
         assert (f"{OPS}-write_note", "undescribed_parameter") in codes
         found["mcp"] = summarized(rows) | {"lint": sorted(map(list, codes))}
 
+        # Bifrost Code Mode: the wikis, read-only by the catalog, behind the meta-tools
+        rules = {name: Rule(risk="read") for name in own if not name.startswith(OPS)}
+        coded = Harness(
+            config=settings(
+                bifrost_virtual_key=store_key, memory_url=None, runs_url=None, api_key=None
+            ),
+            governance=Governance(FakeCatalog(rules)),
+        )
+        async with coded:
+            wire, sent = Wire(), Sent()
+            target = ReAct(
+                "You answer questions about code repositories from their wikis, by code.",
+                gateway_model(coded, wire),
+                max_steps=6,
+                tool_guidance=True,
+                answer_check=True,
+            )
+            agent = coded.wrap(target, id="tool-choice-code-mode", hooks=[sent])
+            item = {
+                "input": "What does the facebook/react wiki say about hooks?",
+                "metadata": {"needed_tools": ["execute_tool_code"]},
+            }
+            report = await coded.evaluate(
+                agent, [item], [tool_coverage()], run_name="tool-choice-code-mode"
+            )
+            rows = rows_of(report, sent, 0.0)
+            harness_part(rows, sent, {"tool_guidance": True, "answer_check": True})
+            sent_defs = definitions(wire)
+            for spec in CODE_MODE_TOOLS:  # the meta-tools, as the harness describes them
+                assert sent_defs[spec.name]["description"] == spec.description
+                assert sent_defs[spec.name]["parameters"] == spec.input_schema
+            assert not any(n.startswith(tuple(wikis)) for n in sent_defs)  # behind them
+            found["code_mode"] = summarized(rows) | {"offered": sorted(sent_defs)}
     saved("MCP via Bifrost", found)
-    print(f"\nMCP: {json.dumps(found['mcp'], default=str)[:2000]}")
+    for part in ("mcp", "code_mode"):
+        print(f"\n{part}: {json.dumps(found[part], default=str)[:2000]}")
