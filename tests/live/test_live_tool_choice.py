@@ -199,7 +199,9 @@ def harness_part(
     """What the harness must have done, whatever the model chose."""
     for row in rows:
         if row["status"] == "error":  # the model's own failures only
-            assert any(f in (row["error"] or "") for f in MODEL_FAILURES), row
+            # (ReAct's own stops — a stall, the step limit — say "stopped")
+            said = row["error"] or ""
+            assert said.startswith("stopped") or any(f in said for f in MODEL_FAILURES), row
     ran = [r for r in rows if r["status"] in ("success", "interrupted")]
     for row in ran:  # every item that needs tools and ran is scored from its trajectory
         assert (row["coverage"] is not None) == bool(row["needed"]), row
@@ -303,6 +305,13 @@ MCP_ITEMS: Final = [
 ]
 
 
+def untitled(schema: Any) -> Any:
+    """A JSON Schema without its ``title`` keywords."""
+    if isinstance(schema, dict):
+        return {k: untitled(v) for k, v in schema.items() if k != "title"}
+    return [untitled(v) for v in schema] if isinstance(schema, list) else schema
+
+
 def definitions(wire: Wire) -> dict[str, dict[str, Any]]:
     """Every tool definition the model was sent, by name."""
     return {
@@ -344,7 +353,8 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
         assert own and set(own) <= set(sent_defs), set(own) - set(sent_defs)
         for name, tool in own.items():
             assert sent_defs[name]["description"] == tool.description, name
-            assert sent_defs[name]["parameters"] == tool.input_schema, name
+            # the gateway drops JSON Schema "title"s (seen live); the rest is the server's
+            assert sent_defs[name]["parameters"] == untitled(tool.input_schema), name
         # the check of the tool set finds what the servers left undescribed
         seen = [
             ToolSpec(name=n, description=d.get("description") or "", input_schema=d["parameters"])
