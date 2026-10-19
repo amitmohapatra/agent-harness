@@ -26,6 +26,7 @@ from trellis.harness.middleware import (
     HarnessTools,
     ModelHooks,
     RunCheckpointer,
+    StepLimit,
     ToolGuidance,
 )
 
@@ -269,7 +270,7 @@ async def test_an_item_paused_for_approval_is_scored_by_tool_coverage_only(
     )
     agent = harness.wrap(ReAct("s", model), id="p", tools=[look, rule])
     dataset = [
-        {"input": "rule for a", "metadata": {"needed_tools": ["rule"]}},
+        {"input": "rule for a", "expected": "x", "metadata": {"needed_tools": ["rule"]}},
         {"input": "look a up", "expected": "found", "metadata": {"needed_tools": ["look"]}},
     ]
     report = await harness.evaluate(agent, dataset, [tool_coverage(), exact_match()], concurrency=1)
@@ -297,3 +298,12 @@ async def test_an_item_paused_on_a_question_is_not_scored(harness: Harness) -> N
     )
     [item] = report.items
     assert item.status == "interrupted" and item.scores == []
+
+
+async def test_a_call_told_to_call_no_tool_is_not_checked(harness: Harness) -> None:
+    model = ScriptedChatModel(turns=[("look", {"item": "a"}), "partial"])
+    target = graph(model, HarnessTools(), StepLimit(1), AnswerCheck(), ModelHooks())
+    assert (await harness.wrap(target, id="none", tools=[look]).run("x", user="u")).answer == (
+        "partial"
+    )
+    assert checked(model) == [] and model.requests[-1]["tool_choice"] == "none"

@@ -3,7 +3,11 @@
 **Functions** — the store-operations set of ``examples/06_scenarios/tool_choice.py``: a broad
 dashboard beside specific tools, a two- and a three-part request, a change behind approval, a
 conclusion to draw, a figure the context remembers out of date, a tool that fails and one that
-hangs — among its 10 tools, and again among 50 (40 unrelated ones added). Each item is scored
+hangs, a five-part request, a part no tool answers, a change asked for indirectly, a read
+that sounds like a change, an unknown record, a change a remembered rule forbids, a question
+about what the assistant can do — among its 11 tools, and again among 51 (40 unrelated ones
+added). Then the same kinds of item on two **held-out** sets (``heldout.py``: an IT help desk,
+travel expenses), written after the guards and never used to change them, reported apart. Each item is scored
 by ``tool_coverage`` (and, with an expected answer, ``contains`` and ``picks``), ``ReAct`` as it
 is and with ``tool_guidance`` and ``answer_check``.
 
@@ -35,6 +39,7 @@ from typing import Any, Final
 
 import pytest
 
+from tests.live import heldout
 from tests.live.conftest import MODEL, OPS, _virtual_key, live_harness, needs_gateway, settings
 from tests.live.proof import MODEL_FAILURES, RUN_SECONDS
 from tests.live.support import Sent as Wire
@@ -46,7 +51,7 @@ from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.evals import EvalReport, tool_coverage
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.middleware import ANSWER_CHECK, TOOL_GUIDANCE
+from trellis.harness.middleware import ANSWER_CHECK, TOOL_GUIDANCE, WRITE_CHECK
 from trellis.harness.tools.lint import lint
 
 scenario = importlib.import_module("examples.06_scenarios.tool_choice")
@@ -57,20 +62,37 @@ VARIANTS: Final[dict[str, dict[str, bool]]] = {
     "guidance": {"tool_guidance": True},
     "guidance+check": {"tool_guidance": True, "answer_check": True},
 }
-#: The tool sets: the store's 10 tools, and the same among 50 (with the variants run there).
-SETS: Final[dict[str, tuple[list[Any], tuple[str, ...]]]] = {
-    "10 tools": (scenario.TOOLS, tuple(VARIANTS)),
-    "50 tools": ([*scenario.TOOLS, *scenario.UNRELATED], ("baseline", "guidance+check")),
+#: The tool sets — tools, items, instructions, capabilities, the variants run — the store's
+#: (the reproduction set), the same among 51 tools, and the held-out ones (``heldout.py``),
+#: reported apart.
+Set = tuple[list[Any], list[dict[str, Any]], str, dict[str, bool], tuple[str, ...]]
+BOTH: Final = ("baseline", "guidance+check")
+SETS: Final[dict[str, Set]] = {
+    "reproduction: store, 11 tools": (
+        scenario.TOOLS,
+        scenario.SCENARIOS,
+        scenario.SYSTEM,
+        scenario.CAN,
+        tuple(VARIANTS),
+    ),
+    "reproduction: store, 51 tools": (
+        [*scenario.TOOLS, *scenario.UNRELATED],
+        scenario.SCENARIOS,
+        scenario.SYSTEM,
+        scenario.CAN,
+        BOTH,
+    ),
+    **{name: (*found, BOTH) for name, found in heldout.SETS.items()},
 }
 #: The first line of the check the model is asked, and of the guidance.
 CHECK: Final = ANSWER_CHECK.splitlines()[0]
 GUIDANCE: Final = TOOL_GUIDANCE.splitlines()[0]
+WRITE_FIRST: Final = WRITE_CHECK.split(".")[1].strip()
 REPORT: Final = Path("build/tool_choice_live.json")
 MAX_STEPS: Final = 8
 #: The tools whose every call fails (an error; a timeout after 2 s).
 FAILING: Final = {"supplier_eta", "transfer_status"}
-
-RUNS: Final = sum(len(v) for _, v in SETS.values()) * REPEATS * len(scenario.SCENARIOS) + 10
+RUNS: Final = max(len(v[4]) * len(v[1]) for v in SETS.values()) * REPEATS + 10
 pytestmark = [pytest.mark.live, needs_gateway]
 
 
@@ -81,6 +103,7 @@ class Sent(Hooks):
     def __init__(self) -> None:
         self.unguided: dict[str, int] = {}
         self.checked: set[str] = set()
+        self.write_checked: set[str] = set()
         self.calls: dict[str, int] = {}
 
     async def before_model(self, call: ModelCall) -> None:
@@ -92,11 +115,15 @@ class Sent(Hooks):
             self.unguided[run.run_id] = self.unguided.get(run.run_id, 0) + 1
         if any(CHECK in str(m.content) for m in call.messages):
             self.checked.add(run.run_id)
+        if any(WRITE_FIRST in str(m.content) for m in call.messages):
+            self.write_checked.add(run.run_id)
 
 
-def rows_of(report: EvalReport, sent: Sent, seconds: float) -> list[dict[str, Any]]:
+def rows_of(
+    report: EvalReport, sent: Sent, seconds: float, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     rows = []
-    for result in report.items:
+    for result, given in zip(report.items, items, strict=True):
         scores = {s.name: s for s in result.scores}
         text = result.input if isinstance(result.input, str) else result.input[-1]["content"]
         rows.append(
@@ -108,6 +135,11 @@ def rows_of(report: EvalReport, sent: Sent, seconds: float) -> list[dict[str, An
                 "comment": scores["tool_coverage"].comment if "tool_coverage" in scores else None,
                 "picks": scores["picks"].value if "picks" in scores else None,
                 "contains": scores["contains"].value if "contains" in scores else None,
+                **{
+                    n: scores[n].value if n in scores else None
+                    for n in ("says_cannot", "says_no_record", "respects_rule", "plain_answer")
+                },
+                "needed": given["metadata"]["needed_tools"],
                 "model_calls": sent.calls.get(result.run_id or "", 0),
                 "answer": result.output if isinstance(result.output, str) else None,
                 "run_id": result.run_id,
@@ -122,7 +154,7 @@ def mean(values: list[Any]) -> float | None:
     return round(sum(numbers) / len(numbers), 3) if numbers else None
 
 
-def summarized(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def summarized(rows: list[dict[str, Any]], writes: set[str]) -> dict[str, Any]:
     statuses: dict[str, int] = {}
     for row in rows:
         statuses[row["status"]] = statuses.get(row["status"], 0) + 1
@@ -131,9 +163,23 @@ def summarized(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "repeats": REPEATS,
         "mean_coverage": mean([r["coverage"] for r in rows]),
         "full_coverage_items": sum(r["coverage"] == 1.0 for r in rows),
-        "broad_tool_used": sum("store_overview" in (r["comment"] or "") for r in rows),
+        # a tool the item should not need (a broader one) called
+        "avoided_called": sum("called though not needed" in (r["comment"] or "") for r in rows),
         "picks": mean([r["picks"] for r in rows]),
         "contains": mean([r["contains"] for r in rows]),
+        **{
+            n: mean([r[n] for r in rows])
+            for n in ("says_cannot", "says_no_record", "respects_rule", "plain_answer")
+        },
+        # a change asked for, answered without calling its tool (claimed, or not made)
+        "writes_not_called": sum(
+            bool(writes & set(r["needed"])) and r["status"] == "success" and r["coverage"] == 0.0
+            for r in rows
+        ),
+        # a read that sounds like a change, answered by calling the write tool
+        "writes_called_unasked": sum(
+            not (writes & set(r["needed"])) and r["status"] == "interrupted" for r in rows
+        ),
         "model_calls": mean([r["model_calls"] for r in rows]),
         "statuses": statuses,
         "items": rows,
@@ -147,27 +193,30 @@ def saved(section: str, found: dict[str, Any]) -> None:
     REPORT.write_text(json.dumps(report, indent=2, default=str))
 
 
-def harness_part(rows: list[dict[str, Any]], sent: Sent, switches: dict[str, bool]) -> None:
+def harness_part(
+    rows: list[dict[str, Any]], sent: Sent, switches: dict[str, bool], writes: set[str]
+) -> None:
     """What the harness must have done, whatever the model chose."""
     for row in rows:
         if row["status"] == "error":  # the model's own failures only
             assert any(f in (row["error"] or "") for f in MODEL_FAILURES), row
     ran = [r for r in rows if r["status"] in ("success", "interrupted")]
-    for row in ran:  # every item that ran is scored from its trajectory
-        assert row["coverage"] is not None, row
-        if row["status"] == "interrupted":  # only a change asks: it was called
+    for row in ran:  # every item that needs tools and ran is scored from its trajectory
+        assert (row["coverage"] is not None) == bool(row["needed"]), row
+        if row["status"] == "interrupted" and writes & set(row["needed"]):  # it was called
             assert row["coverage"] == 1.0, row
-        for tool in FAILING:  # a failing tool's failure reached the model
-            if tool in row["input"] and (row["comment"] or "").find(tool) == -1:
-                assert row["coverage"] == 0.0 or "every call failed" in (row["comment"] or "")
+        for tool in FAILING & set(row["needed"]):  # a failing tool's failure was recorded
+            if row["coverage"] == 1.0:
+                assert f"every call failed: {tool}" in (row["comment"] or ""), row
     ids = {r["run_id"] for r in ran}
     if switches.get("tool_guidance"):
         assert not (ids & set(sent.unguided)), sent.unguided
     if not switches.get("answer_check"):
-        assert not sent.checked
+        assert not sent.checked and not sent.write_checked
     else:
+        # every answer was checked, or followed the check of a change (a rule refused it)
         answered = {r["run_id"] for r in ran if r["status"] == "success"}
-        assert answered <= sent.checked, answered - sent.checked
+        assert answered <= sent.checked | sent.write_checked, answered - sent.checked
 
 
 @pytest.mark.parametrize("toolset", list(SETS))
@@ -175,18 +224,21 @@ def harness_part(rows: list[dict[str, Any]], sent: Sent, switches: dict[str, boo
 async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
     toolset: str,
 ) -> None:
-    tools, variants = SETS[toolset]
+    tools, items, system, can, variants = SETS[toolset]
+    writes = {t.spec.name for t in tools if t.spec.side_effects != "read"}
     found: dict[str, Any] = {}
     async with live_harness(memory_url=None, runs_url=None) as h:
         for variant in variants:
             switches = VARIANTS[variant]
             sent = Sent()
             target = ReAct(
-                scenario.SYSTEM,
+                system,
                 MODEL,
                 max_steps=MAX_STEPS,
                 tool_guidance=switches.get("tool_guidance", False),
                 answer_check=switches.get("answer_check", False),
+                # what the assistant can do: told with the guidance
+                capabilities=can if switches.get("tool_guidance") else None,
             )
             agent = h.wrap(
                 target,
@@ -201,21 +253,26 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
                 began = time.monotonic()
                 report = await h.evaluate(
                     agent,
-                    scenario.SCENARIOS,
+                    items,
                     scenario.EVALUATORS,
                     run_name=f"tool-choice-live-{variant}",
                     concurrency=1,
                 )
-                rows.extend(rows_of(report, sent, time.monotonic() - began))
-            harness_part(rows, sent, switches)
-            found[variant] = summarized(rows)
+                rows.extend(rows_of(report, sent, time.monotonic() - began, items))
+            harness_part(rows, sent, switches, writes)
+            found[variant] = summarized(rows, writes)
     saved(toolset, found)
     for variant, summary in found.items():
         print(
             f"\n{toolset} / {variant}: coverage {summary['mean_coverage']}, "
             f"full {summary['full_coverage_items']}/{len(summary['items'])}, "
-            f"broad tool used {summary['broad_tool_used']}, picks {summary['picks']}, "
-            f"contains {summary['contains']}, model calls {summary['model_calls']}"
+            f"unneeded tool called {summary['avoided_called']}, picks {summary['picks']}, "
+            f"contains {summary['contains']}, says cannot {summary['says_cannot']}, "
+            f"no record {summary['says_no_record']}, rule kept {summary['respects_rule']}, "
+            f"plain capability answer {summary['plain_answer']}, "
+            f"writes not called {summary['writes_not_called']}, "
+            f"writes called unasked {summary['writes_called_unasked']}, "
+            f"model calls {summary['model_calls']}"
         )
         for row in summary["items"]:
             print(
@@ -233,6 +290,7 @@ def store_key(wikis: list[str], ops: str) -> Iterator[str]:
     )
 
 
+MCP_WRITES: Final = {f"{OPS}-delete_records", f"{OPS}-write_note"}
 MCP_ITEMS: Final = [
     {
         "input": "Delete every record of the table audit_tmp.",
@@ -279,8 +337,8 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
         report = await h.evaluate(
             agent, MCP_ITEMS, [tool_coverage()], run_name="tool-choice-mcp", concurrency=1
         )
-        rows = rows_of(report, sent, 0.0)
-        harness_part(rows, sent, {"tool_guidance": True, "answer_check": True})
+        rows = rows_of(report, sent, 0.0, MCP_ITEMS)
+        harness_part(rows, sent, {"tool_guidance": True, "answer_check": True}, MCP_WRITES)
         sent_defs = definitions(wire)
         # the same tool on three servers is three names; each as its server lists it
         assert own and set(own) <= set(sent_defs), set(own) - set(sent_defs)
@@ -294,7 +352,7 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
         ]
         codes = {(f.tool, f.code) for f in lint(seen)}
         assert (f"{OPS}-write_note", "undescribed_parameter") in codes
-        found["mcp"] = summarized(rows) | {"lint": sorted(map(list, codes))}
+        found["mcp"] = summarized(rows, MCP_WRITES) | {"lint": sorted(map(list, codes))}
 
         # Bifrost Code Mode: the wikis, read-only by the catalog, behind the meta-tools
         rules = {name: Rule(risk="read") for name in own if not name.startswith(OPS)}
@@ -321,14 +379,14 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
             report = await coded.evaluate(
                 agent, [item], [tool_coverage()], run_name="tool-choice-code-mode"
             )
-            rows = rows_of(report, sent, 0.0)
-            harness_part(rows, sent, {"tool_guidance": True, "answer_check": True})
+            rows = rows_of(report, sent, 0.0, [item])
+            harness_part(rows, sent, {"tool_guidance": True, "answer_check": True}, set())
             sent_defs = definitions(wire)
             for spec in CODE_MODE_TOOLS:  # the meta-tools, as the harness describes them
                 assert sent_defs[spec.name]["description"] == spec.description
                 assert sent_defs[spec.name]["parameters"] == spec.input_schema
             assert not any(n.startswith(tuple(wikis)) for n in sent_defs)  # behind them
-            found["code_mode"] = summarized(rows) | {"offered": sorted(sent_defs)}
+            found["code_mode"] = summarized(rows, set()) | {"offered": sorted(sent_defs)}
     saved("MCP via Bifrost", found)
     for part in ("mcp", "code_mode"):
         print(f"\n{part}: {json.dumps(found[part], default=str)[:2000]}")

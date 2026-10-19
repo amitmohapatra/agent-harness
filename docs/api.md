@@ -259,7 +259,7 @@ a function target.
 ```text
 ReAct(system, model, *, output=None, max_steps=None, max_repeats=None, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False)
+      tool_guidance=False, answer_check=False, capabilities=None)
 ```
 
 A tool-calling agent for teams with no framework: a LangChain v1 `create_agent` graph with the
@@ -278,7 +278,8 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | `middleware` | `()` | more LangChain or Deep Agents middleware; one named like a default replaces it |
 | `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |
 | `tool_guidance` | `False` | how to choose among tools, added to every call's instructions (`ToolGuidance`; [tool choice](frameworks/react.md#tool-choice)) |
-| `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called (`AnswerCheck`: one more model call) |
+| `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |
+| `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
 
 ## Tools
 

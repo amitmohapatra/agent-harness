@@ -36,13 +36,19 @@ of a write request.
    answer_check=True)` and work in any `create_agent` or Deep Agents graph. They name no tool
    and read only what the run knows. They are code, not settings: a design choice per agent,
    not a fact of the deployment.
-3. **The check widens a narrowed run.** When tool hints narrowed what the run offers, the
+3. **Before a change, the rules; after nothing found, "no record".** `AnswerCheck` checks the
+   first change of an invocation against the rules in the instructions and the memory
+   context before it runs or governance asks anyone (the rules stay text the model reads: no
+   rule language is parsed); when every tool result of the request is empty or not found, or
+   memory is `INSUFFICIENT`, it asks for a plain "no record". What the assistant can do beyond
+   its tools is declared in code (`capabilities=`), since the harness cannot know it.
+4. **The check widens a narrowed run.** When tool hints narrowed what the run offers, the
    check offers every tool (only the writes past 128), so a part the hints did not foresee can
    be served; for that `AnswerCheck` sits outside `HarnessTools`.
-4. **Native first.** LangChain's `LLMToolSelectorMiddleware` (many tools), `TodoListMiddleware`
+5. **Native first.** LangChain's `LLMToolSelectorMiddleware` (many tools), `TodoListMiddleware`
    (a plan) and `tool_choice` are used and documented rather than rebuilt; a first call forced
    to `"required"` is not offered, since a request needing no tool would be made to call one.
-5. **Coverage per item.** `tool_coverage()` reads each item's `needed_tools`, and scores a run
+6. **Coverage per item.** `tool_coverage()` reads each item's `needed_tools`, and scores a run
    that paused for approval (the call it paused on counts as made).
 
 ## Consequences

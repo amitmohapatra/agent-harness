@@ -49,6 +49,7 @@ import contextlib
 import copy
 import json
 import logging
+import re
 import types
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -120,6 +121,8 @@ ERROR_STREAK: Final = 3
 #: The tool that reads a cleared result back by its call's id (:func:`read_result`), and the
 #: most it reads at once, in characters.
 READ_RESULT: Final = "read_result"
+#: Deep Agents' tool that reads a large result saved as a file.
+READ_FILE: Final = "read_file"
 READ_LIMIT: Final = 20_000
 #: What the model is asked when its steps run out.
 LAST_STEP: Final = (
@@ -816,14 +819,26 @@ TOOL_GUIDANCE: Final = (
     "- When several tools could answer a part, use the most specific one whose description "
     "matches it; use a general or overview tool only when no specific tool fits.\n"
     "- Current figures come from a tool call, even when the context remembers older values; "
-    "the context gives background, preferences and rules.\n"
+    "the context gives background, preferences and rules, and its rules still apply.\n"
     "- To create, change or delete something, call the tool that does it: the system asks for "
     "any approval itself. Never say an action was done unless its tool returned success.\n"
-    "- Base each conclusion on the tool results. If no tool can answer a part, say so."
+    "- Before calling a tool that changes data, check the call against the rules in your "
+    "instructions and context: if one forbids it, do not call it; say which rule and why.\n"
+    "- When the tools and the context have nothing about what was asked (an empty result, "
+    "not found), say plainly that there is no record of it: no hedging, no estimates, no "
+    "figures that are not in the results.\n"
+    "- Base each conclusion on the tool results. If no tool can answer a part, say so.\n"
+    "- Asked whether you can do something, answer plainly yes or no, from your tools and the "
+    "capabilities you are told of; do not hedge."
 )
 #: What the model is told about the tools that change data (:class:`ToolGuidance`,
 #: :class:`AnswerCheck`): their names.
 WRITE_TOOLS: Final = "These tools change data: {tools}."
+#: What the model is told of what the assistant can and cannot do (``ToolGuidance``'s
+#: ``capabilities``), before one line per capability.
+CAPABILITIES: Final = (
+    "What you can and cannot do here (asked about one of these, answer plainly yes or no):"
+)
 #: What :class:`AnswerCheck` asks the model, after its draft answer.
 ANSWER_CHECK: Final = (
     "Before this answer goes to the user, check it against the user's request. Do not mention "
@@ -834,13 +849,39 @@ ANSWER_CHECK: Final = (
     "needs a tool call: make it now, with the most specific tool for it.\n"
     "3. A part that asks to create, change or delete something needs the call of the tool "
     "that does it{writes}; the system asks for approval itself. Do not say it was done unless "
-    "that tool returned success.\n"
+    "that tool returned success. If a rule in your instructions or context forbids the "
+    "change, do not call the tool: say which rule forbids it.\n"
     "4. Make sure each conclusion follows from the tool results.\n"
+    "5. If there is no record of what was asked, say so plainly: no hedging, no estimates.\n"
     "If a part is still open, call the tools it needs now. Otherwise reply with the final "
     "answer for the user, and only that."
 )
-#: The state key of :class:`AnswerCheck`: the checks made in this invocation.
+#: What :class:`AnswerCheck` adds when nothing found is about what was asked: every tool result
+#: of the request empty or not found, or no tool called and memory holding nothing.
+NO_RECORD: Final = (
+    "\nNothing {source} is about what was asked. Unless a tool you have not called yet "
+    "would find it, say plainly that there is no record of it, in those words: no hedging, no "
+    "estimates, no figures."
+)
+#: What :class:`AnswerCheck` asks before the first change of an invocation is made (and before
+#: anyone is asked to approve it).
+WRITE_CHECK: Final = (
+    "You were about to call {calls}, which changes data. Before it is made, and before anyone "
+    "is asked to approve it, check it against every rule in your instructions and in the "
+    "context you were given (a standing rule, a limit, a preference). If a rule forbids it, do "
+    "not call it: tell the user plainly which rule forbids it and why. Otherwise make the same "
+    "call again. Do not mention this check."
+)
+#: A tool result that holds nothing: empty, or saying it found nothing.
+_NOTHING: Final = frozenset({"", "[]", "{}", "null", "none", '""', "''"})
+_NOT_FOUND: Final = re.compile(
+    r"\bnot found\b|\bno (?:such|records?|results?|data|matches?)\b|\bdoes not exist\b|\b404\b",
+    re.IGNORECASE,
+)
+#: The state keys of :class:`AnswerCheck`: the checks made in this invocation, and whether its
+#: first change was checked.
 CHECKED: Final = "trellis_checked"
+WRITE_CHECKED: Final = "trellis_write_checked"
 #: The tag that keeps a model call's tokens off the graph's ``messages`` stream (LangGraph's
 #: ``TAG_NOSTREAM``): a draft answer the user is not shown.
 NO_STREAM: Final = "nostream"
@@ -849,63 +890,94 @@ NO_STREAM: Final = "nostream"
 class ToolGuidance(AgentMiddleware):
     """How to choose among tools, added to the instructions of every model call that offers
     tools (:data:`TOOL_GUIDANCE`): every part of a request addressed, the most specific tool
-    over a general one, current figures from tools rather than the remembered context, an
-    action done by calling its tool (never claimed without it), conclusions from the results.
-    Inside a run it also names the offered harness tools that change data (their declared side
-    effects). ``text`` replaces the guidance. No extra model call."""
+    over a general one, current figures from tools rather than the remembered context (whose
+    rules still apply), an action done by calling its tool (never claimed without it, never
+    against a rule), "no record" said plainly, conclusions from the results, a plain yes or no
+    to what it can do. Inside a run it also names the offered harness tools that change data
+    (their declared side effects). ``text`` replaces the guidance (``None``: none, the
+    capabilities only). ``capabilities`` says what
+    the assistant can and cannot do beyond its tools (``{"accept an image upload": False}``),
+    one line each, on every call (:data:`CAPABILITIES`). No extra model call."""
 
-    def __init__(self, text: str = TOOL_GUIDANCE) -> None:
+    def __init__(
+        self,
+        text: str | None = TOOL_GUIDANCE,
+        *,
+        capabilities: Mapping[str, bool] | None = None,
+    ) -> None:
         super().__init__()
-        if not text.strip():
-            raise ConfigurationError("ToolGuidance needs a text (or leave it out)")
+        if text is not None and not text.strip():
+            raise ConfigurationError("ToolGuidance needs a text (None: the capabilities only)")
         self.text = text
+        self.capabilities = dict(capabilities or {})
 
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        if not request.tools:
+        parts = []
+        if request.tools and self.text is not None:
+            writes = _writes_offered(request)
+            parts.append(self.text)
+            if writes:
+                parts.append(WRITE_TOOLS.format(tools=", ".join(writes)))
+        if self.capabilities:
+            lines = [
+                f"- {name}: {'yes' if can else 'no'}" for name, can in self.capabilities.items()
+            ]
+            parts.append("\n".join([CAPABILITIES, *lines]))
+        if not parts:
             return await handler(request)
-        writes = _writes_offered(request)
-        text = self.text + (f"\n{WRITE_TOOLS.format(tools=', '.join(writes))}" if writes else "")
-        return await handler(request.override(system_message=_appended(request, text)))
+        return await handler(request.override(system_message=_appended(request, "\n".join(parts))))
 
 
 class _CheckedState(AgentState[Any]):
     trellis_checked: NotRequired[Annotated[int, PrivateStateAttr]]
+    trellis_write_checked: NotRequired[Annotated[bool, PrivateStateAttr]]
 
 
 class AnswerCheck(AgentMiddleware):
-    """An answer is checked before it is final: when the model answers without calling a tool
-    (its draft, not streamed), it is asked once more, with the draft, to check it against the
-    request (:data:`ANSWER_CHECK`) — every part answered by a tool result, the context or a
-    plain "cannot"; a requested change made by calling its tool (inside a run, the tools that
-    change data are named), never claimed without it; the conclusions following from the
-    results — and either calls the tools still needed (the loop goes on) or gives the final
-    answer, which replaces the draft. At most ``checks`` checks per invocation of the graph:
-    one more model call each. Not on a call offered no tools, or told to call none (behind
-    :class:`StepLimit`, as in ``ReAct``, its last call is checked with no tool offered: only the
-    text can be corrected).
+    """An answer is checked before it is final, and a change before it is made.
 
-    Inside a run whose tool hints narrowed what the model is offered, the check is offered
-    every tool (only those that change data past :data:`~.lint.MOST_TOOLS`): a part the hints
-    did not foresee can still be served. For that it goes before :class:`HarnessTools` (as in
-    ``ReAct``), which then offers them."""
+    **The answer**: when the model answers without calling a tool (its draft, not streamed), it
+    is asked once more, with the draft, to check it against the request (:data:`ANSWER_CHECK`)
+    — every part answered by a tool result, the context or a plain "cannot"; a requested change
+    made by calling its tool (inside a run, the tools that change data are named), never
+    claimed without it, never against a rule; the conclusions following from the results;
+    "no record" said plainly — and either calls the tools still needed (the loop goes on) or
+    gives the final answer, which replaces the draft. When nothing found is about what was
+    asked — every tool result of the request empty or not found, or no tool called and memory
+    holding nothing (``INSUFFICIENT``) — it is told so (:data:`NO_RECORD`). At most ``checks``
+    checks per invocation of the graph: one more model call each.
+
+    **A change** (``writes``, on by default): the first step of an invocation that calls a
+    harness tool changing data is drafted (not streamed) and the model asked to check the
+    call against the rules in its instructions and context (:data:`WRITE_CHECK`) before it
+    runs — before governance asks anyone to approve it: it makes the call again, or tells the
+    user which rule forbids it. One more model call, once per invocation.
+
+    Neither on a call offered no tools, or told to call none (behind :class:`StepLimit`, as in
+    ``ReAct``, its last call is checked with no tool offered: only the text can be corrected).
+    Inside a run whose tool hints narrowed what the model is offered, the answer check is
+    offered every tool (only those that change data past :data:`~.lint.MOST_TOOLS`): a part
+    the hints did not foresee can still be served. For that it goes before
+    :class:`HarnessTools` (as in ``ReAct``), which then offers them."""
 
     state_schema = _CheckedState
 
-    def __init__(self, checks: int = 1, *, text: str = ANSWER_CHECK) -> None:
+    def __init__(self, checks: int = 1, *, writes: bool = True, text: str = ANSWER_CHECK) -> None:
         super().__init__()
         if checks < 1:
             raise ConfigurationError("AnswerCheck makes at least 1 check (or leave it out)")
         if "{writes}" not in text:
             raise ConfigurationError("an AnswerCheck text has a {writes} placeholder")
         self.checks = checks
+        self.writes = writes
         self.text = text
 
     async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        return {CHECKED: 0}
+        return {CHECKED: 0, WRITE_CHECKED: False}
 
     async def awrap_model_call(
         self,
@@ -914,23 +986,40 @@ class AnswerCheck(AgentMiddleware):
     ) -> ModelResponse[Any] | ExtendedModelResponse[Any]:
         runtime = current()
         done = request.state.get(CHECKED, 0)
-        tools = bool(request.tools) or bool(runtime is not None and runtime.tool_names())
-        if done >= self.checks or not tools or request.tool_choice == "none":
+        write_checked = not self.writes or request.state.get(WRITE_CHECKED, False)
+        if (
+            (done >= self.checks and write_checked)
+            or not _tools(request, runtime)
+            or request.tool_choice == "none"
+        ):
             return await handler(request)
         with _quiet():
             draft = await handler(request)
         said = _drafted(draft)
         if said is None:  # a step that calls tools: no answer yet
+            calls = [] if write_checked else _write_calls(draft, runtime)
+            if not calls:
+                return draft
+            told = [
+                *request.messages,
+                AIMessage(content=f"(about to call {'; '.join(calls)})"),
+                HumanMessage(content=WRITE_CHECK.format(calls="; ".join(calls))),
+            ]
+            checked = await handler(request.override(messages=told))
+            return ExtendedModelResponse(
+                model_response=draft if _drafted(checked) == "" else checked,
+                command=Command(update={WRITE_CHECKED: True}),
+            )
+        if done >= self.checks:
             return draft
         writes = _changing(runtime)
         if runtime is not None:
             _widened(runtime, writes)
+        text = self.text.format(writes=f" ({', '.join(writes)})" if writes else "")
         told = [
             *request.messages,
             AIMessage(content=said),
-            HumanMessage(
-                content=self.text.format(writes=f" ({', '.join(writes)})" if writes else "")
-            ),
+            HumanMessage(content=text + _no_record(request.messages, runtime)),
         ]
         checked = await handler(request.override(messages=told))
         if _drafted(checked) == "":  # nothing said, nothing called: the draft stands
@@ -938,6 +1027,48 @@ class AnswerCheck(AgentMiddleware):
         return ExtendedModelResponse(
             model_response=checked, command=Command(update={CHECKED: done + 1})
         )
+
+
+def _write_calls(reply: ModelResponse[Any], runtime: Runtime | None) -> list[str]:
+    """The calls of a reply whose tool changes data, as the model is shown them."""
+    message = _ai(reply)
+    changing = set(_changing(runtime))
+    return [
+        f"{c['name']}({json.dumps(c['args'], default=str)})"
+        for c in (message.tool_calls if message is not None else [])
+        if c["name"] in changing
+    ]
+
+
+def _no_record(messages: Sequence[BaseMessage], runtime: Runtime | None) -> str:
+    """:data:`NO_RECORD` when nothing found is about what was asked: every tool result since
+    the request empty or not found, or none and memory holding nothing; else nothing."""
+    turn: list[BaseMessage] = []
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        turn.append(message)
+    results = [m for m in turn if isinstance(m, ToolMessage)]
+    insufficient = runtime is not None and runtime.evidence == "INSUFFICIENT"
+    if results and all(_empty(m) for m in results):
+        source = "in memory or the tool results" if insufficient else "the tools returned"
+        return NO_RECORD.format(source=source)
+    if not results and insufficient:
+        return NO_RECORD.format(source="in memory")
+    return ""
+
+
+def _empty(message: ToolMessage) -> bool:
+    """A tool result that holds nothing: empty, or saying nothing was found."""
+    text = message.text.strip()
+    return text.casefold() in _NOTHING or bool(_NOT_FOUND.search(text))
+
+
+def _tools(request: ModelRequest[Any], runtime: Runtime | None) -> bool:
+    """Whether the model has tools to call beyond the readers of earlier results: the run's
+    own, or the graph's."""
+    own = [t for t in request.tools if _named(t) not in (READ_RESULT, READ_FILE)]
+    return bool(own) or bool(runtime is not None and runtime.tool_names())
 
 
 def _changing(runtime: Runtime | None) -> list[str]:

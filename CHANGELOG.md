@@ -39,7 +39,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   `ReAct(answer_check=True)` (`AnswerCheck`) checks the draft answer against the request once
   before it is final (one more model call; the draft is not streamed), so a skipped part or a
   change only claimed in text makes the model call the tools still needed, and a run narrowed
-  by tool hints is offered every tool from the check on. Both are LangChain middleware, opt-in.
+  by tool hints is offered every tool from the check on; when every tool result is empty or not
+  found (or memory is `INSUFFICIENT`) the check asks for a plain "no record"; and the first
+  change of a run is checked against the rules in the instructions and memory context before
+  it runs or is sent for approval. `ReAct(capabilities={...})` tells the model what it can and
+  cannot do beyond its tools, for a plain yes or no. All LangChain middleware, opt-in.
 - `trellis.harness.tools.lint.lint(specs)`: what makes a tool set hard to choose among (missing
   or short descriptions, undescribed parameters, names the OpenAI API refuses, look-alike
   names and descriptions, 20+ or 128+ tools at once); the toolbox logs each finding as a

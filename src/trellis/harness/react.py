@@ -34,7 +34,7 @@ model's profile, else :data:`CONTEXT_WINDOW`.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from bifrost_sdk import NO_GATEWAY_TOOLS
@@ -79,6 +79,7 @@ def ReAct(
     checkpointer: Any = None,
     tool_guidance: bool = False,
     answer_check: bool = False,
+    capabilities: Mapping[str, bool] | None = None,
 ) -> Any:
     """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name,
     or a LangChain chat model), its answer an ``output`` model when given. ``max_steps`` model
@@ -91,7 +92,10 @@ def ReAct(
     replaces the run's (:class:`~.RunCheckpointer`). ``tool_guidance`` adds how to choose among
     tools to every call's instructions (:class:`~.ToolGuidance`); ``answer_check`` has the
     model check its answer against the request once before it is final, calling the tools
-    still needed (:class:`~.AnswerCheck`: one more model call)."""
+    still needed, and the first change against the rules before it is made
+    (:class:`~.AnswerCheck`: one more model call each); ``capabilities`` tells the model what
+    it can and cannot do beyond its tools (``{"accept an image upload": False}``), so it
+    answers such a question plainly."""
     try:
         from deepagents.backends import StateBackend
         from deepagents.middleware import FilesystemMiddleware
@@ -133,7 +137,15 @@ def ReAct(
         ),
         create_summarization_middleware(_profiled(chat, window), backend),
         ours.ReadTools(CLEARED),
-        *([ours.ToolGuidance()] if tool_guidance else []),
+        *(
+            [
+                ours.ToolGuidance(
+                    None if not tool_guidance else ours.TOOL_GUIDANCE, capabilities=capabilities
+                )
+            ]
+            if tool_guidance or capabilities
+            else []
+        ),
         ours.ModelHooks(timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars),
     ]
     graph = create_agent(

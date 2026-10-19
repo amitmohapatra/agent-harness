@@ -731,6 +731,7 @@ class Agent:
         if hints and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
         status = pushed.evidence_status
+        runtime.evidence = status
         note = ABSTAIN_NOTES.get(status)
         rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
         runtime.context = rendered or None

@@ -181,7 +181,7 @@ The arguments, each linked to its reference: what they are, their defaults, what
 | [`agent.schedule(...)`](api.md#agentschedule) | `cron`, `input`, `on_behalf_of`, `tz`, `tenant`, `timeout`, `without`, `framework_options`, `priority`, `concurrency_key` |
 | [`agent.resume(...)`](api.md#agentresume) | `decision`, `answer`, `reviewer`, `comment`, `remember`, `tenant` |
 | [`h.worker(...)`](api.md#hworker) | `agents`, `concurrency` |
-| [`ReAct(...)`](api.md#react) | `system`, `model`, `output`, `max_steps`, `max_repeats`, `model_timeout`, `context_window`, `prompt`, `prompt_vars`, `middleware`, `checkpointer`, `tool_guidance`, `answer_check` (tool choice, both off by default: [frameworks/react.md](frameworks/react.md#tool-choice)) |
+| [`ReAct(...)`](api.md#react) | `system`, `model`, `output`, `max_steps`, `max_repeats`, `model_timeout`, `context_window`, `prompt`, `prompt_vars`, `middleware`, `checkpointer`, `tool_guidance`, `answer_check`, `capabilities` (tool choice, all off by default: [frameworks/react.md](frameworks/react.md#tool-choice)) |
 | [`tool(...)`](api.md#tool), [`a2a(...)`](api.md#a2a), [`openapi(...)`](api.md#openapi), [`sandbox(...)`](api.md#sandbox) | `side_effects`, `idempotent`, `timeout`, ... |
 
 ## Who the deployment is

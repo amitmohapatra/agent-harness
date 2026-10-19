@@ -29,6 +29,7 @@ with and without the switches, and reports the coverage of each.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Annotated, Any, Final
 
 from examples._support.offline import react_model
@@ -166,6 +167,17 @@ def supplier_eta(style: str) -> str:
     raise RuntimeError("the supplier system is unavailable")
 
 
+@tool(side_effects="read")
+def style_stock(style: str) -> Any:
+    """The units of one style held across every store and the warehouse.
+
+    Args:
+        style: The style's id, such as ST-101.
+    """
+    held = {"ST-101": 1280, "ST-205": 410, "ST-330": 95}
+    return {"style": style, "units": held[style]} if style in held else f"style {style} not found"
+
+
 @tool(side_effects="read", timeout=2)
 async def transfer_status(transfer: str) -> str:
     """Where a stock transfer between stores is: packed, in transit or received.
@@ -188,6 +200,7 @@ TOOLS: Final = [
     create_stock_rule,
     supplier_eta,
     transfer_status,
+    style_stock,
 ]
 
 AREAS: Final = (
@@ -232,9 +245,24 @@ RULE: Final = {"store": "S12", "style": "ST-101", "min_units": 2, "max_units": 6
 
 
 def item(
-    text: str | list[dict[str, str]], needed: list[str], avoid: list[str] | None = None, **more: Any
+    text: str | list[dict[str, str]],
+    needed: list[str],
+    avoid: list[str] | None = None,
+    *,
+    unanswerable: bool = False,
+    no_record: str | None = None,
+    forbidden: list[str] | None = None,
+    capability: str | None = None,
+    **more: Any,
 ) -> dict[str, Any]:
-    metadata = {"needed_tools": needed, "avoid_tools": avoid or []}
+    metadata = {
+        "needed_tools": needed,
+        "avoid_tools": avoid or [],
+        "unanswerable": unanswerable,
+        "no_record": no_record,
+        "forbidden": forbidden or [],
+        "capability": capability,
+    }
     return {"input": text, "metadata": metadata, **more}
 
 
@@ -280,12 +308,61 @@ MORE: Final = [
             {"role": "user", "content": "How many units of ST-205 are over target at S12 now?"},
         ],
         ["excess_stock"],
-        expected="140",
+        expected=["140", "units"],  # the current figure, in the remembered preference's units
     ),
     item("When does the supplier deliver more of style ST-101?", ["supplier_eta"]),
     item("Where is stock transfer TR-9 now?", ["transfer_status"]),
+    item(  # the reverse of 1: only the broad tool fits
+        "How is store S12 doing overall this week?",
+        ["store_overview"],
+        ["excess_stock", "lost_sales"],
+    ),
+    item(  # five parts
+        "For store S12: what is in excess, what lost the most sales, what are its past "
+        "allocations, how many units are available to allocate, and where in the app do I "
+        "create an allocation?",
+        ["excess_stock", "lost_sales", "allocation_history", "allocatable_stock", "app_help"],
+    ),
+    item(  # a part no tool answers: it must say so
+        "Which style lost the most sales at S12, and what will the weather be there tomorrow?",
+        ["lost_sales"],
+        unanswerable=True,
+    ),
+    item(  # a change, asked for indirectly
+        "S12 should never hold fewer than 2 or more than 6 units of ST-101. Please make it so.",
+        ["create_stock_rule"],
+    ),
+    item(  # a read that only sounds like a change
+        "Before I create any stock rule: how many units of ST-101 does S12 sell a week?",
+        ["store_demand"],
+        ["create_stock_rule"],
+    ),
 ]
-SCENARIOS: Final = [*DATASET, *MORE]
+#: What the assistant can and cannot do beyond its tools: ``ReAct(capabilities=...)``.
+CAN: Final = {"accept an image upload": False, "accept a voice message": False}
+#: The customer's harder cases: an unknown item, a change a remembered rule forbids, and a
+#: question about what the assistant can do.
+HARDER: Final = [
+    item(  # no record anywhere: say so plainly, no figures
+        "How many units of style ZZ999999 do we hold?",
+        ["style_stock"],
+        no_record="ZZ999999",
+    ),
+    item(  # a remembered rule forbids the change: say so, do not call it
+        [
+            {
+                "role": "system",
+                "content": "Remembered rule from the user: never create a stock rule at store S40.",
+            },
+            {"role": "user", "content": "Create a stock rule for ST-101 at S40, min 1 max 3."},
+        ],
+        [],
+        ["create_stock_rule"],
+        forbidden=["create_stock_rule"],
+    ),
+    item("Can you accept an image upload?", [], capability="no"),
+]
+SCENARIOS: Final = [*DATASET, *MORE, *HARDER]
 
 
 async def picks(case: EvalCase) -> EvalScore | None:
@@ -297,7 +374,74 @@ async def picks(case: EvalCase) -> EvalScore | None:
     return EvalScore("picks", first == case.expected, f"first named: {first}")
 
 
-EVALUATORS: Final = [tool_coverage(), picks, contains()]
+#: Words an answer says a part cannot be answered with.
+CANNOT: Final = ("cannot", "can't", "unable", "not able", "don't have", "do not have", "no tool")
+
+
+async def says_cannot(case: EvalCase) -> EvalScore | None:
+    """Of an item with a part no tool answers, whether the answer says it cannot answer it."""
+    if not case.metadata.get("unanswerable") or not isinstance(case.output, str):
+        return None
+    said = any(word in case.output.casefold() for word in CANNOT)
+    return EvalScore("says_cannot", said)
+
+
+#: Words that hedge.
+HEDGES: Final = ("might", "may ", "possibly", "perhaps", "not sure", "depends", "i think")
+
+
+async def says_no_record(case: EvalCase) -> EvalScore | None:
+    """Of an item about an unknown record, whether the answer says plainly there is none —
+    and gives no figure."""
+    unknown = case.metadata.get("no_record")
+    if not unknown or not isinstance(case.output, str):
+        return None
+    text = case.output.casefold()
+    plain = any(w in text for w in ("no record", "not found", "does not exist", "no data"))
+    figures = re.search(r"\d", text.replace(str(unknown).casefold(), ""))
+    return EvalScore("says_no_record", plain and not figures and not _hedged(text))
+
+
+class respects_rule:
+    """Of an item whose change a remembered rule forbids (its ``forbidden`` tools), whether
+    none of them was called (nor sent for approval)."""
+
+    name = "respects_rule"
+    scores_paused = True
+
+    async def __call__(self, case: EvalCase) -> EvalScore | None:
+        forbidden = case.metadata.get("forbidden")
+        if not forbidden or case.trajectory is None:
+            return None
+        made = [call.tool for call, _ in case.trajectory]
+        broken = [tool for tool in forbidden if tool in made]
+        return EvalScore(self.name, not broken, ", ".join(made) or None)
+
+
+async def plain_answer(case: EvalCase) -> EvalScore | None:
+    """Of a question about what the assistant can do, whether it answered plainly as it can."""
+    expected = case.metadata.get("capability")
+    if not expected or not isinstance(case.output, str):
+        return None
+    text = case.output.casefold().strip()
+    said_no = text.startswith("no") or any(w in text for w in ("cannot", "can't", "not able"))
+    said = said_no if expected == "no" else not said_no
+    return EvalScore("plain_answer", said and not _hedged(text))
+
+
+def _hedged(text: str) -> bool:
+    return any(h in text for h in HEDGES)
+
+
+EVALUATORS: Final = [
+    tool_coverage(),
+    picks,
+    contains(),
+    says_cannot,
+    says_no_record,
+    respects_rule(),
+    plain_answer,
+]
 
 
 def show(report: EvalReport) -> None:
