@@ -94,6 +94,7 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | [worker_crash_resume.py](06_scenarios/worker_crash_resume.py) | a worker dies after a payment; the lease lapses; another worker finishes the run and the payment is not made twice |
 | [scheduled_run_selection_limit.py](06_scenarios/scheduled_run_selection_limit.py) | a schedule with `without=`, `timeout=`, `framework_options=` and `priority=`, kept in its metadata and applied to the run it fires |
 | [gateway_code_mode_governed_evals.py](06_scenarios/gateway_code_mode_governed_evals.py) | read-only MCP servers behind Code Mode, a refund behind the catalog's `approve_when`, then `h.evaluate` on the answers and the trajectories |
+| [tool_choice.py](06_scenarios/tool_choice.py) | reliable tool choice, measured: a broad tool beside specific ones, multi-part requests, a change behind approval; `ReAct(tool_guidance=True, answer_check=True)` and `tool_coverage()` per item |
 | [planning_todolist.py](06_scenarios/planning_todolist.py) | opt-in planning: `ReAct(middleware=[TodoListMiddleware()])`, the plan shown by an `after_model` hook |
 
 ## What the examples share

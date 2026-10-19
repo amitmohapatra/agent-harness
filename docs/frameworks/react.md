@@ -45,7 +45,8 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 
 ```text
 ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
-      context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None)
+      context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
+      tool_guidance=False, answer_check=False)
 ```
 
 * `model` — a Bifrost model name: a `ChatOpenAI` on `BIFROST_URL` (needed when `ReAct` is
@@ -69,6 +70,8 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
   of a default one replaces it.
 * `checkpointer` — the graph's checkpointer; by default `RunCheckpointer()`, which keeps the
   graph's checkpoint in the run itself.
+* `tool_guidance`, `answer_check` — how to choose among tools, and a check of the answer
+  before it is final ([below](#tool-choice)).
 
 ## The middleware
 
@@ -94,6 +97,8 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 | `read_result` (a tool) | reads a cleared tool result again, by its call's id, in pieces |
 | `ReadTools` | `read_file` offered only once there is a file to read, `read_result` once a result was cleared: a small model offered them from the start reads nothing, again and again (both stay callable) |
 | `RunCheckpointer` | the graph's checkpoint kept in the run's journal, the latest only: a resume — after a pause, a crash or a requeue — continues the graph where it stopped |
+| `ToolGuidance` (`tool_guidance=True`) | how to choose among tools, added to the instructions of every call that offers tools ([below](#tool-choice)) |
+| `AnswerCheck` (`answer_check=True`) | the draft answer checked against the request once, the tools still needed called ([below](#tool-choice)) |
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, placed before `ModelHooks` (so its span
 shows what the model is sent). Each works the same in any `create_agent` or Deep Agents graph:
@@ -107,6 +112,7 @@ shows what the model is sent). Each works the same in any `create_agent` or Deep
 | `ToolCallLimitMiddleware(...)` (LangChain) | a cap on the calls of a tool, or of all |
 | `PIIMiddleware(...)` (LangChain) | PII redacted, masked or refused in what the model reads |
 | `SummarizationMiddleware(...)` (LangChain) | LangChain's summarization in place of Deep Agents' (same name: it replaces it) |
+| `LLMToolSelectorMiddleware(...)` (LangChain) | many tools: a model call of its own picks those that fit the request, per model call, among the run's tools (`max_tools=`, `on_parsing_failure="all"` so a reply it cannot read offers every tool) |
 
 The harness middleware in a graph of your own: `HarnessTools()` makes the run's tools the
 graph's (`tools=[]` is then enough), `ModelHooks()` gives the hooks and the spans, and
@@ -125,6 +131,35 @@ graph = create_agent(
 )
 agent = h.wrap(graph, id="mine", tools=[quote])
 ```
+
+## Tool choice
+
+A model given several tools goes wrong in typical ways, whatever the tools: it reaches for a
+broad tool (a dashboard) when a specific one answers; it answers one part of a several-part
+request and drops another; it answers a request to change something in text, never calling the
+tool — so the change is not made and its approval never asked; it draws a conclusion the
+results do not support. Two switches, off by default, guard against them — both LangChain
+middleware, which a `create_agent` or Deep Agents graph of your own takes too:
+
+| | What it does | Costs |
+|---|---|---|
+| `tool_guidance=True` — `ToolGuidance()` | adds to the instructions of every call that offers tools (`TOOL_GUIDANCE`): address every part of the request, each with the tool made for it; the most specific tool over a general one; current figures from a tool, not the remembered context, which gives background and rules; a change made by calling its tool — the system asks for approval itself — never claimed without its success; conclusions from the results, and a plain "cannot" for a part no tool answers. Inside a run it names the offered tools that change data (their declared side effects) | a few hundred tokens of instructions, the same on every call (a prompt cache holds) |
+| `answer_check=True` — `AnswerCheck()` | when the model answers without calling a tool, its draft is not final (nor streamed): the model is shown it and asked once to check it against the request (`ANSWER_CHECK`) — every part answered by a tool result, the context, or a plain "cannot"; a change made by its tool (the run's tools that change data named); the conclusions following from the results — and either calls the tools still needed, the loop going on, or gives the final answer in its place. A run whose tool hints narrowed its tools is offered all of them from the check on (only those that change data past 128), so a part the hints did not foresee is still served | one more model call per run (`AnswerCheck(checks=n)`: up to n); after the step limit's last call the check can only correct the text (no tool is offered) |
+
+Both are generic: they name no tool, and read only what the run already knows (the request,
+the results, which tools change data). What they cannot do is tell two tools apart that are
+described alike: that is the tools' descriptions ([tools.md](../tools.md#tool-choice-what-helps-the-model-pick-the-right-tool),
+where the toolbox's check of the tool set, and the native tool selector for many tools, are).
+`tool_coverage()` measures the result per item ([evaluation.md](../evaluation.md#trajectories)).
+
+```python
+target = ReAct(system, "provider/model", tool_guidance=True, answer_check=True)
+```
+
+Native pieces used rather than rebuilt: LangChain's `TodoListMiddleware` for a plan the model
+keeps on a long request, `LLMToolSelectorMiddleware` for many tools, `tool_choice` (the step
+limit's last call is `"none"`). A first call forced to `"required"` is not offered: a request
+that needs no tool (a greeting, a rule the context holds) would be made to call one.
 
 ## What else is automatic
 
@@ -158,6 +193,8 @@ with a model object needs a judge model ([evaluation.md](../evaluation.md#the-ju
 * [`examples/02_way1_react/agent.py`](../../examples/02_way1_react/agent.py) — every piece on: memory, MCP
   tools, an approval resumed in place, a hook, `timeout`, `framework_options`, `without=`.
 * [`examples/02_way1_react/structured_output.py`](../../examples/02_way1_react/structured_output.py) — a tool, then a structured answer.
+* [`examples/06_scenarios/tool_choice.py`](../../examples/06_scenarios/tool_choice.py) — the four
+  ways tool choice goes wrong, the two switches, `tool_coverage` per item.
 * [`examples/05_features/own_scheduler.py`](../../examples/05_features/own_scheduler.py) — your run store, your
   scheduler loop, your governance, memory off.
 * [`examples/05_features/subagents.py`](../../examples/05_features/subagents.py) — two sub-agents at once,

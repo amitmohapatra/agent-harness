@@ -53,7 +53,10 @@ REPOSITORY_RETRY_SECONDS: Final = RETRY_SECONDS
 CODE_MODE_TOOLS: Final[tuple[ToolSpec, ...]] = (
     ToolSpec(
         name="list_tool_files",
-        description="List the virtual declaration files of the MCP servers available to code.",
+        description=(
+            "List the virtual declaration files of the MCP servers available to code, one per "
+            "server: start here to find the tool a task needs, then read its file."
+        ),
         input_schema={"type": "object", "properties": {}},
         source="mcp",
         side_effects="read",
@@ -67,9 +70,18 @@ CODE_MODE_TOOLS: Final[tuple[ToolSpec, ...]] = (
         input_schema={
             "type": "object",
             "properties": {
-                "fileName": {"type": "string"},
-                "startLine": {"type": "integer"},
-                "endLine": {"type": "integer"},
+                "fileName": {
+                    "type": "string",
+                    "description": "A file name exactly as list_tool_files lists it.",
+                },
+                "startLine": {
+                    "type": "integer",
+                    "description": "The first line to read (optional: from the start).",
+                },
+                "endLine": {
+                    "type": "integer",
+                    "description": "The last line to read (optional: to the end).",
+                },
             },
             "required": ["fileName"],
         },
@@ -78,10 +90,19 @@ CODE_MODE_TOOLS: Final[tuple[ToolSpec, ...]] = (
     ),
     ToolSpec(
         name="get_tool_docs",
-        description="The documentation of one tool of one server.",
+        description=(
+            "The documentation of one tool of one server: what it does and its parameters, "
+            "before a script calls it."
+        ),
         input_schema={
             "type": "object",
-            "properties": {"server": {"type": "string"}, "tool": {"type": "string"}},
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "The server's name, as its declaration file gives it.",
+                },
+                "tool": {"type": "string", "description": "The tool's name on that server."},
+            },
             "required": ["server", "tool"],
         },
         source="mcp",
@@ -95,7 +116,13 @@ CODE_MODE_TOOLS: Final[tuple[ToolSpec, ...]] = (
         ),
         input_schema={
             "type": "object",
-            "properties": {"code": {"type": "string"}},
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The script: server.tool(param=value) calls, and print() "
+                    "of what the answer needs.",
+                }
+            },
             "required": ["code"],
         },
         source="mcp",

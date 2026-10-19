@@ -77,6 +77,8 @@ def ReAct(
     prompt_vars: dict[str, Any] | None = None,
     middleware: Sequence[Any] = (),
     checkpointer: Any = None,
+    tool_guidance: bool = False,
+    answer_check: bool = False,
 ) -> Any:
     """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name,
     or a LangChain chat model), its answer an ``output`` model when given. ``max_steps`` model
@@ -86,7 +88,10 @@ def ReAct(
     ``"name@version"``, a ``Prompt``) pinned for the run — a stored prompt of the gateway
     selected by every call, any other rendered into the instructions (``prompt_vars`` fill its
     ``{{variables}}``); ``middleware`` adds or replaces middleware by name; ``checkpointer``
-    replaces the run's (:class:`~.RunCheckpointer`)."""
+    replaces the run's (:class:`~.RunCheckpointer`). ``tool_guidance`` adds how to choose among
+    tools to every call's instructions (:class:`~.ToolGuidance`); ``answer_check`` has the
+    model check its answer against the request once before it is final, calling the tools
+    still needed (:class:`~.AnswerCheck`: one more model call)."""
     try:
         from deepagents.backends import StateBackend
         from deepagents.middleware import FilesystemMiddleware
@@ -110,6 +115,7 @@ def ReAct(
     backend = StateBackend()
     defaults = [
         FilesystemMiddleware(backend=backend, tools=["read_file"]),
+        *([ours.AnswerCheck()] if answer_check else []),
         ours.HarnessTools(),
         ours.StallGuard(max_repeats or ours.MAX_REPEATS),
         ours.StepLimit(max_steps or ours.MAX_STEPS),
@@ -127,6 +133,7 @@ def ReAct(
         ),
         create_summarization_middleware(_profiled(chat, window), backend),
         ours.ReadTools(CLEARED),
+        *([ours.ToolGuidance()] if tool_guidance else []),
         ours.ModelHooks(timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars),
     ]
     graph = create_agent(

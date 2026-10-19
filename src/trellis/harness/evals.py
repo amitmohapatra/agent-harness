@@ -9,8 +9,11 @@ score, or ``None`` when it has nothing to say about this case. Built in:
   memory service's ``/v1/verify`` with the run's ``bundle_id``: :func:`grounding_score`, the
   same check as the sampled one every wrapped run gets);
 * :func:`exact_match`, :func:`contains` — against the case's ``expected``;
-* :func:`called`, :func:`tool_sequence` — against the run's trajectory (``EvalCase.trajectory``:
-  the tool calls it made, in order, with their arguments and outcomes);
+* :func:`called`, :func:`tool_sequence`, :func:`tool_coverage` — against the run's trajectory
+  (``EvalCase.trajectory``: the tool calls it made, in order, with their arguments and
+  outcomes); :func:`tool_coverage` reads the tools each item needs from the item itself
+  (``metadata["needed_tools"]``), and also scores an item whose run paused for approval —
+  the call that paused counts as made;
 * :func:`llm_judge` — a judge model scores the answer against plain-language criteria (strict
   JSON ``{score, reasoning}`` at temperature 0). Which model, and through which virtual key,
   is the deployment's (``TRELLIS_JUDGE_MODEL``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), never the code's.
@@ -48,16 +51,18 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from trellis.contracts import (
     ConfigurationError,
+    Interrupt,
     ModelError,
     RunStatus,
     ToolCall,
     ToolOutcome,
+    ToolStatus,
     new_id,
 )
 from trellis.harness import pipeline, telemetry
@@ -80,6 +85,15 @@ CONCURRENCY: Final = 4
 EVAL_USER: Final = "trellis-evaluate"
 #: Who cancels an item's run that paused, so it does not wait in an inbox.
 EVAL_REVIEWER: Final = "trellis:evaluate"
+#: The item metadata keys :func:`tool_coverage` reads: the tools an item needs, and those it
+#: should not need (a broader tool the needed ones are more specific than).
+NEEDED_TOOLS: Final = "needed_tools"
+AVOID_TOOLS: Final = "avoid_tools"
+#: The outcomes of a call that failed (:func:`tool_coverage` says so).
+FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
+#: The ``ToolOutcome.metadata`` flag of the call an item's run paused on for approval (on the
+#: trajectory the evaluators that score a paused run read: ``scores_paused``).
+PAUSED: Final = "paused"
 #: What the judge model is told: score the answer against the criteria, as strict JSON.
 JUDGE_SYSTEM: Final = (
     "You are a strict evaluator. You grade an AI assistant's answer against the criteria you "
@@ -518,6 +532,49 @@ class tool_sequence:
         return EvalScore(self.name, ok, None if ok else _said(made))
 
 
+@dataclass(frozen=True, slots=True)
+class tool_coverage:
+    """The share of the tools a case needs that its run called, from 0 to 1: ``needed``, else
+    the item's own ``metadata["needed_tools"]`` (each item its own list). A call that paused
+    for approval counts as made — the write reached its gate — so an item whose run paused is
+    scored too. The comment names the needed tools not called, and the calls of ``avoid``
+    (else ``metadata["avoid_tools"]``): tools the case should not need, such as a broader one
+    the needed tools are more specific than — said, not counted. No score without a trajectory,
+    or with nothing needed. A needed tool whose every call failed (an error, a timeout) counts
+    as called — the model chose it — and the comment says so."""
+
+    needed: Sequence[str] | None = None
+    avoid: Sequence[str] | None = field(default=None, kw_only=True)
+    name: str = field(default="tool_coverage", kw_only=True)
+    #: scored on a run that paused for approval as well (:func:`evaluate`)
+    scores_paused: ClassVar[bool] = True
+
+    async def __call__(self, case: EvalCase) -> EvalScore | None:
+        needed = _names(self.needed, case.metadata.get(NEEDED_TOOLS))
+        if case.trajectory is None or not needed:
+            return None
+        made = [call.tool for call, _ in case.trajectory]
+        missing = [tool for tool in needed if tool not in made]
+        ok = {call.tool for call, outcome in case.trajectory if outcome.status not in FAILED}
+        failed = [tool for tool in needed if tool in made and tool not in ok]
+        avoided = [t for t in _names(self.avoid, case.metadata.get(AVOID_TOOLS)) if t in made]
+        said = [
+            *([f"not called: {', '.join(missing)}"] if missing else []),
+            *([f"every call failed: {', '.join(failed)}"] if failed else []),
+            *([f"called though not needed: {', '.join(avoided)}"] if avoided else []),
+        ]
+        value = round((len(needed) - len(missing)) / len(needed), 4)
+        return EvalScore(self.name, value, "; ".join(said) or None)
+
+
+def _names(given: Sequence[str] | None, from_item: Any) -> list[str]:
+    """The tool names given, else the item's (a list, or one name), without repeats."""
+    names = given if given is not None else from_item
+    if isinstance(names, str):
+        names = [names]
+    return list(dict.fromkeys(str(n) for n in names or ()))
+
+
 def _said(tools: Sequence[str]) -> str:
     return f"the calls were {', '.join(tools)}" if tools else "no tool was called"
 
@@ -938,12 +995,21 @@ async def _item(
             result = await pipeline.attempt(
                 agent, record, item.input, journal=journal, observe=pushed.append
             )
-        if result.status is RunStatus.PAUSED and result.interrupt is not None:
-            await agent.resume(result.interrupt.interrupt_id, "cancel", reviewer=EVAL_REVIEWER)
+        paused = result.interrupt if result.status is RunStatus.PAUSED else None
+        if paused is not None:
+            await agent.resume(paused.interrupt_id, "cancel", reviewer=EVAL_REVIEWER)
     except Exception as exc:
         log.warning("evaluation item failed: %s", exc)
         return _result(services, item, None, "error", run_id, error=f"{type(exc).__name__}: {exc}")
-    if result.status is not RunStatus.SUCCESS:
+    trajectory: list[Step] = list(journal.trajectory)
+    if paused is not None and paused.tool_call is not None:
+        # the call the run paused on reached its approval: on the trajectory, for the
+        # evaluators that score a paused run (``scores_paused``)
+        trajectory.append((paused.tool_call.model_copy(update={"task": None}), _paused(paused)))
+        chosen = [e for e in evaluators if getattr(e, "scores_paused", False)]
+    else:
+        chosen = []
+    if result.status is not RunStatus.SUCCESS and not chosen:
         status: ItemStatus = (
             "interrupted"
             if result.status is RunStatus.PAUSED
@@ -955,20 +1021,35 @@ async def _item(
         return _result(services, item, None, status, run_id, error=error)
     context = pushed[0] if pushed else None
     memory = await agent.run_memory(Identity.of(record))
+    succeeded = result.status is RunStatus.SUCCESS
     case = EvalCase(
         input=item.input,
-        output=result.answer,
+        output=result.answer if succeeded else None,
         expected=item.expected,
         run_id=run_id,
         bundle_id=getattr(context, "bundle_id", None),
         context=getattr(context, "rendered", None),
         memory=memory.ctx if memory is not None else None,
         metadata=item.metadata,
-        trajectory=list(journal.trajectory),
+        trajectory=trajectory,
     )
     with telemetry.experiment(current):  # the score spans are the experiment's too
-        scores, failed = await judge(case, evaluators, services=services)
+        scores, failed = await judge(case, evaluators if succeeded else chosen, services=services)
+    if not succeeded:
+        return _result(services, item, None, "interrupted", run_id, scores=scores, failed=failed)
     return _result(services, item, result.answer, "success", run_id, scores=scores, failed=failed)
+
+
+def _paused(interrupt: Interrupt) -> ToolOutcome:
+    """The outcome of the call a run paused on, on its trajectory: not run, waiting for a
+    person (the evaluation cancels the run)."""
+    assert interrupt.tool_call is not None  # an approval's
+    return ToolOutcome(
+        tool=interrupt.tool_call.tool,
+        status=ToolStatus.CANCELLED,
+        output=f"{interrupt.tool_call.tool} paused for approval",
+        metadata={PAUSED: True},
+    )
 
 
 async def _called(
@@ -1067,5 +1148,6 @@ __all__ = [
     "grounding_score",
     "judge",
     "llm_judge",
+    "tool_coverage",
     "tool_sequence",
 ]

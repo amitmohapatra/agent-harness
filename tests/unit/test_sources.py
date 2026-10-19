@@ -18,7 +18,9 @@ async def test_a_function_becomes_a_validated_tool_and_stays_callable() -> None:
         return f"{order}:{amount}"
 
     [resolved] = await refund.resolve()
-    assert resolved.spec.description == "Refund an order."
+    assert resolved.spec.description == (
+        "Refund an order.\n\nMore detail nobody needs in a tool list."
+    )
     assert resolved.spec.side_effects == "irreversible"
     assert resolved.spec.input_schema is not None
     assert resolved.spec.input_schema["required"] == ["order"]

@@ -17,6 +17,12 @@ any ``create_agent`` or Deep Agents graph may take any of them:
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
   pinned for the run (``prompt``: journaled, sent as headers, on the span), and the model
   client's errors as a :class:`~trellis.contracts.ModelError` saying whether it may pass;
+* :class:`ToolGuidance` — how to choose among tools added to the instructions (every part of
+  the request, the specific tool over a general one, current figures from tools, a change made
+  by calling its tool, conclusions from the results), the run's tools that change data named;
+* :class:`AnswerCheck` — the model's draft answer checked against the request once before it
+  is final (not streamed): it calls the tools still needed, or answers in its place; a run
+  whose tool hints narrowed its tools is offered every one from the check on;
 * :class:`StepLimit` — at ``max_steps`` model calls one more, without tools, for the best
   answer (and a ``max_steps`` warning event), instead of LangChain's canned limit message;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
@@ -41,6 +47,7 @@ import asyncio
 import base64
 import contextlib
 import copy
+import json
 import logging
 import types
 import weakref
@@ -71,6 +78,7 @@ from langchain_core.messages import (
     convert_to_messages,
 )
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import var_child_runnable_config
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
@@ -98,6 +106,7 @@ from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool, arguments_of, not_run
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
+from trellis.harness.tools.lint import MOST_TOOLS
 
 log = logging.getLogger("trellis.run")
 
@@ -797,6 +806,206 @@ class ReadTools(AgentMiddleware):
         return await handler(request.override(tools=kept))
 
 
+# --------------------------------------------------------------------------- tool choice
+#: What :class:`ToolGuidance` adds to the instructions: how to choose among tools, the same for
+#: any tool set (the tools' own descriptions say what each is for).
+TOOL_GUIDANCE: Final = (
+    "How to use your tools:\n"
+    "- A request may have several parts (questions, actions). Address every part, each with "
+    "the tool made for it.\n"
+    "- When several tools could answer a part, use the most specific one whose description "
+    "matches it; use a general or overview tool only when no specific tool fits.\n"
+    "- Current figures come from a tool call, even when the context remembers older values; "
+    "the context gives background, preferences and rules.\n"
+    "- To create, change or delete something, call the tool that does it: the system asks for "
+    "any approval itself. Never say an action was done unless its tool returned success.\n"
+    "- Base each conclusion on the tool results. If no tool can answer a part, say so."
+)
+#: What the model is told about the tools that change data (:class:`ToolGuidance`,
+#: :class:`AnswerCheck`): their names.
+WRITE_TOOLS: Final = "These tools change data: {tools}."
+#: What :class:`AnswerCheck` asks the model, after its draft answer.
+ANSWER_CHECK: Final = (
+    "Before this answer goes to the user, check it against the user's request. Do not mention "
+    "this check.\n"
+    "1. List the parts of the request: each question asked and each action requested.\n"
+    "2. For each part, find what answers it: a tool result in this conversation, the context "
+    "you were given, or a plain statement that it cannot be done. A part with none of these "
+    "needs a tool call: make it now, with the most specific tool for it.\n"
+    "3. A part that asks to create, change or delete something needs the call of the tool "
+    "that does it{writes}; the system asks for approval itself. Do not say it was done unless "
+    "that tool returned success.\n"
+    "4. Make sure each conclusion follows from the tool results.\n"
+    "If a part is still open, call the tools it needs now. Otherwise reply with the final "
+    "answer for the user, and only that."
+)
+#: The state key of :class:`AnswerCheck`: the checks made in this invocation.
+CHECKED: Final = "trellis_checked"
+#: The tag that keeps a model call's tokens off the graph's ``messages`` stream (LangGraph's
+#: ``TAG_NOSTREAM``): a draft answer the user is not shown.
+NO_STREAM: Final = "nostream"
+
+
+class ToolGuidance(AgentMiddleware):
+    """How to choose among tools, added to the instructions of every model call that offers
+    tools (:data:`TOOL_GUIDANCE`): every part of a request addressed, the most specific tool
+    over a general one, current figures from tools rather than the remembered context, an
+    action done by calling its tool (never claimed without it), conclusions from the results.
+    Inside a run it also names the offered harness tools that change data (their declared side
+    effects). ``text`` replaces the guidance. No extra model call."""
+
+    def __init__(self, text: str = TOOL_GUIDANCE) -> None:
+        super().__init__()
+        if not text.strip():
+            raise ConfigurationError("ToolGuidance needs a text (or leave it out)")
+        self.text = text
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        if not request.tools:
+            return await handler(request)
+        writes = _writes_offered(request)
+        text = self.text + (f"\n{WRITE_TOOLS.format(tools=', '.join(writes))}" if writes else "")
+        return await handler(request.override(system_message=_appended(request, text)))
+
+
+class _CheckedState(AgentState[Any]):
+    trellis_checked: NotRequired[Annotated[int, PrivateStateAttr]]
+
+
+class AnswerCheck(AgentMiddleware):
+    """An answer is checked before it is final: when the model answers without calling a tool
+    (its draft, not streamed), it is asked once more, with the draft, to check it against the
+    request (:data:`ANSWER_CHECK`) — every part answered by a tool result, the context or a
+    plain "cannot"; a requested change made by calling its tool (inside a run, the tools that
+    change data are named), never claimed without it; the conclusions following from the
+    results — and either calls the tools still needed (the loop goes on) or gives the final
+    answer, which replaces the draft. At most ``checks`` checks per invocation of the graph:
+    one more model call each. Not on a call offered no tools, or told to call none (behind
+    :class:`StepLimit`, as in ``ReAct``, its last call is checked with no tool offered: only the
+    text can be corrected).
+
+    Inside a run whose tool hints narrowed what the model is offered, the check is offered
+    every tool (only those that change data past :data:`~.lint.MOST_TOOLS`): a part the hints
+    did not foresee can still be served. For that it goes before :class:`HarnessTools` (as in
+    ``ReAct``), which then offers them."""
+
+    state_schema = _CheckedState
+
+    def __init__(self, checks: int = 1, *, text: str = ANSWER_CHECK) -> None:
+        super().__init__()
+        if checks < 1:
+            raise ConfigurationError("AnswerCheck makes at least 1 check (or leave it out)")
+        if "{writes}" not in text:
+            raise ConfigurationError("an AnswerCheck text has a {writes} placeholder")
+        self.checks = checks
+        self.text = text
+
+    async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        return {CHECKED: 0}
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any] | ExtendedModelResponse[Any]:
+        runtime = current()
+        done = request.state.get(CHECKED, 0)
+        tools = bool(request.tools) or bool(runtime is not None and runtime.tool_names())
+        if done >= self.checks or not tools or request.tool_choice == "none":
+            return await handler(request)
+        with _quiet():
+            draft = await handler(request)
+        said = _drafted(draft)
+        if said is None:  # a step that calls tools: no answer yet
+            return draft
+        writes = _changing(runtime)
+        if runtime is not None:
+            _widened(runtime, writes)
+        told = [
+            *request.messages,
+            AIMessage(content=said),
+            HumanMessage(
+                content=self.text.format(writes=f" ({', '.join(writes)})" if writes else "")
+            ),
+        ]
+        checked = await handler(request.override(messages=told))
+        if _drafted(checked) == "":  # nothing said, nothing called: the draft stands
+            checked = draft
+        return ExtendedModelResponse(
+            model_response=checked, command=Command(update={CHECKED: done + 1})
+        )
+
+
+def _changing(runtime: Runtime | None) -> list[str]:
+    """The run's own tools that change data (their side effects, as declared), sorted; none
+    outside a run (a graph's own tools say nothing of theirs)."""
+    if runtime is None:
+        return []
+    return sorted(
+        name for name in runtime.tool_names() if runtime.toolbox[name].spec.side_effects != "read"
+    )
+
+
+def _widened(runtime: Runtime, writes: list[str]) -> None:
+    """A run whose tool hints narrowed its tools offers every one of them from now on (only
+    those that change data, past :data:`~.lint.MOST_TOOLS`)."""
+    if runtime.offered is None:
+        return
+    names = runtime.tool_names()
+    runtime.offer(names if len(names) <= MOST_TOOLS else writes)
+
+
+@contextlib.contextmanager
+def _quiet() -> Iterator[None]:
+    """The model calls made inside, tagged :data:`NO_STREAM`: their tokens are not streamed
+    (a reply the graph keeps still reaches the stream whole, as its node's output)."""
+    config = var_child_runnable_config.get() or {}
+    tags = [*(config.get("tags") or []), NO_STREAM]
+    token = var_child_runnable_config.set(cast(RunnableConfig, {**config, "tags": tags}))
+    try:
+        yield
+    finally:
+        var_child_runnable_config.reset(token)
+
+
+def _drafted(reply: ModelResponse[Any]) -> str | None:
+    """What a model reply answers — its structured answer as JSON, else its text — or ``None``
+    when it calls tools (not an answer yet)."""
+    if reply.structured_response is not None:
+        return _json(reply.structured_response)
+    message = _ai(reply)
+    if message is None or message.tool_calls or message.invalid_tool_calls:
+        return None
+    return message.text
+
+
+def _json(value: Any) -> str:
+    dumped = value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+    return json.dumps(dumped, default=str)
+
+
+def _writes_offered(request: ModelRequest[Any]) -> list[str]:
+    """Of the run's tools that change data (:func:`_changing`), those the call offers."""
+    offered = {_named(t) for t in request.tools}
+    return [name for name in _changing(current()) if name in offered]
+
+
+def _appended(request: ModelRequest[Any], text: str) -> SystemMessage:
+    """The request's instructions with ``text`` after them (a system message of content
+    blocks gets one more block)."""
+    system = request.system_message
+    if system is None:
+        return SystemMessage(content=text)
+    if isinstance(system.content, str):
+        joined = f"{system.content}\n\n{text}" if system.content else text
+        return SystemMessage(content=joined)
+    return SystemMessage(content=[*system.content, {"type": "text", "text": text}])
+
+
 # --------------------------------------------------------------------------- checkpoints
 class RunCheckpointer(BaseCheckpointSaver[int]):
     """A checkpointer that keeps the latest checkpoint only — and, in a harness run whose
@@ -973,12 +1182,14 @@ def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfi
 
 
 __all__ = [
+    "AnswerCheck",
     "HarnessTools",
     "ModelHooks",
     "ReadTools",
     "RunCheckpointer",
     "StallGuard",
     "StepLimit",
+    "ToolGuidance",
     "model_error",
     "read_result",
 ]

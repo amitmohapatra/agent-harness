@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import functools
 import inspect
+import re
+import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final, overload
 
@@ -64,10 +66,11 @@ class FunctionTool:
     ) -> None:
         self.fn = fn
         self.model = _arguments_model(fn)
+        said, params = documented(inspect.getdoc(fn) or "")
         self.spec = ToolSpec(
             name=name or fn.__name__,
-            description=description or (inspect.getdoc(fn) or "").split("\n\n")[0],
-            input_schema=self.model.model_json_schema(),
+            description=description or said,
+            input_schema=_described(self.model.model_json_schema(), params),
             source="local",
             side_effects=side_effects,
             idempotent=idempotent,
@@ -119,8 +122,11 @@ def tool(
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
-    The schema comes from the signature (pydantic validates the model's arguments), the
-    description from the docstring's first paragraph. ``idempotent``: a call repeated with the
+    The schema comes from the signature (pydantic validates the model's arguments), each
+    parameter described by the docstring's ``Args:`` (or ``:param x:``) unless an
+    ``Annotated[..., Field(description=...)]`` says; the description is the docstring without
+    its sections (``Args:``, ``Returns:``...), every other paragraph kept — "use it when / not
+    when" included. ``idempotent``: a call repeated with the
     same idempotency key (``trellis.current().idempotency_key``) has its effect once, so it is
     retried like a read and run again after a crash. ``timeout``: the most one call may take,
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
@@ -138,12 +144,85 @@ def tool(
     return made(fn) if fn is not None else made
 
 
+#: A docstring's section headers (Google style): its ``Args`` describe the parameters, and none
+#: of them is the tool's description.
+_SECTION: Final = re.compile(
+    r"^(Args|Arguments|Parameters|Params|Keyword Args|Returns?|Yields?|Raises|Examples?|"
+    r"Notes?|Todo|See Also|Attributes):\s*$"
+)
+_ARG_SECTIONS: Final = frozenset({"Args", "Arguments", "Parameters", "Params", "Keyword Args"})
+#: An argument's entry in an ``Args`` section (``name (type): what it is``), and a Sphinx field.
+_ARG: Final = re.compile(r"^\s+\**(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)$")
+_PARAM: Final = re.compile(r"^:param\s+(?:[^:]*\s)?(\w+):\s*(.*)$")
+_FIELD: Final = re.compile(r"^:(\w+)(\s[^:]*)?:")
+
+
+def documented(doc: str) -> tuple[str, dict[str, str]]:
+    """A function's docstring as a tool's: its description — every paragraph but the sections
+    (``Args:``, ``Returns:``, ``Raises:``... and Sphinx ``:param x:`` fields), so a "use it
+    when / not when" paragraph reaches the model — and each parameter's description, from
+    ``Args:`` (Google style) or ``:param x:`` (Sphinx)."""
+    kept: list[str] = []
+    params: dict[str, str] = {}
+    section: str | None = None  # the section the line is in
+    indent: int | None = None  # its entries' indent
+    current: str | None = None  # the parameter a line goes on describing
+    for line in doc.splitlines():
+        stripped = line.strip()
+        header = _SECTION.match(line)
+        if header:
+            section, indent, current = header.group(1), None, None
+            continue
+        if section is not None and (not stripped or line[0].isspace()):
+            if stripped and section in _ARG_SECTIONS:
+                width = len(line) - len(line.lstrip())
+                indent = width if indent is None else indent
+                entry = _ARG.match(line) if width == indent else None
+                if entry:
+                    current = str(entry.group(1))
+                    params[current] = entry.group(2).strip()
+                elif current is not None:
+                    params[current] = f"{params[current]} {stripped}".strip()
+            continue
+        section = None
+        field = _FIELD.match(line)
+        if field:
+            param = _PARAM.match(line)
+            current = param.group(1) if param else None
+            if param:
+                params[param.group(1)] = param.group(2).strip()
+            continue
+        if current is not None and stripped and line[0].isspace():
+            params[current] = f"{params[current]} {stripped}".strip()  # a field goes on
+            continue
+        current = None
+        kept.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip(), params
+
+
+def _described(schema: dict[str, Any], params: Mapping[str, str]) -> dict[str, Any]:
+    """The arguments' schema with each documented parameter's description, where the
+    signature gave none (an ``Annotated[..., Field(description=...)]`` wins)."""
+    properties = schema.get("properties") or {}
+    for name, text in params.items():
+        found = properties.get(name)
+        if isinstance(found, dict) and text and "description" not in found:
+            found["description"] = text
+    return schema
+
+
 def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
     fields: dict[str, Any] = {}
+    try:  # the annotations as the function's module means them (``from __future__ import
+        # annotations`` leaves them strings, which pydantic cannot resolve from here)
+        hints = typing.get_type_hints(fn, include_extras=True)
+    except Exception:  # a name it cannot resolve: the annotations as written
+        hints = {}
     for param in inspect.signature(fn).parameters.values():
         if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             continue
-        annotation = Any if param.annotation is inspect.Parameter.empty else param.annotation
+        annotation = hints.get(param.name, param.annotation)
+        annotation = Any if annotation is inspect.Parameter.empty else annotation
         default = ... if param.default is inspect.Parameter.empty else param.default
         fields[param.name] = (annotation, default)
     return create_model(  # type: ignore[call-overload]

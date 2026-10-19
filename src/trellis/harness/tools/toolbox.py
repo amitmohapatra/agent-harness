@@ -9,9 +9,12 @@ to the tool catalog, with Code Mode where it is safe.
    tool's from its declaration; a tool the gateway would run itself (its client's
    ``tools_to_auto_execute``: a call of it never reaches the harness) is left out, with a
    warning;
-2. **publish** — every tool goes to the catalog (MCP tools with their annotations, local tools
+2. **lint** — what makes the tools hard for a model to choose among (``tools.lint``: a
+   missing or short description, an undescribed parameter, a name a model API refuses, two
+   tools described alike, too many at once), logged as warnings when the names listed change;
+3. **publish** — every tool goes to the catalog (MCP tools with their annotations, local tools
    with their declared side effects) through governance, in the background, once per content;
-3. **Code Mode** — the Code Mode servers whose tools all only read (as governance says now:
+4. **Code Mode** — the Code Mode servers whose tools all only read (as governance says now:
    the catalog's risk over the tools' own, and no approval rule), when there are at least
    :data:`CODE_MODE_MIN_SERVERS` of them or :data:`CODE_MODE_MIN_TOOLS` tools between them,
    are offered as Bifrost's Code Mode meta-tools (one script instead of many calls); every
@@ -38,6 +41,7 @@ from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.tools.base import Source, Tool
+from trellis.harness.tools.lint import lint
 
 if TYPE_CHECKING:
     from bifrost_sdk import ToolDef
@@ -178,6 +182,8 @@ class Toolbox:
         async with self._lock:
             listing = await self._listings.get()
             if listing is not self._listing:  # listed again
+                if self._listing is None or listing.names != self._listing.names:
+                    _linted(listing)
                 self._listing, self._tools = listing, {}
                 await _publish(self._governance, listing)
             rules = await self._governance.rules(listing.names)
@@ -253,6 +259,13 @@ def _scriptable(
     count = sum(len(by_server[s]) for s in servers)
     large = len(servers) >= CODE_MODE_MIN_SERVERS or count >= CODE_MODE_MIN_TOOLS
     return servers if large else set()
+
+
+def _linted(listing: Listing) -> None:
+    """What makes the listed tools hard to choose among (``tools.lint``), each a warning."""
+    specs = [t.spec for t in listing.local if t.spec.source != "memory"]
+    for finding in lint([*specs, *(_spec(d) for d in listing.defs)]):
+        log.warning("tool choice: %s", finding)
 
 
 async def _publish(governance: Governance, listing: Listing) -> None:
