@@ -11,7 +11,7 @@ catalog.
 | Where from | Tools | Side effects |
 |---|---|---|
 | **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key) — or, with `h.wrap(..., mcp=[slug])`, the tools of those Virtual MCPs — named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `mcp=[]` (or `without={"mcp"}`) is no MCP tools | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
-| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), description from the docstring's first paragraph; `timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
+| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` seconds per exchange | `"write"` |
 | `agent.as_tool(*, name=None, description=None, side_effects=None)` | one: another agent wrapped by this harness, `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"`; `side_effects=` overrides it |
 | `openapi(spec, *, only=None, base_url=None, headers=None, timeout=120)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
@@ -27,6 +27,30 @@ governance, in the background and once per content: MCP tools with their annotat
 OpenAPI and A2A tools with their declared side effects. An administrator sets `approve_when` on
 them there ([governance.md](governance.md)). Concurrent runs that find the toolbox stale share
 one listing.
+
+## Tool choice: what helps the model pick the right tool
+
+What a model chooses from is each tool's name, description and parameter schema — kept as
+the source gave them (an MCP server's, through the gateway, as the server lists them; a
+function's from its signature and docstring; an OpenAPI operation's), in every framework's own
+format. What helps it choose, whatever the source:
+
+| | Where |
+|---|---|
+| **Descriptions worth choosing by** — what the tool is for, when to use it rather than a broader or narrower one, each parameter described | the tool's author: the docstring (functions), the MCP server, the OpenAPI document. The harness checks, below |
+| **A check of the tool set** — `trellis.harness.tools.lint.lint(specs)`: a missing or short description (under 5 words), an undescribed parameter, a name the OpenAI API refuses (letters, digits, `_`, `-`, at most 64), names differing only in case or separators, two tools described the same or nearly (75% of their words shared), 20 tools or more at once (OpenAI's guide suggests fewer), over 128 (the most the OpenAI API takes) | automatic: the toolbox logs each finding as a warning (`trellis.tools`, `tool choice: ...`) when the tools it lists change; in CI, assert `lint([t.spec for t in tools]) == []` |
+| **Fewer tools per call** — the memory service's tool hints (from 5 tools, [below](#tool-hints-what-the-model-is-offered)), or LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call picks the tools for the request) | automatic with memory; `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` without |
+| **How to choose** — every part of a request addressed, the most specific tool over a general one, current figures from tools rather than the remembered context, a change made by calling its tool (never claimed without it) | `ReAct(tool_guidance=True)` (`ToolGuidance`) |
+| **A check before the answer** — the draft answer checked against the request once; a part left open, or a change only claimed, makes the model call the tools still needed — the write tool's call reaches governance, and its approval; nothing found said plainly as "no record" | `ReAct(answer_check=True)` (`AnswerCheck`) |
+| **A check before a change** — the first call of a tool that changes data checked against the rules in the instructions and the memory context, before it runs or anyone is asked to approve it | `ReAct(answer_check=True)` (`AnswerCheck(writes=False)` turns it off) |
+| **What it can do** — capabilities beyond the tools, said plainly | `ReAct(capabilities={"accept an image upload": False})` |
+| **Measured** — `tool_coverage()` scores each evaluation item by the share of its `needed_tools` the run called | [evaluation.md](evaluation.md#trajectories) |
+
+[frameworks/react.md](frameworks/react.md#tool-choice) has the switches;
+[`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py) and
+`tests/live/test_live_tool_choice.py` measure them. The OpenAI Agents and Claude Agent SDK
+targets get the descriptions, the lint and the hints; the guidance and the check are
+LangChain middleware (a `create_agent` or Deep Agents graph of your own takes them too).
 
 ## Every call
 

@@ -164,7 +164,7 @@ src/trellis/
     compat.py          the framework versions this release was tested with; the wrap-time warning
     hooks/             Hooks and how they chain; openai_agents: model hooks through RunHooks
     middleware.py      LangChain v1 middleware: HarnessTools, ModelHooks, StepLimit, StallGuard,
-                       ReadTools, read_result, RunCheckpointer
+                       ReadTools, read_result, RunCheckpointer; ToolGuidance, AnswerCheck (opt-in)
     react.py           ReAct(...): a create_agent graph with the native middleware and the harness's
     subagents.py       agent.as_tool(): a wrapped agent as a tool, each call a child run
     sandbox/           sandbox(): the run's own sandbox as three tools (base: the provider
@@ -350,7 +350,9 @@ local sources and every MCP tool the virtual key allows — fresh: listed again 
 through governance, in the background. Code Mode is chosen for the Code Mode servers whose
 tools all only read as governance says now, when there are enough of them
 (`CODE_MODE_MIN_SERVERS` 3 or `CODE_MODE_MIN_TOOLS` 20); its meta-tools are offered under the
-harness's names, so the gateway returns every call to the bridge. With `mcp=` the definitions
+harness's names, so the gateway returns every call to the bridge. Each new set of names is
+checked for what makes tools hard to choose among (`tools/lint.py`: descriptions, parameters,
+names, look-alikes, how many), each finding a logged warning. With `mcp=` the definitions
 are the named Virtual MCPs' tools; a tool its client lists in `tools_to_auto_execute` is left
 out ([gateway.md](gateway.md)).
 
@@ -452,6 +454,7 @@ take the harness's middleware too (`middleware.py`). The stack `ReAct` builds, i
 flowchart TB
   subgraph stack["ReAct's middleware, outermost first"]
     fs["FilesystemMiddleware(read_file) · Deep Agents<br/>large results saved as files"]
+    ac["AnswerCheck · harness, answer_check=True<br/>the draft answer checked once against the request"]
     ht["HarnessTools · harness<br/>the run's tools per call, calls through the bridge"]
     sg["StallGuard · harness<br/>the same call max_repeats times, or 3 failing steps: stop"]
     sl["StepLimit · harness<br/>at max_steps: one more call without tools"]
@@ -459,15 +462,19 @@ flowchart TB
     ce["ContextEditingMiddleware · LangChain<br/>older results cleared past half the window"]
     su["summarization · Deep Agents<br/>older turns summarized near the window's end"]
     rt["ReadTools · harness<br/>read_file / read_result offered once needed"]
+    tg["ToolGuidance · harness, tool_guidance=True<br/>how to choose among tools, in the instructions"]
     yours["yours: middleware=[...]<br/>(TodoListMiddleware, HumanInTheLoopMiddleware, PII...)"]
     mh["ModelHooks · harness<br/>before/after_model hooks, chat span, model_timeout,<br/>pinned prompt, unparsable calls answered"]
   end
-  fs --> ht --> sg --> sl --> pt --> ce --> su --> rt --> yours --> mh --> model(["the model"])
+  fs --> ac --> ht --> sg --> sl --> pt --> ce --> su --> rt --> tg --> yours --> mh --> model(["the model"])
 ```
 
 One model step through it, and the tool calls it makes, is in
 [flows.md](flows.md#react-one-model-step-through-the-middleware); what each piece does and how
-to add or replace one is [frameworks/react.md](frameworks/react.md#the-middleware).
+to add or replace one is [frameworks/react.md](frameworks/react.md#the-middleware). The two
+opt-in pieces are present only when switched on; `AnswerCheck` sits outside `HarnessTools` so
+that, in a run its tool hints narrowed, the check can be offered every tool
+([frameworks/react.md](frameworks/react.md#tool-choice), [ADR 0002](adr/0002-tool-choice.md)).
 
 ## Run states
 
@@ -522,7 +529,8 @@ loop shuts down it cancels the workers, and a cancelled worker finishes the queu
 
 `evals.py` is a block usable with or without `Harness`: an evaluator is any
 `async (EvalCase) -> EvalScore | None`; the built-ins are `grounding()`, `exact_match()`,
-`contains()`, `called()`, `tool_sequence()` and `llm_judge(criteria)`. What they reach is an
+`contains()`, `called()`, `tool_sequence()`, `tool_coverage()` (each item's `needed_tools`,
+a run paused for approval scored too) and `llm_judge(criteria)`. What they reach is an
 `EvalServices`: Langfuse, and the judge's gateway and model — the deployment's
 (`TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`), never the code's. `evaluate(target,
 ...)` runs a wrapped `Agent` through the pipeline (`h.evaluate` delegates to it) or calls any

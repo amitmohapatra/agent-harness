@@ -443,7 +443,10 @@ class Skills:
             description="Read one file of a skill, by the path load_skill lists.",
             input_schema={
                 "type": "object",
-                "properties": {"name": name, "path": {"type": "string"}},
+                "properties": {
+                    "name": name,
+                    "path": {"type": "string", "description": "the path, as load_skill lists it"},
+                },
                 "required": ["name", "path"],
             },
             side_effects="read",

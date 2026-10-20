@@ -103,6 +103,9 @@ class Runtime:
     run_memory: RunMemory | None = None
     #: the pushed memory context, as the framework's system message carries it
     context: str | None = None
+    #: how far memory covered the question (its ``evidence_status``: ``COMPLETE``,
+    #: ``INCOMPLETE``, ``INSUFFICIENT``), when a context was pushed
+    evidence: str | None = None
     #: the question the run is working on (memory queries, tool-call tasks)
     task: str = ""
     #: this run's tools by name (the agent's own, the MCP tools, the memory pull tools)

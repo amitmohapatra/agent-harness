@@ -136,6 +136,36 @@ evaluators. Code that is not wrapped returns its own as `EvalOutput(answer,
 trajectory=[(ToolCall, ToolOutcome), ...])`; a callable that returns none has `None`, and the
 trajectory evaluators give it no score.
 
+**Tool coverage.** `tool_coverage()` scores each item by the share of the tools it needs that
+its run called, 0 to 1 — the tools each item needs written on the item itself, so one dataset
+holds requests that need different tools:
+
+```python
+from trellis.harness.evals import tool_coverage
+
+dataset = [
+    {
+        "input": "Which styles have excess stock at S12, and which lost the most sales?",
+        "metadata": {
+            "needed_tools": ["excess_stock", "lost_sales"],
+            "avoid_tools": ["store_overview"],
+        },
+    },
+    {
+        "input": "Create a stock rule for ST-101 at S12, min 2, max 6.",
+        "metadata": {"needed_tools": ["create_stock_rule"]},
+    },
+]
+evaluators = [tool_coverage()]  # or tool_coverage(["lookup"]) for every item alike
+```
+
+The comment names the needed tools not called, and the `avoid_tools` that were (a broader tool
+the needed ones are more specific than: said, not counted). A run that paused for approval is
+scored too — the call it paused on reached its gate, so it counts as made — while the other
+evaluators score only runs that succeeded (the item stays `interrupted`; an evaluator of your
+own scores paused runs with a class attribute `scores_paused = True`). Runnable:
+[`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py).
+
 ### `llm_judge`
 
 The judge reads the criteria, the input, the expected answer and the memory context when there

@@ -94,6 +94,7 @@ With the services configured, every wrapped agent gets all of this with no code.
 | **MCP tools** | Every tool the virtual key allows (`mcp=`: those of the named Virtual MCPs), each executed through the gateway saying who the run is for; a tool the gateway would run itself (Agent Mode) is not offered; no model call gets the gateway's MCP tools ([gateway.md](gateway.md)) |
 | **Governance** | Each call runs, runs and is announced, or asks a person: by the tool's risk — the MCP server's annotations or a local tool's declaration, overridden by the catalog's `risk`; the catalog's `approve_when` replaces that; a catalog that cannot be read fails closed; every tool is published to the catalog ([governance.md](governance.md)) |
 | **Tool hints** | The context comes back with the skills the agent learned for the task; from 5 tools on, also with the tools that fit, and the model is offered those, the memory tools and every tool the run already used ([tools.md](tools.md)) |
+| **Tool set check** | When an agent's tools change, what makes them hard for a model to choose among — a missing or short description, an undescribed parameter, a name the OpenAI API refuses, look-alike names or descriptions, 20 or more tools at once — is logged as a warning (`trellis.tools`); nothing is refused ([tools.md](tools.md#tool-choice-what-helps-the-model-pick-the-right-tool)) |
 | **Code Mode** | The read-only Code Mode servers, from 3 servers or 20 tools, become Code Mode meta-tools under the harness's names; their nested calls are recorded from the gateway's log |
 | **Prompts and skills** | A prompt or skill named once is looked up in code, the folder, Langfuse, the gateway; pinned and journaled per run — a stored prompt a framework's model client selects (`h.model_headers(prompt=)`) too ([prompts.md](prompts.md), [skills.md](skills.md)) |
 | **Outcome and grounding** | The run's ending is its `system` feedback; a sampled share is checked against its context, a score on its trace |
@@ -180,7 +181,7 @@ The arguments, each linked to its reference: what they are, their defaults, what
 | [`agent.schedule(...)`](api.md#agentschedule) | `cron`, `input`, `on_behalf_of`, `tz`, `tenant`, `timeout`, `without`, `framework_options`, `priority`, `concurrency_key` |
 | [`agent.resume(...)`](api.md#agentresume) | `decision`, `answer`, `reviewer`, `comment`, `remember`, `tenant` |
 | [`h.worker(...)`](api.md#hworker) | `agents`, `concurrency` |
-| [`ReAct(...)`](api.md#react) | `system`, `model`, `output`, `max_steps`, `max_repeats`, `model_timeout`, `context_window`, `prompt`, `prompt_vars`, `middleware`, `checkpointer` |
+| [`ReAct(...)`](api.md#react) | `system`, `model`, `output`, `max_steps`, `max_repeats`, `model_timeout`, `context_window`, `prompt`, `prompt_vars`, `middleware`, `checkpointer`, `tool_guidance`, `answer_check`, `capabilities` (tool choice, all off by default: [frameworks/react.md](frameworks/react.md#tool-choice)) |
 | [`tool(...)`](api.md#tool), [`a2a(...)`](api.md#a2a), [`openapi(...)`](api.md#openapi), [`sandbox(...)`](api.md#sandbox) | `side_effects`, `idempotent`, `timeout`, ... |
 
 ## Who the deployment is

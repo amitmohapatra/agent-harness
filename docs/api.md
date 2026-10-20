@@ -258,7 +258,8 @@ a function target.
 
 ```text
 ReAct(system, model, *, output=None, max_steps=None, max_repeats=None, model_timeout=None,
-      context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None)
+      context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
+      tool_guidance=False, answer_check=False, capabilities=None)
 ```
 
 A tool-calling agent for teams with no framework: a LangChain v1 `create_agent` graph with the
@@ -276,6 +277,9 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | `prompt`, `prompt_vars` | none | a prompt of the prompt sources, pinned for the run, and its variables ([prompts.md](prompts.md)) |
 | `middleware` | `()` | more LangChain or Deep Agents middleware; one named like a default replaces it |
 | `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |
+| `tool_guidance` | `False` | how to choose among tools, added to every call's instructions (`ToolGuidance`; [tool choice](frameworks/react.md#tool-choice)) |
+| `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |
+| `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
 
 ## Tools
 
@@ -286,8 +290,8 @@ tool(fn, *, name=None, description=None, side_effects="write", idempotent=False,
 @tool  /  @tool(...)
 ```
 
-A Python function (sync or async) as a tool: the schema from its signature, the description
-from its docstring; `side_effects` `"read"`, `"write"` or `"irreversible"`; `idempotent` when a
+A Python function (sync or async) as a tool: the schema from its signature (each parameter
+described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`; `idempotent` when a
 repeated call with its idempotency key has its effect once; `timeout` seconds per call
 ([tools.md](tools.md)).
 

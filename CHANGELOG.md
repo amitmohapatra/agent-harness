@@ -7,6 +7,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- A function tool's description is its docstring without the sections (`Args:`, `Returns:`,
+  `Raises:`...), every other paragraph kept (was: the first paragraph only), and each parameter
+  is described by the docstring's `Args:` or `:param x:` entry unless its annotation says.
+- The Code Mode meta-tools and `read_skill_file` describe every parameter.
+
 - The memory context is always asked for with the run's own tools, so an agent with any number
   of tools gets the skills it learned; the tool hints still come from five tools (now the
   memory service's threshold), and `without={"hints"}` keeps the learned skills while offering
@@ -26,6 +31,28 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   them in parallel. Run one with `python -m examples.<group>.<name>`.
 
 ### Added
+
+- Tool choice. `ReAct(tool_guidance=True)` (`ToolGuidance`) adds how to choose among tools to
+  every call's instructions — every part of a request addressed, the most specific tool over a
+  general one, current figures from tools rather than memory, a change made by calling its
+  tool and never claimed without it — naming the run's tools that change data;
+  `ReAct(answer_check=True)` (`AnswerCheck`) checks the draft answer against the request once
+  before it is final (one more model call; the draft is not streamed), so a skipped part or a
+  change only claimed in text makes the model call the tools still needed, and a run narrowed
+  by tool hints is offered every tool from the check on; when every tool result is empty or not
+  found (or memory is `INSUFFICIENT`) the check asks for a plain "no record"; and the first
+  change of a run is checked against the rules in the instructions and memory context before
+  it runs or is sent for approval. `ReAct(capabilities={...})` tells the model what it can and
+  cannot do beyond its tools, for a plain yes or no. All LangChain middleware, opt-in.
+- `trellis.harness.tools.lint.lint(specs)`: what makes a tool set hard to choose among (missing
+  or short descriptions, undescribed parameters, names the OpenAI API refuses, look-alike
+  names and descriptions, 20+ or 128+ tools at once); the toolbox logs each finding as a
+  warning when its tools change.
+- `tool_coverage()`: an evaluator scoring each item by the share of its `needed_tools` (the
+  item's metadata) the run called, naming the missing ones and any `avoid_tools` called; it also
+  scores a run that paused for approval, the call it paused on counting as made.
+- `examples/06_scenarios/tool_choice.py` and `tests/live/test_live_tool_choice.py`: a tool set
+  reproducing the four typical tool-choice failures, measured with and without the switches.
 
 - Langfuse is set up with its own three names alone: with `LANGFUSE_PUBLIC_KEY` and
   `LANGFUSE_SECRET_KEY` set (at `LANGFUSE_HOST`, else Langfuse Cloud) and
