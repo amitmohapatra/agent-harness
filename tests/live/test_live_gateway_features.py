@@ -37,7 +37,7 @@ from tests.live.conftest import (
     needs_memory,
 )
 from tests.live.support import Forcing, Sent, eventually, gateway_model, memory_scope
-from trellis import ReAct, Runtime
+from trellis import ReAct, Runtime, mcp
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.clients.bifrost import (
     CODE_MODE_TOOLS,
@@ -385,7 +385,7 @@ async def test_an_agent_with_a_virtual_mcp_has_its_tools_only(
     try:
         async with live_harness(ops_key) as h:
             names, noted = (
-                await h.wrap(noter, id=f"live-v-{suffix()}", mcp=[bundle.slug]).run(
+                await h.wrap(noter, id=f"live-v-{suffix()}", tools=[mcp(bundle.slug)]).run(
                     "note", user="live"
                 )
             ).answer

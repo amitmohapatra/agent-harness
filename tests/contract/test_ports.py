@@ -56,9 +56,11 @@ def test_the_public_api_is_the_documented_one() -> None:
         "Settings",
         "a2a",
         "current",
+        "mcp",
         "openapi",
         "sandbox",
         "skills",
+        "stdio",
         "tool",
     ]
     for name in trellis.__all__:

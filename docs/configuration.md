@@ -25,7 +25,9 @@ Each setting lives in one layer, decided by who owns it and how often it changes
   under their own names, never mirrored: `OTEL_*` by the OpenTelemetry SDK (the exporter's
   `OTEL_EXPORTER_OTLP_ENDPOINT`, `..._TRACES_ENDPOINT`, `..._HEADERS`; `OTEL_SERVICE_NAME`;
   `OTEL_RESOURCE_ATTRIBUTES`, whose `service.version` is the agents' version — bake it in at
-  build time), `LANGFUSE_*` and `DOCKER_HOST`;
+  build time), `LANGFUSE_*`, `DOCKER_HOST`, and — without Bifrost — the OpenAI SDK's
+  `OPENAI_BASE_URL` and `OPENAI_API_KEY`, which name the OpenAI-compatible endpoint model names
+  go to ([below](#where-a-model-name-goes));
 * **the code** — the agent's behaviour: the model, prompts and skills (their sources given in
   code: `Harness(prompts=[prompts_dir("prompts")])`, nothing read from the working folder by
   itself — each source in use is logged), tools, MCP selection, the output schema, a budget,
@@ -42,6 +44,20 @@ harness logs one line naming what it is connected to; `trellis doctor` (`python 
 trellis.harness.doctor`) prints every setting, where it came from (secrets redacted), whether
 each service answers and takes its key, whether the spool can be written and the Docker daemon
 answers, and what to set — it changes nothing.
+
+### Where a model name goes
+
+A model *name* (`ReAct(model="provider/model")`, `llm_judge(model="...")`) goes to exactly
+one gateway, chosen from what is set — never a chain of fallbacks
+(`trellis.harness.gateways`):
+
+| Set | Model names go to | What else it can do |
+|---|---|---|
+| `BIFROST_URL` | Bifrost, with `BIFROST_VIRTUAL_KEY` | everything: the MCP tools and Virtual MCPs, Code Mode, the cost of each call (dollar budgets), fallbacks and retries, stored prompts, skills, the judge alias |
+| no `BIFROST_URL`; `OPENAI_BASE_URL` and/or `OPENAI_API_KEY` | that OpenAI-compatible endpoint (LiteLLM's proxy, Portkey, TrueFoundry, OpenRouter, vLLM, Ollama; OpenAI when only the key is set), read by the OpenAI SDK itself | models only: the client's own retries; a judge names its model (`llm_judge(model=)`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
+| neither | nowhere: a model name is an error naming these; models are objects you pass (`ReAct(model=ChatAnthropic(...))`, a framework's own client) | judges need `llm_judge(model=<an object>)` |
+
+`trellis doctor` names the gateway, what named it, and what is off without it.
 
 | Variable | `Settings` field | Unset (default) | Example | Automatic when set |
 |---|---|---|---|---|
@@ -119,7 +135,7 @@ With the services configured, every wrapped agent gets all of this with no code.
 | | |
 |---|---|
 | **Memory** | With `MEMORY_URL`: the context for the question is pushed into the framework's input (without the recent conversation when the framework keeps the thread itself), the memory tools (`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`, `tool_search`) are added, and the transcript, every tool call and the run's outcome are recorded ([memory.md](memory.md)) |
-| **MCP tools** | Every tool the virtual key allows (`mcp=`: those of the named Virtual MCPs), each executed through the gateway saying who the run is for; a tool the gateway would run itself (Agent Mode) is not offered; no model call gets the gateway's MCP tools ([gateway.md](gateway.md)) |
+| **MCP tools** | Every tool the virtual key allows (once `tools=[...]` names any `mcp(...)`: exactly those servers and Virtual MCPs), each executed through the gateway saying who the run is for; a tool the gateway would run itself (Agent Mode) is not offered; no model call gets the gateway's MCP tools ([gateway.md](gateway.md)) |
 | **Governance** | Each call runs, runs and is announced, or asks a person: by the tool's risk — the MCP server's annotations or a local tool's declaration, overridden by the catalog's `risk`; the catalog's `approve_when` replaces that; a catalog that cannot be read fails closed; every tool is published to the catalog ([governance.md](governance.md)) |
 | **Tool hints** | The context comes back with the skills the agent learned for the task; from 5 tools on, also with the tools that fit, and the model is offered those, the memory tools and every tool the run already used ([tools.md](tools.md)) |
 | **Tool set check** | When an agent's tools change, what makes them hard for a model to choose among — a missing or short description, an undescribed parameter, a name the OpenAI API refuses, look-alike names or descriptions, 20 or more tools at once — is logged as a warning (`trellis.tools`); nothing is refused ([tools.md](tools.md#tool-choice-what-helps-the-model-pick-the-right-tool)) |
@@ -152,7 +168,7 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 |---|---|---|---|
 | `memory` | `MEMORY_URL` | the memory context pushed into the framework's input, the memory tools, the records (transcript, tool calls, outcome, decisions as feedback) and the tool narrowing | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
 | `tool_search` | `MEMORY_URL`, from 5 tools | the one owner of tool narrowing: the memory service's tool hints narrow the tools the model is offered, and its `tool_search` tool widens them | every tool offered (the learned skills stay) |
-| `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools, and the gateway is not asked for them (`h.tools(without={"mcp"})` for a graph's; `mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
+| `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or the `mcp(...)` servers named in `tools=[...]`), Code Mode included | no MCP tools, and the gateway is not asked for them (`h.tools(without={"mcp"})` for a graph's; `mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
 | `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
 | `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
 | `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the online judges | not judged |

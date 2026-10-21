@@ -10,21 +10,28 @@ catalog.
 
 | Where from | Tools | Side effects |
 |---|---|---|
-| **MCP** — automatic | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key) — or, with `h.wrap(..., mcp=[slug])`, the tools of those Virtual MCPs — named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `mcp=[]` (or `without={"mcp"}`) is no MCP tools | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
+| **MCP** — automatic, with a gateway | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)). Once `tools=[...]` names any `mcp(...)`, the agent has exactly the MCP servers it names instead; `without={"mcp"}` is no MCP tool at all | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
+| `mcp(target, *, name=None, timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`), `mcp("finance-tools")` a Bifrost Virtual MCP by name (the gateway lists and runs its tools). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. Code Mode is for the gateway's servers | the server's annotations, as above |
 | `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` seconds per exchange | `"write"` |
-| `agent.as_tool(*, name=None, description=None, side_effects=None)` | one: another agent wrapped by this harness, `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"`; `side_effects=` overrides it |
+| an agent wrapped by this harness, in `tools=[...]` | one, named after the agent's id: `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)). `agent.as_tool(*, name=None, description=None, side_effects=None)` is deprecated (one release, with a warning) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"` |
 | `openapi(spec, *, only=None, base_url=None, headers=None, timeout=120)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
 | `sandbox(provider=None, spec=None, *, timeout=120)` | `sandbox_exec`, `sandbox_read` and `sandbox_write`, in a sandbox of the run's own (`SANDBOX=docker`, or the provider given), made at its first call and deleted at its end ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` (idempotent) `"write"`, `sandbox_read` `"read"` |
 | `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills from code, `SKILLS_DIR` and the gateway's Skills Repository, each pinned per run ([skills.md](skills.md)) | `"read"` |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
-`tools=` takes only what runs in this process; which MCP tools an agent has is decided where
-its virtual key is configured, in the gateway. Tool names must be unique across the toolbox.
+Everything an agent can call goes in one `tools=[...]` (or `h.tools(...)` for a framework that
+binds its tools when it is built): functions, sub-agents, `a2a`, `openapi`, `mcp(...)`,
+`sandbox()`, `skills(...)`. Without `mcp(...)` entries, which MCP tools an agent has is decided
+where its virtual key is configured, in the gateway. Tool names must be unique across the
+toolbox. The retired `h.wrap(mcp=[...])` / `h.tools(mcp=[...])` still name Virtual MCPs for one
+release, with a warning (`mcp("name")` in `tools=[...]` replaces them; `mcp=[]` is
+`without={"mcp"}`).
 
 With memory on, every tool is published to the memory service's tool catalog, through
-governance, in the background and once per content: MCP tools with their annotations, local,
-OpenAPI and A2A tools with their declared side effects. An administrator sets `approve_when` on
+governance, in the background and once per content: MCP tools (the gateway's and your own
+servers') with their annotations, local, OpenAPI and A2A tools with their declared side
+effects. An administrator sets `approve_when` on
 them there ([governance.md](governance.md)). Concurrent runs that find the toolbox stale share
 one listing.
 

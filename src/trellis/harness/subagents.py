@@ -51,7 +51,8 @@ from trellis.harness.journal import Journal, content_key
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools.base import SideEffects, Tool
-from trellis.harness.tools.toolbox import listed, side_effects_of
+from trellis.harness.tools.mcp import side_effects_of
+from trellis.harness.tools.toolbox import listed
 from trellis.runs import ConflictError
 
 if TYPE_CHECKING:

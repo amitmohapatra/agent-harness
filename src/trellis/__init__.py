@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from trellis.harness.sandbox import sandbox
     from trellis.harness.settings import Settings
     from trellis.harness.skills import skills
+    from trellis.harness.tools.mcp import mcp, stdio
     from trellis.harness.tools.sources import a2a, openapi, tool
 
 _EXPORTS = {
@@ -43,6 +44,8 @@ _EXPORTS = {
     "tool": "trellis.harness.tools.sources",
     "a2a": "trellis.harness.tools.sources",
     "openapi": "trellis.harness.tools.sources",
+    "mcp": "trellis.harness.tools.mcp",
+    "stdio": "trellis.harness.tools.mcp",
     "skills": "trellis.harness.skills",
     "sandbox": "trellis.harness.sandbox",
     "ReAct": "trellis.harness.react",
@@ -71,9 +74,11 @@ __all__ = [
     "Settings",
     "a2a",
     "current",
+    "mcp",
     "openapi",
     "sandbox",
     "skills",
+    "stdio",
     "tool",
 ]
 

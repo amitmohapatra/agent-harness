@@ -1,5 +1,6 @@
-"""Sub-agents: ``agent.as_tool()`` — a ``ReAct`` planner delegating to two agents at once, one
-of which asks a person before it answers; the answer reaches it through the planner's resume.
+"""Sub-agents: an agent in another agent's ``tools=[...]`` — a ``ReAct`` planner delegating to
+two agents at once, one of which asks a person before it answers; the answer reaches it through
+the planner's resume.
 
     python -m examples.05_features.subagents
 """
@@ -54,7 +55,7 @@ async def main() -> None:
                 ),
             ),
             id="planner",
-            tools=[scout.as_tool(), hotel.as_tool()],  # both only read: they run at once
+            tools=[scout, hotel],  # both only read: they run at once
         )
         result = await planner.run("Plan a weekend in Oslo", user="ada")
         while result.interrupt is not None:  # the booker asks, through the planner

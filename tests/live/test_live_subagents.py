@@ -64,7 +64,7 @@ async def test_a_planner_with_two_children_one_asking_survives_a_killed_worker(
     planner = harness.wrap(
         ReAct(system="You plan trips.", model=model),
         id=f"live-planner-{suffix}",
-        tools=[scout.as_tool(), hotel.as_tool()],
+        tools=[scout, hotel],
     )
     handle = await planner.start("Plan a weekend in Oslo", user="live-user")
     assert await claimed_again(harness, planner)

@@ -51,7 +51,7 @@ make install                         # uv sync (the sibling repositories are pat
 | a part turned off | `await agent.run(q, user="ada", without={"memory"})` | [configuration.md](docs/configuration.md#what-is-on-and-how-to-turn-it-off) |
 | a time limit | `h.wrap(target, id="a", timeout=600)` | [reliability.md](docs/reliability.md) |
 | the framework's own options | `h.wrap(graph, id="a", framework_options={"recursion_limit": 50})` | [configuration.md](docs/configuration.md#the-frameworks-own-run-options) |
-| sub-agents | `h.wrap(planner, id="p", tools=[scout.as_tool()])` | [subagents.md](docs/subagents.md) |
+| sub-agents | `h.wrap(planner, id="p", tools=[scout])` | [subagents.md](docs/subagents.md) |
 | a chat UI, or other agents calling mine | `agent.serve_chat(app)`, `agent.serve_a2a(app, url)` | [surfaces.md](docs/surfaces.md) |
 | to call another agent | `h.wrap(target, id="a", tools=[a2a("https://...")])` | [surfaces.md](docs/surfaces.md) |
 | a score for a test set | `await h.evaluate(agent, dataset, [exact_match(), called("lookup")])` | [evaluation.md](docs/evaluation.md) |

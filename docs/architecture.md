@@ -153,7 +153,7 @@ src/trellis/
                        governance per tenant; wrap / tools / worker / inbox / feedback /
                        add_document / evaluate / score / prompt / model_headers
     agent.py           Agent: run, stream, start, execute (a claimed run), resume, cancel, events,
-                       schedule, as_tool, serve_*; RunHandle; memory push and records
+                       schedule, serve_*; RunHandle; memory push and records
     pipeline.py        one attempt of one run, from its record: the fixed pipeline below
     runtime.py         Runtime (trellis.current()): ask, approve, the pause, interrupt ids,
                        progress checkpoints, tools.call
@@ -166,7 +166,7 @@ src/trellis/
     middleware.py      LangChain v1 middleware: HarnessTools, ModelHooks, StepLimit, StallGuard,
                        ReadTools, read_result, RunCheckpointer; ToolGuidance, AnswerCheck (opt-in)
     react.py           ReAct(...): a create_agent graph with the native middleware and the harness's
-    subagents.py       agent.as_tool(): a wrapped agent as a tool, each call a child run
+    subagents.py       a wrapped agent in tools=[...]: a tool, each call a child run
     sandbox/           sandbox(): the run's own sandbox as three tools (base: the provider
                        interface; docker: DockerSandbox)
     prompts.py         prompt sources (code, PROMPTS_DIR, Langfuse, the gateway), pinned per run
@@ -253,7 +253,7 @@ flowchart TB
   bridge --> hooks["hooks.Chain"]
   agent --> toolbox["tools.toolbox.Toolbox"]
   toolbox --> governance
-  toolbox --> sources["tools.sources<br/>(tool · a2a · openapi · sandbox · skills · as_tool)"]
+  toolbox --> sources["tools.sources<br/>(tool · mcp · a2a · openapi · sandbox · skills · agents)"]
   sources --> a2aclient["a2a.client<br/>(remote · RemoteAgent)"]
   subgraph clients["clients (one per service)"]
     bifrost["bifrost.Gateway"]
@@ -352,7 +352,7 @@ tools all only read as governance says now, when there are enough of them
 (`CODE_MODE_MIN_SERVERS` 3 or `CODE_MODE_MIN_TOOLS` 20); its meta-tools are offered under the
 harness's names, so the gateway returns every call to the bridge. Each new set of names is
 checked for what makes tools hard to choose among (`tools/lint.py`: descriptions, parameters,
-names, look-alikes, how many), each finding a logged warning. With `mcp=` the definitions
+names, look-alikes, how many), each finding a logged warning. With `mcp("name")` entries the definitions
 are the named Virtual MCPs' tools; a tool its client lists in `tools_to_auto_execute` is left
 out ([gateway.md](gateway.md)).
 

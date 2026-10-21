@@ -71,6 +71,36 @@ Each call becomes a `Decision`:
 | `risk`, `rule` | the risk governance used, and the approval rule, if any |
 | `question` | what an approver reads: `"Approve <tool>? <reason>"` |
 
+## One place for approval rules
+
+When a call needs a person is a rule, and rules live in one place: **the tool catalog** in the
+memory service — a tool's `risk` and its `approve_when`. Every framework, every process and
+every worker reads the same rules, an administrator changes them without a deploy, and the
+approvals people give are learned into suggested rules there.
+
+| You want | Where it goes |
+|---|---|
+| a tool always asked about, or never | its `risk` in the catalog (`irreversible`, `read`); with memory off, its declared `side_effects` |
+| asked by the call's arguments (an amount, a list of values, an id) | `approve_when` in the catalog: `amount > 100` |
+| refused outright, rewritten, decided on data outside the call, routed to a reviewer or a screen of your own | a `before_tool` hook ([hooks.md](hooks.md)): custom logic, not a rule |
+
+Set a rule from code (a deploy script) with the memory SDK — the same entry an administrator
+edits:
+
+```python
+scope = h.memory.client.bind(tenant_id=await h.tenant(), agent_id="refunds")
+await scope.advanced.tools.put_catalog([{"name": "refund", "approve_when": "amount > 100"}])
+```
+
+There is no other rule mechanism: no rule in `h.wrap`, in `ReAct` or in a tool's code. A hook
+whose only job is "ask when the amount is over 100" is a catalog rule written in the wrong
+place — [hooks.md](hooks.md) and
+[`examples/02_way1_react/hooks_guardrails.py`](../examples/02_way1_react/hooks_guardrails.py)
+show the catalog way. A framework's own approval gate (LangChain's `HumanInTheLoopMiddleware`,
+an OpenAI Agents `needs_approval` tool) still works, asked once with governance
+([interrupts.md](interrupts.md)), and the harness says at `h.wrap` that its rule belongs in the
+catalog.
+
 ## The catalog, kept fresh
 
 Governance reads the catalog (`GET /v1/tools?names=`) for the tools it has been asked about, in
@@ -119,9 +149,9 @@ through the harness's background writes, so they are kept on disk across an outa
   * `ask`: it pauses the run for approval (`InterruptReason.APPROVAL`, the call attached, the
     decision's `question`).
 
-  Your code comes first: a `before_tool` hook may deny a call, or ask about one governance
-  would run — by its arguments, of an `assignee`, on your own screen
-  ([interrupts.md](interrupts.md#approval-rules-in-code-a-before_tool-hook)); it never
+  Your code comes first, for what a rule cannot say: a `before_tool` hook may deny a call, or
+  ask about one of an `assignee`, on your own screen
+  ([interrupts.md](interrupts.md#who-reviews-on-which-screen-a-before_tool-hook)); it never
   approves one governance asks about. A tool a reviewer approved for the rest of the run
   (`remember="run"`) is not asked about again in it.
 

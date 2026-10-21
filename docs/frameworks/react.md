@@ -113,7 +113,7 @@ answers that it is not available):
 | `FilesystemMiddleware`'s scratch tools (Deep Agents), `files` | `ls`, `write_file` and `edit_file` beside `read_file`: notes and drafts kept as files, one at most 100,000 characters, a run's at most 1,000,000 |
 A `TodoListMiddleware` or `FilesystemMiddleware` given to `ReAct(middleware=)` replaces the
 automatic one (it is then always on). Delegation is your code's: a wrapped agent's
-`agent.as_tool()` ([subagents.md](../subagents.md)).
+another wrapped agent in `tools=[...]` ([subagents.md](../subagents.md)).
 
 **With a budget** (`h.wrap(budget=Budget(...))`, [api.md](../api.md#budget)): once the run's —
 or its parent's — is spent, one more call without tools for the best answer with what it has;
@@ -210,7 +210,7 @@ that needs no tool (a greeting, a rule the context holds) would be made to call 
 | Tool hints | each model call is offered the tools offered at that moment (the hinted ones, the memory tools, those already used, what a `tool_search` found) |
 | Model steps | the graph's checkpoint is the run's: a resume continues from the last step, so the model is not asked again for what it already decided |
 | Several calls in one step | the read-only calls run at once; the others one at a time, in the model's order; a call that pauses lets the others finish (journaled) before the run pauses, and the pauses of one step come one by one |
-| Sub-agents | another wrapped agent in `tools=[agent.as_tool()]` is a call like any other ([subagents.md](../subagents.md)) |
+| Sub-agents | another wrapped agent in `tools=[agent]` is a call like any other ([subagents.md](../subagents.md)) |
 | Skills | with `h.wrap(..., skills=[...])`: their names and descriptions in the context, `load_skill` and `read_skill_file` offered ([skills.md](../skills.md)) |
 | Records, grounding, judges, tracing, trajectory | as for every target |
 

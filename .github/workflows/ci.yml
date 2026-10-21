@@ -72,6 +72,10 @@ jobs:
         # every feature x adapter x way x mode x selection, scripted (tests/matrix), in shards
         # at once; build/matrix.md is the matrix as it ran
         run: make matrix
+      - name: Feature matrix, model names
+        # the ReAct cells again with a model name: served by Bifrost (gateway on) and by an
+        # OpenAI-compatible endpoint (gateway off) — with the model objects above, all three modes
+        run: make matrix-models
       - uses: actions/upload-artifact@v4
         if: always()
         with:

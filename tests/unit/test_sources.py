@@ -5,6 +5,7 @@ import pytest
 import respx
 
 from trellis import a2a, openapi, tool
+from trellis.contracts import ConfigurationError
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 from trellis.harness.tools.sources import as_source
 
@@ -35,7 +36,7 @@ def test_a_bare_function_is_a_source_and_anything_else_is_refused() -> None:
         return 1
 
     assert as_source(lookup).spec.name == "lookup"  # type: ignore[attr-defined]
-    with pytest.raises(TypeError):
+    with pytest.raises(ConfigurationError, match="not a tool: 42 — give a function"):
         as_source(42)  # type: ignore[arg-type]
 
 

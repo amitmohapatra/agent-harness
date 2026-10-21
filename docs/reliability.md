@@ -384,7 +384,7 @@ line naming both versions.
 | a sandbox call: `sandbox(timeout=)` (a command killed past it) | 120 s (the same) | the author |
 | an MCP call | the run's remaining time, else the Bifrost SDK's 60 s | — |
 | a model call: `ReAct(model_timeout=)` | the model client's own (none for `ChatOpenAI`): the run's time bounds it | the author |
-| a sub-agent's run (`agent.as_tool()`) | what is left of its parent's time, and its parent's deadline | — |
+| a sub-agent's run (an agent in `tools=[...]`) | what is left of its parent's time, and its parent's deadline | — |
 | an agent's runs' working time: `h.wrap(timeout=)` | none | the agent's author (every entry, scheduled runs too) |
 | a run's working time: `timeout=` | the agent's | the caller of `run`/`stream`/`start` |
 | a run's end: `deadline=` | none | the caller |

@@ -246,7 +246,7 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
                 target,
                 id=f"tool-choice-{variant}",
                 tools=tools,
-                mcp=[],
+                without={"mcp"},
                 hooks=[sent],
                 timeout=RUN_SECONDS,
             )
