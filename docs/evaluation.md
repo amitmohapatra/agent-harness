@@ -407,6 +407,27 @@ configured (the repository variable `BENCH_BIFROST_URL` and the secret
 `BENCH_BIFROST_VIRTUAL_KEY`; without them the job is skipped): the smoke set (10 tools, one
 repeat) on a pull request, the 10- and 50-tool catalogues nightly.
 
+### Framework head-to-head
+
+`make bench-frameworks` (`python -m benchmark.cost.frameworks`) runs the cost benchmark's tasks,
+catalogues and metrics on every framework the harness supports, three ways, so "which framework,
+and is our `ReAct` the best of them" is a measured answer. The results:
+[eval/frameworks.md](eval/frameworks.md).
+
+```bash
+make bench-frameworks BENCH_ARGS="--model provider/model --window 8192 --n 6"
+# fewer arms or cells: --arms langchain/A,react/C --cells short,long; no load check: --load ''
+```
+
+| | |
+|---|---|
+| Arms | **A** each framework alone, as its own docs set it up: LangChain `create_agent`, `create_deep_agent`, the OpenAI Agents SDK on an OpenAI-compatible chat-completions model, the Claude Agent SDK, CrewAI (its own venv, `--crewai-python`; no wrapped arm); with its signature feature on as `A+<feature>` (LangChain summarization, Deep Agents planning, an OpenAI Agents session). **B** the same agent through `h.wrap` (memory, the run store, tool narrowing on). **C** `ReAct`, and `C-<feature>` run `without={feature}` for `tool_search`, `planning`, `files`, `code_mode`, `memory` |
+| Controls | one model, the same tools (the same tool code), instructions and tasks; every model call goes through a metering proxy (`benchmark/cost/frameworks/meter.py`) that counts tokens and calls the same way for every client and sends one seed per run, one temperature and the same output cap; each arm in its own process (cold start), in an order shuffled with `--seed`; a native arm's process has no harness service in its environment, a wrapped one uses the private memory service and agent-runs the environment names |
+| Cells | `short` (the six short tasks, 10 tools), `long` (the three long ones, 10 tools), `many` (the short tasks, 100 tools), `many50` (50 tools); `--n` runs per cell, its tasks in turn, the k-th pass with seed `seed + k` |
+| Per run | task success and tool coverage (the cost benchmark's), input and output tokens and model calls (the proxy's), wall seconds (p50/p95 per cell), CPU seconds of the arm's process and its children, its peak resident memory |
+| Also | a load check (one short task at concurrency 1 and 10) of each plain arm, and kill-mid-run survival of the wrapped ones: a queued run's worker killed after its first model call, a second worker started |
+| Report | `<out>/rows.jsonl` (every run, appended as it ends; a stopped run resumes) and the markdown, `--doc` (default `docs/eval/frameworks.md`): the arms' table, a ranking per task type, the load check, the kills, what was skipped and why, and the verdict |
+
 ## Load benchmark
 
 `make bench-load` (`python -m benchmark.load`) runs many `ReAct` runs at once — a tool call and
