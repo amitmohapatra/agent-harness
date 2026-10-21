@@ -132,6 +132,9 @@ READ_RESULT: Final = "read_result"
 READ_FILE: Final = "read_file"
 #: The think tool (``trellis.harness.adaptive``): a thought noted, nothing read or changed.
 THINK: Final = "think"
+#: Deep Agents' ``task`` tool (``adaptive.Helpers``): a helper's run, offered on a task of
+#: several parts.
+TASK: Final = "task"
 READ_LIMIT: Final = 20_000
 #: What the model is asked when its steps run out.
 LAST_STEP: Final = (
@@ -171,6 +174,10 @@ class _Step:
     turn: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
+#: The metadata key of a framework tool whose call, cut by a crash, continues where it was
+#: when it runs again (a helper's run: ``adaptive.Helpers``), so ``GovernTools`` runs it again
+#: rather than reporting its effect unknown.
+RESUMABLE: Final = "trellis_resumable"
 #: The tool sets whose LangChain tools a :class:`HarnessTools` keeps converted, at most.
 TOOLSETS: Final = 64
 #: The tools that only change the graph's own state (no effect outside the run, kept by its
@@ -218,7 +225,7 @@ class GovernTools(AgentMiddleware):
             return await handler(request)
 
         async def run(args: dict[str, Any]) -> Any:
-            done = await handler(request.override(tool_call={**call, "args": args}))
+            done = _answer_of(await handler(request.override(tool_call={**call, "args": args})))
             if isinstance(done, ToolMessage) and done.status == "error":
                 raise ToolError(text_of(done.content), source="tools")
             return text_of(getattr(done, "content", done))
@@ -229,13 +236,24 @@ class GovernTools(AgentMiddleware):
             input_schema=_schema_of(own),
             side_effects=side_effects_of(own.metadata),
         )
-        outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
+        resumable = bool((own.metadata or {}).get(RESUMABLE))
+        outcome = await bridge.call(
+            Tool(spec, run, resumable=resumable), dict(call["args"]), call_id=str(call["id"])
+        )
         return ToolMessage(
             content=text_of(outcome.output),
             tool_call_id=str(call["id"]),
             name=call["name"],
             status="error" if outcome.status in FAILED else "success",
         )
+
+
+def _answer_of(done: ToolMessage | Command[Any]) -> Any:
+    """A tool's answer: its message, or the one its command adds (Deep Agents' ``task``)."""
+    if not isinstance(done, Command) or not isinstance(done.update, Mapping):
+        return done
+    said = [m for m in done.update.get("messages") or () if isinstance(m, ToolMessage)]
+    return said[-1] if said else done
 
 
 def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
@@ -1212,9 +1230,10 @@ def _empty(message: ToolMessage) -> bool:
 
 
 def _tools(request: ModelRequest[Any], runtime: Runtime | None) -> bool:
-    """Whether the model has tools to call beyond the readers of earlier results and the think
-    tool: the run's own, or the graph's."""
-    own = [t for t in request.tools if _named(t) not in (READ_RESULT, READ_FILE, THINK)]
+    """Whether the model has tools to call beyond the readers of earlier results, the think
+    tool and the helpers' ``task`` (each offered on its own signal): the run's own, or the
+    graph's."""
+    own = [t for t in request.tools if _named(t) not in (READ_RESULT, READ_FILE, THINK, TASK)]
     return bool(own) or bool(runtime is not None and runtime.tool_names())
 
 

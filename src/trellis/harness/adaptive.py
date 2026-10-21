@@ -33,14 +33,23 @@ first call once the model's prompt cache is seen to work).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import operator
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any, Final, NotRequired
 
 import json_repair
+from deepagents.backends import StateBackend
 from deepagents.middleware.rubric import RubricMiddleware
+from deepagents.middleware.subagents import (
+    GENERAL_PURPOSE_SUBAGENT,
+    TASK_TOOL_DESCRIPTION,
+    CompiledSubAgent,
+    SubAgentMiddleware,
+)
 from deepagents.middleware.unsupported_content import UnsupportedContentMiddleware
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -54,16 +63,36 @@ from langchain.agents.middleware.types import ExtendedModelResponse, PrivateStat
 from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from trellis.harness.automatic import SCRATCH, on, without_tools
+from trellis.contracts import ConfigurationError
+from trellis.harness.automatic import (
+    MIN_WINDOW,
+    SCRATCH,
+    asks_for_steps,
+    on,
+    refused,
+    without_tools,
+)
 from trellis.harness.bounded import LRU
-from trellis.harness.middleware import THINK, _named, _writes_offered
+from trellis.harness.middleware import (
+    FAILED,
+    RESUMABLE,
+    TASK,
+    THINK,
+    _named,
+    _writes_offered,
+)
+from trellis.harness.runtime import Runtime, current
+from trellis.harness.subagents import SubAgent
 from trellis.harness.telemetry import LoopEvent, metrics
+from trellis.harness.tools import bridge
 from trellis.harness.tools.base import FIX_ARGUMENTS, arguments_problem
+from trellis.harness.tools.convert import text_of
 
 log = logging.getLogger("trellis.react")
 
@@ -437,9 +466,175 @@ class Rubric(RubricMiddleware):
         return await super().aafter_agent(state, runtime) if on("rubric") else None
 
 
+# --------------------------------------------------------------------------- helpers
+#: The helpers one run has working at once (the parent's step may call more: they wait).
+HELPERS_AT_ONCE: Final = 4
+#: The general-purpose helper's name, description and instructions (Deep Agents').
+GENERAL: Final = str(GENERAL_PURPOSE_SUBAGENT["name"])
+#: The parent agents whose general-purpose helper is kept, at most.
+HELPER_AGENTS: Final = 64
+#: The todos of a plan from which a task is several independent parts.
+PARTS: Final = 3
+
+
+class Helpers(SubAgentMiddleware):
+    """Deep Agents' ``SubAgentMiddleware`` (``subagents``): its ``task`` tool offered on a
+    task of several parts — a long task's window (:data:`~.automatic.MIN_WINDOW`), and the
+    request asking for steps, a plan of :data:`PARTS` todos or more, or ``task`` already
+    called in the conversation — for a general-purpose helper and every agent the run has as a
+    tool (each then reached through ``task`` only). Each ``task`` call is a child run of the
+    harness (``trellis.harness.subagents``): its own record naming its parent, its tools
+    governed and journaled, its journal kept in its parent's (a crash continues it), its
+    spending the parent's (a parent's budget caps its helpers), at most
+    :data:`HELPERS_AT_ONCE` at once; only its answer comes back. Named as Deep Agents'."""
+
+    def __init__(self, model: Any, *, window: int | None) -> None:
+        general: CompiledSubAgent = {
+            "name": GENERAL,
+            "description": str(GENERAL_PURPOSE_SUBAGENT["description"]),
+            "runnable": RunnableLambda(self._general),
+        }
+        super().__init__(backend=StateBackend(), subagents=[general])
+        self.model = model
+        self.window = window
+        task = self.tools[0]
+        task.metadata = {**(task.metadata or {}), "side_effects": "write", RESUMABLE: True}
+        self._helpers: LRU[str, SubAgentTool] = LRU(HELPER_AGENTS)
+        self._slots: weakref.WeakKeyDictionary[Runtime, asyncio.Semaphore] = (
+            weakref.WeakKeyDictionary()
+        )
+
+    @property
+    def name(self) -> str:
+        return SubAgentMiddleware.__name__
+
+    def wanted(self, request: ModelRequest[Any]) -> bool:
+        """Whether this call is offered ``task``: see the class."""
+        roomy = self.window is not None and self.window >= MIN_WINDOW
+        return roomy and on("subagents") and _parts(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        runtime = current()
+        if runtime is None or not self.wanted(request):
+            return await handler(without_tools(request, {TASK}))
+        agents = _agents(runtime)
+        listed = [(GENERAL, str(GENERAL_PURPOSE_SUBAGENT["description"]))]
+        listed += [(name, runtime.toolbox[name].spec.description) for name in agents]
+        lines = "\n".join(f"- {name}: {description}" for name, description in listed)
+        tools = [
+            t.model_copy(
+                update={"description": TASK_TOOL_DESCRIPTION.format(available_agents=lines)}
+            )
+            if _named(t) == TASK and isinstance(t, BaseTool)
+            else t
+            for t in request.tools
+            if _named(t) not in agents
+        ]
+        return await handler(request.override(tools=tools))
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        call = request.tool_call
+        runtime = current()
+        if call["name"] != TASK or runtime is None:
+            return await handler(request)
+        if not on("subagents"):
+            return refused(dict(call))
+        named = call["args"].get("subagent_type")
+        if named not in _agents(runtime):
+            return await handler(request)  # Deep Agents' task: the general-purpose helper
+        async with self._slot(runtime):
+            outcome = await bridge.call(
+                runtime.toolbox[named],
+                {"message": call["args"].get("description", "")},
+                call_id=str(call["id"]),
+            )
+        return ToolMessage(
+            content=text_of(outcome.output),
+            tool_call_id=str(call["id"]),
+            name=TASK,
+            status="error" if outcome.status in FAILED else "success",
+        )
+
+    def _slot(self, runtime: Runtime) -> asyncio.Semaphore:
+        slots = self._slots.get(runtime)
+        if slots is None:
+            slots = self._slots[runtime] = asyncio.Semaphore(HELPERS_AT_ONCE)
+        return slots
+
+    async def _general(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Deep Agents' general-purpose helper as a child run of the harness: an agent of the
+        run's own agent — its instructions Deep Agents', its model and tools the parent's — run
+        on the task, its answer the helper's last message."""
+        runtime = current()
+        if runtime is None:
+            raise ConfigurationError("a ReAct's helpers run inside a harness run")
+        helper = self._helpers.setdefault(runtime.agent.id, lambda: self._made(runtime))
+        message = state["messages"][-1]
+        async with self._slot(runtime):
+            answer = await helper.call({"message": text_of(message.content)})
+        return {"messages": [AIMessage(content=text_of(answer))]}
+
+    def _made(self, runtime: Runtime) -> SubAgentTool:
+        from trellis.harness.react import ReAct  # noqa: PLC0415 - react builds this
+
+        parent = runtime.agent
+        helper = parent.harness.agents.get(f"{parent.id}{HELPER}") or parent.harness.wrap(
+            ReAct(
+                str(GENERAL_PURPOSE_SUBAGENT["system_prompt"]),
+                self.model,
+                context_window=self.window,
+            ),
+            id=f"{parent.id}{HELPER}",
+            tools=list(parent.sources),
+            without={*parent.without, "subagents"},
+            budget=None,
+        )
+        return SubAgentTool(helper)
+
+
+#: The general-purpose helper's agent id: its parent's, and this.
+HELPER: Final = "-helper"
+
+
+class SubAgentTool:
+    """A helper agent's child run for a task (``trellis.harness.subagents``)."""
+
+    def __init__(self, agent: Any) -> None:
+        self.source = SubAgent(agent, name=agent.id, description=None, side_effects=None)
+
+    async def call(self, args: dict[str, Any]) -> Any:
+        return await self.source._run(args)
+
+
+def _agents(runtime: Runtime) -> list[str]:
+    """The run's tools that are agents (sub-agents: their calls continue after a crash)."""
+    return sorted(name for name, tool in runtime.toolbox.items() if tool.resumable)
+
+
+def _parts(request: ModelRequest[Any]) -> bool:
+    """Whether the task has several parts: the request asks for steps, the plan has
+    :data:`PARTS` todos or more, or ``task`` was called in this conversation already."""
+    state = request.state or {}
+    if asks_for_steps(request) or len(state.get("todos") or ()) >= PARTS:
+        return True
+    return any(
+        isinstance(m, AIMessage) and any(c["name"] == TASK for c in m.tool_calls)
+        for m in reversed(state.get("messages", []))
+    )
+
+
 __all__ = [
     "CalibratedCounter",
     "ClearOldResults",
+    "Helpers",
     "NativeOutput",
     "RepairToolCalls",
     "Rubric",

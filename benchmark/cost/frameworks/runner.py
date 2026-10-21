@@ -48,6 +48,7 @@ CELLS: Final = {
     "output": (10, "output"),
     "rules": (10, "rules"),
     "image": (10, "image"),
+    "multi": (10, "multi"),
 }
 #: The cells a run measures unless told.
 DEFAULT_CELLS: Final = ("short", "long", "many")
@@ -83,7 +84,11 @@ def plan(
     _, length = CELLS[cell]
     tasks = [
         (s, t)
-        for s in (sets if sets is not None else [*catalog.task_sets(), *catalog.item_sets()])
+        for s in (
+            sets
+            if sets is not None
+            else [*catalog.task_sets(), *catalog.item_sets(), *catalog.multi_sets()]
+        )
         for t in s.tasks
         if t["metadata"]["length"] == length
     ]

@@ -63,6 +63,7 @@ TARGETS: Final[dict[str, Target]] = {
     "clear_inputs": Target("input_tokens", Better.LOWER, CORE),
     "unsupported_content": Target("errored", Better.LOWER, ("image",)),
     "rubric": Target("success", Better.HIGHER, ("long",)),
+    "subagents": Target("success", Better.HIGHER, ("multi",)),
 }
 
 

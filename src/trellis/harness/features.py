@@ -41,6 +41,7 @@ Feature = Literal[
     "clear_inputs",
     "unsupported_content",
     "rubric",
+    "subagents",
     # the parts they cover (``memory_push``, ``memory_pull``, ``records`` and ``hints`` are also
     # still accepted as names, deprecated: :data:`DEPRECATED`)
     "memory_push",
@@ -68,6 +69,7 @@ COVERS: Final[dict[str, tuple[Feature, ...]]] = {
         "clear_inputs",
         "unsupported_content",
         "rubric",
+        "subagents",
     ),
     # a deprecated name: the memory tools, ``tool_search`` among them
     "memory_pull": ("memory_pull", "tool_search"),

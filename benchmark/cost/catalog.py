@@ -657,6 +657,72 @@ def item_sets() -> list[TaskSet]:
     ]
 
 
+def multi_sets() -> list[TaskSet]:
+    """Tasks of three independent parts and a combined answer (the helpers' cell): scored on
+    the answer holding each part's facts (a helper's calls are its own run's, not the
+    parent's trajectory)."""
+    store_tools = [t for t in scenario.TOOLS if t.spec.name != "transfer_status"]
+    ask = "Research these three things independently, then combine them into one short report:"
+    return [
+        TaskSet(
+            "store (multi)",
+            scenario.SYSTEM,
+            store_tools,
+            [
+                _task(
+                    scenario.item(
+                        f"{ask}\n1. the excess stock at store S12\n2. the lost sales at store "
+                        "S12\n3. the units available to allocate",
+                        [],
+                        expected=["ST-205", "ST-101", "420"],
+                    ),
+                    "multi: store, three parts",
+                    "multi",
+                )
+            ],
+        ),
+        TaskSet(
+            "help desk (multi)",
+            heldout.HELPDESK_SYSTEM,
+            heldout.HELPDESK_TOOLS,
+            [
+                _task(
+                    scenario.item(
+                        f"{ask}\n1. the network team's open high-priority tickets\n2. the "
+                        "network team's SLA breaches\n3. who laptop LT-2290 is assigned to",
+                        [],
+                        expected=["T-101", "T-188", "omar"],
+                    ),
+                    "multi: help desk, three parts",
+                    "multi",
+                )
+            ],
+        ),
+        TaskSet(
+            "travel (multi)",
+            heldout.TRAVEL_SYSTEM,
+            heldout.TRAVEL_TOOLS,
+            [
+                _task(
+                    scenario.item(
+                        f"{ask}\n1. employee e-401's trips this year\n2. employee e-401's booked "
+                        "flights\n3. what the travel policy says about the meal allowance",
+                        [],
+                        expected=["6", "QX7P2", "45"],
+                    ),
+                    "multi: travel, three parts",
+                    "multi",
+                )
+            ],
+        ),
+    ]
+
+
+def every_set() -> list[TaskSet]:
+    """The cost benchmark's sets, and the ReAct items' (structured, rules, image, multi)."""
+    return [*task_sets(), *item_sets(), *multi_sets()]
+
+
 #: What done looks like for each long task (``RubricMiddleware``'s ``rubric``), by task name.
 RUBRICS: Final = {
     "store: five parts": (

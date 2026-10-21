@@ -144,6 +144,8 @@ def ReAct(
         # outside the harness's tools, whose calls it reads the answers of
         adaptive.StrictTools(),
         ours.HarnessTools(),
+        # inside the harness's tools (it reads them), outside governance (it governs a call)
+        adaptive.Helpers(chat, window=window),
         ours.GovernTools(),
         ours.StallGuard(max_repeats or ours.MAX_REPEATS),
         ours.StepLimit(max_steps or ours.MAX_STEPS),

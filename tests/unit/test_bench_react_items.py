@@ -224,3 +224,21 @@ def test_the_decisions_table_and_the_command(tmp_path: Path, capsys: Any) -> Non
     assert "| think | 0 | — |" in printed
     decided = {d["item"]: d for d in json.loads(out.read_text())}
     assert decided["tool_repair"]["kept"] and not decided["rubric"]["kept"]
+
+
+def test_the_multi_cell_scores_the_combined_answer_and_the_serial_arm_runs_one_helper() -> None:
+    planned = runner.plan("multi", 3, 0)
+    assert all(p.task["metadata"]["needed_tools"] == [] and p.task["expected"] for p in planned)
+    serial = built.ARMS["react/C+subagents-serial"]
+    assert serial.helpers_at_once == 1 and serial.without == set(built.ADAPTIVE) - {"subagents"}
+    assert len(catalog.every_set()) == len(catalog.task_sets()) + 5 + 3
+
+
+async def test_the_serial_arm_sets_one_helper_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trellis.harness import adaptive
+
+    monkeypatch.setattr(adaptive, "HELPERS_AT_ONCE", adaptive.HELPERS_AT_ONCE)
+    setup = built.Setup.on("http://p", "granite/g", "vk")
+    monkeypatch.setenv("BIFROST_URL", "http://p/v1")
+    await built.wrapped(built.ARMS["react/C+subagents-serial"], setup, None, "s", [])
+    assert adaptive.HELPERS_AT_ONCE == 1

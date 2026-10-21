@@ -55,6 +55,7 @@ ADAPTIVE: Final = (
     "clear_inputs",
     "unsupported_content",
     "rubric",
+    "subagents",
 )
 #: The name the agent goes by where a framework asks for one.
 NAME: Final = "assistant"
@@ -72,6 +73,9 @@ class Arm:
     venv: Literal["main", "crewai"] = "main"
     #: C: the adaptive items it runs with (:data:`ADAPTIVE`; ``None``: all of them)
     adds: tuple[str, ...] | None = None
+    #: C: the helpers a run has working at once (``None``: ``adaptive.HELPERS_AT_ONCE``), so
+    #: the helpers' parallel and serial latencies are measured apart
+    helpers_at_once: int | None = None
 
     @property
     def wrapped(self) -> bool:
@@ -149,6 +153,14 @@ def _arms() -> dict[str, Arm]:
                 adds=(item,),
             )
             for item in ADAPTIVE
+        ),
+        Arm(
+            "react/C+subagents-serial",
+            "react",
+            "C",
+            "ReAct with the helpers alone, one at a time",
+            adds=("subagents",),
+            helpers_at_once=1,
         ),
     ]
     return {arm.name: arm for arm in arms}
@@ -560,6 +572,10 @@ async def wrapped(
     arm's ``ReAct`` answers an ``output`` when the task set has one."""
     if arm.kind == "C":
         from trellis import ReAct
+        from trellis.harness import adaptive
+
+        if arm.helpers_at_once is not None:  # this process's arm: one setting for its runs
+            setattr(adaptive, "HELPERS_AT_ONCE", arm.helpers_at_once)  # noqa: B010
 
         target = ReAct(
             system,
