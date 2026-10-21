@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -42,13 +43,13 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.matrix.dimensions import SWITCHES
 from tests.matrix.model import Feature, Selection
 from tests.matrix.models import ModelLog
-from tests.support.adapters import BUILDERS
+from tests.support.adapters import BUILDERS, SYSTEM
 from tests.support.catalog import FakeCatalog
 from tests.support.gateway import URL as GATEWAY_URL
 from tests.support.gateway import FakeGateway
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
-from tests.support.planned import Call, PlannedChatModel
-from trellis import Harness, Settings, tool
+from tests.support.planned import Call, PlannedChat, PlannedChatModel
+from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import (
     Interrupt,
     InterruptReason,
@@ -79,6 +80,10 @@ from trellis.harness.tools import base
 from trellis.runs import Lease, PayloadTooLargeError
 from trellis.runs import Worker as RunsWorker
 
+#: ``make matrix-models``: every ``ReAct`` cell names its model (``MATRIX_MODELS=named``)
+#: instead of passing a model object — the other two of the three model modes.
+NAMED: Final = os.environ.get("MATRIX_MODELS") == "named"
+NAMED_MODEL: Final = "local/small"
 USER: Final = "ada"
 #: The agent's version and default time limit when those switches are on.
 VERSION: Final = "v-matrix"
@@ -276,6 +281,11 @@ class World:
         self.recorder = Recorder()
         self.memory_service = FakeMemoryService(candidates=[])  # no narrowing unless asked
         self.fake_gateway = MatrixGateway(bundles={"": [KEY_TOOL]})
+        #: ``MATRIX_MODELS=named``: a ``ReAct`` names its model, served by the gateway in the
+        #: deployment's mode — Bifrost with the gateway on, an OpenAI-compatible endpoint (a
+        #: gateway of its own, ``OPENAI_BASE_URL``) without it
+        self.compat: FakeGateway | None = None
+        self._serving: FakeGateway | None = None
         #: the team's own approval rules (``with_blocks``: its governance block)
         self.team_catalog = FakeCatalog()
         self.judged: list[EvalCase] = []
@@ -433,6 +443,18 @@ class World:
         mcp: Sequence[str] | None,
     ) -> tuple[Any, list[Any]]:
         adapter = "claude_agent_sdk" if adapter == "claude" else adapter
+        if NAMED and adapter == "react":  # the model by name, served by the deployment's gateway
+            serving = self._serving
+            if serving is None:
+                if "gateway" in self.switched:
+                    serving = self.fake_gateway
+                    serving.serve_models(self.monkeypatch)
+                else:
+                    serving = self.compat = FakeGateway()
+                    serving.serve_openai_compatible(self.monkeypatch)
+                self._serving = serving
+            serving.chat = PlannedChat(plan)
+            return ReAct(system=SYSTEM, model=NAMED_MODEL), tools
         if adapter in FIXED and (mcp is not None or self.without):
             # a graph's tools are bound when it is built: built without what the agent goes
             # without, and with the harness's middleware (it hides what a run turns off)
@@ -772,6 +794,8 @@ class World:
     def _services(self) -> None:
         """The gateway, the judges, tracing and hooks: nothing when off."""
         on = self.switched
+        if self._serving is not None:  # a model name: served by the deployment's gateway
+            assert self._serving.completions, "a model name was never served by its gateway"
         listed = [r for r in self.fake_gateway.requests if r.url.path == "/mcp"]
         if "gateway" not in on:
             assert not self.fake_gateway.requests, "gateway off: the gateway was called"
@@ -803,8 +827,9 @@ class World:
 FIXED: Final = frozenset({"langgraph", "deepagents"})
 #: Features on with the team's blocks whatever the selection (its own governance's rules).
 ON_WITH_BLOCKS: Final = frozenset({"F33"})
-#: Features whose runs never list the key's MCP tools (only their Virtual MCPs).
-NO_KEY_LISTING: Final = frozenset({"F18"})
+#: Features whose runs never list the key's MCP tools: their ``mcp(...)`` entries name exactly
+#: the servers they have (Virtual MCPs, a server of their own).
+NO_KEY_LISTING: Final = frozenset({"F18", "F18s"})
 
 
 def injected_pause(mode: str, pauses: list[Interrupt]) -> bool:

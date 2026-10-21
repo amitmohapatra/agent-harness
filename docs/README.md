@@ -30,10 +30,10 @@ for you.
 |---|---|
 | **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic, approvals, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
-| [gateway.md](gateway.md) | the Bifrost gateway: stored prompts, skills, Virtual MCPs (`mcp=`), who an MCP call is for, what the gateway never does for a run, frameworks' own MCP clients |
+| [gateway.md](gateway.md) | the Bifrost gateway: stored prompts, skills, Virtual MCPs (`mcp("name")`), who an MCP call is for, what the gateway never does for a run, frameworks' own MCP clients |
 | [prompts.md](prompts.md) | prompts from code, `.md` files (`PROMPTS_DIR`), Langfuse and the gateway: one name, the lookup order, `ReAct(prompt=)`, `h.prompt`, pinned per run |
 | [skills.md](skills.md) | Agent Skills from code, `SKILL.md` folders (`SKILLS_DIR`) and the gateway: progressive disclosure, pinned per run |
-| [subagents.md](subagents.md) | `agent.as_tool()`: child runs, their pauses answered through the parent, crashes, cancel, time |
+| [subagents.md](subagents.md) | an agent in another's `tools=[...]`: child runs, their pauses answered through the parent, crashes, cancel, time |
 | [sandbox.md](sandbox.md) | `sandbox()`: commands and files in a sandbox of the run's own — its life, pauses, crashes, timeouts, governance |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed |
 | [hooks.md](hooks.md) | your code around runs, model calls and tool calls: guardrails, redaction of your own, audit |

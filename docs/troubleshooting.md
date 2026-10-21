@@ -44,7 +44,7 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | every tool that writes asks for approval | the tool catalog cannot be read (memory down): governance fails closed | bring the memory service back; rules read in the last 300 s still stand ([governance.md](governance.md#the-catalog-kept-fresh)) |
 | a tool runs although it should ask | its risk is `read`/`write` and no `approve_when` holds | declare it `irreversible`, or set the catalog's `approve_when` ([governance.md](governance.md)) |
 | the approval is asked twice | a framework gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`) and the harness's both gate the tool | gate each tool in one place ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)) |
-| no MCP tools | no `BIFROST_URL`, the key allows none, `without={"mcp"}`, or `mcp=[]` | check the key's MCP allow-list ([gateway.md](gateway.md)) |
+| no MCP tools | no `BIFROST_URL`, the key allows none, `without={"mcp"}`, or `mcp(...)` entries that name other servers | check the key's MCP allow-list ([gateway.md](gateway.md)) |
 | an MCP tool is missing | the gateway would run it itself (Agent Mode: `tools_to_auto_execute`) | take it off the client's auto-execute list ([gateway.md](gateway.md#what-the-gateway-never-does-for-a-run)) |
 | the model is offered only some tools | tool hints narrow from 5 tools on | nothing, or `without={"tool_search"}` ([tools.md](tools.md#tool-hints-what-the-model-is-offered)) |
 | `execute_tool_code` instead of the server's tools | Code Mode: 3+ read-only Code Mode servers or 20+ tools | nothing, or `without={"code_mode"}` ([tools.md](tools.md#code-mode)) |

@@ -80,16 +80,19 @@ the answer when it is given.
 An approval (an `irreversible` tool, a catalog `approve_when` that holds, a hook's `Ask`) is
 the same pause with `reason=APPROVAL` and the tool call attached.
 
-## Approval rules in code: a `before_tool` hook
+## Who reviews, on which screen: a `before_tool` hook
 
-**What.** Your rule for when a call needs a person, by its arguments: a `before_tool` hook
-([hooks.md](hooks.md)) returns `Ask(question, assignee=None, component=None, props=None)` for
-the calls that need one — a person approves it first, asked that, on that screen — and `None`
-for the rest, which governance decides as for any tool.
+**What.** When a call needs a person is a rule in the tool catalog — `approve_when` on the
+call's arguments (`amount > 20`), or the tool's `risk` — and only there
+([governance.md](governance.md#one-place-for-approval-rules)). A `before_tool` hook
+([hooks.md](hooks.md)) adds what such a rule cannot say: who reviews and on which screen
+(`Ask(question, assignee=None, component=None, props=None)`), or a decision that needs data
+outside the call (a customer's status in your database); it returns `None` for the rest, which
+governance decides as for any tool.
 
-**When.** For a rule only your code can say: an amount, a customer, the time of day. A rule an
-administrator owns is the catalog's `approve_when` ([governance.md](governance.md)), which also
-decides by the call's arguments (`amount > 20`).
+**When.** Only for what the catalog's rule cannot express. A threshold, a list of values, a
+customer id in the arguments: the catalog (`approve_when`), set once for every framework and
+process. With memory off there is no catalog, and the tools' own declared risk decides.
 
 **Where.** `h.wrap(..., hooks=[...])` or `Harness(hooks=[...])`, every adapter (the bridge) and
 `ReAct`; Way 2: `governed(fn, gov, ..., hooks=[...])`, whose `on_ask(decision)` gets the
@@ -98,11 +101,15 @@ decision with the `Ask`'s `assignee`, `component` and `props`.
 **How.**
 
 ```python
-class RefundRule(Hooks):
+# when: the catalog's rule (an administrator's, or your deploy script's), every framework
+await scope.advanced.tools.put_catalog([{"name": "refund", "approve_when": "amount > 20"}])
+
+
+class FinanceReviews(Hooks):
+    """Who and where — what the rule cannot say: large refunds go to finance, on its screen."""
+
     async def before_tool(self, call: ToolCall) -> Ask | None:
         amount = call.args.get("amount", 0) if call.tool == "refund" else 0
-        if amount <= 20:
-            return None  # small: governance decides (a write tool runs, announced)
         if amount > 500:
             return Ask(
                 f"Refund {amount} EUR?",
@@ -110,21 +117,19 @@ class RefundRule(Hooks):
                 component="refund-review",
                 props={"amount": amount},
             )
-        return Ask(f"Refund {amount} EUR?")
+        return None  # the rest: governance decides, by the catalog's rule
 
 
 @tool(side_effects="write")
 def refund(order: str, amount: int) -> str: ...
 
 
-agent = h.wrap(target, id="refunds", tools=[refund], hooks=[RefundRule()])
+agent = h.wrap(target, id="refunds", tools=[refund], hooks=[FinanceReviews()])
 ```
 
-A hook asks; it never approves a call governance asks about. So the tool's `side_effects`
-decide what runs unasked: to approve small amounts without a person, declare the tool
-`"write"` (governance runs it, announced) and let the hook ask above the threshold, as above —
-or let the catalog's `approve_when` ask by the arguments. An `irreversible` tool, or one whose
-`approve_when` holds, is always asked about.
+A hook asks; it never approves a call governance asks about: an `irreversible` tool, or one
+whose `approve_when` holds, is always asked about. A tool a rule governs is declared `"write"`,
+so it runs (announced) when the rule does not hold.
 
 **Automatic.** The hook's verdict is journaled with the call: a resumed run reads it instead of
 asking the hook again. An approval remembered for the run (`remember="run"`, below) covers the

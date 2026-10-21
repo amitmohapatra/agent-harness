@@ -1,7 +1,8 @@
 """The tools ``tools=[...]`` accepts — the ones this process runs itself: ``tool(fn)`` (a bare
-function in the list is ``tool(fn)``), ``a2a(url)`` (a remote agent) and ``openapi(spec)``.
-MCP tools are not listed here: they are whatever the agent's Bifrost virtual key allows,
-loaded automatically (``tools.toolbox``).
+function in the list is ``tool(fn)``), ``a2a(url)`` (a remote agent) and ``openapi(spec)``; a
+wrapped agent in the list is a sub-agent (``trellis.harness.subagents``), and ``mcp(...)`` an
+MCP server's tools (``tools.mcp``) — without one, the MCP tools the agent's Bifrost virtual key
+allows, loaded automatically (``tools.toolbox``).
 
 Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A local
 function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
@@ -17,12 +18,13 @@ import inspect
 import re
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final, overload
 
 import httpx
 from pydantic import BaseModel, ConfigDict, create_model
 
-from trellis.contracts import ToolError, ToolSpec
+from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import (
     DEFAULT_SIDE_EFFECTS,
@@ -388,10 +390,44 @@ def _operation_tool(
 # --------------------------------------------------------------------------- normalising
 
 
-def as_source(item: Source | Callable[..., Any]) -> Source:
-    """A ``tools=[...]`` entry as a source: a bare function becomes ``tool(fn)``."""
-    if hasattr(item, "resolve"):
-        return item  # type: ignore[return-value]
-    if callable(item):
-        return tool(item)
-    raise TypeError(f"not a tool source: {item!r}")
+@dataclass(frozen=True)
+class EntryKind:
+    """One kind of ``tools=[...]`` entry: what it is (``accepts``) and the source it becomes
+    (``source``)."""
+
+    name: str
+    accepts: Callable[[Any], bool]
+    source: Callable[[Any], Source]
+
+
+def _is_agent(item: Any) -> bool:
+    from trellis.harness.agent import Agent  # noqa: PLC0415 - the agent imports the sources
+
+    return isinstance(item, Agent)
+
+
+def _sub_agent(item: Any) -> Source:
+    from trellis.harness.subagents import SubAgent  # noqa: PLC0415
+
+    return SubAgent(item, name=None, description=None, side_effects=None)
+
+
+#: The kinds of ``tools=[...]`` entry, registered here and only here, tried in this order: a
+#: wrapped agent (a sub-agent), anything that resolves to tools itself (``tool``, ``mcp``,
+#: ``a2a``, ``openapi``, ``sandbox``, ``skills``, a source of yours), a bare function.
+ENTRY_KINDS: Final[tuple[EntryKind, ...]] = (
+    EntryKind("agent", _is_agent, _sub_agent),
+    EntryKind("source", lambda item: hasattr(item, "resolve"), lambda item: item),
+    EntryKind("function", callable, FunctionTool),
+)
+
+
+def as_source(item: Source | Callable[..., Any] | Any) -> Source:
+    """A ``tools=[...]`` entry as a source, by the first :data:`ENTRY_KINDS` that accepts it."""
+    for kind in ENTRY_KINDS:
+        if kind.accepts(item):
+            return kind.source(item)
+    raise ConfigurationError(
+        f"not a tool: {item!r} — give a function, tool(...), mcp(...), a2a(...), openapi(...), "
+        "sandbox(), skills(...) or a wrapped agent"
+    )

@@ -1,9 +1,11 @@
-"""An agent's toolbox: its own tools (``tools=[...]`` / ``h.tools``) and every MCP tool its
-Bifrost virtual key allows (or the tools of the Virtual MCPs it names: ``mcp=``), published
-to the tool catalog, with Code Mode where it is safe.
+"""An agent's toolbox: its own tools (``tools=[...]`` / ``h.tools``: functions, sub-agents,
+``a2a``, ``openapi``, the MCP servers it reaches itself — ``tools.mcp``) and every MCP tool its
+Bifrost virtual key allows (or, once it names any ``mcp(...)``, the tools of the Virtual MCPs
+it names), published to the tool catalog, with Code Mode where it is safe.
 
 1. **list** — the local sources, and the gateway's MCP listing for the virtual key, or each
-   named Virtual MCP's (kept :data:`TOOLS_TTL_SECONDS`; while a listing fails the last one
+   named Virtual MCP's; an MCP server reached both directly and through the gateway is an
+   error (one path per server) (kept :data:`TOOLS_TTL_SECONDS`; while a listing fails the last one
    stands, listed again after :data:`TOOLS_RETRY_SECONDS`); an MCP tool's side effects come
    from its server's annotations (:func:`side_effects_of`, idempotent when it says so), a local
    tool's from its declaration; a tool the gateway would run itself (its client's
@@ -42,6 +44,7 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.lint import lint
+from trellis.harness.tools.mcp import MCPSource, side_effects_of
 
 if TYPE_CHECKING:
     from bifrost_sdk import ToolDef
@@ -67,6 +70,8 @@ class Listing:
     local: list[Tool]
     defs: list[ToolDef]
     slugs: dict[str, str] | None = None
+    #: the annotations of the tools of the MCP servers reached directly, by tool name
+    hints: dict[str, dict[str, Any]] | None = None
 
     @property
     def names(self) -> list[str]:
@@ -80,13 +85,29 @@ async def listed(
     the named Virtual MCPs hold: a tool in two of them is listed once, through the first),
     less those the gateway would run itself."""
     local: list[Tool] = []
+    hints: dict[str, dict[str, Any]] = {}
+    servers: Counter[str] = Counter()
     for source in sources:
         local.extend(await source.resolve())
+        if isinstance(source, MCPSource):
+            hints.update(source.annotations)
+            servers[source.server or ""] += 1
     defs: list[ToolDef] = []
     slugs: dict[str, str] | None = None
     if gateway is not None:
         defs, slugs = await _mcp_listed(gateway, mcp)
-    listing = Listing(local, defs, slugs)
+    listing = Listing(local, defs, slugs, hints)
+    both = sorted({d.client for d in defs} & set(servers))
+    if both:
+        raise ConfigurationError(
+            f"the MCP server {', '.join(both)} is reached both through the gateway and by "
+            "mcp(...): keep one path (name= renames a server of your own)"
+        )
+    twice = sorted(name for name, n in servers.items() if n > 1)
+    if twice:
+        raise ConfigurationError(
+            f"two mcp(...) entries are the server {', '.join(twice)}: give one a name="
+        )
     twice = sorted(name for name, n in Counter(listing.names).items() if n > 1)
     if twice:
         raise ConfigurationError(f"two tools are named {', '.join(twice)}")
@@ -133,16 +154,6 @@ async def _not_auto_executed(gateway: Gateway, defs: list[ToolDef]) -> list[Tool
             continue
         kept.append(d)
     return kept
-
-
-def side_effects_of(annotations: Any) -> str:
-    """An MCP tool's side effects from its server's annotations (bifrost-sdk
-    ``ToolAnnotations``). Hints, not guarantees: the catalog has the last word."""
-    if annotations is not None and annotations.read_only_hint:
-        return "read"
-    if annotations is not None and annotations.destructive_hint:
-        return "irreversible"
-    return "write"
 
 
 class Toolbox:
@@ -277,6 +288,7 @@ async def _publish(governance: Governance, listing: Listing) -> None:
         for d in listing.defs
         if d.annotations
     }
+    hints.update(listing.hints or {})
     await governance.publish(specs, annotations=hints)
 
 

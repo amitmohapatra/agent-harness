@@ -14,7 +14,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, Final
 
 from agents import Agent as OpenAIAgent
@@ -41,7 +43,7 @@ from tests.support.gateway import SkillVersions
 from tests.support.memory import MEMORY_TOOLS
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
 from tests.support.sandbox import PausingSandboxes
-from trellis import Harness, ReAct, Runtime, Settings, a2a, skills, tool
+from trellis import Harness, ReAct, Runtime, Settings, a2a, mcp, skills, stdio, tool
 from trellis.contracts import (
     InterruptReason,
     RunEventType,
@@ -58,6 +60,9 @@ from trellis.harness.sandbox import sandbox
 from trellis.harness.skills import LOAD_SKILL
 from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
+
+#: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
+MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
 
 # --------------------------------------------------------------------------- not applicable
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
@@ -607,10 +612,24 @@ async def virtual_mcps(w: World) -> None:
         (await w.go([d.lookup()], [("lookup", {"topic": "x"})])).succeeded()
         return
     plan: list[Call] = [("billing-invoice", {"invoice": "7"})]
-    o = (await w.go([d.lookup()], plan, mcp=["billing"])).succeeded()
+    o = (await w.go([d.lookup(), mcp("billing")], plan)).succeeded()
     assert '"invoice": "7"' in o.text, o.answer
     called = {r.url.path for r in w.fake_gateway.requests}
     assert "/mcp/billing" in called and "/mcp" not in called, called  # its bundle only
+
+
+async def mcp_servers(w: World) -> None:
+    """An MCP server of the agent's own (a real one, over stdio): its read tool named
+    ``<server>-<tool>`` and run; off with ``without={"mcp"}`` (the server not even started)."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_SERVER)), name="notes")
+    if "mcp" in w.without:
+        o = (await w.go([d.lookup(), server], [("lookup", {"topic": "x"})])).succeeded()
+        assert server._connection._task is None
+        return
+    o = (await w.go([d.lookup(), server], [("notes-read_note", {"path": "a.md"})])).succeeded()
+    assert "note at a.md" in o.text, o.answer
+    assert [r["status"] for r in o.results("notes-read_note")] == ["ok"]
 
 
 async def skills_(w: World) -> None:
@@ -1195,10 +1214,18 @@ FEATURES: Final[list[Feature]] = [
         "F18",
         "Virtual MCPs: only the named bundles' tools",
         "F18",
-        "mcp=[...] (wrap, or h.tools for a graph)",
+        "tools=[mcp('name')] (wrap, or h.tools for a graph)",
         virtual_mcps,
         needs=frozenset({"gateway", "mcp"}),
         way2=way2.virtual_mcps,
+    ),
+    Feature(
+        "F18s",
+        "MCP servers of the agent's own: a server over stdio, its tools governed and journaled",
+        "N2",
+        "tools=[mcp(stdio(...))] or mcp('https://...') (wrap, or h.tools for a graph)",
+        mcp_servers,
+        way2=NA("Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools"),
     ),
     Feature(
         "F19",

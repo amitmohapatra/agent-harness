@@ -1,10 +1,11 @@
-"""People in the loop: an approval rule in code, labelled choices, a form, your own screen, a
-tool whose result comes from outside, a comment — on a ``ReAct`` agent, answered by a scripted
-reviewer (``trellis.testing.Reviewer``) as a test would.
+"""People in the loop: an approval rule, a reviewer and screen of your own, labelled choices, a
+form, a tool whose result comes from outside, a comment — on a ``ReAct`` agent, answered by a
+scripted reviewer (``trellis.testing.Reviewer``) as a test would.
 
-* ``refund`` has an approval rule in code, a ``before_tool`` hook: up to 20 it runs unasked (the
-  tool is ``write``: governance only announces it), over 500 it asks finance on its own screen
-  (``Ask(..., assignee=, component=, props=)``), anything between is asked of whoever answers;
+* ``refund``: when it needs a person is the tool catalog's rule (``approve_when: amount > 20``;
+  up to 20 it runs unasked, announced — the tool is ``write``); who reviews a large one, and on
+  which screen, is what no rule says: a ``before_tool`` hook asks finance on its own screen over
+  500 (``Ask(..., assignee=, component=, props=)``);
 * ``pick_plans`` asks which plans to offer: labelled options, several picks;
 * ``ship_to`` asks for an address: a form (``form=`` a pydantic model, ``ui_schema=`` its widget
   hints), whose answer is read back into the model;
@@ -19,7 +20,8 @@ from __future__ import annotations
 
 import asyncio
 
-from examples._support.offline import react_model
+from examples._support.memory import ScriptedMemory
+from examples._support.offline import offline_blocks, react_model
 from pydantic import BaseModel
 
 import trellis
@@ -33,13 +35,16 @@ class Address(BaseModel):
     city: str
 
 
-class RefundRule(Hooks):
-    """When a refund needs a person, by its amount."""
+#: When a refund needs a person: the catalog's rule (an administrator's, or a deploy script's
+#: ``put_catalog``), here held by the scripted memory service.
+CATALOG = {"refund": {"risk": "write", "approve_when": "amount > 20"}}
+
+
+class FinanceReviews(Hooks):
+    """Who reviews a large refund, and on which screen — what the catalog's rule cannot say."""
 
     async def before_tool(self, call: ToolCall) -> Ask | None:
         amount = call.args.get("amount", 0) if call.tool == "refund" else 0
-        if amount <= 20:
-            return None  # small: no person
         if amount > 500:
             return Ask(
                 f"Refund {amount} EUR?",
@@ -47,7 +52,7 @@ class RefundRule(Hooks):
                 component="refund-review",
                 props={"amount": amount},
             )
-        return Ask(f"Refund {amount} EUR?")
+        return None  # the rest: governance, by the catalog's rule
 
 
 @tool(side_effects="write")
@@ -98,7 +103,8 @@ async def sign(contract: str) -> str:
 
 
 async def main() -> None:
-    async with Harness() as h:
+    memory = ScriptedMemory(catalog=CATALOG)
+    async with Harness(**offline_blocks(memory=memory)) as h:
         model = react_model(
             [
                 ("refund", {"order": "o1", "amount": 15}),
@@ -113,7 +119,7 @@ async def main() -> None:
             ReAct(system="You handle accounts.", model=model),
             id="accounts",
             tools=[refund, pick_plans, ship_to, sign],
-            hooks=[RefundRule()],
+            hooks=[FinanceReviews()],
         )
         reviewer = Reviewer(
             {

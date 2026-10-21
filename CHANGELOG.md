@@ -28,7 +28,32 @@ tested with are in [docs/versioning.md](docs/versioning.md).
     memory off leaves the framework's default; a memory service that fails fails the call.
   - The framework matrix checks the slots (`F44`) and that every adapter emits the same
     agent-contracts events for the same work (`F60c`).
-
+- `python -m benchmark.thread`: who keeps a conversation's history across runs, the framework's
+  own thread or the memory service's window, measured on recall and input tokens per turn.
+  Measured on Granite through Bifrost with the memory service: recall 1.00 vs 0.92, 202 vs 214
+  tokens a turn — the owners stay as they are (ADR 0003 §6).
+- Without Bifrost, model names go to any OpenAI-compatible endpoint the OpenAI SDK's own
+  `OPENAI_BASE_URL` / `OPENAI_API_KEY` name (LiteLLM's proxy, Portkey, vLLM, Ollama, OpenAI):
+  `ReAct(model="name")` and `llm_judge(model="name")` work there, with the client's own retries.
+  Exactly one gateway serves names — Bifrost, else that endpoint, else none (a name is then an
+  error naming the three) — and each declares its capabilities (`mcp`, `code_mode`, `cost`,
+  `fallbacks`, `prompts`, `skills`; `trellis.harness.gateways`): what the deployment's gateway
+  cannot do is off, and `trellis doctor` lists it.
+- Approval rules have one place, the tool catalog (`risk`, `approve_when`), documented as such
+  (governance.md "One place for approval rules"): hooks are for what a rule cannot say (a
+  refusal, a rewrite, outside data, who reviews and where), and the examples that asked by an
+  amount in a hook now set the catalog's rule. A framework's own approval gate still works,
+  asked once, and the warning at `h.wrap` says its rule belongs in the catalog.
+- One `tools=[...]` for everything an agent calls. `mcp(...)` is the entry for every MCP source:
+  `mcp("https://host/mcp")` (streamable HTTP, `headers=` for its auth), `mcp(stdio("npx",
+  "@mcp/files"))` (a local server the harness starts), or `mcp("finance-tools")` (a Bifrost
+  Virtual MCP). A server of the agent's own is reached with the official MCP SDK (the new `mcp`
+  extra), one kept connection per server, and its tools get the same `<server>-<tool>` names,
+  annotations-to-risk, governance, journal, retries, paging and records as the gateway's. With a
+  gateway and no `mcp(...)` entry the agent still has every MCP tool its key allows; once it
+  names any, it has exactly those. A server reached both directly and through the gateway is an
+  error. A wrapped agent in `tools=[...]` is a sub-agent. The same holds in `h.tools(...)` for
+  every framework.
 - Every gateway call says whose run it is and joins its trace: Bifrost dimension headers
   (`x-bf-dim-tenant`, `-agent`, `-run`, and a hash of the user, never the id) and the W3C
   `traceparent`, on `ReAct`'s calls, the judge's (`x-bf-dim-purpose: judge`) and
@@ -92,6 +117,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- Deprecated, working for one release with a warning naming the replacement:
+  `h.wrap(mcp=[...])` and `h.tools(mcp=[...])` (`mcp("name")` in `tools=[...]`; `mcp=[]` is
+  `without={"mcp"}`) and `agent.as_tool()` (the agent itself in `tools=[...]`; a sub-agent's
+  risk, when its tools do not say it, is set in the tool catalog).
 - `make bench-load` measures the production path too (`--queued MINUTES`): runs queued in
   agent-runs, claimed by worker processes, with the memory service on or as the key registry
   only, each process's resident memory slope reported (the harness workers, the memory API

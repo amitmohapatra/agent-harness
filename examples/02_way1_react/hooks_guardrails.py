@@ -1,9 +1,12 @@
-"""Hooks: a guardrail and redaction of your own, on a ``ReAct`` agent.
+"""Approval rules and hooks, on a ``ReAct`` agent — each in its one place:
 
-* ``Refunds`` — no refund over 1000 (``Deny``: the model reads why), a person for one over 100
-  (``Ask``: the run pauses for ``role:support-lead``), amounts rounded to cents (``Rewrite``);
-* ``Cards`` — card numbers masked in every tool result (``after_tool``: what the model reads,
-  the journal and memory keep) and in every message sent to the model (``before_model``).
+* **when a call needs a person** is a rule in the tool catalog (``approve_when``, set by an
+  administrator or a deploy script; here the scripted memory service holds it): a refund over
+  100 asks. Rules live there and only there, and apply to every framework and process;
+* **what a rule cannot say** is a hook — ``Refunds``: no refund over 1000 at all (``Deny``:
+  the model reads why), amounts rounded to cents (``Rewrite``); ``Cards``: card numbers masked
+  in every tool result (``after_tool``: what the model reads, the journal and memory keep) and
+  in every message sent to the model (``before_model``).
 
     python -m examples.02_way1_react.hooks_guardrails
 """
@@ -15,9 +18,10 @@ import dataclasses
 import re
 from typing import Any
 
-from examples._support.offline import react_model
+from examples._support.memory import ScriptedMemory
+from examples._support.offline import offline_blocks, react_model
 
-from trellis import Ask, Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, tool
+from trellis import Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, tool
 from trellis.contracts import ToolCall, ToolOutcome
 
 CARD = re.compile(r"\b(\d{4})\d{8}(\d{4})\b")
@@ -32,15 +36,19 @@ def mask(value: Any) -> Any:
     return value
 
 
+#: The catalog's rule (what ``put_catalog`` writes in the memory service): over 100 asks.
+CATALOG = {"refund": {"risk": "write", "approve_when": "amount > 100"}}
+
+
 class Refunds(Hooks):
-    async def before_tool(self, call: ToolCall) -> Deny | Ask | Rewrite | None:
+    """What no rule says: a refusal, and a rewrite. When a refund asks is the catalog's."""
+
+    async def before_tool(self, call: ToolCall) -> Deny | Rewrite | None:
         if call.tool != "refund":
             return None
         amount = float(call.args["amount"])
         if amount > 1000:
             return Deny("refunds over 1000 go through finance")
-        if amount > 100:
-            return Ask(f"Refund {amount:g}?", assignee="role:support-lead")
         return Rewrite({**call.args, "amount": round(amount, 2)})
 
 
@@ -65,7 +73,9 @@ def refund(number: str, amount: float) -> str:
 
 
 async def main() -> None:
-    async with Harness(hooks=[Cards()]) as h:  # every agent: no card number reaches a model
+    memory = ScriptedMemory(catalog=CATALOG)
+    # every agent: no card number reaches a model
+    async with Harness(hooks=[Cards()], **offline_blocks(memory=memory)) as h:
         model = react_model(
             [
                 ("order", {"number": "o1"}),
@@ -76,8 +86,8 @@ async def main() -> None:
         target = ReAct(system="You handle refunds. Look the order up first.", model=model)
         agent = h.wrap(target, id="refunds", tools=[order, refund], hooks=[Refunds()])
         paused = await agent.run("Refund order o1, card 4111111111111111.", user="ada")
-        assert paused.interrupt is not None  # over 100: a person approves it
-        print("waiting:", paused.interrupt.question, "-", paused.interrupt.assignee)
+        assert paused.interrupt is not None  # over 100: the catalog's rule asks
+        print("waiting:", paused.interrupt.question)
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
         print(done.status.value, done.answer)
 

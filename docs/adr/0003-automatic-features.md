@@ -17,7 +17,7 @@ long tasks; a short task must keep sending exactly that.
 1. **Reuse, wrap thinly.** Each feature is the framework's own middleware, used as it is; the
    harness adds only the trigger and the glue that keeps it governed, journaled and resumable
    (`trellis.harness.automatic`). Delegation stays the team's explicit code
-   (`agent.as_tool()`): no automatic helper.
+   (an agent in `tools=[...]`): no automatic helper.
 2. **On from signals.** A feature is offered when the run shows it needs it: a long task (the
    model's third call of an invocation, or a request that asks for steps) on a known window with
    room for it (32,000 tokens or more); an unknown window: off. Until then the model is sent neither its tools nor its
@@ -48,7 +48,22 @@ long tasks; a short task must keep sending exactly that.
    * structured output — LangChain's `response_format`;
    * a run's cost cap — the harness's journal counter, only when `budget=` is given; a tenant's
      or a team's budget is Bifrost's;
-   * in-run history — the journal (Deep Agents' offload); long-term facts — memory's records.
+   * in-run history — the journal (Deep Agents' offload); long-term facts — memory's records;
+   * a conversation's history across runs — the framework's own thread when the target keeps
+     one (a graph with its own checkpointer, an OpenAI Agents `session`): the harness sends no
+     memory window; otherwise (`ReAct`, whose checkpoint is the run's own; a graph without a
+     checkpointer) the memory service's window. Measured (`python -m benchmark.thread`, Granite
+     3.3 2B through Bifrost, the memory service at its `main` on a private stack, 3
+     conversations × 5 turns × 2 repeats, the two variants differing only in who keeps the
+     history): recall of facts from earlier turns 1.00 (12/12) with the framework's thread,
+     0.92 (11/12) with the memory window; input tokens per turn 202 and 214 (+6%; by turn
+     93/129/185/295/307 and 93/132/184/316/342). Neither owner wins by the decision rule (the
+     memory window would need non-inferior recall and at least 20% fewer tokens), so the owner
+     stays the one that already has the history, with no duplicate: a team whose framework keeps
+     the thread gets it there — durably only with a durable checkpointer (an in-memory one is
+     lost with its process, and workers are stateless); everything else uses the memory window,
+     which outlives any worker. Seconds per turn were dominated by how long the model wrote
+     (6.7 and 27.7 on average, one memory-variant turn taking 397 s) and are not a comparison.
 7. **Deleted after the architecture review (2026-10-21):** the vendor-native client, the
    per-step effort policy, the in-graph prompt cache, fallbacks from code, the structured-output
    repair, the `task` helper, compaction saved to memory, `compact_conversation`, rewind and

@@ -58,6 +58,18 @@ matrix:  ## The generated feature matrix (feature x adapter x way x mode x selec
 	$(PY) -m tests.matrix.report build/matrix-*.xml --out build/matrix.md; \
 	if [ $$status -ne 0 ]; then grep -h "^FAILED\|^ERROR" build/matrix-*.log; fi; exit $$status
 
+.PHONY: matrix-models
+matrix-models:  ## The matrix's ReAct cells with a model name: served by Bifrost (gateway on) or an OpenAI-compatible endpoint (gateway off)
+	@mkdir -p build && rm -f build/matrix-models-*.xml build/matrix-models-*.log
+	@pids=""; for i in $$(seq 1 $(MATRIX_SHARDS)); do \
+	  env -u BIFROST_URL -u MEMORY_URL -u RUNS_URL -u TRELLIS_API_KEY -u OTEL_EXPORTER_OTLP_ENDPOINT \
+	    -u OPENAI_BASE_URL -u OPENAI_API_KEY MATRIX_MODELS=named MATRIX_SHARD=$$i/$(MATRIX_SHARDS) \
+	    $(PYTEST) -q -m matrix tests/matrix -k react -p no:cacheprovider \
+	    --junitxml=build/matrix-models-$$i.xml > build/matrix-models-$$i.log 2>&1 & pids="$$pids $$!"; \
+	done; status=0; for p in $$pids; do wait $$p || status=1; done; \
+	for i in $$(seq 1 $(MATRIX_SHARDS)); do tail -n 1 build/matrix-models-$$i.log; done; \
+	if [ $$status -ne 0 ]; then grep -h "^FAILED\|^ERROR" build/matrix-models-*.log; fi; exit $$status
+
 .PHONY: lint
 lint:  ## Ruff
 	.venv/bin/ruff check .
