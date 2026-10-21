@@ -530,6 +530,14 @@ async def test_exact_match_and_contains_read_expected_values() -> None:
     assert found == EvalScore("contains", False, "missing: rome")
 
 
+async def test_contains_reads_a_structured_answer_as_its_fields() -> None:
+    class City(BaseModel):
+        name: str
+
+    found = await contains()(EvalCase("q", City(name="Rome"), ["rome"]))
+    assert found == EvalScore("contains", True, None)
+
+
 # --------------------------------------------------------------------------- the judge
 @pytest.mark.parametrize(
     ("verdicts", "value", "asked"),

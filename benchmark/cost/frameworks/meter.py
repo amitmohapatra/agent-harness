@@ -61,6 +61,8 @@ class Counts:
     cached_tokens: int = 0
     cache_reported: bool = False
     refused_tokens: int = 0
+    #: the calls the model server refused as too long (a context overflow)
+    refused_calls: int = 0
     seconds: list[float] = field(default_factory=list)
 
 
@@ -180,6 +182,7 @@ class Meter:
             refused = REFUSED.search(body.decode("utf-8", "replace"))
             if refused:
                 counts.refused_tokens += int(refused.group(1))
+                counts.refused_calls += 1
             return
         usage = usage_of(body)
         counts.input_tokens += usage.input_tokens
@@ -300,6 +303,7 @@ def used(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         "cached_tokens": after["cached_tokens"] - before["cached_tokens"],
         "cache_reported": bool(after["cache_reported"]),
         "refused_tokens": after["refused_tokens"] - before["refused_tokens"],
+        "refused_calls": after["refused_calls"] - before["refused_calls"],
         "seconds": list(after["seconds"][len(before["seconds"]) :]),
     }
 

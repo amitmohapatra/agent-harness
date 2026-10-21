@@ -54,6 +54,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Final, Literal
 from urllib.parse import quote
 
@@ -130,6 +131,21 @@ _events_lost = _meter.create_counter(
     "trellis.run_events.undelivered",
     description="run events agent-runs' event log did not take",
 )
+_loop = _meter.create_counter(
+    "trellis.react.loop",
+    description="what ReAct's loop met and did about it, by event (trellis.harness.adaptive)",
+)
+
+
+class LoopEvent(StrEnum):
+    """What ``ReAct``'s loop counts (``trellis.react.loop``, attribute ``event``)."""
+
+    #: a tool call whose arguments were not JSON, or did not fit the tool's schema
+    MALFORMED_ARGS = "malformed_args"
+    #: a malformed call (or a call of a misspelled tool) repaired instead of asked again
+    REPAIRED = "repaired"
+    #: strict tool schemas turned on for the rest of the conversation
+    STRICT_ON = "strict_on"
 
 
 class _Metrics:
@@ -162,6 +178,10 @@ class _Metrics:
     @staticmethod
     def events_undelivered(count: int) -> None:
         _events_lost.add(count)
+
+    @staticmethod
+    def loop(event: LoopEvent) -> None:
+        _loop.add(1, {"event": event.value})
 
 
 metrics = _Metrics()

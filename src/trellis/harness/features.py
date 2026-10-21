@@ -30,6 +30,17 @@ Feature = Literal[
     "planning",
     "files",
     "react_auto",
+    "react_adaptive",
+    # what ``ReAct`` adds to its loop when a run shows the need (``trellis.harness.adaptive``)
+    "token_count",
+    "strict_tools",
+    "native_output",
+    "tool_repair",
+    "stable_prefix",
+    "think",
+    "clear_inputs",
+    "unsupported_content",
+    "rubric",
     # the parts they cover (``memory_push``, ``memory_pull``, ``records`` and ``hints`` are also
     # still accepted as names, deprecated: :data:`DEPRECATED`)
     "memory_push",
@@ -40,12 +51,24 @@ Feature = Literal[
 #: The features a name turns off together: ``memory`` is its push, its pull, the records and
 #: the tool narrowing; ``tool_search`` the tool hints and the memory service's ``tool_search``
 #: tool (the one owner of narrowing); ``mcp`` the MCP tools and Code Mode, whose scripts reach
-#: them; ``react_auto`` what ``ReAct`` turns on for a long task.
+#: them; ``react_auto`` what ``ReAct`` turns on for a long task; ``react_adaptive`` what it
+#: adds to its loop on a run's signal (``trellis.harness.adaptive``).
 COVERS: Final[dict[str, tuple[Feature, ...]]] = {
     "memory": ("memory_push", "memory_pull", "records", "hints", "tool_search"),
     "tool_search": ("hints", "tool_search"),
     "mcp": ("mcp", "code_mode"),
     "react_auto": ("planning", "files"),
+    "react_adaptive": (
+        "token_count",
+        "strict_tools",
+        "native_output",
+        "tool_repair",
+        "stable_prefix",
+        "think",
+        "clear_inputs",
+        "unsupported_content",
+        "rubric",
+    ),
     # a deprecated name: the memory tools, ``tool_search`` among them
     "memory_pull": ("memory_pull", "tool_search"),
 }

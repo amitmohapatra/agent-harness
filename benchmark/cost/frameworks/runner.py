@@ -27,12 +27,15 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from benchmark import procstat
 from benchmark.cost import catalog
 from benchmark.cost.frameworks import arms as built
 from benchmark.cost.frameworks import meter
+
+if TYPE_CHECKING:
+    from benchmark.cost.frameworks.counters import LoopCounts
 
 #: The cells: task type -> (catalogue size, task length).
 CELLS: Final = {
@@ -40,6 +43,11 @@ CELLS: Final = {
     "long": (10, "long"),
     "many": (100, "short"),
     "many50": (50, "short"),
+    # the ReAct items' own (``catalog.item_sets``): answers of a given shape, changes a
+    # remembered rule decides, a request with an image
+    "output": (10, "output"),
+    "rules": (10, "rules"),
+    "image": (10, "image"),
 }
 #: The cells a run measures unless told.
 DEFAULT_CELLS: Final = ("short", "long", "many")
@@ -75,7 +83,7 @@ def plan(
     _, length = CELLS[cell]
     tasks = [
         (s, t)
-        for s in (sets if sets is not None else catalog.task_sets())
+        for s in (sets if sets is not None else [*catalog.task_sets(), *catalog.item_sets()])
         for t in s.tasks
         if t["metadata"]["length"] == length
     ]
@@ -171,8 +179,12 @@ def row_for(
     used: dict[str, Any],
     usage: dict[str, Any],
     called: list[str],
+    loop: dict[str, int] | None = None,
+    answer_turns: int | None = None,
 ) -> dict[str, Any]:
-    """One run as the report keeps it: the cost benchmark's row, and the arm's own fields."""
+    """One run as the report keeps it: the cost benchmark's row, the arm's own fields, and what
+    the ReAct items are measured by (``loop``: the harness's loop events in the run;
+    ``answer_turns``: the answer tool's calls)."""
     from benchmark.cost.run import row_of
 
     row = row_of(
@@ -198,6 +210,27 @@ def row_for(
         "peak_rss_per_run": usage["peak_rss_per_run"],
         "children_peak_rss_mb": usage["children_peak_rss_mb"],
         "date": datetime.now(UTC).strftime("%Y-%m-%d"),
+        **item_counters(used, loop or {}, answer_turns),
+    }
+
+
+def item_counters(
+    used: dict[str, Any], loop: dict[str, int], answer_turns: int | None
+) -> dict[str, Any]:
+    """The ReAct items' counters of one run: malformed calls, repairs, strict schemas turned
+    on (the harness's loop events), context overflows (the calls the server refused as too
+    long), the share of the input its prompt cache held, and the answer tool's calls."""
+    from trellis.harness.telemetry import LoopEvent
+
+    cached = used.get("cached_tokens") if used.get("cache_reported") else None
+    entered = used.get("input_tokens") or 0
+    return {
+        "malformed_args": loop.get(LoopEvent.MALFORMED_ARGS.value, 0),
+        "repairs": loop.get(LoopEvent.REPAIRED.value, 0),
+        "strict_on": loop.get(LoopEvent.STRICT_ON.value, 0),
+        "context_overflow": used.get("refused_calls", 0),
+        "cache_ratio": round(cached / entered, 4) if cached is not None and entered else None,
+        "answer_tool_calls": answer_turns,
     }
 
 
@@ -295,7 +328,7 @@ async def _run_native(
         used = meter.used(before, meter.snapshot(options.meter_url))
         row = row_for(
             arm, planned, result=report.items[0], used=used, usage=usage, called=calls.names
-        )
+        ) | {"window": options.setup.window}
         rows.append(row)
         _write(options.out, row)
         progress(_said(row))
@@ -305,11 +338,26 @@ async def _run_native(
 async def _run_wrapped(
     options: Options, todo: Sequence[Planned], progress: Callable[[str], None]
 ) -> list[dict]:
+    from benchmark.cost.frameworks.counters import loop_counts
+    from trellis import Settings
+
+    config = Settings.from_env().model_copy(update={"otlp_endpoint": None})
+    with loop_counts() as loop:
+        return await _run_counted(options, todo, progress, config, loop)
+
+
+async def _run_counted(
+    options: Options,
+    todo: Sequence[Planned],
+    progress: Callable[[str], None],
+    config: Any,
+    loop: LoopCounts,
+) -> list[dict]:
+    from benchmark.cost.frameworks.counters import LoopCounts, answer_turns
     from benchmark.cost.run import USER, Called, scenario
-    from trellis import Harness, Settings
+    from trellis import Harness
 
     arm, rows = options.arm, []
-    config = Settings.from_env().model_copy(update={"otlp_endpoint": None})
     async with Harness(config=config, gateway=False) as h:
         agents: dict[tuple[str, int], Any] = {}
         called = Called()
@@ -318,7 +366,12 @@ async def _run_wrapped(
             if where not in agents:
                 sources = catalog.catalogue(planned.taskset.tools, planned.size)
                 target, wrap = await built.wrapped(
-                    arm, options.setup, h, planned.taskset.system, sources
+                    arm,
+                    options.setup,
+                    h,
+                    planned.taskset.system,
+                    sources,
+                    output=planned.taskset.output,
                 )
                 agents[where] = h.wrap(
                     target,
@@ -328,11 +381,12 @@ async def _run_wrapped(
                     **wrap,
                 )
             called.tools = []
+            events = loop.now()
             before = meter.snapshot(options.meter_url, seed=planned.seed)
-            with measured() as usage:
+            with measured() as usage, answer_turns(planned.taskset.output) as turns:
                 report = await h.evaluate(
                     agents[where],
-                    [planned.task],
+                    [graded(arm, planned.task)],
                     scenario.EVALUATORS,
                     run_name=f"bench-frameworks-{arm.name.replace('/', '-')}",
                     concurrency=1,
@@ -346,11 +400,24 @@ async def _run_wrapped(
                 used=used,
                 usage=usage,
                 called=list(called.tools),
-            )
+                loop=LoopCounts.since(events, loop.now()),
+                answer_turns=turns.calls if planned.taskset.output is not None else None,
+            ) | {"window": options.setup.window}
             rows.append(row)
             _write(options.out, row)
             progress(_said(row))
     return rows
+
+
+def graded(arm: built.Arm, task: dict[str, Any]) -> dict[str, Any]:
+    """A ReAct arm's task with its rubric (``catalog.RUBRICS``), when it has one, in its input
+    (``{"messages": [...], "rubric": ...}``): every ReAct arm gets the same input, and only an
+    arm with ``rubric`` on grades by it."""
+    rubric = catalog.RUBRICS.get(task["metadata"]["task"])
+    if arm.framework != "react" or rubric is None or not isinstance(task["input"], str):
+        return task
+    asked = {"messages": [{"role": "user", "content": task["input"]}], "rubric": rubric}
+    return {**task, "input": asked}
 
 
 def agent_id(arm: str, taskset: str, size: int) -> str:

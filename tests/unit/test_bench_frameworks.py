@@ -366,6 +366,7 @@ def test_used_is_the_difference_of_two_snapshots() -> None:
         "cached_tokens": 0,
         "cache_reported": False,
         "refused_tokens": 0,
+        "refused_calls": 0,
         "seconds": [0.5],
     }
     after = {
@@ -376,11 +377,12 @@ def test_used_is_the_difference_of_two_snapshots() -> None:
         "cached_tokens": 8,
         "cache_reported": True,
         "refused_tokens": 900,
+        "refused_calls": 1,
         "seconds": [0.5, 1.0, 2.0],
     }
     assert meter.used(before, after) == {
         "calls": 2, "failed": 1, "input_tokens": 30, "output_tokens": 4, "cached_tokens": 8,
-        "cache_reported": True, "refused_tokens": 900, "seconds": [1.0, 2.0],
+        "cache_reported": True, "refused_tokens": 900, "refused_calls": 1, "seconds": [1.0, 2.0],
     }  # fmt: skip
 
 

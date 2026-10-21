@@ -57,7 +57,7 @@ from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, content_key
 from trellis.harness.runtime import Runtime, current, reason_of
-from trellis.harness.telemetry import metrics, tool_span
+from trellis.harness.telemetry import LoopEvent, metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import (
     OUTCOME_UNKNOWN,
@@ -252,6 +252,7 @@ def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any]) -> ToolOutcome 
     problem = arguments_problem(tool.spec.input_schema or {}, args)
     if problem is None:
         return None
+    metrics.loop(LoopEvent.MALFORMED_ARGS)
     return ToolOutcome(
         tool=tool.name,
         status=ToolStatus.ERROR,

@@ -43,6 +43,19 @@ FRAMEWORKS: Final = (
 )
 #: The features a ``C-<feature>`` arm runs ``ReAct`` without.
 REMOVED: Final = ("tool_search", "planning", "files", "code_mode", "memory")
+#: What ``ReAct`` adds to its loop on a run's signal (``trellis.harness.adaptive``): ``C0`` runs
+#: it without them all (``ReAct`` as main builds it), a ``C+<item>`` arm with that one alone.
+ADAPTIVE: Final = (
+    "token_count",
+    "strict_tools",
+    "native_output",
+    "tool_repair",
+    "stable_prefix",
+    "think",
+    "clear_inputs",
+    "unsupported_content",
+    "rubric",
+)
 #: The name the agent goes by where a framework asks for one.
 NAME: Final = "assistant"
 
@@ -57,11 +70,22 @@ class Arm:
     feature: str | None = None
     #: the interpreter it runs in: the harness's, or CrewAI's own venv
     venv: Literal["main", "crewai"] = "main"
+    #: C: the adaptive items it runs with (:data:`ADAPTIVE`; ``None``: all of them)
+    adds: tuple[str, ...] | None = None
 
     @property
     def wrapped(self) -> bool:
         """Whether it runs through the harness (memory and the run store on)."""
         return self.kind != "A"
+
+    @property
+    def without(self) -> set[str]:
+        """C: what its ``ReAct`` runs without — its removed feature, and the adaptive items
+        it does not add."""
+        removed = {self.feature} if self.feature else set()
+        if self.adds is None:
+            return removed
+        return removed | (set(ADAPTIVE) - set(self.adds))
 
 
 def _arms() -> dict[str, Arm]:
@@ -108,6 +132,23 @@ def _arms() -> dict[str, Arm]:
         *(
             Arm(f"react/C-{f}", "react", "C", f"ReAct without={{{f!r}}}", feature=f)
             for f in REMOVED
+        ),
+        Arm(
+            "react/C0",
+            "react",
+            "C",
+            "ReAct without its adaptive items (as main builds it)",
+            adds=(),
+        ),
+        *(
+            Arm(
+                f"react/C+{item}",
+                "react",
+                "C",
+                f"ReAct with the adaptive {item} alone",
+                adds=(item,),
+            )
+            for item in ADAPTIVE
         ),
     ]
     return {arm.name: arm for arm in arms}
@@ -513,14 +554,21 @@ def _trueforge(arm: Arm, setup: Setup, system: str, tools: Sequence[Tool], calls
 
 # --------------------------------------------------------------------------- arms B and C
 async def wrapped(
-    arm: Arm, setup: Setup, h: Any, system: str, sources: Sequence[Any]
+    arm: Arm, setup: Setup, h: Any, system: str, sources: Sequence[Any], *, output: Any = None
 ) -> tuple[Any, dict[str, Any]]:
-    """Arms B and C: the target and its ``h.wrap`` options (``tools``, ``without``)."""
+    """Arms B and C: the target and its ``h.wrap`` options (``tools``, ``without``); a C
+    arm's ``ReAct`` answers an ``output`` when the task set has one."""
     if arm.kind == "C":
         from trellis import ReAct
 
-        target = ReAct(system, setup.model, max_steps=setup.max_steps, context_window=setup.window)
-        return target, {"tools": list(sources), "without": {arm.feature} if arm.feature else set()}
+        target = ReAct(
+            system,
+            setup.model,
+            output=output,
+            max_steps=setup.max_steps,
+            context_window=setup.window,
+        )
+        return target, {"tools": list(sources), "without": arm.without}
     if arm.kind != "B":
         raise ValueError(f"{arm.name} is not wrapped")
     if arm.framework in ("langchain", "deepagents"):

@@ -447,7 +447,7 @@ class contains:
         if case.expected is None:
             return None
         wanted = case.expected if isinstance(case.expected, list) else [case.expected]
-        text = case.output if isinstance(case.output, str) else json.dumps(case.output)
+        text = case.output if isinstance(case.output, str) else json.dumps(_plain(case.output))
         if not self.case_sensitive:
             text = text.casefold()
         found = [str(w) if self.case_sensitive else str(w).casefold() for w in wanted]
@@ -557,6 +557,11 @@ def _names(given: Sequence[str] | None, from_item: Any) -> list[str]:
     if isinstance(names, str):
         names = [names]
     return list(dict.fromkeys(str(n) for n in names or ()))
+
+
+def _plain(output: Any) -> Any:
+    """An answer as JSON can hold it: a structured answer (``output=``) as its fields."""
+    return output.model_dump(mode="json") if isinstance(output, BaseModel) else output
 
 
 def _said(tools: Sequence[str]) -> str:

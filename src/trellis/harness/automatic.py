@@ -25,6 +25,7 @@ offered it, and a call of it is refused as not available.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Awaitable, Callable, Collection
 from typing import Annotated, Any, Final, NotRequired
@@ -49,6 +50,8 @@ from trellis.harness import budget
 from trellis.harness.features import Feature
 from trellis.harness.middleware import _named
 from trellis.harness.runtime import current
+
+log = logging.getLogger("trellis.react")
 
 #: The smallest context window the long-task tools are offered in, in tokens: together they
 #: cost about 2,600 tokens of instructions and definitions on every call, which a smaller
@@ -108,15 +111,51 @@ def long_task(request: ModelRequest[Any]) -> bool:
     return calls_made(request) >= LONG_AFTER or asks_for_steps(request)
 
 
+class PromptCache:
+    """Whether the model's prompt cache is seen to work: a reply of the graph's model reported
+    cached prompt tokens. From then on the long-task tools are offered from the first call
+    (``stable_prefix``): the tools are near the front of the prompt, and adding them at a
+    later step makes the cache miss everything after them."""
+
+    def __init__(self) -> None:
+        self.seen = False
+
+    def note(self, reply: ModelResponse[Any]) -> None:
+        """Note what ``reply`` says of the cache."""
+        if self.seen:
+            return
+        message = next((m for m in reversed(reply.result) if isinstance(m, AIMessage)), None)
+        usage = (message.usage_metadata if message is not None else None) or {}
+        if (usage.get("input_token_details") or {}).get("cache_read"):
+            self.seen = True
+            log.info("the model's prompt cache works: the long-task tools from the first call")
+
+    def holds(self) -> bool:
+        """Whether the long-task tools go from the first call: the cache works, and
+        ``stable_prefix`` is on."""
+        return self.seen and on("stable_prefix")
+
+
 class _LongTasks:
     """What the long-task middleware share: the model's context window (``None``: not known —
-    no room is assumed, so they are off), and whether this call gets their tools."""
+    no room is assumed, so they are off), the model's prompt cache, and whether this call gets
+    their tools."""
 
     window: int | None = None
+    cache: PromptCache
+
+    @property
+    def roomy(self) -> bool:
+        return self.window is not None and self.window >= MIN_WINDOW
 
     def wanted(self, feature: Feature, request: ModelRequest[Any]) -> bool:
-        roomy = self.window is not None and self.window >= MIN_WINDOW
-        return roomy and on(feature) and long_task(request)
+        return self.roomy and on(feature) and (self.cache.holds() or long_task(request))
+
+    def noted(self, reply: ModelResponse[Any]) -> ModelResponse[Any]:
+        """``reply``, its prompt cache noted (on a window with room for the tools)."""
+        if self.roomy:
+            self.cache.note(reply)
+        return reply
 
 
 def without_tools(request: ModelRequest[Any], names: Collection[str]) -> ModelRequest[Any]:
@@ -166,9 +205,10 @@ class Planning(_LongTasks, TodoListMiddleware):
     the model is sent neither ``write_todos`` nor its instructions. Named as LangChain's, so a
     ``TodoListMiddleware`` given to ``ReAct(middleware=)`` replaces it (always on)."""
 
-    def __init__(self, *, window: int | None = None) -> None:
+    def __init__(self, *, window: int | None = None, cache: PromptCache | None = None) -> None:
         super().__init__()
         self.window = window
+        self.cache = cache or PromptCache()
 
     @property
     def name(self) -> str:
@@ -181,7 +221,7 @@ class Planning(_LongTasks, TodoListMiddleware):
     ) -> Any:
         if self.wanted("planning", request):
             return await super().awrap_model_call(request, handler)
-        return await handler(without_tools(request, {TODOS}))
+        return self.noted(await handler(without_tools(request, {TODOS})))
 
     async def awrap_tool_call(
         self,
@@ -277,9 +317,10 @@ class ScratchFiles(_LongTasks, AgentMiddleware):
     """``ls``, ``write_file`` and ``edit_file`` (Deep Agents' ``FilesystemMiddleware``, which
     ``ReAct`` builds with them) offered on a long task (``files``); refused without it."""
 
-    def __init__(self, *, window: int | None = None) -> None:
+    def __init__(self, *, window: int | None = None, cache: PromptCache | None = None) -> None:
         super().__init__()
         self.window = window
+        self.cache = cache or PromptCache()
 
     async def awrap_model_call(
         self,
@@ -288,7 +329,7 @@ class ScratchFiles(_LongTasks, AgentMiddleware):
     ) -> ModelResponse[Any]:
         if self.wanted("files", request):
             return await handler(request)
-        return await handler(without_tools(request, SCRATCH))
+        return self.noted(await handler(without_tools(request, SCRATCH)))
 
     async def awrap_tool_call(
         self,

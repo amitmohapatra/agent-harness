@@ -102,7 +102,7 @@ from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
 from trellis.harness.repository import pinned
 from trellis.harness.runtime import DEFERRED, Runtime, current
-from trellis.harness.telemetry import gateway_headers, model_span, usage
+from trellis.harness.telemetry import LoopEvent, gateway_headers, metrics, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool, arguments_of, not_run
@@ -124,6 +124,8 @@ ERROR_STREAK: Final = 3
 READ_RESULT: Final = "read_result"
 #: Deep Agents' tool that reads a large result saved as a file.
 READ_FILE: Final = "read_file"
+#: The think tool (``trellis.harness.adaptive``): a thought noted, nothing read or changed.
+THINK: Final = "think"
 READ_LIMIT: Final = 20_000
 #: What the model is asked when its steps run out.
 LAST_STEP: Final = (
@@ -168,7 +170,17 @@ class _Step:
 #: on its default ``StateBackend``; on a backend that writes to a real disk, give the graph
 #: governed tools instead (``h.tools``).
 STATE_TOOLS: Final = frozenset(
-    {"write_todos", "read_result", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+    {
+        "write_todos",
+        "read_result",
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+        THINK,
+    }
 )
 
 
@@ -489,6 +501,8 @@ class ModelHooks(AgentMiddleware):
         last = state["messages"][-1] if state.get("messages") else None
         if not isinstance(last, AIMessage) or not last.invalid_tool_calls:
             return None
+        for _ in last.invalid_tool_calls:
+            metrics.loop(LoopEvent.MALFORMED_ARGS)
         told = [
             ToolMessage(
                 not_run(c.get("name") or "unknown", _malformed(c)),
@@ -1158,9 +1172,9 @@ def _empty(message: ToolMessage) -> bool:
 
 
 def _tools(request: ModelRequest[Any], runtime: Runtime | None) -> bool:
-    """Whether the model has tools to call beyond the readers of earlier results: the run's
-    own, or the graph's."""
-    own = [t for t in request.tools if _named(t) not in (READ_RESULT, READ_FILE)]
+    """Whether the model has tools to call beyond the readers of earlier results and the think
+    tool: the run's own, or the graph's."""
+    own = [t for t in request.tools if _named(t) not in (READ_RESULT, READ_FILE, THINK)]
     return bool(own) or bool(runtime is not None and runtime.tool_names())
 
 

@@ -114,9 +114,9 @@ def ReAct(
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
         from langchain.agents import create_agent
-        from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
+        from langchain.agents.middleware import ClearToolUsesEdit
 
-        from trellis.harness import automatic
+        from trellis.harness import adaptive, automatic
         from trellis.harness import middleware as ours
     except ImportError as exc:  # pragma: no cover - the react extra installs them
         raise ConfigurationError(
@@ -136,12 +136,16 @@ def ReAct(
     else:
         log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
     backend = automatic.JournalBackend()
+    cache = automatic.PromptCache()
+    native = adaptive.native_output(output, chat, gateway=named is not None)
     defaults = [
         automatic.JournalFiles(backend, tools=["read_file", *sorted(automatic.SCRATCH)]),
         # what a long task is offered, decided before anything reads the request's tools
-        automatic.Planning(window=window),
-        automatic.ScratchFiles(window=window),
+        automatic.Planning(window=window, cache=cache),
+        automatic.ScratchFiles(window=window, cache=cache),
         *([ours.AnswerCheck()] if answer_check else []),
+        # outside the harness's tools, whose calls it reads the answers of
+        adaptive.StrictTools(),
         ours.HarnessTools(),
         ours.GovernTools(),
         ours.StallGuard(max_repeats or ours.MAX_REPEATS),
@@ -150,16 +154,14 @@ def ReAct(
         PatchToolCallsMiddleware(),
         *(
             [
-                ContextEditingMiddleware(
-                    edits=[
-                        ClearToolUsesEdit(
-                            trigger=int(CLEAR_AT * window),
-                            clear_at_least=int(MIN_FREED * window),
-                            keep=KEEP_RESULTS,
-                            exclude_tools=(ours.READ_RESULT, "read_file"),
-                            placeholder=CLEARED,
-                        )
-                    ]
+                adaptive.ClearOldResults(
+                    ClearToolUsesEdit(
+                        trigger=int(CLEAR_AT * window),
+                        clear_at_least=int(MIN_FREED * window),
+                        keep=KEEP_RESULTS,
+                        exclude_tools=(ours.READ_RESULT, "read_file"),
+                        placeholder=CLEARED,
+                    )
                 )
             ]
             if window is not None
@@ -167,6 +169,7 @@ def ReAct(
         ),
         create_summarization_middleware(_profiled(chat, window), backend),
         ours.ReadTools(CLEARED),
+        adaptive.ThinkTool(reasons=effort is not None),
         *(
             [
                 ours.ToolGuidance(
@@ -176,13 +179,17 @@ def ReAct(
             if tool_guidance or capabilities
             else []
         ),
+        adaptive.Rubric(chat),
+        *([native] if native is not None else []),
+        adaptive.RepairToolCalls(),
+        adaptive.UnsupportedContent(),
         ours.ModelHooks(
             timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars, gateway=named is not None
         ),
     ]
     graph = create_agent(
         chat,
-        tools=[ours.read_result()],
+        tools=[ours.read_result(), adaptive.think_tool()],
         system_prompt=system,
         middleware=stacked(defaults, middleware),
         response_format=output,

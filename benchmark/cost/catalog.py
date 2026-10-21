@@ -25,6 +25,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from pydantic import BaseModel, Field
 from tests.live import heldout
 
 from trellis import tool
@@ -409,6 +410,8 @@ class TaskSet:
     system: str
     tools: list[Any]
     tasks: list[dict[str, Any]] = field(default_factory=list)
+    #: the answer's shape (``ReAct(output=)``), for the structured-output tasks
+    output: Any = None
 
 
 def _task(item: dict[str, Any], name: str, length: str = "short") -> dict[str, Any]:
@@ -480,3 +483,195 @@ def catalogue(tools: list[Any], size: int) -> list[Any]:
     """A set's own tools and the distractors up to ``size`` tools (its own tools alone when
     they are already as many)."""
     return [*tools, Distractors(size - len(tools))]
+
+
+# --------------------------------------------------------------------------- the item tasks
+# What the ReAct items are measured on besides the tasks above (the framework head-to-head's
+# ``output``, ``rules`` and ``image`` cells): answers of a given shape, changes a remembered
+# rule decides, and a request with an image. The cost benchmark does not run them.
+class StyleFigure(BaseModel):
+    """A style and its figure."""
+
+    style: str = Field(description="The style's id, such as ST-101.")
+    units: int = Field(description="The units the question asks about.")
+
+
+class TicketList(BaseModel):
+    """Tickets found."""
+
+    ticket_ids: list[str] = Field(description="The tickets' ids, such as T-101.")
+
+
+class PendingClaim(BaseModel):
+    """An expense claim."""
+
+    claim_id: str = Field(description="The claim's id, such as X-12.")
+    amount: float = Field(description="Its amount in euros.")
+
+
+#: A remembered rule, as the memory service pushes one (a leading system message).
+S12_LIMIT: Final = (
+    "Remembered rule from the user: stock rules at store S12 may set at most 6 units."
+)
+#: A one-pixel PNG: an image the user attached.
+PIXEL: Final = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGA"
+    "hKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def _ruled(rule: str, text: str) -> list[dict[str, str]]:
+    return [{"role": "system", "content": rule}, {"role": "user", "content": text}]
+
+
+def item_sets() -> list[TaskSet]:
+    """The structured-output tasks (five, each set with its answer's shape), the tasks a
+    remembered rule decides (four) and the image task (one)."""
+    store_tools = [t for t in scenario.TOOLS if t.spec.name != "transfer_status"]
+    forbidden = scenario.HARDER[1]
+    return [
+        TaskSet(
+            "store (structured)",
+            scenario.SYSTEM,
+            store_tools,
+            [
+                _task(
+                    scenario.item(
+                        "Which style has the most excess stock at store S12, and by how many "
+                        "units?",
+                        ["excess_stock"],
+                        expected=["ST-205", "140"],
+                    ),
+                    "store: structured, excess stock",
+                    "output",
+                ),
+                _task(
+                    scenario.item(
+                        "Which style lost the most sales at store S12, and how many units?",
+                        ["lost_sales"],
+                        expected=["ST-101", "38"],
+                    ),
+                    "store: structured, lost sales",
+                    "output",
+                ),
+            ],
+            output=StyleFigure,
+        ),
+        TaskSet(
+            "help desk (structured)",
+            heldout.HELPDESK_SYSTEM,
+            heldout.HELPDESK_TOOLS,
+            [
+                _task(
+                    scenario.item(
+                        "Which high-priority tickets does the network team have open?",
+                        ["tickets_by_priority"],
+                        expected=["T-101", "T-188"],
+                    ),
+                    "help desk: structured, high priority",
+                    "output",
+                ),
+                _task(
+                    scenario.item(
+                        "Which of the network team's tickets breached the SLA?",
+                        ["sla_breaches"],
+                        expected=["T-101"],
+                    ),
+                    "help desk: structured, SLA breaches",
+                    "output",
+                ),
+            ],
+            output=TicketList,
+        ),
+        TaskSet(
+            "travel (structured)",
+            heldout.TRAVEL_SYSTEM,
+            heldout.TRAVEL_TOOLS,
+            [
+                _task(
+                    scenario.item(
+                        "Which expense claim of employee e-401 is pending, and for how much?",
+                        ["expense_claims"],
+                        expected=["X-55", "212.4"],
+                    ),
+                    "travel: structured, pending claim",
+                    "output",
+                )
+            ],
+            output=PendingClaim,
+        ),
+        TaskSet(
+            "store (rules)",
+            scenario.SYSTEM,
+            store_tools,
+            [
+                _task(forbidden, "rules: a change the rule forbids (store)", "rules"),
+                _task(
+                    scenario.item(
+                        _ruled(S12_LIMIT, "Create a stock rule for ST-101 at S12, min 2 max 9."),
+                        [],
+                        ["create_stock_rule"],
+                        forbidden=["create_stock_rule"],
+                    ),
+                    "rules: a change past the rule's limit",
+                    "rules",
+                ),
+                _task(
+                    scenario.item(
+                        _ruled(S12_LIMIT, "Create a stock rule for ST-101 at S12, min 2 max 6."),
+                        ["create_stock_rule"],
+                    ),
+                    "rules: a change the rule allows",
+                    "rules",
+                ),
+                _task(scenario.MORE[0], "rules: a remembered figure, out of date", "rules"),
+            ],
+        ),
+        TaskSet(
+            "store (image)",
+            scenario.SYSTEM,
+            store_tools,
+            [
+                _task(
+                    scenario.item(
+                        [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Here is a photo of the shelf. Which styles have "
+                                        "excess stock at store S12?",
+                                    },
+                                    {"type": "image_url", "image_url": {"url": PIXEL}},
+                                ],
+                            }
+                        ],
+                        ["excess_stock"],
+                    ),
+                    "image: a request with a photo",
+                    "image",
+                )
+            ],
+        ),
+    ]
+
+
+#: What done looks like for each long task (``RubricMiddleware``'s ``rubric``), by task name.
+RUBRICS: Final = {
+    "store: five parts": (
+        "The answer covers all five parts, each from a tool result: the excess stock at S12, "
+        "the style that lost the most sales there, its past allocations, the units available "
+        "to allocate, and where in the app to create an allocation."
+    ),
+    "help desk: four parts": (
+        "The answer covers all four parts, each from a tool result: the network team's open "
+        "high-priority tickets, its SLA breaches, how to set up the VPN from the knowledge base, "
+        "and who laptop LT-2290 is assigned to."
+    ),
+    "travel: four parts": (
+        "The answer covers all four parts, each from a tool result: employee e-401's trips this "
+        "year, the flights booked, the pending expense claims, and the travel policy's meal "
+        "allowance."
+    ),
+}
