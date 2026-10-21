@@ -407,7 +407,10 @@ line naming both versions.
 * **Cancelling an in-process run from another process** ([cancel](#cancel)).
 * **Without `RUNS_URL`**, `LocalRuns` keeps the working time, leases, cancels and releases as
   agent-runs does, but nothing survives a restart and nothing enforces a limit for a run no
-  attempt is working on (the attempts themselves still stop on time).
+  attempt is working on (the attempts themselves still stop on time). It keeps the last 1,000
+  finished runs, each for an hour (`LocalRuns(keep_finished=, keep_finished_seconds=)`), with
+  their artifacts, so a long-lived process does not grow; paused, queued and running runs are
+  always kept. agent-runs (`RUNS_URL`) is the durable store for production.
 
 ## Run it
 

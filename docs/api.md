@@ -43,7 +43,7 @@ spans and closes the clients it built; a block you give is yours to close.
 | Argument | Default | What it is |
 |---|---|---|
 | `config` | `Settings.from_env()` | the deployment as fields, instead of the environment ([Settings](#settings)) |
-| `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
+| `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns(keep_finished=1000, keep_finished_seconds=3600)` (the finished runs it keeps, and how long), or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
 | `memory` | a `MemoryClient` with `MEMORY_URL`, else none | `trellis.memory.MemoryClient`; `False`: no memory whatever `MEMORY_URL` says ([memory.md](memory.md)) |
 | `gateway` | a `Gateway` with `BIFROST_URL`, else none | `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`; `False`: no gateway ([gateway.md](gateway.md)) |
 | `governance` | the memory service's tool catalog, per tenant (with memory), else the tools' own risks | a `Governance`, used for every tenant ([governance.md](governance.md)) |

@@ -49,6 +49,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Fixed
 
+- A long-lived process without `RUNS_URL` no longer grows with every run: `LocalRuns` kept
+  every finished run forever (about 4 kB each; the 30-minute load check grew 130 MB over 38,758
+  runs). It now keeps the last 1,000 finished runs for an hour each, with their artifacts
+  (`LocalRuns(keep_finished=, keep_finished_seconds=)`); paused, queued and running runs are
+  always kept. agent-runs (`RUNS_URL`) stays the durable store for production.
 - A `ReAct` run's files — a large result saved by `FilesystemMiddleware`, a summarized history
   — were lost on a resume (Deep Agents keeps them in a `DeltaChannel`, which needs every
   earlier checkpoint, and the run keeps only the latest): they are now in a channel the
