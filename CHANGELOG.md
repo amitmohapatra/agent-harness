@@ -49,6 +49,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Fixed
 
+- Every piece of the harness's own client-side state is bounded, so a long-lived process
+  serving many tenants, tools and threads does not grow: governance and toolboxes per tenant,
+  the catalog rules kept fresh and the published-once set (4,096 each), prompts and skills
+  kept, an in-memory checkpointer's threads outside a run (10,000), the `h.tools` builds
+  awaiting a wrap, and the names a once-only warning remembers (256) — each the most recently
+  used, the rest read, sent or said again. The write spool stops at 64 MB (a write given up
+  past it is lost, said once) so a long outage cannot fill the disk.
 - A long-lived process without `RUNS_URL` no longer grows with every run: `LocalRuns` kept
   every finished run forever (about 4 kB each; the 30-minute load check grew 130 MB over 38,758
   runs). It now keeps the last 1,000 finished runs for an hour each, with their artifacts

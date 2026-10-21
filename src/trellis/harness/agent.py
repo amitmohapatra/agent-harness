@@ -49,6 +49,7 @@ from trellis.harness.adapters.base import (
     context_window,
 )
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
+from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.evals import (
@@ -175,7 +176,7 @@ class Agent:
         if self.adapter.fixed_tools:
             self.sources, self.mcp = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
-        self._toolboxes: dict[str, Toolbox] = {}
+        self._toolboxes: LRU[str, Toolbox] = LRU()
         #: the runs an attempt of which runs in this process now, by id
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError
+from trellis.harness.bounded import SAID_ONCE
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -153,7 +154,7 @@ def _over(run: Runtime) -> str | None:
     return cap.over(run.replay.journal.spent) if cap is not None else None
 
 
-@functools.cache
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per name, of the most recent
 def _no_cost(model: str) -> None:
     log.warning(
         "the gateway put no cost on %s's replies: their tokens are counted, their dollars are "
