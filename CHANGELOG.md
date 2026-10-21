@@ -7,6 +7,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- `python -m benchmark.thread`: who keeps a conversation's history across runs, the framework's
+  own thread or the memory service's window, measured on recall and input tokens per turn.
+  Measured on Granite through Bifrost with the memory service: recall 1.00 vs 0.92, 202 vs 214
+  tokens a turn — the owners stay as they are (ADR 0003 §6).
 - Without Bifrost, model names go to any OpenAI-compatible endpoint the OpenAI SDK's own
   `OPENAI_BASE_URL` / `OPENAI_API_KEY` name (LiteLLM's proxy, Portkey, vLLM, Ollama, OpenAI):
   `ReAct(model="name")` and `llm_judge(model="name")` work there, with the client's own retries.

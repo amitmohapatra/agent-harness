@@ -407,6 +407,16 @@ configured (the repository variable `BENCH_BIFROST_URL` and the secret
 `BENCH_BIFROST_VIRTUAL_KEY`; without them the job is skipped): the smoke set (10 tools, one
 repeat) on a pull request, the 10- and 50-tool catalogues nightly.
 
+## Thread-history benchmark
+
+`python -m benchmark.thread --model <name>` (with `MEMORY_URL` and a gateway serving the name)
+measures who should keep a conversation's history across runs: a `create_agent` graph with its
+own checkpointer (the framework's thread; the harness sends no memory window) against the same
+graph without one (the memory service's window), on conversations whose later turns ask back
+facts from the first. It reports recall, input tokens per turn and seconds per turn
+(`build/bench-thread.json`, `.md`). The measurement and the decision are in
+[ADR 0003](adr/0003-automatic-features.md) (§6).
+
 ## Load benchmark
 
 `make bench-load` (`python -m benchmark.load`) runs many `ReAct` runs at once — a tool call and
