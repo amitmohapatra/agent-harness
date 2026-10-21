@@ -1,0 +1,5593 @@
+{
+  "model": "granite/granite-3.3-2b",
+  "model_price": "granite-3.3-2b",
+  "date": "2026-10-21",
+  "machine": "x86_64, 4 CPUs, Linux",
+  "environment": {
+    "machine": "x86_64, 4 CPUs, Linux",
+    "vendor_keys": {
+      "ANTHROPIC_API_KEY": false,
+      "OPENAI_API_KEY": false
+    },
+    "bifrost": false
+  },
+  "repeats": 2,
+  "tasks": 10,
+  "sizes": [
+    10,
+    50,
+    100,
+    500
+  ],
+  "variants": {
+    "baseline": "plain tools, everything off",
+    "main": "ReAct as main builds it: result paging, context editing, summarization; ToolGuidance off"
+  },
+  "setup": {
+    "window": 8192,
+    "max_steps": 6
+  },
+  "priced_as": [
+    "claude-sonnet-5-5",
+    "gpt-6-sol"
+  ],
+  "prices": {
+    "granite-3.3-2b": {
+      "input": 0.0,
+      "cached_input": 0.0,
+      "output": 0.0,
+      "cache_write": null,
+      "source": "self-hosted on this machine: no per-token price (hardware and power not priced)"
+    },
+    "claude-sonnet-5-5": {
+      "input": 2.0,
+      "cached_input": 0.1,
+      "output": 10.0,
+      "cache_write": 2.5,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing (read 2026-10-21)"
+    },
+    "gpt-6-sol": {
+      "input": 2.0,
+      "cached_input": 0.2,
+      "output": 10.0,
+      "cache_write": null,
+      "source": "LiteLLM 1.106.1 model_prices_and_context_window_backup.json (2026-10-20; a secondary source: openai.com was not reachable), read 2026-10-21"
+    }
+  },
+  "notes": [
+    "Model: Granite 3.3 2B Q4_K_M on llama.cpp 8baabd5 (llama-server -c 8192 --cache-ram 0 -np 1 -n 512 --temp 0.1 -t 4, the Granite 4.0 tool-call template) behind Bifrost ad8ba2b, on 4 CPUs. Cached tokens are llama.cpp's slot prefix cache, not a vendor prompt cache.",
+    "At 50 tools only the travel set (3 tasks x 2 repeats) was run: the full set at 50 tools takes about 65 minutes per variant on this machine, past the time the run was allowed.",
+    "No vendor key (ANTHROPIC_API_KEY, OPENAI_API_KEY) and no vendor provider in the gateway: no vendor model was measured."
+  ],
+  "cells": [
+    {
+      "size": 10,
+      "variant": "baseline",
+      "runs": 20,
+      "stats": {
+        "input_tokens": {
+          "mean": 2654.3,
+          "ci95": 336.0542931674559,
+          "n": 20
+        },
+        "cached_tokens": {
+          "mean": 2302.95,
+          "ci95": 347.5311729566615,
+          "n": 20
+        },
+        "output_tokens": {
+          "mean": 181.9,
+          "ci95": 51.870030711440585,
+          "n": 20
+        },
+        "model_calls": {
+          "mean": 1.9,
+          "ci95": 0.14405013929732574,
+          "n": 20
+        },
+        "refused_prompt_tokens": {
+          "mean": 4537.2,
+          "ci95": 6535.864262335847,
+          "n": 20
+        },
+        "seconds": {
+          "mean": 38.265499999999996,
+          "ci95": 10.16397447652684,
+          "n": 20
+        },
+        "tool_coverage": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "success": {
+          "mean": 0.9,
+          "ci95": 0.14405013929732574,
+          "n": 20
+        },
+        "errored": {
+          "mean": 0.1,
+          "ci95": 0.14405013929732574,
+          "n": 20
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.0071276,
+          "ci95": 0.0009968090430879123,
+          "n": 20
+        },
+        "gpt-6-sol": {
+          "mean": 0.0071276,
+          "ci95": 0.0009968090430879123,
+          "n": 20
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 2629.1666666666665,
+              "ci95": 413.48481091678747,
+              "n": 12
+            },
+            "cached_tokens": {
+              "mean": 2202.4166666666665,
+              "ci95": 481.988959413687,
+              "n": 12
+            },
+            "output_tokens": {
+              "mean": 112.33333333333333,
+              "ci95": 34.340487912898965,
+              "n": 12
+            },
+            "model_calls": {
+              "mean": 1.8333333333333333,
+              "ci95": 0.247318982880266,
+              "n": 12
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "seconds": {
+              "mean": 26.563333333333333,
+              "ci95": 9.223346910269163,
+              "n": 12
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "success": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0063816666666666666,
+              "ci95": 0.0010330288856327428,
+              "n": 12
+            },
+            "gpt-6-sol": {
+              "mean": 0.0063816666666666666,
+              "ci95": 0.0010330288856327428,
+              "n": 12
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 3148.3333333333335,
+              "ci95": 163.31910856602175,
+              "n": 6
+            },
+            "cached_tokens": {
+              "mean": 2838.3333333333335,
+              "ci95": 254.48196164679342,
+              "n": 6
+            },
+            "output_tokens": {
+              "mean": 320.3333333333333,
+              "ci95": 64.60211294996473,
+              "n": 6
+            },
+            "model_calls": {
+              "mean": 2.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "seconds": {
+              "mean": 63.72833333333333,
+              "ci95": 13.129007987016571,
+              "n": 6
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "success": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0095,
+              "ci95": 0.0006275234666490174,
+              "n": 6
+            },
+            "gpt-6-sol": {
+              "mean": 0.0095,
+              "ci95": 0.0006275234666490174,
+              "n": 6
+            }
+          }
+        },
+        "large": {
+          "stats": {
+            "input_tokens": {
+              "mean": 1323.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": 1300.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "output_tokens": {
+              "mean": 184.0,
+              "ci95": 864.0079999999999,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 2.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 45372.0,
+              "ci95": 1397.6599999999999,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 32.089999999999996,
+              "ci95": 142.43426,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0044859999999999995,
+              "ci95": 0.008640079999999996,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.0044859999999999995,
+              "ci95": 0.008640079999999996,
+              "n": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 10,
+      "variant": "main",
+      "runs": 20,
+      "stats": {
+        "input_tokens": {
+          "mean": 2793.7,
+          "ci95": 335.38414711467254,
+          "n": 20
+        },
+        "cached_tokens": {
+          "mean": 2343.3,
+          "ci95": 330.3955012287219,
+          "n": 20
+        },
+        "output_tokens": {
+          "mean": 222.6,
+          "ci95": 84.81488766430348,
+          "n": 20
+        },
+        "model_calls": {
+          "mean": 1.85,
+          "ci95": 0.17145395998557994,
+          "n": 20
+        },
+        "refused_prompt_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "seconds": {
+          "mean": 51.239,
+          "ci95": 20.56615171652015,
+          "n": 20
+        },
+        "tool_coverage": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "success": {
+          "mean": 0.95,
+          "ci95": 0.10464999999999999,
+          "n": 20
+        },
+        "errored": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.0078134,
+          "ci95": 0.0012491951558530198,
+          "n": 20
+        },
+        "gpt-6-sol": {
+          "mean": 0.0078134,
+          "ci95": 0.0012491951558530198,
+          "n": 20
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 2629.1666666666665,
+              "ci95": 413.48481091678747,
+              "n": 12
+            },
+            "cached_tokens": {
+              "mean": 2202.8333333333335,
+              "ci95": 481.6613863042457,
+              "n": 12
+            },
+            "output_tokens": {
+              "mean": 107.83333333333333,
+              "ci95": 32.56262252250161,
+              "n": 12
+            },
+            "model_calls": {
+              "mean": 1.8333333333333333,
+              "ci95": 0.247318982880266,
+              "n": 12
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "seconds": {
+              "mean": 27.67,
+              "ci95": 8.10855417272962,
+              "n": 12
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "success": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.006336666666666667,
+              "ci95": 0.0010084647015141182,
+              "n": 12
+            },
+            "gpt-6-sol": {
+              "mean": 0.006336666666666667,
+              "ci95": 0.0010084647015141182,
+              "n": 12
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 3148.3333333333335,
+              "ci95": 163.31910856602175,
+              "n": 6
+            },
+            "cached_tokens": {
+              "mean": 2838.3333333333335,
+              "ci95": 254.48196164679342,
+              "n": 6
+            },
+            "output_tokens": {
+              "mean": 313.6666666666667,
+              "ci95": 47.94606730483743,
+              "n": 6
+            },
+            "model_calls": {
+              "mean": 2.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "seconds": {
+              "mean": 64.84833333333333,
+              "ci95": 10.166822025445564,
+              "n": 6
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "success": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.009433333333333334,
+              "ci95": 0.0004592886799641375,
+              "n": 6
+            },
+            "gpt-6-sol": {
+              "mean": 0.009433333333333334,
+              "ci95": 0.0004592886799641375,
+              "n": 6
+            }
+          }
+        },
+        "large": {
+          "stats": {
+            "input_tokens": {
+              "mean": 2717.0,
+              "ci95": 17712.164,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": 1701.0,
+              "ci95": 5095.106,
+              "n": 2
+            },
+            "output_tokens": {
+              "mean": 638.0,
+              "ci95": 1600.9559999999997,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 1.5,
+              "ci95": 6.353,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 151.825,
+              "ci95": 719.7313699999999,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 0.5,
+              "ci95": 6.353,
+              "n": 2
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.011814000000000002,
+              "ci95": 0.051433888,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.011814000000000002,
+              "ci95": 0.051433888,
+              "n": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 50,
+      "variant": "baseline",
+      "runs": 6,
+      "stats": {
+        "input_tokens": {
+          "mean": 17742.0,
+          "ci95": 4517.411714640675,
+          "n": 6
+        },
+        "cached_tokens": {
+          "mean": 16294.166666666666,
+          "ci95": 6143.6882831644925,
+          "n": 6
+        },
+        "output_tokens": {
+          "mean": 203.66666666666666,
+          "ci95": 150.799859075531,
+          "n": 6
+        },
+        "model_calls": {
+          "mean": 2.3333333333333335,
+          "ci95": 0.5420143909528603,
+          "n": 6
+        },
+        "refused_prompt_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "seconds": {
+          "mean": 159.10833333333332,
+          "ci95": 94.32508294979552,
+          "n": 6
+        },
+        "tool_coverage": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "success": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "errored": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 6
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.03752066666666667,
+          "ci95": 0.010503408949790502,
+          "n": 6
+        },
+        "gpt-6-sol": {
+          "mean": 0.03752066666666667,
+          "ci95": 0.010503408949790502,
+          "n": 6
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 14964.0,
+              "ci95": 95.53068494119223,
+              "n": 4
+            },
+            "cached_tokens": {
+              "mean": 12999.25,
+              "ci95": 5883.791245108399,
+              "n": 4
+            },
+            "output_tokens": {
+              "mean": 114.0,
+              "ci95": 75.3446714948487,
+              "n": 4
+            },
+            "model_calls": {
+              "mean": 2.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "seconds": {
+              "mean": 115.83000000000001,
+              "ci95": 122.86961562947585,
+              "n": 4
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "success": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 4
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.031068000000000002,
+              "ci95": 0.0009444627701686651,
+              "n": 4
+            },
+            "gpt-6-sol": {
+              "mean": 0.031068000000000002,
+              "ci95": 0.0009444627701686651,
+              "n": 4
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 23298.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": 22884.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "output_tokens": {
+              "mean": 383.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 3.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 245.665,
+              "ci95": 30.93911000000002,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.050426,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.050426,
+              "ci95": 0.0,
+              "n": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 50,
+      "variant": "main",
+      "runs": 6,
+      "stats": {
+        "input_tokens": {
+          "mean": 15045.666666666666,
+          "ci95": 141.48236853120605,
+          "n": 6
+        },
+        "cached_tokens": {
+          "mean": 14893.333333333334,
+          "ci95": 69.91565464472174,
+          "n": 6
+        },
+        "output_tokens": {
+          "mean": 168.5,
+          "ci95": 98.96346420598869,
+          "n": 6
+        },
+        "model_calls": {
+          "mean": 2.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "refused_prompt_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "seconds": {
+          "mean": 146.31,
+          "ci95": 94.61296767376449,
+          "n": 6
+        },
+        "tool_coverage": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "success": {
+          "mean": 0.6666666666666666,
+          "ci95": 0.5420143909528603,
+          "n": 6
+        },
+        "errored": {
+          "mean": 0.3333333333333333,
+          "ci95": 0.5420143909528603,
+          "n": 6
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 6
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.03177633333333333,
+          "ci95": 0.0012721703008283904,
+          "n": 6
+        },
+        "gpt-6-sol": {
+          "mean": 0.03177633333333333,
+          "ci95": 0.0012721703008283904,
+          "n": 6
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 14964.0,
+              "ci95": 95.53068494119223,
+              "n": 4
+            },
+            "cached_tokens": {
+              "mean": 14850.5,
+              "ci95": 11.94133561764903,
+              "n": 4
+            },
+            "output_tokens": {
+              "mean": 112.75,
+              "ci95": 77.68659295045703,
+              "n": 4
+            },
+            "model_calls": {
+              "mean": 2.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "seconds": {
+              "mean": 92.445,
+              "ci95": 30.72944870530275,
+              "n": 4
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "success": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "errored": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 4
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 4
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0310555,
+              "ci95": 0.0009677932381762459,
+              "n": 4
+            },
+            "gpt-6-sol": {
+              "mean": 0.0310555,
+              "ci95": 0.0009677932381762459,
+              "n": 4
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 15209.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": 14979.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "output_tokens": {
+              "mean": 280.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 2.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 254.04000000000002,
+              "ci95": 615.3515800000001,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.033218,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.033218,
+              "ci95": 0.0,
+              "n": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 100,
+      "variant": "baseline",
+      "runs": 20,
+      "stats": {
+        "input_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "cached_tokens": {
+          "mean": null,
+          "ci95": null,
+          "n": 0
+        },
+        "output_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "model_calls": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "refused_prompt_tokens": {
+          "mean": 14486.3,
+          "ci95": 34.709840172409464,
+          "n": 20
+        },
+        "seconds": {
+          "mean": 0.10250000000000001,
+          "ci95": 0.020533812754819792,
+          "n": 20
+        },
+        "tool_coverage": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "success": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "errored": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "gpt-6-sol": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "model_calls": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "refused_prompt_tokens": {
+              "mean": 14480.333333333334,
+              "ci95": 49.71837464086385,
+              "n": 12
+            },
+            "seconds": {
+              "mean": 0.115,
+              "ci95": 0.033784171376638215,
+              "n": 12
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "model_calls": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "refused_prompt_tokens": {
+              "mean": 14503.0,
+              "ci95": 87.36861763127538,
+              "n": 6
+            },
+            "seconds": {
+              "mean": 0.085,
+              "ci95": 0.012855000000000002,
+              "n": 6
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          }
+        },
+        "large": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 14472.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 0.08,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 100,
+      "variant": "main",
+      "runs": 20,
+      "stats": {
+        "input_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "cached_tokens": {
+          "mean": null,
+          "ci95": null,
+          "n": 0
+        },
+        "output_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "model_calls": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "refused_prompt_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "seconds": {
+          "mean": 0.02,
+          "ci95": 0.010843700548196052,
+          "n": 20
+        },
+        "tool_coverage": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "success": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "errored": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "gpt-6-sol": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "model_calls": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "seconds": {
+              "mean": 0.02666666666666667,
+              "ci95": 0.018039033617086697,
+              "n": 12
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "model_calls": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "seconds": {
+              "mean": 0.01,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          }
+        },
+        "large": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 0.01,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 500,
+      "variant": "baseline",
+      "runs": 20,
+      "stats": {
+        "input_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "cached_tokens": {
+          "mean": null,
+          "ci95": null,
+          "n": 0
+        },
+        "output_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "model_calls": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "refused_prompt_tokens": {
+          "mean": 71050.8,
+          "ci95": 28.97027811199464,
+          "n": 20
+        },
+        "seconds": {
+          "mean": 0.636,
+          "ci95": 0.23562168554765028,
+          "n": 20
+        },
+        "tool_coverage": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "success": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "errored": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "gpt-6-sol": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "model_calls": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "refused_prompt_tokens": {
+              "mean": 71043.66666666667,
+              "ci95": 41.31692896441488,
+              "n": 12
+            },
+            "seconds": {
+              "mean": 0.7666666666666666,
+              "ci95": 0.3951442254386046,
+              "n": 12
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "model_calls": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "refused_prompt_tokens": {
+              "mean": 71066.33333333333,
+              "ci95": 73.02323958576477,
+              "n": 6
+            },
+            "seconds": {
+              "mean": 0.4583333333333333,
+              "ci95": 0.094678139213865,
+              "n": 6
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          }
+        },
+        "large": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 71047.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 0.385,
+              "ci95": 0.19059000000000015,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "size": 500,
+      "variant": "main",
+      "runs": 20,
+      "stats": {
+        "input_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "cached_tokens": {
+          "mean": null,
+          "ci95": null,
+          "n": 0
+        },
+        "output_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "model_calls": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "refused_prompt_tokens": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "seconds": {
+          "mean": 0.271,
+          "ci95": 0.27870755036143835,
+          "n": 20
+        },
+        "tool_coverage": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "success": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "errored": {
+          "mean": 1.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "dollars": {
+        "granite-3.3-2b": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "claude-sonnet-5-5": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        },
+        "gpt-6-sol": {
+          "mean": 0.0,
+          "ci95": 0.0,
+          "n": 20
+        }
+      },
+      "by_length": {
+        "short": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "model_calls": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "seconds": {
+              "mean": 0.43166666666666664,
+              "ci95": 0.46782005284477374,
+              "n": 12
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 12
+            }
+          }
+        },
+        "long": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "model_calls": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "seconds": {
+              "mean": 0.03,
+              "ci95": 0.006638293455399514,
+              "n": 6
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 6
+            }
+          }
+        },
+        "large": {
+          "stats": {
+            "input_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "cached_tokens": {
+              "mean": null,
+              "ci95": null,
+              "n": 0
+            },
+            "output_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "model_calls": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "refused_prompt_tokens": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "seconds": {
+              "mean": 0.03,
+              "ci95": 0.12705999999999998,
+              "n": 2
+            },
+            "tool_coverage": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "success": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "errored": {
+              "mean": 1.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          },
+          "dollars": {
+            "granite-3.3-2b": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "claude-sonnet-5-5": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            },
+            "gpt-6-sol": {
+              "mean": 0.0,
+              "ci95": 0.0,
+              "n": 2
+            }
+          }
+        }
+      }
+    }
+  ],
+  "runs": [
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "excess_stock",
+        "lost_sales"
+      ],
+      "input_tokens": 2759,
+      "output_tokens": 182,
+      "cached_tokens": 1340,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 54.01,
+      "answer": "At store S12, the following styles have excess stock:\n- ST-205 with 140 units over the target.\n- ST-330 with 65 units over the target.\n\nThe styles that lost the most sales at store S12 are:\n- ST-101 with 38 units lost, resulting in a loss of $1520.00.\n- ST-330 with 4 units lost, resulting in a loss ",
+      "size": 10,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "interrupted",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [],
+      "input_tokens": 1282,
+      "output_tokens": 60,
+      "cached_tokens": 1252,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 12.53,
+      "answer": null,
+      "size": 10,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "lost_sales",
+        "excess_stock",
+        "allocation_history",
+        "app_help",
+        "allocatable_stock"
+      ],
+      "input_tokens": 3040,
+      "output_tokens": 358,
+      "cached_tokens": 2578,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 72.6,
+      "answer": "Here's the information you requested:\n\n- **Excess Stock**:\n  - Style ST-205: 140 units over target\n  - Style ST-330: 65 units over target\n\n- **Lost Sales**:\n  - Style ST-101: Lost 38 units, $1520 in revenue\n  - Style ST-330: Lost 4 units, $180 in revenue\n\n- **Past Allocations**:\n  - Style ST-101, St",
+      "size": 10,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "lost_sales",
+        "excess_stock"
+      ],
+      "input_tokens": 2759,
+      "output_tokens": 181,
+      "cached_tokens": 2592,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 33.89,
+      "answer": "At store S12, the following styles have excess stock:\n- ST-205 with 140 units over the target.\n- ST-330 with 65 units over the target.\n\nThe styles that lost the most sales are:\n- ST-101 with 38 units lost, resulting in a lost revenue of $1520.00.\n- ST-330 with 4 units lost, resulting in a lost reven",
+      "size": 10,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "interrupted",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [],
+      "input_tokens": 1282,
+      "output_tokens": 60,
+      "cached_tokens": 1252,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 12.21,
+      "answer": null,
+      "size": 10,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "allocatable_stock",
+        "excess_stock",
+        "lost_sales",
+        "app_help",
+        "allocation_history"
+      ],
+      "input_tokens": 3040,
+      "output_tokens": 425,
+      "cached_tokens": 2578,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 83.07,
+      "answer": "Here's the information you requested:\n\n1. Excess Stock:\n   - Style ST-205: 140 units over target\n   - Style ST-330: 65 units over target\n\n2. Lost Sales:\n   - Style ST-101: Lost 38 units, lost $1520 in revenue\n   - Style ST-330: Lost 4 units, lost $180 in revenue\n\n3. Past Allocations:\n   - Style ST-1",
+      "size": 10,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "sla_breaches",
+        "tickets_by_priority"
+      ],
+      "input_tokens": 2815,
+      "output_tokens": 142,
+      "cached_tokens": 1400,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 38.31,
+      "answer": "The network team has the following high-priority tickets open:\n1. Ticket T-101: \"Core switch down\"\n2. Ticket T-188: \"VPN flaps\"\n\nOne of these tickets, T-101, breached the SLA as it has been overdue for 14 hours.",
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "asset_owner"
+      ],
+      "input_tokens": 2711,
+      "output_tokens": 57,
+      "cached_tokens": 2658,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 14.46,
+      "answer": "The laptop LT-2290 is assigned to Omar (u-77).",
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "asset_owner",
+        "sla_breaches",
+        "desk_dashboard",
+        "knowledge_base",
+        "tickets_by_priority"
+      ],
+      "input_tokens": 3056,
+      "output_tokens": 278,
+      "cached_tokens": 2818,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 53.2,
+      "answer": "The network team currently has 41 open high-priority tickets, 120 closed tickets, and 9 waiting tickets. Their SLA breaches include ticket T-101, which has exceeded its 14-hour overdue mark.\n\nTo set up the VPN, follow these steps from the knowledge base:\n1. Open Settings > Network > VPN.\n2. Import t",
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (45262 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": false,
+      "errored": true,
+      "called": [
+        "ticket_export",
+        "sla_breaches",
+        "docs-update_document"
+      ],
+      "input_tokens": 1323,
+      "output_tokens": 116,
+      "cached_tokens": 1300,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 45262,
+      "seconds": 20.88,
+      "answer": null,
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "tickets_by_priority",
+        "sla_breaches"
+      ],
+      "input_tokens": 2815,
+      "output_tokens": 137,
+      "cached_tokens": 2696,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 25.64,
+      "answer": "The network team has two high-priority tickets open:\n1. Ticket T-101: \"Core switch down\"\n2. Ticket T-188: \"VPN flaps\"\n\nTicket T-101 breached the SLA, as it has been overdue for 14 hours.",
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "asset_owner"
+      ],
+      "input_tokens": 2711,
+      "output_tokens": 57,
+      "cached_tokens": 2658,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 12.95,
+      "answer": "The laptop LT-2290 is assigned to Omar (u-77).",
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "tickets_by_priority",
+        "desk_dashboard",
+        "knowledge_base",
+        "asset_owner",
+        "sla_breaches"
+      ],
+      "input_tokens": 3056,
+      "output_tokens": 263,
+      "cached_tokens": 2818,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 49.38,
+      "answer": "The network team currently has 41 open high-priority tickets, 120 closed tickets, and 9 waiting tickets. Their SLA breaches include ticket T-101, which has exceeded its 14-hour overdue mark. Here's how to set up the VPN: open Settings > Network > VPN, import the profile. The laptop LT-2290 is assign",
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (45482 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": false,
+      "errored": true,
+      "called": [
+        "docs-update_document",
+        "chat-create_user_group",
+        "asset_owner",
+        "knowledge_base",
+        "ticket_export",
+        "sla_breaches"
+      ],
+      "input_tokens": 1323,
+      "output_tokens": 252,
+      "cached_tokens": 1300,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 45482,
+      "seconds": 43.3,
+      "answer": null,
+      "size": 10,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "expense_claims"
+      ],
+      "input_tokens": 3156,
+      "output_tokens": 174,
+      "cached_tokens": 1571,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 48.56,
+      "answer": "Employee e-401 has the following booked flight:\n- **Date**: 3rd November 2026, from London Heathrow (LHR) to Palma de Mallorca (LIS) with reference QX7P2.\n\nPending expense claims for employee e-401 are:\n- **ID**: X-55, amounting to \u20ac212.40, under the category 'hotel'.",
+      "size": 10,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 3052,
+      "output_tokens": 71,
+      "cached_tokens": 2984,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 18.69,
+      "answer": "According to the travel policy, the daily meal allowance is up to 45 EUR. Meals in economy class for journeys under 6 hours are also covered.",
+      "size": 10,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "trip_summary",
+        "travel_policy",
+        "expense_claims"
+      ],
+      "input_tokens": 3349,
+      "output_tokens": 282,
+      "cached_tokens": 3119,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 60.16,
+      "answer": "Here are the details for employee e-401:\n- Trips this year: 6\n- Total spend: 8420.00 EUR\n- Next trip's city: Lisbon\n- Booked flights:\n  - Date: 2026-11-03\n  - Route: LHR-LIS\n  - Booking reference: QX7P2\n- Pending expense claims:\n  - Amount: 212.40 EUR\n  - Category: hotel\n\nTravel policy regarding mea",
+      "size": 10,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "expense_claims",
+        "flight_bookings"
+      ],
+      "input_tokens": 3156,
+      "output_tokens": 158,
+      "cached_tokens": 3042,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 29.91,
+      "answer": "Employee e-401 has the following booked flight:\n- Next flight: LHR-LIS on 2026-11-03, booking reference: QX7P2\n\nPending expense claims for employee e-401 are:\n- Hotel expense: \u20ac212.40, category: hotel, reference: X-55",
+      "size": 10,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 3052,
+      "output_tokens": 69,
+      "cached_tokens": 2984,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 17.6,
+      "answer": "According to the travel policy, the daily meal allowance is 45 EUR, provided that meals are within economy class for journeys under 6 hours.",
+      "size": 10,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "expense_claims",
+        "flight_bookings",
+        "trip_summary",
+        "travel_policy"
+      ],
+      "input_tokens": 3349,
+      "output_tokens": 316,
+      "cached_tokens": 3119,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 63.96,
+      "answer": "Here are the details for employee e-401:\n\n- **Trips this year**: 6\n- **Total spend**: 8420.00 EUR\n- **Next trip's city**: Lisbon\n\n**Booked Flights**:\n- **Date**: 2026-11-03\n- **Route**: London Heathrow (LHR) - Lisbon (LIS)\n- **Booking Reference**: QX7P2\n\n**Pending Expense Claims**:\n- **ID**: X-55\n- ",
+      "size": 10,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "lost_sales",
+        "excess_stock"
+      ],
+      "input_tokens": 2759,
+      "output_tokens": 182,
+      "cached_tokens": 1345,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 46.14,
+      "answer": "At store S12, the following styles have excess stock:\n- ST-205 with 140 units over the target.\n- ST-330 with 65 units over the target.\n\nThe styles that lost the most sales at store S12 are:\n- ST-101 with 38 units lost, resulting in a loss of $1520.00.\n- ST-330 with 4 units lost, resulting in a loss ",
+      "size": 10,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "interrupted",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [],
+      "input_tokens": 1282,
+      "output_tokens": 60,
+      "cached_tokens": 1252,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 12.08,
+      "answer": null,
+      "size": 10,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "excess_stock",
+        "allocation_history",
+        "app_help",
+        "lost_sales",
+        "allocatable_stock"
+      ],
+      "input_tokens": 3040,
+      "output_tokens": 374,
+      "cached_tokens": 2578,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 76.11,
+      "answer": "Here's the information you requested:\n\n1. Excess Stock:\n   - Style ST-205: 140 units over target\n   - Style ST-330: 65 units over target\n\n2. Lost Sales:\n   - Style ST-101: Lost 38 units, $1520 worth\n   - Style ST-330: Lost 4 units, $180 worth\n\n3. Past Allocations:\n   - Style ST-101, Store S12: 24 un",
+      "size": 10,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "lost_sales",
+        "excess_stock"
+      ],
+      "input_tokens": 2759,
+      "output_tokens": 177,
+      "cached_tokens": 2592,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 34.62,
+      "answer": "At store S12, the following styles have excess stock:\n- ST-205 with 140 units over the target.\n- ST-330 with 65 units over the target.\n\nThe styles that lost the most sales are:\n- ST-101 with 38 units lost, resulting in a loss of $1520.00.\n- ST-330 with 4 units lost, resulting in a loss of $180.00.",
+      "size": 10,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "interrupted",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [],
+      "input_tokens": 1282,
+      "output_tokens": 60,
+      "cached_tokens": 1252,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 12.21,
+      "answer": null,
+      "size": 10,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "allocatable_stock",
+        "app_help",
+        "allocation_history",
+        "excess_stock",
+        "lost_sales"
+      ],
+      "input_tokens": 3040,
+      "output_tokens": 369,
+      "cached_tokens": 2578,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 77.81,
+      "answer": "Here's the information you requested:\n\n- **Excess Stock**:\n  - Style ST-205: 140 units over target\n  - Style ST-330: 65 units over target\n\n- **Lost Sales**:\n  - Style ST-101: 38 units lost, $1520.00 in lost revenue\n  - Style ST-330: 4 units lost, $180.00 in lost revenue\n\n- **Past Allocations**:\n  - ",
+      "size": 10,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "sla_breaches",
+        "tickets_by_priority"
+      ],
+      "input_tokens": 2815,
+      "output_tokens": 138,
+      "cached_tokens": 1400,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 39.45,
+      "answer": "The network team has the following high-priority tickets open:\n1. Ticket T-101: \"Core switch down\"\n2. Ticket T-188: \"VPN flaps\"\n\nTicket T-101 breached the SLA, as it has been overdue for 14 hours.",
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "asset_owner"
+      ],
+      "input_tokens": 2711,
+      "output_tokens": 57,
+      "cached_tokens": 2658,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 12.9,
+      "answer": "The laptop LT-2290 is assigned to Omar (u-77).",
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "knowledge_base",
+        "desk_dashboard",
+        "tickets_by_priority",
+        "sla_breaches",
+        "asset_owner"
+      ],
+      "input_tokens": 3056,
+      "output_tokens": 276,
+      "cached_tokens": 2818,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 55.32,
+      "answer": "The network team currently has:\n- 41 open high-priority tickets.\n- 120 closed tickets.\n- 9 waiting tickets.\n\nSLA breaches include:\n- Ticket T-101, overdue by 14 hours.\n\nTo set up the VPN, refer to Article KB-12: open Settings > Network > VPN, import the profile.\n\nLaptop LT-2290 is assigned to omar (",
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "interrupted",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": false,
+      "errored": false,
+      "called": [
+        "docs-update_document",
+        "chat-create_user_group",
+        "knowledge_base",
+        "knowledge_base",
+        "asset_owner",
+        "ticket_export",
+        "desk_dashboard",
+        "sla_breaches",
+        "asset_owner",
+        "desk_dashboard"
+      ],
+      "input_tokens": 1323,
+      "output_tokens": 512,
+      "cached_tokens": 1300,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 95.18,
+      "answer": null,
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "tickets_by_priority",
+        "sla_breaches"
+      ],
+      "input_tokens": 2815,
+      "output_tokens": 142,
+      "cached_tokens": 2696,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 32.31,
+      "answer": "The network team has the following high-priority tickets open:\n1. Ticket T-101: \"Core switch down\"\n2. Ticket T-188: \"VPN flaps\"\n\nOne of these tickets, T-101, breached the SLA as it has been overdue for 14 hours.",
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "asset_owner"
+      ],
+      "input_tokens": 2711,
+      "output_tokens": 57,
+      "cached_tokens": 2658,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 34.6,
+      "answer": "The laptop LT-2290 is assigned to Omar (u-77).",
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "desk_dashboard",
+        "knowledge_base",
+        "tickets_by_priority",
+        "asset_owner",
+        "sla_breaches"
+      ],
+      "input_tokens": 3056,
+      "output_tokens": 278,
+      "cached_tokens": 2818,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 58.48,
+      "answer": "The network team currently has 41 open high-priority tickets, 120 closed tickets, and 9 waiting tickets. Their SLA breaches include ticket T-101, which has exceeded its 14-hour SLA by 14 hours.\n\nTo set up the VPN, follow the guide in Article KB-12: open Settings > Network > VPN, import the profile.\n",
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {
+        "contains": true
+      },
+      "success": true,
+      "errored": false,
+      "called": [
+        "sla_breaches",
+        "docs-update_document",
+        "chat-create_user_group",
+        "asset_owner",
+        "knowledge_base",
+        "ticket_export"
+      ],
+      "input_tokens": 4111,
+      "output_tokens": 764,
+      "cached_tokens": 2102,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 208.47,
+      "answer": "The oldest network ticket ID is \"T-101\".\n\nHere are the first 10 lines of the exported network tickets:\n\n1  id,opened,priority,status,assignee,title\n2  NET-0001,2024-02-02,medium,closed,agent01,Switch port flapping in rack 4 (#1)\n3  NET-0002,2024-03-03,low,waiting,agent02,Wi-Fi slow on floor 3 after ",
+      "size": 10,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "expense_claims"
+      ],
+      "input_tokens": 3156,
+      "output_tokens": 150,
+      "cached_tokens": 1571,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 44.26,
+      "answer": "Employee e-401 has the following booked flight:\n- Next flight: LHR-LIS on 2026-11-03, booking reference X-55.\n\nPending expense claims for e-401:\n- Hotel expense claim: \u20ac212.40, category: hotel.",
+      "size": 10,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 3052,
+      "output_tokens": 58,
+      "cached_tokens": 2984,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 15.59,
+      "answer": "The daily meal allowance is 45 EUR, with a restriction for economy class travel under 6 hours.",
+      "size": 10,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "expense_claims",
+        "trip_summary",
+        "travel_policy"
+      ],
+      "input_tokens": 3349,
+      "output_tokens": 284,
+      "cached_tokens": 3119,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 58.65,
+      "answer": "Here are the details for employee e-401:\n\n- Trips this year: 6\n- Total spend: 8420.00 EUR\n- Next trip's city: Lisbon\n\nFlight bookings:\n- Booked flight: LHR-LIS on 2026-11-03 (reference: QX7P2)\n\nPending expense claims:\n- Hotel expense claim: ID X-55, amount 212.40 EUR\n\nTravel policy regarding meal al",
+      "size": 10,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "expense_claims"
+      ],
+      "input_tokens": 3156,
+      "output_tokens": 142,
+      "cached_tokens": 3042,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 28.66,
+      "answer": "Employee e-401 has the following booked flight:\n- Next flight: LHR-LIS on 2026-11-03, booking reference XQ7P2.\n\nPending expense claim:\n- Amount: \u20ac212.40, category: hotel.",
+      "size": 10,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 3052,
+      "output_tokens": 71,
+      "cached_tokens": 2984,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 19.22,
+      "answer": "According to the travel policy, the daily meal allowance is up to 45 EUR. Meals in economy class for journeys under 6 hours are also covered.",
+      "size": 10,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "success": true,
+      "errored": false,
+      "called": [
+        "trip_summary",
+        "travel_policy",
+        "expense_claims",
+        "flight_bookings"
+      ],
+      "input_tokens": 3349,
+      "output_tokens": 301,
+      "cached_tokens": 3119,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 62.72,
+      "answer": "Here are the details for employee e-401:\n- Trips this year: 6\n- Total spend: 8420.00 EUR\n- Next trip's city: Lisbon\n\nFlights booked:\n- Date: 2026-11-03\n- Route: London Heathrow (LHR) - Lisbon (LIS)\n- Booking reference: QX7P2\n\nPending expense claims:\n- Hotel: ID X-55, Amount: 212.40 EUR, Category: ho",
+      "size": 10,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14389 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14389,
+      "seconds": 0.26,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14395 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14395,
+      "seconds": 0.09,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14412 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14412,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14389 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14389,
+      "seconds": 0.07,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14395 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14395,
+      "seconds": 0.09,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14412 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14412,
+      "seconds": 0.1,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14477 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14477,
+      "seconds": 0.16,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14471 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14471,
+      "seconds": 0.1,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14499 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14499,
+      "seconds": 0.1,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14472 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14472,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14477 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14477,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14471 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14471,
+      "seconds": 0.09,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14499 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14499,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14472 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14472,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14579 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14579,
+      "seconds": 0.14,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14571 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14571,
+      "seconds": 0.13,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14598 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14598,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14579 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14579,
+      "seconds": 0.09,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14571 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14571,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (14598 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 14598,
+      "seconds": 0.07,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.07,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.08,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.07,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.02,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.01,
+      "answer": null,
+      "success": false,
+      "size": 100,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (70962 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 70962,
+      "seconds": 1.82,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (70968 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 70968,
+      "seconds": 0.46,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (70985 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 70985,
+      "seconds": 0.62,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (70962 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 70962,
+      "seconds": 0.44,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (70968 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 70968,
+      "seconds": 0.41,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (70985 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 70985,
+      "seconds": 0.46,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71052 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71052,
+      "seconds": 1.73,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71046 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71046,
+      "seconds": 0.4,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71074 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71074,
+      "seconds": 0.47,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71047 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71047,
+      "seconds": 0.37,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71052 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71052,
+      "seconds": 0.4,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71046 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71046,
+      "seconds": 0.43,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71074 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71074,
+      "seconds": 0.36,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71047 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71047,
+      "seconds": 0.4,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71121 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71121,
+      "seconds": 1.84,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71113 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71113,
+      "seconds": 0.45,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71140 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71140,
+      "seconds": 0.45,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71121 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71121,
+      "seconds": 0.41,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71113 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71113,
+      "seconds": 0.41,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "the model call failed (400): Error code: 400 - {'is_bifrost_error': False, 'status_code': 400, 'error': {'type': 'exceed_context_size_error', 'code': '400', 'message': 'request (71140 tokens) exceeds the available context size (8192 tokens), try increasing it'}, 'extra_fields': {'routing_info': {'pr",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 1,
+      "failed_model_calls": 1,
+      "refused_prompt_tokens": 71140,
+      "seconds": 0.39,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 1.55,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "store",
+      "repeat": 0
+    },
+    {
+      "task": "store: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.02,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: a change behind approval",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.02,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "store: five parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "store",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 1.45,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.04,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 0
+    },
+    {
+      "task": "help desk: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.04,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.02,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "help desk: a large result (~100k characters)",
+      "length": "large",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.02,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "help desk",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 1.92,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.02,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.03,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.04,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 0.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [],
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": null,
+      "cache_written_tokens": 0,
+      "model_calls": 0,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 0.04,
+      "answer": null,
+      "success": false,
+      "size": 500,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "expense_claims"
+      ],
+      "input_tokens": 15016,
+      "output_tokens": 154,
+      "cached_tokens": 7452,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 228.71,
+      "answer": "Employee e-401 has the following booked flight:\n- Flight: LHR-LIS\n- Reference: QX7P2\n- Date: 2026-11-03\n\nThe pending expense claim for employee e-401 is:\n- Amount: 212.4 euros\n- Category: hotel",
+      "success": true,
+      "size": 50,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 14912,
+      "output_tokens": 74,
+      "cached_tokens": 14844,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 65.26,
+      "answer": "According to the travel policy, the daily meal allowance is up to 45 EUR, provided that meals are consumed in economy class for travel durations of under 6 hours.",
+      "success": true,
+      "size": 50,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "trip_summary",
+        "expense_claims",
+        "flight_bookings",
+        "travel_policy",
+        "travel_policy",
+        "trip_summary",
+        "flight_bookings",
+        "expense_claims"
+      ],
+      "input_tokens": 23298,
+      "output_tokens": 383,
+      "cached_tokens": 22884,
+      "cache_written_tokens": 0,
+      "model_calls": 3,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 248.1,
+      "answer": "The employee, e-401, has made 6 trips this year, spending a total of 8420.0 euros. Their next trip is to Lisbon. The booked flight is from London Heathrow (LHR) to Lisbon (LIS) on 2026-11-03, with reference QX7P2. An expense claim of 212.4 euros for a hotel has been",
+      "success": true,
+      "size": 50,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "expense_claims"
+      ],
+      "input_tokens": 15016,
+      "output_tokens": 156,
+      "cached_tokens": 14857,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 102.73,
+      "answer": "Employee e-401 has the following booked flight:\n- Date: 2026-11-03\n- Route: LHR-LIS\n- Booking Reference: QX7P2\n\nThe pending expense claim for employee e-401 is:\n- Amount: 212.4 euros\n- Category: hotel",
+      "success": true,
+      "size": 50,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 14912,
+      "output_tokens": 72,
+      "cached_tokens": 14844,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 66.62,
+      "answer": "According to the travel policy, the daily meal allowance is up to 45 EUR, provided meals are consumed in economy class for travel durations under 6 hours.",
+      "success": true,
+      "size": 50,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "travel_policy",
+        "expense_claims",
+        "trip_summary",
+        "flight_bookings",
+        "trip_summary",
+        "expense_claims",
+        "flight_bookings",
+        "travel_policy"
+      ],
+      "input_tokens": 23298,
+      "output_tokens": 383,
+      "cached_tokens": 22884,
+      "cache_written_tokens": 0,
+      "model_calls": 3,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 243.23,
+      "answer": "The employee, e-401, has made 6 trips this year, spending a total of 8420.00 euros. Their next trip is to Lisbon. The booked flight is from London Heathrow (LHR) to Lisbon (LIS) on 3rd November 2026, with reference QX7P2. The pending expense claim is for a hotel stay with an amount of 212.",
+      "success": true,
+      "size": 50,
+      "variant": "baseline",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "flight_bookings",
+        "expense_claims"
+      ],
+      "input_tokens": 15016,
+      "output_tokens": 155,
+      "cached_tokens": 14857,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 94.94,
+      "answer": "Employee e-401 has the following booked flight:\n- Date: 2026-11-03\n- Route: LHR-LIS\n- Booking Reference: QX7P2\n\nPending expense claim:\n- ID: X-55\n- Amount: 212.4 euros\n- Category: hotel",
+      "success": true,
+      "size": 50,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 14912,
+      "output_tokens": 68,
+      "cached_tokens": 14844,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 64.4,
+      "answer": "According to the travel policy, the daily meal allowance is up to 45 EUR, provided the travel is under 6 hours and in economy class.",
+      "success": true,
+      "size": 50,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [
+        "expense_claims",
+        "trip_summary",
+        "travel_policy",
+        "flight_bookings",
+        "expense_claims",
+        "trip_summary",
+        "travel_policy",
+        "flight_bookings"
+      ],
+      "input_tokens": 15209,
+      "output_tokens": 280,
+      "cached_tokens": 14979,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 205.61,
+      "answer": null,
+      "success": false,
+      "size": 50,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 0
+    },
+    {
+      "task": "travel: specific tools, two parts",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "expense_claims",
+        "flight_bookings"
+      ],
+      "input_tokens": 15016,
+      "output_tokens": 155,
+      "cached_tokens": 14857,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 105.16,
+      "answer": "Employee e-401 has the following booked flight:\n- Date: 2026-11-03\n- Route: LHR-LIS\n- Booking Reference: QX7P2\n\nPending expense claim:\n- ID: X-55\n- Amount: 212.4 euros\n- Category: hotel",
+      "success": true,
+      "size": 50,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: a read that sounds like a change",
+      "length": "short",
+      "status": "success",
+      "error": null,
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": false,
+      "called": [
+        "travel_policy"
+      ],
+      "input_tokens": 14912,
+      "output_tokens": 73,
+      "cached_tokens": 14844,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 105.28,
+      "answer": "According to the travel policy, the daily meal allowance is up to 45 EUR, provided meals are consumed in economy class for travel durations of under 6 hours.",
+      "success": true,
+      "size": 50,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    },
+    {
+      "task": "travel: four parts",
+      "length": "long",
+      "status": "error",
+      "error": "Context remains above the input budget after compaction; reduce input, tools, or configured output tokens.",
+      "tool_coverage": 1.0,
+      "coverage_comment": null,
+      "checks": {},
+      "errored": true,
+      "called": [
+        "flight_bookings",
+        "expense_claims",
+        "trip_summary",
+        "travel_policy",
+        "trip_summary",
+        "flight_bookings",
+        "travel_policy",
+        "expense_claims"
+      ],
+      "input_tokens": 15209,
+      "output_tokens": 280,
+      "cached_tokens": 14979,
+      "cache_written_tokens": 0,
+      "model_calls": 2,
+      "failed_model_calls": 0,
+      "refused_prompt_tokens": 0,
+      "seconds": 302.47,
+      "answer": null,
+      "success": false,
+      "size": 50,
+      "variant": "main",
+      "set": "travel",
+      "repeat": 1
+    }
+  ]
+}

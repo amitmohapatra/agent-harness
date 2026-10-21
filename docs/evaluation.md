@@ -326,3 +326,67 @@ experiment attributes those of its Python SDK (`langfuse/_client/attributes.py`,
 `propagation.py`). Evaluation works on Langfuse v3 (Cloud and self-hosted), through the dataset
 run link, and on v4, through the spans' experiment attributes — the harness sends both, as the
 SDK does.
+
+## Cost benchmark
+
+`make bench-cost` (`python -m benchmark.cost`) measures what a `ReAct` agent costs and how
+well it chooses its tools as its tool catalogue grows, against whatever model the environment
+configures (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, a gateway model name), so a cost feature's
+saving is a measured number before it is switched on by default.
+
+```bash
+make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
+# a local model with a small window: --window 8192; one size, one set: --sizes 50 --sets travel
+```
+
+| | |
+|---|---|
+| Tasks | ten, from the tool-choice sets the live suite uses — the store set ([`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py)) and the held-out help desk and travel sets (`tests/live/heldout.py`): six short (two parts, a change behind approval, a read that sounds like a change), three long (four and five parts, each served by its own tool) and a large result — a help desk export of about 100,000 characters, past what `ReAct` pages. The report gives every figure for all of them and by length |
+| Catalogues | 10, 50, 100 and 500 tools (`--sizes`): each set's own tools, then distractors — 500 synthetic but realistic MCP-style tools (`<server>-<tool>`) of 25 servers (code hosting, CRM, billing, HR, monitoring, DNS...), list / get / create / update / delete of four kinds of record each, every one described and with a typed, described JSON schema; none is about the tasks' domains. The order is fixed, so a run is reproducible |
+| Variants | `baseline`: plain tools, everything off (`create_agent` with only what runs the harness's tools and bounds the loop; `without={"code_mode", "hints"}`). `main`: `ReAct` as it is built — result paging, context editing, summarization, `ToolGuidance` off, Code Mode where it applies (gateway MCP servers; the catalogues here are the agent's own tools, so it does not). `main-paging`, `main-context_editing`, `main-summarization`: `main` with that one piece off. A new feature is one more entry of `benchmark/cost/variants.py`, measured against these (`--variants`) |
+| Per run | input, output and cached tokens (as the model reports them), model calls (every chat model call of the run, a summarization's included), wall time, `tool_coverage` (the share of the task's needed tools called; for a run that ended in an error, from the calls it made) and task success (every needed tool called, no broader one, every other check of the task passed — `contains`, `picks`) |
+| Cost | `benchmark/cost/prices.py`: dollars per million tokens, cached input and cache writes priced apart, each price with its source and the date it was read. A model not in the table is reported with its tokens and no dollars; `--price-as` prices the same tokens at listed models' rates as well (an estimate: their tokenizers count differently) |
+| Report | `build/bench-cost.json` (every run, each cell's means and 95% intervals — Student's t over the runs) and `build/bench-cost.md` (the table), written after every cell |
+
+Memory is off (the tool hints, which narrow a run from five tools, need the memory service),
+and so are the run store and tracing: the benchmark reads and writes no service's data.
+
+### The baseline, measured
+
+`benchmark/cost/results/baseline-local.md` (and `.json`, every run): Granite 3.3 2B on
+llama.cpp (an 8,192-token window, 4 CPUs) behind a local Bifrost, 2026-10-21 — the numbers
+each new feature is compared with. Per run, mean ± the 95% interval's half-width:
+
+| Tools | Variant | Runs | Input tokens | Output tokens | Model calls | Seconds | Tool coverage | Success |
+|---|---|---|---|---|---|---|---|---|
+| 10 | baseline | 20 | 2,654 ± 336 | 182 ± 52 | 1.90 ± 0.14 | 38.3 ± 10.2 | 1.00 | 0.90 ± 0.14 |
+| 10 | main | 20 | 2,794 ± 335 | 223 ± 85 | 1.85 ± 0.17 | 51.2 ± 20.6 | 1.00 | 0.95 ± 0.10 |
+| 50 (travel) | baseline | 6 | 17,742 ± 4,517 | 204 ± 151 | 2.33 ± 0.54 | 159 ± 94 | 1.00 | 1.00 |
+| 50 (travel) | main | 6 | 15,046 ± 141 | 168 ± 99 | 2.00 | 146 ± 95 | 1.00 | 0.67 ± 0.54 |
+| 100 | both | 20 each | — (does not fit: ~14,500 prompt tokens) | | | | 0 | 0 |
+| 500 | both | 20 each | — (does not fit: ~71,000 prompt tokens) | | | | 0 | 0 |
+
+What it shows:
+
+* **Short and long tasks at 10 tools cost the same in both variants** (the same input tokens
+  and calls): what `main` adds costs nothing until it is needed.
+* **The large result is where `main` pays.** The baseline sent the ~100,000-character export
+  whole (about 45,000 prompt tokens, refused by an 8k window: both runs failed); `main` paged
+  it and answered from the preview (one run right, the other paused at a write distractor it
+  called). With a large-window vendor model the baseline would pay those 45,000 tokens on
+  every later call of the run.
+* **At 50 tools the tool definitions are the cost**: about 7,000 of every call's ~7,500 prompt
+  tokens. `main`'s summarization guard stopped both four-part runs when the history and the
+  tools passed its budget — compaction cannot shrink the tools — where the baseline, sent to the
+  server, still fit: on a small window the guard is stricter than the server.
+* **From 100 tools nothing fits an 8k window** — the definitions alone are ~14,500 tokens
+  (100) and ~71,000 (500). The baseline sends each request and the server refuses it; `main`
+  refuses before sending. Tool search (deferring the definitions) is what makes these sizes
+  work at all.
+
+Not measured here: any vendor model (no `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or vendor
+provider in the gateway — the dollar columns of the report are the same token counts priced
+at those models' rates, an estimate), vendor prompt caching (the cached tokens are llama.cpp's
+own prefix cache), the tool hints (they need the memory service), Code Mode (it needs gateway
+MCP servers), and the full task set at 50 tools (about 65 minutes per variant on this
+machine; the travel set ran).
