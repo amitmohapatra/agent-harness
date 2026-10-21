@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol
 
 from trellis.contracts import ConfigurationError
+from trellis.harness.bounded import LRU
 from trellis.harness.fresh import Fresh
 
 if TYPE_CHECKING:
@@ -160,7 +161,7 @@ class Kept[K, T]:
         self._what = what
         self._ttl = ttl
         self._retry = retry
-        self._kept: dict[K, Fresh[tuple[T | None]]] = {}
+        self._kept: LRU[K, Fresh[tuple[T | None]]] = LRU()
 
     async def get(self, key: K, *, forever: bool = False) -> T | None:
         found = self._kept.get(key)

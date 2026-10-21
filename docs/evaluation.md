@@ -451,4 +451,33 @@ growth from the end of the warm-up (the first fifth) to the end, in MB and per r
 
 Each worker is a process with its own harness (memory, the run store and tracing off, as in the
 cost benchmark), so the processes share nothing: the run store's queue (`h.worker`) is not in
-the measured path. Writes `build/bench-load.json` and `.md`.
+the measured path (`--queued` puts it there, below). Writes `build/bench-load.json` and `.md`.
+
+### The production path
+
+`--queued MINUTES` measures what a deployment runs instead: this process queues runs in
+agent-runs (`RUNS_URL`) — `agent.start`, then the run's result — keeping
+`--leak-concurrency` in flight, and `--workers` worker processes claim and execute them
+(`h.worker([agent]).run()`), with the memory service (`MEMORY_URL`) on, or, with
+`--no-memory`, only as the key registry agent-runs asks. It samples the resident memory of
+each worker process and of each `--watch name=pid` process (the memory API and worker,
+agent-runs, its ticker) and reports each one's slope after the warm-up, in MB per hour.
+
+```bash
+make bench-load LOAD_ARGS="--queued=15 --leak-concurrency=10 --watch=agent-runs=<pid>"
+```
+
+Measured 2026-10-21 on a private stack (the memory service and agent-runs at their `main`, a
+database of their own each; never a shared one), Paced model, one worker process, 10 runs in
+flight, 15 minutes each, 4 CPUs:
+
+| Setup | Runs | Runs/s | p50 / p95 / p99 s | Errors | Slope, MB per hour: harness worker / memory API / memory worker / agent-runs / ticker |
+|---|---|---|---|---|---|
+| `RUNS_URL` (memory as the key registry) | 3,784 | 4.05 | 2.19 / 4.18 / 4.79 | 0 | 4.0 / 0.8 / 0.9 / 1.3 / 1.0 |
+| `MEMORY_URL` + `RUNS_URL` (memory on) | 3,466 | 3.71 | 2.47 / 4.32 / 5.31 | 1 | 4.9 / 4.3 / 2.8 / 3.9 / 1.0 |
+
+Every process is flat after the warm-up: the harness worker held 140–144 MB, the memory API
+and worker ~2.1–2.3 GB each (their encoders), agent-runs 138 MB, the ticker 115 MB; the
+slopes are a few MB an hour (0.5–1.5 kB a run: allocator noise at this length, not a growth a
+longer run continues). The one error was agent-runs' tenant request budget (429) answering a
+result poll; `handle.result` now waits what it says and polls again.

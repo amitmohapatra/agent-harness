@@ -121,3 +121,44 @@ def test_a_level_waits_for_free_memory(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_free_memory_is_read_from_proc() -> None:
     assert (cli.free_mb() or 0) > 0
+
+
+def test_the_queued_mode_reports_each_processs_slope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from benchmark.load import queued
+
+    assert queued.slope([(0, 100.0), (10, None)]) is None
+    assert queued.slope([(0, 100.0), (1, 101.0), (2, 102.0)]) is None  # all warm-up but one
+    rising = [(t * 60.0, 100.0 + t) for t in range(11)]  # 1 MB a minute
+    assert queued.slope(rising) == pytest.approx(60.0)
+    assert queued.slope([(t * 60.0, 100.0) for t in range(11)]) == 0.0
+
+    async def drive(plan: Plan, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["memory"] is False and kwargs["seconds"] == 60.0
+        return {
+            "minutes": 1.0,
+            "concurrency": kwargs["concurrency"],
+            "workers": kwargs["workers"],
+            "memory": kwargs["memory"],
+            "runs": 10,
+            "throughput": 0.5,
+            "p50": 1.0,
+            "p95": 2.0,
+            "p99": 3.0,
+            "errors": 0,
+            "error_examples": [],
+            "processes": [
+                {"name": "worker 1", "slope_mb_per_hour": 1.5, "rss": rising, "cpu_seconds": 1}
+            ],
+        }
+
+    monkeypatch.setattr(queued, "drive", drive)
+    out = tmp_path / "q"
+    argv = ["--queued", "1", "--no-memory", "--workers", "2", "--out", str(out)]
+    assert cli.main(argv) == 0
+    table = out.with_suffix(".md").read_text()
+    assert (
+        "Queued in agent-runs, 2 worker process(es), 10 in flight, 1 minutes, memory off" in table
+    )
+    assert "| worker 1 | 102 | 110 | 1.5 |" in table

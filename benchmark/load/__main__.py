@@ -21,6 +21,7 @@ Writes ``<out>.json`` and ``<out>.md``. See ``docs/evaluation.md#load-benchmark`
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import multiprocessing
 import os
@@ -34,6 +35,7 @@ from typing import Any
 
 from benchmark import procstat
 from benchmark.cost.__main__ import _list, watched
+from benchmark.load import queued
 from benchmark.load.run import Measured, Plan, process
 
 #: Above this share of a level's runs in error, the level is a limit.
@@ -61,6 +63,19 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--leak-concurrency", type=int, default=10)
     parser.add_argument("--sample-seconds", type=float, default=30.0)
     parser.add_argument("--watch", action="append", default=[], help="name=pid")
+    parser.add_argument(
+        "--queued",
+        type=float,
+        default=0.0,
+        metavar="MINUTES",
+        help="the production path for this long instead of the levels: runs queued in agent-runs "
+        "(RUNS_URL) and claimed by --workers worker processes, --leak-concurrency in flight",
+    )
+    parser.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="with --queued: the agents' memory parts off (the service only as the key registry)",
+    )
     parser.add_argument("--out", default="build/bench-load")
     args = parser.parse_args(argv)
     try:
@@ -219,6 +234,25 @@ def markdown(report: dict[str, Any]) -> str:
             f"{num(found['end_mb'], 0)} MB at the end — {num(found['growth_mb'], 1)} MB "
             f"({num(found['growth_kb_per_run'])} kB per run).",
         ]
+    run = report.get("queued")
+    if run:
+        lines += [
+            "",
+            f"Queued in agent-runs, {run['workers']} worker process(es), {run['concurrency']} in "
+            f"flight, {run['minutes']:g} minutes, memory {'on' if run['memory'] else 'off'}: "
+            f"{run['runs']} runs, {num(run['throughput'])} runs/s, p50 {num(run['p50'])} s, "
+            f"p95 {num(run['p95'])} s, p99 {num(run['p99'])} s, {run['errors']} errors.",
+            "",
+            "| process | resident MB after the warm-up | at the end | slope, MB per hour |",
+            "|---|---|---|---|",
+        ]
+        for p in run["processes"]:
+            known = [m for t, m in p["rss"] if m is not None and t >= p["rss"][-1][0] / 5]
+            first, last = (known[0], known[-1]) if known else (None, None)
+            lines.append(
+                f"| {p['name']} | {num(first, 0)} | {num(last, 0)} | "
+                f"{num(p['slope_mb_per_hour'], 1)} |"
+            )
     for note in report.get("notes", []):
         lines += ["", note]
     return "\n".join(lines) + "\n"
@@ -242,6 +276,22 @@ def main(argv: list[str] | None = None) -> int:
         out.with_suffix(".json").write_text(json.dumps(report, indent=2, default=str))
         out.with_suffix(".md").write_text(markdown(report))
 
+    if args.queued > 0:
+        plan = Plan(concurrency=1, model=args.model, pace=args.pace, window=args.window,
+                    sample_seconds=args.sample_seconds, run_seconds=args.run_seconds)  # fmt: skip
+        report["queued"] = asyncio.run(
+            queued.drive(
+                plan,
+                seconds=args.queued * 60,
+                concurrency=args.leak_concurrency,
+                workers=args.workers[0],
+                memory=not args.no_memory,
+                watch=args.watch,
+            )
+        )
+        written()
+        sys.stdout.write(markdown(report))
+        return 0
     for workers in args.workers:
         for concurrency in args.levels:
             free = free_mb()

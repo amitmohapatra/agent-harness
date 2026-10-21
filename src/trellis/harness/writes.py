@@ -59,6 +59,9 @@ WRITE_ATTEMPTS: Final = 3
 WRITE_BACKOFF_SECONDS: Final = 0.5
 #: The spool file, in the spool directory.
 SPOOL_FILE: Final = "trellis-writes.jsonl"
+#: The most the spool file may hold, in bytes: past it a write given up is lost, not kept (a
+#: long outage must not fill the disk), said once until the spool is replayed.
+MAX_SPOOL_BYTES: Final = 64 * 1024 * 1024
 
 Work = Callable[[], Awaitable[object]]
 #: Turns a spooled record back into its write (``None``: nothing replays it here).
@@ -92,6 +95,8 @@ class Writes:
         self.failed = 0
         #: writes given up and kept in the spool for the next start
         self.spooled = 0
+        #: the spool reached :data:`MAX_SPOOL_BYTES` (said once)
+        self._full = False
 
     def start(self) -> None:
         """Bind to the running loop now (and replay the spool), rather than at the first
@@ -234,9 +239,21 @@ class Writes:
         if self._spool is None or item.record is None:
             return False
         line = json.dumps({"label": item.label, **item.record}, default=str)
+        path = self._spool / SPOOL_FILE
         try:
             self._spool.mkdir(parents=True, exist_ok=True)
-            with (self._spool / SPOOL_FILE).open("a", encoding="utf-8") as spool:
+            held = path.stat().st_size if path.exists() else 0
+            if held + len(line) + 1 > MAX_SPOOL_BYTES:
+                if not self._full:
+                    log.error(
+                        "the write spool %s is full (%d bytes): writes given up are lost "
+                        "until it is replayed at the next start",
+                        path,
+                        held,
+                    )
+                    self._full = True
+                return False
+            with path.open("a", encoding="utf-8") as spool:
                 spool.write(line + "\n")
         except OSError as exc:
             log.error("the write spool %s cannot be written: %s", self._spool, exc)

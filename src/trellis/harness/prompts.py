@@ -48,6 +48,7 @@ from bifrost_sdk.headers import PROMPT_ID
 
 from trellis.contracts import ConfigurationError, HarnessError
 from trellis.harness import telemetry
+from trellis.harness.bounded import LRU
 from trellis.harness.clients.bifrost import Gateway, PromptPin
 from trellis.harness.journal import content_key
 from trellis.harness.repository import (
@@ -523,7 +524,7 @@ class ModelPrompts:
     def __init__(self, gateway: Gateway | None) -> None:
         self.sources = None if gateway is None else PromptSources([BifrostPrompts(gateway)])
         #: the references handed out, in order
-        self.refs: dict[str, None] = {}
+        self.refs: LRU[str, None] = LRU()
 
     async def headers(self, ref: str) -> ModelHeaders:
         """The headers selecting ``ref`` (``"name"``, ``"name@version"``): inside a run of

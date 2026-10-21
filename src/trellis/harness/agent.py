@@ -49,6 +49,7 @@ from trellis.harness.adapters.base import (
     context_window,
 )
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
+from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.evals import (
@@ -175,7 +176,7 @@ class Agent:
         if self.adapter.fixed_tools:
             self.sources, self.mcp = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
-        self._toolboxes: dict[str, Toolbox] = {}
+        self._toolboxes: LRU[str, Toolbox] = LRU()
         #: the runs an attempt of which runs in this process now, by id
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
@@ -1124,10 +1125,16 @@ class RunHandle:
         return await self.agent.cancel(self.run_id, reason=reason, tenant=self.tenant)
 
     async def result(self, *, timeout: float | None = None) -> Result:  # noqa: ASYNC109
-        """Wait until the run pauses or ends (a worker must be running it)."""
+        """Wait until the run pauses or ends (a worker must be running it). A poll the run
+        store refuses for the tenant's request budget (429) waits what it says, then polls
+        again."""
         async with asyncio.timeout(timeout):
             while True:
-                record = await self.status()
+                try:
+                    record = await self.status()
+                except RateLimitedError as exc:
+                    await asyncio.sleep(exc.retry_after or POLL_SECONDS * 4)
+                    continue
                 if record.status is RunStatus.PAUSED or record.final:
                     return Result.of(record)
                 await asyncio.sleep(POLL_SECONDS)
