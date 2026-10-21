@@ -59,7 +59,7 @@ async def main() -> None:
             hooks=[Audit()],
             timeout=300,
             framework_options={"max_turns": 8},  # Runner.run's own argument
-            without={"hints"},  # every tool offered every turn
+            without={"tool_search"},  # every tool offered every turn
         )
 
         result = await agent.run("Order 12000 EUR of steel from ACME.", user="ada")

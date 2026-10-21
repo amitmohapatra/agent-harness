@@ -291,7 +291,7 @@ class Harness:
         tools = await self.resolve(mine, tenant=tenant, mcp=bundles, without=off)
         if self.memory is not None and "memory_pull" not in off:
             scope = self.memory.scoped(tenant)
-            tools.extend(await self.memory_tools(scope))
+            tools.extend(t for t in await self.memory_tools(scope) if t.feature not in off)
         native = convert(tool_format, tools)
         if tool_format == "langchain" and native:
             for tool in native:
@@ -622,7 +622,11 @@ class Harness:
     async def memory_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
         return [
-            Tool(spec, _memory_call(spec), feature="memory_pull")
+            Tool(
+                spec,
+                _memory_call(spec),
+                feature="tool_search" if spec.name == TOOL_SEARCH else "memory_pull",
+            )
             for spec in await run_memory.agent_tools()
         ]
 

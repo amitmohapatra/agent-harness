@@ -33,7 +33,7 @@ the grounding check verifies the answer against.
   tools section (next step, argument values found in memory, what is missing) and its `tools`
   (`[{name, confidence}]`, confidence 0–1), which narrow the tools the model is offered
   ([tools.md](tools.md)). One call: the harness asks for no hints of its own;
-  `without={"hints"}` keeps the learned skills and offers every tool.
+  `without={"tool_search"}` keeps the learned skills and offers every tool.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
 it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.

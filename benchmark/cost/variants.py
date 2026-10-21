@@ -73,7 +73,7 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
         checkpointer=ours.RunCheckpointer(),
         name="baseline",
     )
-    return graph, {"without": {"code_mode", "hints", *AUTOMATIC}}
+    return graph, {"without": {"code_mode", "tool_search", *AUTOMATIC}}
 
 
 def main(

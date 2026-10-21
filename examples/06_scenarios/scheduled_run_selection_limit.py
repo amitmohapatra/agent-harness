@@ -37,7 +37,7 @@ async def main() -> None:
             "Morning digest",
             on_behalf_of="ada",
             tz="Europe/Paris",
-            without={"memory_push", "judges"},
+            without={"memory", "judges"},
             timeout=120,
             framework_options={"recursion_limit": 12},
             priority=10,

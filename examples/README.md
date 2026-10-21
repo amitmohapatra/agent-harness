@@ -39,7 +39,7 @@ local and MCP tools, governance and a person, a hook, `without=`, `timeout=` and
 | [02_way1_langgraph/stategraph.py](02_way1_langgraph/stategraph.py) | a hand-built `StateGraph` with a checkpointer: a harness approval in the tool node and the graph's own `interrupt()`, both resumed in place |
 | [02_way1_langgraph/hitl_middleware.py](02_way1_langgraph/hitl_middleware.py) | LangChain's `HumanInTheLoopMiddleware`: an edit, then a reject with a reason |
 | [02_way1_deepagents/agent.py](02_way1_deepagents/agent.py) | Deep Agents with `TodoListMiddleware`: a plan, an MCP lookup, an approval resumed in place; a `Deny` hook, `timeout`, `framework_options`, `without=` |
-| [02_way1_openai_agents/agent.py](02_way1_openai_agents/agent.py) | an OpenAI Agents `Agent`: harness tools added per run, an MCP lookup replayed on the resume, an `after_tool` audit hook, `max_turns` through `framework_options`, `without={"hints"}` |
+| [02_way1_openai_agents/agent.py](02_way1_openai_agents/agent.py) | an OpenAI Agents `Agent`: harness tools added per run, an MCP lookup replayed on the resume, an `after_tool` audit hook, `max_turns` through `framework_options`, `without={"tool_search"}` |
 | [02_way1_openai_agents/handoff.py](02_way1_openai_agents/handoff.py) | a handoff to a specialist built with `h.tools(framework="openai_agents")` |
 | [02_way1_claude/agent.py](02_way1_claude/agent.py) | `ClaudeAgentOptions`: the harness's tools as the `trellis` MCP server, an MCP lookup, an approval, a `Rewrite` hook, `max_turns`, `without=` (a scripted CLI offline) |
 

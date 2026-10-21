@@ -150,24 +150,25 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 
 | Feature (`without=` name) | On when | What it is | Turned off |
 |---|---|---|---|
-| `memory` | `MEMORY_URL` | `memory_push`, `memory_pull` and `records` together | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
-| `memory_push` | `MEMORY_URL` | the memory context pushed into the framework's input (and the tool hints with it) | no context, no `/v1/context` call |
-| `memory_pull` | `MEMORY_URL` | the memory tools (`memory_search`, `tool_search`, ...) | not offered; a graph's, bound at build, are hidden from a `create_agent` or Deep Agents graph's model calls (`ReAct` included); a hand-built `StateGraph` is offered them and they answer that they are off; `h.tools(without=)` leaves them out |
-| `records` | `MEMORY_URL` | the transcript, every tool call, the outcome, decisions as feedback | nothing written to memory about the run |
-| `hints` | `MEMORY_URL`, from 5 tools | the tool hints narrow the tools the model is offered | every tool offered (the learned skills stay) |
-| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the answer checked against the context it was given | not checked |
-| `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the online judges | not judged |
+| `memory` | `MEMORY_URL` | the memory context pushed into the framework's input, the memory tools, the records (transcript, tool calls, outcome, decisions as feedback) and the tool narrowing | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
+| `tool_search` | `MEMORY_URL`, from 5 tools | the one owner of tool narrowing: the memory service's tool hints narrow the tools the model is offered, and its `tool_search` tool widens them | every tool offered (the learned skills stay) |
 | `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools, and the gateway is not asked for them (`h.tools(without={"mcp"})` for a graph's; `mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
 | `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
 | `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
+| `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the online judges | not judged |
+| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the answer checked against the context it was given | not checked |
 | `planning` | `ReAct`, a long task, a known window of 32,000 tokens or more | LangChain's `TodoListMiddleware`: `write_todos` and its instructions ([react.md](frameworks/react.md#the-middleware)) | not offered; a call answers that it is not available |
 | `files` | the same | Deep Agents' scratch file tools: `ls`, `write_file`, `edit_file` on the run's journal | not offered (paged results are still read with `read_file`); a call answers that it is not available |
+| `react_auto` | the same | `planning` and `files` together | both off |
 
-A name not in the table is refused (`ConfigurationError`, naming them). Not switchable, because
-they are automatic and deterministic: governance and approvals, the journal and replay, the
-clients' retries and time limits, tracing and redaction, the run record. Inside a run,
-`trellis.current().uses(feature)` says whether a feature (a row's name, not `memory`, which is
-three) is on. Runnable: [examples/02_way1_react/agent.py](../examples/02_way1_react/agent.py),
+Deprecated names, still accepted for one release with a warning naming the replacement:
+`memory_push`, `memory_pull` and `records` (each still turns off its part alone; use `memory`)
+and `hints` (use `tool_search`). A name in neither list is refused (`ConfigurationError`,
+naming the features). Not switchable, because they are correctness or have an owner elsewhere:
+governance and approvals, the journal and replay, tool retries and time limits, tracing and
+redaction, the run record, a budget (opt-in: give one), structured output, model retries,
+fallbacks and caching (the gateway's). Inside a run, `trellis.current().uses(feature)` says
+whether a part is on. Runnable: [examples/02_way1_react/agent.py](../examples/02_way1_react/agent.py),
 [examples/06_scenarios/scheduled_run_selection_limit.py](../examples/06_scenarios/scheduled_run_selection_limit.py).
 
 ## The framework's own run options

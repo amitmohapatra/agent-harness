@@ -66,8 +66,8 @@ async def main() -> None:
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="ada")
         print(result.status.value, result.answer)
 
-        quiet = await agent.run("How many SKU-1?", user="ada", without={"memory_push"})
-        print("without the pushed context:", quiet.status.value, quiet.answer)
+        quiet = await agent.run("How many SKU-1?", user="ada", without={"memory"})
+        print("without memory:", quiet.status.value, quiet.answer)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- `without=` has fewer names: `memory`, `tool_search` (the tool hints and memory's `tool_search`
+  tool), `mcp`, `code_mode`, `skills`, `judges`, `grounding`, `planning`, `files`, and the
+  umbrella `react_auto` (`planning` and `files`). `memory` now also turns the narrowing off.
+  `memory_push`, `memory_pull`, `records` and `hints` still work for a release, with a warning.
+
 - Configuration: each setting in one layer. The environment holds endpoints and keys
   (`TRELLIS_JUDGE_VIRTUAL_KEY` kept: evaluation's own budget), one `TRELLIS_EVAL_SAMPLE` for
   grounding and judges, `TRELLIS_SPOOL_DIR` (default: the XDG state folder, except in a
