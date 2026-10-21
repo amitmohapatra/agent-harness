@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import logging
 
+from trellis.harness.bounded import SAID_ONCE, LRUSet
+
 log = logging.getLogger("trellis.harness")
 
-#: What was said once already (``said``), by key.
-_said: set[str] = set()
+#: What was said once already (``said``), by key: the most recent, past the bound said again.
+_said: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
 
 
 def said(key: str, message: str, *args: object, extra: dict[str, object]) -> bool:

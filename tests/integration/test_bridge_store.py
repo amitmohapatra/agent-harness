@@ -22,6 +22,7 @@ from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, current
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import bridges
+from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.store import MAX_CHARS, MemoryStore
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
@@ -62,8 +63,8 @@ async def reads(state: State, runtime: GraphRuntime[None]) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def _forget_what_was_said() -> None:
-    bridges._said.clear()
+def _forget_what_was_said(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bridges, "_said", LRUSet(maxsize=SAID_ONCE))
 
 
 async def test_a_graph_without_a_store_stores_in_the_memory_service(
@@ -348,3 +349,9 @@ async def test_a_worker_that_dies_after_a_put_leaves_one_item(
         await first.aclose()
         await second.aclose()
     assert len([m for m in memory_service.memories.values() if m["current"]]) == 1
+
+
+def test_what_the_bridges_said_once_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bridges, "_said", LRUSet(maxsize=2))
+    said = [bridges.said(k, "x", extra={}) for k in ("a", "b", "a", "c", "b", "a")]
+    assert said == [True, True, False, True, False, True]  # a forgotten past the bound

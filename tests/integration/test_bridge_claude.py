@@ -18,6 +18,7 @@ from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness import bridges
+from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
@@ -35,9 +36,9 @@ def refund(order: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _reset() -> None:
+def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     refunds.clear()
-    bridges._said.clear()
+    monkeypatch.setattr(bridges, "_said", LRUSet(maxsize=SAID_ONCE))
 
 
 def machine(tmp_path: Path, name: str, script: list[dict[str, Any]], **fields: Any) -> Any:
