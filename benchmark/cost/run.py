@@ -31,7 +31,6 @@ from langchain_core.tracers.context import register_configure_hook
 
 from benchmark import procstat
 from benchmark.cost import catalog, prices, stats
-from benchmark.cost.variants import VARIANTS, Setup
 from trellis import Harness, Hooks, Settings
 from trellis.contracts import ToolCall, ToolOutcome
 
@@ -227,6 +226,8 @@ async def run_cell(
         ]
         if not todo:
             continue
+        from benchmark.cost.variants import VARIANTS, Setup  # the react extra: on use
+
         built = Setup(system=taskset.system, **setup)
         target, options = VARIANTS[variant].build(built)
         called = Called()
@@ -376,6 +377,8 @@ def report_of(
     watch: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """The report: the settings, every cell's statistics and every run."""
+    from benchmark.cost.variants import VARIANTS
+
     env = environment()
     listed = prices.price_of(model)
     cells = []

@@ -7,6 +7,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- `make bench-frameworks`: the cost benchmark's tasks, catalogues and metrics on each
+  framework alone (LangChain, Deep Agents, the OpenAI Agents SDK, the Claude Agent SDK, CrewAI,
+  TrueForge), the same agents through `h.wrap`, and `ReAct` with each feature removed in turn —
+  every model call counted by one metering proxy, one seed per run, each arm in its own
+  process; a load check and kill-mid-run survival of the wrapped arms. Results:
+  `docs/eval/frameworks.md`.
+
 - Every gateway call says whose run it is and joins its trace: Bifrost dimension headers
   (`x-bf-dim-tenant`, `-agent`, `-run`, and a hash of the user, never the id) and the W3C
   `traceparent`, on `ReAct`'s calls, the judge's (`x-bf-dim-purpose: judge`) and

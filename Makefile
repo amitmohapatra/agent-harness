@@ -38,6 +38,10 @@ bench:  ## Harness overhead vs the committed baseline (writes build/benchmark-re
 bench-cost:  ## Cost and accuracy of ReAct over 10-500 tools per variant (BIFROST_URL, a model; BENCH_ARGS)
 	$(PY) -m benchmark.cost $(BENCH_ARGS)
 
+.PHONY: bench-frameworks
+bench-frameworks:  ## The framework head-to-head: each framework alone, wrapped, and ReAct (BIFROST_URL, a model; private MEMORY_URL/RUNS_URL; BENCH_ARGS)
+	$(PY) -m benchmark.cost.frameworks $(BENCH_ARGS)
+
 .PHONY: bench-gate
 bench-gate:  ## The cost benchmark's report (build/bench-cost.json) against the stored baseline: fails a cell worse past its margin
 	$(PY) -m benchmark.cost.gate build/bench-cost.json benchmark/cost/results/baseline-local.json $(GATE_ARGS)
