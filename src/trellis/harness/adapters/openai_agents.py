@@ -12,6 +12,9 @@
   whose message is the answer; an edit is a reject telling the model to call the tool again
   with the edited arguments — and that call, when the model makes it with exactly those
   arguments, is approved in the same attempt instead of asking again;
+* session: a run given no ``session`` of its own, with memory on, keeps the conversation in the
+  memory service's thread (``bridges.session.MemorySession``): the SDK's own ``Session``
+  interface, the memory service behind it;
 * framework options: keyword arguments of ``Runner.run``/``run_streamed`` (``max_turns``,
   ``run_config``, ``context``...), except the ones the harness gives itself
   (:data:`OWN_ARGUMENTS`), which are refused.
@@ -37,8 +40,9 @@ from trellis.harness.adapters.base import (
     Output,
     ToolFormat,
 )
+from trellis.harness.bridges.session import MemorySession, bridged
 from trellis.harness.journal import Pending
-from trellis.harness.runtime import reason_of
+from trellis.harness.runtime import Runtime, reason_of
 
 log = logging.getLogger("trellis.harness")
 
@@ -93,8 +97,10 @@ class OpenAIAgentsAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "turn"
 
-    def keeps_conversation(self, target: Any) -> bool:
-        return False
+    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
+        """A session keeps the conversation: the run's own (``framework_options``), or the
+        memory service's thread (``bridges.session``)."""
+        return runtime.framework_options.get("session") is not None or bridged(runtime)
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         system = [{"role": "system", "content": context}] if context else []
@@ -108,7 +114,7 @@ class OpenAIAgentsAdapter:
         from agents import Runner
 
         agent, hooks = self._agent(target, run), _hooks(run)
-        options = run.runtime.framework_options
+        options = _options(run, native_input)
         given = await self._input(agent, native_input)
         result = await Runner.run(agent, given, hooks=hooks, **options)
         state = _edited_call(result, native_input)
@@ -120,7 +126,7 @@ class OpenAIAgentsAdapter:
         from agents import Runner
 
         agent, hooks = self._agent(target, run), _hooks(run)
-        options = run.runtime.framework_options
+        options = _options(run, native_input)
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
         try:
@@ -234,6 +240,19 @@ class OpenAIAgentsAdapter:
             else:
                 state.reject(item, rejection_message=native_input.message)
         return state
+
+
+def _options(run: Invocation, native_input: Any) -> dict[str, Any]:
+    """``Runner.run``'s options: the run's framework options, and — given no session of its
+    own, with memory on — the conversation kept in the memory service's thread
+    (``bridges.session``)."""
+    runtime = run.runtime
+    options = dict(runtime.framework_options)
+    if bridged(runtime):
+        fresh = not isinstance(native_input, _Continue)
+        options["session"] = MemorySession(runtime, fresh=fresh)
+        runtime.transcript_kept = True  # the session writes the thread
+    return options
 
 
 def _hooks(run: Invocation) -> Any:

@@ -26,6 +26,8 @@ from tests.support.openapi import MEMORY_OPENAPI, OpenAPI
 from trellis.memory import MemoryClient
 
 URL: Final = "http://memory.test"
+#: When everything the fake stores was stored.
+NOW: Final = "2026-10-01T00:00:00Z"
 #: The toolbox the service hints tools for (the memory service's ``TOOL_HINTS_MIN``); the
 #: learned skills come back for any toolbox.
 HINTS_MIN_TOOLS: Final = 5
@@ -43,7 +45,13 @@ AGENT_TOOLS: Final[list[dict[str, Any]]] = json.loads(
 #: The memory tools' names, in the service's order.
 MEMORY_TOOLS: Final = [t["name"] for t in AGENT_TOOLS]
 #: The status each route answers a success with, where it is not 200.
-CREATED: Final = {"messages": 202, "record_tool": 202, "add_document": 202}
+CREATED: Final = {
+    "messages": 202,
+    "record_tool": 202,
+    "add_document": 202,
+    "remember": 201,
+    "forget": 204,
+}
 
 #: (method, path pattern) -> the name a call is filed under
 ROUTES: Final = [
@@ -61,6 +69,12 @@ ROUTES: Final = [
     ("PUT", r"/v1/agents/model-key", "model_key"),
     ("POST", r"/v1/documents", "add_document"),
     ("GET", r"/v1/documents/(?P<document_id>[^/]+)", "document"),
+    ("POST", r"/v1/memories", "remember"),
+    ("GET", r"/v1/memories", "list_memories"),
+    ("DELETE", r"/v1/memories/(?P<memory_id>[^/]+)", "forget"),
+    ("POST", r"/v1/memories/(?P<memory_id>[^/]+)/supersede", "supersede"),
+    ("POST", r"/v1/recall", "recall"),
+    ("GET", r"/v1/threads/(?P<thread_id>[^/]+)/messages", "thread_messages"),
 ]
 
 
@@ -129,6 +143,11 @@ class FakeMemoryService:
     _stored: set[str] = field(default_factory=set)
     #: reads of each document so far
     _reads: dict[str, int] = field(default_factory=dict)
+    #: the memories ``remember`` stored, by id, as the service lists them (a superseded or
+    #: forgotten one stays, no longer CURRENT); each with the user it was stored for
+    memories: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: each thread's messages, in order, as the service lists them
+    threads: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         MADE.append(self)
@@ -179,6 +198,8 @@ class FakeMemoryService:
                 )
                 if name == "catalog" and self.etags:
                     return _conditional(request, answer)
+                if answer is None:
+                    return httpx.Response(status)
                 return httpx.Response(status, json=answer)
         return problem(404, request.url.path)
 
@@ -404,21 +425,147 @@ class FakeMemoryService:
         ``source_message_id`` is acknowledged as ``deduplicated``."""
         thread = call.scope.get("thread_id") or call.scope.get("agent_run_id") or "thr_1"
         acks = []
+        kept = self.threads.setdefault(thread, [])
         for message in call.body["messages"]:
             n = next(self._ids)
             source_id = message.get("source_message_id") or f"anon_{n}"
+            deduplicated = source_id in self._stored
             acks.append(
                 {
                     "message_id": f"msg_{n}",
                     "thread_id": thread,
                     "session_id": "ses_1",
                     "turn_id": f"trn_{n}",
-                    "sequence": n,
-                    "deduplicated": source_id in self._stored,
+                    "sequence": len(kept) + 1,
+                    "deduplicated": deduplicated,
                 }
             )
             self._stored.add(source_id)
+            if not deduplicated:
+                kept.append(
+                    {
+                        "message_id": f"msg_{n}",
+                        "thread_id": thread,
+                        "session_id": "ses_1",
+                        "turn_id": f"trn_{n}",
+                        "role": message["role"],
+                        "kind": message.get("kind") or "VISIBLE",
+                        "sequence": len(kept) + 1,
+                        "content": message["content"],
+                        "author_principal": f"agent:{call.scope.get('agent_id') or 'a'}",
+                        "agent_run_id": call.scope.get("agent_run_id"),
+                        "occurred_at": NOW,
+                        "archive_status": "STAGED",
+                        "attachments": [],
+                        "custom_metadata": message.get("custom_metadata") or {},
+                    }
+                )
         return {"messages": acks}
+
+    def _thread_messages(self, call: Call) -> dict[str, Any]:
+        """The thread's newest ``limit`` messages, oldest first (the INTERNAL ones only with
+        ``include_internal``)."""
+        thread = call.path["thread_id"]
+        internal = call.query.get("include_internal") == "true"
+        limit = int(call.query.get("limit") or 50)
+        found = [m for m in self.threads.get(thread, []) if internal or m["kind"] == "VISIBLE"]
+        return {"thread_id": thread, "messages": found[-limit:]}
+
+    # ------------------------------------------------------------------ memories
+    def _remember(self, call: Call) -> tuple[int, dict[str, Any]]:
+        """As the service does: the same content in the same scope is the memory already
+        stored (``200``, ``deduplicated``)."""
+        body, user = call.body, call.scope.get("user_id")
+        for memory_id, kept in self.memories.items():
+            if kept["content"] == body["content"] and kept["user"] == user and kept["current"]:
+                return 200, {"memory_id": memory_id, "deduplicated": True}
+        memory_id = self._id("mem")
+        self.memories[memory_id] = {
+            "content": body["content"],
+            "user": user,
+            "visibility": body.get("visibility") or "USER",
+            "memory_type": body.get("memory_type") or "SEMANTIC",
+            "current": True,
+            "superseded_by": None,
+            "supersedes": None,
+            "created_at": NOW,
+        }
+        return 201, {"memory_id": memory_id, "deduplicated": False, "job_ids": []}
+
+    def _memory_response(self, memory_id: str) -> dict[str, Any]:
+        kept = self.memories[memory_id]
+        status = "CURRENT" if kept["current"] else "SUPERSEDED"
+        return {
+            "memory_id": memory_id,
+            "content": kept["content"],
+            "memory_type": kept["memory_type"],
+            "lifetime": "LONG_TERM",
+            "visibility": kept["visibility"],
+            "scope_level": "USER",
+            "owner_principal": f"user:{kept['user']}",
+            "temporal_status": status,
+            "observed_at": kept["created_at"],
+            "confidence": 0.9,
+            "importance": 0.5,
+            "reinforcement_count": 1,
+            "evidence": [],
+            "supersedes": kept["supersedes"],
+            "superseded_by": kept["superseded_by"],
+            "created_at": kept["created_at"],
+            "updated_at": kept["created_at"],
+        }
+
+    def _visible(self, call: Call) -> list[str]:
+        """The current memories of the caller's user, newest first."""
+        user = call.scope.get("user_id")
+        found = [i for i, m in self.memories.items() if m["current"] and m["user"] == user]
+        return list(reversed(found))
+
+    def _list_memories(self, call: Call) -> dict[str, Any]:
+        """One page of the inventory, newest first, with the cursor of the next."""
+        found = self._visible(call)
+        limit = int(call.query.get("limit") or 100)
+        start = int(call.query.get("cursor") or 0)
+        page = found[start : start + limit]
+        more = start + limit < len(found)
+        return {
+            "memories": [self._memory_response(i) for i in page],
+            "next_cursor": str(start + limit) if more else None,
+        }
+
+    def _forget(self, call: Call) -> None:
+        kept = self.memories.get(call.path["memory_id"])
+        if kept is not None:
+            kept["current"] = False
+
+    def _supersede(self, call: Call) -> dict[str, Any]:
+        old = call.path["memory_id"]
+        kept = self.memories[old]
+        new = self._id("mem")
+        self.memories[new] = {
+            **kept,
+            "content": call.body["content"],
+            "supersedes": old,
+            "superseded_by": None,
+        }
+        kept["current"], kept["superseded_by"] = False, new
+        return {"memory_id": new, "supersedes": old}
+
+    def _recall(self, call: Call) -> dict[str, Any]:
+        """The current memories sharing a word with the query, the most words first."""
+        words = set(re.findall(r"\w+", call.body["query"].lower()))
+        scored = [
+            (len(words & set(re.findall(r"\w+", self.memories[i]["content"].lower()))), i)
+            for i in self._visible(call)
+        ]
+        ranked = [i for score, i in sorted(scored, key=lambda s: -s[0]) if score]
+        limit = int(call.body.get("limit") or 20)
+        return {
+            "items": [
+                {"id": i, "kind": "memory", "text": self.memories[i]["content"]}
+                for i in ranked[:limit]
+            ]
+        }
 
     def _catalog(self, call: Call) -> dict[str, Any]:
         names = call.query.get_list("names")

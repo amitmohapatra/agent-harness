@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
-from agents import Agent, function_tool
+from agents import Agent, SQLiteSession, function_tool
 
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.openai_model import ScriptedModel
@@ -331,12 +331,17 @@ async def test_an_agent_built_with_h_tools_gets_read_file_once(harness: Harness)
 async def test_a_session_keeps_the_thread_so_memorys_window_is_not_sent(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    model = ScriptedModel(["one", "two"])
+    model = ScriptedModel(["one", "two", "three"])
     agent = memory_harness.wrap(Agent(name="s", model=model), id="sess")
-    await agent.run("hi", user="u1")
-    await agent.run("hi", user="u1", framework_options={"session": object()})
+    await agent.run("hi", user="u1", without={"records"})  # no session: memory's window
+    own = SQLiteSession("own")  # the team's own session
+    await agent.run("hi", user="u1", framework_options={"session": own})
+    await agent.run("hi", user="u1")  # the memory service's session (bridges.session)
     windows = [c.body.get("window") for c in memory_service.named("context")]
-    assert windows[-2:] == [True, False]
+    assert windows[-3:] == [True, False, False]
+    items = cast("list[dict[str, Any]]", await own.get_items())
+    assert [i["content"] for i in items if i.get("role") == "user"] == ["hi"]
+    own.close()
 
 
 def test_the_sdks_own_tracing_is_left_as_set_and_said_once(

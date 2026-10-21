@@ -91,7 +91,8 @@ carry a `can_use_tool` of the harness's:
 
 | | |
 |---|---|
-| Memory push | the context is appended to the options' `system_prompt` (a string, a `preset`'s `append`, a `custom` prompt); with no system prompt it is the system prompt |
+| Memory push | the context goes with every prompt as Claude Code adds context to one: a `UserPromptSubmit` hook answering `additionalContext`, beside the options' own hooks; the `system_prompt` is left as written |
+| Session | kept in the run's journal by the SDK's `SessionStore` ([native slots](#native-slots-the-prompt-hook-and-the-session-store)) |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
@@ -100,6 +101,26 @@ carry a `can_use_tool` of the harness's:
 
 The answer is the `ResultMessage`'s `structured_output` (an `output_format`) or its `result`; a
 `ResultMessage` with `is_error` fails the run (`ClaudeRunError`).
+
+## Native slots: the prompt hook and the session store
+
+The call stays `h.wrap(options, id=...)`.
+
+* **Context:** `trellis.harness.bridges.claude.with_context` adds one `UserPromptSubmit` matcher
+  to the options' `hooks`; its hook answers the run's memory context as `additionalContext`, for
+  the first prompt and for the one a resumed session is sent. Memory off (or the service down,
+  a warning) registers nothing.
+* **Session:** the SDK mirrors Claude's session to a `SessionStore` and writes it back for the
+  CLI when a query resumes it. The harness's is `JournalSessions`, in the run's journal, which
+  agent-runs keeps with the run: a run paused on one machine, or whose worker died, continues
+  its session on any other — its built-in tools are not run again. The run's progress is saved
+  before each step Claude takes (each permission the CLI asks), with the session as mirrored so
+  far (`session_store_flush="eager"`). Options with a `session_store` of their own, or with
+  `enable_file_checkpointing` (local disk only), keep theirs — said once in the log — and a
+  session the CLI cannot continue is run again from its prompt, as before.
+* **Memory tool:** the SDK has no memory-tool backend to put the memory service behind (Claude
+  Code's memory is its `CLAUDE.md` files, a sub-agent's `memory` scope a folder): the memory
+  service's tools are on the `trellis` server instead.
 
 ## Approvals and pauses
 
@@ -124,7 +145,7 @@ harness calls already made are not made again; the built-ins run again.
 `framework_options=` sets `ClaudeAgentOptions` fields on the run's copy of the options (on
 `h.wrap` for every run, on `run`/`stream`/`start` for one, over the agent's): `max_turns`,
 `model`, `permission_mode`, `cwd`... before the harness's own changes, which merge with them —
-a `system_prompt` gets the memory context appended, a `can_use_tool` is asked after governance
+`hooks` get the context hook beside them, a `can_use_tool` is asked after governance
 as the target's would be, and `mcp_servers` get the harness's `trellis` server beside them (one
 of that name is refused). The session is the harness's (`resume`, `continue_conversation`) and so
 is the permission prompt (`permission_prompt_tool_name`): both refused, as is a name that is not
@@ -152,10 +173,10 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
 * A built-in tool the CLI does not ask about (`allowed_tools`, `bypassPermissions`) is not the
   harness's; a built-in that ran is not journaled or recorded (above).
 * No model hooks: the CLI makes the model calls ([hooks.md](../hooks.md)).
-* A session resumes on the machine whose CLI holds it (or a shared `session_store`);
-  elsewhere the query runs again from its prompt (above).
-* A `system_prompt` given as a prompt file is read by the CLI; the context has no place in it
-  and is not added (use a string or a preset with `append`).
+* A session kept by the options themselves (their `session_store`, file checkpointing) resumes
+  only where it is; elsewhere the query runs again from its prompt (above).
+* A worker that dies during a step continues from the last step saved: that step's built-in
+  tool may run again.
 * Large results: a tool's result comes back from the CLI in one message (as the model reads it),
   which the SDK reads into a buffer of `max_buffer_size` bytes (1 MiB by default: a message
   over it fails the run with `CLIJSONDecodeError`). A harness tool's large result is cut before

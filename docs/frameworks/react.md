@@ -207,6 +207,7 @@ that needs no tool (a greeting, a rule the context holds) would be made to call 
 |---|---|
 | Memory push | the context is a system message after `system` |
 | Memory pull | the memory tools are offered to every model call |
+| Long-term store | the graph's LangGraph store is the memory service (`get_store()` in a tool), as for any graph compiled without one ([langgraph.md](langgraph.md#native-slots-the-memory-service-behind-the-graphs-store)) |
 | Tool hints | each model call is offered the tools offered at that moment (the hinted ones, the memory tools, those already used, what a `tool_search` found) |
 | Model steps | the graph's checkpoint is the run's: a resume continues from the last step, so the model is not asked again for what it already decided |
 | Several calls in one step | the read-only calls run at once; the others one at a time, in the model's order; a call that pauses lets the others finish (journaled) before the run pauses, and the pauses of one step come one by one |

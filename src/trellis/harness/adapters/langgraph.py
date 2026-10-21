@@ -29,6 +29,10 @@
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
   stopped, and it holds no conversation of its own (the memory service gives the recent turns);
+* store: a graph compiled without a store of its own is run with the memory service as its
+  long-term store (``bridges.store.MemoryStore``: ``runtime.store``, ``get_store()``, Deep
+  Agents' ``StoreBackend``) while the run has memory and its memory tools; a graph's own store
+  is kept (said once);
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
   ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; the harness's
   ``configurable.thread_id`` wins over one given.
@@ -50,8 +54,9 @@ from trellis.harness.adapters.base import (
     ToolFormat,
 )
 from trellis.harness.asking import answer_of
+from trellis.harness.bridges import said
 from trellis.harness.journal import Journal, Pending
-from trellis.harness.runtime import DEFERRED, MARKER, reason_of
+from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"
@@ -81,7 +86,7 @@ class LangGraphAdapter:
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
 
-    def keeps_conversation(self, target: Any) -> bool:
+    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
         return _checkpointed(target) and not run_scoped(target)
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
@@ -97,7 +102,7 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        return await self._graph(target).ainvoke(
+        return await self._graph(target, run).ainvoke(
             _continued(target, native_input, run), self._config(target, run), version="v2"
         )
 
@@ -107,7 +112,7 @@ class LangGraphAdapter:
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
-        async for part in self._graph(target).astream(
+        async for part in self._graph(target, run).astream(
             _continued(target, native_input, run),
             self._config(target, run),
             stream_mode=["messages", "values"],
@@ -186,9 +191,12 @@ class LangGraphAdapter:
         if not isinstance(options.get("configurable", {}), Mapping):
             raise ConfigurationError("framework_options' configurable is a dict")
 
-    def _graph(self, target: Any) -> Any:
-        """The graph run for ``target``: its narrowing copy, when it has one."""
-        return target if self.narrowed is None else self.narrowed
+    def _graph(self, target: Any, run: Invocation) -> Any:
+        """The graph run for ``target``: its narrowing copy, when it has one — given the
+        run's store (the memory service: ``bridges.store``) when it has none of its own."""
+        graph = target if self.narrowed is None else self.narrowed
+        store = run_store(target, run.runtime)
+        return graph if store is None else graph.copy({"store": store})
 
     @staticmethod
     def _config(target: Any, run: Invocation) -> dict[str, Any]:
@@ -201,6 +209,28 @@ class LangGraphAdapter:
         options = runtime.framework_options
         thread = thread_of(target, runtime)
         return {**options, "configurable": {**options.get("configurable", {}), "thread_id": thread}}
+
+
+def run_store(target: Any, runtime: Any) -> Any | None:
+    """The store a run of ``target`` is given (``bridges.store.MemoryStore``): with memory on
+    for the run and its memory tools not turned off (``without=``), to a graph compiled without
+    a store; ``None`` otherwise. A graph's own store is kept, and said once."""
+    if runtime.run_memory is None or not runtime.uses("memory_pull"):
+        return None
+    if getattr(target, "store", None) is not None:
+        said(
+            f"store:{runtime.agent_id}",
+            "%s: the graph has a store of its own, which it keeps: the memory service is not "
+            "behind it (compile the graph without store= for the memory service's)",
+            runtime.agent_id,
+            extra={"agent_id": runtime.agent_id},
+        )
+        return None
+    import asyncio
+
+    from trellis.harness.bridges.store import MemoryStore
+
+    return MemoryStore(runtime.run_memory.ctx, asyncio.get_running_loop())
 
 
 def _narrowed(target: Any) -> Any | None:

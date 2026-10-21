@@ -420,7 +420,7 @@ flowchart LR
 ```
 
 * `prepare_input(target, input, context)` — the framework's input, the memory context as a
-  system message (or appended to the system prompt);
+  system message (or carried to the framework's own slot: Claude's prompt hook);
 * `invoke(target, native_input, run)` / `stream(...)` — run it; the stream yields text deltas
   and finally `Output(value)`;
 * `extract(target, output)` — the answer, the assistant transcript, and a pause the framework
@@ -429,19 +429,27 @@ flowchart LR
   `Command(resume=...)` for a checkpointed graph, the SDK's `RunState` for its approvals,
   otherwise the original input (a re-run);
 * `check_options(options)` — refuses `framework_options=` its run call cannot take, at wrap and
-  call time ([configuration.md](configuration.md#the-frameworks-own-run-options)).
+  call time ([configuration.md](configuration.md#the-frameworks-own-run-options));
+* `keeps_conversation(target, runtime)` — whether the framework keeps the run's conversation
+  itself (a checkpointer, a session): memory's context then leaves the recent turns out.
+
+Where a framework has a slot of its own for something the platform owns, the adapter fills it
+from `trellis.harness.bridges` — one module per framework, its official interface, the
+platform's service behind it: a LangGraph `BaseStore` on the memory service (`bridges.store`),
+an OpenAI Agents `Session` on the memory service's thread (`bridges.session`), Claude's
+`UserPromptSubmit` hook and `SessionStore` (`bridges.claude`, the session in the run's journal).
 
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
 | LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
 | `ReAct` (a `create_agent` graph) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
-| Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through `can_use_tool` | per run | appended to `system_prompt` |
+| Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through `can_use_tool` | per run | a `UserPromptSubmit` hook (`additionalContext`) |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |
 
 A framework installed outside the range this release was tested with is said once when its
 first target is wrapped (`compat.check`, [versioning.md](versioning.md)). The framework's own
-entry point (`graph.ainvoke`, `Runner.run`, `query`) is not intercepted: call
+entry point (`graph.ainvoke`, `Runner.run`, `query` / `ClaudeSDKClient`) is not intercepted: call
 `agent.run`/`stream`/`resume`. One page per framework: [frameworks/](README.md#which-target).
 
 ## The middleware

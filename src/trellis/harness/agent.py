@@ -726,12 +726,9 @@ class Agent:
                 pushed = await memory.context(
                     runtime.task,
                     tools=own or None,
-                    # the framework keeps the thread itself (a checkpointer; an OpenAI Agents
-                    # ``session`` given as a run option): memory's window is not sent again
-                    window=not (
-                        self.adapter.keeps_conversation(self.target)
-                        or runtime.framework_options.get("session") is not None
-                    ),
+                    # the framework keeps the thread itself (a checkpointer, a session): memory's
+                    # window is not sent again
+                    window=not self.adapter.keeps_conversation(self.target, runtime),
                     hints=hints,
                     budget=self.context_budget,
                 )
@@ -772,7 +769,13 @@ class Agent:
     async def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
         """The attempt's transcript, whether the run succeeded, paused or failed."""
         memory = runtime.run_memory
-        if memory is not None and runtime.uses("records") and messages:
+        # a framework conversation kept in the thread (``bridges.session``) wrote it already
+        if (
+            memory is not None
+            and runtime.uses("records")
+            and messages
+            and not runtime.transcript_kept
+        ):
             run_id, attempt = runtime.run_id, runtime.attempt
             await self.harness.writes.submit(
                 "memory.transcript",

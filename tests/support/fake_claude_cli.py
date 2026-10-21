@@ -10,12 +10,19 @@ one of Claude Code's own (run here: a line in the ``FAKE_CLAUDE_BUILTINS`` file)
 "..."}`` answers (``{last}`` in it is the text of the last tool result, so an answer shows what
 the "model" read). ``FAKE_CLAUDE_RECORD`` names a file the CLI writes what it was started with
 (system prompt, allowed tools, the session it resumes, prompt, its
-``ANTHROPIC_CUSTOM_HEADERS``) to.
+``ANTHROPIC_CUSTOM_HEADERS``, the context its ``UserPromptSubmit`` hooks added) to.
+
+Hooks: the ``UserPromptSubmit`` hooks the SDK registered (its ``initialize`` request) are called
+before a turn, as the real CLI calls them, and the ``additionalContext`` they answer is recorded
+(``context``) and is what ``{context}`` in a scripted text stands for.
 
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
 the temporary directory): the steps done so far — a tool call that failed or paused is not done.
 ``--resume=<id>`` goes on after them, as the real CLI continues a conversation; a session it
-does not hold is the real CLI's error result. ``--max-turns`` stops a query after that many
+does not hold is the real CLI's error result. With ``--session-mirror`` (the SDK has a
+``SessionStore``) every step is mirrored as the real CLI mirrors its transcript (a
+``transcript_mirror`` frame), and a resume the SDK materialised (``CLAUDE_CONFIG_DIR``) goes on
+from that transcript — whatever this machine's own sessions hold. ``--max-turns`` stops a query after that many
 steps, with the real CLI's ``error_max_turns`` result.
 """
 
@@ -55,6 +62,32 @@ class Cli:
     def __init__(self) -> None:
         self.requests = 0
         self.mcp_ready = False
+        #: the hooks the SDK registered, by event (its ``initialize`` request)
+        self.hooks: dict[str, Any] = {}
+
+    def prompt_context(self, session: str, prompt: Any) -> str:
+        """What the ``UserPromptSubmit`` hooks add to ``prompt`` (their ``additionalContext``)."""
+        added = []
+        for matcher in self.hooks.get("UserPromptSubmit") or []:
+            for callback in matcher.get("hookCallbackIds") or []:
+                answer = self.control(
+                    {
+                        "subtype": "hook_callback",
+                        "callback_id": callback,
+                        "input": {
+                            "session_id": session,
+                            "transcript_path": "",
+                            "cwd": os.getcwd(),
+                            "hook_event_name": "UserPromptSubmit",
+                            "prompt": prompt,
+                        },
+                        "tool_use_id": None,
+                    }
+                )
+                context = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
+                if context:
+                    added.append(context)
+        return "\n".join(added)
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
@@ -122,6 +155,8 @@ class Cli:
     def turn(self, prompt: Any) -> None:
         script = json.loads(os.environ.get("FAKE_CLAUDE_SCRIPT", '[{"text": "ok"}]'))
         resumed = argument("--resume")
+        session = resumed or str(uuid.uuid4())
+        context = self.prompt_context(session, prompt)
         record = os.environ.get("FAKE_CLAUDE_RECORD")
         if record:
             servers = json.loads(argument("--mcp-config") or "{}").get("mcpServers", {})
@@ -136,17 +171,23 @@ class Cli:
                         "resume": resumed,
                         "prompt": prompt,
                         "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
+                        "context": context,
+                        "materialised": mirrored(session) is not None,
                     },
                     handle,
                 )
-        session = resumed or str(uuid.uuid4())
         kept = SESSIONS / f"{session}.json"
+        restored = mirrored(session) if resumed is not None else None
+        if restored is not None:  # the SDK wrote the session back from its store
+            SESSIONS.mkdir(parents=True, exist_ok=True)
+            kept.write_text(json.dumps({"done": restored}))
         if resumed is not None and not kept.exists():
             send(result(session, f"No conversation found with session ID: {session}"))
             return
         if resumed is None:  # a new conversation: kept from its first message
             SESSIONS.mkdir(parents=True, exist_ok=True)
             kept.write_text(json.dumps({"done": 0}))
+            mirror(session, 0)
         done = json.loads(kept.read_text())["done"]
         last = read = ""
         limit = argument("--max-turns")
@@ -155,7 +196,7 @@ class Cli:
                 send(result(session, "Reached maximum number of turns", subtype="error_max_turns"))
                 return
             if "text" in item:
-                last = item["text"].replace("{last}", read)
+                last = item["text"].replace("{last}", read).replace("{context}", context)
                 send(assistant(session, [{"type": "text", "text": last}]))
             else:
                 read, completed, interrupted = self.tool(session, step, item)
@@ -164,6 +205,7 @@ class Cli:
                         break
                     continue
             kept.write_text(json.dumps({"done": step + 1}))
+            mirror(session, step + 1)
         send(result(session, last=last, turns=len(script)))
 
     def tool(self, session: str, step: int, item: dict[str, Any]) -> tuple[str, bool, bool]:
@@ -207,6 +249,31 @@ class Cli:
             }
         )
         return read, not error, waits or bool(permission.get("interrupt"))
+
+
+def projects() -> Path:
+    """Where the CLI keeps its transcripts (as the real CLI: under ``CLAUDE_CONFIG_DIR``)."""
+    home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return Path(home) / "projects"
+
+
+def mirror(session: str, done: int) -> None:
+    """With ``--session-mirror``: one transcript entry (the steps done) mirrored to the SDK."""
+    if "--session-mirror" not in sys.argv:
+        return
+    entry = {"type": "progress", "uuid": f"{session}-{done}", "done": done}
+    path = projects() / "fake-project" / f"{session}.jsonl"
+    send({"type": "transcript_mirror", "filePath": str(path), "entries": [entry]})
+
+
+def mirrored(session: str) -> int | None:
+    """The steps done, as a transcript the SDK materialised says (``None``: there is none)."""
+    if not os.environ.get("CLAUDE_CONFIG_DIR"):
+        return None
+    for found in projects().glob(f"*/{session}.jsonl"):
+        lines = [json.loads(line) for line in found.read_text().splitlines() if line.strip()]
+        return max(int(e.get("done", 0)) for e in lines)
+    return None
 
 
 def assistant(session: str, content: list[dict[str, Any]]) -> dict[str, Any]:
@@ -253,6 +320,8 @@ def main() -> None:
         kind = message.get("type")
         if kind == "control_request":
             request = message["request"]
+            if request.get("subtype") == "initialize":
+                cli.hooks = request.get("hooks") or {}
             send(
                 {
                     "type": "control_response",

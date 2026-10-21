@@ -32,7 +32,6 @@ from trellis.harness.adapters.claude import (
     CLI_MESSAGE_BYTES,
     ClaudeAdapter,
     ClaudeRunError,
-    _with_context,
     configured_servers,
 )
 from trellis.harness.adapters.function import FunctionAdapter
@@ -49,6 +48,7 @@ from trellis.harness.adapters.openai_agents import (
     _arguments,
     _Continue,
 )
+from trellis.harness.bridges.claude import JournalSessions, with_context
 from trellis.harness.evals import _unfenced
 from trellis.harness.journal import Journal, Pending
 
@@ -113,28 +113,24 @@ def test_a_function_gets_the_context_before_a_message_list() -> None:
 # --------------------------------------------------------------------------- Claude
 
 
-@pytest.mark.parametrize(
-    ("system_prompt", "expected"),
-    [
-        (None, "CTX"),
-        ("You ship.", "You ship.\n\nCTX"),
-        (
-            {"type": "preset", "preset": "claude_code"},
-            {"type": "preset", "preset": "claude_code", "append": "CTX"},
-        ),
-        (
-            {"type": "preset", "preset": "claude_code", "append": "Be brief."},
-            {"type": "preset", "preset": "claude_code", "append": "Be brief.\n\nCTX"},
-        ),
-        ({"type": "custom", "prompt": "Mine."}, {"type": "custom", "prompt": "Mine.\n\nCTX"}),
-        ({"type": "file", "path": "prompt.md"}, {"type": "file", "path": "prompt.md"}),
-    ],
-    ids=["none", "text", "preset", "preset-appended", "custom", "file-untouched"],
-)
-def test_the_context_joins_whatever_system_prompt_the_options_have(
-    system_prompt: Any, expected: Any
-) -> None:
-    assert _with_context(system_prompt, "CTX") == expected
+async def test_the_context_is_a_prompt_hook_beside_the_options_own() -> None:
+    from claude_agent_sdk import HookContext, HookInput, HookMatcher
+    from claude_agent_sdk.types import SyncHookJSONOutput
+
+    async def mine(given: HookInput, tool: str | None, hook: HookContext) -> SyncHookJSONOutput:
+        return {}
+
+    own = {"UserPromptSubmit": [HookMatcher(hooks=[mine])], "Stop": [HookMatcher(hooks=[mine])]}
+    hooks = with_context(own, "CTX")
+    assert hooks["Stop"] == own["Stop"] and own["UserPromptSubmit"] == [own["UserPromptSubmit"][0]]
+    first, added = hooks["UserPromptSubmit"]
+    assert first.hooks == [mine]
+    asked: Any = {"prompt": "hi"}
+    answer = await added.hooks[0](asked, None, {"signal": None})
+    assert answer == {
+        "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "CTX"}
+    }
+    assert list(with_context(None, "CTX")) == ["UserPromptSubmit"]
 
 
 def test_a_structured_input_is_the_prompt_as_json() -> None:
@@ -183,14 +179,28 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     ]
     seen: list[ClaudeAgentOptions] = []
 
-    async def query(*, prompt: str, options: ClaudeAgentOptions) -> Any:
-        seen.append(options)
-        for message in messages:
-            yield message
+    class Client:
+        """The SDK's client, answering ``messages`` (no CLI is started)."""
 
-    monkeypatch.setattr(claude_agent_sdk, "query", query)
+        def __init__(self, *, options: ClaudeAgentOptions) -> None:
+            seen.append(options)
+
+        async def __aenter__(self) -> Client:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def query(self, prompt: str) -> None:
+            assert prompt == "go"
+
+        async def receive_response(self) -> Any:
+            for message in messages:
+                yield message
+
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
     replay = SimpleNamespace(journal=Journal())
-    runtime = SimpleNamespace(pending=None, replay=replay, framework_options={})
+    runtime = SimpleNamespace(pending=None, replay=replay, framework_options={}, agent_id="a")
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
     native = adapter.prepare_input(None, "go", None)
@@ -198,12 +208,20 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     items = [i async for i in adapter.stream(options, native, run)]
     assert items[:-1] == ["done"]
     assert isinstance(items[-1], Output) and items[-1].value == messages
-    # no context and no harness tools: the options as they were, the permission check and
-    # the room for a large tool result added
+    # no context and no harness tools: the options as they were, the permission check, the
+    # room for a large tool result and the session kept in the run's journal added
     [sent] = seen
     assert sent.can_use_tool is not None and sent.resume is None
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
-    assert dataclasses.replace(sent, can_use_tool=None, max_buffer_size=None) == options
+    assert isinstance(sent.session_store, JournalSessions)
+    assert sent.session_store_flush == "eager"
+    unchanged = {
+        "can_use_tool": None,
+        "max_buffer_size": None,
+        "session_store": None,
+        "session_store_flush": options.session_store_flush,
+    }
+    assert dataclasses.replace(sent, **unchanged) == options
 
 
 # --------------------------------------------------------------------------- LangGraph
@@ -241,7 +259,7 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
             yield {"type": "custom", "data": "progress"}
             yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
 
-    runtime = SimpleNamespace(thread=None, run_id="run_1", framework_options={})
+    runtime = SimpleNamespace(thread=None, run_id="run_1", framework_options={}, run_memory=None)
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]
     assert items[0] == "hel" and len(items) == 2

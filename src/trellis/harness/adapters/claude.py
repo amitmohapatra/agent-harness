@@ -1,6 +1,8 @@
 """Claude Agent SDK: the target is the ``ClaudeAgentOptions`` a team already configured.
 
-* input: the prompt, and the memory context appended to the options' system prompt;
+* input: the prompt; the memory context goes with every prompt as Claude Code's own
+  ``UserPromptSubmit`` hook adds context (``bridges.claude.with_context``), beside the options'
+  hooks;
 * run: ``query(prompt, options)`` on a copy of the options that also carries the harness
   tools as one in-process MCP server (``mcp__trellis__*``) beside the team's own servers — a
   ``mcp_servers`` given as a config file or JSON text is read, since the SDK serves an
@@ -14,14 +16,17 @@
   ends). The session the CLI kept (``ResultMessage.session_id``) is in the run's journal, and
   the next attempt resumes it (``resume=``): Claude goes on from where it was — its built-in
   tools are not run again — and, told which call a person answered about, calls that tool
-  again, which the journal answers. A session the CLI no longer holds (another machine, its
-  store cleared) is a warning, and the query runs again from its prompt against the journal;
+  again, which the journal answers. The session is kept in the run's journal too, as the SDK's
+  ``SessionStore`` (``bridges.claude.JournalSessions``): the SDK writes it back for the CLI on
+  any machine. A session the CLI cannot continue still (options keeping their own store, a
+  transcript the CLI refuses) is a warning, and the query runs again from its prompt against the
+  journal;
 * model headers: ``ANTHROPIC_CUSTOM_HEADERS`` in the options' ``env`` that select a stored
   prompt the run pinned (``h.model_headers(prompt=)``) select the version it pinned — the CLI
   reads them as it starts, once per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
-  before the harness's own changes. Merged with them: ``system_prompt`` (the memory context is
-  appended to it), ``can_use_tool`` (the harness asks it after governance, as the target's)
+  before the harness's own changes. Merged with them: ``hooks`` (the context hook goes beside
+  them), ``can_use_tool`` (the harness asks it after governance, as the target's)
   and ``mcp_servers`` (the harness's ``trellis`` server goes beside them; a server of that name
   is refused). Refused: the fields that choose the session a query continues, and the
   permission prompt tool (:data:`OWNED`).
@@ -44,9 +49,10 @@ from trellis.contracts import (
     ToolSpec,
 )
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
+from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import selected_env
-from trellis.harness.runtime import Paused
+from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
 
@@ -72,6 +78,8 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: as an agent-runs artifact (50 MiB: a journal over a checkpoint's size travels as one) —
 #: escaped as JSON, twice that at most.
 CLI_MESSAGE_BYTES: Final = 2 * 50 * 1024 * 1024
+#: When the SDK hands the session store a step: as soon as the CLI mirrors it.
+SESSION_FLUSH: Final = "eager"
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -123,7 +131,7 @@ class ClaudeAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "run"
 
-    def keeps_conversation(self, target: Any) -> bool:
+    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
         return False
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
@@ -233,23 +241,26 @@ class ClaudeAdapter:
     async def _query(
         target: Any, native_input: Any, run: Invocation, session: str | None
     ) -> AsyncIterator[Any]:
-        """One query (``session``: the one it resumes); the session it runs in kept in the
-        journal as it goes."""
-        from claude_agent_sdk import query
+        """One query (``session``: the one it resumes) on the SDK's client; the session it runs
+        in kept in the journal as it goes."""
+        from claude_agent_sdk import ClaudeSDKClient
 
         runtime = run.runtime
         given = runtime.framework_options
         target = dataclasses.replace(target, **given) if given else target
         options = _options(target, native_input.context, run, session)
         prompt = native_input.prompt if session is None else _resumed(native_input, run)
-        async for message in query(prompt=prompt, options=options):
-            found = getattr(message, "session_id", None)
-            if isinstance(found, str):
-                runtime.replay.journal.session = found
-            yield message
-            if runtime.pending is not None:
-                # the run paused: stop here; the CLI process goes with it
-                return
+        # disconnected as soon as the run pauses: the CLI process ends, and the SDK hands the
+        # session store what it mirrored before the journal is saved with the pause
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for message in client.receive_response():
+                found = getattr(message, "session_id", None)
+                if isinstance(found, str):
+                    runtime.replay.journal.session = found
+                yield message
+                if runtime.pending is not None:
+                    return  # the run paused: stop here
 
 
 def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
@@ -274,18 +285,24 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
             "permission check as can_use_tool (the harness asks it after governance), not "
             "permission_prompt_tool_name"
         )
+    runtime = run.runtime
     changes: dict[str, Any] = {
         "can_use_tool": _permission(options.can_use_tool),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
     }
     if context:
-        changes["system_prompt"] = _with_context(options.system_prompt, context)
+        changes["hooks"] = with_context(options.hooks, context)
+    store = session_store(options, runtime.replay.journal, runtime.agent_id)
+    if store is not None:
+        # each step mirrored as it is taken: the journal saved before the next holds it
+        changes["session_store"] = store
+        changes["session_store_flush"] = SESSION_FLUSH
     if run.native_tools is not None:
         servers = configured_servers(options.mcp_servers)
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
     if session is not None:
         changes["resume"] = session
-    env = selected_env(options.env, run.runtime)
+    env = selected_env(options.env, runtime)
     if env is not None:
         changes["env"] = env
     return dataclasses.replace(options, **changes)
@@ -294,12 +311,17 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
 def _permission(own: Any) -> Any:
     """The options' ``can_use_tool``: a harness tool runs (the bridge decides about it); any
     other is the run's decision (``bridge.permitted``: hooks, governance, a person), then
-    ``own``'s, the team's callback, with the arguments as they were decided."""
+    ``own``'s, the team's callback, with the arguments as they were decided. Before Claude takes
+    a step, the run's progress is saved — its session as mirrored so far among it — so a worker
+    that dies during the step continues the session from there, not from an earlier step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
     from trellis.harness.tools.convert.claude import SERVER, WAITING
 
     async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
+        runtime = current()
+        assert runtime is not None  # the CLI asks inside the run it works for
+        await runtime.progress(now=True)
         if name.startswith(f"mcp__{SERVER}__"):
             return PermissionResultAllow()
         side_effects = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
@@ -333,16 +355,3 @@ def configured_servers(configured: Any) -> dict[str, Any]:
     if not isinstance(servers, dict):
         raise ConfigurationError(f"mcp_servers {text[:80]!r} holds no mcpServers object")
     return servers
-
-
-def _with_context(system_prompt: Any, context: str) -> Any:
-    if system_prompt is None:
-        return context
-    if isinstance(system_prompt, str):
-        return f"{system_prompt}\n\n{context}"
-    if isinstance(system_prompt, dict) and system_prompt.get("type") == "preset":
-        appended = system_prompt.get("append")
-        return {**system_prompt, "append": f"{appended}\n\n{context}" if appended else context}
-    if isinstance(system_prompt, dict) and system_prompt.get("type") == "custom":
-        return {**system_prompt, "prompt": f"{system_prompt['prompt']}\n\n{context}"}
-    return system_prompt  # a prompt file: the CLI reads it, and the context has no place in it

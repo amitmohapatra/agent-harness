@@ -1,7 +1,7 @@
 """The adapter contract: four functions per framework, and one check.
 
 * ``prepare_input(target, input, context)`` — the framework's input, with the pushed memory
-  context as a system message (``keeps_conversation(target)``: the target holds the thread's
+  context as a system message (``keeps_conversation(target, runtime)``: the run's thread is held
   messages itself, so the context is asked for without the recent conversation);
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
@@ -92,7 +92,7 @@ class Adapter(Protocol):
     fixed_tools: bool
     narrows: Narrowing
 
-    def keeps_conversation(self, target: Any) -> bool: ...
+    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool: ...
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any: ...
 

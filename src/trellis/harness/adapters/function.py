@@ -21,6 +21,7 @@ from trellis.harness.adapters.base import (
     no_options,
 )
 from trellis.harness.journal import Pending
+from trellis.harness.runtime import Runtime
 
 
 class FunctionAdapter:
@@ -29,7 +30,7 @@ class FunctionAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "none"
 
-    def keeps_conversation(self, target: Any) -> bool:
+    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
         return False
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:

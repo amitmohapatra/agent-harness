@@ -5,7 +5,29 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## Unreleased
 
+### Changed
+
+- The Claude adapter runs each query on the SDK's `ClaudeSDKClient` (disconnected when the run
+  pauses), and its memory context no longer changes the options' `system_prompt`.
+
 ### Added
+
+- Native slots, the platform's services behind them (`trellis.harness.bridges`): each framework
+  keeps its own feature, and `h.wrap(agent, id=...)` configures nothing more.
+  - LangGraph, Deep Agents and `ReAct`: a graph compiled without a store runs with the memory
+    service as its `BaseStore` (`MemoryStore`: each item a memory of the run's user; `put` of a
+    key held supersedes it, `delete` forgets it, a search with a query is the service's recall).
+  - OpenAI Agents SDK: a run given no `session` keeps its conversation in the memory service's
+    thread (`MemorySession`): the next run on the thread continues it, a run run again from its
+    input is one turn, the transcript is not written twice and the window is left to the session.
+  - Claude Agent SDK: the memory context goes with every prompt as a `UserPromptSubmit` hook
+    (`additionalContext`) instead of being appended to the system prompt; the session is kept in
+    the run's journal as the SDK's `SessionStore` (`JournalSessions`), so a paused run, or one
+    whose worker died, continues its session on any machine (progress saved before each step).
+  - A framework given its own store, session or session store keeps it (said once in the log);
+    memory off leaves the framework's default; a memory service that fails fails the call.
+  - The framework matrix checks the slots (`F44`) and that every adapter emits the same
+    agent-contracts events for the same work (`F60c`).
 
 - Every gateway call says whose run it is and joins its trace: Bifrost dimension headers
   (`x-bf-dim-tenant`, `-agent`, `-run`, and a hash of the user, never the id) and the W3C
