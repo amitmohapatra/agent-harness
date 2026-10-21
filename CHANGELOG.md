@@ -7,6 +7,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- Tool search: a catalogue of 20 tools or more that the tool hints did not narrow is narrowed
+  to the tools the task is about — BM25 over every tool's definition, parameters included,
+  plus the tools the task names — for `ReAct`, graphs built with `h.tools`, OpenAI Agents and
+  Claude; a `ReAct` also narrows definitions that crowd its window (before the summarization
+  guard counts them) and searches again at every step. `without={"tool_search"}`
+  ([tools.md](docs/tools.md#tool-search)).
+
 - `ReAct` plans, keeps scratch files and hands parts of a long task to a helper — LangChain's
   `TodoListMiddleware`, Deep Agents' file tools and Deep Agents' `task` tool, each a child run
   of the same agent — once the model has made three calls or the request asks for steps, on a

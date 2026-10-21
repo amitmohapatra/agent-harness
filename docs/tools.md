@@ -39,7 +39,7 @@ format. What helps it choose, whatever the source:
 |---|---|
 | **Descriptions worth choosing by** — what the tool is for, when to use it rather than a broader or narrower one, each parameter described | the tool's author: the docstring (functions), the MCP server, the OpenAPI document. The harness checks, below |
 | **A check of the tool set** — `trellis.harness.tools.lint.lint(specs)`: a missing or short description (under 5 words), an undescribed parameter, a name the OpenAI API refuses (letters, digits, `_`, `-`, at most 64), names differing only in case or separators, two tools described the same or nearly (75% of their words shared), 20 tools or more at once (OpenAI's guide suggests fewer), over 128 (the most the OpenAI API takes) | automatic: the toolbox logs each finding as a warning (`trellis.tools`, `tool choice: ...`) when the tools it lists change; in CI, assert `lint([t.spec for t in tools]) == []` |
-| **Fewer tools per call** — the memory service's tool hints (from 5 tools, [below](#tool-hints-what-the-model-is-offered)), or LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call picks the tools for the request) | automatic with memory; `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` without |
+| **Fewer tools per call** — the memory service's tool hints (from 5 tools, [below](#tool-hints-what-the-model-is-offered)); without them, from 20 tools, a search over the definitions ([tool search](#tool-search)); or LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call picks the tools for the request) | automatic; `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` for a model's choice |
 | **How to choose** — every part of a request addressed, the most specific tool over a general one, current figures from tools rather than the remembered context, a change made by calling its tool (never claimed without it) | `ReAct(tool_guidance=True)` (`ToolGuidance`) |
 | **A check before the answer** — the draft answer checked against the request once; a part left open, or a change only claimed, makes the model call the tools still needed — the write tool's call reaches governance, and its approval; nothing found said plainly as "no record" | `ReAct(answer_check=True)` (`AnswerCheck`) |
 | **A check before a change** — the first call of a tool that changes data checked against the rules in the instructions and the memory context, before it runs or anyone is asked to approve it | `ReAct(answer_check=True)` (`AnswerCheck(writes=False)` turns it off) |
@@ -118,7 +118,24 @@ more tools, the model is then offered:
 | function | n/a: it calls tools by name |
 
 A tool outside the offered set still runs if the model calls it. When the context call fails,
-or the service names no tools, every tool is offered.
+or the service names no tools, the [tool search](#tool-search) narrows a catalogue of 20 tools
+or more, and every tool of a smaller one is offered.
+
+## Tool search
+
+A catalogue of 20 tools or more that the tool hints did not narrow (memory off, or no
+candidates) is narrowed by a search for the task (`tools/search.py`, no model call): BM25 over
+each tool's whole definition — its name, its description, and each parameter's name,
+description and allowed values — so a tool is found by what its parameters take as well as by
+what it is called. The model is offered the 10 best matches, every tool the task names as it is
+named, and Code Mode's and the skills' tools; the memory tools are offered as always. It works
+wherever the hints do (the table above): per model call in a `ReAct` and a graph built with
+`h.tools`, per turn in OpenAI Agents, per run in Claude; a function target calls any tool by
+name. A `ReAct` also narrows a smaller catalogue whose definitions would take more than 40% of
+its context window — the definitions, not the history, crowding a small window are narrowed
+before anything is summarized or refused — and on a narrowed run searches again at every step,
+with what the model last said and what the tools last answered, offering up to 3 more tools
+(the offered set only grows). `without={"tool_search"}` offers every tool.
 
 ## Code Mode
 

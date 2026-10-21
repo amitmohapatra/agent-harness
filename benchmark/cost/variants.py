@@ -5,12 +5,16 @@ same instructions and model. A new cost feature lands as one more entry of :data
 * ``baseline`` — the plain tool-calling loop, everything off: LangChain's ``create_agent``
   with only what runs the harness's tools and bounds the loop (``HarnessTools``,
   ``StallGuard``, ``StepLimit``, ``PatchToolCallsMiddleware``, ``ModelHooks``), no result
-  paging, no context editing, no summarization; ``without={"code_mode", "hints"}``.
-* ``main`` — ``ReAct(...)`` as ``main`` builds it, nothing changed: result paging
+  paging, no context editing, no summarization; ``without={"code_mode", "hints"}`` and every
+  automatic feature.
+* ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: the features it turns
+  on by itself (planning, scratch files, the ``task`` helper, tool search...), result paging
   (``FilesystemMiddleware``: a result over 80,000 characters saved, a preview sent), older
   results cleared past half the window, summarization near its end, ``ToolGuidance`` and
   ``AnswerCheck`` off, Code Mode where it applies (read-only Code Mode MCP servers of the
   gateway; this benchmark's catalogues are the harness's own tools, so it does not).
+* ``main-<feature>`` — ``main`` run ``without={feature}`` for each feature it turns on by
+  itself (:data:`AUTOMATIC`); ``main@8k`` — ``main`` on an 8,192-token window;
 * ``main-<piece>`` — ``main`` with one of its pieces off (:data:`PIECES`: ``paging``,
   ``context_editing``, ``summarization``), so each piece is measured on its own: the default
   middleware of that name replaced by one that does nothing (``ReAct(middleware=)`` replaces a
@@ -69,18 +73,24 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
         checkpointer=ours.RunCheckpointer(),
         name="baseline",
     )
-    return graph, {"without": {"code_mode", "hints"}}
+    return graph, {"without": {"code_mode", "hints", *AUTOMATIC}}
 
 
-def main(setup: Setup, *, off: tuple[str, ...] = ()) -> tuple[Any, dict[str, Any]]:
+def main(
+    setup: Setup,
+    *,
+    off: tuple[str, ...] = (),
+    without: tuple[str, ...] = (),
+    window: int | None = None,
+) -> tuple[Any, dict[str, Any]]:
     target = ReAct(
         setup.system,
         setup.model,
         max_steps=setup.max_steps,
-        context_window=setup.window,
+        context_window=window or setup.window,
         middleware=[Off(PIECES[piece]) for piece in off],
     )
-    return target, {}
+    return target, {"without": set(without)} if without else {}
 
 
 class Off(AgentMiddleware):
@@ -103,6 +113,14 @@ PIECES: Final = {
 }
 
 
+#: The features ``ReAct`` turns on by itself (``trellis.harness.automatic``): a
+#: ``main-<feature>`` variant is ``main`` run ``without={feature}``, and ``baseline`` is
+#: without them all.
+AUTOMATIC: Final = ("planning", "files", "subagent_task", "tool_search")
+#: The window ``main@8k`` assumes whatever the model's: a small local model's.
+SMALL_WINDOW: Final = 8_192
+
+
 VARIANTS: Final[dict[str, Variant]] = {
     "baseline": Variant("baseline", "plain tools, everything off", baseline),
     "main": Variant(
@@ -118,6 +136,19 @@ VARIANTS: Final[dict[str, Variant]] = {
         )
         for piece in PIECES
     },
+    **{
+        f"main-{feature}": Variant(
+            f"main-{feature}",
+            f"main without {feature}",
+            functools.partial(main, without=(feature,)),
+        )
+        for feature in AUTOMATIC
+    },
+    "main@8k": Variant(
+        "main@8k",
+        "main on an 8,192-token window, whatever the model's",
+        functools.partial(main, window=SMALL_WINDOW),
+    ),
 }
 #: The variants a run compares by default.
 DEFAULT: Final = ("baseline", "main")

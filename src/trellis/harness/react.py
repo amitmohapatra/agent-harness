@@ -121,7 +121,9 @@ def ReAct(
     backend = automatic.JournalBackend()
     defaults = [
         automatic.JournalFiles(backend, tools=["read_file", *sorted(automatic.SCRATCH)]),
-        # what a long task is offered, decided before anything reads the request's tools
+        # what the model is offered, decided before anything reads the request's tools: the
+        # tools the task is about, and what a long task needs
+        automatic.ToolSearch(window=window),
         automatic.Planning(window=window),
         automatic.Helpers(backend, window=window),
         automatic.ScratchFiles(window=window),

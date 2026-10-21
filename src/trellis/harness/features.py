@@ -29,6 +29,8 @@ Feature = Literal[
     "planning",
     "files",
     "subagent_task",
+    # a large catalogue narrowed to the tools the task is about (``tools.search``)
+    "tool_search",
 ]
 #: The features a name turns off together: ``memory`` is its push, its pull and the records;
 #: ``mcp`` the MCP tools and Code Mode, whose scripts reach them.

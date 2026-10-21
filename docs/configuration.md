@@ -134,6 +134,7 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 | `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
 | `planning` | `ReAct`, a long task, a window of 32,000 tokens or more | LangChain's `TodoListMiddleware`: `write_todos` and its instructions ([react.md](frameworks/react.md#the-middleware)) | not offered; a call answers that it is not available |
 | `files` | the same | Deep Agents' scratch file tools: `ls`, `write_file`, `edit_file` on the run's journal | not offered (paged results are still read with `read_file`); a call answers that it is not available |
+| `tool_search` | 20 tools or more that the tool hints did not narrow, or (`ReAct`) definitions over 40% of the window | the tools offered narrowed to the best matches of a search over every definition (name, description, each parameter's description and values), the tools the task names, Code Mode's and the skills' tools ([tools.md](tools.md#tool-search)) | every tool offered |
 | `subagent_task` | the same | Deep Agents' `task` tool: a general-purpose helper, each call a child run of the same agent | not offered; a call answers that it is not available |
 
 A name not in the table is refused (`ConfigurationError`, naming them). Not switchable, because
