@@ -39,8 +39,11 @@ def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
 
     class OnHttpx(langchain_openai.ChatOpenAI):
         def __init__(self, **kwargs: Any) -> None:
-            if not isinstance(kwargs.get("http_async_client"), httpx.AsyncClient):
-                kwargs["http_async_client"] = httpx.AsyncClient()
+            given = kwargs.get("http_async_client")
+            if not isinstance(given, httpx.AsyncClient):
+                # the hooks the harness gave its client (what it reads of a gateway's error)
+                hooks = getattr(given, "event_hooks", None)
+                kwargs["http_async_client"] = httpx.AsyncClient(event_hooks=hooks)
             super().__init__(**kwargs)
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", OnHttpx)

@@ -50,6 +50,7 @@ from trellis.contracts import (
     ToolStatus,
 )
 from trellis.contracts.errors import is_pause_signal
+from trellis.harness import budget
 from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
@@ -153,9 +154,12 @@ async def _called(
         _events(runtime, ref, tool_call, refused)
         return refused
     decision, tool_call, rejected = await _decided(runtime, tool.spec, tool_call, verdict)
+    # the budget again, then counted at once: the calls of one step are decided together
+    rejected = rejected or _over_budget(runtime, tool)
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
         return rejected
+    budget.count_tool_call(runtime)
     _started(runtime, ref, tool.name, tool_call.args)
     try:
         outcome = await _ran(
@@ -202,7 +206,8 @@ async def _ran(
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
         within = runtime.limited(tool.timeout, key=idem)
-        outcome, error = await execute(tool, args, reads=reads, within=within)
+        retry = runtime.uses("tool_retry")
+        outcome, error = await execute(tool, args, reads=reads, within=within, retry=retry)
         if isinstance(error, RunCancelled) or (error is not None and is_pause_signal(error)):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume
@@ -216,10 +221,28 @@ async def _ran(
     return outcome
 
 
+def _over_budget(runtime: Runtime, tool: Tool) -> ToolOutcome | None:
+    """A call refused because the run's budget is spent (``budget.py``), as the model reads
+    it."""
+    spent = budget.reached(runtime)
+    if spent is None:
+        return None
+    budget.stopped(runtime, spent)
+    return ToolOutcome(
+        tool=tool.name,
+        status=ToolStatus.ERROR,
+        output=f"{tool.name} was not run: {budget.SPENT} ({spent})",
+        error_class=budget.BUDGET_EXCEEDED,
+    )
+
+
 def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any]) -> ToolOutcome | None:
-    """Why a call is not run at all, as the model reads it: a tool the framework was built
-    with of a feature this run is without, or arguments that do not fit its schema (nothing
-    runs, nothing is journaled: the model corrects them)."""
+    """Why a call is not run at all, as the model reads it: the run's budget is spent, a tool
+    the framework was built with of a feature this run is without, or arguments that do not
+    fit its schema (nothing runs, nothing is journaled: the model corrects them)."""
+    over = _over_budget(runtime, tool)
+    if over is not None:
+        return over
     if tool.feature is not None and not runtime.uses(tool.feature):
         return ToolOutcome(
             tool=tool.name,

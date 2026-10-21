@@ -117,6 +117,12 @@ class Journal(BaseModel):
     #: the graph's latest checkpoint and its pending writes, by namespace, when the graph keeps
     #: them in the run (``middleware.RunCheckpointer``): a resume continues where it stopped
     graph: dict[str, Any] | None = None
+    #: what the run has spent so far, its sub-agents' runs included (``budget.py``): tokens,
+    #: cached tokens, cost, model calls, tool calls — a resume goes on from it
+    spent: dict[str, float] = Field(default_factory=dict)
+    #: the models that answered the run's model calls, by the name each reply gave, and how
+    #: many calls each answered: a fallback the gateway or the harness made shows here
+    answered_by: dict[str, int] = Field(default_factory=dict)
     #: the large tool results the model read a preview of, whole, by the path it reads them at
     #: (``tools.results``: OpenAI Agents and Claude, which have no cut of their own)
     results: dict[str, str] = Field(default_factory=dict)

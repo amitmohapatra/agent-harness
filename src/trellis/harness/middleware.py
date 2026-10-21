@@ -96,6 +96,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ModelError, ToolStatus
+from trellis.harness import budget
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
@@ -448,6 +449,8 @@ class ModelHooks(AgentMiddleware):
                 if error is exc:
                     raise
                 raise error from exc
+            if runtime is not None:  # what the run spent (``budget.py``)
+                budget.account_reply(runtime, reply)
             await hooks.answered(call, reply)
             _replied(span, reply)
         return reply
@@ -593,7 +596,8 @@ def _replied(span: Any, reply: ModelResponse[Any]) -> None:
     if message is None:
         return
     metadata = message.response_metadata or {}
-    counts = message.usage_metadata or {}
+    counts: dict[str, Any] = dict(message.usage_metadata or {})
+    details = counts.get("input_token_details") or {}
     reason = metadata.get("finish_reason")
     usage(
         span,
@@ -601,6 +605,8 @@ def _replied(span: Any, reply: ModelResponse[Any]) -> None:
         input_tokens=counts.get("input_tokens"),
         output_tokens=counts.get("output_tokens"),
         finish_reasons=[reason] if isinstance(reason, str) else [],
+        cached_tokens=details.get("cache_read"),
+        written_tokens=details.get("cache_creation"),
     )
     span_output(span, message.text or _spoken(message).get("tool_calls"))
 

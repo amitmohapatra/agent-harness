@@ -5,7 +5,7 @@ serves it (``native_client``), and the reasoning effort of each step (``effort``
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import ConfigurationError
-from trellis.harness import models
+from trellis.harness import models, react
 from trellis.harness.automatic import DECIDING, ROUTINE, Effort, NativeClient, step_effort
 from trellis.harness.middleware import ANSWER_CHECK
 from trellis.harness.react import _native_model, detected_window
@@ -102,9 +102,9 @@ def test_a_model_object_is_its_own_window_and_is_never_replaced() -> None:
 
 
 # --------------------------------------------------------------------------- the client
-def anthropic_stream(text: str) -> bytes:
+def anthropic_stream(text: str, usage: dict[str, int] | None = None) -> bytes:
     events = [
-        ("message_start", {"type": "message_start", "message": {"id": "m1", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5", "content": [], "stop_reason": None, "usage": {"input_tokens": 12, "output_tokens": 0}}}),
+        ("message_start", {"type": "message_start", "message": {"id": "m1", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5", "content": [], "stop_reason": None, "usage": {"input_tokens": 12, "output_tokens": 0, **(usage or {})}}}),
         ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
         ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
         ("content_block_stop", {"type": "content_block_stop", "index": 0}),
@@ -119,8 +119,12 @@ class Anthropic:
     client, which respx does not see): an empty request is invalid (the probe), a message is
     answered with ``text``, streamed or not."""
 
-    def __init__(self, text: str = "hi") -> None:
+    def __init__(
+        self, text: str = "hi", errors: Sequence[int] = (), usage: dict[str, int] | None = None
+    ) -> None:
         self.text = text
+        self.usage = usage or {}
+        self.errors = list(errors)
         self.requests: list[dict[str, Any]] = []
         self.headers: list[dict[str, str]] = []
 
@@ -130,10 +134,13 @@ class Anthropic:
         body = json.loads(request.content or b"{}")
         self.requests.append(body)
         self.headers.append(dict(request.headers))
+        if self.errors:
+            error = {"type": "error", "error": {"type": "api_error", "message": "upstream down"}}
+            return httpx2.Response(self.errors.pop(0), json=error)
         if body.get("stream"):
             return httpx2.Response(
                 200,
-                content=anthropic_stream(self.text),
+                content=anthropic_stream(self.text, self.usage),
                 headers={"content-type": "text/event-stream"},
             )
         message = {
@@ -143,7 +150,7 @@ class Anthropic:
             "model": "claude-sonnet-5-5",
             "content": [{"type": "text", "text": self.text}],
             "stop_reason": "end_turn",
-            "usage": {"input_tokens": 12, "output_tokens": 3},
+            "usage": {"input_tokens": 12, "output_tokens": 3, **self.usage},
         }
         return httpx2.Response(200, json=message)
 
@@ -152,7 +159,9 @@ class Anthropic:
         from langchain_anthropic._client_utils import _AsyncHttpxClientWrapper
 
         return _AsyncHttpxClientWrapper(
-            base_url=params["base_url"], transport=httpx2.MockTransport(self)
+            base_url=params["base_url"],
+            transport=httpx2.MockTransport(self),
+            event_hooks={"response": [react._gateway_answered]},
         )
 
 
@@ -160,10 +169,8 @@ class Anthropic:
 async def test_a_vendors_model_is_asked_through_its_own_api_when_the_gateway_serves_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import langchain_anthropic.chat_models as anthropic_models
-
     endpoint = Anthropic()
-    monkeypatch.setattr(anthropic_models, "_get_default_async_httpx_client", endpoint.client)
+    monkeypatch.setattr(react, "_anthropic_http", endpoint.client)
     respx.post("http://gw.test/anthropic/v1/messages").mock(return_value=httpx.Response(400))
     generic = respx.post(f"{GATEWAY}/chat/completions").mock(return_value=chat_reply("generic"))
     graph = ReAct("s", "anthropic/claude-sonnet-5-5")

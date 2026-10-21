@@ -38,15 +38,23 @@ from deepagents.backends.utils import file_data_to_string
 from deepagents.middleware import FilesystemMiddleware
 from deepagents.middleware.filesystem import _file_data_reducer
 from deepagents.middleware.subagents import SubAgentMiddleware
-from langchain.agents.middleware import AgentMiddleware, AgentState, ModelRequest, ModelResponse
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
+    ModelFallbackMiddleware,
+    ModelRequest,
+    ModelResponse,
+)
 from langchain.agents.middleware.todo import TodoListMiddleware
+from langchain.agents.structured_output import StructuredOutputValidationError
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from trellis.contracts import ConfigurationError, ToolStatus
-from trellis.harness import models
+from trellis.contracts import ConfigurationError, ModelError, ToolStatus
+from trellis.harness import budget, models
 from trellis.harness.features import Feature
 from trellis.harness.middleware import ANSWER_CHECK, WRITE_CHECK, _named
 from trellis.harness.runtime import Runtime, current
@@ -210,6 +218,164 @@ def step_effort(request: ModelRequest[Any]) -> str:
     checking = isinstance(last, HumanMessage) and last.text.startswith(_CHECKS)
     failed = isinstance(last, ToolMessage) and last.status == "error"
     return DECIDING if checking or failed or calls_made(request) == 0 else ROUTINE
+
+
+# --------------------------------------------------------------------------- spending
+class PromptCache(AnthropicPromptCachingMiddleware):
+    """LangChain's ``AnthropicPromptCachingMiddleware`` on the calls that reach an Anthropic
+    model through its own API (``native_client``): the conversation's prefix — the
+    instructions, the tools (sorted), the memory context, the history — is marked for the
+    prompt cache (``prompt_cache``). Every other model is left as it is: OpenAI's caching is
+    automatic, and the order is the same for it. Named as LangChain's, so one given to
+    ``ReAct(middleware=)`` replaces it."""
+
+    def __init__(self) -> None:
+        super().__init__(unsupported_model_behavior="ignore")
+
+    @property
+    def name(self) -> str:
+        return AnthropicPromptCachingMiddleware.__name__
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> Any:
+        if not on("prompt_cache"):
+            return await handler(request)
+        return await super().awrap_model_call(request, handler)
+
+
+class GatewayFallbacks(AgentMiddleware):
+    """``ReAct(fallback_models=)``'s model names, for a model the gateway serves: sent with
+    every call to it as Bifrost's own ``fallbacks`` (``provider/model``), so the gateway — the
+    one place that falls back for its models, as it does for the fallbacks configured on the
+    virtual key or the provider — tries each in order when the model fails (``fallback``). A
+    call to any other model (a fallback of the user's own, ``Fallback``) is sent as it is."""
+
+    def __init__(self, names: Collection[str], clients: Collection[Any]) -> None:
+        super().__init__()
+        self.names = list(names)
+        #: the gateway's clients ReAct built (the generic one, the vendor's own)
+        self.clients = list(clients)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> Any:
+        if not on("fallback") or not any(request.model is c for c in self.clients):
+            return await handler(request)
+        settings = dict(request.model_settings)
+        settings["extra_body"] = {**(settings.get("extra_body") or {}), "fallbacks": self.names}
+        return await handler(request.override(model_settings=settings))
+
+
+class Fallback(ModelFallbackMiddleware):
+    """LangChain's ``ModelFallbackMiddleware``, for the fallbacks the gateway cannot make: a
+    model call that fails is made again with the next of ``ReAct(fallback_models=)``'s chat
+    models (and, for a model of the user's own, its named ones, as ``ReAct`` builds a gateway
+    model), in order (``fallback``); the last one's error is the run's. For a model the
+    gateway serves, its names are the gateway's (``GatewayFallbacks``): never both."""
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> Any:
+        if not on("fallback"):
+            return await handler(request)
+        return await super().awrap_model_call(request, handler)
+
+
+class Budgeted(AgentMiddleware):
+    """The run's budget (``budget``; ``trellis.harness.budget``; ``ModelHooks`` counts what
+    every model reply spent): once it — the run's, or a run it works inside — is spent, one
+    more call with no tool, told to answer with what it has (``SPENT``); the run then ends
+    ``PARTIAL`` (``BUDGET_EXCEEDED``)."""
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        runtime = current()
+        spent = budget.reached(runtime) if runtime is not None else None
+        if runtime is not None and spent is not None:
+            budget.stopped(runtime, spent)
+            told = [*request.messages, HumanMessage(content=budget.SPENT)]
+            request = request.override(
+                messages=told, tools=[] if request.response_format is not None else request.tools
+            )
+            if request.tools:
+                request = request.override(tool_choice="none")
+        return await handler(request)
+
+
+class StructuredRepair(AgentMiddleware):
+    """An answer that does not fit ``ReAct(output=)``'s schema (``structured_output``): the
+    model is told what was wrong and asked once more — by LangChain's tool strategy (its error
+    tool message), or here (:data:`REPAIR`) when the provider's strategy refused it — and a
+    second answer that does not fit either fails the run, saying why. Without it, LangChain's
+    own: the tool strategy asks again until the step limit, a provider's fails at once."""
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        if request.response_format is None or not on("structured_output"):
+            return await handler(request)
+        if _failed_answers(request) >= 2:
+            raise ModelError(
+                "the answer did not fit the output schema twice; it was told what was wrong "
+                "once and answered wrong again",
+                source="langgraph",
+            )
+        try:
+            return await handler(request)
+        except StructuredOutputValidationError as exc:
+            told = [
+                *request.messages,
+                exc.ai_message,
+                HumanMessage(content=f"{REPAIR}\n{exc.source}"),
+            ]
+            try:
+                return await handler(request.override(messages=told))
+            except StructuredOutputValidationError as again:
+                raise ModelError(
+                    f"the answer did not fit the output schema twice: {again.source}",
+                    source="langgraph",
+                ) from again
+
+
+#: What a model is told when its answer did not fit the output schema.
+REPAIR: Final = (
+    "That answer does not fit the schema the answer must follow. Answer again so it does:"
+)
+
+
+def _failed_answers(request: ModelRequest[Any]) -> int:
+    """The answers of this invocation that the output schema refused (LangChain answers each
+    with an error tool message under the output tool's name)."""
+    names = _answer_tools(request.response_format)
+    count = 0
+    for message in _history(request):
+        if isinstance(message, HumanMessage):
+            count = 0
+        elif isinstance(message, ToolMessage) and message.name in names:
+            count += message.text.startswith("Error")
+    return count
+
+
+def _answer_tools(response_format: Any) -> set[str]:
+    """The names of the tools an answer to ``response_format`` is given with: its schemas'."""
+    specs = getattr(response_format, "schema_specs", None)
+    if specs is not None:
+        return {spec.name for spec in specs}
+    schema = getattr(response_format, "schema", response_format)
+    named = schema.get("title") if isinstance(schema, dict) else getattr(schema, "__name__", None)
+    return {named} if isinstance(named, str) else set()
 
 
 # --------------------------------------------------------------------------- tool search

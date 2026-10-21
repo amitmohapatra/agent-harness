@@ -40,8 +40,10 @@ listing, else the table of known models, else :data:`CONTEXT_WINDOW` (``models.w
 from __future__ import annotations
 
 import functools
+import json
 import logging
 from collections.abc import Mapping, Sequence
+from functools import cached_property
 from typing import Any, Final
 
 from bifrost_sdk import NO_GATEWAY_TOOLS
@@ -68,7 +70,11 @@ CLEARED: Final = (
     "[result cleared to keep the context small: read_result(id=<this call's id>) reads it again]"
 )
 #: Retries of a model call the model client makes itself (after a timeout, a 408, 409, 429
-#: or 5xx, honouring ``Retry-After``), within ``model_timeout`` and the run's time.
+#: or 5xx, honouring ``Retry-After``), within ``model_timeout`` and the run's time. Bifrost
+#: retries no model call of its own unless a provider's ``network_config.max_retries`` says
+#: (its default is 0), so these are the only retries by default; an error the gateway gives
+#: after it tried the request's fallbacks (or its own) is not retried here: every model was
+#: already tried (:func:`_gateway_answered`).
 MODEL_RETRIES: Final = 2
 #: The ``Authorization`` a gateway without a virtual key is sent (the client needs one).
 NO_KEY: Final = "no-virtual-key"
@@ -78,7 +84,7 @@ def ReAct(
     system: str,
     model: str | Any,
     *,
-    output: type[BaseModel] | None = None,
+    output: type[BaseModel] | dict[str, Any] | None = None,
     max_steps: int | None = None,
     max_repeats: int | None = None,
     model_timeout: float | None = None,
@@ -91,6 +97,7 @@ def ReAct(
     answer_check: bool = False,
     capabilities: Mapping[str, bool] | None = None,
     effort: str | None = None,
+    fallback_models: Sequence[str | Any] = (),
 ) -> Any:
     """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name,
     or a LangChain chat model), its answer an ``output`` model when given. ``max_steps`` model
@@ -107,7 +114,10 @@ def ReAct(
     (:class:`~.AnswerCheck`: one more model call each); ``capabilities`` tells the model what
     it can and cannot do beyond its tools (``{"accept an image upload": False}``), so it
     answers such a question plainly. ``effort`` fixes the reasoning effort of every step of a
-    model that takes one (else each step's own, :class:`~.automatic.Effort`)."""
+    model that takes one (else each step's own, :class:`~.automatic.Effort`).
+    ``fallback_models`` are tried in order when a model call fails (names, as ``model``, or
+    chat models; :class:`~.automatic.Fallback`). ``output`` may be a pydantic model or a JSON
+    schema."""
     try:
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
@@ -130,6 +140,15 @@ def ReAct(
     known = None if detected.source == "default" else window
     chat = _gateway_model(model, timeout=model_timeout, window=window)
     native = _native_model(named, timeout=model_timeout, window=window) if named else None
+    # a model the gateway serves falls back there (Bifrost's own fallbacks, never two
+    # layers); the harness falls back only to a model of the user's own, or for one
+    forwarded = [m for m in fallback_models if named and isinstance(m, str)]
+    fallbacks = [
+        _built(m, timeout=model_timeout, window=window)
+        for m in fallback_models
+        if not (named and isinstance(m, str))
+    ]
+    gateway = [c for c in (chat, native) if named and c is not None]
     backend = automatic.JournalBackend()
     defaults = [
         # the vendor's own API, when the gateway serves it, for every call (outermost)
@@ -145,6 +164,7 @@ def ReAct(
         ours.HarnessTools(),
         ours.StallGuard(max_repeats or ours.MAX_REPEATS),
         ours.StepLimit(max_steps or ours.MAX_STEPS),
+        automatic.Budgeted(),
         PatchToolCallsMiddleware(),
         ContextEditingMiddleware(
             edits=[
@@ -168,6 +188,10 @@ def ReAct(
             if tool_guidance or capabilities
             else []
         ),
+        automatic.StructuredRepair(),
+        *([automatic.Fallback(*fallbacks)] if fallbacks else []),
+        *([automatic.GatewayFallbacks(forwarded, gateway)] if forwarded else []),
+        automatic.PromptCache(),
         automatic.Effort(effort),
         ours.ModelHooks(timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars),
     ]
@@ -223,6 +247,15 @@ def detected_window(model: Any, context_window: int | None = None) -> models.Win
     return _detected(named, given=context_window, profile=_window(model))
 
 
+def _built(model: str | Any, *, timeout: float | None, window: int) -> Any:
+    """A model as ``ReAct`` asks it: a name its vendor's own client when the gateway serves
+    it, else the gateway's generic one; a chat model as it is."""
+    if not isinstance(model, str):
+        return model
+    native = _native_model(model, timeout=timeout, window=window)
+    return native if native is not None else _gateway_model(model, timeout=timeout, window=window)
+
+
 def _native_model(name: str, *, timeout: float | None, window: int) -> Any | None:
     """The vendor's own client for a vendor's model name, on the gateway's endpoint for that
     vendor's API — ``ChatAnthropic`` on its Anthropic endpoint, ``ChatOpenAI`` on its Responses
@@ -243,10 +276,8 @@ def _native_model(name: str, *, timeout: float | None, window: int) -> Any | Non
         "profile": {"max_input_tokens": window},
     }
     if vendor == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-
         root = settings.bifrost_url.rstrip("/").removesuffix("/v1")
-        return ChatAnthropic(
+        return _anthropic()(
             model_name=models.bare(name),
             base_url=f"{root}/anthropic",
             api_key=key,  # type: ignore[arg-type]
@@ -262,7 +293,9 @@ def _native_model(name: str, *, timeout: float | None, window: int) -> Any | Non
         api_key=key,  # type: ignore[arg-type]
         use_responses_api=True,
         stream_usage=True,
-        http_async_client=openai.DefaultAsyncHttpxClient(),
+        http_async_client=openai.DefaultAsyncHttpxClient(
+            event_hooks={"response": [_gateway_answered]}
+        ),
         **common,
     )
 
@@ -296,8 +329,55 @@ def _gateway_model(model: Any, *, timeout: float | None, window: int) -> Any:
         profile={"max_input_tokens": window},
         # a client of its own: langchain-openai shares one per gateway URL across the process,
         # whose pooled connections break the models of a later event loop
-        http_async_client=openai.DefaultAsyncHttpxClient(),
+        http_async_client=openai.DefaultAsyncHttpxClient(
+            event_hooks={"response": [_gateway_answered]}
+        ),
     )
+
+
+async def _gateway_answered(response: Any) -> None:
+    """A gateway's error after it tried every model — the request's ``fallbacks``, or its own
+    (the error's ``extra_fields.routing_info.is_fallback``) — is not retried by the client
+    (``x-should-retry: false``, which the openai and anthropic SDKs honour): retrying would
+    try them all again. Any other error is retried as the client does."""
+    if response.status_code < 400:
+        return
+    try:
+        sent = json.loads(response.request.content or b"{}")
+        walked = isinstance(sent, dict) and bool(sent.get("fallbacks"))
+        if not walked:
+            said = json.loads(await response.aread() or b"{}")
+            info = (said.get("extra_fields") or {}).get("routing_info") or {}
+            walked = isinstance(info, dict) and info.get("is_fallback") is True
+    except Exception:
+        return
+    if walked:
+        response.headers["x-should-retry"] = "false"
+
+
+def _anthropic_http(**params: Any) -> Any:
+    """The HTTP client of a gateway ``ChatAnthropic``: its own (as the generic client's), the
+    gateway's errors read by :func:`_gateway_answered`."""
+    from langchain_anthropic._client_utils import _AsyncHttpxClientWrapper
+
+    return _AsyncHttpxClientWrapper(**params, event_hooks={"response": [_gateway_answered]})
+
+
+@functools.cache
+def _anthropic() -> type[Any]:
+    """``ChatAnthropic`` on the gateway's Anthropic endpoint, with an HTTP client of its own
+    (:func:`_anthropic_http`; LangChain shares one per URL across the process)."""
+    import anthropic
+    from langchain_anthropic import ChatAnthropic
+
+    class GatewayAnthropic(ChatAnthropic):
+        @cached_property
+        def _async_client(self) -> anthropic.AsyncClient:
+            params = self._client_params
+            http = {k: params[k] for k in ("base_url", "timeout") if k in params}
+            return anthropic.AsyncClient(**params, http_client=_anthropic_http(**http))
+
+    return GatewayAnthropic
 
 
 def _profiled(model: Any, window: int) -> Any:

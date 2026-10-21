@@ -483,14 +483,19 @@ def usage(
     input_tokens: int | None,
     output_tokens: int | None,
     finish_reasons: list[str],
+    cached_tokens: int | None = None,
+    written_tokens: int | None = None,
 ) -> None:
-    """A model reply's model, usage and finish reasons, as GenAI attributes."""
+    """A model reply's model, usage (the input tokens read from and written to the prompt
+    cache among them) and finish reasons, as GenAI attributes."""
     if not span.is_recording():
         return
     found: dict[str, Any] = {
         "gen_ai.response.model": model,
         "gen_ai.usage.input_tokens": input_tokens,
         "gen_ai.usage.output_tokens": output_tokens,
+        "gen_ai.usage.cache_read.input_tokens": cached_tokens or None,
+        "gen_ai.usage.cache_creation.input_tokens": written_tokens or None,
         "gen_ai.response.finish_reasons": finish_reasons,
     }
     span.set_attributes(redact_attributes({k: v for k, v in found.items() if v not in (None, [])}))

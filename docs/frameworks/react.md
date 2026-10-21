@@ -46,7 +46,8 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 ```text
 ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None, effort=None)
+      tool_guidance=False, answer_check=False, capabilities=None, effort=None,
+      fallback_models=())
 ```
 
 * `model` — a Bifrost model name: a `ChatOpenAI` on `BIFROST_URL` (needed when `ReAct` is
@@ -58,9 +59,10 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
   tool search work (`native_client`; an empty request probes the endpoint once: nothing is
   generated); otherwise the `ChatOpenAI` above, said once in the log. Or any LangChain chat
   model, used as it is (never replaced).
-* `output` — a Pydantic model the answer is parsed into (LangChain's `response_format`: the
-  provider's structured output when LangChain knows the model has it, else a tool the model
-  answers with).
+* `output` — a Pydantic model or a JSON schema the answer is parsed into (LangChain's
+  `response_format`: the provider's structured output when LangChain knows the model has it,
+  else a tool the model answers with). An answer that does not fit is asked for once more,
+  saying what was wrong; a second is a `ModelError` saying so (`structured_output`).
 * `model_timeout` — the most one model call may take, in seconds, its client's retries
   included; within what is left of the run's `timeout=`/`deadline=`.
 * `context_window` — the model's window in tokens. Unset, it is detected: the model object's
@@ -71,6 +73,12 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
   threshold below is a share of it.
 * `effort` — the reasoning effort of every step of a model that takes one; unset, each step's
   own (`effort`, below).
+* `fallback_models` — models tried in order when a model call fails (`fallback`). For a model
+  name the gateway falls back: the names are sent with every call as Bifrost's own
+  `fallbacks` (as the fallbacks configured on the virtual key are), never a second layer in
+  the graph; the model that answered is in the `chat` span and the run's journal
+  (`answered_by`). A chat model of your own (or for a model of your own) is tried by
+  LangChain's `ModelFallbackMiddleware`. The last one's error is the run's.
 * `prompt` — a prompt (`"triage"`, `"triage@3"`, a `Prompt`) from the prompt sources — code,
   `PROMPTS_DIR`, Langfuse, the gateway ([prompts.md](../prompts.md)) — looked up at the run's
   start and pinned for it (a resume reads the same one): a stored prompt of the gateway's is
@@ -121,6 +129,10 @@ A `TodoListMiddleware`, `FilesystemMiddleware` or `SubAgentMiddleware` given to
 | tool search, `tool_search` | 20 tools or more, or definitions over 40% of the window, narrowed to the tools the task is about, searched again at every step ([tools.md](../tools.md#tool-search)) |
 | the vendor's own API, `native_client` | a vendor's model named by name asked through its own API on the gateway (above) |
 | effort, `effort` | a model that reasons (its LangChain profile lists effort levels, or `trellis.harness.models.EFFORT_LEVELS`) thinks hard on the steps that decide the run — its first call, the step after a tool failed, an `AnswerCheck` check — and little on the others; `effort=` fixes it. A model that takes no effort (a local one) is sent none |
+| the prompt cache, `prompt_cache` | an Anthropic model's calls have their stable start — the instructions, the tools, the history — cached (LangChain's `AnthropicPromptCachingMiddleware`); OpenAI's caching is automatic. Cached tokens are on the `chat` span and the run's budget |
+| fallback models, `fallback` | with `fallback_models=`: a failed call tried on each in order — by the gateway for its models, by `ModelFallbackMiddleware` for your own |
+| structured output repair, `structured_output` | with `output=`: an answer that does not fit asked for once more |
+| the budget, `budget` | once the run's budget ([api.md](../api.md#budget)) — or its parent's — is spent: one more call, without tools, for the best answer with what it has; the run ends `PARTIAL` (`BUDGET_EXCEEDED`) |
 
 **The harness's** (`trellis.harness.middleware`) — only what the native middleware does not do:
 

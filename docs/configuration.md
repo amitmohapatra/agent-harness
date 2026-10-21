@@ -138,10 +138,15 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 | `native_client` | `ReAct` with a vendor's model name (`anthropic/...`, `openai/...`) whose own API the gateway serves | `ChatAnthropic` on the gateway's Anthropic endpoint, or `ChatOpenAI` on its Responses API ([react.md](frameworks/react.md)) | the gateway's chat completions (`ChatOpenAI`) |
 | `effort` | `ReAct`, a model that takes a reasoning effort | high effort on the steps that decide the run, low on the others | no effort sent |
 | `subagent_task` | the same | Deep Agents' `task` tool: a general-purpose helper, each call a child run of the same agent | not offered; a call answers that it is not available |
+| `prompt_cache` | `ReAct` with an Anthropic chat model | LangChain's `AnthropicPromptCachingMiddleware`: the stable start of every call cached, its cached tokens counted on the run and its `chat` span | nothing marked for caching |
+| `fallback` | `ReAct(fallback_models=[...])` | a failed model call tried on each fallback in order: by the gateway (Bifrost's `fallbacks`, sent with the call) for a model name, by LangChain's `ModelFallbackMiddleware` for a chat model of your own | the error, as without fallbacks (the fallbacks configured on the gateway still apply) |
+| `tool_retry` | always | a read (or idempotent) tool retried after an error that may pass, waiting what its `Retry-After` says when there is time left ([reliability.md](reliability.md#retries)) | every tool call made once |
+| `structured_output` | `ReAct(output=...)` | an answer that does not parse into `output` asked for once more, saying what was wrong; then a clear `ModelError` | the first parse error is the run's error |
+| `budget` | always (`h.wrap(budget=...)`, else `Budget()`) | tokens, dollars (the gateway's cost, else the price table) and tool calls counted on the run's journal; at a limit no new tool call, a final answer, the run `PARTIAL` (`BUDGET_EXCEEDED`) ([api.md](api.md#budget)) | counted, never enforced |
 
 A name not in the table is refused (`ConfigurationError`, naming them). Not switchable, because
-they are automatic and deterministic: governance and approvals, the journal and replay, retries
-and time limits, tracing and redaction, the run record. Inside a run,
+they are automatic and deterministic: governance and approvals, the journal and replay, the
+clients' retries and time limits, tracing and redaction, the run record. Inside a run,
 `trellis.current().uses(feature)` says whether a feature (a row's name, not `memory`, which is
 three) is on. Runnable: [examples/02_way1_react/agent.py](../examples/02_way1_react/agent.py),
 [examples/06_scenarios/scheduled_run_selection_limit.py](../examples/06_scenarios/scheduled_run_selection_limit.py).

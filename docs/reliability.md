@@ -157,8 +157,8 @@ memory service's transcript say what it did until then.
 **What.** A call that only reads (or whose tool says it is idempotent) is tried again after an
 error that may pass; a call that does more runs once.
 
-**When.** Always; there is nothing to set. The tool's side effects decide — as governance sees
-them: the catalog's `risk` over the tool's own declaration.
+**When.** Always (`without={"tool_retry"}` turns it off). The tool's side effects decide — as
+governance sees them: the catalog's `risk` over the tool's own declaration.
 
 **Where.** Every harness tool call, every adapter; `governed` in Way 2 (`side_effects="read"`).
 
@@ -174,6 +174,11 @@ function tool is when `@tool(idempotent=True)` says so (it hands its service the
 `trellis.current().idempotency_key`), and a tool of your own source when its
 `ToolSpec(idempotent=True)` does.
 
+An error that says when to come back (its `retry_after`, or the `Retry-After` seconds of the
+HTTP response it carries) is retried after that wait instead — unless the wait is longer than
+the time the call and the run have left, when it is not waited and the error is the outcome.
+`without={"tool_retry"}`: every tool call is made once.
+
 **On failure.** The last error is the outcome the model reads (`"<tool> failed: ..."`), as
 before.
 
@@ -185,7 +190,8 @@ them bounds them.
 | Layer | What it retries | How often, how long | Bounded by |
 |---|---|---|---|
 | Bifrost SDK (the judge's models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | the run's time |
-| `ReAct`'s model client (`ChatOpenAI`) | a timeout, a dropped connection, `408/409/429/5xx` | 3 attempts, the openai client's backoff, `Retry-After` | `model_timeout`, the run's time |
+| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | a timeout, a dropped connection, `408/409/429/5xx` — not an error the gateway gave after it tried the call's fallbacks (they would all be tried again) | 3 attempts, the client's backoff, `Retry-After` | `model_timeout`, the run's time |
+| Bifrost (the gateway) | a model call per provider `network_config.max_retries` (default 0), then the call's fallbacks | its config | its timeouts; set retries there or in `ReAct`, not both: they multiply |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
 | runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |

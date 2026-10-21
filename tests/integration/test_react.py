@@ -139,8 +139,8 @@ def test_each_gateway_model_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")
     made: list[httpx.AsyncClient] = []
 
-    def client() -> httpx.AsyncClient:
-        made.append(httpx.AsyncClient())
+    def client(**params: Any) -> httpx.AsyncClient:
+        made.append(httpx.AsyncClient(**params))
         return made[-1]
 
     monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", client)

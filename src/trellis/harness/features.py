@@ -34,6 +34,12 @@ Feature = Literal[
     # the vendor's own API for a vendor's model, and the effort of each step
     "native_client",
     "effort",
+    # what a run spends and how it recovers (``budget.py``, ``automatic``, the tool bridge)
+    "prompt_cache",
+    "fallback",
+    "tool_retry",
+    "structured_output",
+    "budget",
 ]
 #: The features a name turns off together: ``memory`` is its push, its pull and the records;
 #: ``mcp`` the MCP tools and Code Mode, whose scripts reach them.

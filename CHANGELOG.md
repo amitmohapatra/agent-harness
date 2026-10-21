@@ -7,6 +7,22 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- Budgets: every run has one (`h.wrap(budget=Budget(max_tokens=, max_cost=, max_tool_calls=))`,
+  default 2,000,000 tokens and 200 tool calls), counted on its journal — so a resume goes on
+  from what was spent and a sub-agent's spending counts toward its parent's. At a limit no new
+  tool call starts, a `ReAct` gives its best answer with what it has, and the run ends `PARTIAL`
+  with `BUDGET_EXCEEDED` (`without={"budget"}`). The price table moved to
+  `trellis.harness.prices`.
+
+- `ReAct` caches the stable start of every call on an Anthropic model (LangChain's
+  `AnthropicPromptCachingMiddleware`, `prompt_cache`; cached tokens on the `chat` span), falls back
+  to `ReAct(fallback_models=[...])` in order when a model call fails — through the gateway
+  (Bifrost's `fallbacks`) for a model name, `ModelFallbackMiddleware` only for a chat model
+  of your own (`fallback`), the answering model recorded — asks once more for an answer that does not fit `output` — now a pydantic model
+  or a JSON schema — then fails clearly (`structured_output`). A read tool's retry waits what
+  an error's `Retry-After` says when there is time left, else gives up (`tool_retry`); the
+  model client no longer retries an error the gateway gave after trying its fallbacks.
+
 - `ReAct` detects a named model's context window — the model's profile, the gateway's model
   listing (or the `n_ctx` a llama.cpp server reports through it), a sourced table of known
   models, else 128k said once — and scales every threshold by it; it asks a vendor's model

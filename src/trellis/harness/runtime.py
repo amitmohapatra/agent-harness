@@ -118,6 +118,9 @@ class Runtime:
     #: ``offered`` is a tool search's (``tools.search``), not the tool hints': every model
     #: step of a ``ReAct`` searches again
     searched: bool = False
+    #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
+    #: and the run ends ``PARTIAL``
+    budget_spent: str | None = None
     #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
     skills: dict[str, ResolvedSkill] = field(default_factory=dict)
     #: the prompts this attempt pinned (``PromptSources.pin``: a ``ReAct``'s ``prompt=``, the

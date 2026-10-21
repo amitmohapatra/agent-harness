@@ -53,6 +53,7 @@ from trellis.harness.adapters.base import (
     metadata_of,
 )
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
+from trellis.harness.budget import Budget
 from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.evals import (
     EvalCase,
@@ -126,6 +127,7 @@ class Agent:
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
         framework_options: Mapping[str, Any] | None = None,
+        budget: Budget | None = None,
     ):
         if timeout is not None and timeout <= 0:
             raise ConfigurationError(f"{id}: a timeout is a number of seconds over 0")
@@ -139,6 +141,9 @@ class Agent:
         self.timeout = timeout
         #: what the harness does not do for any of its runs (``h.wrap(without=)``)
         self.without = features(without)
+        #: the most one of its runs may spend (``budget.py``; the default ``Budget()`` unless
+        #: ``h.wrap(budget=)`` says)
+        self.budget = budget or Budget()
         #: the hooks around its runs, model calls and tool calls: the harness's, then its own
         self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)

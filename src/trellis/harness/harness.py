@@ -25,6 +25,7 @@ from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import ToolFormat
 from trellis.harness.agent import Agent
+from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
@@ -210,6 +211,7 @@ class Harness:
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
         framework_options: Mapping[str, Any] | None = None,
+        budget: Budget | None = None,
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
@@ -230,7 +232,9 @@ class Harness:
         framework's own options for every run's call, passed through unchanged (a LangGraph
         config's keys, ``Runner.run``'s arguments, ``ClaudeAgentOptions`` fields; each
         framework's page says which the harness keeps for itself): a run's own
-        (``run``/``stream``/``start``/``schedule(framework_options=)``) go over them."""
+        (``run``/``stream``/``start``/``schedule(framework_options=)``) go over them.
+        ``budget`` is the most one of its runs may spend — tokens, dollars, tool calls
+        (``trellis.harness.budget``; the default ``Budget()`` otherwise)."""
         agent = Agent(
             self,
             target,
@@ -243,6 +247,7 @@ class Harness:
             without=without,
             hooks=hooks,
             framework_options=framework_options,
+            budget=budget,
         )
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")

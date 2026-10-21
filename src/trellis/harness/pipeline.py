@@ -45,7 +45,7 @@ from trellis.contracts import (
     RunStatus,
     ToolCall,
 )
-from trellis.harness import sandbox
+from trellis.harness import budget, sandbox
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -702,6 +702,8 @@ async def _succeeded(
     agent: Agent, runtime: Runtime, extracted: Extracted, pushed: PromptContext | None
 ) -> Result:
     answer = extracted.answer
+    if runtime.budget_spent is not None:
+        return await _partial(agent, runtime, extracted)
     await runtime.events.settle(
         lambda: runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer)),
         lambda: _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer)),
@@ -714,6 +716,29 @@ async def _succeeded(
     if runtime.used_code_mode:
         await agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)
+
+
+async def _partial(agent: Agent, runtime: Runtime, extracted: Extracted) -> Result:
+    """An answer given when the run's budget was spent (``budget.py``): what it could do,
+    recorded ``PARTIAL``; the result's error ``BUDGET_EXCEEDED`` (and the ``budget`` warning
+    event) says which limit."""
+    answer = extracted.answer
+    error = AgentError(
+        code=budget.BUDGET_EXCEEDED,
+        category=ErrorCategory.POLICY,
+        message=f"the run's budget is spent: {runtime.budget_spent}",
+    )
+    runtime.events.warning("budget", error.message)
+    await runtime.events.settle(
+        lambda: runtime.events.finished(RunOutcome.PARTIAL, result=jsonable(answer)),
+        # the run record carries no error for a PARTIAL run (the contract): the warning event
+        # and the recorded outcome say why
+        lambda: _ended(agent, runtime, RunStatus.PARTIAL, output=jsonable(answer)),
+    )
+    metrics.run_finished(runtime.agent_id, RunOutcome.PARTIAL.value)
+    await agent.recorded_run(runtime, _transcript(runtime, extracted))
+    await agent.recorded_outcome(runtime, RunStatus.PARTIAL, error.message)
+    return Result(run_id=runtime.run_id, status=RunStatus.PARTIAL, answer=answer, error=error)
 
 
 async def _ended(agent: Agent, runtime: Runtime, status: RunStatus, **fields: Any) -> None:

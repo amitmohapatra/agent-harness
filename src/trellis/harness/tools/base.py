@@ -130,10 +130,12 @@ async def execute(
     *,
     reads: bool,
     within: AbstractAsyncContextManager[Any] | None = None,
+    retry: bool = True,
 ) -> tuple[ToolOutcome, Exception | None]:
     """One call of ``tool`` within its time — ``within`` (a run's call: ``Runtime.limited``,
     the tool's ``timeout`` and the run's), else the tool's ``timeout`` — tried again after an
-    error that may pass when it ``reads`` (or is idempotent). The outcome, and what the call
+    error that may pass when it ``reads`` (or is idempotent), unless ``retry`` is off (a run
+    ``without={"tool_retry"}``). The outcome, and what the call
     raised: an error (``ERROR``), or out of time a :class:`ToolTimeout` (``TIMEOUT``: for a
     call that does more than read, its effect is unknown — ``metadata["unknown"]``)."""
     attempts = 0
@@ -146,7 +148,8 @@ async def execute(
     began = time.monotonic()
     try:
         async with within or asyncio.timeout(tool.timeout):
-            output = await retried(once, retries=retries_of(tool.spec, reads=reads))
+            retries = retries_of(tool.spec, reads=reads) if retry else 0
+            output = await retried(once, retries=retries)
     except Exception as exc:
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
             return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
@@ -175,18 +178,59 @@ async def execute(
     return ToolOutcome(tool=tool.name, output=output, attempts=attempts), None
 
 
-async def retried(call: Callable[[], Awaitable[Any]], *, retries: int) -> Any:
+async def retried(
+    call: Callable[[], Awaitable[Any]],
+    *,
+    retries: int,
+    left: Callable[[], float | None] | None = None,
+) -> Any:
     """``call()``, tried again up to ``retries`` times after an error that may pass, with a
-    jittered backoff. The caller's timeout bounds the whole of it."""
+    jittered backoff — or, when the error says when to come back (``Retry-After``), then: a
+    wait longer than the time ``left`` (the run's, the call's) is not waited, the error is
+    raised. The caller's timeout bounds the whole of it."""
     attempt = 0
+    after: float | None = None
     while True:
         try:
             return await call()
         except Exception as exc:
             if attempt == retries or is_pause_signal(exc) or not AgentError.of(exc).retryable:
                 raise
-        await asyncio.sleep(random.uniform(0, RETRY_BACKOFF_SECONDS * 2**attempt))
+            after = retry_after(exc)
+            remaining = (left or _left)()
+            if after is not None and remaining is not None and after > remaining:
+                raise
+        backoff = random.uniform(0, RETRY_BACKOFF_SECONDS * 2**attempt)
+        await asyncio.sleep(max(backoff, after or 0.0))
         attempt += 1
+
+
+def retry_after(exc: BaseException) -> float | None:
+    """When an error says to come back, in seconds: its own ``retry_after``, or the
+    ``Retry-After`` header of the HTTP response it carries (seconds; a date is not read)."""
+    for held in (exc, exc.__cause__):
+        if held is None:
+            continue
+        said = getattr(held, "retry_after", None)
+        response = getattr(held, "response", None)
+        headers = getattr(response, "headers", None)
+        if said is None and headers is not None:
+            said = headers.get("retry-after")
+        if said is None:
+            continue
+        try:
+            return max(0.0, float(said))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _left() -> float | None:
+    """The time the code running now may still take (``Runtime.remaining``), in a run."""
+    from trellis.harness.runtime import current  # noqa: PLC0415 - runtime imports tools
+
+    runtime = current()
+    return runtime.remaining() if runtime is not None else None
 
 
 async def invoked(fn: Callable[..., Any], /, **kwargs: Any) -> Any:

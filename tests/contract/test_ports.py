@@ -43,6 +43,7 @@ def test_the_public_api_is_the_documented_one() -> None:
     assert trellis.__all__ == [
         "Agent",
         "Ask",
+        "Budget",
         "Deny",
         "Harness",
         "Hooks",
