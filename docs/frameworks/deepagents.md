@@ -60,7 +60,8 @@ its backend; they are independent of the memory service and can be used beside i
 as its LangGraph store, so a `StoreBackend` (for example `/memories/` in a `CompositeBackend`)
 keeps its files as the user's memories, read back exactly and searchable by every agent of
 theirs ([langgraph.md](langgraph.md#native-slots-the-memory-service-behind-the-graphs-store)).
-A store of your own is kept (said once in the log); memory off leaves Deep Agents' default. A
+With memory on, a store of your own is not used beside it (said once in the log; `without=
+{"memory"}` runs the agent on its own); memory off leaves Deep Agents' default. A
 file over 8,000 characters as JSON is refused (one memory holds at most that).
 
 ## Native or ours: skills, prompts, sandbox

@@ -106,7 +106,7 @@ async def test_what_one_conversation_stored_another_reads(
     assert other.status is RunStatus.SUCCESS and seen[2] is None
 
 
-async def test_a_graphs_own_store_is_kept_and_said_once(
+async def test_with_memory_on_a_graphs_own_store_is_not_used_beside_it(
     memory_harness: Harness, memory_service: FakeMemoryService, caplog: pytest.LogCaptureFixture
 ) -> None:
     own = InMemoryStore()
@@ -116,11 +116,21 @@ async def test_a_graphs_own_store_is_kept_and_said_once(
             assert (await agent.run({"topic": "tides"}, user="ada", thread=thread)).status is (
                 RunStatus.SUCCESS
             )
-    said = [r for r in caplog.records if "store of its own" in r.getMessage()]
-    assert len(said) == 1
-    assert not memory_service.named("remember")  # the memory service is not behind it
+    said = [r for r in caplog.records if "own store is not used" in r.getMessage()]
+    assert len(said) == 1 and said[0].__dict__["bridge"] == "store"
+    assert memory_service.named("remember")  # the memory service is the store
+    assert await own.aget(PREFS, "topic") is None  # the graph's own is not written beside it
+
+
+async def test_without_memory_a_graphs_own_store_is_its_store(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    own = InMemoryStore()
+    agent = memory_harness.wrap(graph_of(remembers, store=own), id="own", without={"memory"})
+    assert (await agent.run({"topic": "tides"}, user="ada")).status is RunStatus.SUCCESS
     item = await own.aget(PREFS, "topic")
     assert item is not None and item.value == {"text": "tides", "n": 1}
+    assert not memory_service.named("remember")
 
 
 async def test_memory_off_leaves_the_graph_without_a_store(harness: Harness) -> None:

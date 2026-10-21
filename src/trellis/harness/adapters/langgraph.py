@@ -55,6 +55,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.asking import answer_of
 from trellis.harness.bridges import said
+from trellis.harness.bridges.history import Thread, owns, thread_for
 from trellis.harness.journal import Journal, Pending
 from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
 
@@ -82,12 +83,34 @@ class LangGraphAdapter:
         self.fixed_tools = not per_call
         #: the graph run in its place: a ``create_agent`` graph whose model calls narrow its
         #: bound tools to those the run offers (``None``: ``target`` itself is run)
+        self.per_call = per_call
         self.narrowed = None if per_call else _narrowed(target)
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
 
+    def runs(self, target: Any, *, agent_id: str, memory: bool) -> Any:
+        """The graph the harness runs: ``target``, or — where the history policy puts the
+        framework on the run's own thread (``bridges.history``: ``Thread.RUN``) — a copy of it on
+        the harness's ``RunCheckpointer``, its checkpoint in the run's journal."""
+        if run_scoped(target):
+            return target
+        own = target.checkpointer if _checkpointed(target) else None
+        if thread_for(own, bridged=False, agent_id=agent_id, memory=memory) is not Thread.RUN:
+            return target
+        from trellis.harness.middleware import RunCheckpointer
+
+        graph = target.copy({"checkpointer": RunCheckpointer()})
+        self.narrowed = None if self.per_call else _narrowed(graph)
+        return graph
+
     def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
-        return _checkpointed(target) and not run_scoped(target)
+        """Whether the graph's own checkpointer owns the conversation's history
+        (``bridges.history``: a durable one does; the run's own, or one kept in RAM, does not)."""
+        if run_scoped(target):
+            return False
+        own = target.checkpointer if _checkpointed(target) else None
+        memory = runtime.run_memory is not None
+        return owns(thread_for(own, bridged=False, agent_id=runtime.agent_id, memory=memory))
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         from langchain_core.messages import SystemMessage
@@ -213,19 +236,19 @@ class LangGraphAdapter:
 
 def run_store(target: Any, runtime: Any) -> Any | None:
     """The store a run of ``target`` is given (``bridges.store.MemoryStore``): with memory on
-    for the run and its memory tools not turned off (``without=``), to a graph compiled without
-    a store; ``None`` otherwise. A graph's own store is kept, and said once."""
+    for the run and its memory tools not turned off (``without=``), the memory service is the
+    graph's long-term store — a store it was compiled with is not used beside it (said once);
+    ``None`` otherwise (the graph's own store, or none, as it was built)."""
     if runtime.run_memory is None or not runtime.uses("memory_pull"):
         return None
     if getattr(target, "store", None) is not None:
         said(
             f"store:{runtime.agent_id}",
-            "%s: the graph has a store of its own, which it keeps: the memory service is not "
-            "behind it (compile the graph without store= for the memory service's)",
+            "%s: the graph's own store is not used while memory is on: the memory service is "
+            "its long-term store (without={'memory'} runs it on its own store)",
             runtime.agent_id,
             extra={"agent_id": runtime.agent_id},
         )
-        return None
     import asyncio
 
     from trellis.harness.bridges.store import MemoryStore

@@ -20,6 +20,7 @@ from trellis.harness.adapters.base import (
     ToolFormat,
     no_options,
 )
+from trellis.harness.bridges.history import owns, thread_for
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime
 
@@ -30,8 +31,14 @@ class FunctionAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "none"
 
+    def runs(self, target: Any, *, agent_id: str, memory: bool) -> Any:
+        return target
+
     def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
-        return False
+        """No thread store across runs (the history policy's ``bridges.history``): memory's
+        window carries the conversation."""
+        memory = runtime.run_memory is not None
+        return owns(thread_for(None, bridged=False, agent_id=runtime.agent_id, memory=memory))
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         if context and isinstance(input, list):

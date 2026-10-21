@@ -144,6 +144,13 @@ class Agent:
         #: the hooks around its runs, model calls and tool calls: the harness's, then its own
         self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)
+        #: what the harness runs: the target, or a copy on the run's own thread where the
+        #: history policy puts it there (``bridges.history``)
+        self.target = self.adapter.runs(
+            target,
+            agent_id=self.id,
+            memory=harness.memory is not None and not self.without >= MEMORY,
+        )
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
         if self.adapter.name == "openai_agents":  # its SDK's own tracing: left as set, said
@@ -720,15 +727,19 @@ class Agent:
         context (:meth:`remembered`), then the section of the skills the run pinned
         (``skills.pin``); and the stored prompts the harness handed to model clients
         (``h.model_headers(prompt=)``) pinned for the run (``prompts.ModelPrompts.pin``). The
-        memory context, when there is one, is returned."""
-        pushed = await self.remembered(runtime)
+        memory context, when there is one, is returned. Whether the framework keeps the
+        conversation durably decides whether memory's window carries the recent turns
+        (``bridges.history``: a thread kept in RAM is said once, memory on or off)."""
+        kept = self.adapter.keeps_conversation(self.target, runtime)
+        pushed = await self.remembered(runtime, window=not kept)
         if runtime.uses("skills"):
             await skills.pin(runtime, self.sources)
         await self.harness.model_prompts.pin(runtime)
         return pushed
 
-    async def remembered(self, runtime: Runtime) -> PromptContext | None:
-        """The memory context for this run, in the runtime. Asked with the run's own tools,
+    async def remembered(self, runtime: Runtime, *, window: bool) -> PromptContext | None:
+        """The memory context for this run, in the runtime — with the recent conversation
+        (``window``) unless the framework keeps it durably. Asked with the run's own tools,
         it carries the skills the agent learned for the task, and - from five tools, the
         service's threshold - the tools that fit, whose candidates narrow the tools the model
         is offered (the ``hints`` feature). A failure is a warning."""
@@ -742,9 +753,7 @@ class Agent:
                 pushed = await memory.context(
                     runtime.task,
                     tools=own or None,
-                    # the framework keeps the thread itself (a checkpointer, a session): memory's
-                    # window is not sent again
-                    window=not self.adapter.keeps_conversation(self.target, runtime),
+                    window=window,
                     hints=hints,
                     budget=self.context_budget,
                 )

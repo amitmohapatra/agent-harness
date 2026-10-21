@@ -141,17 +141,54 @@ async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Pat
     assert built_ins(tmp_path) == [{"tool": "Write", "args": {"file_path": "a.txt"}}]
 
 
-async def test_options_with_their_own_store_keep_it_and_it_is_said_once(
+class DurableStore:
+    """A session store standing for a durable one (a database's): not one kept in RAM."""
+
+    def __init__(self) -> None:
+        self.kept = InMemorySessionStore()
+
+    async def append(self, key: Any, entries: list[Any]) -> None:
+        await self.kept.append(key, entries)
+
+    async def load(self, key: Any) -> list[Any] | None:
+        return await self.kept.load(key)
+
+
+def said(caplog: pytest.LogCaptureFixture, bridge: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.__dict__.get("bridge") == bridge]
+
+
+async def test_options_with_their_own_store_keep_it(
     harness: Harness, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    own = InMemorySessionStore()
-    agent = harness.wrap(machine(tmp_path, "one", [{"text": "ok"}], session_store=own), id="own")
+    """A store of the team's own is kept; one kept in RAM is said once, with the fix."""
+    in_ram, durable = InMemorySessionStore(), DurableStore()
+    ram = harness.wrap(machine(tmp_path, "one", [{"text": "ok"}], session_store=in_ram), id="ram")
+    kept = harness.wrap(machine(tmp_path, "two", [{"text": "ok"}], session_store=durable), id="db")
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        for agent in (ram, ram, kept):
+            assert (await agent.run("hi", user="ada")).status is RunStatus.SUCCESS
+    [warning] = said(caplog, "claude_session")
+    message = warning.getMessage()
+    assert (
+        "ram: its InMemorySessionStore keeps Claude's session in this process's memory" in message
+    )
+    assert (
+        "runs the query again from its prompt" in message and "a durable session store" in message
+    )
+    assert in_ram._store and durable.kept._store  # each team's store got its session
+
+
+async def test_file_checkpointing_keeps_the_session_on_the_local_disk_and_says_so(
+    harness: Harness, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    options = machine(tmp_path, "one", [{"text": "ok"}], enable_file_checkpointing=True)
+    agent = harness.wrap(options, id="files")
     with caplog.at_level(logging.WARNING, logger="trellis.harness"):
         for _ in range(2):
             assert (await agent.run("hi", user="ada")).status is RunStatus.SUCCESS
-    said = [r for r in caplog.records if "keep Claude's session themselves" in r.getMessage()]
-    assert len(said) == 1 and said[0].__dict__["bridge"] == "claude_session"
-    assert own._store  # the team's store got the session
+    [warning] = said(caplog, "claude_session")
+    assert "leave enable_file_checkpointing off" in warning.getMessage()
 
 
 async def test_a_memory_service_that_is_down_leaves_the_prompt_without_context(

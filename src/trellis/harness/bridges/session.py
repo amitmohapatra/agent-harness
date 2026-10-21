@@ -1,7 +1,8 @@
 """The OpenAI Agents SDK's conversation (``Session``), kept in the memory service's thread.
 
 An agent run without a session of its own (``framework_options={"session": ...}``) is given a
-:class:`MemorySession` while memory is on for the run: the SDK reads the conversation's earlier
+:class:`MemorySession` while memory is on for the run (``bridges.history``: the policy's
+``Thread.BRIDGED``): the SDK reads the conversation's earlier
 items from it and adds each turn's to it, as with its own sessions — and they are the messages
 of the run's thread in the memory service (``thread=``; a run with no conversation is its own),
 which every agent of the user's learns from. The memory service then leaves the recent
@@ -67,14 +68,12 @@ ROLES: Final = {"user": "USER", "assistant": "ASSISTANT", "system": "SYSTEM"}
 TEXT_PARTS: Final = frozenset({"input_text", "output_text", "text"})
 
 
-def bridged(runtime: Runtime) -> bool:
-    """Whether a run's conversation is a :class:`MemorySession`: given no session of its own,
-    with memory on for the run — its context (the push) and its records both."""
+def bridgeable(runtime: Runtime) -> bool:
+    """Whether a run's conversation can be a :class:`MemorySession`: memory is on for the run —
+    its context (the push) and its records both. (Whether it is, the history policy says:
+    ``bridges.history``.)"""
     return (
-        runtime.framework_options.get("session") is None
-        and runtime.run_memory is not None
-        and runtime.uses("memory_push")
-        and runtime.uses("records")
+        runtime.run_memory is not None and runtime.uses("memory_push") and runtime.uses("records")
     )
 
 
@@ -263,4 +262,4 @@ def _event(text: str, meta: dict[str, Any]) -> Message:
     )
 
 
-__all__ = ["HISTORY_LIMIT", "MemorySession", "bridged"]
+__all__ = ["HISTORY_LIMIT", "MemorySession", "bridgeable"]

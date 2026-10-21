@@ -115,9 +115,12 @@ The call stays `h.wrap(options, id=...)`.
   agent-runs keeps with the run: a run paused on one machine, or whose worker died, continues
   its session on any other — its built-in tools are not run again. The run's progress is saved
   before each step Claude takes (each permission the CLI asks), with the session as mirrored so
-  far (`session_store_flush="eager"`). Options with a `session_store` of their own, or with
-  `enable_file_checkpointing` (local disk only), keep theirs — said once in the log — and a
+  far (`session_store_flush="eager"`). Options with a `session_store` of their own keep it
+  (one kept in RAM, `InMemorySessionStore`, is said once in the log, with the fix); with
+  `enable_file_checkpointing` the SDK keeps the session on the local disk only (said once); a
   session the CLI cannot continue is run again from its prompt, as before.
+* **History across runs:** each run is a Claude session of its own, so memory's window carries
+  the conversation from one run to the next ([the policy](../memory.md#who-owns-a-conversations-history)).
 * **Memory tool:** the SDK has no memory-tool backend to put the memory service behind (Claude
   Code's memory is its `CLAUDE.md` files, a sub-agent's `memory` scope a folder): the memory
   service's tools are on the `trellis` server instead.

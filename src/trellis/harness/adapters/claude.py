@@ -50,6 +50,7 @@ from trellis.contracts import (
 )
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
 from trellis.harness.bridges.claude import session_store, with_context
+from trellis.harness.bridges.history import owns, thread_for
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import selected_env
 from trellis.harness.runtime import Paused, Runtime, current
@@ -131,8 +132,14 @@ class ClaudeAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "run"
 
+    def runs(self, target: Any, *, agent_id: str, memory: bool) -> Any:
+        return target
+
     def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
-        return False
+        """No thread store across runs (the history policy's ``bridges.history``): memory's
+        window carries the conversation."""
+        memory = runtime.run_memory is not None
+        return owns(thread_for(None, bridged=False, agent_id=runtime.agent_id, memory=memory))
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         prompt = input if isinstance(input, str) else json.dumps(input, default=str)

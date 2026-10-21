@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -329,12 +330,12 @@ async def test_an_agent_built_with_h_tools_gets_read_file_once(harness: Harness)
 
 
 async def test_a_session_keeps_the_thread_so_memorys_window_is_not_sent(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
     model = ScriptedModel(["one", "two", "three"])
     agent = memory_harness.wrap(Agent(name="s", model=model), id="sess")
     await agent.run("hi", user="u1", without={"records"})  # no session: memory's window
-    own = SQLiteSession("own")  # the team's own session
+    own = SQLiteSession("own", tmp_path / "sessions.db")  # the team's own, durable session
     await agent.run("hi", user="u1", framework_options={"session": own})
     await agent.run("hi", user="u1")  # the memory service's session (bridges.session)
     windows = [c.body.get("window") for c in memory_service.named("context")]

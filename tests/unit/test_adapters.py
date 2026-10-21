@@ -200,7 +200,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
     replay = SimpleNamespace(journal=Journal())
-    runtime = SimpleNamespace(pending=None, replay=replay, framework_options={}, agent_id="a")
+    runtime = SimpleNamespace(
+        pending=None, replay=replay, framework_options={}, agent_id="a", run_memory=None
+    )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
     native = adapter.prepare_input(None, "go", None)

@@ -137,8 +137,8 @@ the transcript a second time.
   `needs_approval` tool continues the SDK's own saved `RunState` (kept in the run's journal
   with the pause, so any worker resumes it) and continues its items.
 * A read returns the thread's newest 500 messages (the service's page).
-* Your own session is kept: with `framework_options={"session": SQLiteSession(...)}` the SDK
-  keeps the thread there, and the harness records the transcript as for any run. Memory off
+* Your own session is kept: with `framework_options={"session": SQLiteSession(..., "db")}` the
+  SDK keeps the thread there, and the harness records the transcript as for any run. Memory off
   (or `without={"memory"}`) leaves the SDK's default: no session. A memory service that fails
   fails the session's call, and with it the run.
 
@@ -186,10 +186,12 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 
 * A resume after a harness approval re-runs the conversation: the model is asked again for the
   steps before the pause (their tool calls replay from the journal).
-* A session of your own (`framework_options={"session": ...}`) keeps the thread itself, so the
-  memory context is pushed without the recent conversation (memory's window), as for a
-  checkpointed LangGraph graph; it also keeps each turn's context message, which the memory
-  service's session leaves out.
+* A durable session of your own (`framework_options={"session": ...}`) keeps the thread itself,
+  so the memory context is pushed without the recent conversation (memory's window), as for a
+  durably checkpointed LangGraph graph; it also keeps each turn's context message, which the
+  memory service's session leaves out. A session kept in RAM (`SQLiteSession` on `":memory:"`)
+  does not own the history: memory's window does, said once
+  ([the policy](../memory.md#who-owns-a-conversations-history)).
 * A `RunConfig` object given to one in-process run (`run`/`stream`) is not kept with its record:
   a resume runs with the agent's (put it on `h.wrap`, or give it as a dict).
 

@@ -24,8 +24,18 @@ tested with are in [docs/versioning.md](docs/versioning.md).
     (`additionalContext`) instead of being appended to the system prompt; the session is kept in
     the run's journal as the SDK's `SessionStore` (`JournalSessions`), so a paused run, or one
     whose worker died, continues its session on any machine (progress saved before each step).
-  - A framework given its own store, session or session store keeps it (said once in the log);
-    memory off leaves the framework's default; a memory service that fails fails the call.
+  - One owner for long-term memory: with memory on, a graph's own `BaseStore` is not used beside
+    the memory service (said once; `without={"memory"}` runs it on its own). A team's own
+    session or session store is kept; memory off leaves the framework's default; a memory
+    service that fails fails the call.
+  - One policy for a conversation's history across runs, used by every adapter
+    (`bridges.history.thread_for`): a durable thread store the framework was given owns it;
+    else the memory service's thread through the framework's slot (OpenAI Agents); else
+    memory's window. A store kept only in RAM — `InMemorySaver`, `SQLiteSession(":memory:")`,
+    Claude's `InMemorySessionStore` — no longer turns memory's window off: it is lost with its
+    worker, said once with the fix (`PostgresSaver`); an unknown store is taken as durable. The
+    policy is one constant: `MEMORY_WINDOW` makes memory's window own every history, the
+    framework working on the run's own thread in the journal.
   - The framework matrix checks the slots (`F44`) and that every adapter emits the same
     agent-contracts events for the same work (`F60c`).
 - `python -m benchmark.thread`: who keeps a conversation's history across runs, the framework's

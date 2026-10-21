@@ -96,15 +96,21 @@ memory tools (not `without={"memory"}`):
 | `search(..., query=...)` | the service's ranked recall, in its order (`filter=` with `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte` applies) |
 
 What the graph stores is then retrieved into the user's other agents' context like anything
-they learned. A graph compiled with its own store (`compile(store=InMemoryStore())`) keeps it,
-and the log says once that the memory service is not behind it. Memory off — the deployment's
-or the run's `without=` — leaves LangGraph's default: no store. A memory service that fails
+they learned. With memory on, a graph's own store (`compile(store=...)`) is not used beside it
+— one owner for long-term memory — and the log says so once; memory off — the deployment's or
+the run's `without={"memory"}` — runs the graph as it was built: on its own store, or none. A memory service that fails
 fails the store call (the memory SDK's error), as every memory call does; nothing is kept
 elsewhere. The store holds what a memory holds: at most 8,000 characters of JSON an item, no
 TTL, no `index=` of its own (both refused).
 
-The checkpointer is the other slot: a graph built with the harness's `RunCheckpointer` (as
-`ReAct` is) keeps its checkpoint in the run's journal, below.
+The checkpointer is the other slot, for the conversation's history across runs; one policy
+decides its owner for every framework ([memory.md](../memory.md#who-owns-a-conversations-history)):
+a **durable** checkpointer of the graph's own (`PostgresSaver`, any store the harness does not
+know as RAM-only) owns it, and memory's window is left out; an `InMemorySaver` (`MemorySaver`)
+does not — it is lost with its worker — so memory's window carries the conversation, and the log
+says so once, naming `PostgresSaver` as the fix (with memory off: that the history will not
+survive a restart). A graph built with the harness's `RunCheckpointer` (as `ReAct` is) keeps its
+checkpoint in the run's journal: the run's own step state, never the conversation's.
 
 ## Approvals and pauses
 

@@ -40,7 +40,8 @@ from trellis.harness.adapters.base import (
     Output,
     ToolFormat,
 )
-from trellis.harness.bridges.session import MemorySession, bridged
+from trellis.harness.bridges.history import Thread, owns, thread_for
+from trellis.harness.bridges.session import MemorySession, bridgeable
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, reason_of
 
@@ -97,10 +98,13 @@ class OpenAIAgentsAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "turn"
 
+    def runs(self, target: Any, *, agent_id: str, memory: bool) -> Any:
+        return target
+
     def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
-        """A session keeps the conversation: the run's own (``framework_options``), or the
-        memory service's thread (``bridges.session``)."""
-        return runtime.framework_options.get("session") is not None or bridged(runtime)
+        """Whether a session owns the conversation's history (``bridges.history``): the run's
+        own when it is durable, or the memory service's thread (``bridges.session``)."""
+        return owns(_thread(runtime))
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         system = [{"role": "system", "content": context}] if context else []
@@ -242,16 +246,30 @@ class OpenAIAgentsAdapter:
         return state
 
 
+def _thread(runtime: Runtime) -> Thread:
+    """The session the run works on, by the history policy (``bridges.history``)."""
+    return thread_for(
+        runtime.framework_options.get("session"),
+        bridged=bridgeable(runtime),
+        agent_id=runtime.agent_id,
+        memory=runtime.run_memory is not None,
+    )
+
+
 def _options(run: Invocation, native_input: Any) -> dict[str, Any]:
-    """``Runner.run``'s options: the run's framework options, and — given no session of its
-    own, with memory on — the conversation kept in the memory service's thread
-    (``bridges.session``)."""
+    """``Runner.run``'s options: the run's framework options, with the session the history
+    policy gives the run — the memory service's thread (``Thread.BRIDGED``:
+    ``bridges.session``), none (``Thread.RUN``: the run's own items, its saved state in the
+    journal), or the run's own as given."""
     runtime = run.runtime
     options = dict(runtime.framework_options)
-    if bridged(runtime):
+    thread = _thread(runtime)
+    if thread is Thread.BRIDGED:
         fresh = not isinstance(native_input, _Continue)
         options["session"] = MemorySession(runtime, fresh=fresh)
         runtime.transcript_kept = True  # the session writes the thread
+    elif thread is Thread.RUN:
+        options.pop("session", None)
     return options
 
 

@@ -4,6 +4,7 @@ scripted chat model. Deep Agents has its own file."""
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any, NotRequired, TypedDict
 
 import pytest
@@ -13,6 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.durable import SharedSaver
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
@@ -202,7 +204,8 @@ async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conve
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChatModel(turns=["first", "second"])
-    graph = create_agent(model, tools=[], system_prompt="You help.", checkpointer=InMemorySaver())
+    durable = SharedSaver(f"helper-{uuid.uuid4().hex}")  # a durable checkpointer (PostgresSaver)
+    graph = create_agent(model, tools=[], system_prompt="You help.", checkpointer=durable)
     agent = memory_harness.wrap(graph, id="helper")
     for question in ("one?", "two?"):
         assert (await agent.run(question, user="u1", thread="th")).status is RunStatus.SUCCESS
