@@ -139,7 +139,9 @@ async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService
         assert pulled["context"] and "memory_search" not in pulled["tools"]
         _, calls = await run("records")
         assert "context" in calls and not {"messages", "feedback"} & calls
-        _, calls = await run("grounding")
+        _, calls = await run("grounding")  # the score is off; the check is the run's records
+        assert "verify" in calls
+        _, calls = await run("grounding", "records")
         assert "verify" not in calls
         await run("judges")
         assert judged == []
@@ -313,7 +315,8 @@ async def test_a_queued_run_and_its_sub_agents_keep_its_without(
         child_run = await h.runs.get(summary.run_id)
         assert child_run is not None
         assert child_run.metadata == {
-            "without": ["hints", "memory_pull", "memory_push", "records", "tool_search"]
+            "without": ["hints", "memory_pull", "memory_push", "records", "tool_search"],
+            "agent_group": handle.run_id,  # the delegation tree, named by its top run
         }
     assert reached(memory_service) == set()
 

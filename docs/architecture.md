@@ -288,7 +288,7 @@ flowchart LR
   D --> E[adapter<br/>prepare · invoke/stream · extract]
   E -->|paused| F[record PAUSED<br/>interrupt + journal as checkpoint]
   E -->|ended| G[record SUCCESS / ERROR / TIMEOUT]
-  G --> H[background writes: transcript,<br/>system outcome, sampled grounding,<br/>sampled judges]
+  G --> H[background writes: transcript,<br/>system outcome, the grounding check,<br/>sampled judges]
 ```
 
 A memory service that is down degrades a run, it never fails it: a failed context read is a

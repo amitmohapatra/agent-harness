@@ -54,6 +54,7 @@ ROUTES: Final = [
     ("POST", r"/v1/tools/hints", "tool_hints"),
     ("POST", r"/v1/tools/invocations", "record_tool"),
     ("POST", r"/v1/feedback", "feedback"),
+    ("GET", r"/v1/feedback", "feedback_list"),
     ("POST", r"/v1/verify", "verify"),
     ("POST", r"/v1/messages", "messages"),
     ("GET", r"/v1/tools", "catalog"),
@@ -98,6 +99,9 @@ class FakeMemoryService:
     unsupported: int = 1
     #: the items of the context the claims were checked against
     evidence: int = 3
+    #: the memories the supported claims rest on (``/v1/verify``'s ``evidence_ids``; the
+    #: service cites the ``mem_`` ones in the judge's verdict on the run)
+    cited: list[str] = field(default_factory=lambda: ["mem_7", "chk_3", "mem_9"])
     #: names of the calls that answer 503 (DEPENDENCY_UNAVAILABLE)
     fail: set[str] = field(default_factory=set)
     #: names of the calls that answer 503 this many times, then succeed
@@ -324,13 +328,8 @@ class FakeMemoryService:
         if feedback_id in self.stored_feedback:
             return 200, self.stored_feedback[feedback_id]
         record: dict[str, Any] = {
-            "feedback_id": feedback_id,
-            "tenant_id": scope.get("tenant_id") or self.tenant or "default",
-            "workspace_id": scope.get("workspace_id"),
-            "user_id": scope.get("user_id"),
-            "agent_id": scope.get("agent_id"),
+            **self._record(call, feedback_id),
             "agent_run_id": body.get("agent_run_id") or scope.get("agent_run_id"),
-            "trace_id": None,
             "target_kind": body["target_kind"],
             "target_id": body["target_id"],
             "verdict": body["verdict"],
@@ -341,12 +340,30 @@ class FakeMemoryService:
             "source": body.get("source") or "human",
             "evidence_refs": body.get("evidence_refs") or [],
             "metadata": body.get("metadata") or {},
-            "created_at": datetime.now(UTC).isoformat(),
         }
         if _waits_for_review(call):
             record["review"] = {"state": "pending"}
         self.stored_feedback[feedback_id] = record
         return 201, record
+
+    def _record(self, call: Call, feedback_id: str) -> dict[str, Any]:
+        """A stored feedback record's identity, as the service takes it from the call."""
+        scope = call.scope
+        return {
+            "feedback_id": feedback_id,
+            "tenant_id": scope.get("tenant_id") or self.tenant or "default",
+            "workspace_id": scope.get("workspace_id"),
+            "user_id": scope.get("user_id"),
+            "agent_id": scope.get("agent_id"),
+            "agent_run_id": scope.get("agent_run_id"),
+            "trace_id": None,
+            "correction": None,
+            "score": None,
+            "comment": None,
+            "evidence_refs": [],
+            "metadata": {},
+            "created_at": datetime.now(UTC).isoformat(),
+        }
 
     def _add_document(self, call: Call) -> dict[str, Any]:
         document_id = self._id("doc")
@@ -381,13 +398,34 @@ class FakeMemoryService:
         }
 
     def _verify(self, call: Call) -> dict[str, Any]:
+        """The service's grounding check: one verdict per claim, and — with claims, evidence
+        and a run — the judge's verdict on the run, citing the memories the supported claims
+        rest on (its ``judge_run``)."""
         claims = [
             {
                 "claim": f"claim {i}",
                 "verdict": "supported" if i >= self.unsupported else "unsupported",
+                "evidence_ids": self.cited if i >= self.unsupported else [],
             }
             for i in range(self.claims)
         ]
+        run_id = call.body.get("run_id") or call.scope.get("agent_run_id")
+        feedback_id = None
+        if self.claims and self.evidence and run_id:
+            feedback_id = f"fb_judge_{run_id}_{call.body['bundle_id']}"
+            self.stored_feedback[feedback_id] = {
+                **self._record(call, feedback_id),
+                "target_kind": "run",
+                "target_id": run_id,
+                "verdict": "confirm" if not self.unsupported else "reject",
+                "reviewer": "judge:grounding",
+                "source": "judge",
+                "evidence_refs": [
+                    {"source_type": "memory", "source_id": i}
+                    for i in dict.fromkeys(self.cited)
+                    if i.startswith("mem_")
+                ],
+            }
         return {
             "claims": claims,
             "supported": self.claims - self.unsupported,
@@ -396,8 +434,18 @@ class FakeMemoryService:
                 self.unsupported / self.claims if self.claims else 0.0
             ),
             "evidence_count": self.evidence,
-            "feedback_id": self._id("fb"),
+            "feedback_id": feedback_id,
         }
+
+    def _feedback_list(self, call: Call) -> dict[str, Any]:
+        """The feedback on one target, newest first (one page)."""
+        kind, target = call.query.get("target_kind"), call.query.get("target_id")
+        found = [
+            f
+            for f in self.stored_feedback.values()
+            if f["target_kind"] == kind and f["target_id"] == target
+        ]
+        return {"feedback": found[::-1], "next_cursor": None}
 
     def _messages(self, call: Call) -> dict[str, Any]:
         """One durable append. A message the service has already stored under its

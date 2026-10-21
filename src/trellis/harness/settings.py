@@ -50,8 +50,8 @@ OTEL_EXPORTER_ENV: Final = (
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 )
-#: The share of successful runs evaluated (grounding and the online judges) when
-#: ``TRELLIS_EVAL_SAMPLE`` is unset.
+#: The share of successful runs evaluated (the grounding score on the trace, the online judges)
+#: when ``TRELLIS_EVAL_SAMPLE`` is unset.
 EVAL_SAMPLE: Final = 0.1
 #: The variables that mark a container or a serverless runtime, where a folder on local disk
 #: does not outlive the process: the spool's default is not taken there.
@@ -103,9 +103,9 @@ class Settings(BaseModel):
     #: start: ``OTEL_RESOURCE_ATTRIBUTES``' ``service.version`` (bake it in at build time);
     #: ``h.wrap(..., version=)`` names one agent's own.
     agent_version: str | None = Field(default=None, max_length=128)
-    #: The share of successful runs evaluated — checked against the context they were given
-    #: (the memory service's ``/v1/verify``) and scored by the online judges — 0 to 1, chosen
-    #: by the run id, so a run is either always or never sampled.
+    #: The share of successful runs evaluated — the grounding check's score on their trace
+    #: (every run given a memory context is checked, ``/v1/verify``, for its outcome) and the
+    #: online judges — 0 to 1, chosen by the run id, so a run is either always or never sampled.
     eval_sample: float = Field(default=EVAL_SAMPLE, ge=0.0, le=1.0)
     #: Deprecated (``llm_judge(model=)``, or the gateway's judge alias): the judge's model.
     judge_model: str | None = None

@@ -8,7 +8,11 @@
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
 * ``resume_input(target, native_input, pending, resolution)`` — what continues a paused run;
 * ``check_options(options)`` — refuses framework options (``framework_options=``) its run call
-  cannot take: they reach the framework's own run call unchanged (``runtime.framework_options``).
+  cannot take: they reach the framework's own run call unchanged (``runtime.framework_options``);
+* ``native_tools(target)`` — the names of the tools the framework gives the model itself, beside
+  the harness's (an OpenAI Agents agent's own tools, Claude's built-ins and its MCP tools, the
+  tools a compiled graph's tool nodes run), where they can be read: they count among the
+  agent's tools for the skills it learned and the tool hints (``Agent.remembered``).
 
 ``run`` carries the per-run tools (already converted by ``tools.convert`` for the format the
 adapter names) and the runtime. Adapters never wrap models, never re-implement a loop, and
@@ -111,6 +115,8 @@ class Adapter(Protocol):
     ) -> Any: ...
 
     def check_options(self, options: Mapping[str, Any]) -> None: ...
+
+    def native_tools(self, target: Any) -> list[str]: ...
 
 
 def no_options(options: Mapping[str, Any], target: str, why: str) -> None:

@@ -186,6 +186,16 @@ class LangGraphAdapter:
         if not isinstance(options.get("configurable", {}), Mapping):
             raise ConfigurationError("framework_options' configurable is a dict")
 
+    def native_tools(self, target: Any) -> list[str]:
+        """A graph that binds its tools when it is built: what its tool nodes run
+        (:func:`bound_tools`), its own tools and the ones built with ``h.tools`` alike (a tool
+        a node binds to its model in its own code cannot be read). A graph that takes the
+        run's tools per model call (``ReAct``) has the run's toolbox as its tools: its nodes
+        hold only what its middleware offers on its own (a long task's files)."""
+        if not self.fixed_tools:
+            return []
+        return [t.name for t in bound_tools(target) if isinstance(getattr(t, "name", None), str)]
+
     def _graph(self, target: Any) -> Any:
         """The graph run for ``target``: its narrowing copy, when it has one."""
         return target if self.narrowed is None else self.narrowed

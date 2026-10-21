@@ -60,3 +60,6 @@ class FunctionAdapter:
 
     def check_options(self, options: Mapping[str, Any]) -> None:
         no_options(options, "a function target", "it reads what it needs from its input")
+
+    def native_tools(self, target: Any) -> list[str]:
+        return []  # a function calls the run's tools, nothing of its own the harness can read

@@ -42,8 +42,13 @@ derives it from the annotations the harness published and from what an administr
 | `irreversible` | `ask`: waits for approval |
 
 **`approve_when`.** The catalog may also hold an approval rule for the tool. The rule is set by
-an administrator, or by someone who accepted an approval suggestion
-(`POST /v1/tools/approval-suggestions/{id}/accept` in the memory service). A rule replaces the
+an administrator, or learned: once people's decisions on a tool's calls of one argument shape
+support a rule (five decisions, 95 % approved, or half or more rejected or edited), the memory
+service accepts it on its own (its ADR 0042), logs it and lists it — `trellis doctor` prints
+every one, in effect or revoked. It never does so for an `irreversible` tool, whose suggestions
+wait for a person (`POST /v1/tools/approval-suggestions/{id}/accept`). Revoke a rule by
+taking it out of the tool's `approve_when` (`put_catalog`); later decisions do not bring it
+back. A rule replaces the
 risk's action: the call asks exactly when the expression holds on the call's arguments. When it
 does not hold, the call runs, and it is announced unless the tool only reads.
 
@@ -172,7 +177,8 @@ An approver answers with `agent.resume(interrupt_id, decision, ...)`
 | cancel | the run ends `CANCELLED` |
 
 Each decision is also `TOOL_CALL` feedback, from which the memory service learns approval
-suggestions.
+rules and accepts them on its own (above): a call people keep approving stops asking within
+the catalog's refresh, one they keep rejecting always asks.
 
 **Gate a tool in one place.** A framework's own approval gate pauses the run as the same
 approval and takes the same decisions

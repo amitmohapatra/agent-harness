@@ -292,7 +292,11 @@ async def test_the_context_is_appended_to_the_system_prompt(
 ) -> None:
     target = options(tmp_path, [{"text": "email"}], system_prompt="You help.")
     await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
-    assert started_with(tmp_path)["system_prompt"] == f"You help.\n\n{memory_service.context_text}"
+    [asked] = memory_service.named("context")
+    # Claude's built-in tools are the agent's tools too: the context carries their hints
+    rendered = memory_service.context_text + "\n\n## Tools\n- Read (confidence 0.90)"
+    assert started_with(tmp_path)["system_prompt"] == f"You help.\n\n{rendered}"
+    assert asked.body["tools"]["available"][:2] == ["Read", "Glob"]
 
 
 async def test_the_hints_narrow_the_tools_for_the_run(

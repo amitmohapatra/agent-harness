@@ -22,13 +22,23 @@ attribute on the target or its `model`, or a LangChain model's `profile`), betwe
 the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, tools?}`, items cited
 by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
 message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what
-the grounding check verifies the answer against.
+the grounding check verifies the answer against. Where the input has no place for it — a
+function target given text, a graph whose input has no `messages` — and the run's code never
+reads `trellis.current().context`, the agent answers without it: a warning says so once per
+agent (`memory_context`), naming the fix (read `agent.context`, or give the input its
+messages); the harness puts the context nowhere else.
 
+* `document_ids` when the run names documents (`agent.run(..., document_ids=[...])`, the ids
+  `h.add_document` returned): the context draws its passages from those alone. Kept with the
+  run, so its resume, a worker's attempt and its sub-agents' runs use them too.
 * `window=false` when the framework keeps the thread's messages itself (a LangGraph graph with
   a checkpointer): the service leaves the recent conversation out. Such a graph's context
   message has a fixed id (`trellis-memory-context`), so its thread holds one that each turn
   replaces.
-* The request carries the run's own tool names: the context then includes the skills the agent
+* The request carries the run's own tool names — the harness's and the ones the framework gives
+  the model itself, where they can be read: an OpenAI Agents agent's `tools`, Claude's built-in
+  tools (its `tools`, less `disallowed_tools`) and its MCP tools named in `allowed_tools`, the
+  tools a compiled graph's tool nodes run: the context then includes the skills the agent
   learned for the task ([skills.md](skills.md#learned-skills)) and, with 5 or more tools, the
   tools section (next step, argument values found in memory, what is missing) and its `tools`
   (`[{name, confidence}]`, confidence 0–1), which narrow the tools the model is offered
@@ -88,7 +98,7 @@ Every write above is queued and the run moves on (`writes.py`); four writers dra
   the next time a harness with the same directory starts writing (a worker at its start, any
   other process at its first write). The service stores a replayed write that had in fact
   landed once (every write carries its idempotency key or message id). Without the directory,
-  or for a write that is not data (the sampled grounding check, the model key, Code Mode
+  or for a write that is not data (the grounding check, the model key, Code Mode
   calls read back from the gateway), it is lost: counted (`trellis.writes.failed`) and, during a
   run, a `warning` event.
 
@@ -101,7 +111,8 @@ outlives the process, after its next start; never silently dropped.
 file to the memory service (`POST /v1/documents`) in that user's scope (or one thread's) and
 waits until it is parsed and indexed (`GET /v1/documents/{id}`). Nothing else is needed: the
 push context of the user's next run retrieves and cites its passages like any other
-document. `visibility` widens who may retrieve it (`WORKSPACE`, `TENANT`); inside a run the
+document; to have a run's context draw on given documents alone, pass their ids
+(`agent.run(question, user=..., document_ids=[doc.document_id])`). `visibility` widens who may retrieve it (`WORKSPACE`, `TENANT`); inside a run the
 SDK's `agent.memory.advanced.documents` does the same in the run's scope.
 
 ## Outcome and grounding
@@ -112,13 +123,19 @@ precedence **human > judge > system**:
 * **system** — the harness, when the run ends: `SUCCESS` → `confirm`, `ERROR` → `reject` (a
   cancelled run says nothing about the agent). Never "no exception = success" on its own: the
   judge and people outrank it.
-* **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
-  (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
-  context the run was given; the service records the verdict itself (`source=judge`), and the
-  harness puts the same score — the share of the answer's claims the evidence supports — on
-  the run's trace (`grounding`). An answer with no checkable claim, or a context that held no
-  evidence (every claim would be "unsupported" against nothing), is no verdict and no score.
-* **human** — `h.feedback(run_id, verdict, correction=None)`. The memory service stores a
+* **judge** — on every successful run with an answer (a structured one as its JSON) that was
+  given a memory context, `/v1/verify {bundle_id, answer, run_id}` checks the answer against
+  that context, in the background once the answer is out; the service records the verdict
+  itself (`source=judge`), which outranks the run's own `confirm`, so a confirmed outcome is a
+  verified one, and marks the memory pulls the supported claims rest on as used. It is part of
+  the run's records (off with `without={"memory"}`), apart from the eval sample: on a run the
+  sample takes (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id) the harness also puts
+  the score — the share of the answer's claims the evidence supports — on the run's trace
+  (`grounding`; `without={"grounding"}` keeps the check and drops the score). An answer with no
+  checkable claim, or a context that held no evidence (every claim would be "unsupported"
+  against nothing), is no verdict and no score.
+* **human** — `h.feedback(run_id, verdict, correction=None)`, citing the memories the judge's
+  verdict found the answer rests on (`evidence_refs`), whose confidence it moves. The memory service stores a
   person's verdict as a vote that waits for the tenant administrator (`review.state ==
   "pending"`, its ADR 0028): it changes the run's outcome, and the confidence of what the run
   cited, only once approved (`GET /v1/feedback/pending`, `POST /v1/feedback/{id}/approve`

@@ -1,8 +1,10 @@
 """``trellis doctor`` (``python -m trellis.harness.doctor``): the effective settings and where
 each came from — the environment variable, derived, detected, or the default — secrets
 redacted; which gateway serves model names and what it cannot do (``trellis.harness.gateways``);
-whether each service is reachable and takes its key; whether the spool can be
-written and the Docker daemon answers; and what to set. It changes nothing: it suggests.
+whether each service is reachable and takes its key — for the memory service also the key's
+role, the agents' model key, its readiness (``/health/ready``) and its version (``/version``);
+whether the spool can be written and the Docker daemon answers; the approval rules the memory
+service accepted on its own (its ADR 0042); and what to set. It changes nothing: it suggests.
 
 Exit code ``0`` when every check passes, ``1`` otherwise."""
 
@@ -35,6 +37,20 @@ SECRETS: Final = frozenset(
 )
 #: How long each check waits for its service, in seconds.
 CHECK_SECONDS: Final = 3.0
+#: The memory key role the harness acts with: it acts for users and agents.
+SERVICE_ROLE: Final = "service"
+#: The role that names the tenant per call, and the one that administers a tenant.
+PLATFORM_ROLE: Final = "platform"
+ADMIN_ROLE: Final = "admin"
+#: How ``may_act_as`` names an agent a key may act as.
+AGENT_PRINCIPAL: Final = "agent:"
+#: The memory service's readiness answers that still serve (``degraded``: an optional
+#: dependency is down).
+READY: Final = frozenset({"ready", "degraded"})
+#: The listing of the approval rules the memory service accepted on its own, and the most of
+#: them the report shows (the newest).
+AUTO_ACCEPTED_PATH: Final = "/v1/tools/approval-suggestions/auto-accepted"
+RULES_SHOWN: Final = 100
 
 
 @dataclass(frozen=True)
@@ -42,6 +58,15 @@ class Check:
     name: str
     ok: bool
     said: str
+
+
+@dataclass(frozen=True)
+class Examined:
+    """What the services said: the checks, and the approval rules the memory service accepted
+    on its own (``None``: not listed — memory off, or the service did not answer)."""
+
+    checks: list[Check]
+    rules: list[str] | None
 
 
 def shown(field: str, value: Any) -> str:
@@ -86,19 +111,24 @@ def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
 
 async def checks(settings: Settings, environ: Mapping[str, str] | None = None) -> list[Check]:
     """Each service the settings name, reached with its key; the spool; the Docker daemon."""
+    return (await examine(settings, environ)).checks
+
+
+async def examine(settings: Settings, environ: Mapping[str, str] | None = None) -> Examined:
+    """:func:`checks`, and the approval rules the memory service accepted on its own."""
     env = os.environ if environ is None else environ
     async with httpx.AsyncClient(timeout=CHECK_SECONDS) as client:
-        found = await asyncio.gather(
+        gateway, (memory, rules), runs = await asyncio.gather(
             _gateway(client, model_gateway(settings, env)),
             _memory(client, settings),
             _runs(client, settings),
         )
-    done = [c for c in found if c is not None]
+    done = [c for c in (gateway, *memory, runs) if c is not None]
     if settings.spool_dir:
         done.append(_spool(settings.spool_dir))
     if settings.sandbox == "docker":
         done.append(await _docker())
-    return done
+    return Examined(done, rules)
 
 
 def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
@@ -135,11 +165,148 @@ async def _gateway(client: httpx.AsyncClient, gateway: ModelGateway | None) -> C
     return await _reached(client, "gateway", url, {"Authorization": f"Bearer {gateway.probe_key}"})
 
 
-async def _memory(client: httpx.AsyncClient, s: Settings) -> Check | None:
+async def _memory(client: httpx.AsyncClient, s: Settings) -> tuple[list[Check], list[str] | None]:
+    """The memory service: reached with the key (``/v1/keys/self``) and what the key is (its
+    role, the agents' model key), whether it is ready and which version it is, and the
+    approval rules it accepted on its own."""
     if not s.memory_url:
-        return None
+        return [], None
+    base = s.memory_url.rstrip("/")
     headers = {"Authorization": f"Bearer {s.api_key or ''}"}
-    return await _reached(client, "memory", f"{s.memory_url.rstrip('/')}/v1/keys/self", headers)
+    reached, answer = await _asked(client, "memory", f"{base}/v1/keys/self", headers)
+    found = [reached, await _ready(client, base), await _version(client, base)]
+    if answer is None:  # the key is not taken: nothing more can be asked with it
+        return found, None
+    key = answer.json()
+    found.append(_role(key))
+    found.append(await _model_key(client, s, base, headers, key))
+    rules = await _rules(client, base, headers) if key.get("tenant_id") else None
+    return found, rules
+
+
+def _role(key: Mapping[str, Any]) -> Check:
+    """The key's role: a service key is what the harness acts with."""
+    role, tenant = key.get("role"), key.get("tenant_id")
+    if role == SERVICE_ROLE:
+        return Check("memory key", True, f"a service key of tenant {tenant}")
+    if role == PLATFORM_ROLE:
+        return Check("memory key", True, "the platform key: every call names its tenant (tenant=)")
+    if role == ADMIN_ROLE:
+        return Check(
+            "memory key",
+            False,
+            f"the admin key of tenant {tenant}: the verdicts it sends for people (h.feedback) "
+            "skip the review they wait for, and it manages the tenant's keys; give the "
+            "harness a service key (POST /v1/keys with role service)",
+        )
+    return Check("memory key", False, f"a key of role {role!r}: the harness needs a service key")
+
+
+async def _model_key(
+    client: httpx.AsyncClient,
+    s: Settings,
+    base: str,
+    headers: Mapping[str, str],
+    key: Mapping[str, Any],
+) -> Check:
+    """The model key the memory service's LLM work for the agents is paid with: each agent
+    registers ``BIFROST_VIRTUAL_KEY`` at its first run; the agents the key is restricted to
+    (``may_act_as``) are asked for their status."""
+    if not s.bifrost_virtual_key:
+        return Check(
+            "model key",
+            True,
+            "BIFROST_VIRTUAL_KEY unset: the memory service's model work for these agents runs "
+            "on the tenant's or the operator's key",
+        )
+    named = [
+        principal.removeprefix(AGENT_PRINCIPAL)
+        for principal in key.get("may_act_as") or ()
+        if principal.startswith(AGENT_PRINCIPAL)
+    ]
+    if not named:
+        return Check(
+            "model key",
+            True,
+            "each agent registers BIFROST_VIRTUAL_KEY as its memory model key at its first run",
+        )
+    said: list[str] = []
+    for agent in named:
+        url = str(httpx.URL(f"{base}/v1/agents/model-key", params={"agent_id": agent}))
+        reached, answer = await _asked(client, "model key", url, headers)
+        if answer is None:
+            return reached
+        said.append(f"{agent}: {_key_state(answer.json())}")
+    return Check("model key", True, "; ".join(said))
+
+
+def _key_state(status: Mapping[str, Any]) -> str:
+    """An agent's model-key status, as the report says it."""
+    if status.get("revoked"):
+        return "revoked (registered again at its next run)"
+    if status.get("registered"):
+        return f"registered (revision {status.get('revision')})"
+    return "registered at its first run"
+
+
+async def _ready(client: httpx.AsyncClient, base: str) -> Check:
+    """``/health/ready``: ready, or degraded (an optional dependency down: named)."""
+    url = f"{base}/health/ready"
+    try:
+        response = await client.get(url)
+        body = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return Check("memory ready", False, f"{url} cannot be read ({type(exc).__name__})")
+    status = body.get("status")
+    down = sorted(n for n, d in (body.get("dependencies") or {}).items() if not d.get("ok"))
+    where = f" (down: {', '.join(down)})" if down else ""
+    return Check("memory ready", status in READY, f"{url}: {status}{where}")
+
+
+async def _version(client: httpx.AsyncClient, base: str) -> Check:
+    """``/version``: the memory service's version and API version."""
+    url = f"{base}/version"
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+        body = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return Check("memory version", False, f"{url} cannot be read ({type(exc).__name__})")
+    return Check(
+        "memory version",
+        True,
+        f"{body.get('service')} {body.get('version')} (API {body.get('api_version')})",
+    )
+
+
+async def _rules(
+    client: httpx.AsyncClient, base: str, headers: Mapping[str, str]
+) -> list[str] | None:
+    """The approval rules the memory service accepted on its own, newest first (at most
+    :data:`RULES_SHOWN`), each as a line; ``None`` when they cannot be listed."""
+    try:
+        response = await client.get(
+            f"{base}{AUTO_ACCEPTED_PATH}", headers=dict(headers), params={"limit": RULES_SHOWN}
+        )
+        response.raise_for_status()
+        body = response.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    lines = [_rule(rule) for rule in body.get("rules") or ()]
+    if body.get("next_cursor"):
+        lines.append(f"... and more: {AUTO_ACCEPTED_PATH} lists every one")
+    return lines
+
+
+def _rule(rule: Mapping[str, Any]) -> str:
+    """One accepted rule, as the report says it."""
+    agent = rule.get("agent_id") or "the tenant"
+    state = "in effect" if rule.get("in_effect") else "revoked"
+    return (
+        f"{rule.get('tool')} ({rule.get('arg_shape')}): {rule.get('suggestion')}, from "
+        f"{agent}'s {rule.get('support')} decisions, accepted {rule.get('accepted_at')}, "
+        f"{state}"
+    )
 
 
 async def _runs(client: httpx.AsyncClient, s: Settings) -> Check | None:
@@ -158,15 +325,29 @@ async def _reached(
     *,
     found_ok: bool = False,
 ) -> Check:
+    return (await _asked(client, name, url, headers, found_ok=found_ok))[0]
+
+
+async def _asked(
+    client: httpx.AsyncClient,
+    name: str,
+    url: str,
+    headers: Mapping[str, str],
+    *,
+    found_ok: bool = False,
+) -> tuple[Check, httpx.Response | None]:
+    """``url`` asked with the key: the check, and the answer when it was a success."""
     try:
         response = await client.get(url, headers=dict(headers))
     except httpx.HTTPError as exc:
-        return Check(name, False, f"{url} cannot be reached ({type(exc).__name__})")
+        return Check(name, False, f"{url} cannot be reached ({type(exc).__name__})"), None
     if response.status_code in (401, 403):
-        return Check(name, False, f"{url} refused the key ({response.status_code})")
-    if response.is_success or (found_ok and response.status_code == 404):
-        return Check(name, True, f"{url} answered, the key taken")
-    return Check(name, False, f"{url} answered {response.status_code}")
+        return Check(name, False, f"{url} refused the key ({response.status_code})"), None
+    if response.is_success:
+        return Check(name, True, f"{url} answered, the key taken"), response
+    if found_ok and response.status_code == 404:
+        return Check(name, True, f"{url} answered, the key taken"), None
+    return Check(name, False, f"{url} answered {response.status_code}"), None
 
 
 def _spool(folder: str) -> Check:
@@ -196,6 +377,7 @@ def report(
     found: Sequence[Check],
     said: Sequence[str],
     gateway: Sequence[str] = (),
+    rules: Sequence[str] | None = None,
 ) -> str:
     width = max(len(name) for name, _, _ in rows)
     lines = ["Settings (value, and where it came from):"]
@@ -205,6 +387,12 @@ def report(
         lines += [f"  {line}" for line in gateway]
     lines.append("Checks:")
     lines += [f"  {'ok  ' if c.ok else 'FAIL'}  {c.name}: {c.said}" for c in found] or ["  none"]
+    if rules is not None:
+        lines.append(
+            "Approval rules the memory service accepted on its own (revoke one by taking it out "
+            "of the tool's approve_when in the catalog):"
+        )
+        lines += [f"  - {line}" for line in rules] or ["  none"]
     lines.append("Suggestions:")
     lines += [f"  - {line}" for line in said] or ["  none"]
     return "\n".join(lines)
@@ -214,10 +402,16 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     del argv  # no options
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
-    found = asyncio.run(checks(settings, env))
-    said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
+    examined = asyncio.run(examine(settings, env))
+    said = report(
+        effective(env),
+        examined.checks,
+        suggestions(settings, env),
+        gateway_said(settings, env),
+        examined.rules,
+    )
     sys.stdout.write(said + "\n")
-    return 0 if all(c.ok for c in found) else 1
+    return 0 if all(c.ok for c in examined.checks) else 1
 
 
 def cli() -> int:

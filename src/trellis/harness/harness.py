@@ -18,7 +18,13 @@ import logging
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, Final, Literal, TypeVar
 
-from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
+from trellis.contracts import (
+    ConfigurationError,
+    FeedbackSource,
+    FeedbackVerdict,
+    RunStatus,
+    ToolSpec,
+)
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import ToolFormat
@@ -361,29 +367,26 @@ class Harness:
     ) -> Feedback | None:
         """What a person said about a run: a score on its trace (Langfuse, when the OTLP
         settings reach it; a ``score`` span otherwise) and — memory on — the run's ``human``
-        feedback. The memory service stores it pending (``review.state``) until the tenant
-        administrator approves it, and only then does it outrank the judge's and the run's
-        own; the stored record is returned (None with memory off). ``tenant`` is the run's,
-        named by a platform key only."""
+        feedback, citing the memories the run's answer rested on (``RunMemory.cited``), whose
+        confidence it moves once it is applied. The memory service stores it pending
+        (``review.state``) until the tenant administrator approves it, and only then does it
+        outrank the judge's and the run's own; the stored record is returned (None with
+        memory off). ``tenant`` is the run's, named by a platform key only."""
         chosen = FeedbackVerdict(verdict)
         record = await self.runs.get(run_id, tenant=await self.tenant(tenant))
         if record is None:
             raise ConfigurationError(f"no run {run_id}")
         stored: Feedback | None = None
         if self.memory is not None:
-            scope = Identity(
-                tenant=record.tenant_id,
-                user=record.user_id or record.on_behalf_of or "system",
-                agent_id=record.agent_id,
-                run_id=run_id,
-                thread=record.thread_id,
-            )
-            stored = await self.memory.bind(scope).run_feedback(
+            scope = Identity.of(record)
+            run_memory = self.memory.bind(scope)
+            stored = await run_memory.run_feedback(
                 chosen.value,
-                source="human",
+                source=FeedbackSource.HUMAN.value,
                 correction=correction,
                 reviewer=scope.user,
                 key=f"{run_id}:human:{chosen.value}",
+                evidence_refs=await run_memory.cited(),
             )
         comment = None if correction is None else str(correction)
         await self.score(

@@ -480,7 +480,8 @@ async def pin(runtime: Runtime, sources: Sequence[Any]) -> None:
     if not found.skills:
         return
     section = found.section
-    runtime.context = f"{runtime.context}\n\n{section}" if runtime.context else section
+    pushed = runtime.pushed_context
+    runtime.context = f"{pushed}\n\n{section}" if pushed else section
     runtime.offer([LOAD_SKILL, READ_SKILL_FILE])
     runtime.events.custom(EVENT, versions=found.versions)
     telemetry.attribute("trellis.skills", ",".join(f"{n}@{v}" for n, v in found.versions.items()))

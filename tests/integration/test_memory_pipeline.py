@@ -589,14 +589,32 @@ async def test_a_structured_answer_is_verified_as_its_json(
     assert verified.body["answer"] == '{"contact": "email"}'
 
 
-async def test_an_unsampled_run_is_not_verified(memory_service: FakeMemoryService) -> None:
+@respx.mock
+async def test_an_unsampled_run_is_verified_for_its_outcome_and_not_scored(
+    memory_service: FakeMemoryService,
+) -> None:
+    """The check labels the run (the judge's verdict, recorded by the service); the eval
+    sample only decides whether its score goes on the trace."""
+    scores = respx.post("https://lf.test/api/public/scores").mock(
+        return_value=httpx.Response(200, json={"id": "x"})
+    )
+    langfuse = {
+        "langfuse_public_key": "pk",
+        "langfuse_secret_key": "sk",
+        "langfuse_host": "https://lf.test",
+    }
+
     async def fn(input: str, agent: Runtime) -> str:
         return "answer"
 
-    async with harness_with(memory_service, eval_sample=0.0) as h:
-        await h.wrap(fn, id="n").run("q", user="u")
+    async with harness_with(memory_service, **langfuse, eval_sample=0.0) as h:
+        result = await h.wrap(fn, id="n").run("q", user="u")
         await h.writes.drain()
-    assert memory_service.named("verify") == []
+    [verified] = memory_service.named("verify")
+    assert verified.scope["agent_run_id"] == result.run_id
+    judged = [f for f in memory_service.stored_feedback.values() if f["source"] == "judge"]
+    assert [f["target_id"] for f in judged] == [result.run_id]
+    assert not [c for c in scores.calls if b"grounding" in c.request.content]
 
 
 # --------------------------------------------------------------------------- feedback

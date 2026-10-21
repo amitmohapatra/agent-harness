@@ -152,8 +152,8 @@ await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None,
 | Call | What it does | Page |
 |---|---|---|
 | `inbox` | the paused runs waiting on `assignee` (`user:…`, `role:…`) or anyone, newest first; answer one with `agent.resume` | [interrupts.md](interrupts.md#an-inbox-of-your-own) |
-| `feedback` | a person's verdict on a run (`confirm`, `approve`, `reject`, `correct`, `edit`): a score on its trace, and with memory the run's `human` feedback, pending the tenant administrator | [memory.md](memory.md) |
-| `add_document` | a file into a user's (or a thread's) document memory, waiting until it is indexed (`wait=None`: at once); needs `MEMORY_URL` | [memory.md](memory.md) |
+| `feedback` | a person's verdict on a run (`confirm`, `approve`, `reject`, `correct`, `edit`): a score on its trace, and with memory the run's `human` feedback citing the memories its answer rested on (the judge's), pending the tenant administrator | [memory.md](memory.md) |
+| `add_document` | a file into a user's (or a thread's) document memory, waiting until it is indexed (`wait=None`: at once); needs `MEMORY_URL`; a run scoped to it: `agent.run(..., document_ids=[doc.document_id])` | [memory.md](memory.md) |
 | `evaluate` | the agent over a dataset (a Langfuse dataset's name, or a list), each answer scored onto its run's trace | [evaluation.md](evaluation.md) |
 
 `tenant=` is only for a platform key (one with no tenant of its own).
@@ -166,7 +166,7 @@ What `h.wrap` returns.
 
 ```text
 await agent.run(input, *, user, thread=None, tenant=None, timeout=None, deadline=None,
-                without=(), framework_options=None) -> Result
+                without=(), framework_options=None, document_ids=None) -> Result
 agent.stream(...same...) -> AsyncIterator[RunEvent]
 await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 ```
@@ -181,6 +181,7 @@ await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 | `deadline` | none | when the run must have ended → `TIMEOUT` |
 | `without` | `()` | parts off for this run, on top of the agent's; kept with the run ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | the agent's | the framework's own options for this run, over the agent's ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
+| `document_ids` | none (every document the person's scope reads) | the documents (`h.add_document(...).document_id`) the run's memory context draws its passages from, none else; kept with the run and its sub-agents' runs ([memory.md](memory.md#push)) |
 | `priority` (`start`) | `0` | -1000 to 1000: a higher one is claimed first ([runs.md](runs.md#queue-order-and-busy-conversations)) |
 | `concurrency_key` (`start`) | `thread:<thread>` | runs sharing one run one at a time |
 
@@ -220,8 +221,8 @@ events until it ends, from any replica with `RUNS_URL`
 
 ```text
 await agent.schedule(cron, input, *, on_behalf_of, tz="UTC", tenant=None, timeout=None,
-                     without=(), framework_options=None, priority=0, concurrency_key=None)
-    -> Schedule
+                     without=(), framework_options=None, priority=0, concurrency_key=None,
+                     document_ids=None) -> Schedule
 ```
 
 Queue a run on a cadence (cron, or `hourly`, `daily`, `weekly`, `weekdays`, `manual`), acting
