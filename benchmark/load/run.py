@@ -89,7 +89,8 @@ def stock(sku: str) -> int:
     return 7
 
 
-def agent(h: Any, plan: Plan) -> Any:
+def agent(h: Any, plan: Plan, without: frozenset[str] = frozenset()) -> Any:
+    """The agent under load, wrapped by ``h`` (``without``: the parts it runs without)."""
     from trellis import ReAct, tool
 
     model: Any = plan.model or Paced(pace=plan.pace)
@@ -97,7 +98,11 @@ def agent(h: Any, plan: Plan) -> Any:
         "You answer stock questions with the stock tool.", model, context_window=plan.window
     )
     return h.wrap(
-        target, id="load", tools=[tool(side_effects="read")(stock)], timeout=plan.run_seconds
+        target,
+        id="load",
+        tools=[tool(side_effects="read")(stock)],
+        timeout=plan.run_seconds,
+        without=set(without),
     )
 
 

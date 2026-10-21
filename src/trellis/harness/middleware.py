@@ -97,6 +97,7 @@ from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
 from trellis.harness import budget
+from trellis.harness.bounded import LRU
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
@@ -1231,6 +1232,10 @@ def _appended(request: ModelRequest[Any], text: str) -> SystemMessage:
 
 
 # --------------------------------------------------------------------------- checkpoints
+#: Outside a run, how many threads :class:`RunCheckpointer` keeps (the most recently used).
+THREADS_KEPT: Final = 10_000
+
+
 class RunCheckpointer(BaseCheckpointSaver[int]):
     """A checkpointer that keeps the latest checkpoint only — and, in a harness run whose
     ``thread_id`` is the run (``LangGraphAdapter`` sees to it), keeps it in the run's journal
@@ -1242,7 +1247,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
 
     def __init__(self) -> None:
         super().__init__()
-        self._threads: dict[str, dict[str, Any]] = {}
+        #: outside a run: the threads' latest checkpoints, the least recently used forgotten
+        #: past the bound (an in-memory checkpointer; inside a run, the run's journal)
+        self._threads: LRU[str, dict[str, Any]] = LRU(THREADS_KEPT)
 
     # ------------------------------------------------------------------ storage
     def _slot(self, thread_id: str) -> dict[str, Any]:
@@ -1253,7 +1260,7 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
             if journal.graph is None:
                 journal.graph = {}
             return journal.graph
-        return self._threads.setdefault(thread_id, {})
+        return self._threads.setdefault(thread_id, dict)
 
     def _dumped(self, value: Any) -> list[str]:
         kind, data = self.serde.dumps_typed(value)

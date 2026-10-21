@@ -41,6 +41,7 @@ import time
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec, stable_id
+from trellis.harness.bounded import LRU
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.sandbox.base import (
     AGENT,
@@ -119,7 +120,7 @@ class SandboxSource:
             ),
         ]
         #: when this process last reaped each tenant's sandboxes (``time.monotonic``)
-        self._reaped: dict[str, float] = {}
+        self._reaped: LRU[str, float] = LRU()
 
     async def resolve(self) -> list[Tool]:
         return list(self.tools)
