@@ -49,6 +49,8 @@ react = [
   "trellis-harness[langgraph]",
   "langchain-openai>=1.6,<1.7",
   "deepagents>=0.7.19,<0.8",
+  # a tool call whose arguments are not JSON repaired (``trellis.harness.adaptive``)
+  "json-repair>=0.64,<0.65",
 ]
 openai-agents = ["openai-agents>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
