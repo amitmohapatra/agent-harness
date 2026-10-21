@@ -7,6 +7,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- A framework's own tools are governed: an OpenAI Agents agent's `FunctionTool`s by `h.wrap`,
+  on a copy of the agent; a `create_agent` or Deep Agents graph's tools through
+  `h.governance_middleware()` (`ReAct` has it) — decided by risk (the catalog's, else the
+  tool's declared `side_effects` or annotations, else `write`), asked when governance asks,
+  journaled, timed and traced. The graph's state tools are let through.
+
 - One approval per call: a tool held by the framework's own approval gate
   (`HumanInTheLoopMiddleware`, Deep Agents' `interrupt_on`, an OpenAI Agents `needs_approval`
   tool) and by governance is asked once — governance counts the framework's approval, kept in

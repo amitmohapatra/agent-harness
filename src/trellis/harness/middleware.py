@@ -95,7 +95,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from trellis.contracts import ConfigurationError, ModelError, ToolStatus
+from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
 from trellis.harness import budget
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
@@ -161,6 +161,83 @@ class _Step:
     finished: set[str]
     stopped: BaseException | None = None
     turn: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+
+#: The tools that only change the graph's own state (no effect outside the run, kept by its
+#: checkpoint): a ``GovernTools`` lets them through. Deep Agents' file tools are among them
+#: on its default ``StateBackend``; on a backend that writes to a real disk, give the graph
+#: governed tools instead (``h.tools``).
+STATE_TOOLS: Final = frozenset(
+    {"write_todos", "read_result", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+)
+
+
+class GovernTools(AgentMiddleware):
+    """The framework's own tools of a ``create_agent`` or Deep Agents graph — those not built
+    with ``h.tools`` — run as the harness's are (``h.governance_middleware()``; ``ReAct`` has
+    it): governance decides each call (the catalog's risk, else the tool's declared one in its
+    ``metadata["side_effects"]``, else its MCP-style annotations, else ``write``: announced),
+    a person approves when it asks, and the call is journaled (a resume does not run it again),
+    timed and traced. The harness's tools and the graph's state tools (:data:`STATE_TOOLS`)
+    are let through as they are."""
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        runtime = current()
+        call = request.tool_call
+        own = request.tool
+        if (
+            runtime is None
+            or own is None
+            or call["name"] in runtime.toolbox
+            or call["name"] in STATE_TOOLS
+        ):
+            return await handler(request)
+
+        async def run(args: dict[str, Any]) -> Any:
+            done = await handler(request.override(tool_call={**call, "args": args}))
+            if isinstance(done, ToolMessage) and done.status == "error":
+                raise ToolError(text_of(done.content), source="tools")
+            return text_of(getattr(done, "content", done))
+
+        spec = ToolSpec(
+            name=call["name"],
+            description=own.description or call["name"],
+            input_schema=_schema_of(own),
+            side_effects=side_effects_of(own.metadata),
+        )
+        outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
+        return ToolMessage(
+            content=text_of(outcome.output),
+            tool_call_id=str(call["id"]),
+            name=call["name"],
+            status="error" if outcome.status in FAILED else "success",
+        )
+
+
+def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
+    """A framework tool's risk as it declares it: ``side_effects`` (``read``, ``write``,
+    ``irreversible``), else MCP-style annotations (``readOnlyHint``: read, ``destructiveHint``:
+    irreversible), else ``write``."""
+    found = dict(metadata or {})
+    declared = found.get("side_effects")
+    if declared in ("read", "write", "irreversible"):
+        return str(declared)
+    hints = found.get("annotations") or {}
+    if isinstance(hints, Mapping) and hints.get("readOnlyHint"):
+        return "read"
+    if isinstance(hints, Mapping) and hints.get("destructiveHint"):
+        return "irreversible"
+    return "write"
+
+
+def _schema_of(tool: Any) -> dict[str, Any]:
+    from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: PLC0415
+
+    return dict(convert_to_openai_tool(tool)["function"].get("parameters") or {})
 
 
 class HarnessTools(AgentMiddleware):

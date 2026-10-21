@@ -148,11 +148,22 @@ suggestions.
 approval and takes the same decisions
 ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
 Such gates are LangChain's `HumanInTheLoopMiddleware`, Deep Agents' `interrupt_on` and OpenAI
-Agents' `needs_approval`. A tool the framework gates should not also be `irreversible` or under
-an `approve_when` in the harness, or each call is approved twice.
+Agents' `needs_approval`. A tool both gate is asked once: governance counts the framework's
+approval ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
 
-A framework's own tools are not harness tools, so governance does not see them. Examples are
-Deep Agents' file tools and your own `function_tool`s ([framework pages](README.md#which-target)).
-Claude Code's built-ins are the exception: the CLI asks the SDK's permission callback, and the
-harness's decides them by risk (`Bash` asks, `Write` is announced, `Read` runs)
+**A framework's own tools** — those not built with `h.tools` — are governed too:
+* an OpenAI Agents agent's `FunctionTool`s, by `h.wrap` itself, on a copy of the agent (yours is
+  not changed);
+* a `create_agent` or Deep Agents graph's tools, through `h.governance_middleware()` added when
+  the graph is built (`create_agent(..., middleware=[h.governance_middleware()])`; `ReAct` has
+  it).
+
+Each call is then decided as a harness tool's is — the catalog's risk, else the tool's declared
+one (`tool.metadata["side_effects"]`, or MCP-style `annotations`), else `write` (announced) —
+asked when governance asks, journaled (a resume does not run it again), timed and traced. The
+graph's state tools (`write_todos`, `read_result`, Deep Agents' file tools on its default
+`StateBackend`) are let through: they change only the run's own state. Deep Agents' file tools
+on a backend that writes to a real disk are not seen: give the graph governed tools instead.
+Claude Code's built-ins go through the CLI's permission callback, where the harness decides them
+by risk (`Bash` asks, `Write` is announced, `Read` runs)
 ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md#claude-codes-built-in-tools)).

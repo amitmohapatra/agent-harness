@@ -442,6 +442,17 @@ class Harness:
         message)."""
         return await self.prompts.messages(ref, **values)
 
+    def governance_middleware(self) -> Any:
+        """A LangChain middleware that runs the framework's own tools of a ``create_agent`` or
+        Deep Agents graph — those not built with :meth:`tools` — as the harness's tools are:
+        governed, approved when governance asks, journaled, timed and traced
+        (``middleware.GovernTools``). Add it when you build the graph:
+        ``create_agent(..., middleware=[h.governance_middleware()])``; ``ReAct`` has it. An
+        OpenAI Agents agent's own tools are governed by ``h.wrap`` itself, on a copy."""
+        from trellis.harness.middleware import GovernTools  # noqa: PLC0415 - the react extra
+
+        return GovernTools()
+
     async def model_headers(self, *, prompt: str | None = None) -> Mapping[str, str]:
         """The headers to give a framework's own model client pointed at the gateway
         (``AsyncOpenAI(default_headers=...)``, ``ChatOpenAI(default_headers=...)``): the

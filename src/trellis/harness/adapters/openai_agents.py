@@ -186,12 +186,16 @@ class OpenAIAgentsAdapter:
     # ------------------------------------------------------------------ internals
     @staticmethod
     def _agent(target: Any, run: Invocation) -> Any:
-        if not run.native_tools:
-            return target
+        from trellis.harness.tools.convert.openai_agents import governed
+
+        # the agent's own tools governed, on a copy (the agent you wrapped is not changed)
+        own = [governed(t) for t in target.tools]
         # a tool the agent carries already (built with h.tools: read_file, say) is not added twice
         carried = {getattr(t, "name", None) for t in target.tools}
-        added = [t for t in run.native_tools if t.name not in carried]
-        return target.clone(tools=[*target.tools, *added])
+        added = [t for t in run.native_tools or () if t.name not in carried]
+        if not added and all(a is b for a, b in zip(own, target.tools, strict=True)):
+            return target
+        return target.clone(tools=[*own, *added])
 
     @staticmethod
     async def _input(agent: Any, native_input: Any) -> Any:

@@ -143,6 +143,7 @@ def ReAct(
         automatic.ScratchFiles(window=window),
         *([ours.AnswerCheck()] if answer_check else []),
         ours.HarnessTools(),
+        ours.GovernTools(),
         ours.StallGuard(max_repeats or ours.MAX_REPEATS),
         ours.StepLimit(max_steps or ours.MAX_STEPS),
         automatic.Budgeted(),

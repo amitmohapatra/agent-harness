@@ -95,6 +95,17 @@ LangChain tools (`framework="langgraph"` or `"deepagents"`), `FunctionTool`s
 these Virtual MCPs) and the memory tools; `without=` leaves features' tools out
 ([tools.md](tools.md#tools-built-into-the-agent-htools)).
 
+### h.governance_middleware
+
+```text
+h.governance_middleware() -> AgentMiddleware
+```
+
+A LangChain middleware that runs a `create_agent` or Deep Agents graph's own tools (those not
+built with `h.tools`) as harness tools are: governed, asked when governance asks, journaled,
+timed and traced ([governance.md](governance.md)). Add it when you build the graph; `ReAct` has
+it. An OpenAI Agents agent's own tools need nothing: `h.wrap` governs them on a copy.
+
 ### h.prompt, h.prompt_messages, h.model_headers
 
 ```text
