@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
 from trellis.contracts import Feedback, ToolSpec
+from trellis.harness.bounded import LRUSet
 from trellis.memory import MemoryContext
 from trellis.memory.models import SideEffects
 
@@ -40,6 +41,10 @@ GOVERNANCE_TTL_SECONDS: Final = 30.0
 #: How long rules read earlier still stand while the catalog cannot be read; past it (or with
 #: none read) every tool that does more than read asks.
 GOVERNANCE_STALE_SECONDS: Final = 300.0
+#: The tools whose rules are kept fresh (the most recently asked about), and the published
+#: entries remembered as stored (the most recent): bounds, not limits on the toolbox.
+NAMES_KEPT: Final = 4096
+PUBLISHED_KEPT: Final = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,8 +125,8 @@ class Rules:
     def __init__(self, catalog: Catalog) -> None:
         self._catalog = catalog
         self._lock = asyncio.Lock()
-        #: the tools asked about, in the order they were first asked about
-        self._names: dict[str, None] = {}
+        #: the tools asked about, the least recently asked forgotten past the bound
+        self._names: LRUSet[str] = LRUSet(maxsize=NAMES_KEPT)
         #: the catalog's word on them (``None``: unread), and when and under which ETag
         self._rules: dict[str, Rule] | None = None
         self._etag: str | None = None
@@ -135,8 +140,9 @@ class Rules:
         async with self._lock:
             now = _now()
             new = [n for n in names if n not in self._names]
+            for name in names:
+                self._names.add(name)
             if new:
-                self._names.update(dict.fromkeys(new))
                 self._etag = None  # other names: the next read is a full one
                 self._asked_at = 0.0
             if self._names and now - self._asked_at > GOVERNANCE_TTL_SECONDS:
@@ -173,13 +179,14 @@ class Published:
     """What this process has stored in one tenant's catalog (by content digest), and what is
     on its way there."""
 
-    done: set[str] = field(default_factory=set)
+    #: stored, the least recently stored forgotten past the bound (then sent again: the
+    #: catalog's upsert is idempotent)
+    done: LRUSet[str] = field(default_factory=lambda: LRUSet(maxsize=PUBLISHED_KEPT))
     pending: set[str] = field(default_factory=set)
 
     def fresh(self, entries: Sequence[dict[str, object]]) -> list[dict[str, object]]:
         """The entries neither stored nor on their way."""
-        sent = self.done | self.pending
-        return [e for e in entries if digest(e) not in sent]
+        return [e for e in entries if (d := digest(e)) not in self.done and d not in self.pending]
 
 
 def digest(entry: Mapping[str, object]) -> str:
