@@ -1125,10 +1125,16 @@ class RunHandle:
         return await self.agent.cancel(self.run_id, reason=reason, tenant=self.tenant)
 
     async def result(self, *, timeout: float | None = None) -> Result:  # noqa: ASYNC109
-        """Wait until the run pauses or ends (a worker must be running it)."""
+        """Wait until the run pauses or ends (a worker must be running it). A poll the run
+        store refuses for the tenant's request budget (429) waits what it says, then polls
+        again."""
         async with asyncio.timeout(timeout):
             while True:
-                record = await self.status()
+                try:
+                    record = await self.status()
+                except RateLimitedError as exc:
+                    await asyncio.sleep(exc.retry_after or POLL_SECONDS * 4)
+                    continue
                 if record.status is RunStatus.PAUSED or record.final:
                     return Result.of(record)
                 await asyncio.sleep(POLL_SECONDS)

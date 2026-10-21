@@ -417,3 +417,44 @@ def test_a_worker_logs_json_lines_unless_a_terminal_reads_them() -> None:
         logs.configure(stream)
         assert type(root.handlers[0].formatter or logging.Formatter()) is formatter
     root.handlers[:] = kept
+
+
+class SlowToAnswer(LocalRuns):
+    """agent-runs refusing the first polls of a run's status for the tenant's budget."""
+
+    def __init__(self, refusals: list[float | None]) -> None:
+        super().__init__()
+        self.refusals = refusals
+
+    async def get(self, run_id: str, *, tenant: str | None = None) -> Any:
+        if self.refusals:
+            raise RateLimitedError(
+                "budget spent", code="RATE_LIMIT", status=429, retry_after=self.refusals.pop(0)
+            )
+        return await super().get(run_id, tenant=tenant)
+
+
+async def test_waiting_for_a_result_waits_out_a_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trellis.harness import agent as agent_module
+
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(agent_module.asyncio, "sleep", sleep)
+
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    runs = SlowToAnswer([])
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = h.wrap(echo, id="echo")
+        handle = await agent.start("o", user="ada")
+        assert await h.worker([agent]).run_once()
+        runs.refusals = [0.25, None]
+        result = await handle.result(timeout=5)
+    assert result.status is RunStatus.SUCCESS and result.answer == "o"
+    assert slept[:2] == [0.25, agent_module.POLL_SECONDS * 4]  # as asked, else a while

@@ -49,6 +49,8 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Fixed
 
+- `handle.result()` waits out agent-runs' request budget (429, its `Retry-After`) and polls
+  again, instead of failing the wait.
 - Every piece of the harness's own client-side state is bounded, so a long-lived process
   serving many tenants, tools and threads does not grow: governance and toolboxes per tenant,
   the catalog rules kept fresh and the published-once set (4,096 each), prompts and skills
@@ -68,6 +70,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- `make bench-load` measures the production path too (`--queued MINUTES`): runs queued in
+  agent-runs, claimed by worker processes, with the memory service on or as the key registry
+  only, each process's resident memory slope reported (the harness workers, the memory API
+  and worker, agent-runs, its ticker).
 - The deprecated `TRELLIS_GROUNDING_SAMPLE` and `TRELLIS_JUDGE_SAMPLE` (and the matching
   `Settings` fields) are read as `TRELLIS_EVAL_SAMPLE` taking the larger of the two, so setting
   one to 0 no longer turns the other off; turn one part off with `without={"grounding"}` or
