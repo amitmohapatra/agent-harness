@@ -7,6 +7,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- `ReAct` detects a named model's context window — the model's profile, the gateway's model
+  listing (or the `n_ctx` a llama.cpp server reports through it), a sourced table of known
+  models, else 128k said once — and scales every threshold by it; it asks a vendor's model
+  through the vendor's own API on the gateway when the gateway serves it (`ChatAnthropic`,
+  OpenAI's Responses API; `native_client`), and sets each step's reasoning effort on a model
+  that takes one (`effort`, `ReAct(effort=)`). The cost benchmark records the window it used.
+
 - Tool search: a catalogue of 20 tools or more that the tool hints did not narrow is narrowed
   to the tools the task is about — BM25 over every tool's definition, parameters included,
   plus the tools the task names — for `ReAct`, graphs built with `h.tools`, OpenAI Agents and

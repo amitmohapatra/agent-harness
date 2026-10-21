@@ -45,9 +45,10 @@ from langchain_core.runnables import RunnableLambda
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from trellis.contracts import ToolStatus
+from trellis.contracts import ConfigurationError, ToolStatus
+from trellis.harness import models
 from trellis.harness.features import Feature
-from trellis.harness.middleware import _named
+from trellis.harness.middleware import ANSWER_CHECK, WRITE_CHECK, _named
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge, search
 from trellis.harness.tools.convert import text_of
@@ -83,6 +84,8 @@ MAX_HELPERS: Final = 4
 MAX_FILE_CHARS: Final = 100_000
 MAX_RUN_CHARS: Final = 1_000_000
 RESERVED: Final = ("/large_tool_results/", "/conversation_history/")
+#: How the checks ``AnswerCheck`` asks begin (a check is a deciding step).
+_CHECKS: Final = (ANSWER_CHECK.split(".")[0], WRITE_CHECK.split("{")[0])
 #: What a call of a feature the run is without reads.
 NOT_AVAILABLE: Final = "{tool} is not available in this run"
 
@@ -146,6 +149,67 @@ def refused(call: dict[str, Any]) -> ToolMessage:
         name=call["name"],
         status="error",
     )
+
+
+# --------------------------------------------------------------------------- the model
+class NativeClient(AgentMiddleware):
+    """A model named by its vendor's name asked through the vendor's own API on the gateway
+    (``native_client``: ``ChatAnthropic`` on the gateway's Anthropic endpoint, ``ChatOpenAI`` on
+    its Responses API), not the generic chat completions the graph was built with: the
+    vendor's caching, effort and tool search then work. Without it, the generic client."""
+
+    def __init__(self, native: Any) -> None:
+        super().__init__()
+        self.native = native
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        if on("native_client"):
+            return await handler(request.override(model=self.native))
+        return await handler(request)
+
+
+#: The effort of a routine step, and of a step that decides more (``effort``).
+ROUTINE: Final = "low"
+DECIDING: Final = "high"
+
+
+class Effort(AgentMiddleware):
+    """How hard a model that reasons thinks, per step (``effort``): :data:`DECIDING` for the
+    steps that decide the run — its first call (the plan), the step after a tool failed, a
+    check of an answer or of a change before it is made — :data:`ROUTINE` for the others.
+    ``level`` fixes it for every step. A model that takes no effort is sent none (a local
+    model: nothing changes); a level it does not take is the nearest it does."""
+
+    def __init__(self, level: str | None = None) -> None:
+        super().__init__()
+        if level is not None and level not in models.EFFORTS:
+            raise ConfigurationError(f"effort is one of {', '.join(models.EFFORTS)}")
+        self.level = level
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        levels = models.effort_levels(request.model)
+        if not levels or not on("effort"):
+            return await handler(request)
+        level = models.nearest(self.level or step_effort(request), levels)
+        settings = {**request.model_settings, "reasoning_effort": level}
+        return await handler(request.override(model_settings=settings))
+
+
+def step_effort(request: ModelRequest[Any]) -> str:
+    """:data:`DECIDING` for the run's first call, the step after a failed tool call, and a
+    check (an ``AnswerCheck`` message last); :data:`ROUTINE` otherwise."""
+    last = request.messages[-1] if request.messages else None
+    checking = isinstance(last, HumanMessage) and last.text.startswith(_CHECKS)
+    failed = isinstance(last, ToolMessage) and last.status == "error"
+    return DECIDING if checking or failed or calls_made(request) == 0 else ROUTINE
 
 
 # --------------------------------------------------------------------------- tool search

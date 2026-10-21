@@ -30,13 +30,17 @@ the loop is the harness's. What it is built with:
   named as a default one (``SummarizationMiddleware``, ``FilesystemMiddleware``...) replaces it.
 
 A model name is a model of the gateway (``BIFROST_URL``, the virtual key
-``BIFROST_VIRTUAL_KEY``), asked through ``ChatOpenAI`` with the gateway's deny-all MCP scope;
-any LangChain chat model is used as it is. The context window is ``context_window``, else the
-model's profile, else :data:`CONTEXT_WINDOW`.
+``BIFROST_VIRTUAL_KEY``), asked through ``ChatOpenAI`` with the gateway's deny-all MCP scope —
+or, for a vendor's model whose own API the gateway serves, through that API (``ChatAnthropic``,
+OpenAI's Responses API; ``native_client``); any LangChain chat model is used as it is. The
+context window is ``context_window``, else the model's profile, else the gateway's model
+listing, else the table of known models, else :data:`CONTEXT_WINDOW` (``models.window_of``).
 """
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
@@ -44,12 +48,15 @@ from bifrost_sdk import NO_GATEWAY_TOOLS
 from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError
+from trellis.harness import models
 from trellis.harness.adapters.base import MODEL_METADATA, WINDOW_METADATA, context_window
 from trellis.harness.prompts import Prompt
 from trellis.harness.settings import Settings
 
-#: The window assumed when neither ``context_window`` nor the model says, in tokens.
-CONTEXT_WINDOW: Final = 128_000
+log = logging.getLogger("trellis.models")
+
+#: The window assumed when nothing says, in tokens (``models.window_of``).
+CONTEXT_WINDOW: Final = models.DEFAULT_WINDOW
 #: The share of the window past which older tool results are cleared from the request, the
 #: last :data:`KEEP_RESULTS` kept, and the share a clearing frees at least (the cached prompt
 #: breaks only when it pays).
@@ -83,6 +90,7 @@ def ReAct(
     tool_guidance: bool = False,
     answer_check: bool = False,
     capabilities: Mapping[str, bool] | None = None,
+    effort: str | None = None,
 ) -> Any:
     """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name,
     or a LangChain chat model), its answer an ``output`` model when given. ``max_steps`` model
@@ -98,7 +106,8 @@ def ReAct(
     still needed, and the first change against the rules before it is made
     (:class:`~.AnswerCheck`: one more model call each); ``capabilities`` tells the model what
     it can and cannot do beyond its tools (``{"accept an image upload": False}``), so it
-    answers such a question plainly."""
+    answers such a question plainly. ``effort`` fixes the reasoning effort of every step of a
+    model that takes one (else each step's own, :class:`~.automatic.Effort`)."""
     try:
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
@@ -115,11 +124,16 @@ def ReAct(
         raise ConfigurationError("model_timeout is a number of seconds over 0")
     if context_window is not None and context_window <= 0:
         raise ConfigurationError("context_window is a number of tokens over 0")
-    known = context_window or _window(model)
-    window = known or CONTEXT_WINDOW
+    named = model if isinstance(model, str) else None
+    detected = _detected(named, given=context_window, profile=_window(model))
+    window = detected.tokens
+    known = None if detected.source == "default" else window
     chat = _gateway_model(model, timeout=model_timeout, window=window)
+    native = _native_model(named, timeout=model_timeout, window=window) if named else None
     backend = automatic.JournalBackend()
     defaults = [
+        # the vendor's own API, when the gateway serves it, for every call (outermost)
+        *([automatic.NativeClient(native)] if native is not None else []),
         automatic.JournalFiles(backend, tools=["read_file", *sorted(automatic.SCRATCH)]),
         # what the model is offered, decided before anything reads the request's tools: the
         # tools the task is about, and what a long task needs
@@ -154,6 +168,7 @@ def ReAct(
             if tool_guidance or capabilities
             else []
         ),
+        automatic.Effort(effort),
         ours.ModelHooks(timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars),
     ]
     graph = create_agent(
@@ -165,7 +180,6 @@ def ReAct(
         checkpointer=checkpointer or ours.RunCheckpointer(),
         name="react",
     )
-    named = model if isinstance(model, str) else None
     # what the harness reads of the graph: the judge's fallback model, the window when known
     # (the pushed memory context's budget is a share of it)
     return graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: known})
@@ -188,6 +202,76 @@ def stacked(defaults: Sequence[Any], given: Sequence[Any]) -> list[Any]:
 
 def _window(model: Any) -> int | None:
     return None if isinstance(model, str) else context_window(model)
+
+
+def _detected(name: str | None, *, given: int | None, profile: int | None) -> models.Window:
+    """The model's window (``models.window_of``): the gateway asked for a model name."""
+    settings = Settings.from_env() if name is not None else None
+    return models.window_of(
+        name,
+        given=given,
+        profile=profile,
+        base_url=settings.bifrost_url if settings is not None else None,
+        key=settings.bifrost_virtual_key if settings is not None else None,
+    )
+
+
+def detected_window(model: Any, context_window: int | None = None) -> models.Window:
+    """The context window ``ReAct(model, context_window=)`` builds with, and what said so
+    (``given``, ``profile``, ``gateway``, ``server``, ``table``, ``default``)."""
+    named = model if isinstance(model, str) else None
+    return _detected(named, given=context_window, profile=_window(model))
+
+
+def _native_model(name: str, *, timeout: float | None, window: int) -> Any | None:
+    """The vendor's own client for a vendor's model name, on the gateway's endpoint for that
+    vendor's API — ``ChatAnthropic`` on its Anthropic endpoint, ``ChatOpenAI`` on its Responses
+    API — when the gateway serves it (``models.serves``); ``None`` otherwise (the generic
+    client is used, as for any other name; said once in the log)."""
+    vendor = models.vendor_of(name)
+    settings = Settings.from_env()
+    if vendor is None or settings.bifrost_url is None:
+        return None
+    key = settings.bifrost_virtual_key or NO_KEY
+    if not models.serves(settings.bifrost_url, key, vendor):
+        _generic(name, vendor)
+        return None
+    common: dict[str, Any] = {
+        "default_headers": dict(NO_GATEWAY_TOOLS),
+        "timeout": timeout,
+        "max_retries": MODEL_RETRIES,
+        "profile": {"max_input_tokens": window},
+    }
+    if vendor == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        root = settings.bifrost_url.rstrip("/").removesuffix("/v1")
+        return ChatAnthropic(
+            model_name=models.bare(name),
+            base_url=f"{root}/anthropic",
+            api_key=key,  # type: ignore[arg-type]
+            stream_usage=True,
+            **common,
+        )
+    import openai
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=name,
+        base_url=settings.bifrost_url,
+        api_key=key,  # type: ignore[arg-type]
+        use_responses_api=True,
+        stream_usage=True,
+        http_async_client=openai.DefaultAsyncHttpxClient(),
+        **common,
+    )
+
+
+@functools.cache
+def _generic(name: str, vendor: str) -> None:
+    log.info(
+        "%s: the gateway does not serve %s's own API; the generic client is used", name, vendor
+    )
 
 
 def _gateway_model(model: Any, *, timeout: float | None, window: int) -> Any:
@@ -217,9 +301,9 @@ def _gateway_model(model: Any, *, timeout: float | None, window: int) -> Any:
 
 
 def _profiled(model: Any, window: int) -> Any:
-    """The model, its profile naming the window (what the summarization's thresholds are
-    shares of): a copy, when the model does not say."""
+    """The model, its profile naming the window ReAct detected (what the summarization's
+    thresholds are shares of): a copy, when the model says otherwise or nothing."""
     profile = getattr(model, "profile", None)
-    if isinstance(profile, dict) and isinstance(profile.get("max_input_tokens"), int):
+    if isinstance(profile, dict) and profile.get("max_input_tokens") == window:
         return model
     return model.model_copy(update={"profile": {**(profile or {}), "max_input_tokens": window}})

@@ -31,6 +31,9 @@ Feature = Literal[
     "subagent_task",
     # a large catalogue narrowed to the tools the task is about (``tools.search``)
     "tool_search",
+    # the vendor's own API for a vendor's model, and the effort of each step
+    "native_client",
+    "effort",
 ]
 #: The features a name turns off together: ``memory`` is its push, its pull and the records;
 #: ``mcp`` the MCP tools and Code Mode, whose scripts reach them.

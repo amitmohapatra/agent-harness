@@ -46,20 +46,31 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 ```text
 ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None)
+      tool_guidance=False, answer_check=False, capabilities=None, effort=None)
 ```
 
 * `model` — a Bifrost model name: a `ChatOpenAI` on `BIFROST_URL` (needed when `ReAct` is
   called) with the agent's virtual key (`BIFROST_VIRTUAL_KEY`), the gateway's deny-all MCP
   scope (the harness gives the tools), `timeout=model_timeout`, 2 retries of its own and the
-  window as its profile. Or any LangChain chat model, used as it is.
+  window as its profile. A vendor's model (`anthropic/...`, `openai/...`) is asked through the
+  vendor's own API on the gateway when the gateway serves it — `ChatAnthropic` on its
+  Anthropic endpoint, `ChatOpenAI` on its Responses API — so the vendor's caching, effort and
+  tool search work (`native_client`; an empty request probes the endpoint once: nothing is
+  generated); otherwise the `ChatOpenAI` above, said once in the log. Or any LangChain chat
+  model, used as it is (never replaced).
 * `output` — a Pydantic model the answer is parsed into (LangChain's `response_format`: the
   provider's structured output when LangChain knows the model has it, else a tool the model
   answers with).
 * `model_timeout` — the most one model call may take, in seconds, its client's retries
   included; within what is left of the run's `timeout=`/`deadline=`.
-* `context_window` — the model's window in tokens, when its profile does not say
-  (`max_input_tokens`) and the 128k assumed is wrong for it.
+* `context_window` — the model's window in tokens. Unset, it is detected: the model object's
+  profile (`max_input_tokens`); for a model name, the gateway's model listing (a listed
+  `max_input_tokens`, `context_window` or `context_length`, or the `n_ctx` an OpenAI-compatible
+  llama.cpp server reports through it), then the table of known models
+  (`trellis.harness.models.WINDOWS`, sourced and dated), else 128k, said once in the log. Every
+  threshold below is a share of it.
+* `effort` — the reasoning effort of every step of a model that takes one; unset, each step's
+  own (`effort`, below).
 * `prompt` — a prompt (`"triage"`, `"triage@3"`, a `Prompt`) from the prompt sources — code,
   `PROMPTS_DIR`, Langfuse, the gateway ([prompts.md](../prompts.md)) — looked up at the run's
   start and pinned for it (a resume reads the same one): a stored prompt of the gateway's is
@@ -102,6 +113,14 @@ answers that it is not available):
 
 A `TodoListMiddleware`, `FilesystemMiddleware` or `SubAgentMiddleware` given to
 `ReAct(middleware=)` replaces the automatic one (it is then always on).
+
+**Automatic for every task**, each off with `without=`:
+
+| What (`without=` name) | What it does |
+|---|---|
+| tool search, `tool_search` | 20 tools or more, or definitions over 40% of the window, narrowed to the tools the task is about, searched again at every step ([tools.md](../tools.md#tool-search)) |
+| the vendor's own API, `native_client` | a vendor's model named by name asked through its own API on the gateway (above) |
+| effort, `effort` | a model that reasons (its LangChain profile lists effort levels, or `trellis.harness.models.EFFORT_LEVELS`) thinks hard on the steps that decide the run — its first call, the step after a tool failed, an `AnswerCheck` check — and little on the others; `effort=` fixes it. A model that takes no effort (a local one) is sent none |
 
 **The harness's** (`trellis.harness.middleware`) — only what the native middleware does not do:
 
