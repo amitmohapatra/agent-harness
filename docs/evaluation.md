@@ -326,3 +326,27 @@ experiment attributes those of its Python SDK (`langfuse/_client/attributes.py`,
 `propagation.py`). Evaluation works on Langfuse v3 (Cloud and self-hosted), through the dataset
 run link, and on v4, through the spans' experiment attributes — the harness sends both, as the
 SDK does.
+
+## Cost benchmark
+
+`make bench-cost` (`python -m benchmark.cost`) measures what a `ReAct` agent costs and how
+well it chooses its tools as its tool catalogue grows, against whatever model the environment
+configures (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, a gateway model name), so a cost feature's
+saving is a measured number before it is switched on by default.
+
+```bash
+make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
+# a local model with a small window: --window 8192; one size, one set: --sizes 50 --sets travel
+```
+
+| | |
+|---|---|
+| Tasks | ten, from the tool-choice sets the live suite uses — the store set ([`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py)) and the held-out help desk and travel sets (`tests/live/heldout.py`): six short (two parts, a change behind approval, a read that sounds like a change), three long (four and five parts, each served by its own tool) and a large result — a help desk export of about 100,000 characters, past what `ReAct` pages. The report gives every figure for all of them and by length |
+| Catalogues | 10, 50, 100 and 500 tools (`--sizes`): each set's own tools, then distractors — 500 synthetic but realistic MCP-style tools (`<server>-<tool>`) of 25 servers (code hosting, CRM, billing, HR, monitoring, DNS...), list / get / create / update / delete of four kinds of record each, every one described and with a typed, described JSON schema; none is about the tasks' domains. The order is fixed, so a run is reproducible |
+| Variants | `baseline`: plain tools, everything off (`create_agent` with only what runs the harness's tools and bounds the loop; `without={"code_mode", "hints"}`). `main`: `ReAct` as it is built — result paging, context editing, summarization, `ToolGuidance` off, Code Mode where it applies (gateway MCP servers; the catalogues here are the agent's own tools, so it does not). `main-paging`, `main-context_editing`, `main-summarization`: `main` with that one piece off. A new feature is one more entry of `benchmark/cost/variants.py`, measured against these (`--variants`) |
+| Per run | input, output and cached tokens (as the model reports them), model calls (every chat model call of the run, a summarization's included), wall time, `tool_coverage` (the share of the task's needed tools called; for a run that ended in an error, from the calls it made) and task success (every needed tool called, no broader one, every other check of the task passed — `contains`, `picks`) |
+| Cost | `benchmark/cost/prices.py`: dollars per million tokens, cached input and cache writes priced apart, each price with its source and the date it was read. A model not in the table is reported with its tokens and no dollars; `--price-as` prices the same tokens at listed models' rates as well (an estimate: their tokenizers count differently) |
+| Report | `build/bench-cost.json` (every run, each cell's means and 95% intervals — Student's t over the runs) and `build/bench-cost.md` (the table), written after every cell |
+
+Memory is off (the tool hints, which narrow a run from five tools, need the memory service),
+and so are the run store and tracing: the benchmark reads and writes no service's data.

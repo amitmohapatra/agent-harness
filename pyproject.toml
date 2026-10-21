@@ -114,11 +114,15 @@ select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PL", "RUF", "ASYNC", "T20"]
 ignore = ["PLR0913", "PLR2004", "B008"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["trellis"]
+known-first-party = ["trellis", "benchmark"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004", "T20", "PLC0415", "E501", "PLR0915"]
 "examples/**" = ["T20", "PLC0415"]
+# the cost benchmark imports the react extra when it builds a variant
+"benchmark/**" = ["PLC0415"]
+# the distractor servers' table, one kind of record a line
+"benchmark/cost/catalog.py" = ["E501"]
 # Adapters import their framework on first use, never at module import.
 "src/trellis/harness/adapters/**" = ["PLC0415"]
 "src/trellis/harness/tools/convert/**" = ["PLC0415"]
@@ -131,7 +135,7 @@ known-first-party = ["trellis"]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"
-include = ["src", "tests", "examples"]
+include = ["src", "tests", "examples", "benchmark"]
 exclude = ["**/__pycache__", "**/.venv", ".claude"]
 typeCheckingMode = "standard"
 # ``trellis`` is a pkgutil-style package (it extends ``__path__``) and pyright does not follow

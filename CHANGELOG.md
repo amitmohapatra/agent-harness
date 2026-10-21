@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## Unreleased
 
+### Added
+
+- `make bench-cost` (`python -m benchmark.cost`): the cost and accuracy of a `ReAct` agent over
+  tool catalogues of 10, 50, 100 and 500 tools, against whatever model is configured — input,
+  output and cached tokens, model calls, wall time, `tool_coverage` and task success per run,
+  dollars from a price table with sources (`benchmark/cost/prices.py`), means and 95%
+  intervals per variant as JSON and markdown ([evaluation.md](docs/evaluation.md#cost-benchmark)).
+
 ### Changed
 
 - A function tool's description is its docstring without the sections (`Args:`, `Returns:`,

@@ -34,6 +34,10 @@ test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, R
 bench:  ## Harness overhead vs the committed baseline (writes build/benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s
 
+.PHONY: bench-cost
+bench-cost:  ## Cost and accuracy of ReAct over 10-500 tools per variant (BIFROST_URL, a model; BENCH_ARGS)
+	$(PY) -m benchmark.cost $(BENCH_ARGS)
+
 .PHONY: matrix
 matrix:  ## The generated feature matrix (feature x adapter x way x mode x selection), sharded, and its report (build/matrix.md)
 	@mkdir -p build && rm -f build/matrix-*.xml build/matrix-*.log
