@@ -441,7 +441,8 @@ def model_span(
     model: str, messages: Any, *, extra: Mapping[str, Any] | None = None
 ) -> Iterator[trace.Span]:
     """A model call's ``chat`` span; ``extra`` attributes say more about the request (the
-    stored prompt it selects)."""
+    stored prompt it selects). ``messages`` may be a function making them: called only when
+    the span records."""
     with _tracer.start_as_current_span(f"chat {model}", kind=trace.SpanKind.CLIENT) as current:
         if current.is_recording():
             attributes = {
@@ -449,7 +450,7 @@ def model_span(
                 "gen_ai.provider.name": model.split("/", 1)[0] if "/" in model else "bifrost",
                 "gen_ai.request.model": model,
                 "langfuse.observation.type": "generation",
-                "langfuse.observation.input": _text(messages),
+                "langfuse.observation.input": _text(messages() if callable(messages) else messages),
                 **(extra or {}),
             }
             current.set_attributes(redact_attributes(attributes))
