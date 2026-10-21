@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import logging
 import operator
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any, Final, NotRequired
 
@@ -61,6 +60,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from trellis.harness.automatic import SCRATCH, on, without_tools
+from trellis.harness.bounded import LRU
 from trellis.harness.middleware import THINK, _named, _writes_offered
 from trellis.harness.telemetry import LoopEvent, metrics
 from trellis.harness.tools.base import FIX_ARGUMENTS, arguments_problem
@@ -84,8 +84,7 @@ class CalibratedCounter:
     and kept for the next calls: at most :data:`TOOLSETS` sets."""
 
     def __init__(self, toolsets: int = TOOLSETS) -> None:
-        self.toolsets = toolsets
-        self._texts: OrderedDict[tuple[str, ...], SystemMessage] = OrderedDict()
+        self._texts: LRU[tuple[str, ...], SystemMessage] = LRU(toolsets)
 
     def __call__(
         self,
@@ -102,16 +101,10 @@ class CalibratedCounter:
     def _definitions(self, tools: Tools) -> SystemMessage:
         """The tool set's definitions as one message (kept: a tool set is keyed by its tools'
         names, in the order sent)."""
-        key = tuple(_named(t) for t in tools)
-        found = self._texts.get(key)
-        if found is None:
-            text = json.dumps([convert_to_openai_tool(t) for t in tools])
-            found = self._texts[key] = SystemMessage(content=text)
-            if len(self._texts) > self.toolsets:
-                self._texts.popitem(last=False)
-        else:
-            self._texts.move_to_end(key)
-        return found
+        return self._texts.setdefault(
+            tuple(_named(t) for t in tools),
+            lambda: SystemMessage(content=json.dumps([convert_to_openai_tool(t) for t in tools])),
+        )
 
 
 class _Editing(ContextEditingMiddleware):

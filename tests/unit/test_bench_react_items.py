@@ -106,6 +106,7 @@ def test_the_answer_tools_calls_are_counted() -> None:
 def test_the_loop_events_are_counted_while_open_and_the_counter_restored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    own = vars(telemetry.metrics).get("loop")
     with counters.loop_counts() as loop:
         before = loop.now()
         telemetry.metrics.loop(LoopEvent.REPAIRED)
@@ -113,7 +114,7 @@ def test_the_loop_events_are_counted_while_open_and_the_counter_restored(
         telemetry.metrics.loop(LoopEvent.STRICT_ON)
         since = counters.LoopCounts.since(before, loop.now())
     assert since["repaired"] == 2 and since["strict_on"] == 1 and since["malformed_args"] == 0
-    assert "loop" not in vars(telemetry.metrics)  # the harness's own counter again
+    assert vars(telemetry.metrics).get("loop") is own  # the counter as it was
     seen: list[LoopEvent] = []
     monkeypatch.setattr(telemetry.metrics, "loop", seen.append)
     with counters.loop_counts() as loop:
