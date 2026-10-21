@@ -1,0 +1,66 @@
+name: bench
+
+# The cost benchmark's gate against benchmark/cost/results/baseline-local.json. It needs a
+# model behind a gateway, so it runs only where one is configured: the repository variable
+# BENCH_BIFROST_URL (and the secret BENCH_BIFROST_VIRTUAL_KEY) naming a gateway serving the
+# baseline's model. On a pull request: the smoke set (10 tools, one repeat). Nightly: the
+# 10- and 50-tool catalogues, two repeats. Without the variable the job is skipped.
+on:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  gate:
+    if: ${{ vars.BENCH_BIFROST_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        working-directory: agent-harness
+    env:
+      BIFROST_URL: ${{ vars.BENCH_BIFROST_URL }}
+      BIFROST_VIRTUAL_KEY: ${{ secrets.BENCH_BIFROST_VIRTUAL_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: agent-harness
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-contracts
+          path: agent-contracts
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/bifrost-sdk
+          path: bifrost-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-memory-service
+          path: agent-memory-service
+      - uses: actions/checkout@v4
+        with:
+          repository: amitmohapatra/agent-runs
+          path: agent-runs
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: agent-harness/uv.lock
+      - name: Install
+        run: uv sync --all-extras
+      - name: Smoke set
+        if: github.event_name == 'pull_request'
+        run: make bench-cost BENCH_ARGS="--model granite/granite-3.3-2b --window 8192 --sizes 10 --repeats 1"
+      - name: Nightly set
+        if: github.event_name != 'pull_request'
+        run: make bench-cost BENCH_ARGS="--model granite/granite-3.3-2b --window 8192 --sizes 10,50 --repeats 2"
+      - name: Gate
+        run: make bench-gate
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-cost
+          path: |
+            agent-harness/build/bench-cost.json
+            agent-harness/build/bench-cost.md

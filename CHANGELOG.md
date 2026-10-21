@@ -56,6 +56,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- The cost benchmark records each model call's seconds (p50 and p95 per cell) and the CPU
+  seconds per run of its own process and of each `--watch name=pid` one (the model server, the
+  gateway), with their peak memory. `make bench-gate` checks a report against the stored
+  baseline (non-inferiority: success within 0.15, input tokens within 10%), run by
+  `.github/workflows/bench.yml` where a gateway is configured; `make bench-load` measures many
+  runs at once on one and two worker processes and checks for a memory leak.
 - The retry loops (read-only tool retries, background memory writes, A2A push
   notifications) run on `tenacity`, now a direct dependency; the attempts, waits and
   `Retry-After` handling are unchanged.

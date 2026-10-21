@@ -8,7 +8,9 @@ Writes ``<out>.json`` (every run, and each cell's means and 95% intervals) and `
 (the table). The model is a gateway model name (``--model``, else ``TRELLIS_BENCH_MODEL``,
 else ``TRELLIS_LIVE_MODEL``); its context window is ``--window`` (a local model's ``-c``), else
 unknown — the window-scaled features then off, as ``ReAct`` does — and the report says which
-(``setup.window_source``). See ``docs/evaluation.md#cost-benchmark``.
+(``setup.window_source``). ``--watch name=pid`` (repeatable: the model server, the gateway)
+adds those processes' CPU seconds per run and peak memory to the report. See
+``docs/evaluation.md#cost-benchmark``.
 """
 
 from __future__ import annotations
@@ -27,6 +29,17 @@ from trellis.harness.react import window_of
 
 def _list(text: str) -> list[str]:
     return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def watched(pairs: list[str]) -> dict[str, int]:
+    """``name=pid`` pairs, as a mapping."""
+    found = {}
+    for pair in pairs:
+        name, _, pid = pair.partition("=")
+        if not name or not pid.isdigit():
+            raise argparse.ArgumentTypeError(f"--watch takes name=pid, not {pair!r}")
+        found[name] = int(pid)
+    return found
 
 
 def arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -50,6 +63,12 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="also price the tokens as these listed models (an estimate)",
     )
     parser.add_argument("--note", action="append", default=[], help="a note for the report")
+    parser.add_argument(
+        "--watch",
+        action="append",
+        default=[],
+        help="name=pid of another process to measure (its CPU seconds and peak memory)",
+    )
     parser.add_argument("--out", default="build/bench-cost")
     parser.add_argument(
         "--resume",
@@ -62,6 +81,10 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     unknown = [v for v in _list(args.variants) if v not in VARIANTS]
     if unknown:
         parser.error(f"unknown variants {unknown}: the variants are {', '.join(VARIANTS)}")
+    try:
+        args.watch = watched(args.watch)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
     unpriced = [m for m in _list(args.price_as) if m not in prices.PRICES]
     if unpriced:
         parser.error(f"no price for {unpriced}: the table has {', '.join(prices.PRICES)}")
@@ -99,6 +122,7 @@ async def bench(args: argparse.Namespace) -> dict:
             setup=setup,
             priced_as=_list(args.price_as),
             notes=args.note,
+            watch=args.watch,
         )
         report["setup"]["window_source"] = source
         out.with_suffix(".json").write_text(json.dumps(report, indent=2, default=str))
@@ -123,6 +147,7 @@ async def bench(args: argparse.Namespace) -> dict:
                     run_seconds=args.timeout,
                     done=done,
                     on_row=kept,
+                    watch=args.watch,
                 )
     return written()
 

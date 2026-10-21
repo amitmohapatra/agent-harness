@@ -38,6 +38,14 @@ bench:  ## Harness overhead vs the committed baseline (writes build/benchmark-re
 bench-cost:  ## Cost and accuracy of ReAct over 10-500 tools per variant (BIFROST_URL, a model; BENCH_ARGS)
 	$(PY) -m benchmark.cost $(BENCH_ARGS)
 
+.PHONY: bench-gate
+bench-gate:  ## The cost benchmark's report (build/bench-cost.json) against the stored baseline: fails a cell worse past its margin
+	$(PY) -m benchmark.cost.gate build/bench-cost.json benchmark/cost/results/baseline-local.json $(GATE_ARGS)
+
+.PHONY: bench-load
+bench-load:  ## Many runs at once on 1 and 2 worker processes: throughput, p50/p95/p99, errors, CPU and memory (LOAD_ARGS)
+	$(PY) -m benchmark.load $(LOAD_ARGS)
+
 .PHONY: matrix
 matrix:  ## The generated feature matrix (feature x adapter x way x mode x selection), sharded, and its report (build/matrix.md)
 	@mkdir -p build && rm -f build/matrix-*.xml build/matrix-*.log

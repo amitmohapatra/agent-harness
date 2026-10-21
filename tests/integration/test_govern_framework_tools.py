@@ -177,3 +177,21 @@ async def test_an_error_the_tool_itself_reports_is_an_error_outcome(harness: Har
     model = ScriptedChatModel(turns=[("picky", {"x": "1"}), "refused"])
     events = [e async for e in harness.wrap(graph(model, picky), id="g").stream("x", user="u")]
     assert results(events) == {"picky": "error"}
+
+
+async def test_the_graphs_state_tools_keep_their_state_and_are_not_tool_calls(
+    harness: Harness,
+) -> None:
+    from langchain.agents.middleware import TodoListMiddleware
+
+    todos = [{"content": "count a", "status": "in_progress"}]
+    model = ScriptedChatModel(turns=[("write_todos", {"todos": todos}), "planned"])
+    target = create_agent(  # type: ignore[call-overload]
+        model,
+        middleware=[TodoListMiddleware(), GovernTools()],  # type: ignore[list-item]
+        checkpointer=InMemorySaver(),
+    )
+    events = [e async for e in harness.wrap(target, id="g").stream("plan", user="u", thread="t")]
+    assert "write_todos" not in results(events)  # the graph's state, not a governed call
+    state = await target.aget_state({"configurable": {"thread_id": "t"}})
+    assert state.values["todos"] == todos
