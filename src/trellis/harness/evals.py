@@ -68,7 +68,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline, telemetry
 from trellis.harness.clients.bifrost import Gateway, PromptPin
-from trellis.harness.gateways import model_gateway, unserved
+from trellis.harness.gateways import OpenAICompatible, model_gateway, unserved
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.prompts import BifrostPrompts, Prompt, PromptSources
@@ -319,15 +319,15 @@ class EvalServices:
             return model
         if self.judge_gateway is not None:
             return _Named(self.judge_gateway, model)
-        gateway = model_gateway(None)  # no Bifrost: an OpenAI-compatible endpoint, if any
-        if gateway is None:
+        gateway = model_gateway(Settings())  # no Bifrost here: the OpenAI SDK's endpoint, if any
+        if not isinstance(gateway, OpenAICompatible):
             raise unserved("llm_judge")
         if model == JUDGE_ALIAS:
             raise ConfigurationError(
                 f"the judge alias {JUDGE_ALIAS!r} is Bifrost's: on the OpenAI-compatible "
                 f"gateway at {gateway.url} name the judge's model, llm_judge(model='...')"
             )
-        return _OpenAICompatible(model)
+        return gateway.judge(model)
 
     async def score(
         self,
@@ -701,18 +701,19 @@ class _Named:
 
 
 @dataclass
-class _OpenAICompatible:
-    """A model name on the OpenAI-compatible endpoint the OpenAI SDK's own variables name."""
+class OpenAICompatibleJudge:
+    """A model name on the OpenAI-compatible endpoint the OpenAI SDK's own variables name
+    (``key``: the one to send when the SDK has none, for a server that takes none)."""
 
     model: str
+    key: str | None = None
     client: Any = None
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
         if self.client is None:
             import openai  # noqa: PLC0415 - the react extra installs it
 
-            key = None if os.environ.get("OPENAI_API_KEY", "").strip() else "no-key"
-            self.client = openai.AsyncOpenAI(api_key=key)  # OPENAI_BASE_URL, OPENAI_API_KEY
+            self.client = openai.AsyncOpenAI(api_key=self.key)  # OPENAI_BASE_URL, _API_KEY
         response = await self.client.chat.completions.create(
             model=self.model, messages=messages, **body
         )

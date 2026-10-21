@@ -188,7 +188,7 @@ async def test_one_path_per_server(gw: tuple[Harness, FakeGateway]) -> None:
 
 
 def test_a_virtual_mcp_needs_the_gateway(harness: Harness) -> None:
-    with pytest.raises(ConfigurationError, match="is a Virtual MCP of the gateway"):
+    with pytest.raises(ConfigurationError, match="a Virtual MCP, needs a gateway with mcp"):
         harness.wrap(toolbox, id="v", tools=[mcp("finance-tools")])
     harness.wrap(toolbox, id="off", tools=[mcp("finance-tools")], without={"mcp"})
 

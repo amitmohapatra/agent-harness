@@ -44,7 +44,7 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.lint import lint
-from trellis.harness.tools.mcp import MCPSource
+from trellis.harness.tools.mcp import MCPSource, side_effects_of
 
 if TYPE_CHECKING:
     from bifrost_sdk import ToolDef
@@ -154,16 +154,6 @@ async def _not_auto_executed(gateway: Gateway, defs: list[ToolDef]) -> list[Tool
             continue
         kept.append(d)
     return kept
-
-
-def side_effects_of(annotations: Any) -> str:
-    """An MCP tool's side effects from its server's annotations (bifrost-sdk
-    ``ToolAnnotations``). Hints, not guarantees: the catalog has the last word."""
-    if annotations is not None and annotations.read_only_hint:
-        return "read"
-    if annotations is not None and annotations.destructive_hint:
-        return "irreversible"
-    return "write"
 
 
 class Toolbox:

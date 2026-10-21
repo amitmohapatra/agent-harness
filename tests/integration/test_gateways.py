@@ -18,9 +18,12 @@ from trellis.contracts import ConfigurationError
 from trellis.harness import doctor
 from trellis.harness.evals import EvalServices, llm_judge
 from trellis.harness.gateways import (
-    BIFROST,
-    OPENAI_COMPATIBLE,
+    BIFROST_CLIENT_RETRIES,
     OPENAI_DEFAULT_URL,
+    Bifrost,
+    Capability,
+    GatewayKind,
+    OpenAICompatible,
     missing,
     model_gateway,
 )
@@ -43,24 +46,27 @@ def _no_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_one_gateway_is_chosen_never_a_chain() -> None:
-    both = model_gateway("http://bf/v1", {"OPENAI_BASE_URL": "http://litellm/v1"})
-    assert both is not None and both.kind == "bifrost" and both.capabilities == BIFROST
-    compat = model_gateway(None, {"OPENAI_BASE_URL": "http://litellm/v1"})
+    bifrost = Settings(bifrost_url="http://bf/v1")
+    both = model_gateway(bifrost, {"OPENAI_BASE_URL": "http://litellm/v1"})
+    assert isinstance(both, Bifrost) and both.kind is GatewayKind.BIFROST
+    assert both.capabilities == frozenset(Capability) and both.probe_key == "no-key"
+    compat = model_gateway(Settings(), {"OPENAI_BASE_URL": "http://litellm/v1"})
     assert compat is not None and (compat.kind, compat.url) == (
         "openai_compatible",
         "http://litellm/v1",
     )
-    assert compat.capabilities == OPENAI_COMPATIBLE and compat.source == "OPENAI_BASE_URL"
-    openai = model_gateway(None, {"OPENAI_API_KEY": "sk"})
-    assert openai is not None and openai.url == OPENAI_DEFAULT_URL
-    assert model_gateway(None, {"OPENAI_API_KEY": " "}) is None
+    assert isinstance(compat, OpenAICompatible) and compat.source == "OPENAI_BASE_URL"
+    assert compat.capabilities == {Capability.MODELS} and compat.probe_key == "no-key"
+    openai = model_gateway(Settings(), {"OPENAI_API_KEY": "sk"})
+    assert openai is not None and openai.url == OPENAI_DEFAULT_URL and openai.probe_key == "sk"
+    assert model_gateway(Settings(), {"OPENAI_API_KEY": " "}) is None
     assert (
-        missing(None, "mcp", "mcp('x')")
+        missing(None, Capability.MCP, "mcp('x')")
         == "mcp('x') needs a gateway with mcp: Bifrost (BIFROST_URL)"
     )
-    said = missing(compat, "code_mode", "Code Mode")
-    assert said is not None and "openai-compatible gateway at http://litellm/v1 has none" in said
-    assert missing(both, "code_mode", "Code Mode") is None
+    said = missing(compat, Capability.CODE_MODE, "Code Mode")
+    assert said is not None and "OpenAI-compatible gateway at http://litellm/v1 has none" in said
+    assert missing(both, Capability.CODE_MODE, "Code Mode") is None
 
 
 def test_a_name_with_no_gateway_says_where_names_go() -> None:
@@ -78,7 +84,8 @@ async def test_a_name_on_an_openai_compatible_gateway(monkeypatch: pytest.Monkey
     )
     graph = ReAct(system="s", model="gpt-x", context_window=50_000)
     async with Harness(config=Settings()) as h:
-        assert h.model_gateway is not None and h.model_gateway.kind == "openai_compatible"
+        assert h.model_gateway is not None
+        assert h.model_gateway.kind is GatewayKind.OPENAI_COMPATIBLE
         result = await h.wrap(graph, id="compat").run("x", user="u")
     assert result.answer == "hi", result.error
     request = route.calls[0].request
@@ -89,7 +96,7 @@ async def test_a_name_on_an_openai_compatible_gateway(monkeypatch: pytest.Monkey
 
 
 def test_the_client_retries_where_no_gateway_does(monkeypatch: pytest.MonkeyPatch) -> None:
-    from trellis.harness.react import MODEL_RETRIES, _gateway_model
+    from trellis.harness.react import _gateway_model
 
     monkeypatch.setenv("OPENAI_BASE_URL", "http://litellm.test/v1")
     compat = _gateway_model("m", timeout=None, effort=None, settings=Settings())
@@ -97,7 +104,7 @@ def test_the_client_retries_where_no_gateway_does(monkeypatch: pytest.MonkeyPatc
     bifrost = _gateway_model(
         "m", timeout=None, effort=None, settings=Settings(bifrost_url="http://bf/v1")
     )
-    assert bifrost.max_retries == MODEL_RETRIES == 0  # the gateway retries
+    assert bifrost.max_retries == BIFROST_CLIENT_RETRIES == 0  # the gateway retries
 
 
 async def test_a_judge_by_name_on_an_openai_compatible_gateway(

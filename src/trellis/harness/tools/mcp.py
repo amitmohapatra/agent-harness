@@ -24,8 +24,9 @@ import asyncio
 import functools
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
@@ -71,12 +72,21 @@ def server_name(text: str) -> str:
 
 
 def side_effects_of(annotations: Any) -> SideEffects:
-    """An MCP tool's side effects from its annotations (hints, not guarantees)."""
-    if annotations is not None and getattr(annotations, "read_only_hint", None):
+    """An MCP tool's side effects from its server's annotations — the MCP SDK's or, through the
+    gateway, bifrost-sdk's ``ToolAnnotations``: hints, not guarantees (the catalog has the last
+    word)."""
+    if _hint(annotations, "read_only_hint", "readOnlyHint"):
         return "read"
-    if annotations is not None and getattr(annotations, "destructive_hint", None):
+    if _hint(annotations, "destructive_hint", "destructiveHint"):
         return "irreversible"
     return "write"
+
+
+def _hint(annotations: Any, attribute: str, key: str) -> bool:
+    """An annotation's hint: an SDK object's attribute, or a mapping's key (the wire's name)."""
+    if isinstance(annotations, Mapping):
+        return bool(annotations.get(key))
+    return bool(getattr(annotations, attribute, None))
 
 
 class MCPSource:
@@ -93,21 +103,17 @@ class MCPSource:
         self.target = target
         self.timeout = timeout
         self.headers = dict(headers or {})
-        if isinstance(target, Stdio):
-            self.kind = "stdio"
-        elif isinstance(target, str) and URL.match(target):
-            self.kind = "http"
-        elif isinstance(target, str) and VIRTUAL.match(target):
-            self.kind = "virtual"
-            if name is not None or headers:
-                raise ConfigurationError(
-                    f"mcp({target!r}) is a Virtual MCP of the gateway: it takes no name= or "
-                    "headers= (the gateway names its servers and holds their keys)"
-                )
-        else:
+        transport = next((t for t in TRANSPORTS if t.accepts(target)), None)
+        if transport is None:
             raise ConfigurationError(
                 f"mcp({target!r}): give a server's URL (https://...), stdio(command, ...) for a "
                 "local server, or a Virtual MCP's name"
+            )
+        self.transport = transport
+        if transport.client is None and (name is not None or headers):
+            raise ConfigurationError(
+                f"mcp({target!r}) is a Virtual MCP of the gateway: it takes no name= or "
+                "headers= (the gateway names its servers and holds their keys)"
             )
         self.server = None if name is None else server_name(name)
         if name is not None and not self.server:
@@ -120,13 +126,17 @@ class MCPSource:
         return f"mcp({self.target!r})"
 
     @property
+    def kind(self) -> McpKind:
+        return self.transport.kind
+
+    @property
     def virtual(self) -> str | None:
         """The Virtual MCP's name, for one the gateway lists (``None``: a server of its own)."""
-        return self.target if self.kind == "virtual" else None  # type: ignore[return-value]
+        return self.target if self.transport.client is None else None  # type: ignore[return-value]
 
     async def resolve(self) -> list[Tool]:
         """The server's tools, listed through the connection (every page)."""
-        if self.kind == "virtual":
+        if self.virtual is not None:
             raise ConfigurationError(f"{self!r} is listed by the gateway, not resolved")
         client = await self._connection.client()
         server = self.server or self._own_name(client)
@@ -185,41 +195,89 @@ class MCPSource:
     def _own_name(self, client: Client) -> str:
         info = client.server_info
         named = server_name(info.name) if info is not None and info.name else ""
-        if named:
-            return named
-        if isinstance(self.target, Stdio):
-            last = self.target.args[-1] if self.target.args else self.target.command
-            return server_name(PurePath(last).stem) or "mcp"
-        return server_name((urlsplit(self.target).hostname or "").split(".")[0]) or "mcp"
+        return named or self.transport.fallback_name(self.target) or UNNAMED
 
     def _client(self) -> Client:
-        try:
-            from mcp import Client  # noqa: PLC0415 - the mcp extra
-            from mcp.client.stdio import StdioServerParameters  # noqa: PLC0415
-            from mcp.client.streamable_http import streamable_http_client  # noqa: PLC0415
-            from mcp.shared._httpx_utils import create_mcp_http_client  # noqa: PLC0415
-        except ImportError as exc:  # pragma: no cover - the mcp extra installs it
-            raise ConfigurationError(
-                "mcp(...) needs the mcp extra: pip install 'trellis-harness[mcp]'"
-            ) from exc
-        if isinstance(self.target, Stdio):
-            return Client(
-                StdioServerParameters(
-                    command=self.target.command,
-                    args=list(self.target.args),
-                    env=None if self.target.env is None else dict(self.target.env),
-                    cwd=self.target.cwd,
-                )
-            )
-        if not self.headers:
-            return Client(self.target)
-        http = create_mcp_http_client(headers=self.headers)
-        self._connection.closing.append(http)
-        return Client(streamable_http_client(self.target, http_client=http))
+        assert self.transport.client is not None  # a Virtual MCP opens no connection
+        return self.transport.client(self)
 
     async def aclose(self) -> None:
         """Close the connection (a stdio server's process ends with it)."""
         await self._connection.aclose()
+
+
+class McpKind(StrEnum):
+    HTTP = "http"
+    STDIO = "stdio"
+    VIRTUAL = "virtual"
+
+
+@dataclass(frozen=True)
+class Transport:
+    """One kind of ``mcp(...)`` target: what it accepts, the SDK client a server of it is
+    reached with (``None``: the gateway lists and runs it), and a name for a server that gives
+    itself none."""
+
+    kind: McpKind
+    accepts: Callable[[Any], bool]
+    client: Callable[[MCPSource], Client] | None
+    fallback_name: Callable[[Any], str]
+
+
+def _sdk() -> Any:
+    try:
+        import mcp  # noqa: PLC0415 - the mcp extra
+        import mcp.client.stdio  # noqa: PLC0415
+        import mcp.client.streamable_http  # noqa: PLC0415
+        import mcp.shared._httpx_utils  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - the mcp extra installs it
+        raise ConfigurationError(
+            "mcp(...) needs the mcp extra: pip install 'trellis-harness[mcp]'"
+        ) from exc
+    return mcp
+
+
+def _http_client(source: MCPSource) -> Client:
+    sdk = _sdk()
+    if not source.headers:
+        return sdk.Client(source.target)
+    http = sdk.shared._httpx_utils.create_mcp_http_client(headers=source.headers)
+    source._connection.closing.append(http)
+    transport = sdk.client.streamable_http.streamable_http_client(source.target, http_client=http)
+    return sdk.Client(transport)
+
+
+def _stdio_client(source: MCPSource) -> Client:
+    sdk = _sdk()
+    target = source.target
+    assert isinstance(target, Stdio)
+    params = sdk.client.stdio.StdioServerParameters(
+        command=target.command,
+        args=list(target.args),
+        env=None if target.env is None else dict(target.env),
+        cwd=target.cwd,
+    )
+    return sdk.Client(params)
+
+
+def _host_name(target: Any) -> str:
+    return server_name((urlsplit(target).hostname or "").split(".")[0])
+
+
+def _command_name(target: Any) -> str:
+    return server_name(PurePath(target.args[-1] if target.args else target.command).stem)
+
+
+#: The kinds of ``mcp(...)`` target, registered here and only here, tried in this order.
+TRANSPORTS: Final[tuple[Transport, ...]] = (
+    Transport(McpKind.STDIO, lambda t: isinstance(t, Stdio), _stdio_client, _command_name),
+    Transport(
+        McpKind.HTTP, lambda t: isinstance(t, str) and bool(URL.match(t)), _http_client, _host_name
+    ),
+    Transport(McpKind.VIRTUAL, lambda t: isinstance(t, str) and bool(VIRTUAL.match(t)), None, str),
+)
+#: A server that gives no name, at an address with none to take.
+UNNAMED: Final = "mcp"
 
 
 def answer_of(result: Any) -> Any:

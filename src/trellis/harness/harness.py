@@ -203,13 +203,13 @@ class Harness:
         telemetry.configure(s)
         #: where a model name goes (``trellis.harness.gateways``): Bifrost, else an
         #: OpenAI-compatible endpoint, else none
-        self.model_gateway = model_gateway(s.bifrost_url)
+        self.model_gateway = model_gateway(s)
         log.info(
             "trellis harness: gateway %s, memory %s, runs %s, spool %s, traces %s, sandbox %s "
             "(trellis doctor prints each setting and its source)",
             "none"
             if self.model_gateway is None
-            else f"{self.model_gateway.kind} {self.model_gateway.url}",
+            else f"{self.model_gateway.title} {self.model_gateway.url}",
             s.memory_url or "off",
             s.runs_url or "in process",
             s.spool_dir or "none",

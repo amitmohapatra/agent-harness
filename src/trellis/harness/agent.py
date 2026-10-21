@@ -62,6 +62,7 @@ from trellis.harness.evals import (
     sampled,
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
+from trellis.harness.gateways import Capability, missing
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
@@ -179,9 +180,12 @@ class Agent:
         if skills:
             self.sources.append(Skills(skills))
         if self.mcp and harness.gateway is None and "mcp" not in self.without:
+            what = f"mcp({self.mcp[0]!r}), a Virtual MCP,"
+            why = missing(harness.model_gateway, Capability.MCP, what) or (
+                f"{what} needs the gateway, which this harness was given as off"
+            )
             raise ConfigurationError(
-                f"{id}: mcp({self.mcp[0]!r}) is a Virtual MCP of the gateway, and there is no "
-                "gateway (BIFROST_URL): give the server's URL, mcp('https://...'), instead"
+                f"{id}: {why}: give the server's URL, mcp('https://...'), instead"
             )
         if self.adapter.fixed_tools:
             self.sources, self.mcp = harness.built_for(bound_tools(target))

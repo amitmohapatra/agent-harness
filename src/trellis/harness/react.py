@@ -45,17 +45,15 @@ from __future__ import annotations
 
 import functools
 import logging
-import os
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
-from bifrost_sdk import NO_GATEWAY_TOOLS
 from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import MODEL_METADATA, WINDOW_METADATA, context_window
 from trellis.harness.bounded import SAID_ONCE
-from trellis.harness.gateways import model_gateway, unserved
+from trellis.harness.gateways import Capability, ModelGateway, model_gateway, unserved
 from trellis.harness.prompts import Prompt
 from trellis.harness.settings import Settings
 
@@ -71,12 +69,6 @@ MIN_FREED: Final = 0.1
 CLEARED: Final = (
     "[result cleared to keep the context small: read_result(id=<this call's id>) reads it again]"
 )
-#: Retries of a model call the model client makes itself: none — the gateway retries (a
-#: provider's ``network_config.max_retries`` in Bifrost) and falls back, the one place that
-#: does, so attempts never multiply.
-MODEL_RETRIES: Final = 0
-#: The ``Authorization`` a gateway without a virtual key is sent (the client needs one).
-NO_KEY: Final = "no-virtual-key"
 
 
 def ReAct(
@@ -134,11 +126,7 @@ def ReAct(
     if effort is not None and not isinstance(model, str):
         raise ConfigurationError("effort is for a model name: set it on your own chat model")
     named = model if isinstance(model, str) else None
-    gateway = None
-    if named is not None:
-        settings = settings or Settings.from_env()
-        gateway = model_gateway(settings.bifrost_url)
-    chat = _gateway_model(model, timeout=model_timeout, effort=effort, settings=settings)
+    gateway, chat = _served(model, timeout=model_timeout, effort=effort, settings=settings)
     window, source = window_of(chat, context_window)
     if window is None:
         _unknown(named or type(chat).__name__)
@@ -189,7 +177,7 @@ def ReAct(
             timeout=model_timeout,
             prompt=prompt,
             prompt_vars=prompt_vars,
-            gateway=gateway is not None and gateway.kind == "bifrost",
+            gateway=gateway is not None and gateway.has(Capability.ATTRIBUTION),
         ),
     ]
     graph = create_agent(
@@ -239,43 +227,24 @@ def _unknown(name: str) -> None:
     )
 
 
+def _served(
+    model: Any, *, timeout: float | None, effort: str | None, settings: Settings | None
+) -> tuple[ModelGateway | None, Any]:
+    """The gateway that serves a model name, and the chat model it makes of it
+    (``trellis.harness.gateways``); any other model as it is, served by none."""
+    if not isinstance(model, str):
+        return None, model
+    gateway = model_gateway(settings or Settings.from_env())
+    if gateway is None:
+        raise unserved("ReAct")
+    return gateway, gateway.chat_model(model, timeout=timeout, effort=effort)
+
+
 def _gateway_model(
     model: Any, *, timeout: float | None, effort: str | None, settings: Settings | None
 ) -> Any:
-    """A chat model for a model name, from the deployment's one gateway
-    (``trellis.harness.gateways``): ``ChatOpenAI`` on ``BIFROST_URL`` (the deny-all MCP scope,
-    no retries of its own: the gateway retries), else on the OpenAI-compatible endpoint the
-    OpenAI SDK's own variables name (the client's own retries: nothing else retries there);
-    any other model as it is."""
-    if not isinstance(model, str):
-        return model
-    import openai
-    from langchain_openai import ChatOpenAI
-
-    settings = settings or Settings.from_env()
-    gateway = model_gateway(settings.bifrost_url)
-    if gateway is None:
-        raise unserved("ReAct")
-    common: dict[str, Any] = {
-        "model": model,
-        "timeout": timeout,
-        "stream_usage": True,
-        "reasoning_effort": effort,
-        # a client of its own: langchain-openai shares one per gateway URL across the process,
-        # whose pooled connections break the models of a later event loop
-        "http_async_client": openai.DefaultAsyncHttpxClient(),
-    }
-    if gateway.kind == "openai_compatible":  # the SDK reads OPENAI_BASE_URL / OPENAI_API_KEY
-        if not os.environ.get("OPENAI_API_KEY", "").strip():  # a server that takes none
-            common["api_key"] = NO_KEY
-        return ChatOpenAI(**common)
-    return ChatOpenAI(
-        base_url=settings.bifrost_url,
-        api_key=settings.bifrost_virtual_key or NO_KEY,  # type: ignore[arg-type]
-        default_headers=dict(NO_GATEWAY_TOOLS),
-        max_retries=MODEL_RETRIES,
-        **common,
-    )
+    """The chat model for ``model`` (:func:`_served`'s), for a graph built by hand."""
+    return _served(model, timeout=timeout, effort=effort, settings=settings)[1]
 
 
 def _profiled(model: Any, window: int | None) -> Any:

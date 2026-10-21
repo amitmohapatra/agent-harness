@@ -19,7 +19,7 @@ from typing import Any, Final
 
 import httpx
 
-from trellis.harness.gateways import CAPABILITIES, model_gateway
+from trellis.harness.gateways import CAPABILITIES, ModelGateway, model_gateway
 from trellis.harness.settings import DEPRECATED, Settings, sourced
 
 #: The settings whose values are secrets: shown as set, never as their value.
@@ -70,7 +70,7 @@ def effective(environ: Mapping[str, str] | None = None) -> list[tuple[str, str, 
 
 def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     """Which gateway serves model names, what named it, and what is off without it."""
-    gateway = model_gateway(settings.bifrost_url, environ)
+    gateway = model_gateway(settings, environ)
     if gateway is None:
         off = sorted(CAPABILITIES)
         lines = [
@@ -79,8 +79,7 @@ def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
         ]
     else:
         off = sorted(set(CAPABILITIES) - gateway.capabilities)
-        kind = "Bifrost" if gateway.kind == "bifrost" else "OpenAI-compatible"
-        lines = [f"{kind} at {gateway.url} ({gateway.source})"]
+        lines = [f"{gateway.title} at {gateway.url} ({gateway.source})"]
     lines += [f"off: {CAPABILITIES[c]}" for c in off]
     return lines
 
@@ -90,8 +89,7 @@ async def checks(settings: Settings, environ: Mapping[str, str] | None = None) -
     env = os.environ if environ is None else environ
     async with httpx.AsyncClient(timeout=CHECK_SECONDS) as client:
         found = await asyncio.gather(
-            _gateway(client, settings),
-            _openai_compatible(client, settings, env),
+            _gateway(client, model_gateway(settings, env)),
             _memory(client, settings),
             _runs(client, settings),
         )
@@ -129,24 +127,12 @@ def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     return said
 
 
-async def _gateway(client: httpx.AsyncClient, s: Settings) -> Check | None:
-    if not s.bifrost_url:
+async def _gateway(client: httpx.AsyncClient, gateway: ModelGateway | None) -> Check | None:
+    """The gateway that serves model names, asked for its models with its key."""
+    if gateway is None:
         return None
-    key = s.bifrost_virtual_key or "none"
-    return await _reached(
-        client, "gateway", f"{s.bifrost_url.rstrip('/')}/models", {"Authorization": f"Bearer {key}"}
-    )
-
-
-async def _openai_compatible(
-    client: httpx.AsyncClient, s: Settings, environ: Mapping[str, str]
-) -> Check | None:
-    gateway = model_gateway(s.bifrost_url, environ)
-    if gateway is None or gateway.kind != "openai_compatible":
-        return None
-    key = environ.get("OPENAI_API_KEY", "").strip() or "none"
     url = f"{gateway.url.rstrip('/')}/models"
-    return await _reached(client, "gateway", url, {"Authorization": f"Bearer {key}"})
+    return await _reached(client, "gateway", url, {"Authorization": f"Bearer {gateway.probe_key}"})
 
 
 async def _memory(client: httpx.AsyncClient, s: Settings) -> Check | None:
