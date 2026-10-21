@@ -4,7 +4,7 @@ trace. (Your own code, not wrapped, judges its runs with ``judge()``: ``examples
 
     python -m examples.05_features.online_judges
 
-``TRELLIS_JUDGE_SAMPLE`` is the share of runs judged (0.1 by default with judges); this example
+``TRELLIS_EVAL_SAMPLE`` is the share of runs judged (0.1 by default); this example
 judges every run unless the environment says otherwise.
 """
 
@@ -27,7 +27,7 @@ async def concise(case: EvalCase) -> EvalScore:
 
 
 async def main() -> None:
-    environment = {"TRELLIS_JUDGE_SAMPLE": "1", **os.environ}
+    environment = {"TRELLIS_EVAL_SAMPLE": "1", **os.environ}
     judges = [concise, llm_judge("Answers the question correctly.", name="correct")]
     async with Harness(config=Settings.from_env(environment), judges=judges) as h:
         judge_offline(h)

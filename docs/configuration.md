@@ -67,7 +67,7 @@ answers, and what to set — it changes nothing.
 | `TRELLIS_WORKER_CONCURRENCY` (`worker_concurrency`) | `h.worker(concurrency=)` or the worker's `--concurrency` (default: the CPU count, 1 to 8) |
 | `SANDBOX_IMAGE` (`sandbox_image`) | `SandboxSpec(image=)` in code |
 | `TRELLIS_JUDGE_MODEL` (`judge_model`) | `llm_judge(model=)` in code, or the gateway's judge alias ([evaluation.md](evaluation.md#the-judges-model)) |
-| `TRELLIS_GROUNDING_SAMPLE`, `TRELLIS_JUDGE_SAMPLE` (`grounding_sample`, `judge_sample`) | `TRELLIS_EVAL_SAMPLE` (`eval_sample`), which wins |
+| `TRELLIS_GROUNDING_SAMPLE`, `TRELLIS_JUDGE_SAMPLE` (`grounding_sample`, `judge_sample`) | `TRELLIS_EVAL_SAMPLE` (`eval_sample`), which wins; given only the retired ones, the larger (one part alone off: `without={"grounding"}` or `{"judges"}`) |
 | `LANGFUSE_HOST` | `LANGFUSE_BASE_URL`, which wins |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`/`_HEADERS` as `Settings` fields | read by the OpenTelemetry SDK itself; `Settings(otlp_endpoint=, otlp_headers=)` stays for code |
 

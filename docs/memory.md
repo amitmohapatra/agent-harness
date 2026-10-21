@@ -113,7 +113,7 @@ precedence **human > judge > system**:
   cancelled run says nothing about the agent). Never "no exception = success" on its own: the
   judge and people outrank it.
 * **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
-  (`TRELLIS_GROUNDING_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
+  (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim, or a context that held no

@@ -65,7 +65,7 @@ sequenceDiagram
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
   W-)Mem: POST /v1/feedback (system: confirm)
-  W-)Mem: POST /v1/verify (sampled: TRELLIS_GROUNDING_SAMPLE) → grounding score
+  W-)Mem: POST /v1/verify (sampled: TRELLIS_EVAL_SAMPLE) → grounding score
   W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
   Agent->>Runs: get(run_id, tenant=)
@@ -511,7 +511,7 @@ sequenceDiagram
 
   User->>P: await agent.run(question, user=)
   P->>Runs: finish(SUCCESS, answer)
-  P->>P: sampled(run_id, TRELLIS_JUDGE_SAMPLE)? and not without judges
+  P->>P: sampled(run_id, TRELLIS_EVAL_SAMPLE)? and not without judges
   P-)W: submit judge.<name> (one per judge)
   P-->>User: Result(SUCCESS, answer): nothing waits for the judges
   W->>J: judge(EvalCase(question, answer, context, memory, run_id, trajectory), [one judge])

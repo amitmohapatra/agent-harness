@@ -96,7 +96,7 @@ score goes on the case's trace: `trace_id` (32 hex characters, the trace your ow
 made), else its run's (`run_id`). A case with neither is scored and kept off any trace.
 `sample` (0 to 1) judges only that share of cases, chosen by the run id (else the trace id), so
 a run is always or never judged; `None` judges every case. To let the deployment choose, pass
-`Settings.from_env().judge_sample` (`TRELLIS_JUDGE_SAMPLE`; `None` when unset).
+`Settings.from_env().eval_sample` (`TRELLIS_EVAL_SAMPLE`; 0.1 when unset).
 
 `judge` runs where it is awaited: run it after the response is sent (your web framework's
 background task), so the judge model is never on the request path.

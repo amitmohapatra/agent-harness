@@ -7,7 +7,7 @@ annotation queues live there. Trellis fills it two ways:
 |---|---|---|
 | What | an agent run over a dataset, every answer scored | live runs scored as they happen |
 | Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, evaluators)` | automatic: `Harness(judges=[...])`, and the sampled grounding check |
-| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (`TRELLIS_JUDGE_SAMPLE`, or `sample=`) |
+| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (`TRELLIS_EVAL_SAMPLE`, or `sample=`) |
 | When | now: the call returns an `EvalReport` | after the run — in the background writes queue, never on the request path, when wrapped |
 | Where the scores go | each run's trace (Langfuse scores, and a `score` span); a Langfuse dataset's runs are linked to the dataset run | each run's trace (or the trace a case names) |
 
@@ -43,8 +43,8 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
 ```
 
 * **Automatic.** With memory on, a sampled share of successful runs is checked against the
-  context it was given (`TRELLIS_GROUNDING_SAMPLE`, [memory.md](memory.md)), and with `judges=`
-  a sampled share is judged (`TRELLIS_JUDGE_SAMPLE`, [Online](#online-judges) below).
+  context it was given (`TRELLIS_EVAL_SAMPLE`, [memory.md](memory.md)), and with `judges=`
+  a sampled share is judged (the same `TRELLIS_EVAL_SAMPLE`, [Online](#online-judges) below).
   Nothing to call.
 * **`h.evaluate`** runs each item through the normal pipeline — memory, tools, governance and
   approvals, the agent's time limit (`h.wrap(timeout=)`: a hung item ends `TIMEOUT`, an
@@ -204,7 +204,7 @@ verdict replayed for a merely similar answer would be wrong.
 with a prompt of the criteria plus the case — up to about 32 000 characters. Offline that is
 one call per item and judge; online it is one per *sampled* run and judge: at the default 10 %
 sample, 1 000 runs a day cost about 100 judge calls a day per judge. Sample down
-(`TRELLIS_JUDGE_SAMPLE`), judge offline on a dataset instead, or use a cheaper deterministic
+(`TRELLIS_EVAL_SAMPLE`), judge offline on a dataset instead, or use a cheaper deterministic
 evaluator where one will do.
 
 ## Offline: `evaluate` and `h.evaluate`
@@ -298,10 +298,10 @@ id (no `expected`). Its score goes on
 the run's trace; a judge that fails is a `warning` event on the run's stream (`judge_failed`)
 and a log line.
 
-**`TRELLIS_JUDGE_SAMPLE`** is the share of runs judged, 0 to 1. Unset, it is 0.1 when the harness
-has judges (and nothing is judged without judges). The run id decides — salted apart from the
-grounding sample (`TRELLIS_GROUNDING_SAMPLE`), so the two samples are independent — so a run is
-either always or never judged, whichever process asks. `judge(..., sample=rate)` from code you
+**`TRELLIS_EVAL_SAMPLE`** is the share of runs evaluated, 0 to 1 — judged (with judges) and
+checked for grounding (with memory) — 0.1 when unset; `without={"judges"}` or
+`{"grounding"}` turns one of the two off. The run id decides — salted apart for the judges,
+so the two samples are independent — so a run is either always or never judged, whichever process asks. `judge(..., sample=rate)` from code you
 do not wrap samples the same way ([blocks/evaluation.md](blocks/evaluation.md#online-judge)).
 
 ## Langfuse setup

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from trellis import Settings
 from trellis.harness import settings as settings_module
 from trellis.harness.prompts import LangfusePrompts, PromptSources
-from trellis.harness.settings import parse_headers
+from trellis.harness.settings import parse_headers, sourced
 from trellis.harness.telemetry import Langfuse
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -183,3 +183,14 @@ def test_env_example_documents_exactly_what_is_read() -> None:
     read = set(re.findall(r'"([A-Z][A-Z0-9_]+)"', source)) - set(settings_module.OTEL_EXPORTER_ENV)
     read -= {*settings_module.EPHEMERAL_MARKERS, "XDG_STATE_HOME", "OTEL_RESOURCE_ATTRIBUTES"}
     assert read == documented
+
+
+def test_the_retired_sample_rates_are_read_as_the_larger_of_them() -> None:
+    """A retired rate of 0 does not turn the other part off: ``without=`` does that now."""
+    env = {"TRELLIS_GROUNDING_SAMPLE": "0", "TRELLIS_JUDGE_SAMPLE": "0.5"}
+    assert Settings.from_env(env).eval_sample == 0.5
+    found = sourced(env)["eval_sample"]
+    assert found == (0.5, "TRELLIS_GROUNDING_SAMPLE and TRELLIS_JUDGE_SAMPLE")
+    assert Settings(grounding_sample=0.0, judge_sample=0.3).eval_sample == 0.3  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        Settings.from_env({"TRELLIS_JUDGE_SAMPLE": "lots"})

@@ -56,6 +56,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- The deprecated `TRELLIS_GROUNDING_SAMPLE` and `TRELLIS_JUDGE_SAMPLE` (and the matching
+  `Settings` fields) are read as `TRELLIS_EVAL_SAMPLE` taking the larger of the two, so setting
+  one to 0 no longer turns the other off; turn one part off with `without={"grounding"}` or
+  `without={"judges"}`.
 - The cost benchmark records each model call's seconds (p50 and p95 per cell) and the CPU
   seconds per run of its own process and of each `--watch name=pid` one (the model server, the
   gateway), with their peak memory. `make bench-gate` checks a report against the stored

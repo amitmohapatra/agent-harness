@@ -64,8 +64,8 @@ DEPRECATED: Final[dict[str, str]] = {
     "TRELLIS_WORKER_CONCURRENCY": "h.worker(concurrency=) or the worker's --concurrency",
     "SANDBOX_IMAGE": "SandboxSpec(image=) in code",
     "TRELLIS_JUDGE_MODEL": "llm_judge(model=) in code, or the gateway's judge alias",
-    "TRELLIS_GROUNDING_SAMPLE": "TRELLIS_EVAL_SAMPLE",
-    "TRELLIS_JUDGE_SAMPLE": "TRELLIS_EVAL_SAMPLE",
+    "TRELLIS_GROUNDING_SAMPLE": "TRELLIS_EVAL_SAMPLE (grounding alone off: without={'grounding'})",
+    "TRELLIS_JUDGE_SAMPLE": "TRELLIS_EVAL_SAMPLE (the judges alone off: without={'judges'})",
     "LANGFUSE_HOST": "LANGFUSE_BASE_URL",
 }
 
@@ -133,14 +133,18 @@ class Settings(BaseModel):
     @classmethod
     def _renamed(cls, given: Any) -> Any:
         """The retired fields ``grounding_sample`` and ``judge_sample``, read as ``eval_sample``
-        for one more release (said once)."""
+        for one more release (said once): the larger of them, so one set to 0 does not turn the
+        other off (``without={"grounding"}`` / ``{"judges"}`` is how one is off now)."""
         found = dict(given)  # its keywords: Settings(...) and from_env
+        values = []
         for old in ("grounding_sample", "judge_sample"):
             if old in found:
                 _deprecated_field(old)
                 value = found.pop(old)
                 if value is not None:
-                    found.setdefault("eval_sample", value)
+                    values.append(value)
+        if values and "eval_sample" not in found:
+            found["eval_sample"] = _largest(values)
         return found
 
     @classmethod
@@ -187,9 +191,10 @@ def sourced(environ: Mapping[str, str] | None = None) -> dict[str, tuple[object,
     for name in ("LANGFUSE_BASE_URL", "LANGFUSE_HOST"):
         if "langfuse_host" not in found:
             put("langfuse_host", get(name), name)
-    for name in ("TRELLIS_EVAL_SAMPLE", "TRELLIS_GROUNDING_SAMPLE", "TRELLIS_JUDGE_SAMPLE"):
-        if "eval_sample" not in found:
-            put("eval_sample", get(name), name)
+    put("eval_sample", get("TRELLIS_EVAL_SAMPLE"), "TRELLIS_EVAL_SAMPLE")
+    retired = {n: v for n in ("TRELLIS_GROUNDING_SAMPLE", "TRELLIS_JUDGE_SAMPLE") if (v := get(n))}
+    if retired and "eval_sample" not in found:  # the larger: a 0 does not turn the other off
+        put("eval_sample", _largest(list(retired.values())), " and ".join(retired))
     version = service_version(env)
     if version is not None:
         put("agent_version", version, "OTEL_RESOURCE_ATTRIBUTES (service.version)")
@@ -253,7 +258,20 @@ def _no_spool(why: str) -> None:
 
 @functools.cache
 def _deprecated_field(name: str) -> None:
-    log.warning("Settings(%s=) is deprecated and goes in the next release: use eval_sample", name)
+    log.warning(
+        "Settings(%s=) is deprecated and goes in the next release: use eval_sample (one part off: "
+        "without={'grounding'} or {'judges'})",
+        name,
+    )
+
+
+def _largest(values: list[Any]) -> Any:
+    """The largest of the retired sample rates (as given, when one is not a number: the
+    validation then says so)."""
+    try:
+        return max(float(v) for v in values)
+    except (TypeError, ValueError):
+        return values[0]
 
 
 @functools.cache
