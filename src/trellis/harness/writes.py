@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
+
 from trellis.harness.events import RunEvents
 from trellis.harness.telemetry import metrics
 
@@ -194,21 +196,23 @@ class Writes:
                 self._give_up(undelivered, "still undelivered when the process stopped")
 
     async def _attempt(self, item: _Item) -> None:
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                await item.work()
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                passing = bool(getattr(exc, "retryable", True))
-                if not passing or attempt == WRITE_ATTEMPTS:
-                    self._give_up(item, f"{type(exc).__name__}: {exc}", keep=passing)
-                    return
-            ceiling = WRITE_BACKOFF_SECONDS * 2 ** (attempt - 1)
-            await asyncio.sleep(random.uniform(0, ceiling))  # jitter, not a secret
+        def wait(state: RetryCallState) -> float:  # full jitter, not a secret
+            return random.uniform(0, WRITE_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
+
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(WRITE_ATTEMPTS),
+                retry=retry_if_exception(_passing),
+                wait=wait,
+                sleep=asyncio.sleep,
+                reraise=True,
+            ):
+                with attempt:
+                    await item.work()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._give_up(item, f"{type(exc).__name__}: {exc}", keep=_passing(exc))
 
     def _give_up(self, item: _Item, reason: str, *, keep: bool = True) -> None:
         """The write will not be delivered by this process: kept in the spool when it can be
@@ -270,3 +274,9 @@ class Writes:
                 continue
             replayed += 1
         log.info("replaying %d spooled write(s) from %s", replayed, self._spool)
+
+
+def _passing(exc: BaseException) -> bool:
+    """Whether a write's failure may pass (tried again, spooled when it does not): its own
+    ``retryable``, else yes."""
+    return isinstance(exc, Exception) and bool(getattr(exc, "retryable", True))

@@ -24,6 +24,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
+from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
+
 from trellis.contracts import (
     AgentError,
     ConfigurationError,
@@ -186,21 +188,30 @@ async def retried(
     jittered backoff — or, when the error says when to come back (``Retry-After``), then: a
     wait longer than the time ``left`` (the run's, the call's) is not waited, the error is
     raised. The caller's timeout bounds the whole of it."""
-    attempt = 0
-    after: float | None = None
-    while True:
-        try:
+
+    def passes(exc: BaseException) -> bool:
+        if is_pause_signal(exc) or not isinstance(exc, Exception):
+            return False
+        if not AgentError.of(exc).retryable:
+            return False
+        after, remaining = retry_after(exc), (left or _left)()
+        return after is None or remaining is None or after <= remaining
+
+    def wait(state: RetryCallState) -> float:
+        backoff = random.uniform(0, RETRY_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
+        error = state.outcome.exception() if state.outcome is not None else None
+        return max(backoff, (retry_after(error) if error is not None else None) or 0.0)
+
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(retries + 1),
+        retry=retry_if_exception(passes),
+        wait=wait,
+        sleep=asyncio.sleep,
+        reraise=True,
+    ):
+        with attempt:
             return await call()
-        except Exception as exc:
-            if attempt == retries or is_pause_signal(exc) or not AgentError.of(exc).retryable:
-                raise
-            after = retry_after(exc)
-            remaining = (left or _left)()
-            if after is not None and remaining is not None and after > remaining:
-                raise
-        backoff = random.uniform(0, RETRY_BACKOFF_SECONDS * 2**attempt)
-        await asyncio.sleep(max(backoff, after or 0.0))
-        attempt += 1
+    raise AssertionError("unreachable: tenacity returns or raises")  # pragma: no cover
 
 
 def retry_after(exc: BaseException) -> float | None:

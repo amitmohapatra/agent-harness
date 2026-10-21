@@ -56,6 +56,9 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- The retry loops (read-only tool retries, background memory writes, A2A push
+  notifications) run on `tenacity`, now a direct dependency; the attempts, waits and
+  `Retry-After` handling are unchanged.
 - The judge asks the gateway's judge alias `trellis-judge` (routed by the Bifrost admin) unless a
   judge names its model; it never falls back to the judged agent's model. An alias the gateway
   does not route turns the judges off, said once. Bifrost's semantic cache is not used for

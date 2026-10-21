@@ -28,6 +28,7 @@ from a2a.server.tasks import PushNotificationConfigStore, PushNotificationSender
 from a2a.server.tasks.push_notification_sender import PushNotificationEvent
 from a2a.utils.proto_utils import to_stream_response
 from google.protobuf.json_format import MessageToDict
+from tenacity import AsyncRetrying, retry_if_result, stop_after_attempt, wait_exponential
 
 from trellis.runs.webhooks import DELIVERY_HEADER, EVENT_HEADER, SIGNATURE_HEADER, sign
 
@@ -127,7 +128,12 @@ class PushNotifier(PushNotificationSender):
             DELIVERY_HEADER: f"{task_id}:{time.time_ns()}",
             TOKEN_HEADER: token,
         }
-        for attempt in range(1, ATTEMPTS + 1):
+
+        tried = 0
+
+        async def attempt() -> bool:
+            nonlocal tried
+            tried += 1
             headers[SIGNATURE_HEADER] = sign(token, int(time.time()), body)
             try:
                 response = await self._client.post(target, content=body, headers=headers)
@@ -136,7 +142,14 @@ class PushNotifier(PushNotificationSender):
                 failure = f"HTTP {response.status_code}"
             except httpx.HTTPError as exc:
                 failure = f"{type(exc).__name__}: {exc}"
-            log.warning("A2A push attempt %d for %s failed: %s", attempt, task_id, failure)
-            if attempt < ATTEMPTS:
-                await asyncio.sleep(0.2 * 2 ** (attempt - 1))
-        return False
+            log.warning("A2A push attempt %d for %s failed: %s", tried, task_id, failure)
+            return False
+
+        retrying = AsyncRetrying(
+            stop=stop_after_attempt(ATTEMPTS),
+            retry=retry_if_result(lambda delivered: not delivered),
+            wait=wait_exponential(multiplier=0.2),
+            sleep=asyncio.sleep,
+            retry_error_callback=lambda state: False,
+        )
+        return bool(await retrying(attempt))
