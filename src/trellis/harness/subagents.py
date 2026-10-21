@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import (
@@ -47,6 +48,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline
 from trellis.harness.adapters.langgraph import bound_tools
+from trellis.harness.features import Feature
 from trellis.harness.journal import Journal, content_key
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, current
@@ -102,8 +104,12 @@ class SubAgent:
         name: str | None,
         description: str | None,
         side_effects: SideEffects | None,
+        without: Collection[Feature] = (),
     ) -> None:
         self.agent = agent
+        #: what its runs are without besides what the parent's run is (``ReAct``'s helpers:
+        #: ``subagent_task``, so a helper starts none)
+        self.without = frozenset(without)
         self.name = name or agent.id
         self.description = description or _described(agent)
         self.side_effects = side_effects
@@ -134,7 +140,7 @@ class SubAgent:
             timeout=parent.remaining(),
             deadline=parent.deadline,
             parent=parent.run_id,
-            without=parent.without,
+            without=parent.without | self.without,
         )
         result = await self._continued(parent, await child.harness.runs.start(start))
         while result.status is RunStatus.PAUSED:

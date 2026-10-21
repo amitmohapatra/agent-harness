@@ -11,10 +11,13 @@ the loop is the harness's. What it is built with:
   cleared from the request past half the context window, the last :data:`KEEP_RESULTS` kept),
   Deep Agents' summarization (the older turns summarized near the window's end, the history
   they held saved where ``read_file`` reads it, oversized arguments truncated first, a context
-  overflow summarized and retried), Deep Agents' ``FilesystemMiddleware`` with ``read_file``
-  only (a large tool result saved as a file, a head-and-tail preview in its place), Deep
+  overflow summarized and retried), Deep Agents' ``FilesystemMiddleware`` on the run's journal
+  (a large tool result saved as a file, a head-and-tail preview in its place, ``read_file``
+  reading it), Deep
   Agents' ``PatchToolCallsMiddleware`` (a call left unanswered gets an answer), parallel tool
   calls and ``response_format`` for ``output=``;
+* **native, on when a task needs them** (``trellis.harness.automatic``) — planning, scratch
+  files and the ``task`` helper on a long task;
 * **the harness's** (``trellis.harness.middleware``) — :class:`~.HarnessTools` (the run's
   tools per model call, sorted; writes in the model's order), :class:`~.ModelHooks` (the
   hooks, the ``chat`` span, ``model_timeout`` and the run's time left, the ``prompt`` pinned
@@ -97,13 +100,12 @@ def ReAct(
     it can and cannot do beyond its tools (``{"accept an image upload": False}``), so it
     answers such a question plainly."""
     try:
-        from deepagents.backends import StateBackend
-        from deepagents.middleware import FilesystemMiddleware
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
         from langchain.agents import create_agent
         from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
 
+        from trellis.harness import automatic
         from trellis.harness import middleware as ours
     except ImportError as exc:  # pragma: no cover - the react extra installs them
         raise ConfigurationError(
@@ -116,9 +118,13 @@ def ReAct(
     known = context_window or _window(model)
     window = known or CONTEXT_WINDOW
     chat = _gateway_model(model, timeout=model_timeout, window=window)
-    backend = StateBackend()
+    backend = automatic.JournalBackend()
     defaults = [
-        FilesystemMiddleware(backend=backend, tools=["read_file"]),
+        automatic.JournalFiles(backend, tools=["read_file", *sorted(automatic.SCRATCH)]),
+        # what a long task is offered, decided before anything reads the request's tools
+        automatic.Planning(window=window),
+        automatic.Helpers(backend, window=window),
+        automatic.ScratchFiles(window=window),
         *([ours.AnswerCheck()] if answer_check else []),
         ours.HarnessTools(),
         ours.StallGuard(max_repeats or ours.MAX_REPEATS),

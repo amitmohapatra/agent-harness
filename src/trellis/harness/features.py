@@ -25,6 +25,10 @@ Feature = Literal[
     "code_mode",
     "skills",
     "mcp",
+    # what ReAct turns on by itself (``trellis.harness.automatic``)
+    "planning",
+    "files",
+    "subagent_task",
 ]
 #: The features a name turns off together: ``memory`` is its push, its pull and the records;
 #: ``mcp`` the MCP tools and Code Mode, whose scripts reach them.

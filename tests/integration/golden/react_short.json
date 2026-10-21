@@ -1,0 +1,254 @@
+[
+  {
+    "messages": [
+      {
+        "content": "You answer stock questions.",
+        "role": "system"
+      },
+      {
+        "content": "How many a-1 are in stock?",
+        "role": "user"
+      }
+    ],
+    "model": "scripted",
+    "stream": false,
+    "tools": [
+      {
+        "function": {
+          "description": "Report number 0 of one store.",
+          "name": "report_0",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Report number 1 of one store.",
+          "name": "report_1",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Report number 2 of one store.",
+          "name": "report_2",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Report number 3 of one store.",
+          "name": "report_3",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Units of a SKU in stock.",
+          "name": "stock",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "sku": {
+                "description": "The SKU, such as a-1.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sku"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "content": "You answer stock questions.",
+        "role": "system"
+      },
+      {
+        "content": "How many a-1 are in stock?",
+        "role": "user"
+      },
+      {
+        "content": null,
+        "name": "react",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"sku\": \"a-1\"}",
+              "name": "stock"
+            },
+            "id": "call_1",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "7",
+        "role": "tool",
+        "tool_call_id": "call_1"
+      }
+    ],
+    "model": "scripted",
+    "stream": false,
+    "tools": [
+      {
+        "function": {
+          "description": "Report number 0 of one store.",
+          "name": "report_0",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Report number 1 of one store.",
+          "name": "report_1",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Report number 2 of one store.",
+          "name": "report_2",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Report number 3 of one store.",
+          "name": "report_3",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "store": {
+                "description": "The store's id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Units of a SKU in stock.",
+          "name": "stock",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "sku": {
+                "description": "The SKU, such as a-1.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sku"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ]
+  }
+]

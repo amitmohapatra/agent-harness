@@ -132,6 +132,9 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 | `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools, and the gateway is not asked for them (`h.tools(without={"mcp"})` for a graph's; `mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
 | `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
 | `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
+| `planning` | `ReAct`, a long task, a window of 32,000 tokens or more | LangChain's `TodoListMiddleware`: `write_todos` and its instructions ([react.md](frameworks/react.md#the-middleware)) | not offered; a call answers that it is not available |
+| `files` | the same | Deep Agents' scratch file tools: `ls`, `write_file`, `edit_file` on the run's journal | not offered (paged results are still read with `read_file`); a call answers that it is not available |
+| `subagent_task` | the same | Deep Agents' `task` tool: a general-purpose helper, each call a child run of the same agent | not offered; a call answers that it is not available |
 
 A name not in the table is refused (`ConfigurationError`, naming them). Not switchable, because
 they are automatic and deterministic: governance and approvals, the journal and replay, retries

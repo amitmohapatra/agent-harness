@@ -7,11 +7,24 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- `ReAct` plans, keeps scratch files and hands parts of a long task to a helper — LangChain's
+  `TodoListMiddleware`, Deep Agents' file tools and Deep Agents' `task` tool, each a child run
+  of the same agent — once the model has made three calls or the request asks for steps, on a
+  window of 32,000 tokens or more; a shorter task is sent what it was before. `without=` turns
+  each off: `planning`, `files`, `subagent_task` ([react.md](docs/frameworks/react.md#the-middleware)).
+
 - `make bench-cost` (`python -m benchmark.cost`): the cost and accuracy of a `ReAct` agent over
   tool catalogues of 10, 50, 100 and 500 tools, against whatever model is configured — input,
   output and cached tokens, model calls, wall time, `tool_coverage` and task success per run,
   dollars from a price table with sources (`benchmark/cost/prices.py`), means and 95%
   intervals per variant as JSON and markdown ([evaluation.md](docs/evaluation.md#cost-benchmark)).
+
+### Fixed
+
+- A `ReAct` run's files — a large result saved by `FilesystemMiddleware`, a summarized history
+  — were lost on a resume (Deep Agents keeps them in a `DeltaChannel`, which needs every
+  earlier checkpoint, and the run keeps only the latest): they are now in a channel the
+  journal keeps whole.
 
 ### Changed
 
