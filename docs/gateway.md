@@ -208,6 +208,20 @@ the server take a token from a header of its own that your gateway forwards.
 answers with the URL where it is given) is an error result the model reads; nothing is retried
 past a write's single attempt.
 
+## Whose run a model call is, and its trace
+
+Every model call the harness makes through the gateway — a `ReAct`'s, a judge's, and a
+framework client given `h.model_headers()` (an OpenAI client reads them per request) — carries
+Bifrost's dimension headers, which Bifrost puts on its logs, its OpenTelemetry spans and its
+metrics: `x-bf-dim-tenant`, `x-bf-dim-agent`, `x-bf-dim-run` and `x-bf-dim-user` — a hash of the
+user id, never the id itself (dimensions are not for personal data); a judge's also
+`x-bf-dim-purpose: judge`. Cost per agent, run and tenant is then Bifrost's report. Each call
+also carries the W3C `traceparent` of the span it is made in, which Bifrost's OTel plugin keeps:
+the gateway's span of the call is in the run's trace, whatever the framework. The harness's
+own `chat` spans stay where `ModelHooks` runs (a `ReAct`, a graph built with `h.tools`); for an
+OpenAI Agents run its SDK's own tracing is left as you set it (the SDK exports to OpenAI unless
+you turn it off: `agents.set_tracing_disabled(True)`), said once when such an agent is wrapped.
+
 ## Frameworks' own MCP clients
 
 The gateway is an MCP server itself: `/mcp` (every tool the key allows) and `/mcp/<slug>` (one

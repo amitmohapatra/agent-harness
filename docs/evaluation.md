@@ -178,26 +178,27 @@ is a `ConfigurationError`.
 
 #### The judge's model
 
-**Which model, and whose budget, is configuration:**
+**Which model is the gateway's; whose budget is the deployment's:**
 
 | | |
 |---|---|
 | `llm_judge(criteria, model="name")` | this judge's own Bifrost model name: two judges of one run may ask two models |
-| `TRELLIS_JUDGE_MODEL` | else, the Bifrost model name every judge asks, through `BIFROST_URL` |
+| the judge alias `trellis-judge` | else, the model name every judge asks through `BIFROST_URL`: an alias the Bifrost admin routes to the judging model, changed at runtime with no redeploy (`TRELLIS_JUDGE_MODEL`, deprecated, still names one for a release) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the virtual key the judge's calls go through; unset: `BIFROST_VIRTUAL_KEY` |
 
-A judge model, once set, is always the one asked: the judge never silently becomes the agent's
-model. Each score says which model gave it — the comment ends `[judge: <model>]`, its `score`
-span carries `trellis.score.model`, and a log line names it.
+The judge never becomes the judged agent's own model. An alias the gateway does not route
+(it answers 404) turns the judges off: each judge's failure says so in the report's `failed`,
+and the log says it once. Each score says which model gave it — the comment ends
+`[judge: <model>]`, its `score` span carries `trellis.score.model`, and a log line names it.
+Every judge call carries Bifrost's dimensions of the run it judges (`x-bf-dim-run`, and online
+also its agent, tenant and hashed user) with `x-bf-dim-purpose: judge`, so its spend is
+attributed in Bifrost's logs and metrics.
 
-Set a **different, stronger model than the agent's**: a model grading its own answers is
-biased towards them. Give the judge **its own virtual key**: its spend is then budgeted,
-rate-limited and reported in Bifrost apart from the agents' traffic. With no judge model set,
-a wrapped `ReAct` built with a gateway model name is judged by that model
-(`agent.evals.fallback_model`), and the harness logs once per agent that the judge shares the
-agent's model. Any other judged agent — a `ReAct` given a model object, a graph, a function —
-and any code judged through `EvalServices.from_env()` then gets no judge score, with the reason
-in the report's `failed` (`"llm_judge needs a judge model: set TRELLIS_JUDGE_MODEL ..."`).
+Route the alias to a **different, stronger model than the agent's**: a model grading its own
+answers is biased towards them. Give the judge **its own virtual key**: its spend is then
+budgeted, rate-limited and reported in Bifrost apart from the agents' traffic, so evaluation
+can never exhaust production's budget. Bifrost's semantic cache is not used for judges: a
+verdict replayed for a merely similar answer would be wrong.
 
 **Cost.** Every judged answer is one judge model call (two when the first reply is malformed),
 with a prompt of the criteria plus the case — up to about 32 000 characters. Offline that is

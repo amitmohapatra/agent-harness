@@ -486,7 +486,7 @@ sequenceDiagram
     P-->>H: Result + the run's tool calls (the trajectory)
     H->>Mem: grounding: POST /v1/verify {bundle_id, answer}
     H->>H: called / tool_sequence: read EvalCase.trajectory
-    H->>GW: llm_judge: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL, temperature 0)
+    H->>GW: llm_judge: POST /v1/chat/completions (the judge alias, temperature 0)
     GW-->>H: {"score", "reasoning"} (malformed → asked once more)
     H->>LF: POST /api/public/scores (each score, on the run's trace)
   end
@@ -515,7 +515,7 @@ sequenceDiagram
   P-)W: submit judge.<name> (one per judge)
   P-->>User: Result(SUCCESS, answer): nothing waits for the judges
   W->>J: judge(EvalCase(question, answer, context, memory, run_id, trajectory), [one judge])
-  J->>GW: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL)
+  J->>GW: POST /v1/chat/completions (the judge alias)
   GW-->>J: {"score", "reasoning"}
   J->>LF: POST /api/public/scores on the run's trace (and a score span)
   Note over W,J: a judge that fails is a warning event and a log line, never a failed run

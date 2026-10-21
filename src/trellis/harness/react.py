@@ -176,7 +176,9 @@ def ReAct(
             if tool_guidance or capabilities
             else []
         ),
-        ours.ModelHooks(timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars),
+        ours.ModelHooks(
+            timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars, gateway=named is not None
+        ),
     ]
     graph = create_agent(
         chat,

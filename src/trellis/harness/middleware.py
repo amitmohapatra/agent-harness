@@ -102,7 +102,7 @@ from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
 from trellis.harness.repository import pinned
 from trellis.harness.runtime import DEFERRED, Runtime, current
-from trellis.harness.telemetry import model_span, usage
+from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool, arguments_of, not_run
@@ -464,8 +464,12 @@ class ModelHooks(AgentMiddleware):
         timeout: float | None = None,
         prompt: str | Prompt | None = None,
         prompt_vars: dict[str, Any] | None = None,
+        gateway: bool = False,
     ) -> None:
         super().__init__()
+        #: the model is the gateway's: every call carries the run's Bifrost dimensions and
+        #: its ``traceparent`` (``telemetry.gateway_headers``)
+        self.gateway = gateway
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
         if isinstance(prompt, str):
@@ -517,6 +521,12 @@ class ModelHooks(AgentMiddleware):
             request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", _said(request), extra=extra) as span:
+            if self.gateway:  # in the model's span: the gateway's span of the call joins it
+                sent = request.model_settings.get("extra_headers") or {}
+                headers = {**sent, **gateway_headers()}
+                request = request.override(
+                    model_settings={**request.model_settings, "extra_headers": headers}
+                )
             try:
                 async with _limited(runtime, self.timeout):
                     reply = await handler(request)

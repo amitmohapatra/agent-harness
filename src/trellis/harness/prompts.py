@@ -568,6 +568,29 @@ class ModelPrompts:
         return runtime
 
 
+class GatewayHeaders(Mapping[str, str]):
+    """``h.model_headers()``: the gateway's deny-all MCP scope, and — read each time they are
+    read, so a client that keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends them
+    per request — the run's Bifrost dimensions and its ``traceparent``."""
+
+    def now(self) -> dict[str, str]:
+        from trellis.harness.telemetry import gateway_headers  # noqa: PLC0415
+
+        return {**NO_GATEWAY_TOOLS, **gateway_headers()}
+
+    def __getitem__(self, name: str) -> str:
+        return self.now()[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.now())
+
+    def __len__(self) -> int:
+        return len(self.now())
+
+    def __repr__(self) -> str:
+        return f"GatewayHeaders({self.now()!r})"
+
+
 class ModelHeaders(Mapping[str, str]):
     """``h.model_headers(prompt=)``: the gateway's deny-all MCP scope and a stored prompt's
     selection (``x-bf-prompt-id``, ``x-bf-prompt-version``), read each time they are read — a
@@ -581,9 +604,12 @@ class ModelHeaders(Mapping[str, str]):
         self._resolved = resolved
 
     def now(self) -> dict[str, str]:
-        """The headers as a request made now sends them."""
+        """The headers as a request made now sends them: the run's dimensions and trace too
+        (``telemetry.gateway_headers``)."""
+        from trellis.harness.telemetry import gateway_headers  # noqa: PLC0415
+
         pin = self._owner.selection(self._ref) or self._resolved
-        return {**NO_GATEWAY_TOOLS, **pin.options().headers()}
+        return {**NO_GATEWAY_TOOLS, **pin.options().headers(), **gateway_headers()}
 
     def __getitem__(self, name: str) -> str:
         return self.now()[name]

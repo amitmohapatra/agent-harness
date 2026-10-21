@@ -337,3 +337,26 @@ async def test_a_session_keeps_the_thread_so_memorys_window_is_not_sent(
     await agent.run("hi", user="u1", framework_options={"session": object()})
     windows = [c.body.get("window") for c in memory_service.named("context")]
     assert windows[-2:] == [True, False]
+
+
+def test_the_sdks_own_tracing_is_left_as_set_and_said_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agents.tracing import get_trace_provider
+
+    from trellis.harness.adapters.openai_agents import sdk_tracing_said
+
+    provider = get_trace_provider()
+    was = getattr(provider, "_disabled", False)
+    try:
+        provider.set_disabled(False)
+        sdk_tracing_said.cache_clear()
+        with caplog.at_level("INFO", logger="trellis.harness"):
+            assert sdk_tracing_said() is True
+        assert "exports to OpenAI" in caplog.text
+        provider.set_disabled(True)
+        sdk_tracing_said.cache_clear()
+        assert sdk_tracing_said() is False
+    finally:
+        provider.set_disabled(was)
+        sdk_tracing_said.cache_clear()

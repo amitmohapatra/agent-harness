@@ -7,6 +7,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- Every gateway call says whose run it is and joins its trace: Bifrost dimension headers
+  (`x-bf-dim-tenant`, `-agent`, `-run`, and a hash of the user, never the id) and the W3C
+  `traceparent`, on `ReAct`'s calls, the judge's (`x-bf-dim-purpose: judge`) and
+  `h.model_headers()` (read per request). The OpenAI Agents SDK's own trace export is left as
+  set, said once.
+
 - A framework's own tools are governed: an OpenAI Agents agent's `FunctionTool`s by `h.wrap`,
   on a copy of the agent; a `create_agent` or Deep Agents graph's tools through
   `h.governance_middleware()` (`ReAct` has it) — decided by risk (the catalog's, else the
@@ -49,6 +55,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   journal keeps whole.
 
 ### Changed
+
+- The judge asks the gateway's judge alias `trellis-judge` (routed by the Bifrost admin) unless a
+  judge names its model; it never falls back to the judged agent's model. An alias the gateway
+  does not route turns the judges off, said once. Bifrost's semantic cache is not used for
+  judges.
 
 - `without=` has fewer names: `memory`, `tool_search` (the tool hints and memory's `tool_search`
   tool), `mcp`, `code_mode`, `skills`, `judges`, `grounding`, `planning`, `files`, and the

@@ -12,6 +12,7 @@ from typing import Any, cast
 import httpx
 import pytest
 import respx
+from bifrost_sdk import NO_GATEWAY_TOOLS
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from opentelemetry.sdk.trace import TracerProvider
@@ -282,3 +283,28 @@ async def test_a_structured_answer_at_the_budget_is_asked_for_without_other_tool
         result = await agent.run("a-1?", user="u")
     assert result.status is RunStatus.PARTIAL and result.answer == Count(sku="a-1", units=7)
     assert model.requests[-1]["tools"] == ["Count"]  # only the answer's own tool
+
+
+# --------------------------------------------------------------------------- attribution
+@respx.mock
+async def test_every_gateway_call_says_whose_run_and_joins_its_trace(
+    spans: InMemorySpanExporter,
+) -> None:
+    import hashlib
+
+    chat = respx.post(f"{GATEWAY}/chat/completions").mock(
+        return_value=httpx.Response(200, json=completion())
+    )
+    async with harness() as h:
+        result = await h.wrap(ReAct("s", "granite/g"), id="dims").run("hi?", user="ada")
+        given = await h.model_headers()
+        assert dict(given) == dict(NO_GATEWAY_TOOLS) and len(given) == len(NO_GATEWAY_TOOLS)
+        assert repr(given).startswith("GatewayHeaders(")  # read per request: nothing outside a run
+    headers = chat.calls[0].request.headers
+    assert headers["x-bf-dim-agent"] == "dims" and headers["x-bf-dim-run"] == result.run_id
+    assert headers["x-bf-dim-tenant"] == "default"
+    assert headers["x-bf-dim-user"] == hashlib.sha256(b"ada").hexdigest()[:16]  # never "ada"
+    [model_span] = [s for s in spans.get_finished_spans() if s.name.startswith("chat ")]
+    assert model_span.context is not None
+    trace_id = format(model_span.context.trace_id, "032x")
+    assert headers["traceparent"].split("-")[1] == trace_id  # the gateway's span joins it

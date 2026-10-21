@@ -18,8 +18,6 @@ import logging
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, Final, Literal, TypeVar
 
-from bifrost_sdk import NO_GATEWAY_TOOLS
-
 from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
@@ -36,7 +34,13 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
-from trellis.harness.prompts import ModelPrompts, Prompt, PromptSource, PromptSources
+from trellis.harness.prompts import (
+    GatewayHeaders,
+    ModelPrompts,
+    Prompt,
+    PromptSource,
+    PromptSources,
+)
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
@@ -476,7 +480,7 @@ class Harness:
         version on each call; the Claude Code CLI's ``ANTHROPIC_CUSTOM_HEADERS`` get it as the
         CLI starts."""
         if prompt is None:
-            return dict(NO_GATEWAY_TOOLS)
+            return GatewayHeaders()
         return await self.model_prompts.headers(prompt)
 
     async def aclose(self) -> None:

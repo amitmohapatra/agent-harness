@@ -165,7 +165,7 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 |---|---|
 | A score for every item of a test set, before shipping | `await h.evaluate(agent, "dataset-name" or [items], [exact_match(), llm_judge("...")])`: each item through the real pipeline, scores on the traces, a Langfuse dataset run, an `EvalReport` |
 | Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_JUDGE_SAMPLE`) judged in the background |
-| A judge that does not grade itself, on its own budget | `TRELLIS_JUDGE_MODEL` (a stronger model than the agent's) and `TRELLIS_JUDGE_VIRTUAL_KEY` |
+| A judge that does not grade itself, on its own budget | the judge alias `trellis-judge` routed in Bifrost to a stronger model than the agent's, and `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | Which tools a run called, in what order, with what arguments | `called("lookup", before="refund")`, `tool_sequence([...])`, or your own reading `case.trajectory` ([evaluation.md](evaluation.md#trajectories)) |
 | Every run's answer checked against what memory gave it, cheaply | nothing: the sampled grounding check (`TRELLIS_GROUNDING_SAMPLE`, 10 %); `grounding()` makes it an explicit evaluator |
 | An exact or partial match against an expected answer | `exact_match()`, `contains()` (offline: they need `expected`) |

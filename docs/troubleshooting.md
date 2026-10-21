@@ -59,7 +59,7 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | `ConfigurationError: memory is off for this run` | `trellis.current().memory` with memory off | set `MEMORY_URL`, or check `agent.uses("memory_pull")` first |
 | `warning` events about writes, `trellis.writes.undelivered` | memory writes given up after retries | set `TRELLIS_SPOOL_DIR` on a volume that outlives the process ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | a person's feedback does not change memory | human feedback waits for the tenant administrator's review | approve it in the memory service; the trace score is there already |
-| no judge scores | no judge model (`TRELLIS_JUDGE_MODEL`, a judge's `model=`, or a `ReAct` built with a model name) | set `TRELLIS_JUDGE_MODEL` ([evaluation.md](evaluation.md#the-judges-model)) |
+| no judge scores | the judge alias `trellis-judge` is not routed in Bifrost (the log says so once), or no `BIFROST_URL` | route the alias in Bifrost, or give `llm_judge(model=)` ([evaluation.md](evaluation.md#the-judges-model)) |
 | few runs judged | online judges score a sample (`TRELLIS_JUDGE_SAMPLE`, 0.1 by default) | raise the sample |
 | no traces | no `OTEL_EXPORTER_OTLP_ENDPOINT`, no Langfuse keys and no provider of your own | set it ([observability.md](observability.md#export)) |
 | a value shows as `[redacted]` in a span | its name or value looks like a secret | expected; redact more with a hook of your own ([observability.md](observability.md#redaction)) |

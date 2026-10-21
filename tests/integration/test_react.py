@@ -121,7 +121,6 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
         config=Settings(bifrost_url="http://gw.test/v1", bifrost_virtual_key="vk")
     ) as h:
         agent = h.wrap(graph, id="named")
-        assert agent.evals.fallback_model == "provider/model"
         result = await agent.run("x", user="u")
     assert result.answer == "hi"
     request = route.calls[0].request

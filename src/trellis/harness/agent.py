@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
-import functools
 import json
 import logging
 from collections.abc import (
@@ -44,13 +42,11 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, pipeline, sandbox, skills
+from trellis.harness import compat, pipeline, sandbox, skills, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
-    MODEL_METADATA,
     context_window,
-    metadata_of,
 )
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.budget import Budget
@@ -147,6 +143,10 @@ class Agent:
         self.adapter = detect(target)
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
+        if self.adapter.name == "openai_agents":  # its SDK's own tracing: left as set, said
+            from trellis.harness.adapters.openai_agents import sdk_tracing_said  # noqa: PLC0415
+
+            sdk_tracing_said()
         for gated in sorted(gated_tools(target)):
             log.warning(
                 "%s: %s is approved in the framework's own gate: governance counts that "
@@ -183,14 +183,11 @@ class Agent:
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
 
-    @functools.cached_property
+    @property
     def evals(self) -> EvalServices:
-        """What this agent's runs are evaluated with: the harness's services, the judge falling
-        back to the gateway model a ``ReAct`` target was named with when
-        ``TRELLIS_JUDGE_MODEL`` is unset."""
-        model = metadata_of(self.target).get(MODEL_METADATA)
-        named = model if isinstance(model, str) else None
-        return dataclasses.replace(self.harness.evals, fallback_model=named)
+        """What this agent's runs are evaluated with: the harness's services (the judge is the
+        gateway's judge alias, never the agent's own model)."""
+        return self.harness.evals
 
     # ------------------------------------------------------------------ running
     async def run(
@@ -857,11 +854,13 @@ class Agent:
             trajectory=list(runtime.replay.journal.trajectory),
         )
         services, events = self.evals, runtime.events
+        dims = {**telemetry.attribution(runtime), "purpose": "judge"}
         for evaluator in judges:
             name = name_of(evaluator)
 
             async def work(evaluator: Evaluator = evaluator, name: str = name) -> None:
-                _, failed = await judge(case, [evaluator], services=services)
+                with telemetry.attributed(dims):  # the judge's calls: whose run they judge
+                    _, failed = await judge(case, [evaluator], services=services)
                 if failed:
                     events.warning("judge_failed", f"judge {name}: {failed[name]}")
 

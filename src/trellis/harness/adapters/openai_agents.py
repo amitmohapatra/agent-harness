@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
+import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar, Final
@@ -37,6 +39,8 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import reason_of
+
+log = logging.getLogger("trellis.harness")
 
 #: ``Runner.run``'s arguments the harness gives itself: the agent (a clone carrying the harness
 #: tools), its input (with the memory context, or the resumed state) and the run's hooks.
@@ -63,6 +67,24 @@ class _Continue:
     #: an edit: the tool and its edited arguments, approved when the model calls it with them
     tool: str | None = None
     edited: dict[str, Any] | None = None
+
+
+@functools.cache
+def sdk_tracing_said() -> bool:
+    """Say once, when an agent is wrapped, that the SDK's own tracing — which exports to
+    OpenAI unless turned off — is left as the application set it (``True`` when said)."""
+    from agents.tracing import get_trace_provider
+
+    provider = get_trace_provider()
+    disabled = getattr(provider, "_disabled", False)
+    if disabled:
+        return False
+    log.info(
+        "the OpenAI Agents SDK's own tracing is on and exports to OpenAI: the harness leaves it "
+        "as you set it (agents.set_tracing_disabled(True), or OPENAI_AGENTS_DISABLE_TRACING=1, "
+        "turns it off); the run's trace is the harness's and the gateway's"
+    )
+    return True
 
 
 class OpenAIAgentsAdapter:

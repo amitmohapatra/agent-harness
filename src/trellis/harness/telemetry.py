@@ -60,7 +60,7 @@ from urllib.parse import quote
 import httpx
 from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
-from opentelemetry import trace
+from opentelemetry import propagate, trace
 
 from trellis.contracts import ConfigurationError
 from trellis.harness.redaction import DEFAULT as REDACTOR
@@ -718,6 +718,54 @@ def configure(settings: Settings, environ: Mapping[str, str] | None = None) -> b
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     return True
+
+
+#: The Bifrost dimension headers every gateway request the harness makes carries
+#: (``x-bf-dim-*``: in Bifrost's logs, its OTel spans and its metrics): whose run it is.
+DIMENSION_PREFIX: Final = "x-bf-dim-"
+#: The attribution of work done outside a run's task for a run (a judge in the background).
+_ATTRIBUTED: ContextVar[dict[str, str] | None] = ContextVar("trellis_attributed", default=None)
+
+
+def attribution(runtime: Any) -> dict[str, str]:
+    """A run's Bifrost dimensions: its tenant, agent and run, and a hash of its user (never
+    the user id itself: Bifrost's dimensions are not for personal data)."""
+    user = getattr(runtime, "user", None) or ""
+    found = {
+        "tenant": getattr(runtime, "tenant", None),
+        "agent": getattr(runtime, "agent_id", None),
+        "run": getattr(runtime, "run_id", None),
+        "user": hashlib.sha256(user.encode()).hexdigest()[:16] if user else None,
+    }
+    return {k: str(v) for k, v in found.items() if v}
+
+
+@contextmanager
+def attributed(dimensions: dict[str, str]) -> Iterator[None]:
+    """Gateway requests made here carry ``dimensions`` (work for a run, done off its task)."""
+    token = _ATTRIBUTED.set(dimensions)
+    try:
+        yield
+    finally:
+        _ATTRIBUTED.reset(token)
+
+
+def current_attribution() -> dict[str, str] | None:
+    """The dimensions :func:`attributed` set here, if any."""
+    return _ATTRIBUTED.get()
+
+
+def gateway_headers() -> dict[str, str]:
+    """The headers a gateway request made now carries: the run's dimensions (the run in this
+    task, else :func:`attributed`'s) and the W3C ``traceparent`` of the span it is made in, so
+    the gateway's own span of the call joins the run's trace."""
+    from trellis.harness.runtime import current  # noqa: PLC0415 - runtime imports telemetry
+
+    runtime = current()
+    dims = attribution(runtime) if runtime is not None else (_ATTRIBUTED.get() or {})
+    headers = {f"{DIMENSION_PREFIX}{k}": v for k, v in dims.items()}
+    propagate.inject(headers)
+    return headers
 
 
 def exporting() -> bool:
