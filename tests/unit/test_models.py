@@ -1,6 +1,6 @@
 """What the harness knows of a model by its name (``trellis.harness.models``): its context
-window — given, the model's profile, the gateway's listing (its own fields, or the llama.cpp
-server's ``n_ctx`` it passes on), else the default said once — its
+window — given, else its LangChain profile (bundled, never fetched), else the default said once —
+its
 vendor, whether the gateway serves that vendor's own API, and the effort levels it takes."""
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ GATEWAY = "http://gateway.test/v1"
 @pytest.fixture(autouse=True)
 def _fresh() -> Iterator[None]:
     """Each test asks the gateway again (the probes are cached per process)."""
-    for cached in (models._listed, models.serves, models._assumed):
+    for cached in (models.serves, models._assumed, models._said):
         cached.cache_clear()
     yield
 
@@ -34,55 +34,24 @@ def listing(*entries: dict[str, Any]) -> httpx.Response:
 
 
 # --------------------------------------------------------------------------- the window
-def test_a_given_window_wins_over_every_other_source() -> None:
-    with respx.mock(assert_all_called=False) as mock:
-        route = mock.get(f"{GATEWAY}/models").mock(
-            return_value=listing({"id": "granite/g", "max_input_tokens": 4096})
-        )
-        assert window_of("granite/g", given=9000, profile=7000, base_url=GATEWAY) == Window(
-            9000, "given"
-        )
-        assert window_of("granite/g", profile=7000, base_url=GATEWAY) == Window(7000, "profile")
-        assert not route.called
+def test_a_given_window_wins_then_the_profile(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="trellis.models"):
+        assert window_of("openai/gpt-4.1", given=9000, profile=7000) == Window(9000, "given")
+        assert window_of("granite/g", profile=7000) == Window(7000, "profile")
+    assert "the context window of granite/g: 7000 tokens (profile)" in caplog.text
 
 
 @pytest.mark.parametrize(
-    ("entry", "found"),
-    [
-        ({"id": "granite/g", "max_input_tokens": 4096}, Window(4096, "gateway")),
-        ({"id": "granite/g", "context_length": 32768}, Window(32768, "gateway")),
-        ({"id": "g", "context_window": 16384}, Window(16384, "gateway")),  # listed bare
-        (
-            {"id": "granite/g", "meta": {"n_ctx": 8192, "n_ctx_train": 131072}},
-            Window(8192, "server"),
-        ),
-    ],
+    ("name", "tokens"),
+    [("openai/gpt-4.1", 1_047_576), ("gpt-4.1", 1_047_576), ("claude-opus-5-5", 1_000_000)],
 )
-def test_the_gateways_listing_says_the_window(entry: dict[str, Any], found: Window) -> None:
-    with respx.mock() as mock:
-        mock.get(f"{GATEWAY}/models").mock(return_value=listing({"id": "other"}, entry))
-        assert window_of("granite/g", base_url=GATEWAY, key="vk") == found
-        assert mock.calls.last.request.headers["authorization"] == "Bearer vk"
+def test_a_vendors_model_name_has_the_profile_langchain_bundles(name: str, tokens: int) -> None:
+    assert window_of(name) == Window(tokens, "profile")
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [
-        httpx.Response(200, json={"data": [{"id": "anthropic/claude-sonnet-5-5"}]}),  # no field
-        httpx.Response(500),
-        httpx.Response(200, json=["not", "an", "object"]),
-        httpx.ConnectError("down"),
-    ],
-)
-def test_a_listing_that_says_nothing_is_the_default(answer: Any) -> None:
-    with respx.mock() as mock:
-        route = mock.get(f"{GATEWAY}/models")
-        if isinstance(answer, Exception):
-            route.mock(side_effect=answer)
-        else:
-            route.mock(return_value=answer)
-        found = window_of("anthropic/claude-sonnet-5-5", base_url=GATEWAY)
-    assert found == Window(DEFAULT_WINDOW, "default")  # no copied table: the model says
+def test_nothing_is_fetched_for_a_window() -> None:
+    with respx.mock(assert_all_mocked=True):  # any request would fail the test
+        assert window_of("granite/g") == Window(DEFAULT_WINDOW, "default")
 
 
 def test_an_unknown_model_is_the_default_said_once(caplog: pytest.LogCaptureFixture) -> None:
@@ -94,14 +63,9 @@ def test_an_unknown_model_is_the_default_said_once(caplog: pytest.LogCaptureFixt
     assert len(said) == 1 and "is not known" in said[0]
 
 
-def test_the_gateway_is_asked_once_per_model() -> None:
-    with respx.mock() as mock:
-        route = mock.get(f"{GATEWAY}/models").mock(
-            return_value=listing({"id": "granite/g", "max_input_tokens": 4096})
-        )
-        for _ in range(3):
-            window_of("granite/g", base_url=GATEWAY)
-        assert route.call_count == 1
+def test_the_bundled_profile_is_a_vendors_only() -> None:
+    assert models.bundled_profile("granite/granite-3.3-2b") == {}
+    assert models.bundled_profile("openai/no-such-model") == {}
 
 
 # --------------------------------------------------------------------------- the vendor

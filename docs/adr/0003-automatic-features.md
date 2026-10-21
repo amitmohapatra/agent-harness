@@ -38,7 +38,7 @@ long tasks; a short task must keep sending exactly that.
    * tool narrowing — the memory service's tool hints and `tool_search`; without memory, every
      tool is offered (the toolbox's check warns from 20 tools);
    * a model's context window — what the model says of itself: `context_window=`, else its
-     LangChain profile, else the gateway's model listing; else 128k, said once;
+     LangChain profile (bundled with LangChain, never fetched); else 128k, said once;
    * reasoning effort levels — the model's LangChain profile; none listed, none sent;
    * dollars — the gateway's per-call cost (Bifrost's `usage.cost`); the price table is the
      benchmark's own (`benchmark/cost/prices.py`);

@@ -290,7 +290,7 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | `max_steps` | 12 | model calls with tools, then one more without |
 | `max_repeats` | 3 | identical calls in a row that stop the run |
 | `model_timeout` | none | the most one model call may take, in seconds |
-| `context_window` | detected: the model's profile, else the gateway's model listing (the llama.cpp server's `n_ctx` it passes on included), else 128,000 (said once) | the model's window in tokens; every threshold is scaled by it |
+| `context_window` | the model's LangChain profile (bundled, never fetched), else 128,000 (said once) | the model's window in tokens; every threshold is scaled by it |
 | `prompt`, `prompt_vars` | none | a prompt of the prompt sources, pinned for the run, and its variables ([prompts.md](prompts.md)) |
 | `middleware` | `()` | more LangChain or Deep Agents middleware; one named like a default replaces it |
 | `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |

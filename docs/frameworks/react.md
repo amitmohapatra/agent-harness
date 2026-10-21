@@ -65,11 +65,11 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
   saying what was wrong; a second is a `ModelError` saying so (`structured_output`).
 * `model_timeout` — the most one model call may take, in seconds, the gateway's retries and
   fallbacks included; within what is left of the run's `timeout=`/`deadline=`.
-* `context_window` — the model's window in tokens. Unset, it is detected: the model object's
-  profile (`max_input_tokens`); for a model name, the gateway's model listing (a listed
-  `max_input_tokens`, `context_window` or `context_length`, or the `n_ctx` an OpenAI-compatible
-  llama.cpp server reports through it) — what the model says of itself; when nothing says,
-  128k, said once in the log. Every threshold below is a share of it.
+* `context_window` — the model's window in tokens; given, it wins. Unset, the model's
+  LangChain profile (`max_input_tokens`): the model object's, or the one LangChain bundles for a
+  vendor's model name — never fetched; when none says, 128k, said once in the log (give it for
+  a local model: a llama.cpp server's `-c`). Where the number came from is logged. Every
+  threshold below is a share of it.
 * `effort` — the reasoning effort of every step of a model that takes one; unset, each step's
   own (`effort`, below).
 * `fallback_models` — gateway model names tried in order when a model call fails

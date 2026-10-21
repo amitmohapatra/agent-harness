@@ -30,7 +30,7 @@ STEPS = "Do this step by step: count a-1."
 def _gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BIFROST_URL", GATEWAY)
     monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
-    for cached in (models._listed, models.serves, models._assumed):
+    for cached in (models.serves, models._assumed, models._said):
         cached.cache_clear()
     yield
 
@@ -73,20 +73,12 @@ def offered(request: httpx.Request) -> set[str]:
 
 # --------------------------------------------------------------------------- the window
 @respx.mock
-@pytest.mark.parametrize(("n_ctx", "long_tools"), [(8_192, False), (1_000_000, True)])
-async def test_the_window_the_gateway_reports_scales_what_react_does(
-    n_ctx: int, long_tools: bool
-) -> None:
-    respx.get(f"{GATEWAY}/models").mock(
-        return_value=httpx.Response(
-            200, json={"data": [{"id": "granite/g", "meta": {"n_ctx": n_ctx}}]}
-        )
-    )
+@pytest.mark.parametrize(("given", "long_tools"), [(8_192, False), (1_000_000, True)])
+async def test_the_window_scales_what_react_does(given: int, long_tools: bool) -> None:
     chat = respx.post(f"{GATEWAY}/chat/completions").mock(return_value=chat_reply())
-    assert detected_window("granite/g") == models.Window(n_ctx, "server")
-    graph = ReAct("s", "granite/g")
+    graph = ReAct("s", "granite/g", context_window=given)
     async with harness() as h:
-        await h.wrap(graph, id=f"w{n_ctx}", tools=[stock]).run(STEPS, user="u")
+        await h.wrap(graph, id=f"w{given}", tools=[stock]).run(STEPS, user="u")
     # a long task's tools need room: offered on a large window only
     assert ("write_todos" in offered(chat.calls[0].request)) is long_tools
 

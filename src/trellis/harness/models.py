@@ -1,12 +1,11 @@
 """What the harness knows of a model named by a string (a gateway model name): its vendor and
 its context window — what ``ReAct`` builds its client with and scales its limits by.
 
-**The window** is what the model says of itself: the ``context_window`` given, else the model
-object's LangChain profile, else the gateway's model listing (a listed model's
-``max_input_tokens``, ``context_window``, ``context_length``, or the ``n_ctx`` an
-OpenAI-compatible llama.cpp server reports and the gateway passes on); when none says,
-:data:`DEFAULT_WINDOW`, said once in the log. The gateway is asked once per process and model,
-waiting at most :data:`PROBE_SECONDS`.
+**The window** is the ``context_window`` given (code wins), else the model's LangChain profile
+— the model object's, or the one LangChain bundles for a vendor's model name — never fetched;
+when none says, :data:`DEFAULT_WINDOW`, said once in the log. Where the number came from is
+logged once per model. :func:`serves` asks the gateway, once per process, waiting at most
+:data:`PROBE_SECONDS`.
 
 **The vendor**, of a name the gateway routes to a provider: ``anthropic/...`` or ``openai/...``
 (a bare ``claude-...`` or ``gpt-...`` name too). Another provider in front of a vendor's model
@@ -17,6 +16,7 @@ own API. :func:`serves` says whether the gateway serves a vendor's API at all.
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeGuard
@@ -31,11 +31,9 @@ DEFAULT_WINDOW: Final = 128_000
 PROBE_SECONDS: Final = 2.0
 #: Every effort level, least first.
 EFFORTS: Final = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-#: What a gateway's model listing may call a model's window.
-LISTED: Final = ("max_input_tokens", "context_window", "context_length", "max_context_length")
 
 Vendor = Literal["anthropic", "openai"]
-Source = Literal["given", "profile", "gateway", "server", "default"]
+Source = Literal["given", "profile", "default"]
 #: A vendor's own gateway provider name, and the bare model names that are its.
 VENDOR_NAMES: Final[dict[Vendor, tuple[str, ...]]] = {
     "anthropic": ("claude",),
@@ -67,26 +65,37 @@ def vendor_of(name: str) -> Vendor | None:
     )
 
 
-def window_of(
-    name: str | None,
-    *,
-    given: int | None = None,
-    profile: int | None = None,
-    base_url: str | None = None,
-    key: str | None = None,
-) -> Window:
-    """The window of the model ``name`` (or of a model object whose ``profile`` says), from the
-    first source that says (see the module)."""
+def window_of(name: str | None, *, given: int | None = None, profile: int | None = None) -> Window:
+    """The window of the model ``name`` (or of a model object whose ``profile`` says): the
+    ``given`` one, else its LangChain profile's (bundled with LangChain, never fetched), else
+    :data:`DEFAULT_WINDOW`, said once. Where it came from is logged once per model."""
     if given is not None:
-        return Window(given, "given")
-    if profile is not None:
-        return Window(profile, "profile")
-    if name is not None and base_url is not None:
-        found = _listed(base_url, key, name)
-        if found is not None:
-            return found
-    _assumed(name or "the model")
-    return Window(DEFAULT_WINDOW, "default")
+        found = Window(given, "given")
+    elif profile is not None:
+        found = Window(profile, "profile")
+    else:
+        listed = bundled_profile(name).get("max_input_tokens") if name else None
+        found = Window(listed, "profile") if _tokens(listed) else None  # type: ignore[arg-type]
+    if found is None:
+        _assumed(name or "the model")
+        return Window(DEFAULT_WINDOW, "default")
+    _said(name or "the model", found.tokens, found.source)
+    return found
+
+
+def bundled_profile(name: str) -> dict[str, Any]:
+    """The LangChain profile bundled for a vendor's model name (``anthropic/...``,
+    ``openai/...``, a bare ``claude-...`` or ``gpt-...``): its window, its effort levels...
+    Empty for any other model."""
+    vendor = vendor_of(name)
+    modules = {
+        "anthropic": "langchain_anthropic.chat_models",
+        "openai": "langchain_openai.chat_models.base",
+    }
+    if vendor is None:
+        return {}
+    profiles = importlib.import_module(modules[vendor])  # the react extra installs both
+    return dict(profiles._get_default_model_profile(bare(name)) or {})
 
 
 def effort_levels(model: Any) -> tuple[str, ...]:
@@ -111,39 +120,17 @@ def _tokens(value: Any) -> TypeGuard[int]:
 
 
 @functools.cache
+def _said(name: str, tokens: int, source: str) -> None:
+    log.info("the context window of %s: %d tokens (%s)", name, tokens, source)
+
+
+@functools.cache
 def _assumed(name: str) -> None:
     log.warning(
         "the context window of %s is not known: %d tokens assumed (ReAct(context_window=) says it)",
         name,
         DEFAULT_WINDOW,
     )
-
-
-@functools.cache
-def _listed(base_url: str, key: str | None, name: str) -> Window | None:
-    """What the gateway's model listing says of ``name``'s window (``None``: nothing, or the
-    gateway did not answer)."""
-    try:
-        response = httpx.get(
-            f"{base_url.rstrip('/')}/models",
-            headers={"Authorization": f"Bearer {key or 'none'}"},
-            timeout=PROBE_SECONDS,
-        )
-        listing = response.json() if response.is_success else {}
-    except Exception:
-        return None
-    entries = listing.get("data") if isinstance(listing, dict) else None
-    for entry in entries if isinstance(entries, list) else []:
-        if not isinstance(entry, dict) or entry.get("id") not in (name, bare(name)):
-            continue
-        for field in LISTED:
-            if _tokens(entry.get(field)):
-                return Window(entry[field], "gateway")
-        meta = entry.get("meta")
-        n_ctx = meta.get("n_ctx") if isinstance(meta, dict) else None
-        if _tokens(n_ctx):
-            return Window(n_ctx, "server")
-    return None
 
 
 @functools.cache

@@ -33,8 +33,8 @@ A model name is a model of the gateway (``BIFROST_URL``, the virtual key
 ``BIFROST_VIRTUAL_KEY``), asked through ``ChatOpenAI`` with the gateway's deny-all MCP scope —
 or, for a vendor's model whose own API the gateway serves, through that API (``ChatAnthropic``,
 OpenAI's Responses API; ``native_client``); any LangChain chat model is used as it is. The
-context window is ``context_window``, else the model's profile, else the gateway's model
-listing, else :data:`CONTEXT_WINDOW` (``models.window_of``).
+context window is ``context_window``, else the model's LangChain profile (bundled, never
+fetched), else :data:`CONTEXT_WINDOW` (``models.window_of``).
 """
 
 from __future__ import annotations
@@ -217,20 +217,13 @@ def _window(model: Any) -> int | None:
 
 
 def _detected(name: str | None, *, given: int | None, profile: int | None) -> models.Window:
-    """The model's window (``models.window_of``): the gateway asked for a model name."""
-    settings = Settings.from_env() if name is not None else None
-    return models.window_of(
-        name,
-        given=given,
-        profile=profile,
-        base_url=settings.bifrost_url if settings is not None else None,
-        key=settings.bifrost_virtual_key if settings is not None else None,
-    )
+    """The model's window (``models.window_of``)."""
+    return models.window_of(name, given=given, profile=profile)
 
 
 def detected_window(model: Any, context_window: int | None = None) -> models.Window:
     """The context window ``ReAct(model, context_window=)`` builds with, and what said so
-    (``given``, ``profile``, ``gateway``, ``server``, ``default``)."""
+    (``given``, ``profile``, ``default``)."""
     named = model if isinstance(model, str) else None
     return _detected(named, given=context_window, profile=_window(model))
 
@@ -252,7 +245,7 @@ def _native_model(name: str, *, timeout: float | None, window: int) -> Any | Non
         "default_headers": dict(NO_GATEWAY_TOOLS),
         "timeout": timeout,
         "max_retries": MODEL_RETRIES,
-        "profile": {"max_input_tokens": window},
+        "profile": {**models.bundled_profile(name), "max_input_tokens": window},
     }
     if vendor == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -305,7 +298,7 @@ def _gateway_model(model: Any, *, timeout: float | None, window: int) -> Any:
         timeout=timeout,
         max_retries=MODEL_RETRIES,
         stream_usage=True,
-        profile={"max_input_tokens": window},
+        profile={**models.bundled_profile(model), "max_input_tokens": window},  # type: ignore[arg-type]
         # a client of its own: langchain-openai shares one per gateway URL across the process,
         # whose pooled connections break the models of a later event loop
         http_async_client=openai.DefaultAsyncHttpxClient(),

@@ -33,7 +33,7 @@ GATEWAY = "http://gw.test/v1"
 def _gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BIFROST_URL", GATEWAY)
     monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
-    for cached in (models._listed, models.serves, models._assumed, budget._no_cost):
+    for cached in (models.serves, models._assumed, models._said, budget._no_cost):
         cached.cache_clear()
     yield
 
