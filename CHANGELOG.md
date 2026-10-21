@@ -7,6 +7,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- `ReAct` saves the turns a summary replaces to the memory service first, each once
+  (`compaction_memory`), and offers Deep Agents' `compact_conversation` on a long task. Rewind:
+  a run keeps its graph's last 20 checkpoints, `agent.checkpoints(run_id)` lists them and
+  `agent.fork(run_id, checkpoint_id)` starts a new run from one, the calls already made
+  replayed (a run holding a change of unknown effect is refused).
+
 - Budgets: every run has one (`h.wrap(budget=Budget(max_tokens=, max_cost=, max_tool_calls=))`,
   default 2,000,000 tokens and 200 tool calls), counted on its journal — so a resume goes on
   from what was spent and a sub-agent's spending counts toward its parent's. At a limit no new

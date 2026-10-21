@@ -99,7 +99,7 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 |---|---|
 | `FilesystemMiddleware` (Deep Agents) on a journal backend | a tool result over 20,000 tokens is saved as a file in the graph's state (`/large_tool_results/<call id>`), a head-and-tail preview in its place; `read_file` reads it by lines (OpenAI Agents and Claude get the same from the harness: [tools.md](../tools.md#large-results)). The files are in a channel the run's journal keeps whole, so they are still there after a pause, a crash or a move to another worker |
 | `ContextEditingMiddleware` + `ClearToolUsesEdit` (LangChain) | past half the window, the older tool results (all but the last 3) are cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a provider's prompt cache breaks rarely |
-| `create_summarization_middleware` (Deep Agents) | past 85% of the window, the older turns are summarized by one model call, the last 10% kept; the turns it replaced are saved where `read_file` reads them (`/conversation_history/...`); oversized tool arguments in older turns are truncated first; a context overflow is summarized and retried |
+| `create_summarization_middleware` (Deep Agents) | past 85% of the window, the older turns are summarized by one model call, the last 10% kept; the turns it replaced are saved where `read_file` reads them (`/conversation_history/...`); oversized tool arguments in older turns are truncated first; a context overflow is summarized and retried. The turns a summary replaces are saved to the memory service first, each once (`compaction_memory`; with memory off, summarized as before, said once) |
 | `PatchToolCallsMiddleware` (Deep Agents) | a tool call left with no answer (a crash, a cancel) gets one, so the conversation stays valid |
 | `response_format` (LangChain) | `output=` |
 | parallel tool calls (LangGraph) | the calls of one step run at once, each in its own task |
@@ -115,6 +115,7 @@ answers that it is not available):
 |---|---|
 | `TodoListMiddleware` (LangChain), `planning` | the `write_todos` tool and its instructions: a plan the model keeps |
 | `FilesystemMiddleware`'s scratch tools (Deep Agents), `files` | `ls`, `write_file` and `edit_file` beside `read_file`: notes and drafts kept as files, one at most 100,000 characters, a run's at most 1,000,000 |
+| Deep Agents' `compact_conversation` tool, `files` | the model compacts its own context when a phase is done (eligible from about half the summarization trigger, as Deep Agents gates it) |
 | `SubAgentMiddleware` (Deep Agents), `subagent_task` | the `task` tool: a general-purpose helper with the same tools does a self-contained part in a context of its own. Each call is a child run of the same agent, as `agent.as_tool()` makes one ([subagents.md](../subagents.md)): governed, journaled, continued from its journal after a crash, its question the parent's, cancelled with the parent. A helper starts no helper; at most 4 work at once per run |
 
 A `TodoListMiddleware`, `FilesystemMiddleware` or `SubAgentMiddleware` given to
@@ -141,7 +142,7 @@ A `TodoListMiddleware`, `FilesystemMiddleware` or `SubAgentMiddleware` given to
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed (no such tool, arguments that do not fit, an error, a timeout), stop the run with a `ModelError` |
 | `read_result` (a tool) | reads a cleared tool result again, by its call's id, in pieces |
 | `ReadTools` | `read_file` offered only once there is a file to read, `read_result` once a result was cleared: a small model offered them from the start reads nothing, again and again (both stay callable) |
-| `RunCheckpointer` | the graph's checkpoint kept in the run's journal, the latest only: a resume — after a pause, a crash or a requeue — continues the graph where it stopped |
+| `RunCheckpointer` | the graph's checkpoints kept in the run's journal, the last 20: a resume — after a pause, a crash or a requeue — continues the graph where it stopped, and `agent.fork(run_id, checkpoint_id)` starts a new run from an earlier one ([api.md](../api.md#agentcheckpoints-agentfork)) |
 | `ToolGuidance` (`tool_guidance=True`) | how to choose among tools, added to the instructions of every call that offers tools ([below](#tool-choice)) |
 | `AnswerCheck` (`answer_check=True`) | the draft answer checked against the request once, the tools still needed called ([below](#tool-choice)) |
 

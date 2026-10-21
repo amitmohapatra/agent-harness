@@ -189,6 +189,20 @@ Answer a pause: `interrupt_id` (or the run's id), `decision` one of `answer`, `a
 calls in this run. An answer that does not fit is refused (`ConfigurationError`) and the run
 keeps waiting ([interrupts.md](interrupts.md#answering)).
 
+### agent.checkpoints, agent.fork
+
+```text
+await agent.checkpoints(run_id, *, tenant=None) -> list[str]
+await agent.fork(run_id, checkpoint_id, *, tenant=None, without=()) -> Result
+```
+
+Rewind: `checkpoints` lists the graph checkpoints a run keeps, newest first (a `ReAct` run, or
+a graph with a `RunCheckpointer`: its last 20; a run that has ended keeps none); `fork` starts
+a new run, in this process, from one of them — with this agent, so another model or other
+tools if it is another — the calls the run made replayed from its journal, never made again.
+A run holding a change whose effect is unknown is refused (`ConfigurationError`, saying so);
+the new run's journal names the run and checkpoint it came from (`forked_from`).
+
 ### agent.execute, agent.cancel, agent.events
 
 ```text

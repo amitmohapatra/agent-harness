@@ -29,6 +29,8 @@ Feature = Literal[
     "planning",
     "files",
     "subagent_task",
+    # the turns a summary replaces saved to memory first (``automatic.Compaction``)
+    "compaction_memory",
     # the vendor's own API for a vendor's model, and the effort of each step
     "native_client",
     "effort",

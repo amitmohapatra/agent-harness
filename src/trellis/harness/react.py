@@ -115,7 +115,6 @@ def ReAct(
     model or a JSON schema."""
     try:
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-        from deepagents.middleware.summarization import create_summarization_middleware
         from langchain.agents import create_agent
         from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
 
@@ -140,6 +139,7 @@ def ReAct(
             "fallback_models are the gateway's: ReAct falls back through it, for a model name"
         )
     backend = automatic.JournalBackend()
+    compaction = automatic.Compaction.of(_profiled(chat, window), backend)
     defaults = [
         # the vendor's own API, when the gateway serves it, for every call (outermost)
         *([automatic.NativeClient(native)] if native is not None else []),
@@ -148,6 +148,7 @@ def ReAct(
         automatic.Planning(window=window),
         automatic.Helpers(backend, window=window),
         automatic.ScratchFiles(window=window),
+        automatic.CompactNow(compaction, window=window),
         *([ours.AnswerCheck()] if answer_check else []),
         ours.HarnessTools(),
         ours.StallGuard(max_repeats or ours.MAX_REPEATS),
@@ -165,7 +166,7 @@ def ReAct(
                 )
             ]
         ),
-        create_summarization_middleware(_profiled(chat, window), backend),
+        compaction,
         ours.ReadTools(CLEARED),
         *(
             [

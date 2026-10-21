@@ -33,6 +33,9 @@ run: the model is not offered it, and a call of it is refused as not available.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
+import logging
 import re
 import weakref
 from collections.abc import Awaitable, Callable, Collection
@@ -44,6 +47,11 @@ from deepagents.backends.utils import file_data_to_string
 from deepagents.middleware import FilesystemMiddleware
 from deepagents.middleware.filesystem import _file_data_reducer
 from deepagents.middleware.subagents import SubAgentMiddleware
+from deepagents.middleware.summarization import (
+    SummarizationMiddleware,
+    SummarizationToolMiddleware,
+    compute_summarization_defaults,
+)
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
@@ -61,10 +69,13 @@ from langgraph.types import Command
 from trellis.contracts import ConfigurationError, ModelError, ToolStatus
 from trellis.harness import budget, models
 from trellis.harness.features import Feature
+from trellis.harness.journal import content_key
 from trellis.harness.middleware import ANSWER_CHECK, WRITE_CHECK, _named
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.convert import text_of
+
+log = logging.getLogger("trellis.run")
 
 #: The smallest context window the long-task tools are offered in, in tokens: together they
 #: cost about 2,600 tokens of instructions and definitions on every call, which a smaller
@@ -499,6 +510,100 @@ class ScratchFiles(_LongTasks, AgentMiddleware):
         if request.tool_call["name"] in SCRATCH and not on("files"):
             return refused(dict(request.tool_call))
         return await handler(request)
+
+
+# --------------------------------------------------------------------------- compaction
+class Compaction(SummarizationMiddleware):
+    """Deep Agents' summarization (built as ``create_summarization_middleware`` builds it), the
+    turns it summarizes away saved to the memory service first (``compaction_memory``): the
+    service keeps their facts, which the summary may drop. The write is the background
+    writes' (a failed one is spooled on disk); compaction never waits for it. With memory off
+    it summarizes as before, said once."""
+
+    @classmethod
+    def of(cls, model: Any, backend: Any) -> Compaction:
+        defaults = compute_summarization_defaults(model)
+        return cls(
+            model=model,
+            backend=backend,
+            trigger=defaults["trigger"],
+            keep=defaults["keep"],
+            truncate_args_settings=defaults["truncate_args_settings"],
+        )
+
+    async def _aoffload_to_backend(
+        self, backend: Any, messages: list[Any], session_id: str
+    ) -> str | None:
+        runtime = current()
+        if runtime is not None and runtime.uses("compaction_memory"):
+            await _saved(runtime, self._filter_summary_messages(messages))
+        return await super()._aoffload_to_backend(backend, messages, session_id)
+
+
+async def _saved(runtime: Runtime, messages: list[Any]) -> None:
+    """``messages`` saved to the run's memory, as (role, text)."""
+    pairs = [(_role(m), _said(m)) for m in messages]
+    # not the memory context (memory's own) nor the question (the transcript's)
+    said = [(r, t) for r, t in pairs if t and r != "system" and t != runtime.task]
+    memory = runtime.run_memory
+    if memory is None:
+        _unsaved()
+        return
+    if not said:
+        return
+    compaction = content_key("compacted", {"said": said})
+    await runtime.agent.harness.writes.submit(
+        "memory.compacted",
+        lambda: memory.record_compacted(said, runtime.run_id, compaction),
+        events=runtime.events,
+        record=memory.record(
+            "record_compacted",
+            messages=[list(m) for m in said],
+            run_id=runtime.run_id,
+            compaction=compaction,
+        ),
+    )
+
+
+def _role(message: Any) -> str:
+    return {"human": "user", "ai": "assistant", "tool": "tool"}.get(message.type, "system")
+
+
+def _said(message: Any) -> str:
+    calls = (
+        [f"{c['name']}({json.dumps(c['args'], default=str)})" for c in message.tool_calls]
+        if isinstance(message, AIMessage)
+        else []
+    )
+    return "\n".join([message.text, *calls]).strip()
+
+
+@functools.cache
+def _unsaved() -> None:
+    log.warning("compaction is not saved to memory: the run has no memory (MEMORY_URL)")
+
+
+class CompactNow(_LongTasks, SummarizationToolMiddleware):
+    """Deep Agents' ``compact_conversation`` tool, offered on a long task (``files``: it moves
+    the history into the run's files): the model compacts its own context when it judges a
+    phase done — eligible from about half the summarization trigger, as Deep Agents gates it."""
+
+    def __init__(self, summarization: Any, *, window: int | None = None) -> None:
+        super().__init__(summarization)
+        self.window = window
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        if self.wanted("files", request):
+            return await handler(request)
+        return await handler(without_tools(request, {COMPACT}))
+
+
+#: Deep Agents' tool that compacts the conversation.
+COMPACT: Final = "compact_conversation"
 
 
 # --------------------------------------------------------------------------- helpers
