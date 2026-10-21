@@ -424,7 +424,7 @@ class PromptSources(Chain[ResolvedPrompt]):
     (:meth:`of`: ``PROMPTS_DIR``, Langfuse, Bifrost)."""
 
     kind = "prompt"
-    hint = "pass Harness(prompts=[...]), or set PROMPTS_DIR, the Langfuse keys or BIFROST_URL"
+    hint = "pass Harness(prompts=[prompts_dir(...), ...]), or set the Langfuse keys or BIFROST_URL"
 
     def __init__(self, sources: Sequence[PromptSource] = ()) -> None:
         super().__init__(sources)

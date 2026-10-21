@@ -50,6 +50,22 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- Configuration: each setting in one layer. The environment holds endpoints and keys
+  (`TRELLIS_JUDGE_VIRTUAL_KEY` kept: evaluation's own budget), one `TRELLIS_EVAL_SAMPLE` for
+  grounding and judges, `TRELLIS_SPOOL_DIR` (default: the XDG state folder, except in a
+  container or serverless runtime, said once) and `SANDBOX`; the tools' own variables are read
+  under their own names — the OpenTelemetry SDK's exporter reads `OTEL_EXPORTER_OTLP_*` itself
+  (`..._TRACES_ENDPOINT` honoured), `service.name` is only a default under `OTEL_SERVICE_NAME`
+  (fixed: it overrode it), the agents' version is `OTEL_RESOURCE_ATTRIBUTES`' `service.version`,
+  Langfuse is `LANGFUSE_BASE_URL` and its keys (scores no longer read from OTLP headers), and the
+  Docker daemon is found as docker-py finds it (`DOCKER_HOST`, the docker context, the socket).
+  Deprecated, read for one release with a warning naming the replacement: `PROMPTS_DIR`,
+  `SKILLS_DIR`, `TRELLIS_AGENT_VERSION`, `TRELLIS_WORKER_CONCURRENCY`, `SANDBOX_IMAGE`,
+  `TRELLIS_JUDGE_MODEL`, `TRELLIS_GROUNDING_SAMPLE`, `TRELLIS_JUDGE_SAMPLE`, `LANGFUSE_HOST`.
+  A startup log line names what the harness is connected to, and `trellis doctor` prints every
+  setting with its source, checks each service and key, the spool and the Docker daemon, and
+  suggests what to set. Each prompt and skill source in use is logged.
+
 - One owner per concern (the architecture review, ADR 0003): model retries, fallbacks and prompt
   caching are the gateway's — `ReAct`'s client makes one attempt, where it made three (set the
   provider's `network_config.max_retries` in Bifrost); a model's window is `context_window=`, else

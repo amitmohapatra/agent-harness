@@ -83,8 +83,6 @@ KEY_RETRY_SECONDS: Final = 30.0
 NOT_CONFIGURED: Final = "not configured"
 #: How a person's verdict reads as a Langfuse score.
 VERDICT_SCORES: Final = {"confirm": 1.0, "approve": 1.0, "edit": 0.5, "correct": 0.0, "reject": 0.0}
-#: The share of successful runs online judges score when ``TRELLIS_JUDGE_SAMPLE`` is unset.
-JUDGE_SAMPLE: Final = 0.1
 #: Paused runs one inbox page asks for (agent-runs' page limit), and the pages one inbox read
 #: follows at most: past that the newest are returned and a warning is logged.
 INBOX_LIMIT: Final = 500
@@ -111,7 +109,7 @@ class Harness:
     ``SKILLS_DIR``, the gateway).
 
     ``judges`` are the online evaluators every sampled successful run is scored by
-    (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
+    (``TRELLIS_EVAL_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
     (``trellis.harness.hooks.Hooks``) run around every run, model call and tool call of every
     agent it wraps, before each agent's own."""
 
@@ -155,9 +153,7 @@ class Harness:
         self.judges: list[Evaluator] = list(judges)
         #: the hooks of every agent wrapped here
         self.hooks: list[Hooks] = list(hooks)
-        self.judge_sample = (
-            s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
-        )
+        self.judge_sample = s.eval_sample if judges else 0.0
         if builds_memory:
             memory = self._making(MemoryClient(s.memory_url, api_key=s.api_key))
         self.memory = Memory(memory) if memory else None
@@ -196,6 +192,16 @@ class Harness:
         self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
         self.evals.prompts = self.prompts
         telemetry.configure(s)
+        log.info(
+            "trellis harness: gateway %s, memory %s, runs %s, spool %s, traces %s, sandbox %s "
+            "(python -m trellis.harness.doctor prints each setting and its source)",
+            s.bifrost_url or "off",
+            s.memory_url or "off",
+            s.runs_url or "in process",
+            s.spool_dir or "none",
+            "on" if telemetry.exporting() else "off",
+            s.sandbox or "none",
+        )
 
     # ------------------------------------------------------------------ attaching
     def wrap(

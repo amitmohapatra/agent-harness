@@ -49,6 +49,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -64,15 +65,19 @@ from opentelemetry import trace
 from trellis.contracts import ConfigurationError
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.redaction import redact_attributes
-from trellis.harness.settings import LANGFUSE_OTLP_PATH, Settings
+from trellis.harness.settings import (
+    LANGFUSE_CLOUD,
+    LANGFUSE_OTLP_PATH,
+    OTEL_EXPORTER_ENV,
+    Settings,
+    basic_auth,
+)
 
 log = logging.getLogger("trellis.telemetry")
 
 TRACER_NAME: Final = "trellis"
 #: The OTLP/HTTP traces path, appended to ``OTEL_EXPORTER_OTLP_ENDPOINT`` (the OTel spec).
 TRACES_PATH: Final = "/v1/traces"
-#: The OTLP header that names Langfuse's host when traces go through a collector.
-LANGFUSE_HOST_HEADER: Final = "x-langfuse-host"
 LANGFUSE_SCORES_PATH: Final = "/api/public/scores"
 #: A dataset by name, its items page by page, and a run's trace linked to a dataset run
 #: (Langfuse's public API: ``fern/apis/server/definition`` in its repository).
@@ -555,15 +560,13 @@ class Langfuse:
 
     @classmethod
     def of(cls, settings: Settings) -> Langfuse | None:
-        """The scores API the OTLP settings reach, or ``None`` (scores stay spans)."""
-        authorization = settings.otlp_headers.get("authorization", "")
-        if not authorization.lower().startswith("basic "):
+        """Langfuse's scores API, from its own settings (``LANGFUSE_BASE_URL``, unset: its
+        cloud, and the key pair), or ``None`` without both keys (scores stay spans)."""
+        public, secret = settings.langfuse_public_key, settings.langfuse_secret_key
+        if not (public and secret):
             return None
-        host = settings.otlp_headers.get(LANGFUSE_HOST_HEADER)
-        endpoint = settings.otlp_endpoint or ""
-        if host is None and LANGFUSE_OTLP_PATH in endpoint:
-            host = endpoint.split(LANGFUSE_OTLP_PATH, 1)[0]
-        return cls(host, authorization) if host else None
+        host = (settings.langfuse_host or LANGFUSE_CLOUD).rstrip("/")
+        return cls(host, basic_auth(public, secret))
 
     async def post(
         self,
@@ -673,13 +676,23 @@ METRICS_PATH: Final = "/v1/metrics"
 METRICS_EXPORT_MILLIS: Final = 60_000
 
 
-def configure(settings: Settings) -> bool:
-    """Install an OTLP exporter when the deployment asked for one (and one for the metrics,
-    unless the endpoint is Langfuse's, which takes traces only). Returns whether the traces'
-    exporter was installed."""
-    if not settings.otlp_endpoint:
+def configure(settings: Settings, environ: Mapping[str, str] | None = None) -> bool:
+    """Install an OTLP exporter when the deployment asked for one — the OpenTelemetry SDK's own
+    exporter variables (:data:`~.settings.OTEL_EXPORTER_ENV`, ``..._HEADERS``...), which its
+    exporter reads itself, else an endpoint given in code or derived from Langfuse's keys — and
+    one for the metrics, unless the endpoint is Langfuse's (traces only). A provider already
+    installed is kept, never replaced. Returns whether the traces' exporter was installed."""
+    env = os.environ if environ is None else environ
+    from_env = any(env.get(name) for name in OTEL_EXPORTER_ENV)
+    if not from_env and not settings.otlp_endpoint:
         return False
-    _measured(settings.otlp_endpoint, settings.otlp_headers)
+    if from_env:
+        endpoint = env.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        if endpoint:
+            _measured(endpoint, {}, env_headers=True)
+    else:
+        assert settings.otlp_endpoint is not None
+        _measured(settings.otlp_endpoint, settings.otlp_headers)
     if not isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider):
         log.info("an OpenTelemetry tracer provider is already installed; keeping it")
         return False
@@ -687,7 +700,6 @@ def configure(settings: Settings) -> bool:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # noqa: PLC0415
             OTLPSpanExporter,
         )
-        from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
         from opentelemetry.sdk.trace import TracerProvider  # noqa: PLC0415
         from opentelemetry.sdk.trace.export import BatchSpanProcessor  # noqa: PLC0415
     except ImportError:
@@ -695,16 +707,42 @@ def configure(settings: Settings) -> bool:
             "OTLP export is configured but not installed: pip install 'trellis-harness[otel]'"
         )
         return False
-    provider = TracerProvider(resource=Resource.create({"service.name": "trellis-harness"}))
-    exporter = OTLPSpanExporter(
-        endpoint=traces_url(settings.otlp_endpoint), headers=settings.otlp_headers
+    exporter = (
+        OTLPSpanExporter()  # the SDK reads its own variables: endpoint, headers, traces endpoint
+        if from_env
+        else OTLPSpanExporter(
+            endpoint=traces_url(settings.otlp_endpoint or ""), headers=settings.otlp_headers
+        )
     )
+    provider = TracerProvider(resource=resource())
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     return True
 
 
-def _measured(endpoint: str, headers: Mapping[str, str]) -> bool:
+def exporting() -> bool:
+    """Whether an OpenTelemetry tracer provider is installed (the harness's, or the app's)."""
+    return not isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider)
+
+
+#: The ``service.name`` the harness's telemetry carries when ``OTEL_SERVICE_NAME`` (or
+#: ``OTEL_RESOURCE_ATTRIBUTES``) names none.
+SERVICE_NAME: Final = "trellis-harness"
+
+
+def resource() -> Any:
+    """The OpenTelemetry resource of this process: ``Resource.create()`` — ``OTEL_SERVICE_NAME``
+    and ``OTEL_RESOURCE_ATTRIBUTES`` as the SDK reads them — with :data:`SERVICE_NAME` only as
+    the default, never over a name the environment gives."""
+    from opentelemetry.sdk.resources import Resource  # noqa: PLC0415 - the otel extra
+
+    found = Resource.create()
+    if str(found.attributes.get("service.name", "")).startswith("unknown_service"):
+        found = found.merge(Resource({"service.name": SERVICE_NAME}))
+    return found
+
+
+def _measured(endpoint: str, headers: Mapping[str, str], *, env_headers: bool = False) -> bool:
     """Export the counters and histograms over OTLP/HTTP to ``<endpoint>/v1/metrics``, every
     :data:`METRICS_EXPORT_MILLIS` — unless the endpoint is Langfuse's (no metrics there), the
     application installed a meter provider itself (kept), or the extra is not installed."""
@@ -722,13 +760,15 @@ def _measured(endpoint: str, headers: Mapping[str, str]) -> bool:
         from opentelemetry.sdk.metrics.export import (  # noqa: PLC0415
             PeriodicExportingMetricReader,
         )
-        from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
     except ImportError:
         return False  # configure() says how to install the extra
-    exporter = OTLPMetricExporter(endpoint=metrics_url(endpoint), headers=dict(headers))
+    exporter = (
+        OTLPMetricExporter(endpoint=metrics_url(endpoint))  # its headers: the SDK's variables
+        if env_headers
+        else OTLPMetricExporter(endpoint=metrics_url(endpoint), headers=dict(headers))
+    )
     reader = PeriodicExportingMetricReader(exporter, export_interval_millis=METRICS_EXPORT_MILLIS)
-    resource = Resource.create({"service.name": "trellis-harness"})
-    otel_metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+    otel_metrics.set_meter_provider(MeterProvider(resource=resource(), metric_readers=[reader]))
     return True
 
 

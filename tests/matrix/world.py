@@ -336,8 +336,8 @@ class World:
     def _made(self) -> Harness:
         on = self.switched
         settings = Settings(
-            grounding_sample=1.0 if "grounding" in on else 0.0,
-            judge_sample=1.0 if "judges" in on else None,
+            # one sample for both (``TRELLIS_EVAL_SAMPLE``); each is still its own feature
+            eval_sample=1.0 if {"grounding", "judges"} & set(on) else 0.0,
             bifrost_virtual_key="vk" if "gateway" in on else None,
             bifrost_url=GATEWAY_URL if "gateway" in on else None,
         )

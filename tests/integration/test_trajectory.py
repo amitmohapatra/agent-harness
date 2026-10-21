@@ -102,7 +102,7 @@ async def test_an_online_judge_sees_the_whole_trajectory_of_a_resumed_run(
     judge of the run reads both, once each, in order — whether the framework re-ran the run
     from its input (the first call replayed from the journal) or went on where it stopped."""
     seen = Seen()
-    async with Harness(config=Settings(judge_sample=1.0), judges=[seen]) as h:
+    async with Harness(config=Settings(eval_sample=1.0), judges=[seen]) as h:
         plan: list[Call] = [("lookup", {"topic": "o1"}), ("refund", {"order": "o1"})]
         target, tools = await BUILDERS[framework](h, [lookup, refund], tmp_path, plan)
         agent = h.wrap(target, id=f"resumed-{framework}", tools=tools)

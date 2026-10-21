@@ -123,7 +123,7 @@ async def test_a_sampled_answer_is_verified_against_its_context() -> None:
     async def answer(input: str, agent: Runtime) -> str:
         return f"Your warehouse is in Berlin ({suffix})."
 
-    async with live_harness(grounding_sample=1.0) as h:
+    async with live_harness(eval_sample=1.0) as h:
         agent = h.wrap(answer, id=f"live-grounded-{suffix}")
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         await seed(scope, f"The warehouse of {user} is in Berlin.", visibility="USER")

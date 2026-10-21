@@ -126,23 +126,58 @@ def test_nothing_configured_installs_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "headers", "host"),
+    ("given", "host"),
     [
-        ("https://lf.example/api/public/otel", {"authorization": "Basic x"}, "https://lf.example"),
+        ({"langfuse_public_key": "pk", "langfuse_secret_key": "sk"}, "https://cloud.langfuse.com"),
         (
-            "http://collector:4318",
-            {"authorization": "Basic x", "x-langfuse-host": "https://lf.example"},
+            {
+                "langfuse_public_key": "pk",
+                "langfuse_secret_key": "sk",
+                "langfuse_host": "https://lf.example/",
+            },
             "https://lf.example",
         ),
-        ("http://collector:4318", {"authorization": "Basic x"}, None),
-        ("https://lf.example/api/public/otel", {}, None),
-        ("https://lf.example/api/public/otel", {"authorization": "Bearer t"}, None),
+        ({"langfuse_public_key": "pk"}, None),
+        ({"otlp_endpoint": "https://lf.example/api/public/otel"}, None),  # not its own names
     ],
-    ids=["langfuse-direct", "collector-named-host", "collector-only", "no-auth", "not-basic"],
+    ids=["cloud", "own-host", "no-secret", "otlp-only"],
 )
-def test_the_scores_api_is_reached_only_with_langfuse_credentials(endpoint, headers, host) -> None:
-    scores = Langfuse.of(Settings(otlp_endpoint=endpoint, otlp_headers=headers))
+def test_the_scores_api_is_reached_with_langfuses_own_settings(
+    given: dict[str, str], host: str | None
+) -> None:
+    scores = Langfuse.of(Settings(**given))  # type: ignore[arg-type]
     assert (scores.host if scores is not None else None) == host
+
+
+def test_the_service_name_is_a_default_never_over_the_environments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
+    assert telemetry.resource().attributes["service.name"] == telemetry.SERVICE_NAME
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "billing-agent")
+    assert telemetry.resource().attributes["service.name"] == "billing-agent"
+    monkeypatch.delenv("OTEL_SERVICE_NAME")
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=from-attributes")
+    assert telemetry.resource().attributes["service.name"] == "from-attributes"
+
+
+def test_the_sdks_exporter_reads_its_own_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    from opentelemetry import trace
+
+    installed: list[object] = []
+    monkeypatch.setattr(trace, "set_tracer_provider", installed.append)
+    monkeypatch.setattr(telemetry, "_measured", lambda *a, **k: False)
+    env = {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector:4318/v1/traces"}
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]
+    )
+    assert telemetry.configure(Settings(), env) is True
+    [provider] = installed
+    [processor] = provider._active_span_processor._span_processors  # type: ignore[attr-defined]
+    assert processor.span_exporter._endpoint == "http://collector:4318/v1/traces"
+    monkeypatch.setattr(telemetry, "_measured", lambda *a, **k: False)
+    assert telemetry.configure(Settings(), {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4318"})
 
 
 @respx.mock

@@ -820,7 +820,7 @@ class Agent:
             or pushed is None
             or not text
             or not runtime.uses("grounding")
-            or not sampled(runtime.run_id, self.harness.settings.grounding_sample)
+            or not sampled(runtime.run_id, self.harness.settings.eval_sample)
         ):
             return
         bundle_id, run_id, traced = pushed.bundle_id, runtime.run_id, runtime.trace_run
@@ -834,7 +834,7 @@ class Agent:
         await self.harness.writes.submit("memory.verify", work, events=runtime.events)
 
     async def judged(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
-        """On a sampled run (``TRELLIS_JUDGE_SAMPLE``), each of the harness's online judges in
+        """On a sampled run (``TRELLIS_EVAL_SAMPLE``), each of the harness's online judges in
         the background — never on the request path — as ``judge(case, [it], services=self.evals)``,
         its score on the run's trace; the case's output is the answer as :func:`graded`. A judge
         that fails is a warning."""

@@ -58,9 +58,7 @@ async def test_one_rule_gates_a_wrapped_agent_and_a_plain_graph() -> None:
 
     team = await Team.open(f"live-mixed-plain-{suffix}")
     with StubLangfuse() as langfuse:
-        async with live_harness(
-            judges=[ordered], judge_sample=1.0, grounding_sample=0.0, **langfuse.settings()
-        ) as h:
+        async with live_harness(judges=[ordered], eval_sample=1.0, **langfuse.settings()) as h:
             try:
                 wrapped = h.wrap(buyer, id=f"live-mixed-wrapped-{suffix}", tools=[place_order])
                 # the administrator's one rule, in the tenant's catalog

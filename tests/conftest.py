@@ -18,6 +18,15 @@ set_tracing_disabled(True)
 
 
 @pytest.fixture(autouse=True)
+def no_spool_on_this_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test reads its settings from the mapping it gives, never this machine's folders: no
+    spool is detected (the test of the detection restores it)."""
+    from trellis.harness import settings
+
+    monkeypatch.setattr(settings, "default_spool", lambda environ: None)
+
+
+@pytest.fixture(autouse=True)
 def memory_contract() -> Iterator[None]:
     """Every memory fake a test made spoke the memory service's OpenAPI document: what the
     harness sent and what the fake answered."""

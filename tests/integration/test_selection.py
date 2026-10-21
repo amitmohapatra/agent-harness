@@ -98,7 +98,7 @@ async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService
 
     defs = [Def(f"wiki-t{i}", "wiki") for i in range(20)]  # read only: Code Mode
     gateway = cast("Gateway", StubGateway([*defs, Def("erp-pay", "erp", annotations=None)]))
-    settings = Settings(grounding_sample=1.0, judge_sample=1.0)
+    settings = Settings(eval_sample=1.0)
     async with Harness(
         config=settings, memory=memory_service.client(), gateway=gateway, judges=[judge]
     ) as h:

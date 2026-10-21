@@ -18,14 +18,17 @@ provider of microVMs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
+import os
 import posixpath
 import tarfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Final
 
 import httpx
@@ -39,7 +42,8 @@ from trellis.harness.sandbox.base import (
     SandboxSpec,
 )
 
-#: Where the daemon listens, and the Engine API version spoken (Docker 24 and later).
+#: Where the daemon listens when ``DOCKER_HOST`` and the docker context say nothing, and the
+#: Engine API version spoken (Docker 24 and later).
 DOCKER_SOCKET: Final = "/var/run/docker.sock"
 API_VERSION: Final = "v1.43"
 #: The image of a sandbox whose spec and provider name none (``SANDBOX_IMAGE`` names another).
@@ -68,15 +72,41 @@ KILL: Final = (
 )
 
 
+def docker_host(environ: Mapping[str, str] | None = None) -> str:
+    """Where the Docker daemon is, as docker-py's ``from_env`` finds it: ``DOCKER_HOST``, else
+    the current docker context's endpoint (``DOCKER_CONTEXT``, else ``currentContext`` in
+    ``~/.docker/config.json``), else the local socket: ``unix:///path`` or ``tcp://host:port``."""
+    env = os.environ if environ is None else environ
+    if env.get("DOCKER_HOST"):
+        return env["DOCKER_HOST"]
+    config = Path(env.get("DOCKER_CONFIG") or Path.home() / ".docker")
+    try:
+        context = env.get("DOCKER_CONTEXT") or json.loads((config / "config.json").read_text()).get(
+            "currentContext"
+        )
+        if context and context != "default":
+            digest = hashlib.sha256(context.encode()).hexdigest()
+            meta = json.loads((config / "contexts" / "meta" / digest / "meta.json").read_text())
+            host = meta["Endpoints"]["docker"]["Host"]
+            if isinstance(host, str) and host:
+                return host
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return f"unix://{DOCKER_SOCKET}"
+
+
 class DockerSandbox:
     """The Docker provider (``SANDBOX=docker``): ``image``, the image of a sandbox whose spec
-    names none (else :data:`DEFAULT_IMAGE`); ``socket``, the daemon's Unix socket."""
+    names none (else :data:`DEFAULT_IMAGE`); ``host``, where the daemon is (else
+    :func:`docker_host`: ``DOCKER_HOST``, the docker context, the local socket)."""
 
     name = "docker"
 
-    def __init__(self, image: str | None = None, *, socket: str = DOCKER_SOCKET) -> None:
+    def __init__(
+        self, image: str | None = None, *, host: str | None = None, socket: str | None = None
+    ) -> None:
         self.image = image or DEFAULT_IMAGE
-        self.socket = socket
+        self.host = f"unix://{socket}" if socket else host or docker_host()
 
     async def create(self, ref: SandboxRef, spec: SandboxSpec) -> Container:
         if isinstance(spec.network, tuple):
@@ -169,8 +199,12 @@ class DockerSandbox:
 
     @asynccontextmanager
     async def _client(self) -> AsyncIterator[httpx.AsyncClient]:
-        transport = httpx.AsyncHTTPTransport(uds=self.socket)
-        base = f"http://docker/{API_VERSION}"
+        if self.host.startswith("unix://"):
+            transport = httpx.AsyncHTTPTransport(uds=self.host.removeprefix("unix://"))
+            base = f"http://docker/{API_VERSION}"
+        else:  # tcp://host:port, as Docker names it: plain HTTP to it
+            transport = httpx.AsyncHTTPTransport()
+            base = f"http://{self.host.split('://', 1)[-1]}/{API_VERSION}"
         async with httpx.AsyncClient(
             transport=transport, base_url=base, timeout=REQUEST_SECONDS
         ) as client:

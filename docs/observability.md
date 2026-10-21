@@ -72,20 +72,21 @@ formatter with `handler.setFormatter(trellis.harness.logs.JSONFormatter())`.
 
 ## Export
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` (+ `OTEL_EXPORTER_OTLP_HEADERS`) makes `Harness()` install a
-tracer provider with one OTLP/HTTP exporter (the `[otel]` extra) to `<endpoint>/v1/traces` —
-unless the application installed a provider itself, which it keeps. Two deployments:
+An OpenTelemetry exporter variable (`OTEL_EXPORTER_OTLP_ENDPOINT`, or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`; with `OTEL_EXPORTER_OTLP_HEADERS`) makes `Harness()`
+install a tracer provider with the SDK's OTLP/HTTP exporter (the `[otel]` extra), which reads
+those variables itself — unless the application installed a provider itself, which it keeps
+(never replaced). The resource is `Resource.create()`: `OTEL_SERVICE_NAME` and
+`OTEL_RESOURCE_ATTRIBUTES` as the SDK reads them, `service.name=trellis-harness` only when they
+name none. Two deployments:
 
-* **Straight to Langfuse** — Langfuse's own three names, nothing else:
+* **Straight to Langfuse** — Langfuse's own names, nothing else:
   `LANGFUSE_PUBLIC_KEY=pk-lf-...`, `LANGFUSE_SECRET_KEY=sk-lf-...` and, unless the project is
-  on Langfuse Cloud, `LANGFUSE_HOST=https://langfuse.example.com`. With
-  `OTEL_EXPORTER_OTLP_ENDPOINT` unset the harness exports where Langfuse's SDK does:
-  `<LANGFUSE_HOST>/api/public/otel` with `Authorization: Basic base64(pk:sk)` and
-  `x-langfuse-ingestion-version: 4`. The same keys read its prompts
-  ([prompts.md](prompts.md)), post its scores and read its datasets. (The explicit form —
-  `OTEL_EXPORTER_OTLP_ENDPOINT=…/api/public/otel` with
-  `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>` — still works, for traces
-  and scores.)
+  on Langfuse Cloud, `LANGFUSE_BASE_URL=https://langfuse.example.com` (`LANGFUSE_HOST`, its
+  old name, still read for a release). With no OpenTelemetry exporter variable set the harness
+  exports where Langfuse's SDK does: `<LANGFUSE_BASE_URL>/api/public/otel` with
+  `Authorization: Basic base64(pk:sk)` and `x-langfuse-ingestion-version: 4`. The same keys read
+  its prompts ([prompts.md](prompts.md)), post its scores and read its datasets.
 * **Through the collector** ([deploy/otel-collector.yaml](../deploy/otel-collector.yaml)) —
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`,
   `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>,x-langfuse-host=https://cloud.langfuse.com`.
@@ -94,8 +95,8 @@ unless the application installed a provider itself, which it keeps. Two deployme
   `langfuse.observation.type` — to Langfuse (a `filter` processor). It forwards the caller's
   `Authorization` header to Langfuse (`headers_setter`, batches keyed by it), so one collector
   serves several Langfuse projects. Collector env: `LANGFUSE_OTLP_ENDPOINT`, `DD_API_KEY`,
-  `DD_SITE`. A set `OTEL_EXPORTER_OTLP_ENDPOINT` always wins over the Langfuse keys, which then
-  only read prompts.
+  `DD_SITE`. A set exporter variable always wins over the Langfuse keys for the traces; the
+  scores, datasets and prompts still use Langfuse's own names (set them too).
 
 Spans are exported in batches every few seconds; closing the harness (`async with Harness()`
 ending, `aclose()`, a worker's shutdown) first exports what is still queued, so a short script

@@ -64,7 +64,7 @@ Way 2: the provider is a block of its own ([below](#way-2-without-a-harness)).
 from trellis import sandbox
 from trellis.harness.sandbox import DockerSandbox, SandboxSpec
 
-# the image (else the provider's: SANDBOX_IMAGE for the deployment's), at most 1 core and
+# the image (else the provider's own), at most 1 core and
 # 512 MiB, no network (the default; "open", or the hosts it may reach where the provider can
 # enforce that), and a file written before its first command
 spec = SandboxSpec(
@@ -77,8 +77,8 @@ tools = [sandbox(DockerSandbox(), spec, timeout=300)]
 |---|---|
 | `sandbox(provider=None, spec=None, *, timeout=120)` | the tool source. `provider`: where sandboxes come from (else the deployment's: `SANDBOX`); `spec`: what each is made of; `timeout`: the most one call may take, in seconds (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool) |
 | `SandboxSpec(image=None, cpu=None, memory=None, network="none", files={})` | frozen; `cpu` and `memory` over 0 |
-| `DockerSandbox(image=None, *, socket="/var/run/docker.sock")` | the Docker provider: `image` for a spec that names none (else `python:3.12-slim`), `socket` the daemon's |
-| `configured(settings)` | the deployment's provider: `SANDBOX=docker` is `DockerSandbox(SANDBOX_IMAGE)` |
+| `DockerSandbox(image=None, *, host=None, socket=None)` | the Docker provider: `image` for a spec that names none (else `python:3.12-slim`); the daemon at `host` (`unix:///path` or `tcp://host:port`) or `socket`, else where docker-py would find it: `DOCKER_HOST`, else the current docker context's endpoint, else `/var/run/docker.sock` |
+| `configured(settings)` | the deployment's provider: `SANDBOX=docker` is `DockerSandbox()` (the deprecated `SANDBOX_IMAGE`, while it is read, its image) |
 | `await reap(provider, runs, *, tenant)` | deletes the tenant's sandboxes whose runs have ended (and returns them): what runs it automatically does by hand, for a cron |
 | `SandboxRef(provider, id, labels, snapshot)` | which sandbox, as a run's journal keeps it: never a secret or a host path |
 

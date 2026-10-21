@@ -30,6 +30,9 @@ dependencies = [
   "opentelemetry-api>=1.44",
 ]
 
+[project.scripts]
+trellis = "trellis.harness.doctor:cli"
+
 [project.optional-dependencies]
 # `create_agent` and its middleware (HumanInTheLoopMiddleware, TodoListMiddleware) are
 # the `langchain` package: LangChain v1 agents are LangGraph graphs.

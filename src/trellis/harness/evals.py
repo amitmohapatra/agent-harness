@@ -33,7 +33,7 @@ builds experiments from: ``telemetry.Experiment``).
   ``async (input) -> answer`` otherwise — evaluated, and scored; :class:`EvalReport` says how
   each item went and the mean of each evaluator.
 * **Online** — :func:`judge` scores one case from any code. A wrapped agent does it by itself:
-  ``Harness(judges=[...])`` — after a sampled successful run (``TRELLIS_JUDGE_SAMPLE``, by the
+  ``Harness(judges=[...])`` — after a sampled successful run (``TRELLIS_EVAL_SAMPLE``, by the
   run id) each judge runs in the background writes queue, never on the request path, and its
   score lands on the run's trace. A judge that fails is a warning, never a failed run.
 """
