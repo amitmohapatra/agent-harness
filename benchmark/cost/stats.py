@@ -65,18 +65,19 @@ def markdown(report: dict[str, Any]) -> str:
     lines = [
         f"# Cost benchmark: {report['model']}",
         "",
-        f"{report['repeats']} repeats of {report['tasks']} tasks per cell; each figure is the "
-        "mean per run ± the half-width of its 95% interval (Student's t over the runs). "
+        f"Up to {report['repeats']} repeats of {report['tasks']} tasks per cell (`runs`); each "
+        "figure is the mean per run ± the half-width of its 95% interval (Student's t over "
+        "the runs). "
         f"Measured {report['date']} on {report['machine']}.",
         "",
-        "| tools | variant | " + " | ".join(c[0] for c in COLUMNS) + " | $ per run |",
-        "|---|---|" + "---|" * (len(COLUMNS) + 1),
+        "| tools | variant | runs | " + " | ".join(c[0] for c in COLUMNS) + " | $ per run |",
+        "|---|---|---|" + "---|" * (len(COLUMNS) + 1),
     ]
     for cell in report["cells"]:
         stats = cell["stats"]
         priced = cell["dollars"].get(report["model_price"] or "", None)
         lines.append(
-            f"| {cell['size']} | {cell['variant']} | "
+            f"| {cell['size']} | {cell['variant']} | {cell.get('runs', '—')} | "
             + " | ".join(
                 shown(stats.get(key), digits, scale=scale) for _, key, digits, scale in COLUMNS
             )

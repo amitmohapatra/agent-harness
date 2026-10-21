@@ -50,6 +50,11 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--note", action="append", default=[], help="a note for the report")
     parser.add_argument("--out", default="build/bench-cost")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="keep the runs <out>.json already holds for this model, and run only the others",
+    )
     args = parser.parse_args(argv)
     if not args.model:
         parser.error("no model: --model, TRELLIS_BENCH_MODEL or TRELLIS_LIVE_MODEL")
@@ -75,13 +80,18 @@ async def bench(args: argparse.Namespace) -> dict:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
+    saved = out.with_suffix(".json")
+    if args.resume and saved.exists():
+        before = json.loads(saved.read_text())
+        rows = list(before["runs"]) if before.get("model") == args.model else []
+    done = {run.key(r) for r in rows}
 
     def written() -> dict:
         report = run.report_of(
             rows,
             model=args.model,
-            sizes=sizes,
-            variants=variants,
+            sizes=sorted({*sizes, *(r["size"] for r in rows)}),
+            variants=list(dict.fromkeys([*variants, *(r["variant"] for r in rows)])),
             repeats=args.repeats,
             sets=sets,
             setup=setup,
@@ -92,10 +102,15 @@ async def bench(args: argparse.Namespace) -> dict:
         out.with_suffix(".md").write_text(stats.markdown(report))
         return report
 
+    def kept(row: dict) -> None:
+        """After every run: a benchmark stopped part way keeps what it measured."""
+        rows.append(row)
+        written()
+
     async with run.harness() as h:
         for size in sizes:
             for variant in variants:
-                rows += await run.run_cell(
+                await run.run_cell(
                     h,
                     variant,
                     size,
@@ -103,8 +118,9 @@ async def bench(args: argparse.Namespace) -> dict:
                     repeats=args.repeats,
                     sets=sets,
                     run_seconds=args.timeout,
+                    done=done,
+                    on_row=kept,
                 )
-                written()  # after every cell: an interrupted run keeps what it measured
     return written()
 
 

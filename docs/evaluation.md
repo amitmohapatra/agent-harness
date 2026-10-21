@@ -350,3 +350,43 @@ make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
 
 Memory is off (the tool hints, which narrow a run from five tools, need the memory service),
 and so are the run store and tracing: the benchmark reads and writes no service's data.
+
+### The baseline, measured
+
+`benchmark/cost/results/baseline-local.md` (and `.json`, every run): Granite 3.3 2B on
+llama.cpp (an 8,192-token window, 4 CPUs) behind a local Bifrost, 2026-10-21 — the numbers
+each new feature is compared with. Per run, mean ± the 95% interval's half-width:
+
+| Tools | Variant | Runs | Input tokens | Output tokens | Model calls | Seconds | Tool coverage | Success |
+|---|---|---|---|---|---|---|---|---|
+| 10 | baseline | 20 | 2,654 ± 336 | 182 ± 52 | 1.90 ± 0.14 | 38.3 ± 10.2 | 1.00 | 0.90 ± 0.14 |
+| 10 | main | 20 | 2,794 ± 335 | 223 ± 85 | 1.85 ± 0.17 | 51.2 ± 20.6 | 1.00 | 0.95 ± 0.10 |
+| 50 (travel) | baseline | 6 | 17,742 ± 4,517 | 204 ± 151 | 2.33 ± 0.54 | 159 ± 94 | 1.00 | 1.00 |
+| 50 (travel) | main | 6 | 15,046 ± 141 | 168 ± 99 | 2.00 | 146 ± 95 | 1.00 | 0.67 ± 0.54 |
+| 100 | both | 20 each | — (does not fit: ~14,500 prompt tokens) | | | | 0 | 0 |
+| 500 | both | 20 each | — (does not fit: ~71,000 prompt tokens) | | | | 0 | 0 |
+
+What it shows:
+
+* **Short and long tasks at 10 tools cost the same in both variants** (the same input tokens
+  and calls): what `main` adds costs nothing until it is needed.
+* **The large result is where `main` pays.** The baseline sent the ~100,000-character export
+  whole (about 45,000 prompt tokens, refused by an 8k window: both runs failed); `main` paged
+  it and answered from the preview (one run right, the other paused at a write distractor it
+  called). With a large-window vendor model the baseline would pay those 45,000 tokens on
+  every later call of the run.
+* **At 50 tools the tool definitions are the cost**: about 7,000 of every call's ~7,500 prompt
+  tokens. `main`'s summarization guard stopped both four-part runs when the history and the
+  tools passed its budget — compaction cannot shrink the tools — where the baseline, sent to the
+  server, still fit: on a small window the guard is stricter than the server.
+* **From 100 tools nothing fits an 8k window** — the definitions alone are ~14,500 tokens
+  (100) and ~71,000 (500). The baseline sends each request and the server refuses it; `main`
+  refuses before sending. Tool search (deferring the definitions) is what makes these sizes
+  work at all.
+
+Not measured here: any vendor model (no `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or vendor
+provider in the gateway — the dollar columns of the report are the same token counts priced
+at those models' rates, an estimate), vendor prompt caching (the cached tokens are llama.cpp's
+own prefix cache), the tool hints (they need the memory service), Code Mode (it needs gateway
+MCP servers), and the full task set at 50 tools (about 65 minutes per variant on this
+machine; the travel set ran).

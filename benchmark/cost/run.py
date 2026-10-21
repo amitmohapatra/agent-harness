@@ -17,7 +17,7 @@ import os
 import platform
 import re
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
@@ -125,34 +125,44 @@ def coverage_of(needed: Sequence[str], called: Sequence[str]) -> float | None:
     return sum(tool in called for tool in needed) / len(needed)
 
 
+def succeeded(row: dict[str, Any], *, approval: bool) -> bool:
+    """Whether a run did its task: it answered — or, for a task that asks for a change
+    (``approval``), it paused at that change's approval — having called every needed tool and
+    no broader one, and passed every other check of the task (``contains``, ``picks``). A run
+    that paused at a change its task did not ask for did not."""
+    ended = row["status"] == "success" or (row["status"] == "interrupted" and approval)
+    return (
+        ended
+        and row["tool_coverage"] in (None, 1.0)
+        and "called though not needed" not in (row["coverage_comment"] or "")
+        and all(float(v) == 1.0 for v in row["checks"].values())
+    )
+
+
 def row_of(
-    result: Any, task: dict[str, Any], meter: Meter, called: list[str], seconds: float
+    result: Any,
+    task: dict[str, Any],
+    meter: Meter,
+    called: list[str],
+    seconds: float,
+    *,
+    approval: bool = False,
 ) -> dict[str, Any]:
-    """One run, as the report keeps it."""
+    """One run, as the report keeps it (``approval``: its task asks for a change)."""
     scores = {s.name: s for s in result.scores}
     needed = task["metadata"]["needed_tools"]
     scored = scores.get("tool_coverage")
     coverage = float(scored.value) if scored is not None else coverage_of(needed, called)
     comment = scored.comment if scored is not None else None
-    checks = [
-        float(s.value) for name, s in scores.items() if name != "tool_coverage"
-    ]  # contains, picks...: what else the task expects
-    ran = result.status in ("success", "interrupted")
-    success = (
-        ran
-        and (coverage is None or coverage == 1.0)
-        and "called though not needed" not in (comment or "")
-        and all(c == 1.0 for c in checks)
-    )
-    return {
+    row = {
         "task": task["metadata"]["task"],
         "length": task["metadata"].get("length", "short"),
         "status": result.status,
         "error": (result.error or "")[:300] or None,
         "tool_coverage": coverage,
         "coverage_comment": comment,
+        # contains, picks...: what else the task expects
         "checks": {n: s.value for n, s in scores.items() if n != "tool_coverage"},
-        "success": success,
         "errored": result.status == "error",
         "called": called,
         "input_tokens": meter.input_tokens,
@@ -165,6 +175,7 @@ def row_of(
         "seconds": round(seconds, 2),
         "answer": result.output[:ANSWER_CHARS] if isinstance(result.output, str) else None,
     }
+    return row | {"success": succeeded(row, approval=approval)}
 
 
 async def run_cell(
@@ -177,15 +188,27 @@ async def run_cell(
     sets: Sequence[catalog.TaskSet],
     run_seconds: float,
     progress: Any = print,
+    done: Collection[tuple[Any, ...]] = (),
+    on_row: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Every task of ``sets`` ``repeats`` times on catalogues of ``size`` tools, as
-    ``variant``: one row per run."""
+    ``variant``: one row per run, each given to ``on_row`` as it ends. A run whose
+    :func:`key` is in ``done`` (measured before: ``--resume``) is not run again."""
     rows = []
     for taskset in sets:
+        todo = [
+            (repeat, task)
+            for repeat in range(repeats)
+            for task in taskset.tasks
+            if (size, variant, taskset.name, repeat, task["metadata"]["task"]) not in done
+        ]
+        if not todo:
+            continue
         built = Setup(system=taskset.system, **setup)
         target, options = VARIANTS[variant].build(built)
         called = Called()
         tools = catalog.catalogue(taskset.tools, size)
+        changes = {t.spec.name for t in taskset.tools if t.spec.side_effects != "read"}
         agent = h.wrap(
             target,
             id=f"bench-{variant}-{taskset.name.replace(' ', '-')}-{size}",
@@ -194,31 +217,42 @@ async def run_cell(
             timeout=run_seconds,
             **options,
         )
-        for repeat in range(repeats):
-            for task in taskset.tasks:
-                called.tools = []
-                began = time.monotonic()
-                with metered() as meter:
-                    report = await h.evaluate(
-                        agent,
-                        [task],
-                        scenario.EVALUATORS,
-                        run_name=f"bench-cost-{variant}-{size}",
-                        concurrency=1,
-                        user=USER,
-                    )
-                row = row_of(
-                    report.items[0], task, meter, list(called.tools), time.monotonic() - began
+        for repeat, task in todo:
+            called.tools = []
+            began = time.monotonic()
+            with metered() as meter:
+                report = await h.evaluate(
+                    agent,
+                    [task],
+                    scenario.EVALUATORS,
+                    run_name=f"bench-cost-{variant}-{size}",
+                    concurrency=1,
+                    user=USER,
                 )
-                row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
-                rows.append(row)
-                progress(
-                    f"{size:>4} {variant:<9} r{repeat} {row['status']:<11} "
-                    f"cov={row['tool_coverage']} in={row['input_tokens']} "
-                    f"out={row['output_tokens']} calls={row['model_calls']} "
-                    f"{row['seconds']}s  {row['task']}"
-                )
+            row = row_of(
+                report.items[0],
+                task,
+                meter,
+                list(called.tools),
+                time.monotonic() - began,
+                approval=bool(changes & set(task["metadata"]["needed_tools"])),
+            )
+            row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
+            rows.append(row)
+            if on_row is not None:
+                on_row(row)
+            progress(
+                f"{size:>4} {variant:<9} r{repeat} {row['status']:<11} "
+                f"cov={row['tool_coverage']} in={row['input_tokens']} "
+                f"out={row['output_tokens']} calls={row['model_calls']} "
+                f"{row['seconds']}s  {row['task']}"
+            )
     return rows
+
+
+def key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """What identifies a run: its catalogue size, variant, task set, repeat and task."""
+    return (row["size"], row["variant"], row["set"], row["repeat"], row["task"])
 
 
 #: The per-run figures summarized per cell.
@@ -305,6 +339,7 @@ def report_of(
                     {
                         "size": size,
                         "variant": variant,
+                        "runs": len(mine),
                         **summary(mine, model, priced_as),
                         "by_length": by_length,
                     }

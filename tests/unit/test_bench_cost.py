@@ -282,23 +282,28 @@ async def test_the_command_writes_the_json_and_the_table(
     assert "not priced" in stats.markdown(report)
 
 
-async def _one_row(h: Any, variant: str, size: int, *args: Any, **kwargs: Any) -> list[Any]:
-    return [
-        {
-            "size": size,
-            "variant": variant,
-            "input_tokens": 10,
-            "output_tokens": 1,
-            "cached_tokens": None,
-            "cache_written_tokens": 0,
-            "model_calls": 1,
-            "seconds": 0.1,
-            "tool_coverage": 1.0,
-            "success": True,
-            "errored": False,
-            "length": "short",
-        }
-    ]
+async def _one_row(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
+    row = {
+        "size": size,
+        "variant": variant,
+        "set": "travel",
+        "repeat": 0,
+        "task": "t",
+        "input_tokens": 10,
+        "output_tokens": 1,
+        "cached_tokens": None,
+        "cache_written_tokens": 0,
+        "model_calls": 1,
+        "seconds": 0.1,
+        "tool_coverage": 1.0,
+        "success": True,
+        "errored": False,
+        "length": "short",
+    }
+    if run.key(row) in kwargs["done"]:
+        return []
+    kwargs["on_row"](row)
+    return [row]
 
 
 @pytest.mark.parametrize(("variant", "paged"), [("main", True), ("main-paging", False)])
@@ -328,3 +333,30 @@ def test_only_the_measured_models_own_price_counts_its_cache() -> None:
     found = run.summary([row], "anthropic/claude-sonnet-5-5", ["gpt-6-sol"])["dollars"]
     assert found["claude-sonnet-5-5"]["mean"] == pytest.approx(0.1 * 2.0 + 0.9 * 0.10)
     assert found["gpt-6-sol"]["mean"] == pytest.approx(2.0)  # every input token in full
+
+
+async def test_a_resumed_run_keeps_the_runs_measured_and_runs_only_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: Settings()))
+    monkeypatch.setattr(cli.run, "run_cell", _one_row)
+    out = tmp_path / "bench"
+    argv = ["--model", "m", "--sizes", "10", "--variants", "main", "--out", str(out)]
+    first = await cli.bench(cli.arguments(argv))
+    assert len(first["runs"]) == 1
+    again = await cli.bench(cli.arguments([*argv, "--sizes", "50", "--resume"]))
+    assert [(r["size"], r["variant"]) for r in again["runs"]] == [(10, "main"), (50, "main")]
+    assert [(c["size"], c["runs"]) for c in again["cells"]] == [(10, 1), (50, 1)]
+    other = await cli.bench(cli.arguments([*argv, "--model", "n", "--resume"]))
+    assert len(other["runs"]) == 1  # another model's runs are not kept
+
+
+def test_a_paused_run_succeeds_only_when_its_task_asks_for_a_change() -> None:
+    paused = {"status": "interrupted", "tool_coverage": 1.0, "coverage_comment": None}
+    paused |= {"checks": {}}
+    assert run.succeeded(paused, approval=True)
+    assert not run.succeeded(paused, approval=False)  # it paused at a change nobody asked for
+    assert not run.succeeded(paused | {"checks": {"contains": False}}, approval=True)
+    broader = paused | {"coverage_comment": "x called though not needed"}
+    assert not run.succeeded(broader | {"status": "success"}, approval=False)
+    assert run.succeeded(paused | {"status": "success", "tool_coverage": None}, approval=False)
