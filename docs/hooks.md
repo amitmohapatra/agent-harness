@@ -15,9 +15,15 @@ need; every method does nothing by default.
 | `after_tool(call, outcome) -> outcome` | after each harness tool call ran | return another outcome: what the model reads, journaled and recorded |
 | `on_error(stage, error)` | a run that failed or ran out of time (`"run"`), a model call that failed (`"model"`), a tool call that failed or timed out (`"tool"`) | observe (what it raises is logged) |
 
-**When.** For the rules only your code knows. What the deployment already decides needs no
-hook: a tool's risk and the catalog's `approve_when` (governance), redaction of the stream,
-the spans and the memory records (automatic), time limits (`timeout=`).
+**When.** For custom logic a rule cannot express. **When a call needs a person is never a
+hook's**: approval rules live in one place, the tool catalog — a tool's `risk` and its
+`approve_when` (`amount > 100`), set by an administrator or a deploy script, read by every
+framework and process ([governance.md](governance.md#one-place-for-approval-rules)); with
+memory off, the tools' own declared risk decides. A hook is for what such a rule cannot say: a
+refusal (`Deny`), a rewrite (`Rewrite`), a decision that needs outside data (an account frozen
+in your database), who reviews and on which screen (`Ask(assignee=, component=)`). Redaction of
+the stream, the spans and the memory records (automatic) and time limits (`timeout=`) need no
+hook either.
 
 **Where.** `Harness(hooks=[...])` for every agent of the harness; `h.wrap(..., hooks=[...])`
 for one agent, after the harness's. Way 2: `governed(fn, gov, ..., hooks=[...])` for your own
@@ -35,21 +41,20 @@ tools, and each framework's own mechanism (below) outside a harness run.
 **How.**
 
 ```python
-from trellis import Ask, Deny, Harness, Hooks, ModelCall, Rewrite
+from trellis import Deny, Harness, Hooks, ModelCall, Rewrite
 from trellis.contracts import ToolCall, ToolOutcome
 
 
 class Refunds(Hooks):
-    """A guardrail: no refund over 1000, a person for one over 100, amounts in cents."""
+    """A guardrail: no refund over 1000, amounts in cents. When a refund needs a person is the
+    catalog's rule (approve_when: amount > 100), not this hook's."""
 
-    async def before_tool(self, call: ToolCall) -> Deny | Ask | Rewrite | None:
+    async def before_tool(self, call: ToolCall) -> Deny | Rewrite | None:
         if call.tool != "refund":
             return None
         amount = call.args["amount"]
         if amount > 1000:
             return Deny("refunds over 1000 go through finance")
-        if amount > 100:
-            return Ask(f"Refund {amount}?", assignee="role:support-lead")
         return Rewrite({**call.args, "cents": round(amount * 100)})
 
 

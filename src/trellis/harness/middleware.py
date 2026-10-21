@@ -54,7 +54,7 @@ import types
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Final, NotRequired, cast
+from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
 from bifrost_sdk.headers import PROMPT_ID
 from langchain.agents.factory import _chain_async_model_call_handlers
@@ -106,10 +106,11 @@ from trellis.harness.runtime import DEFERRED, Runtime, current
 from trellis.harness.telemetry import LoopEvent, gateway_headers, metrics, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool, arguments_of, not_run
+from trellis.harness.tools.base import SideEffects, Tool, arguments_of, not_run
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.lint import MOST_TOOLS
+from trellis.harness.tools.mcp import side_effects_of as annotated
 
 log = logging.getLogger("trellis.run")
 
@@ -237,14 +238,9 @@ def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
     irreversible), else ``write``."""
     found = dict(metadata or {})
     declared = found.get("side_effects")
-    if declared in ("read", "write", "irreversible"):
+    if declared in get_args(SideEffects):
         return str(declared)
-    hints = found.get("annotations") or {}
-    if isinstance(hints, Mapping) and hints.get("readOnlyHint"):
-        return "read"
-    if isinstance(hints, Mapping) and hints.get("destructiveHint"):
-        return "irreversible"
-    return "write"
+    return annotated(found.get("annotations"))
 
 
 def _schema_of(tool: Any) -> dict[str, Any]:

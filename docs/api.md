@@ -69,9 +69,9 @@ framework is detected from its type and not modified.
 | Argument | Default | What it is |
 |---|---|---|
 | `id` | required | the agent's id: its runs, records, traces, catalog entries and inbox entries are under it |
-| `tools` | `()` | the agent's own tools, run in this process: functions, [`tool`](#tool), [`a2a`](#a2a), [`openapi`](#openapi), [`sandbox`](#sandbox), [`skills`](#skills), `agent.as_tool()`; refused for a compiled graph, which takes `h.tools(...)` ([tools.md](tools.md)) |
+| `tools` | `()` | everything the agent can call: functions, [`tool`](#tool), [`mcp`](#mcp-stdio) servers, other wrapped agents (sub-agents), [`a2a`](#a2a), [`openapi`](#openapi), [`sandbox`](#sandbox), [`skills`](#skills); refused for a compiled graph, which takes `h.tools(...)` ([tools.md](tools.md)) |
 | `version` | `TRELLIS_AGENT_VERSION` | the agent's code version, recorded with each run it starts ([reliability.md](reliability.md#agent-version)) |
-| `mcp` | every MCP tool the virtual key allows | the gateway's Virtual MCPs (by slug) whose tools are the agent's; `[]`: none ([gateway.md](gateway.md)) |
+| `mcp` | every MCP tool the virtual key allows | deprecated (one release, with a warning): `mcp("slug")` in `tools`; `[]` is `without={"mcp"}` ([gateway.md](gateway.md)) |
 | `skills` | `()` | skills by name (`"name"`, `"name@version"`) or given (`Skill(...)`) ([skills.md](skills.md)) |
 | `timeout` | no limit | the most working time of each run, in seconds, however it starts ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
 | `without` | `()` | what the harness does not do for any of its runs ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
@@ -91,8 +91,9 @@ await h.tools(*sources, framework, mcp=None, without=()) -> list
 The toolbox as the framework's own tools, for an agent built with them before it is wrapped:
 LangChain tools (`framework="langgraph"` or `"deepagents"`), `FunctionTool`s
 (`"openai_agents"`), one in-process MCP server (`"claude_agent_sdk"`). It holds `sources`
-(functions, `skills(...)`, `sandbox()`, `agent.as_tool()`...), the MCP tools (`mcp=`: those of
-these Virtual MCPs) and the memory tools; `without=` leaves features' tools out
+(functions, `mcp(...)`, wrapped agents, `skills(...)`, `sandbox()`...), the MCP tools the key
+allows when no `mcp(...)` is among them (`mcp=`: deprecated, as in `h.wrap`) and the memory
+tools; `without=` leaves features' tools out
 ([tools.md](tools.md#tools-built-into-the-agent-htools)).
 
 ### h.governance_middleware
@@ -228,16 +229,17 @@ for `on_behalf_of`; each fired run takes the options `start` takes, kept in the 
 metadata ([runs.md](runs.md#schedules),
 [examples/06_scenarios/scheduled_run_selection_limit.py](../examples/06_scenarios/scheduled_run_selection_limit.py)).
 
-### agent.as_tool, agent.serve_chat, agent.serve_a2a
+### agent.serve_chat, agent.serve_a2a (agent.as_tool, deprecated)
 
 ```text
-agent.as_tool(*, name=None, description=None, side_effects=None) -> SubAgent
 agent.serve_chat(app, *, path="/agui", identity=None)
 agent.serve_a2a(app, url, *, identity=None)
+agent.as_tool(*, name=None, description=None, side_effects=None) -> SubAgent  # deprecated
 ```
 
-`as_tool` is this agent as another agent's tool: each call a child run
-([subagents.md](subagents.md)). `serve_chat` mounts AG-UI routes on a FastAPI app;
+An agent in another agent's `tools=[...]` is its sub-agent: each call a child run
+([subagents.md](subagents.md)); `as_tool` still does the same for one release, with a
+warning. `serve_chat` mounts AG-UI routes on a FastAPI app;
 `serve_a2a` the agent card and A2A JSON-RPC at `url` ([surfaces.md](surfaces.md)).
 
 ## RunHandle
@@ -327,6 +329,20 @@ A Python function (sync or async) as a tool: the schema from its signature (each
 described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`; `idempotent` when a
 repeated call with its idempotency key has its effect once; `timeout` seconds per call
 ([tools.md](tools.md)).
+
+### mcp, stdio
+
+```text
+mcp(target, *, name=None, timeout=120, headers=None)
+stdio(command, *args, env=None, cwd=None)
+```
+
+An MCP server's tools as a `tools=[...]` entry: `target` is its URL (`"https://host/mcp"`, over
+streamable HTTP, `headers=` sent with every request), a local server (`stdio(...)`: the harness
+starts it and talks over its stdin and stdout), or a Bifrost Virtual MCP's name. Tools are named
+`<name>-<tool>` (else the name the server gives itself); their side effects come from their
+annotations. Once an agent names any `mcp(...)`, its MCP tools are exactly the ones it names
+([tools.md](tools.md)). The `mcp` extra (the official MCP SDK).
 
 ### a2a
 

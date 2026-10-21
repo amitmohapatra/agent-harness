@@ -276,7 +276,7 @@ async def test_a_pause_reaches_a_webhook_with_what_a_notice_says() -> None:
             async def parent(input: str, agent: Runtime) -> Any:
                 return await agent.tools.call(helper.id, message="pick")
 
-            boss = h.wrap(parent, id=f"live-notice-boss-{suffix}", tools=[helper.as_tool()])
+            boss = h.wrap(parent, id=f"live-notice-boss-{suffix}", tools=[helper])
             asked = await boss.run("go", user="live-user")
             assert asked.interrupt is not None
             told = await _delivered(hook.secret, asked.run_id)

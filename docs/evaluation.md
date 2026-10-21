@@ -411,11 +411,11 @@ repeat) on a pull request, the 10- and 50-tool catalogues nightly.
 
 `make bench-frameworks` (`python -m benchmark.cost.frameworks`) runs the cost benchmark's tasks,
 catalogues and metrics on every framework the harness supports, three ways, so "which framework,
-and is our `ReAct` the best of them" is a measured answer. The results:
-[eval/frameworks.md](eval/frameworks.md).
+and is our `ReAct` the best of them" is a measured answer. A run writes its results to
+`docs/eval/frameworks.md` (`--doc`).
 
 ```bash
-make bench-frameworks BENCH_ARGS="--model provider/model --window 8192 --n 6"
+make bench-frameworks BENCH_ARGS="--model provider/model --window=8192 --n=6"
 # fewer arms or cells: --arms langchain/A,react/C --cells short,long; no load check: --load ''
 ```
 
@@ -427,6 +427,16 @@ make bench-frameworks BENCH_ARGS="--model provider/model --window 8192 --n 6"
 | Per run | task success and tool coverage (the cost benchmark's), input and output tokens and model calls (the proxy's), wall seconds (p50/p95 per cell), CPU seconds of the arm's process and its children, its peak resident memory |
 | Also | a load check (one short task at concurrency 1 and 10) of each plain arm, and kill-mid-run survival of the wrapped ones: a queued run's worker killed after its first model call, a second worker started |
 | Report | `<out>/rows.jsonl` (every run, appended as it ends; a stopped run resumes) and the markdown, `--doc` (default `docs/eval/frameworks.md`): the arms' table, a ranking per task type, the load check, the kills, what was skipped and why, and the verdict |
+
+## Thread-history benchmark
+
+`python -m benchmark.thread --model <name>` (with `MEMORY_URL` and a gateway serving the name)
+measures who should keep a conversation's history across runs: a `create_agent` graph with its
+own checkpointer (the framework's thread; the harness sends no memory window) against the same
+graph without one (the memory service's window), on conversations whose later turns ask back
+facts from the first. It reports recall, input tokens per turn and seconds per turn
+(`build/bench-thread.json`, `.md`). The measurement and the decision are in
+[ADR 0003](adr/0003-automatic-features.md) (§6).
 
 ## Load benchmark
 

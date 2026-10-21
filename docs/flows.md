@@ -342,7 +342,7 @@ No model request ever gets the gateway's MCP tools: `bifrost-sdk` sends the deny
 
 ## Sub-agents
 
-`agent.as_tool()` (`subagents.py`): a planner calls a child agent; the child asks a person;
+An agent in another's `tools=[...]` (`subagents.py`): a planner calls a child agent; the child asks a person;
 the answer goes back through the planner
 ([examples/06_scenarios/parallel_subagents_mixed_frameworks.py](../examples/06_scenarios/parallel_subagents_mixed_frameworks.py)).
 
