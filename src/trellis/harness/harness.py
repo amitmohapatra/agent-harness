@@ -30,6 +30,7 @@ from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.features import Feature, features
 from trellis.harness.fresh import Fresh
+from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
@@ -47,6 +48,7 @@ from trellis.harness.settings import Settings
 from trellis.harness.skills import Skill, SkillSource, SkillSources
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
+from trellis.harness.tools.mcp import MCPSource, retired_mcp, split
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.harness.worker import Worker
@@ -196,10 +198,15 @@ class Harness:
         self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
         self.evals.prompts = self.prompts
         telemetry.configure(s)
+        #: where a model name goes (``trellis.harness.gateways``): Bifrost, else an
+        #: OpenAI-compatible endpoint, else none
+        self.model_gateway = model_gateway(s.bifrost_url)
         log.info(
             "trellis harness: gateway %s, memory %s, runs %s, spool %s, traces %s, sandbox %s "
-            "(python -m trellis.harness.doctor prints each setting and its source)",
-            s.bifrost_url or "off",
+            "(trellis doctor prints each setting and its source)",
+            "none"
+            if self.model_gateway is None
+            else f"{self.model_gateway.kind} {self.model_gateway.url}",
             s.memory_url or "off",
             s.runs_url or "in process",
             s.spool_dir or "none",
@@ -213,7 +220,7 @@ class Harness:
         target: Any,
         *,
         id: str,
-        tools: Sequence[Source | Callable[..., Any]] = (),
+        tools: Sequence[Source | Callable[..., Any] | Agent] = (),
         version: str | None = None,
         mcp: Sequence[str] | None = None,
         skills: Sequence[str | Skill] = (),
@@ -225,9 +232,11 @@ class Harness:
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
-        ``tools`` are the agent's own, run in this process (functions, ``a2a``, ``openapi``);
-        its MCP tools are the ones the Bifrost virtual key allows — or, with ``mcp``, the tools
-        of those Virtual MCPs of the gateway (by slug). ``skills`` are skills by name
+        ``tools`` are the agent's own (functions, ``a2a``, ``openapi``, wrapped agents as
+        sub-agents) and its MCP servers, ``mcp(...)`` (``tools.mcp``): a server's URL, a local
+        ``stdio(...)`` server, or a Virtual MCP of the gateway by name; with none, its MCP tools
+        are the ones the Bifrost virtual key allows. ``mcp`` (deprecated: ``mcp("name")`` in
+        ``tools``) names Virtual MCPs as before. ``skills`` are skills by name
         (``"name"``, ``"name@version"``, from the skill sources) or given (``Skill``):
         ``trellis.harness.skills``.
         ``version`` is the version of the agent's code (else ``TRELLIS_AGENT_VERSION``),
@@ -266,7 +275,7 @@ class Harness:
 
     async def tools(
         self,
-        *sources: Source | Callable[..., Any],
+        *sources: Source | Callable[..., Any] | Agent,
         framework: Framework,
         mcp: Sequence[str] | None = None,
         without: Collection[Feature] = (),
@@ -275,9 +284,10 @@ class Harness:
         agent with them before wrapping it: LangChain tools (``langgraph``, ``deepagents``),
         ``FunctionTool``\\ s (``openai_agents``), or one in-process MCP server
         (``claude_agent_sdk``); another name is refused, naming these. It holds ``sources``
-        (``skills(...)`` among them), the MCP tools the virtual key allows (or the Virtual MCPs
-        ``mcp`` names hold) and — memory on — the memory service's agent tools, less the parts
-        ``without`` names (``mcp``: the gateway is not asked; ``memory_pull``...): a graph's
+        (``skills(...)``, ``mcp(...)`` and wrapped agents among them), the MCP tools the virtual
+        key allows (or, once ``sources`` name any ``mcp(...)``, the ones they name; ``mcp``:
+        deprecated, Virtual MCPs by name) and — memory on — the memory service's agent tools,
+        less the parts ``without`` names (``mcp``: no MCP tool; ``memory_pull``...): a graph's
         tools are bound when it is built, so build it without what its agent goes without
         (the harness's LangChain middleware, ``ModelHooks``, hides a part turned off later).
         Every call is still the harness's: governance, approval, record."""
@@ -286,9 +296,10 @@ class Harness:
             raise ConfigurationError(
                 f"no framework {framework!r}: name one of {', '.join(FORMATS)}"
             )
-        mine = [as_source(s) for s in sources]
+        if mcp is not None:
+            retired_mcp("h.tools")
+        mine, bundles = split([as_source(s) for s in sources], None if mcp is None else list(mcp))
         off = features(without)
-        bundles = None if mcp is None else list(mcp)
         tenant = await self.tenant()
         number = len(self._built)
         self._built[number] = (mine, bundles)
@@ -488,11 +499,18 @@ class Harness:
         (the blocks given are their owner's to close)."""
         await self.writes.aclose()
         await telemetry.flush()
+        await asyncio.gather(*(s.aclose() for s in self._mcp_sources()))
         judge = self.evals.judge_gateway
         judge = judge if judge is not self.gateway else None
         clients = (*self._made, judge, self.evals.langfuse)
         closers = [c.aclose() for c in clients if c is not None]
         await asyncio.gather(*closers)
+
+    def _mcp_sources(self) -> list[MCPSource]:
+        """The MCP servers this harness's agents and toolboxes reach themselves."""
+        found = [s for a in self.agents.values() for s in a.sources]
+        found += [s for mine, _ in self._built.values() for s in mine]
+        return list({id(s): s for s in found if isinstance(s, MCPSource)}.values())
 
     async def __aenter__(self) -> Harness:
         return self
@@ -601,9 +619,11 @@ class Harness:
         without: Collection[Feature] = (),
     ) -> Toolbox:
         """A toolbox of ``sources`` and the MCP tools in ``tenant`` (the key's, or those of
-        the Virtual MCPs ``mcp`` names; none ``without`` ``mcp``: the gateway is not asked),
+        the Virtual MCPs ``mcp`` names; none ``without`` ``mcp``: no MCP server is asked),
         published to its catalog and kept fresh (``tools/toolbox.py``)."""
         gateway = None if "mcp" in without else self.gateway
+        if "mcp" in without:  # its own MCP servers not reached either
+            sources = [s for s in sources if not isinstance(s, MCPSource)]
         return Toolbox(sources, gateway=gateway, governance=self.governance(tenant), mcp=mcp)
 
     async def resolve(

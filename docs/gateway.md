@@ -5,13 +5,13 @@ the tools a virtual key allows are the agent's ([tools.md](tools.md)), and `ReAc
 judge call models by name. This page is the rest of what the harness uses of the gateway —
 stored prompts, skills, Virtual MCPs, who a tool call is for — and what it makes sure the
 gateway never does for a run. Nothing here is configured beyond the two variables: every
-feature is off until an agent names it (`prompt=`, `skills=`, `mcp=`).
+feature is off until an agent names it (`prompt=`, `skills=`, `mcp("name")`).
 
 | You want | Use | Section |
 |---|---|---|
 | a system prompt kept, versioned and changed in the gateway, not in code | `ReAct(..., prompt="triage")`, `llm_judge(..., prompt=)`, `h.model_headers(prompt=)` | [Prompts](#prompts) |
 | instructions the model reads only when a task needs them | `h.wrap(..., skills=["sql-review"])`, `skills(...)` | [Skills](#skills) |
-| an agent limited to some tools of some MCP servers | `h.wrap(..., mcp=["finance-tools"])` | [Virtual MCPs](#virtual-mcps) |
+| an agent limited to some tools of some MCP servers | `h.wrap(..., tools=[mcp("finance-tools")])` | [Virtual MCPs](#virtual-mcps) |
 | an MCP server acting for the person a run is for | nothing: every call says who | [Who a call is for](#who-a-call-is-for) |
 | your framework's own MCP client on the gateway | its client at `/mcp` with the key — ungoverned | [Frameworks' own MCP clients](#frameworks-own-mcp-clients) |
 
@@ -158,10 +158,12 @@ gateway (`/mcp/<slug>`), attached to virtual keys.
 **When.** One virtual key, several agents that should each see only some of its tools: a
 finance agent that sees the payment tools and not the CRM's.
 
-**How.** `h.wrap(target, id="payer", mcp=["finance-tools"])` (a graph: `h.tools(...,
-framework="langgraph", mcp=[...])`). Without `mcp=` the agent has every tool its key allows,
-as before; with it, the tools of those Virtual MCPs (a tool in two of them is listed once, from
-the first), each listed and run through its bundle. The key must be attached to each one
+**How.** `h.wrap(target, id="payer", tools=[mcp("finance-tools")])` (a graph: `h.tools(
+mcp("finance-tools"), framework="langgraph")`). Without `mcp(...)` entries the agent has every
+tool its key allows, as before; with them, exactly the servers they name — these Virtual MCPs'
+tools (a tool in two of them is listed once, from the first), each listed and run through its
+bundle, and any server of the agent's own (`mcp("https://...")`, `mcp(stdio(...))`,
+[tools.md](tools.md)). The retired `mcp=["finance-tools"]` still works for one release. The key must be attached to each one
 (`admin.virtual_mcps.attach`, bifrost-sdk).
 
 **Automatic.** Governance, approvals, the journal and the records are the same as for any MCP

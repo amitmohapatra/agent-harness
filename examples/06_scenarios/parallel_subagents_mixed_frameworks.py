@@ -1,8 +1,8 @@
 """Scenario: a ``ReAct`` planner delegating to three sub-agents at once, each on another
 framework — a LangGraph graph, an OpenAI Agents ``Agent`` and a plain function that asks a person.
 
-* each ``agent.as_tool()`` is one tool of the planner; each call is a child run of it: its own
-  run record, the planner's tenant, user, thread, time limit and trace;
+* each agent in the planner's ``tools=[...]`` is one tool of it; each call is a child run of it:
+  its own run record, the planner's tenant, user, thread, time limit and trace;
 * the three calls of one model step run at once (they only read);
 * the function asks the traveller which budget: the question pauses the planner (the other two
   children finish first, journaled), it is answered with the planner's ``resume``, and it goes
@@ -75,7 +75,7 @@ async def main() -> None:
                 ),
             ),
             id="planner",
-            tools=[s.as_tool(side_effects="read") for s in (scout, visas, hotel)],
+            tools=[scout, visas, hotel],  # each only reads: read sub-agents
         )
 
         result = await planner.run("Plan a weekend in Oslo", user="ada")

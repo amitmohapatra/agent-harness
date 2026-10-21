@@ -1,6 +1,7 @@
 """``trellis doctor`` (``python -m trellis.harness.doctor``): the effective settings and where
 each came from — the environment variable, derived, detected, or the default — secrets
-redacted; whether each service is reachable and takes its key; whether the spool can be
+redacted; which gateway serves model names and what it cannot do (``trellis.harness.gateways``);
+whether each service is reachable and takes its key; whether the spool can be
 written and the Docker daemon answers; and what to set. It changes nothing: it suggests.
 
 Exit code ``0`` when every check passes, ``1`` otherwise."""
@@ -18,6 +19,7 @@ from typing import Any, Final
 
 import httpx
 
+from trellis.harness.gateways import CAPABILITIES, model_gateway
 from trellis.harness.settings import DEPRECATED, Settings, sourced
 
 #: The settings whose values are secrets: shown as set, never as their value.
@@ -66,11 +68,30 @@ def effective(environ: Mapping[str, str] | None = None) -> list[tuple[str, str, 
     ]
 
 
-async def checks(settings: Settings) -> list[Check]:
+def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
+    """Which gateway serves model names, what named it, and what is off without it."""
+    gateway = model_gateway(settings.bifrost_url, environ)
+    if gateway is None:
+        off = sorted(CAPABILITIES)
+        lines = [
+            "none: models are objects passed in code (no BIFROST_URL, no OPENAI_BASE_URL or "
+            "OPENAI_API_KEY)"
+        ]
+    else:
+        off = sorted(set(CAPABILITIES) - gateway.capabilities)
+        kind = "Bifrost" if gateway.kind == "bifrost" else "OpenAI-compatible"
+        lines = [f"{kind} at {gateway.url} ({gateway.source})"]
+    lines += [f"off: {CAPABILITIES[c]}" for c in off]
+    return lines
+
+
+async def checks(settings: Settings, environ: Mapping[str, str] | None = None) -> list[Check]:
     """Each service the settings name, reached with its key; the spool; the Docker daemon."""
+    env = os.environ if environ is None else environ
     async with httpx.AsyncClient(timeout=CHECK_SECONDS) as client:
         found = await asyncio.gather(
             _gateway(client, settings),
+            _openai_compatible(client, settings, env),
             _memory(client, settings),
             _runs(client, settings),
         )
@@ -115,6 +136,17 @@ async def _gateway(client: httpx.AsyncClient, s: Settings) -> Check | None:
     return await _reached(
         client, "gateway", f"{s.bifrost_url.rstrip('/')}/models", {"Authorization": f"Bearer {key}"}
     )
+
+
+async def _openai_compatible(
+    client: httpx.AsyncClient, s: Settings, environ: Mapping[str, str]
+) -> Check | None:
+    gateway = model_gateway(s.bifrost_url, environ)
+    if gateway is None or gateway.kind != "openai_compatible":
+        return None
+    key = environ.get("OPENAI_API_KEY", "").strip() or "none"
+    url = f"{gateway.url.rstrip('/')}/models"
+    return await _reached(client, "gateway", url, {"Authorization": f"Bearer {key}"})
 
 
 async def _memory(client: httpx.AsyncClient, s: Settings) -> Check | None:
@@ -174,11 +206,17 @@ async def _docker() -> Check:
 
 
 def report(
-    rows: Sequence[tuple[str, str, str]], found: Sequence[Check], said: Sequence[str]
+    rows: Sequence[tuple[str, str, str]],
+    found: Sequence[Check],
+    said: Sequence[str],
+    gateway: Sequence[str] = (),
 ) -> str:
     width = max(len(name) for name, _, _ in rows)
     lines = ["Settings (value, and where it came from):"]
     lines += [f"  {name.ljust(width)}  {value}  [{source}]" for name, value, source in rows]
+    if gateway:
+        lines.append("Gateway (where a model name goes):")
+        lines += [f"  {line}" for line in gateway]
     lines.append("Checks:")
     lines += [f"  {'ok  ' if c.ok else 'FAIL'}  {c.name}: {c.said}" for c in found] or ["  none"]
     lines.append("Suggestions:")
@@ -190,8 +228,9 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     del argv  # no options
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
-    found = asyncio.run(checks(settings))
-    sys.stdout.write(report(effective(env), found, suggestions(settings, env)) + "\n")
+    found = asyncio.run(checks(settings, env))
+    said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
+    sys.stdout.write(said + "\n")
     return 0 if all(c.ok for c in found) else 1
 
 

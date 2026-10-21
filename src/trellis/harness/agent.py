@@ -72,6 +72,7 @@ from trellis.harness.skills import Skill, Skills
 from trellis.harness.subagents import SubAgent, asked_by, cancel_children
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
+from trellis.harness.tools.mcp import retired_as_tool, retired_mcp, split
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -150,7 +151,8 @@ class Agent:
         for gated in sorted(gated_tools(target)):
             log.warning(
                 "%s: %s is approved in the framework's own gate: governance counts that "
-                "approval, so each call is asked once",
+                "approval, so each call is asked once; approval rules belong in the tool "
+                "catalog (risk, approve_when), the one place every framework reads",
                 id,
                 gated,
             )
@@ -167,11 +169,19 @@ class Agent:
                 f"await h.tools(..., framework='{self.adapter.name}') to the graph instead of "
                 f"{'/'.join(f'{n}=' for n in given)} (skills as skills(...), mcp= to h.tools)"
             )
-        self.sources = [as_source(t) for t in tools]
+        if mcp is not None:
+            retired_mcp("h.wrap")
+        #: the Virtual MCPs whose tools the agent has (``None``: everything its key allows)
+        self.sources, self.mcp = split(
+            [as_source(t) for t in tools], None if mcp is None else list(mcp)
+        )
         if skills:
             self.sources.append(Skills(skills))
-        #: the Virtual MCPs whose tools the agent has (``None``: everything its key allows)
-        self.mcp = None if mcp is None else list(mcp)
+        if self.mcp and harness.gateway is None and "mcp" not in self.without:
+            raise ConfigurationError(
+                f"{id}: mcp({self.mcp[0]!r}) is a Virtual MCP of the gateway, and there is no "
+                "gateway (BIFROST_URL): give the server's URL, mcp('https://...'), instead"
+            )
         if self.adapter.fixed_tools:
             self.sources, self.mcp = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
@@ -416,6 +426,7 @@ class Agent:
         (``trellis.harness.subagents``). ``name`` (else the agent's id), ``description`` (else
         the function's docstring, or a generic one) and ``side_effects`` (else ``read`` when
         every tool it declares only reads, ``write`` otherwise) are the tool's."""
+        retired_as_tool()
         return SubAgent(self, name=name, description=description, side_effects=side_effects)
 
     # ------------------------------------------------------------------ surfaces

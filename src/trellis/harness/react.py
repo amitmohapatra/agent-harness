@@ -31,10 +31,12 @@ the loop is the harness's. What it is built with:
   ``ModelHooks``; one named as a default one (``SummarizationMiddleware``,
   ``FilesystemMiddleware``...) replaces it.
 
-A model name is a model of the gateway (``BIFROST_URL``, the virtual key
-``BIFROST_VIRTUAL_KEY``, from ``settings=`` or the environment), asked through ``ChatOpenAI``
-on its chat completions with the deny-all MCP scope; the gateway owns retries, fallbacks and
-prompt caching. Any LangChain chat model is used as it is. The context window is
+A model name is a model of the deployment's one gateway (``trellis.harness.gateways``), asked
+through ``ChatOpenAI`` on its chat completions: Bifrost (``BIFROST_URL``, the virtual key
+``BIFROST_VIRTUAL_KEY``, from ``settings=`` or the environment; the deny-all MCP scope; the
+gateway owns retries, fallbacks and prompt caching), else any OpenAI-compatible endpoint the
+OpenAI SDK's ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` name (the client's own retries); with
+neither, a name is an error. Any LangChain chat model is used as it is. The context window is
 ``context_window``, else the model's LangChain profile (``model.profile``); when neither says,
 the window-scaled features are off, said once.
 """
@@ -43,6 +45,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
@@ -51,6 +54,7 @@ from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import MODEL_METADATA, WINDOW_METADATA, context_window
+from trellis.harness.gateways import model_gateway, unserved
 from trellis.harness.prompts import Prompt
 from trellis.harness.settings import Settings
 
@@ -129,6 +133,10 @@ def ReAct(
     if effort is not None and not isinstance(model, str):
         raise ConfigurationError("effort is for a model name: set it on your own chat model")
     named = model if isinstance(model, str) else None
+    gateway = None
+    if named is not None:
+        settings = settings or Settings.from_env()
+        gateway = model_gateway(settings.bifrost_url)
     chat = _gateway_model(model, timeout=model_timeout, effort=effort, settings=settings)
     window, source = window_of(chat, context_window)
     if window is None:
@@ -177,7 +185,10 @@ def ReAct(
             else []
         ),
         ours.ModelHooks(
-            timeout=model_timeout, prompt=prompt, prompt_vars=prompt_vars, gateway=named is not None
+            timeout=model_timeout,
+            prompt=prompt,
+            prompt_vars=prompt_vars,
+            gateway=gateway is not None and gateway.kind == "bifrost",
         ),
     ]
     graph = create_agent(
@@ -230,28 +241,39 @@ def _unknown(name: str) -> None:
 def _gateway_model(
     model: Any, *, timeout: float | None, effort: str | None, settings: Settings | None
 ) -> Any:
-    """A chat model of the gateway for a model name (``ChatOpenAI`` on ``BIFROST_URL``, with the
-    deny-all MCP scope and no retries of its own); any other model as it is."""
+    """A chat model for a model name, from the deployment's one gateway
+    (``trellis.harness.gateways``): ``ChatOpenAI`` on ``BIFROST_URL`` (the deny-all MCP scope,
+    no retries of its own: the gateway retries), else on the OpenAI-compatible endpoint the
+    OpenAI SDK's own variables name (the client's own retries: nothing else retries there);
+    any other model as it is."""
     if not isinstance(model, str):
         return model
     import openai
     from langchain_openai import ChatOpenAI
 
     settings = settings or Settings.from_env()
-    if settings.bifrost_url is None:
-        raise ConfigurationError("ReAct with a model name needs BIFROST_URL")
+    gateway = model_gateway(settings.bifrost_url)
+    if gateway is None:
+        raise unserved("ReAct")
+    common: dict[str, Any] = {
+        "model": model,
+        "timeout": timeout,
+        "stream_usage": True,
+        "reasoning_effort": effort,
+        # a client of its own: langchain-openai shares one per gateway URL across the process,
+        # whose pooled connections break the models of a later event loop
+        "http_async_client": openai.DefaultAsyncHttpxClient(),
+    }
+    if gateway.kind == "openai_compatible":  # the SDK reads OPENAI_BASE_URL / OPENAI_API_KEY
+        if not os.environ.get("OPENAI_API_KEY", "").strip():  # a server that takes none
+            common["api_key"] = NO_KEY
+        return ChatOpenAI(**common)
     return ChatOpenAI(
-        model=model,
         base_url=settings.bifrost_url,
         api_key=settings.bifrost_virtual_key or NO_KEY,  # type: ignore[arg-type]
         default_headers=dict(NO_GATEWAY_TOOLS),
-        timeout=timeout,
         max_retries=MODEL_RETRIES,
-        stream_usage=True,
-        reasoning_effort=effort,
-        # a client of its own: langchain-openai shares one per gateway URL across the process,
-        # whose pooled connections break the models of a later event loop
-        http_async_client=openai.DefaultAsyncHttpxClient(),
+        **common,
     )
 
 

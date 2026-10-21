@@ -1,6 +1,6 @@
 # Sub-agents: an agent as another agent's tool
 
-`agent.as_tool()` turns any wrapped agent into a tool of any other. The model decides when to
+A wrapped agent in another agent's `tools=[...]` is its sub-agent: a tool of it. The model decides when to
 delegate and what to delegate at once; each call is a *child run* of the sub-agent, with its
 own record, journal and answer, inside the parent's call. Nothing to configure: you name the
 agents, the harness does the rest — the child's identity and time, its pauses, its crashes,
@@ -11,15 +11,14 @@ research = h.wrap(ReAct(system="You research.", model=model), id="research", too
 writer = h.wrap(
     ReAct(system="You write. Ask research for facts.", model=model),
     id="writer",
-    tools=[research.as_tool()],
+    tools=[research],
 )
 result = await writer.run("Write about lighthouses", user="ada")
 ```
 
 | You write | Automatic |
 |---|---|
-| `tools=[agent.as_tool()]` (or `h.tools(agent.as_tool(), framework=...)`) | a child run per call: its id, its parent, its tenant, user, thread, time and trace; its pauses answered through the parent; its crash continued; its cancel with the parent |
-| optionally `as_tool(name=, description=, side_effects=)` | the tool's name (the agent's id), description (a function's docstring, else a generic one) and side effects (from the tools the child declares) |
+| `tools=[agent]` (or `h.tools(agent, framework=...)`) | a child run per call: its id, its parent, its tenant, user, thread, time and trace; its pauses answered through the parent; its crash continued; its cancel with the parent; the tool's name (the agent's id), description (a function's docstring, else a generic one) and side effects (from the tools the child declares) |
 
 ## What
 
@@ -43,7 +42,7 @@ vendor); a sub-agent runs in the parent's process.
 
 Way 1, every target on either side: a `ReAct` parent with a function, LangGraph, OpenAI Agents,
 Claude or `ReAct` child, or any framework's parent calling the tool built by
-`h.tools(child.as_tool(), framework=...)`; every mode the parent runs in (`run`, `stream`,
+`h.tools(child, framework=...)`; every mode the parent runs in (`run`, `stream`,
 `start` and workers, a resume in another process, `serve_chat`, `serve_a2a`). Way 2 has no
 sub-agent block: an agent you do not wrap calls another with `remote()`
 ([blocks/a2a.md](blocks/a2a.md)).
@@ -66,7 +65,7 @@ hotel = h.wrap(booker, id="booker", tools=[hotels])
 planner = h.wrap(
     ReAct(system="You plan trips: ask scout and booker at once.", model=model),
     id="planner",
-    tools=[scout.as_tool(), hotel.as_tool()],
+    tools=[scout, hotel],
 )
 result = await planner.run("Plan a weekend in Oslo", user="ada")
 while result.interrupt:  # booker's question, asked through the planner
@@ -75,9 +74,12 @@ while result.interrupt:  # booker's question, asked through the planner
     )
 ```
 
-`agent.as_tool(*, name=None, description=None, side_effects=None)`. Override only what you
-know better: a `name` the model reads more easily, a `description` saying when to delegate, or
-`side_effects` when the child does more (or less) than its tools say.
+The tool is named after the agent's id (name it for the model: `id="research"`), described by
+the function's docstring, and its side effects come from the tools the child declares. When
+the child does more (or less) than its tools say, set its risk in the tool catalog, where every
+tool's risk and approval rule live ([governance.md](governance.md)).
+`agent.as_tool(*, name=None, description=None, side_effects=None)` is deprecated: it works for
+one release, with a warning.
 
 ## Automatic
 

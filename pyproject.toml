@@ -54,10 +54,12 @@ openai-agents = ["openai-agents>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
 agui = ["fastapi>=0.115"]
 a2a = ["a2a-sdk[http-server]>=1.1,<1.2", "fastapi>=0.115"]
+# ``mcp(...)`` entries for MCP servers the harness reaches itself (HTTP, stdio): the official SDK.
+mcp = ["mcp>=2.2,<3"]
 # OTLP export (Langfuse is reached through the same exporter; no Langfuse SDK).
 otel = ["opentelemetry-sdk>=1.44", "opentelemetry-exporter-otlp-proto-http>=1.44"]
 all = [
-  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,agui,a2a,otel]",
+  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,agui,a2a,otel,mcp]",
 ]
 
 [dependency-groups]

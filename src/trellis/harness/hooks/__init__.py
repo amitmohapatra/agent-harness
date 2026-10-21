@@ -3,12 +3,17 @@ or not.
 
     class Guard(Hooks):
         async def before_tool(self, call: ToolCall) -> Deny | Ask | Rewrite | None:
-            if call.tool == "refund" and call.args.get("amount", 0) > 1000:
-                return Ask("A refund over 1000: approve it?")
+            if call.tool == "refund" and await frozen(call.args["account"]):
+                return Deny("the account is frozen")
             return None
 
     h = Harness(hooks=[Guard()])                      # every agent of this harness
     agent = h.wrap(target, id="support", hooks=[Audit()])  # this agent, after the harness's
+
+Hooks are for custom logic a rule cannot express — a refusal, a rewrite, a decision on data
+outside the call, who reviews and on which screen. When a call needs a person is a rule, and
+rules live in one place: the tool catalog's ``risk`` and ``approve_when``
+(``trellis.harness.governance``).
 
 Subclass :class:`Hooks` and override what you need (every method does nothing by default);
 hooks run in order — the harness's, then the agent's. Where they fire:

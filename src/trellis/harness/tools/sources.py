@@ -1,7 +1,8 @@
 """The tools ``tools=[...]`` accepts — the ones this process runs itself: ``tool(fn)`` (a bare
-function in the list is ``tool(fn)``), ``a2a(url)`` (a remote agent) and ``openapi(spec)``.
-MCP tools are not listed here: they are whatever the agent's Bifrost virtual key allows,
-loaded automatically (``tools.toolbox``).
+function in the list is ``tool(fn)``), ``a2a(url)`` (a remote agent) and ``openapi(spec)``; a
+wrapped agent in the list is a sub-agent (``trellis.harness.subagents``), and ``mcp(...)`` an
+MCP server's tools (``tools.mcp``) — without one, the MCP tools the agent's Bifrost virtual key
+allows, loaded automatically (``tools.toolbox``).
 
 Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A local
 function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
@@ -388,10 +389,16 @@ def _operation_tool(
 # --------------------------------------------------------------------------- normalising
 
 
-def as_source(item: Source | Callable[..., Any]) -> Source:
-    """A ``tools=[...]`` entry as a source: a bare function becomes ``tool(fn)``."""
+def as_source(item: Source | Callable[..., Any] | Any) -> Source:
+    """A ``tools=[...]`` entry as a source: a bare function becomes ``tool(fn)``, a wrapped
+    agent a sub-agent (``trellis.harness.subagents``)."""
+    from trellis.harness.agent import Agent  # noqa: PLC0415 - the agent imports the sources
+    from trellis.harness.subagents import SubAgent  # noqa: PLC0415
+
+    if isinstance(item, Agent):
+        return SubAgent(item, name=None, description=None, side_effects=None)
     if hasattr(item, "resolve"):
-        return item  # type: ignore[return-value]
+        return item  # type: ignore[no-any-return]
     if callable(item):
         return tool(item)
     raise TypeError(f"not a tool source: {item!r}")

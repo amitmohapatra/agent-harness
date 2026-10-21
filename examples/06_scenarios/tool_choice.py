@@ -481,7 +481,7 @@ async def main() -> None:
     )
     async with Harness() as h:
         target = ReAct(SYSTEM, model, tool_guidance=True, answer_check=True, max_steps=6)
-        agent = h.wrap(target, id="store-ops", tools=TOOLS, mcp=[])
+        agent = h.wrap(target, id="store-ops", tools=TOOLS, without={"mcp"})
         report = await h.evaluate(
             agent, DATASET, EVALUATORS, run_name="tool-choice-offline", concurrency=1
         )

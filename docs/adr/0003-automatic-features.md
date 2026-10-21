@@ -17,7 +17,7 @@ long tasks; a short task must keep sending exactly that.
 1. **Reuse, wrap thinly.** Each feature is the framework's own middleware, used as it is; the
    harness adds only the trigger and the glue that keeps it governed, journaled and resumable
    (`trellis.harness.automatic`). Delegation stays the team's explicit code
-   (`agent.as_tool()`): no automatic helper.
+   (an agent in `tools=[...]`): no automatic helper.
 2. **On from signals.** A feature is offered when the run shows it needs it: a long task (the
    model's third call of an invocation, or a request that asks for steps) on a known window with
    room for it (32,000 tokens or more); an unknown window: off. Until then the model is sent neither its tools nor its
