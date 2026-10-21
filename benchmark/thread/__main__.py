@@ -2,12 +2,15 @@
 memory service's window — measured (``python -m benchmark.thread``, under ``heavy.sh``), with
 the worker restarted mid-conversation:
 
-* ``framework``: a ``create_agent`` graph on the harness's durable checkpointer
-  (``RunCheckpointer``: the graph's checkpoint kept in the run's journal, in agent-runs);
-* ``framework-ram``: the same graph on LangGraph's ``InMemorySaver`` (the framework's thread in
-  the worker's memory: the harness sends no memory window, ``keeps_conversation``);
-* ``memory``: the same graph without a checkpointer: the memory service's window gives the
-  recent turns.
+* ``framework``: a ``create_agent`` graph on a durable checkpointer of its own, LangGraph's
+  ``AsyncPostgresSaver`` (``--postgres``, a private database): its thread owns the history and
+  the harness sends no memory window (``bridges.history``: ``Thread.OWN``);
+* ``framework-journal``: the same graph on the harness's journal-backed ``RunCheckpointer`` (its
+  checkpoint in the run's journal, in agent-runs): the run's own thread, durable but per run, so
+  memory's window carries the conversation;
+* ``framework-ram``: the same graph on LangGraph's ``InMemorySaver``: kept in the worker's
+  memory, so by the policy memory's window carries the conversation (said once);
+* ``memory``: the same graph without a checkpointer: memory's window gives the recent turns.
 
 They differ in nothing else — the same model, instructions, no tools. After turn
 :data:`RESTART_AFTER` the worker is restarted: its harness closed, a new one opened and the
@@ -34,8 +37,8 @@ import statistics
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Final
@@ -126,28 +129,49 @@ def _graph(model: str, checkpointer: Any) -> Any:
     return create_agent(chat, tools=[], system_prompt=SYSTEM, checkpointer=checkpointer)
 
 
-def framework_target(model: str) -> Any:
+@asynccontextmanager
+async def postgres(dsn: str) -> AsyncIterator[Any]:
+    """LangGraph's own durable checkpointer, for one worker's life (its connections)."""
+    from langgraph.checkpoint.postgres.aio import (  # pyright: ignore[reportMissingImports]
+        AsyncPostgresSaver,
+    )
+
+    async with AsyncPostgresSaver.from_conn_string(dsn) as saver:
+        await saver.setup()
+        yield saver
+
+
+@asynccontextmanager
+async def given(checkpointer: Any) -> AsyncIterator[Any]:
+    yield checkpointer
+
+
+def _journal() -> Any:
     from trellis.harness.middleware import RunCheckpointer
 
-    return _graph(model, RunCheckpointer())
+    return RunCheckpointer()
 
 
-def framework_ram_target(model: str) -> Any:
+def _ram() -> Any:
     from langgraph.checkpoint.memory import InMemorySaver
 
-    return _graph(model, InMemorySaver())
+    return InMemorySaver()
 
 
-def memory_target(model: str) -> Any:
-    return _graph(model, None)
-
-
-#: Each variant's graph, built again by the restarted worker.
-TARGETS: Final[dict[str, Callable[[str], Any]]] = {
-    FRAMEWORK: framework_target,
-    "framework-ram": framework_ram_target,
-    MEMORY: memory_target,
+#: Each variant's checkpointer for one worker's life, from the Postgres DSN (built again by the
+#: restarted worker).
+SAVERS: Final[dict[str, Callable[[str | None], AbstractAsyncContextManager[Any]]]] = {
+    FRAMEWORK: lambda dsn: postgres(_dsn(dsn)),
+    "framework-journal": lambda dsn: given(_journal()),
+    "framework-ram": lambda dsn: given(_ram()),
+    MEMORY: lambda dsn: given(None),
 }
+
+
+def _dsn(dsn: str | None) -> str:
+    if dsn is None:
+        raise SystemExit("the framework variant runs on PostgreSQL: --postgres <dsn>")
+    return dsn
 
 
 def config() -> Settings:
@@ -158,7 +182,9 @@ def config() -> Settings:
     return found
 
 
-async def converse(variant: str, model: str, repeat: int) -> list[dict[str, Any]]:
+async def converse(
+    variant: str, model: str, repeat: int, dsn: str | None = None
+) -> list[dict[str, Any]]:
     """Each conversation in ``variant``, its worker restarted after :data:`RESTART_AFTER`
     turns: a harness of its own (a worker's life) for the turns before, and one for those
     after, each with the graph built again."""
@@ -168,8 +194,11 @@ async def converse(variant: str, model: str, repeat: int) -> list[dict[str, Any]
         thread, user = f"conv-{uuid.uuid4().hex[:8]}", f"bench-{uuid.uuid4().hex[:6]}"
         facts = [fact.lower() for fact in expected.values()]
         for start, stop in ((0, RESTART_AFTER), (RESTART_AFTER, len(turns))):
-            async with Harness(config=config(), gateway=False) as h:
-                agent = h.wrap(TARGETS[variant](model), id=agent_id)
+            async with (
+                SAVERS[variant](dsn) as checkpointer,
+                Harness(config=config(), gateway=False) as h,
+            ):
+                agent = h.wrap(_graph(model, checkpointer), id=agent_id)
                 for i in range(start, stop):
                     began = time.monotonic()
                     with heard() as listener:
@@ -269,7 +298,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for repeat in range(args.repeats):
         for variant in args.variants:
-            rows += await converse(variant, args.model, repeat)
+            rows += await converse(variant, args.model, repeat, args.postgres)
     found = summary(rows)
     return {
         "model": args.model,
@@ -285,7 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m benchmark.thread", description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--repeats", type=int, default=1)
-    parser.add_argument("--variants", nargs="+", default=list(TARGETS), choices=list(TARGETS))
+    parser.add_argument("--variants", nargs="+", default=list(SAVERS), choices=list(SAVERS))
+    parser.add_argument("--postgres", help="a database for the framework's durable checkpointer")
     parser.add_argument("--out", default="build/bench-thread")
     args = parser.parse_args(argv)
     report = asyncio.run(main_async(args))

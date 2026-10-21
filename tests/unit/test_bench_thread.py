@@ -10,7 +10,7 @@ import pytest
 from benchmark.thread.__main__ import (
     CONVERSATIONS,
     RESTART_AFTER,
-    TARGETS,
+    SAVERS,
     decision,
     markdown,
     summary,
@@ -45,7 +45,20 @@ def test_the_report_gives_recall_history_and_tokens_per_turn_for_each_owner() ->
     )
     assert "Decision: the memory window saves 0% of the input tokens" in table
     assert all(len(turns) == 5 and expected for turns, expected in CONVERSATIONS)
-    assert set(TARGETS) == {"framework", "framework-ram", "memory"}
+    assert set(SAVERS) == {"framework", "framework-journal", "framework-ram", "memory"}
+
+
+async def test_each_variant_has_its_checkpointer_and_the_durable_one_needs_postgres() -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from trellis.harness.middleware import RunCheckpointer
+
+    async with SAVERS["memory"](None) as none, SAVERS["framework-ram"](None) as ram:
+        assert none is None and isinstance(ram, InMemorySaver)
+    async with SAVERS["framework-journal"](None) as journal:
+        assert isinstance(journal, RunCheckpointer)
+    with pytest.raises(SystemExit, match="--postgres"):
+        SAVERS["framework"](None)
 
 
 @pytest.mark.parametrize(
