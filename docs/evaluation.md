@@ -398,7 +398,8 @@ machine; the travel set ran).
 stored baseline, cell by cell (catalogue size and variant) on the tasks both ran, and exits
 non-zero when a cell is worse past its margin: a success rate lower by more than
 `--success-margin` (0.15: a small model's runs vary), or mean input tokens higher by more than
-`--token-margin` (10%). Better passes — the gate is non-inferiority, not equality — and a cell
+`--token-margin` (10%) on the successful runs of the tasks both reports did (a run that stopped
+early sent fewer tokens for less work: counting it would reward failing). Better passes — the gate is non-inferiority, not equality — and a cell
 only one report measured is listed, not failed.
 
 `.github/workflows/bench.yml` runs it where a gateway serving the baseline's model is

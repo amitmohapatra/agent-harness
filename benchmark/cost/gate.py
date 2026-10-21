@@ -8,7 +8,9 @@ caught before it lands.
 Each catalogue size and variant both reports measured is compared on the tasks both ran (a
 smoke run of a few tasks is compared with the baseline's runs of those tasks): its success rate
 may fall by at most ``--success-margin`` (0.15 by default: a small model's runs vary), and its
-mean input tokens may rise by at most ``--token-margin`` (10%). A cell either report did not
+mean input tokens may rise by at most ``--token-margin`` (10%) — the tokens of the successful
+runs of the tasks both reports did (a run that stopped early sent fewer tokens for less work:
+counting it would reward failing). A cell either report did not
 measure is listed, not failed. A better cell passes: the gate is non-inferiority, not equality.
 """
 
@@ -65,7 +67,11 @@ def compare(
         a = [r for r in theirs[cell] if r["task"] in common]
         b = [r for r in mine[cell] if r["task"] in common]
         success = (_mean(a, "success"), _mean(b, "success"))
-        tokens = (_mean(a, "input_tokens"), _mean(b, "input_tokens"))
+        done = {r["task"] for r in a if r["success"]} & {r["task"] for r in b if r["success"]}
+        tokens = (
+            _mean([r for r in a if r["success"] and r["task"] in done], "input_tokens"),
+            _mean([r for r in b if r["success"] and r["task"] in done], "input_tokens"),
+        )
         failed = []
         if success[1] < success[0] - success_margin:
             failed.append(f"success {success[1]:.2f} < {success[0]:.2f} - {success_margin:g}")
@@ -76,13 +82,14 @@ def compare(
 
 
 def _mean(rows: list[dict[str, Any]], key: str) -> float:
-    return statistics.fmean(float(r[key] or 0) for r in rows)
+    """The mean of ``key`` over ``rows`` (0 for none: nothing to compare)."""
+    return statistics.fmean(float(r[key] or 0) for r in rows) if rows else 0.0
 
 
 def table(compared: Sequence[Compared], alone: Sequence[tuple[int, str]]) -> str:
     lines = [
-        "| tools | variant | tasks | success (baseline → now) | input tokens (baseline → now) "
-        "| verdict |",
+        "| tools | variant | tasks | success (baseline → now) | input tokens of the runs both "
+        "did (baseline → now) | verdict |",
         "|---|---|---|---|---|---|",
     ]
     for c in compared:

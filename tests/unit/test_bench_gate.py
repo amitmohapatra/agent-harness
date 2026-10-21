@@ -40,11 +40,24 @@ def test_a_cell_as_good_or_better_passes_on_the_common_tasks() -> None:
 
 
 def test_less_success_or_more_tokens_past_the_margin_fails() -> None:
-    now = report((10, "main", "a", False, 1300), (10, "main", "b", True, 1000))
-    [cell], _ = gate.compare(now, BASELINE)
-    assert cell.failed == ("success 0.50 < 1.00 - 0.15", "input tokens 1,150 > 1,000 + 10%")
-    [lenient], _ = gate.compare(now, BASELINE, success_margin=0.5, token_margin=0.2)
+    worse = report((10, "main", "a", False, 1000), (10, "main", "b", True, 1000))
+    [cell], _ = gate.compare(worse, BASELINE)
+    assert cell.failed == ("success 0.50 < 1.00 - 0.15",)
+    dearer = report((10, "main", "a", True, 1300), (10, "main", "b", True, 1000))
+    [cell], _ = gate.compare(dearer, BASELINE)
+    assert cell.failed == ("input tokens 1,150 > 1,000 + 10%",)
+    [lenient], _ = gate.compare(dearer, BASELINE, token_margin=0.2)
     assert not lenient.failed
+
+
+def test_tokens_are_compared_on_the_runs_both_did() -> None:
+    """A task the baseline failed (it stopped early, sending less) is not counted against a
+    report that does it now."""
+    now = report(
+        (10, "main", "a", True, 1000), (10, "main", "b", True, 1000), (10, "main", "c", True, 9000)
+    )
+    [cell], _ = gate.compare(now, BASELINE)
+    assert cell.success == (2 / 3, 1.0) and cell.input_tokens == (1000, 1000) and not cell.failed
 
 
 def test_a_cell_with_no_common_task_and_a_baseline_of_no_tokens_are_not_failed() -> None:
