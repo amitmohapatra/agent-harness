@@ -96,10 +96,11 @@ run's own limit still bounds them.
 
 **How.** `ReAct(system=..., model="provider/model", model_timeout=30)`.
 
-**Automatic.** The model client of a `ReAct` built with a model name retries a completion on a
-timeout, `408`/`409`/`429`/`5xx` or a dropped connection (3 attempts in all, honouring
-`Retry-After`); those retries happen *inside* `model_timeout`, and what is left of the run
-bounds them all. A model error left is a `ModelError`, retryable for those causes (a queued run
+**Automatic.** The model client of a `ReAct` built with a model name makes one attempt: the
+gateway is the one place that retries a model call (a provider's `network_config.max_retries`
+in Bifrost, 0 by default) and falls back (`fallback_models`, or the virtual key's), so
+attempts never multiply. All of it happens *inside* `model_timeout`, and what is left of the
+run bounds it. A model error left is a `ModelError`, retryable for those causes (a queued run
 is queued again, its graph continuing from its checkpoint).
 
 **On failure.** The run fails `ERROR` with a `ModelError` that says
@@ -190,8 +191,8 @@ them bounds them.
 | Layer | What it retries | How often, how long | Bounded by |
 |---|---|---|---|
 | Bifrost SDK (the judge's models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | the run's time |
-| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | a timeout, a dropped connection, `408/409/429/5xx` — not an error the gateway gave after it tried the call's fallbacks (they would all be tried again) | 3 attempts, the client's backoff, `Retry-After` | `model_timeout`, the run's time |
-| Bifrost (the gateway) | a model call per provider `network_config.max_retries` (default 0), then the call's fallbacks | its config | its timeouts; set retries there or in `ReAct`, not both: they multiply |
+| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | nothing: the gateway retries | 1 attempt | `model_timeout`, the run's time |
+| Bifrost (the gateway) | a model call, per a provider's `network_config.max_retries` (default 0), then the call's fallbacks (`fallback_models`, the virtual key's) | its configuration | `model_timeout`, the run's time |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
 | runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |

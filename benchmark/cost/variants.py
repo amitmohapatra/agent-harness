@@ -116,7 +116,7 @@ PIECES: Final = {
 #: The features ``ReAct`` turns on by itself (``trellis.harness.automatic``): a
 #: ``main-<feature>`` variant is ``main`` run ``without={feature}``, and ``baseline`` is
 #: without them all.
-AUTOMATIC: Final = ("planning", "files", "subagent_task", "tool_search")
+AUTOMATIC: Final = ("planning", "files", "subagent_task")
 #: The window ``main@8k`` assumes whatever the model's: a small local model's.
 SMALL_WINDOW: Final = 8_192
 

@@ -3,6 +3,12 @@ middleware used as it is, the harness's code only the trigger and the glue that 
 governed, journaled and resumable. A task that does not need one never sees it: a short task's
 model calls are what they were before any of these existed (the tools, the instructions).
 
+Each is one trigger (a small function of the request or the run) and the LangChain or Deep
+Agents part it turns on. For every task: the vendor's own client (``native_client``), each
+step's effort (``effort``), the prompt cache (``prompt_cache``), the gateway's fallbacks
+(``fallback``), the run's budget (``budget``) and one repair of a structured answer
+(``structured_output``).
+
 * **A long task** — :func:`long_task`: once the model has made :data:`LONG_AFTER` calls in this
   invocation, or the request asks for steps (a list of :data:`STEP_ITEMS` items or more, "step
   by step", "a plan") — on a model whose window has room for them (:data:`MIN_WINDOW`) gets:
@@ -41,7 +47,6 @@ from deepagents.middleware.subagents import SubAgentMiddleware
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
-    ModelFallbackMiddleware,
     ModelRequest,
     ModelResponse,
 )
@@ -58,7 +63,7 @@ from trellis.harness import budget, models
 from trellis.harness.features import Feature
 from trellis.harness.middleware import ANSWER_CHECK, WRITE_CHECK, _named
 from trellis.harness.runtime import Runtime, current
-from trellis.harness.tools import bridge, search
+from trellis.harness.tools import bridge
 from trellis.harness.tools.convert import text_of
 
 #: The smallest context window the long-task tools are offered in, in tokens: together they
@@ -247,36 +252,14 @@ class PromptCache(AnthropicPromptCachingMiddleware):
 
 
 class GatewayFallbacks(AgentMiddleware):
-    """``ReAct(fallback_models=)``'s model names, for a model the gateway serves: sent with
-    every call to it as Bifrost's own ``fallbacks`` (``provider/model``), so the gateway — the
-    one place that falls back for its models, as it does for the fallbacks configured on the
-    virtual key or the provider — tries each in order when the model fails (``fallback``). A
-    call to any other model (a fallback of the user's own, ``Fallback``) is sent as it is."""
+    """``ReAct(fallback_models=)``: sent with every model call as Bifrost's own ``fallbacks``
+    (``provider/model``), so the gateway — the one place that falls back, as it does for the
+    fallbacks configured on the virtual key or the provider — tries each in order when the
+    model fails (``fallback``)."""
 
-    def __init__(self, names: Collection[str], clients: Collection[Any]) -> None:
+    def __init__(self, names: Collection[str]) -> None:
         super().__init__()
         self.names = list(names)
-        #: the gateway's clients ReAct built (the generic one, the vendor's own)
-        self.clients = list(clients)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> Any:
-        if not on("fallback") or not any(request.model is c for c in self.clients):
-            return await handler(request)
-        settings = dict(request.model_settings)
-        settings["extra_body"] = {**(settings.get("extra_body") or {}), "fallbacks": self.names}
-        return await handler(request.override(model_settings=settings))
-
-
-class Fallback(ModelFallbackMiddleware):
-    """LangChain's ``ModelFallbackMiddleware``, for the fallbacks the gateway cannot make: a
-    model call that fails is made again with the next of ``ReAct(fallback_models=)``'s chat
-    models (and, for a model of the user's own, its named ones, as ``ReAct`` builds a gateway
-    model), in order (``fallback``); the last one's error is the run's. For a model the
-    gateway serves, its names are the gateway's (``GatewayFallbacks``): never both."""
 
     async def awrap_model_call(
         self,
@@ -285,7 +268,9 @@ class Fallback(ModelFallbackMiddleware):
     ) -> Any:
         if not on("fallback"):
             return await handler(request)
-        return await super().awrap_model_call(request, handler)
+        settings = dict(request.model_settings)
+        settings["extra_body"] = {**(settings.get("extra_body") or {}), "fallbacks": self.names}
+        return await handler(request.override(model_settings=settings))
 
 
 class Budgeted(AgentMiddleware):
@@ -369,71 +354,11 @@ def _failed_answers(request: ModelRequest[Any]) -> int:
 
 
 def _answer_tools(response_format: Any) -> set[str]:
-    """The names of the tools an answer to ``response_format`` is given with: its schemas'."""
-    specs = getattr(response_format, "schema_specs", None)
-    if specs is not None:
-        return {spec.name for spec in specs}
+    """The name of the tool an answer to ``response_format`` (``ReAct(output=)``: a pydantic
+    model or a JSON schema) is given with: its schema's."""
     schema = getattr(response_format, "schema", response_format)
     named = schema.get("title") if isinstance(schema, dict) else getattr(schema, "__name__", None)
     return {named} if isinstance(named, str) else set()
-
-
-# --------------------------------------------------------------------------- tool search
-#: The share of the window the run's tool definitions may take before they are narrowed,
-#: whatever their number: a few large definitions crowd a small window as many do.
-TOOLS_SHARE: Final = 0.4
-#: The most tools a step's search adds to what the model is offered.
-RESEARCH_K: Final = 3
-
-
-class ToolSearch(AgentMiddleware):
-    """Before anything else reads the request, the run's tools narrowed to what the task is
-    about (``tool_search``; ``tools.search``): a catalogue the harness did not narrow already
-    (the tool hints, or the search a run of :data:`~.search.TOOL_SEARCH_MIN` tools gets) whose
-    definitions would take more than :data:`TOOLS_SHARE` of the ``window`` — the definitions,
-    not the history, crowding the window are narrowed, never summarized or refused. On a run a
-    search narrowed (not the tool hints) every step searches again with what the model last
-    said and what the tools last answered, and offers up to :data:`RESEARCH_K` more tools: a
-    tool needed mid-run is found then (the offered set only grows, so a prompt cache holds)."""
-
-    def __init__(self, *, window: int | None = None) -> None:
-        super().__init__()
-        self.window = window
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        runtime = current()
-        if runtime is None or not runtime.uses("tool_search"):
-            return await handler(request)
-        own = [runtime.toolbox[n] for n in runtime.tool_names()]
-        if runtime.offered is None:
-            crowded = (
-                self.window is not None
-                and search.definition_tokens(t.spec for t in own) > TOOLS_SHARE * self.window
-            )
-            if crowded:
-                runtime.offered = set(search.offered_for(runtime.task, own))
-                runtime.searched = True
-        elif runtime.searched:
-            latest = _latest(request)
-            if latest:
-                runtime.offer(search.search(latest, [t.spec for t in own], RESEARCH_K))
-        return await handler(request)
-
-
-def _latest(request: ModelRequest[Any]) -> str:
-    """What the model last said and what the tools last answered (this step's search)."""
-    said: list[str] = []
-    for message in reversed(_history(request)):
-        if isinstance(message, HumanMessage):
-            break
-        said.append(message.text)
-        if isinstance(message, AIMessage):
-            break
-    return " ".join(said)
 
 
 # --------------------------------------------------------------------------- planning

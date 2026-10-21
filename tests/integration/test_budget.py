@@ -120,14 +120,16 @@ def test_a_budget_is_numbers_from_zero() -> None:
         Budget(max_cost=-1)
 
 
-async def test_a_budget_in_dollars_is_priced_from_the_table(harness: Harness) -> None:
+async def test_a_budget_in_dollars_counts_what_the_gateway_said(harness: Harness) -> None:
     async def spender(input: str, agent: Runtime) -> Any:
-        budget.account(agent, model="claude-sonnet-5-5", input_tokens=1_000_000, output_tokens=0)
+        budget.account(agent, model="m", input_tokens=10, output_tokens=0, cost=0.6)
+        assert budget.reached(agent) is None
+        budget.account(agent, model="m", input_tokens=10, output_tokens=0, cost=0.6)
         return budget.reached(agent)
 
     agent = harness.wrap(spender, id="spend", budget=Budget(max_cost=1.0))
     said = (await agent.run("spend", user="u")).answer
-    assert said is not None and said.startswith("max_cost 1 reached")
+    assert said == "max_cost 1 reached (1.2 spent)"
 
 
 # --------------------------------------------------------------------------- tool retries

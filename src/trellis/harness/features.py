@@ -29,8 +29,6 @@ Feature = Literal[
     "planning",
     "files",
     "subagent_task",
-    # a large catalogue narrowed to the tools the task is about (``tools.search``)
-    "tool_search",
     # the vendor's own API for a vendor's model, and the effort of each step
     "native_client",
     "effort",

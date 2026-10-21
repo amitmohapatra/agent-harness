@@ -1,6 +1,6 @@
 """What the harness knows of a model by its name (``trellis.harness.models``): its context
 window — given, the model's profile, the gateway's listing (its own fields, or the llama.cpp
-server's ``n_ctx`` it passes on), the table of known models, else the default said once — its
+server's ``n_ctx`` it passes on), else the default said once — its
 vendor, whether the gateway serves that vendor's own API, and the effort levels it takes."""
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def test_the_gateways_listing_says_the_window(entry: dict[str, Any], found: Wind
         httpx.ConnectError("down"),
     ],
 )
-def test_a_listing_that_says_nothing_falls_to_the_table(answer: Any) -> None:
+def test_a_listing_that_says_nothing_is_the_default(answer: Any) -> None:
     with respx.mock() as mock:
         route = mock.get(f"{GATEWAY}/models")
         if isinstance(answer, Exception):
@@ -82,7 +82,7 @@ def test_a_listing_that_says_nothing_falls_to_the_table(answer: Any) -> None:
         else:
             route.mock(return_value=answer)
         found = window_of("anthropic/claude-sonnet-5-5", base_url=GATEWAY)
-    assert found == Window(1_000_000, "table")
+    assert found == Window(DEFAULT_WINDOW, "default")  # no copied table: the model says
 
 
 def test_an_unknown_model_is_the_default_said_once(caplog: pytest.LogCaptureFixture) -> None:
@@ -148,14 +148,15 @@ def test_an_unreachable_gateway_serves_nothing() -> None:
 
 
 # --------------------------------------------------------------------------- effort
-def test_the_effort_levels_of_a_model_are_its_profiles_or_the_tables() -> None:
+def test_the_effort_levels_of_a_model_are_its_profiles() -> None:
     assert models.effort_levels(ChatAnthropic(model_name="claude-opus-5-5", api_key="x"))[:3] == (  # type: ignore[call-arg]
         "low",
         "medium",
         "high",
     )
     sonnet = ChatAnthropic(model_name="claude-sonnet-5-5", api_key="x")  # type: ignore[call-arg]
-    assert models.effort_levels(sonnet) == models.EFFORT_LEVELS["claude-sonnet-5-5"]
+    listed = (sonnet.profile or {}).get("reasoning_effort_levels")
+    assert models.effort_levels(sonnet) == tuple(listed or ())  # its profile, or none
     assert models.effort_levels(ChatOpenAI(model="granite/granite-3.3-2b", api_key="x")) == ()  # type: ignore[arg-type]
     assert models.effort_levels(object()) == ()
 

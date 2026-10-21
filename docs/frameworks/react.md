@@ -63,22 +63,20 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
   `response_format`: the provider's structured output when LangChain knows the model has it,
   else a tool the model answers with). An answer that does not fit is asked for once more,
   saying what was wrong; a second is a `ModelError` saying so (`structured_output`).
-* `model_timeout` — the most one model call may take, in seconds, its client's retries
-  included; within what is left of the run's `timeout=`/`deadline=`.
+* `model_timeout` — the most one model call may take, in seconds, the gateway's retries and
+  fallbacks included; within what is left of the run's `timeout=`/`deadline=`.
 * `context_window` — the model's window in tokens. Unset, it is detected: the model object's
   profile (`max_input_tokens`); for a model name, the gateway's model listing (a listed
   `max_input_tokens`, `context_window` or `context_length`, or the `n_ctx` an OpenAI-compatible
-  llama.cpp server reports through it), then the table of known models
-  (`trellis.harness.models.WINDOWS`, sourced and dated), else 128k, said once in the log. Every
-  threshold below is a share of it.
+  llama.cpp server reports through it) — what the model says of itself; when nothing says,
+  128k, said once in the log. Every threshold below is a share of it.
 * `effort` — the reasoning effort of every step of a model that takes one; unset, each step's
   own (`effort`, below).
-* `fallback_models` — models tried in order when a model call fails (`fallback`). For a model
-  name the gateway falls back: the names are sent with every call as Bifrost's own
-  `fallbacks` (as the fallbacks configured on the virtual key are), never a second layer in
-  the graph; the model that answered is in the `chat` span and the run's journal
-  (`answered_by`). A chat model of your own (or for a model of your own) is tried by
-  LangChain's `ModelFallbackMiddleware`. The last one's error is the run's.
+* `fallback_models` — gateway model names tried in order when a model call fails
+  (`fallback`): sent with every call as Bifrost's own `fallbacks` (as the fallbacks configured
+  on the virtual key are), the gateway the one place that falls back; the model that answered
+  is in the `chat` span and the run's journal (`answered_by`). For a model name only (a chat
+  model of your own is refused them).
 * `prompt` — a prompt (`"triage"`, `"triage@3"`, a `Prompt`) from the prompt sources — code,
   `PROMPTS_DIR`, Langfuse, the gateway ([prompts.md](../prompts.md)) — looked up at the run's
   start and pinned for it (a resume reads the same one): a stored prompt of the gateway's is
@@ -126,11 +124,10 @@ A `TodoListMiddleware`, `FilesystemMiddleware` or `SubAgentMiddleware` given to
 
 | What (`without=` name) | What it does |
 |---|---|
-| tool search, `tool_search` | 20 tools or more, or definitions over 40% of the window, narrowed to the tools the task is about, searched again at every step ([tools.md](../tools.md#tool-search)) |
 | the vendor's own API, `native_client` | a vendor's model named by name asked through its own API on the gateway (above) |
-| effort, `effort` | a model that reasons (its LangChain profile lists effort levels, or `trellis.harness.models.EFFORT_LEVELS`) thinks hard on the steps that decide the run — its first call, the step after a tool failed, an `AnswerCheck` check — and little on the others; `effort=` fixes it. A model that takes no effort (a local one) is sent none |
+| effort, `effort` | a model that reasons (its LangChain profile lists effort levels) thinks hard on the steps that decide the run — its first call, the step after a tool failed, an `AnswerCheck` check — and little on the others; `effort=` fixes it. A model that takes no effort (a local one) is sent none |
 | the prompt cache, `prompt_cache` | an Anthropic model's calls have their stable start — the instructions, the tools, the history — cached (LangChain's `AnthropicPromptCachingMiddleware`); OpenAI's caching is automatic. Cached tokens are on the `chat` span and the run's budget |
-| fallback models, `fallback` | with `fallback_models=`: a failed call tried on each in order — by the gateway for its models, by `ModelFallbackMiddleware` for your own |
+| fallback models, `fallback` | with `fallback_models=`: the gateway tries each in order when a call fails |
 | structured output repair, `structured_output` | with `output=`: an answer that does not fit asked for once more |
 | the budget, `budget` | once the run's budget ([api.md](../api.md#budget)) — or its parent's — is spent: one more call, without tools, for the best answer with what it has; the run ends `PARTIAL` (`BUDGET_EXCEEDED`) |
 

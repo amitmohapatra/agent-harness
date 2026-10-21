@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import ConfigurationError
-from trellis.harness import models, react
+from trellis.harness import models
 from trellis.harness.automatic import DECIDING, ROUTINE, Effort, NativeClient, step_effort
 from trellis.harness.middleware import ANSWER_CHECK
 from trellis.harness.react import _native_model, detected_window
@@ -159,10 +159,14 @@ class Anthropic:
         from langchain_anthropic._client_utils import _AsyncHttpxClientWrapper
 
         return _AsyncHttpxClientWrapper(
-            base_url=params["base_url"],
-            transport=httpx2.MockTransport(self),
-            event_hooks={"response": [react._gateway_answered]},
+            base_url=params["base_url"], transport=httpx2.MockTransport(self)
         )
+
+    def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The anthropic SDK's clients reach this endpoint."""
+        import langchain_anthropic.chat_models as anthropic_models
+
+        monkeypatch.setattr(anthropic_models, "_get_default_async_httpx_client", self.client)
 
 
 @respx.mock
@@ -170,7 +174,7 @@ async def test_a_vendors_model_is_asked_through_its_own_api_when_the_gateway_ser
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     endpoint = Anthropic()
-    monkeypatch.setattr(react, "_anthropic_http", endpoint.client)
+    endpoint.patch(monkeypatch)
     respx.post("http://gw.test/anthropic/v1/messages").mock(return_value=httpx.Response(400))
     generic = respx.post(f"{GATEWAY}/chat/completions").mock(return_value=chat_reply("generic"))
     graph = ReAct("s", "anthropic/claude-sonnet-5-5")
@@ -179,7 +183,8 @@ async def test_a_vendors_model_is_asked_through_its_own_api_when_the_gateway_ser
         assert (await agent.run("hi?", user="u")).answer == "hi"
         sent = endpoint.requests[-1]
         assert sent["model"] == "claude-sonnet-5-5"  # the vendor's own name, on its own route
-        assert sent["output_config"]["effort"] == DECIDING  # the first step decides
+        # its LangChain profile lists no effort levels: none is sent (no copied table)
+        assert "output_config" not in sent
         assert endpoint.headers[-1]["x-api-key"] == "vk"
         assert not generic.called
         # without it, the generic client — the same graph

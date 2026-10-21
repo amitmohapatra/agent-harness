@@ -33,6 +33,19 @@ long tasks; a short task must keep sending exactly that.
    checkpoint keeps whole (Deep Agents' `DeltaChannel` needs every earlier checkpoint, and the
    run keeps only the latest), so they survive a pause, a crash and another worker.
 
+6. **One owner per concern, no fallback chains.** When the owner is not there, the feature is
+   off (or the user's explicit setting applies), said once in the log:
+   * tool narrowing — the memory service's tool hints and `tool_search`; without memory, every
+     tool is offered (the toolbox's check warns from 20 tools);
+   * a model's context window — what the model says of itself: `context_window=`, else its
+     LangChain profile, else the gateway's model listing; else 128k, said once;
+   * reasoning effort levels — the model's LangChain profile; none listed, none sent;
+   * dollars — the gateway's per-call cost (Bifrost's `usage.cost`); the price table is the
+     benchmark's own (`benchmark/cost/prices.py`);
+   * model retries and fallbacks — the gateway (Bifrost's provider retries, the virtual key's
+     fallbacks, `fallback_models` sent as its `fallbacks`); the client makes one attempt;
+   * the vendor's own API — used when the gateway serves it, else the generic client.
+
 ## Consequences
 
 * A long task on a small window (an 8k local model) is not offered these tools: their cost

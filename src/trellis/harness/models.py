@@ -1,12 +1,12 @@
 """What the harness knows of a model named by a string (a gateway model name): its vendor and
 its context window — what ``ReAct`` builds its client with and scales its limits by.
 
-**The window**, from the first of these that says: the ``context_window`` given; the model
-object's profile; the gateway's model listing (a listed model's ``max_input_tokens``,
-``context_window``, ``context_length``, or the server's own ``n_ctx`` that an OpenAI-compatible
-llama.cpp server reports and the gateway passes on); the table of known models
-(:data:`WINDOWS`, each with its source and date); else :data:`DEFAULT_WINDOW`, said once in the
-log. The gateway is asked once per process and model, waiting at most :data:`PROBE_SECONDS`.
+**The window** is what the model says of itself: the ``context_window`` given, else the model
+object's LangChain profile, else the gateway's model listing (a listed model's
+``max_input_tokens``, ``context_window``, ``context_length``, or the ``n_ctx`` an
+OpenAI-compatible llama.cpp server reports and the gateway passes on); when none says,
+:data:`DEFAULT_WINDOW`, said once in the log. The gateway is asked once per process and model,
+waiting at most :data:`PROBE_SECONDS`.
 
 **The vendor**, of a name the gateway routes to a provider: ``anthropic/...`` or ``openai/...``
 (a bare ``claude-...`` or ``gpt-...`` name too). Another provider in front of a vendor's model
@@ -29,34 +29,13 @@ log = logging.getLogger("trellis.models")
 DEFAULT_WINDOW: Final = 128_000
 #: How long a probe of the gateway may take, in seconds.
 PROBE_SECONDS: Final = 2.0
-#: Where the table's windows come from.
-LITELLM: Final = "LiteLLM 1.106.1 model_prices_and_context_window_backup.json (2026-10-20)"
-#: The context windows of known models (``max_input_tokens``), by the last part of their name.
-WINDOWS: Final[dict[str, tuple[int, str]]] = {
-    "claude-opus-5-5": (1_000_000, LITELLM),
-    "claude-sonnet-5-5": (1_000_000, LITELLM),
-    "claude-haiku-5-5": (1_000_000, LITELLM),
-    "gpt-6-sol": (922_000, LITELLM),
-    "gpt-6-luna": (922_000, LITELLM),
-    "gpt-5.6": (922_000, LITELLM),
-    "gpt-5-mini": (272_000, LITELLM),
-    "gpt-4.1": (1_047_576, LITELLM),
-    "gpt-4.1-nano": (1_047_576, LITELLM),
-}
-#: The reasoning effort levels of known models whose LangChain profile does not list them
-#: (``reasoning_effort_levels``), by the last part of their name: Claude's from Anthropic's
-#: documentation (read 2026-10-21).
-EFFORT_LEVELS: Final[dict[str, tuple[str, ...]]] = {
-    "claude-sonnet-5-5": ("low", "medium", "high", "xhigh", "max"),
-    "claude-haiku-5-5": ("low", "medium", "high", "xhigh", "max"),
-}
 #: Every effort level, least first.
 EFFORTS: Final = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 #: What a gateway's model listing may call a model's window.
 LISTED: Final = ("max_input_tokens", "context_window", "context_length", "max_context_length")
 
 Vendor = Literal["anthropic", "openai"]
-Source = Literal["given", "profile", "gateway", "server", "table", "default"]
+Source = Literal["given", "profile", "gateway", "server", "default"]
 #: A vendor's own gateway provider name, and the bare model names that are its.
 VENDOR_NAMES: Final[dict[Vendor, tuple[str, ...]]] = {
     "anthropic": ("claude",),
@@ -102,27 +81,20 @@ def window_of(
         return Window(given, "given")
     if profile is not None:
         return Window(profile, "profile")
-    if name is not None:
-        if base_url is not None:
-            found = _listed(base_url, key, name)
-            if found is not None:
-                return found
-        known = WINDOWS.get(bare(name))
-        if known is not None:
-            return Window(known[0], "table")
+    if name is not None and base_url is not None:
+        found = _listed(base_url, key, name)
+        if found is not None:
+            return found
     _assumed(name or "the model")
     return Window(DEFAULT_WINDOW, "default")
 
 
 def effort_levels(model: Any) -> tuple[str, ...]:
-    """The reasoning effort levels a chat model takes: its profile's, else the table's for its
-    name (:data:`EFFORT_LEVELS`); none for a model that takes no effort."""
+    """The reasoning effort levels a chat model takes, as its LangChain profile lists them
+    (``reasoning_effort_levels``); none when it lists none."""
     profile = getattr(model, "profile", None)
     listed = profile.get("reasoning_effort_levels") if isinstance(profile, dict) else None
-    if isinstance(listed, list | tuple) and listed:
-        return tuple(str(level) for level in listed if level in EFFORTS)
-    name = getattr(model, "model_name", None) or getattr(model, "model", None)
-    return EFFORT_LEVELS.get(bare(name), ()) if isinstance(name, str) else ()
+    return tuple(str(v) for v in listed if v in EFFORTS) if isinstance(listed, list | tuple) else ()
 
 
 def nearest(level: str, levels: tuple[str, ...]) -> str:
@@ -195,7 +167,6 @@ def serves(base_url: str, key: str | None, vendor: Vendor) -> bool:
 __all__ = [
     "DEFAULT_WINDOW",
     "EFFORTS",
-    "WINDOWS",
     "Window",
     "bare",
     "effort_levels",

@@ -75,7 +75,6 @@ from trellis.harness.runtime import Runtime, reason_of, run_of
 from trellis.harness.skills import Skill, Skills
 from trellis.harness.subagents import SubAgent, asked_by, cancel_children
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools import search
 from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
@@ -704,24 +703,10 @@ class Agent:
         (``h.model_headers(prompt=)``) pinned for the run (``prompts.ModelPrompts.pin``). The
         memory context, when there is one, is returned."""
         pushed = await self.remembered(runtime)
-        self.searched(runtime)
         if runtime.uses("skills"):
             await skills.pin(runtime, self.sources)
         await self.harness.model_prompts.pin(runtime)
         return pushed
-
-    def searched(self, runtime: Runtime) -> None:
-        """A catalogue of :data:`~.tools.search.TOOL_SEARCH_MIN` tools or more that the tool
-        hints did not narrow (memory off, or no candidates) narrowed by a search for the task
-        (``tool_search``): the model is offered the best matches, the tools the task names, and
-        Code Mode's and the skills' tools; a framework that narrows nothing is left alone."""
-        if runtime.offered is not None or not runtime.uses("tool_search"):
-            return
-        own = [runtime.toolbox[n] for n in runtime.tool_names()]
-        if len(own) < search.TOOL_SEARCH_MIN or self.adapter.narrows == "none":
-            return
-        runtime.offered = set(search.offered_for(runtime.task, own))
-        runtime.searched = True
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
         """The memory context for this run, in the runtime. Asked with the run's own tools,

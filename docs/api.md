@@ -276,7 +276,7 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | `max_steps` | 12 | model calls with tools, then one more without |
 | `max_repeats` | 3 | identical calls in a row that stop the run |
 | `model_timeout` | none | the most one model call may take, in seconds |
-| `context_window` | detected: the model's profile, the gateway's model listing, the llama.cpp server's `n_ctx` the gateway passes on, the table of known models, else 128,000 (said once) | the model's window in tokens; every threshold is scaled by it |
+| `context_window` | detected: the model's profile, else the gateway's model listing (the llama.cpp server's `n_ctx` it passes on included), else 128,000 (said once) | the model's window in tokens; every threshold is scaled by it |
 | `prompt`, `prompt_vars` | none | a prompt of the prompt sources, pinned for the run, and its variables ([prompts.md](prompts.md)) |
 | `middleware` | `()` | more LangChain or Deep Agents middleware; one named like a default replaces it |
 | `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |
@@ -284,7 +284,7 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |
 | `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
 | `effort` | each step's own: `high` to plan, after a tool failed and to check the answer, `low` otherwise | the reasoning effort of every step, for a model that takes one (the nearest level it takes) |
-| `fallback_models` | `()` | models tried in order when a model call fails: for a model name, the names go to the gateway as Bifrost's own `fallbacks` (the gateway falls back, once); a chat model of your own is tried by LangChain's `ModelFallbackMiddleware` |
+| `fallback_models` | `()` | gateway model names tried in order when a model call fails: sent as Bifrost's own `fallbacks`, the gateway falls back (for a model name only) |
 
 ## Budget
 
@@ -292,8 +292,9 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 Budget(max_tokens=2_000_000, max_cost=None, max_tool_calls=200)
 ```
 
-The most one run may spend: tokens (input and output, every model call), US dollars (priced
-from the price table; a model it does not have is counted in tokens and said once in the log)
+The most one run may spend: tokens (input and output, every model call), US dollars (what
+the gateway says each call cost; a call it put no cost on is counted in tokens, said once in the
+log)
 and harness tool calls; `None` is no limit. A sub-agent's spending counts toward its parent's,
 and a resumed run goes on from what it spent. At a limit no new tool call starts (the calls
 under way finish), a `ReAct` is asked once more, with no tools, for its best answer, and the

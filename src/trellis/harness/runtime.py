@@ -115,9 +115,6 @@ class Runtime:
     offered: set[str] | None = None
     #: the tools this run has called, in any attempt (the journal keeps them across a pause)
     used: set[str] = field(default_factory=set)
-    #: ``offered`` is a tool search's (``tools.search``), not the tool hints': every model
-    #: step of a ``ReAct`` searches again
-    searched: bool = False
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None

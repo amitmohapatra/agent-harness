@@ -11,31 +11,22 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   default 2,000,000 tokens and 200 tool calls), counted on its journal — so a resume goes on
   from what was spent and a sub-agent's spending counts toward its parent's. At a limit no new
   tool call starts, a `ReAct` gives its best answer with what it has, and the run ends `PARTIAL`
-  with `BUDGET_EXCEEDED` (`without={"budget"}`). The price table moved to
-  `trellis.harness.prices`.
+  with `BUDGET_EXCEEDED` (`without={"budget"}`). Dollars are what the gateway says each call
+  cost; a tenant's or a team's budget is the gateway's.
 
 - `ReAct` caches the stable start of every call on an Anthropic model (LangChain's
-  `AnthropicPromptCachingMiddleware`, `prompt_cache`; cached tokens on the `chat` span), falls back
-  to `ReAct(fallback_models=[...])` in order when a model call fails — through the gateway
-  (Bifrost's `fallbacks`) for a model name, `ModelFallbackMiddleware` only for a chat model
-  of your own (`fallback`), the answering model recorded — asks once more for an answer that does not fit `output` — now a pydantic model
-  or a JSON schema — then fails clearly (`structured_output`). A read tool's retry waits what
-  an error's `Retry-After` says when there is time left, else gives up (`tool_retry`); the
-  model client no longer retries an error the gateway gave after trying its fallbacks.
+  `AnthropicPromptCachingMiddleware`, `prompt_cache`; cached tokens on the `chat` span), sends
+  `ReAct(fallback_models=[...])` with every call as Bifrost's own `fallbacks` (`fallback`;
+  the answering model recorded), and asks once more for an answer that does not fit `output`
+  — now a pydantic model or a JSON schema — then fails clearly (`structured_output`). A read
+  tool's retry waits what an error's `Retry-After` says when there is time left, else gives
+  up (`tool_retry`).
 
-- `ReAct` detects a named model's context window — the model's profile, the gateway's model
-  listing (or the `n_ctx` a llama.cpp server reports through it), a sourced table of known
-  models, else 128k said once — and scales every threshold by it; it asks a vendor's model
-  through the vendor's own API on the gateway when the gateway serves it (`ChatAnthropic`,
+- `ReAct` detects a named model's context window — the model's profile, else the gateway's
+  model listing (or the `n_ctx` a llama.cpp server reports through it), else 128k said once —
+  and scales every threshold by it; it asks a vendor's model through the vendor's own API on the gateway when the gateway serves it (`ChatAnthropic`,
   OpenAI's Responses API; `native_client`), and sets each step's reasoning effort on a model
   that takes one (`effort`, `ReAct(effort=)`). The cost benchmark records the window it used.
-
-- Tool search: a catalogue of 20 tools or more that the tool hints did not narrow is narrowed
-  to the tools the task is about — BM25 over every tool's definition, parameters included,
-  plus the tools the task names — for `ReAct`, graphs built with `h.tools`, OpenAI Agents and
-  Claude; a `ReAct` also narrows definitions that crowd its window (before the summarization
-  guard counts them) and searches again at every step. `without={"tool_search"}`
-  ([tools.md](docs/tools.md#tool-search)).
 
 - `ReAct` plans, keeps scratch files and hands parts of a long task to a helper — LangChain's
   `TodoListMiddleware`, Deep Agents' file tools and Deep Agents' `task` tool, each a child run
@@ -57,6 +48,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   journal keeps whole.
 
 ### Changed
+
+- One owner per concern: model retries and fallbacks are the gateway's (`ReAct`'s client makes
+  one attempt, where it made three), a model's window is what it says of itself (its profile,
+  else the gateway's listing, else 128k), its effort levels its LangChain profile's, a run's
+  dollars the gateway's cost. No copied tables of windows, prices or effort levels.
 
 - A function tool's description is its docstring without the sections (`Args:`, `Returns:`,
   `Raises:`...), every other paragraph kept (was: the first paragraph only), and each parameter

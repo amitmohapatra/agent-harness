@@ -1,7 +1,7 @@
-"""What a ``ReAct`` run spends and how it recovers: fallback models (the gateway's own for a
-model it serves, LangChain's ``ModelFallbackMiddleware`` only for a model of the user's own),
-the model client's retries not doubling the gateway's, the prompt cache on an Anthropic model,
-an answer that does not fit ``output`` asked for once more, and the run's budget."""
+"""What a ``ReAct`` run spends and how it recovers: fallback models and model retries are the
+gateway's (Bifrost's ``fallbacks``; the client tries once), the prompt cache on an Anthropic
+model, an answer that does not fit ``output`` asked for once more, and the run's budget, its
+dollars what the gateway says."""
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field
 from tests.integration.test_react_native import Anthropic
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Budget, Harness, ReAct, Runtime, Settings, current, tool
-from trellis.contracts import ModelError, RunStatus
-from trellis.harness import automatic, budget, models, react, telemetry
+from trellis.contracts import ConfigurationError, ModelError, RunStatus
+from trellis.harness import automatic, budget, models, telemetry
 
 GATEWAY = "http://gw.test/v1"
 
@@ -33,7 +33,7 @@ GATEWAY = "http://gw.test/v1"
 def _gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BIFROST_URL", GATEWAY)
     monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
-    for cached in (models._listed, models.serves, models._assumed, budget._unpriced):
+    for cached in (models._listed, models.serves, models._assumed, budget._no_cost):
         cached.cache_clear()
     yield
 
@@ -101,17 +101,6 @@ def tool_call(name: str, args: dict[str, Any], *, model: str = "granite/g") -> d
     return body
 
 
-def walked_error(status: int = 503) -> httpx.Response:
-    """A gateway error after it tried its own fallbacks (Bifrost's ``routing_info``)."""
-    body = {
-        "is_bifrost_error": False,
-        "status_code": status,
-        "error": {"message": "every model failed"},
-        "extra_fields": {"routing_info": {"is_fallback": True, "model": "gpt-6-sol"}},
-    }
-    return httpx.Response(status, json=body)
-
-
 class Spending(ScriptedChatModel):
     """A scripted model whose replies say their usage and model; while ``fails`` has any,
     a call fails with the next."""
@@ -140,27 +129,24 @@ def body_of(route: respx.Route, n: int = 0) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- fallback
 @respx.mock
-async def test_a_gateway_models_fallbacks_are_the_gateways_own_and_never_two_layers() -> None:
-    chat = respx.post(f"{GATEWAY}/chat/completions").mock(return_value=httpx.Response(503))
+async def test_fallbacks_and_retries_are_the_gateways_and_never_a_second_layer() -> None:
+    chat = respx.post(f"{GATEWAY}/chat/completions").mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, json=completion("unused"))]
+    )
     graph = ReAct("s", "granite/g", fallback_models=["openai/gpt-6-sol", "granite/other"])
     async with harness() as h:
         result = await h.wrap(graph, id="fb").run("hi?", user="u")
+    # the fallbacks went with the request, for the gateway to try (and to retry, as its own
+    # configuration says); its error is the run's: the client tried once, the graph has no
+    # fallback of its own
     assert result.status is RunStatus.ERROR
-    # the fallbacks went with the request, for the gateway to try; it tried them and failed,
-    # so the client did not try them all again, and nothing in the graph fell back either
     assert body_of(chat)["fallbacks"] == ["openai/gpt-6-sol", "granite/other"]
     assert chat.call_count == 1
 
 
-def test_react_adds_no_fallback_middleware_for_a_gateway_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    built: list[Any] = []
-    monkeypatch.setattr(automatic.Fallback, "__init__", lambda self, *m: built.append(m))
-    ReAct("s", "granite/g", fallback_models=["openai/gpt-6-sol"])
-    assert built == []
-    ReAct("s", "granite/g", fallback_models=[Spending(turns=[])])  # a model of the user's own
-    assert len(built) == 1
+def test_fallbacks_are_for_a_gateway_model() -> None:
+    with pytest.raises(ConfigurationError, match="fallback_models are the gateway's"):
+        ReAct("s", Spending(turns=[]), fallback_models=["openai/gpt-6-sol"])
 
 
 @respx.mock
@@ -192,28 +178,6 @@ async def test_the_model_that_answered_is_recorded(spans: InMemorySpanExporter) 
     assert {dict(s.attributes or {})["gen_ai.response.model"] for s in chats} == {"gpt-6-sol"}
 
 
-async def test_a_model_of_the_users_own_falls_back_in_the_graph() -> None:
-    first = Spending(turns=[], fails=["down"])
-    second = Spending(turns=["from the fallback"], model_name="provider/second")
-    async with Harness(config=Settings()) as h:
-        agent = h.wrap(ReAct("s", first, fallback_models=[second]), id="own")
-        assert (await agent.run("hi?", user="u")).answer == "from the fallback"
-        first.fails = ["down"]
-        failed = await agent.run("hi?", user="u", without={"fallback"})
-    assert failed.status is RunStatus.ERROR and second.turns == []
-
-
-async def test_when_every_fallback_fails_the_last_error_is_the_runs() -> None:
-    first = Spending(turns=[], fails=["first down"])
-    second = Spending(turns=[], fails=["second down"])
-    async with Harness(config=Settings()) as h:
-        result = await h.wrap(ReAct("s", first, fallback_models=[second]), id="own").run(
-            "hi?", user="u"
-        )
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "second down" in result.error.message
-
-
 async def test_without_fallbacks_a_failed_call_is_the_runs_error_as_before() -> None:
     model = Spending(turns=[], fails=["down"])
     async with Harness(config=Settings()) as h:
@@ -222,23 +186,11 @@ async def test_without_fallbacks_a_failed_call_is_the_runs_error_as_before() -> 
     assert "down" in result.error.message
 
 
-@respx.mock
-async def test_a_user_models_named_fallback_is_a_gateway_model_in_the_graph() -> None:
-    chat = respx.post(f"{GATEWAY}/chat/completions").mock(
-        return_value=httpx.Response(200, json=completion("from the gateway"))
-    )
-    first = Spending(turns=[], fails=["down"])
-    async with harness() as h:
-        agent = h.wrap(ReAct("s", first, fallback_models=["granite/g"]), id="own")
-        assert (await agent.run("hi?", user="u")).answer == "from the gateway"
-    assert "fallbacks" not in body_of(chat)  # its own call: nothing for the gateway to try
-
-
 async def test_a_native_clients_fallback_across_vendors_goes_through_the_gateway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     endpoint = Anthropic(errors=[529])
-    monkeypatch.setattr(react, "_anthropic_http", endpoint.client)
+    endpoint.patch(monkeypatch)
     with respx.mock(assert_all_called=False) as mock:
         mock.post("http://gw.test/anthropic/v1/messages").mock(return_value=httpx.Response(400))
         generic = mock.post(f"{GATEWAY}/chat/completions")
@@ -251,41 +203,12 @@ async def test_a_native_clients_fallback_across_vendors_goes_through_the_gateway
     assert sent["fallbacks"] == ["openai/gpt-6-sol"] and sent["model"] == "claude-sonnet-5-5"
 
 
-# --------------------------------------------------------------------------- model retries
-@respx.mock
-async def test_the_client_retries_an_error_the_gateway_did_not_fall_back_from() -> None:
-    chat = respx.post(f"{GATEWAY}/chat/completions").mock(
-        side_effect=[httpx.Response(503), httpx.Response(200, json=completion("after a retry"))]
-    )
-    async with harness() as h:
-        result = await h.wrap(ReAct("s", "granite/g"), id="r").run("hi?", user="u")
-    assert result.answer == "after a retry" and chat.call_count == 2
-
-
-@respx.mock
-async def test_the_client_does_not_retry_after_the_gateways_own_fallbacks() -> None:
-    chat = respx.post(f"{GATEWAY}/chat/completions").mock(return_value=walked_error())
-    async with harness() as h:
-        result = await h.wrap(ReAct("s", "granite/g"), id="r").run("hi?", user="u")
-    assert result.status is RunStatus.ERROR and chat.call_count == 1
-
-
-async def test_a_gateway_answer_the_hook_cannot_read_is_left_as_it_is() -> None:
-    request = httpx.Request("POST", GATEWAY, content=b"not json")
-    response = httpx.Response(503, request=request, content=b"not json either")
-    await react._gateway_answered(response)
-    assert "x-should-retry" not in response.headers
-    fine = httpx.Response(200, request=request)
-    await react._gateway_answered(fine)
-    assert "x-should-retry" not in fine.headers
-
-
 # --------------------------------------------------------------------------- prompt cache
 async def test_an_anthropic_models_calls_are_cached_and_their_cached_tokens_counted(
     monkeypatch: pytest.MonkeyPatch, spans: InMemorySpanExporter
 ) -> None:
     endpoint = Anthropic(usage={"cache_read_input_tokens": 40, "cache_creation_input_tokens": 5})
-    monkeypatch.setattr(react, "_anthropic_http", endpoint.client)
+    endpoint.patch(monkeypatch)
     with respx.mock(assert_all_called=False) as mock:
         mock.post("http://gw.test/anthropic/v1/messages").mock(return_value=httpx.Response(400))
         async with harness() as h:
@@ -441,21 +364,21 @@ async def test_without_a_budget_there_is_no_limit_but_spending_is_counted() -> N
     assert runs[0].replay.journal.spent["tokens"] == 220  # both replies, counted
 
 
-async def test_a_model_the_price_table_has_not_is_said_once(
+async def test_a_reply_the_gateway_put_no_cost_on_is_said_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    model = Spending(turns=["a", "b"], model_name="local/unpriced")
+    model = Spending(turns=["a", "b"], model_name="local/costless")
     async with Harness(config=Settings()) as h:
         agent = h.wrap(ReAct("s", model), id="b", budget=Budget(max_cost=1.0))
         with caplog.at_level("WARNING", logger="trellis.run"):
             await agent.run("x", user="u")
             await agent.run("x", user="u")
-    said = [r for r in caplog.records if "local/unpriced is not in the price table" in r.message]
+    said = [r for r in caplog.records if "no cost on local/costless" in r.message]
     assert len(said) == 1
 
 
 @respx.mock
-async def test_the_gateways_cost_is_the_runs_before_the_price_table() -> None:
+async def test_the_gateways_cost_is_what_the_run_spent() -> None:
     runs.clear()
     said = {"cost": {"total_cost": 0.25}}
     respx.post(f"{GATEWAY}/chat/completions").mock(
@@ -468,7 +391,7 @@ async def test_the_gateways_cost_is_the_runs_before_the_price_table() -> None:
         agent = h.wrap(ReAct("s", "granite/g"), id="cost", tools=[stock])
         assert (await agent.run("a-1?", user="u")).answer == "7"
     spent = runs[0].replay.journal.spent
-    assert spent["cost"] == 0.25 and spent["model_calls"] == 2  # granite: not in the table
+    assert spent["cost"] == 0.25 and spent["model_calls"] == 2
 
 
 def test_a_reply_without_the_gateways_cost_says_none() -> None:
@@ -492,9 +415,5 @@ def test_the_answer_tools_of_a_given_strategy_are_its_schemas() -> None:
     from langchain.agents.structured_output import ToolStrategy
 
     assert automatic._answer_tools(ToolStrategy(Count)) == {"Count"}
+    assert automatic._answer_tools(None) == set()
     assert automatic._answer_tools(SCHEMA) == {"Count"}
-
-
-def test_the_gateway_anthropic_client_reads_the_gateways_errors() -> None:
-    client = react._anthropic_http(base_url="http://gw.test/anthropic")
-    assert react._gateway_answered in client.event_hooks["response"]

@@ -1,17 +1,15 @@
 """A run's budget: the most it may spend — tokens, dollars, tool calls — counted as it runs and
 kept in its journal, so a resume goes on from what was spent, and a sub-agent's spending counts
 toward its parent's too. ``h.wrap(..., budget=Budget(...))`` sets it; every run has the default
-:class:`Budget` otherwise (``without={"budget"}``: no limit).
+:class:`Budget` otherwise (``without={"budget"}``: no limit). Only the run's own cap is the
+harness's: a tenant's or a team's budget is the gateway's (Bifrost's virtual-key budgets).
 
 Counted: every model reply the harness sees (``ReAct`` and any graph with ``ModelHooks``, an
-OpenAI Agents run's hooks) — its input, output and cached tokens, and its dollars: what the
-gateway said it cost (Bifrost's ``usage.cost``), else priced from the table
-(``trellis.harness.prices``, dated and sourced; a model it has not is counted in tokens and said
-once in the log) — and every harness tool call. Only the run's own cap is the harness's: a
-tenant's or a team's budget is the gateway's (Bifrost's virtual-key budgets). Enforced: at a
-limit no new tool call starts (the calls under way finish), and a ``ReAct`` asks its model once
-more, with no tools, for the best answer with what it has; the run ends ``PARTIAL``, its
-error ``BUDGET_EXCEEDED``.
+OpenAI Agents run's hooks) — its input, output and cached tokens, and the dollars the gateway
+says it cost (Bifrost's ``usage.cost``; a reply it put no cost on is counted in tokens, said
+once in the log) — and every harness tool call. Enforced: at a limit no new tool call starts
+(the calls under way finish), and a ``ReAct`` asks its model once more, with no tools, for the
+best answer with what it has; the run ends ``PARTIAL``, its error ``BUDGET_EXCEEDED``.
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError
-from trellis.harness import prices
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -46,7 +43,7 @@ SPENT: Final = (
 @dataclass(frozen=True)
 class Budget:
     """The most one run may spend: ``max_tokens`` (input and output, every model call),
-    ``max_cost`` in US dollars (``None``: no limit; priced from the price table), and
+    ``max_cost`` in US dollars as the gateway reports them (``None``: no limit), and
     ``max_tool_calls`` harness tool calls. A sub-agent's run counts toward its parent's."""
 
     max_tokens: int | None = DEFAULT_MAX_TOKENS
@@ -58,6 +55,18 @@ class Budget:
             value = getattr(self, name)
             if value is not None and value < 0:
                 raise ConfigurationError(f"a budget's {name} is a number from 0")
+
+    def over(self, spent: dict[str, float]) -> str | None:
+        """The limit ``spent`` has reached, said (``None``: none)."""
+        for name, used in (
+            ("max_tokens", spent.get("tokens", 0)),
+            ("max_cost", spent.get("cost", 0.0)),
+            ("max_tool_calls", spent.get("tool_calls", 0)),
+        ):
+            limit = getattr(self, name)
+            if limit is not None and used >= limit:
+                return f"{name} {limit:g} reached ({used:g} spent)"
+        return None
 
 
 def _runs(runtime: Runtime) -> Iterator[Runtime]:
@@ -75,26 +84,12 @@ def account(
     input_tokens: int,
     output_tokens: int,
     cached: int = 0,
-    written: int = 0,
     cost: float | None = None,
 ) -> None:
     """One model reply's spending, on the run and every run it works inside, and the model that
     answered it (as the reply names it), on the run."""
-    if cost is None:  # the gateway did not say: the price table's
-        price = prices.price_of(model) if model else None
-        if price is None and model:
-            _unpriced(model)
-        cost = (
-            prices.dollars(
-                price,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached=cached,
-                written=written,
-            )
-            if price is not None
-            else 0.0
-        )
+    if cost is None:
+        _no_cost(model or "a model")
     if model:
         answered = runtime.replay.journal.answered_by
         answered[model] = answered.get(model, 0) + 1
@@ -102,12 +97,13 @@ def account(
         spent = run.replay.journal.spent
         spent["tokens"] = spent.get("tokens", 0) + input_tokens + output_tokens
         spent["cached_tokens"] = spent.get("cached_tokens", 0) + cached
-        spent["cost"] = spent.get("cost", 0.0) + cost
+        spent["cost"] = spent.get("cost", 0.0) + (cost or 0.0)
         spent["model_calls"] = spent.get("model_calls", 0) + 1
 
 
 def account_reply(runtime: Runtime, reply: Any) -> None:
-    """A LangChain model reply's usage (its ``AIMessage``'s ``usage_metadata``), accounted."""
+    """A LangChain model reply's usage (its ``AIMessage``'s ``usage_metadata``, and the cost
+    the gateway put in its ``token_usage``), accounted."""
     from langchain_core.messages import AIMessage  # noqa: PLC0415 - the react extra
 
     messages = getattr(reply, "result", None) or [reply]
@@ -115,7 +111,6 @@ def account_reply(runtime: Runtime, reply: Any) -> None:
     if message is None:
         return
     usage: dict[str, Any] = dict(message.usage_metadata or {})
-    details = usage.get("input_token_details") or {}
     metadata = message.response_metadata or {}
     account(
         runtime,
@@ -123,8 +118,7 @@ def account_reply(runtime: Runtime, reply: Any) -> None:
         cost=gateway_cost(metadata),
         input_tokens=int(usage.get("input_tokens") or 0),
         output_tokens=int(usage.get("output_tokens") or 0),
-        cached=int(details.get("cache_read") or 0),
-        written=int(details.get("cache_creation") or 0),
+        cached=int((usage.get("input_token_details") or {}).get("cache_read") or 0),
     )
 
 
@@ -149,18 +143,8 @@ def reached(runtime: Runtime) -> str | None:
     is without its budget."""
     if not runtime.uses("budget"):
         return None
-    for run in _runs(runtime):
-        budget: Budget = run.agent.budget
-        spent = run.replay.journal.spent
-        for name, used in (
-            ("max_tokens", spent.get("tokens", 0)),
-            ("max_cost", spent.get("cost", 0.0)),
-            ("max_tool_calls", spent.get("tool_calls", 0)),
-        ):
-            limit = getattr(budget, name)
-            if limit is not None and used >= limit:
-                return f"{name} {limit:g} reached ({used:g} spent)"
-    return None
+    said = (run.agent.budget.over(run.replay.journal.spent) for run in _runs(runtime))
+    return next((s for s in said if s is not None), None)
 
 
 def stopped(runtime: Runtime, spent: str) -> None:
@@ -168,26 +152,21 @@ def stopped(runtime: Runtime, spent: str) -> None:
     run up to the one whose limit it was end ``PARTIAL`` (a parent whose budget cut its
     sub-agent's work short has a partial answer too)."""
     runs = list(_runs(runtime))
-    last = next((n for n, run in enumerate(runs) if _over(run, run.agent.budget)), len(runs))
+    last = next(
+        (n for n, run in enumerate(runs) if run.agent.budget.over(run.replay.journal.spent)),
+        len(runs),
+    )
     for run in runs[: last + 1]:
         run.budget_spent = spent
 
 
-def _over(run: Runtime, budget: Budget) -> bool:
-    spent = run.replay.journal.spent
-    return any(
-        limit is not None and used >= limit
-        for limit, used in (
-            (budget.max_tokens, spent.get("tokens", 0)),
-            (budget.max_cost, spent.get("cost", 0.0)),
-            (budget.max_tool_calls, spent.get("tool_calls", 0)),
-        )
-    )
-
-
 @functools.cache
-def _unpriced(model: str) -> None:
-    log.warning("%s is not in the price table: its tokens are counted, its dollars are not", model)
+def _no_cost(model: str) -> None:
+    log.warning(
+        "the gateway put no cost on %s's replies: their tokens are counted, their dollars are "
+        "not (a max_cost budget does not see them)",
+        model,
+    )
 
 
 __all__ = [
