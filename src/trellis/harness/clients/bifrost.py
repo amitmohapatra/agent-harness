@@ -27,6 +27,7 @@ from bifrost_sdk.admin import Admin, Skill
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness import telemetry
+from trellis.harness.bounded import LRU
 from trellis.harness.fresh import Fresh
 from trellis.harness.identity import identity_headers
 from trellis.harness.repository import RETRY_SECONDS, TTL_SECONDS, NotFound, pinned
@@ -184,10 +185,10 @@ class Gateway:
         #: the gateway's management API, asked with the virtual key (the stored prompts, the
         #: skills, the MCP clients' Agent Mode lists), as the MCP log is read
         self.admin = admin or Admin(url, token=virtual_key)
-        self._prompts: dict[str, Fresh[PromptPin]] = {}
-        self._served: dict[str, Fresh[Skill]] = {}
+        self._prompts: LRU[str, Fresh[PromptPin]] = LRU()
+        self._served: LRU[str, Fresh[Skill]] = LRU()
         #: skills as a given version reads (immutable once published), by name and version
-        self._versions: dict[tuple[str, str], Skill] = {}
+        self._versions: LRU[tuple[str, str], Skill] = LRU()
 
     async def tools(self, slug: str | None = None) -> list[ToolDef]:
         """Every MCP tool the virtual key allows: the gateway's own `/mcp` listing asked with

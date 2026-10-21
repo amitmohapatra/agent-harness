@@ -168,7 +168,8 @@ class Governance:
         async def send() -> None:
             try:
                 await catalog.publish(fresh)
-                published.done |= digests  # stored: not sent again
+                for stored in digests:  # stored: not sent again
+                    published.done.add(stored)
             finally:
                 published.pending -= digests  # failed: sent again by the next publish
 

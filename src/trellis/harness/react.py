@@ -54,6 +54,7 @@ from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import MODEL_METADATA, WINDOW_METADATA, context_window
+from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.gateways import model_gateway, unserved
 from trellis.harness.prompts import Prompt
 from trellis.harness.settings import Settings
@@ -229,7 +230,7 @@ def window_of(model: Any, given: int | None = None) -> tuple[int | None, str]:
     return (found, "profile") if found is not None else (None, "unknown")
 
 
-@functools.cache
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per name, of the most recent
 def _unknown(name: str) -> None:
     log.warning(
         "the context window of %s is not known: clearing old tool results and the long-task "

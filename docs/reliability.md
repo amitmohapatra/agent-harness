@@ -411,6 +411,10 @@ line naming both versions.
   finished runs, each for an hour (`LocalRuns(keep_finished=, keep_finished_seconds=)`), with
   their artifacts, so a long-lived process does not grow; paused, queued and running runs are
   always kept. agent-runs (`RUNS_URL`) is the durable store for production.
+* **The harness's own state is bounded** (`trellis.harness.bounded`): what it keeps per
+  tenant, tool, prompt, skill or thread is the most recently used, up to a bound, and the
+  spool stops at 64 MB (`writes.MAX_SPOOL_BYTES`); what is forgotten is read, sent or said
+  again. A process's memory does not grow with the tenants, tools or threads it serves.
 
 ## Run it
 

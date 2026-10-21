@@ -23,6 +23,7 @@ from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import ToolFormat
 from trellis.harness.agent import Agent
+from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
@@ -172,7 +173,8 @@ class Harness:
         #: the sources and Virtual MCPs of each :meth:`tools` call, by the number its LangChain
         #: tools carry in their metadata: a LangGraph agent's toolbox is those of the calls its
         #: graph's tools came from
-        self._built: dict[int, tuple[list[Source], list[str] | None]] = {}
+        self._built: LRU[int, tuple[list[Source], list[str] | None]] = LRU()
+        self._next_built = 0
         self._key = Fresh(
             self._whoami,
             what="who TRELLIS_API_KEY is",
@@ -184,7 +186,8 @@ class Harness:
         #: the memory service said it takes no model keys: none is registered again
         self._model_keys_off = False
         #: governance per tenant (:meth:`governance`), or the one given for every tenant
-        self._governance: dict[str, Governance] = {}
+        #: one governance per tenant, the least recently used forgotten past the bound
+        self._governance: LRU[str, Governance] = LRU()
         self._given_governance = governance
         #: where prompts and skills are looked up: the sources given, as they are; else the
         #: ones the environment names (``PROMPTS_DIR``, Langfuse, ``SKILLS_DIR``, the gateway)
@@ -301,7 +304,8 @@ class Harness:
         mine, bundles = split([as_source(s) for s in sources], None if mcp is None else list(mcp))
         off = features(without)
         tenant = await self.tenant()
-        number = len(self._built)
+        number = self._next_built
+        self._next_built += 1
         self._built[number] = (mine, bundles)
         tools = await self.resolve(mine, tenant=tenant, mcp=bundles, without=off)
         if self.memory is not None and "memory_pull" not in off:
@@ -568,6 +572,13 @@ class Harness:
                 if (n := (getattr(t, "metadata", None) or {}).get(TOOLBOX)) is not None
             }
         )
+        missing = [n for n in numbers if n not in self._built]
+        if missing:
+            raise ConfigurationError(
+                f"the tools of this graph were built by one of the {self._next_built} "
+                f"h.tools(...) calls past the last {self._built.maxsize}: wrap a graph soon "
+                "after building it"
+            )
         built = [self._built[n] for n in numbers]
         sources = [s for found, _ in built for s in found]
         named = [bundles for _, bundles in built]
