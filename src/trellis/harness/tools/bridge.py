@@ -317,6 +317,12 @@ async def _decided(
     if decision.asks and reach in remembered:
         decision = decision.approved(f"{spec.name} was approved for the rest of the run.")
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
+    gated = content_key("approved", spec.name, call.args)
+    approved = runtime.replay.journal.approved
+    if decision.asks and decision.assignee is None and gated in approved:
+        approved.remove(gated)  # one approval, one call
+        decision = decision.approved(f"{spec.name} was approved in the framework's own gate.")
+        runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
     if decision.asks:
         resolution = await runtime.approve(call, decision)
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL

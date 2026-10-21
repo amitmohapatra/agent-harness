@@ -501,6 +501,7 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     re-run will ask for it (or left to the framework, when it resumes from its own state)."""
     pending = journal.pending
     if resolution is not None and pending is not None:
+        journal.approved_in_framework(resolution)
         if pending.native_state:
             journal.pending = None
         else:

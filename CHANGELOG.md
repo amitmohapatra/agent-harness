@@ -7,6 +7,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- One approval per call: a tool held by the framework's own approval gate
+  (`HumanInTheLoopMiddleware`, Deep Agents' `interrupt_on`, an OpenAI Agents `needs_approval`
+  tool) and by governance is asked once — governance counts the framework's approval, kept in
+  the run's journal; a hook's `Deny` still wins. `h.wrap` logs each tool both gate.
+
 - `ReAct` saves the turns a summary replaces to the memory service first, each once
   (`compaction_memory`), and offers Deep Agents' `compact_conversation` on a long task. Rewind:
   a run keeps its graph's last 20 checkpoints, `agent.checkpoints(run_id)` lists them and

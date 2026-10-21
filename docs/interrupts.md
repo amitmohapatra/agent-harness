@@ -465,9 +465,15 @@ middleware's `{"decisions": [...]}`, one per call, in order:
 A decision that a call's `allowed_decisions` does not include is refused by `resume`
 (`ConfigurationError`) before anything is recorded, and the run keeps waiting. An edit's
 arguments go to the middleware as given (it and the tool check them), as do decisions sent as
-`{"decisions": [...]}`. Leave the
-tools the middleware covers out of the harness's own approvals (`side_effects="write"` or
-`"read"`, no catalog `approve_when`), or the call is approved twice.
+`{"decisions": [...]}`.
+
+**One approval per call.** A tool the framework's gate holds that governance would also ask
+about (`side_effects="irreversible"`, a catalog `approve_when`) is asked once: the framework's
+approval — of the call as approved, or as edited — is filed in the run's journal and
+governance counts it for that call instead of asking again (a `decision` event with
+`framework: true` says so; a resume in another process reads it from the journal). A
+`before_tool` hook's `Deny` still refuses the call, and an `Ask` naming someone else still
+asks them: the stricter decision wins. `h.wrap` logs each tool both gate, once.
 
 **OpenAI Agents `function_tool(needs_approval=...)`.** The SDK pauses with its `RunState`,
 which the pause keeps as the run's checkpoint, and the resume continues that state. The SDK

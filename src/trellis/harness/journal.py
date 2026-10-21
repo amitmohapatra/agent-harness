@@ -49,6 +49,7 @@ from trellis.contracts import (
     ConfigurationError,
     HarnessError,
     Interrupt,
+    InterruptDecision,
     InterruptResolution,
     ToolCall,
     ToolOutcome,
@@ -104,6 +105,11 @@ class Journal(BaseModel):
     #: <assignee>"`` when the approval was asked of someone): their later calls asked of the
     #: same are not asked about again in this run
     remembered: list[str] = Field(default_factory=list)
+    #: the calls a framework's own approval gate approved (LangChain's
+    #: ``HumanInTheLoopMiddleware``, Deep Agents' ``interrupt_on``, an OpenAI Agents
+    #: ``needs_approval`` tool), by content: governance counts that approval, once each, and
+    #: does not ask again (``approved_in_framework``)
+    approved: list[str] = Field(default_factory=list)
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)
@@ -208,6 +214,29 @@ class Journal(BaseModel):
         record = (self.graph or {}).get("") or {}
         latest = [record["id"]] if "id" in record else []
         return latest + [r["id"] for r in record.get("history", [])]
+
+    def approved_in_framework(self, resolution: InterruptResolution) -> None:
+        """The calls the open pause — a framework's own approval gate — approved by
+        ``resolution``, filed for governance (:attr:`approved`): every call it holds on an
+        approval, the first with its edited arguments on an edit."""
+        if self.pending is None or resolution.decision not in (
+            InterruptDecision.APPROVE,
+            InterruptDecision.EDIT,
+        ):
+            return
+        interrupt = self.pending.interrupt
+        payload = interrupt.payload or {}
+        actions = payload.get("action_requests")
+        if isinstance(actions, list) and payload.get("review_configs") is not None:
+            calls = [(a.get("name"), a.get("args") or {}) for a in actions]
+        elif self.pending.native_state is not None and interrupt.tool_call is not None:
+            calls = [(interrupt.tool_call.tool, interrupt.tool_call.args)]
+        else:
+            return  # the harness's own question: governance asked it
+        edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
+        if isinstance(edited, dict) and calls:
+            calls[0] = (calls[0][0], edited)
+        self.approved += [content_key("approved", name, args) for name, args in calls]
 
     def answered(self, resolution: InterruptResolution) -> None:
         """File the answer to the open pause, and close it."""

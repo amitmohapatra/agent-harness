@@ -148,6 +148,13 @@ class Agent:
         self.adapter = detect(target)
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
+        for gated in sorted(gated_tools(target)):
+            log.warning(
+                "%s: %s is approved in the framework's own gate: governance counts that "
+                "approval, so each call is asked once",
+                id,
+                gated,
+            )
         #: the framework's own options for every run's call (``h.wrap(framework_options=)``):
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
@@ -1081,6 +1088,22 @@ def graded(answer: Any) -> str:
     if answer is None or isinstance(answer, str):
         return answer or ""
     return json.dumps(pipeline.jsonable(answer), default=str)
+
+
+def gated_tools(target: Any) -> set[str]:
+    """The tools a target's own approval gate holds: LangChain's
+    ``HumanInTheLoopMiddleware`` (Deep Agents' ``interrupt_on``) in a compiled graph, an
+    OpenAI Agents tool with ``needs_approval``."""
+    gated: set[str] = set()
+    for node in (getattr(target, "nodes", None) or {}).values():
+        owner = getattr(getattr(getattr(node, "bound", None), "func", None), "__self__", None)
+        gates = getattr(owner, "interrupt_on", None)
+        if type(owner).__name__ == "HumanInTheLoopMiddleware" and isinstance(gates, dict):
+            gated |= {name for name, config in gates.items() if config}
+    for tool in getattr(target, "tools", None) or []:
+        if getattr(tool, "needs_approval", False) and isinstance(getattr(tool, "name", None), str):
+            gated.add(tool.name)
+    return gated
 
 
 def _kept_as_json(framework_options: Mapping[str, Any] | None) -> None:
