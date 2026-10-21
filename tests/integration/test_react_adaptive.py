@@ -7,13 +7,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 import pytest
+import respx
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
 from tests.support.models import Script, ScriptedChat
-from trellis import Harness, ReAct, tool
+from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness import adaptive, telemetry
 from trellis.harness.react import CLEARED
@@ -301,22 +303,41 @@ async def test_without_think_no_think_tool(harness: Harness) -> None:
     assert "think" not in tools_of(model, 0)
 
 
+GATEWAY = "http://gw.test/v1"
+
+
+@respx.mock
 async def test_a_model_that_reasons_gets_no_think_tool() -> None:
-    seen: list[list[str]] = []
-
-    async def handler(request: Any) -> ModelResponse[Any]:
-        seen.append([adaptive._named(t) for t in request.tools])
-        return ModelResponse(result=[AIMessage(content="x")])
-
-    think = adaptive.think_tool()
-    request = ModelRequest(
-        model=None,  # type: ignore[arg-type]
-        messages=[SystemMessage(content=RULE), HumanMessage(content="x")],
-        tools=[think],
+    chat = respx.post(f"{GATEWAY}/chat/completions").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "granite/g",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "no"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
     )
-    await adaptive.ThinkTool(reasons=True).awrap_model_call(request, handler)
-    assert seen == [[]]
-    assert await think.ainvoke({"thought": "t"}) == adaptive.THOUGHT
+    asked = [{"role": "system", "content": RULE}, {"role": "user", "content": "Reorder 6 a-1."}]
+    settings = Settings(bifrost_url=GATEWAY, bifrost_virtual_key="vk")
+    async with Harness(config=settings, gateway=False) as h:
+        for n, effort in enumerate(("low", None)):
+            target = ReAct("s", "granite/g", effort=effort, settings=settings)
+            await h.wrap(target, id=f"e{n}", tools=[stock, reorder]).run(asked, user="u")
+    named = [
+        [t["function"]["name"] for t in json.loads(c.request.content)["tools"]] for c in chat.calls
+    ]
+    assert "think" not in named[0] and "think" in named[1]
+    assert await adaptive.think_tool().ainvoke({"thought": "t"}) == adaptive.THOUGHT
 
 
 # --------------------------------------------------------------------------- the token count
@@ -425,6 +446,23 @@ async def test_with_the_scratch_files_offered_cleared_calls_lose_their_arguments
     assert (await agent.run("read the book", user="u")).answer == "done"
     last = json.dumps(model.requests[-1]["messages"])
     assert CLEARED in last and BODY not in last  # the write's body went with its result
+
+
+async def test_without_the_scratch_files_cleared_calls_keep_their_arguments(
+    harness: Harness,
+) -> None:
+    model = ScriptedChat([*(("chapter", {"n": n}) for n in range(1, 7)), "done"])
+    agent = harness.wrap(
+        ReAct(system="s", model=model, context_window=30_000),
+        id="noscratch",
+        tools=[chapter],
+        without={"files"},
+    )
+    assert (await agent.run("read the book", user="u")).answer == "done"
+    last = model.requests[-1]["messages"]
+    assert CLEARED in json.dumps(last)
+    first = next(m for m in last if m.get("tool_calls"))
+    assert json.loads(first["tool_calls"][0]["function"]["arguments"]) == {"n": 1}
 
 
 async def test_without_clear_inputs_cleared_calls_keep_their_arguments(harness: Harness) -> None:
