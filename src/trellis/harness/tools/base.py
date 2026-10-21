@@ -130,12 +130,10 @@ async def execute(
     *,
     reads: bool,
     within: AbstractAsyncContextManager[Any] | None = None,
-    retry: bool = True,
 ) -> tuple[ToolOutcome, Exception | None]:
     """One call of ``tool`` within its time — ``within`` (a run's call: ``Runtime.limited``,
     the tool's ``timeout`` and the run's), else the tool's ``timeout`` — tried again after an
-    error that may pass when it ``reads`` (or is idempotent), unless ``retry`` is off (a run
-    ``without={"tool_retry"}``). The outcome, and what the call
+    error that may pass when it ``reads`` (or is idempotent). The outcome, and what the call
     raised: an error (``ERROR``), or out of time a :class:`ToolTimeout` (``TIMEOUT``: for a
     call that does more than read, its effect is unknown — ``metadata["unknown"]``)."""
     attempts = 0
@@ -148,7 +146,7 @@ async def execute(
     began = time.monotonic()
     try:
         async with within or asyncio.timeout(tool.timeout):
-            retries = retries_of(tool.spec, reads=reads) if retry else 0
+            retries = retries_of(tool.spec, reads=reads)
             output = await retried(once, retries=retries)
     except Exception as exc:
         if is_pause_signal(exc):  # it asked a person: the caller lets it through

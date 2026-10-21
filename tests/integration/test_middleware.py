@@ -24,7 +24,6 @@ from trellis.contracts import ConfigurationError, ModelError, RunEventType, RunS
 from trellis.harness import telemetry
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
-    CHECKPOINT_HISTORY,
     LAST_STEP,
     READ_RESULT,
     HarnessTools,
@@ -565,7 +564,7 @@ async def test_read_result_reads_a_result_of_the_conversation_in_parts(harness: 
 
 
 # --------------------------------------------------------------------------- RunCheckpointer
-async def test_the_last_checkpoints_are_kept_and_live_in_memory_outside_a_run() -> None:
+async def test_the_checkpoint_is_the_latest_only_and_lives_in_memory_outside_a_run() -> None:
     saver = RunCheckpointer()
     model = ScriptedChatModel(turns=["one", "two"])
     target = graph(model, checkpointer=saver)
@@ -575,13 +574,13 @@ async def test_the_last_checkpoints_are_kept_and_live_in_memory_outside_a_run() 
     assert list(saver._threads["t"]) == [""]  # one namespace, one checkpoint
     state = await target.aget_state(config)
     assert [m.content for m in state.values["messages"]] == ["a", "one", "b", "two"]
-    found = [c async for c in saver.alist(config)]  # the latest first, then the earlier ones
-    assert 1 < len(found) <= CHECKPOINT_HISTORY and found[0].parent_config is not None
+    found = [c async for c in saver.alist(config)]
+    assert len(found) == 1 and found[0].parent_config is not None
     latest = found[0].config
     assert await saver.aget_tuple(latest) is not None
-    assert await saver.aget_tuple(found[0].parent_config) is not None  # kept, to fork from
+    assert await saver.aget_tuple(found[0].parent_config) is None  # pruned
     assert [c async for c in saver.alist(None, filter={"source": "nope"})] == []
-    assert [c async for c in saver.alist(None, before=found[-1].config)] == []
+    assert [c async for c in saver.alist(None, before=latest)] == []
     assert len([c async for c in saver.alist(None, limit=1)]) == 1
     await saver.adelete_thread("t")
     assert await saver.aget_tuple(config) is None

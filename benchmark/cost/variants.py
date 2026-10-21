@@ -41,7 +41,7 @@ class Setup:
 
     system: str
     model: Any  # a gateway model name, or a LangChain chat model
-    window: int
+    window: int | None
     max_steps: int
 
 
@@ -60,7 +60,7 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
     from trellis.harness.react import _gateway_model
 
     graph = create_agent(
-        _gateway_model(setup.model, timeout=None, window=setup.window),
+        _gateway_model(setup.model, timeout=None, effort=None, settings=None),
         tools=[],
         system_prompt=setup.system,
         middleware=[
@@ -116,7 +116,7 @@ PIECES: Final = {
 #: The features ``ReAct`` turns on by itself (``trellis.harness.automatic``): a
 #: ``main-<feature>`` variant is ``main`` run ``without={feature}``, and ``baseline`` is
 #: without them all.
-AUTOMATIC: Final = ("planning", "files", "subagent_task")
+AUTOMATIC: Final = ("planning", "files")
 #: The window ``main@8k`` assumes whatever the model's: a small local model's.
 SMALL_WINDOW: Final = 8_192
 

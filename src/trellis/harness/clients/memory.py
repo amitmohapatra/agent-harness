@@ -18,7 +18,6 @@ from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.identity import Identity
-from trellis.harness.journal import content_key
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.models import (
     AgentTool,
@@ -179,23 +178,6 @@ class RunMemory:
             for index, (role, content) in enumerate(messages)
         ]
         await self.ctx.history.add(batch, idempotency_key=f"{run_id}:{attempt}:transcript")
-
-    async def record_compacted(
-        self, messages: Sequence[tuple[str, str]], run_id: str, compaction: str
-    ) -> None:
-        """The turns a run's history summarized away (``compaction``: which summary), saved
-        before they leave the model's context: the service keeps their facts. Each is named
-        by its content, so a turn two summaries hold is stored once."""
-        batch = [
-            {
-                "role": role.upper(),
-                "content": content,
-                "source_system": SOURCE_SYSTEM,
-                "source_message_id": f"{run_id}:compacted:{content_key('turn', role, content)}",
-            }
-            for role, content in messages
-        ]
-        await self.ctx.history.add(batch, idempotency_key=f"{run_id}:compacted:{compaction}")
 
     async def record_tool(self, call: ToolCall, outcome: ToolOutcome) -> None:
         await self.ctx.record_tool(

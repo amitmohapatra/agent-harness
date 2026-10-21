@@ -77,7 +77,7 @@ framework is detected from its type and not modified.
 | `without` | `()` | what the harness does not do for any of its runs ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `hooks` | `()` | this agent's hooks, after the harness's ([hooks.md](hooks.md)) |
 | `framework_options` | none | the framework's own options for every run's call, passed through ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
-| `budget` | `Budget()`: 2,000,000 tokens, 200 tool calls, no dollar limit | the most each run may spend, a sub-agent's run counted toward its parent's ([`Budget`](#budget)) |
+| `budget` | none: no cap | the most each run may spend, a sub-agent's run counted toward its parent's ([`Budget`](#budget)) |
 
 A framework installed outside the range this release was tested with is said once in the log
 when its first target is wrapped ([versioning.md](versioning.md)).
@@ -189,20 +189,6 @@ Answer a pause: `interrupt_id` (or the run's id), `decision` one of `answer`, `a
 calls in this run. An answer that does not fit is refused (`ConfigurationError`) and the run
 keeps waiting ([interrupts.md](interrupts.md#answering)).
 
-### agent.checkpoints, agent.fork
-
-```text
-await agent.checkpoints(run_id, *, tenant=None) -> list[str]
-await agent.fork(run_id, checkpoint_id, *, tenant=None, without=()) -> Result
-```
-
-Rewind: `checkpoints` lists the graph checkpoints a run keeps, newest first (a `ReAct` run, or
-a graph with a `RunCheckpointer`: its last 20; a run that has ended keeps none); `fork` starts
-a new run, in this process, from one of them — with this agent, so another model or other
-tools if it is another — the calls the run made replayed from its journal, never made again.
-A run holding a change whose effect is unknown is refused (`ConfigurationError`, saying so);
-the new run's journal names the run and checkpoint it came from (`forked_from`).
-
 ### agent.execute, agent.cancel, agent.events
 
 ```text
@@ -275,8 +261,7 @@ a function target.
 ```text
 ReAct(system, model, *, output=None, max_steps=None, max_repeats=None, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None, effort=None,
-      fallback_models=())
+      tool_guidance=False, answer_check=False, capabilities=None, effort=None, settings=None)
 ```
 
 A tool-calling agent for teams with no framework: a LangChain v1 `create_agent` graph with the
@@ -285,34 +270,38 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | Argument | Default | What it is |
 |---|---|---|
 | `system` | required | the instructions (may be `""` with a `prompt`) |
-| `model` | required | a Bifrost model name (a `ChatOpenAI` on `BIFROST_URL`) or any LangChain chat model |
-| `output` | none | a pydantic model or a JSON schema the answer is parsed into; an answer that does not parse is asked for once more, then the run fails with a clear error |
+| `model` | required | a Bifrost model name (a `ChatOpenAI` on `BIFROST_URL`, no retries of its own: the gateway's) or any LangChain chat model |
+| `output` | none | a pydantic model or a JSON schema the answer is parsed into (LangChain's `response_format`) |
 | `max_steps` | 12 | model calls with tools, then one more without |
 | `max_repeats` | 3 | identical calls in a row that stop the run |
 | `model_timeout` | none | the most one model call may take, in seconds |
-| `context_window` | the model's LangChain profile (bundled, never fetched), else 128,000 (said once) | the model's window in tokens; every threshold is scaled by it |
+| `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `prompt`, `prompt_vars` | none | a prompt of the prompt sources, pinned for the run, and its variables ([prompts.md](prompts.md)) |
 | `middleware` | `()` | more LangChain or Deep Agents middleware; one named like a default replaces it |
 | `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |
 | `tool_guidance` | `False` | how to choose among tools, added to every call's instructions (`ToolGuidance`; [tool choice](frameworks/react.md#tool-choice)) |
 | `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |
 | `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
-| `effort` | each step's own: `high` to plan, after a tool failed and to check the answer, `low` otherwise | the reasoning effort of every step, for a model that takes one (the nearest level it takes) |
-| `fallback_models` | `()` | gateway model names tried in order when a model call fails: sent as Bifrost's own `fallbacks`, the gateway falls back (for a model name only) |
+| `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
+| `settings` | the environment's | the gateway's address and key (`Settings`, as `Harness(config=)` takes) |
 
 ## Budget
 
 ```text
-Budget(max_tokens=2_000_000, max_cost=None, max_tool_calls=200)
+Budget(max_tokens=None, max_cost=None, max_tool_calls=None)
 ```
 
-The most one run may spend: tokens (input and output, every model call), US dollars (what
-the gateway says each call cost; a call it put no cost on is counted in tokens, said once in the
-log)
-and harness tool calls; `None` is no limit. A sub-agent's spending counts toward its parent's,
-and a resumed run goes on from what it spent. At a limit no new tool call starts (the calls
-under way finish), a `ReAct` is asked once more, with no tools, for its best answer, and the
-run ends `PARTIAL` with the error `BUDGET_EXCEEDED`. `without={"budget"}`: no limit.
+The most one run may spend, set per agent (`h.wrap(budget=)`; none given: no cap, spending
+still counted): tokens (input and output, every model call), US dollars (what the gateway says
+each call cost — Bifrost's `usage.cost`; a call it put no cost on is counted in tokens, said
+once when a dollar cap is set) and harness tool calls; `None` is no limit. A sub-agent's
+spending counts toward its parent's, and a resumed run goes on from what it spent. At a limit
+no new tool call starts (the calls under way finish), a `ReAct` is asked once more, with no
+tools, for its best answer, and the run ends `PARTIAL`, its result's error `BUDGET_EXCEEDED`.
+What is counted: the model replies of a `ReAct` (and any graph with `ModelHooks`) and of an
+OpenAI Agents run (tokens; its dollars are not reported), and every harness tool call of any
+framework; a Claude Agent SDK run's model use is not counted. A tenant's or a team's budget is
+the gateway's (Bifrost's virtual-key budgets).
 
 ## Tools
 

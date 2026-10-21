@@ -234,7 +234,7 @@ class Harness:
         framework's page says which the harness keeps for itself): a run's own
         (``run``/``stream``/``start``/``schedule(framework_options=)``) go over them.
         ``budget`` is the most one of its runs may spend — tokens, dollars, tool calls
-        (``trellis.harness.budget``; the default ``Budget()`` otherwise)."""
+        (``trellis.harness.budget``; none given: no cap)."""
         agent = Agent(
             self,
             target,

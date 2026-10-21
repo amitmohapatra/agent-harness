@@ -326,3 +326,14 @@ async def test_an_agent_built_with_h_tools_gets_read_file_once(harness: Harness)
     agent = harness.wrap(target, id="dumper", tools=[ship])
     assert (await agent.run("dump it", user="u1")).answer == "done"
     assert model.tools[1].count("read_file") == 1
+
+
+async def test_a_session_keeps_the_thread_so_memorys_window_is_not_sent(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    model = ScriptedModel(["one", "two"])
+    agent = memory_harness.wrap(Agent(name="s", model=model), id="sess")
+    await agent.run("hi", user="u1")
+    await agent.run("hi", user="u1", framework_options={"session": object()})
+    windows = [c.body.get("window") for c in memory_service.named("context")]
+    assert windows[-2:] == [True, False]

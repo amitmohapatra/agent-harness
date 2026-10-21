@@ -1,6 +1,6 @@
 """A run's budget whatever the framework (``budget.py``): tool calls counted as they start —
 the calls of one step decided together, a sub-agent's toward its parent's, a resumed run's
-from what it spent — and a read tool's retries (``tool_retry``): after an error that may
+from what it spent — and a read tool's retries: after an error that may
 pass, waiting what its ``Retry-After`` says when there is time left; a write never."""
 
 from __future__ import annotations
@@ -109,13 +109,13 @@ async def test_without_a_budget_nothing_is_refused(harness: Harness) -> None:
     async def counter(input: str, agent: Runtime) -> list[Any]:
         return [await agent.tools.call("stock", sku=s) for s in ("a", "b")]
 
-    agent = harness.wrap(counter, id="count", tools=shop.tools(), budget=Budget(max_tool_calls=0))
-    result = await agent.run("count", user="u", without={"budget"})
+    agent = harness.wrap(counter, id="count", tools=shop.tools())
+    result = await agent.run("count", user="u")
     assert result.answer == [7, 7] and result.status is RunStatus.SUCCESS
 
 
 def test_a_budget_is_numbers_from_zero() -> None:
-    assert Budget() == Budget(max_tokens=2_000_000, max_cost=None, max_tool_calls=200)
+    assert Budget() == Budget(max_tokens=None, max_cost=None, max_tool_calls=None)  # no cap
     with pytest.raises(ConfigurationError, match="max_cost is a number from 0"):
         Budget(max_cost=-1)
 
@@ -175,17 +175,6 @@ async def test_a_write_is_never_retried(harness: Harness) -> None:
     assert result.answer == "order failed: the shop is busy" and shop.writes == ["a"]
 
 
-async def test_without_tool_retry_a_read_is_made_once(harness: Harness) -> None:
-    shop = Shop(fails=1)
-
-    async def reader(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call("stock", sku="a")
-
-    agent = harness.wrap(reader, id="r", tools=shop.tools())
-    result = await agent.run("read", user="u", without={"tool_retry"})
-    assert result.answer == "stock failed: the stock service is busy" and shop.reads == ["a"]
-
-
 # --------------------------------------------------------------------------- the pieces
 def test_when_an_error_says_to_come_back() -> None:
     import httpx
@@ -211,3 +200,14 @@ def test_a_reply_with_no_model_message_spends_nothing() -> None:
 
     runtime: Any = SimpleNamespace()  # never read: there is nothing to account
     budget.account_reply(runtime, SimpleNamespace(result=["not a message"]))
+
+
+def test_the_calls_of_an_invocation_with_no_user_message_count_from_its_start() -> None:
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+
+    from trellis.harness import automatic
+
+    request: Any = SimpleNamespace(state={"messages": [AIMessage("a"), AIMessage("b")]})
+    assert automatic.calls_made(request) == 2

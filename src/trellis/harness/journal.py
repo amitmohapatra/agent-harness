@@ -46,7 +46,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trellis.contracts import (
     ArtifactRef,
-    ConfigurationError,
     HarnessError,
     Interrupt,
     InterruptDecision,
@@ -127,11 +126,6 @@ class Journal(BaseModel):
     #: what the run has spent so far, its sub-agents' runs included (``budget.py``): tokens,
     #: cached tokens, cost, model calls, tool calls — a resume goes on from it
     spent: dict[str, float] = Field(default_factory=dict)
-    #: the models that answered the run's model calls, by the name each reply gave, and how
-    #: many calls each answered: a fallback the gateway or the harness made shows here
-    answered_by: dict[str, int] = Field(default_factory=dict)
-    #: the run and checkpoint this run was forked from (``agent.fork``)
-    forked_from: dict[str, str] | None = None
     #: the large tool results the model read a preview of, whole, by the path it reads them at
     #: (``tools.results``: OpenAI Agents and Claude, which have no cut of their own)
     results: dict[str, str] = Field(default_factory=dict)
@@ -173,47 +167,6 @@ class Journal(BaseModel):
             return dumped
         ref = await artifacts.upload(run_id, data, worker_id=worker_id, tenant=tenant)
         return {JOURNAL_REF: ref.model_dump(mode="json", exclude_none=True)}
-
-    def forked(self, run_id: str, checkpoint_id: str) -> Journal:
-        """A new run's journal that starts the graph at ``checkpoint_id`` of this run's
-        (``agent.fork``): the calls this run made are replayed, never made again — so a run
-        holding a change whose effect is unknown (started, never ended, or timed out) is not
-        forked: which state to start from is not known."""
-        unknown = [
-            key
-            for key, started in self.started.items()
-            if started > len(self.calls.get(key, []))
-            or any(
-                isinstance(c, dict) and (c.get(OUTCOME) or {}).get("status") == "timeout"
-                for c in self.calls.get(key, [])
-            )
-        ]
-        if unknown:
-            raise ConfigurationError(
-                f"run {run_id} is not forked: it holds a change whose effect is unknown "
-                "(it started and never ended, or timed out); settle it first"
-            )
-        record = (self.graph or {}).get("") or {}
-        older = record.get("history", [])
-        chain = [record, *older] if "checkpoint" in record else older
-        at = next((n for n, r in enumerate(chain) if r["id"] == checkpoint_id), None)
-        if at is None:
-            raise ConfigurationError(f"run {run_id} keeps no checkpoint {checkpoint_id}")
-        start = {k: chain[at][k] for k in ("id", "checkpoint", "metadata", "parent")}
-        return self.model_copy(
-            deep=True,
-            update={
-                "graph": {"": {**start, "writes": [], "history": chain[at + 1 :]}},
-                "pending": None,
-                "forked_from": {"run_id": run_id, "checkpoint_id": checkpoint_id},
-            },
-        )
-
-    def checkpoints(self) -> list[str]:
-        """The graph checkpoints this run keeps, newest first (``RunCheckpointer``)."""
-        record = (self.graph or {}).get("") or {}
-        latest = [record["id"]] if "id" in record else []
-        return latest + [r["id"] for r in record.get("history", [])]
 
     def approved_in_framework(self, resolution: InterruptResolution) -> None:
         """The calls the open pause — a framework's own approval gate — approved by

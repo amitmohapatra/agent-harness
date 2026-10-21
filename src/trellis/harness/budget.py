@@ -1,8 +1,8 @@
 """A run's budget: the most it may spend — tokens, dollars, tool calls — counted as it runs and
 kept in its journal, so a resume goes on from what was spent, and a sub-agent's spending counts
-toward its parent's too. ``h.wrap(..., budget=Budget(...))`` sets it; every run has the default
-:class:`Budget` otherwise (``without={"budget"}``: no limit). Only the run's own cap is the
-harness's: a tenant's or a team's budget is the gateway's (Bifrost's virtual-key budgets).
+toward its parent's too. ``h.wrap(..., budget=Budget(...))`` sets it; an agent given none has
+no cap (its runs are still counted). Only the run's own cap is the harness's: a tenant's or a
+team's budget is the gateway's (Bifrost's virtual-key budgets).
 
 Counted: every model reply the harness sees (``ReAct`` and any graph with ``ModelHooks``, an
 OpenAI Agents run's hooks) — its input, output and cached tokens, and the dollars the gateway
@@ -27,10 +27,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.run")
 
-#: A run's tokens (input and output, every model call) unless its budget says.
-DEFAULT_MAX_TOKENS: Final = 2_000_000
-#: A run's harness tool calls unless its budget says.
-DEFAULT_MAX_TOOL_CALLS: Final = 200
 #: The error code of a run that ended at its budget.
 BUDGET_EXCEEDED: Final = "BUDGET_EXCEEDED"
 #: What a run's model is told when its budget is spent.
@@ -43,12 +39,12 @@ SPENT: Final = (
 @dataclass(frozen=True)
 class Budget:
     """The most one run may spend: ``max_tokens`` (input and output, every model call),
-    ``max_cost`` in US dollars as the gateway reports them (``None``: no limit), and
-    ``max_tool_calls`` harness tool calls. A sub-agent's run counts toward its parent's."""
+    ``max_cost`` in US dollars as the gateway reports them, and ``max_tool_calls`` harness tool
+    calls (each ``None``: no limit). A sub-agent's run counts toward its parent's."""
 
-    max_tokens: int | None = DEFAULT_MAX_TOKENS
+    max_tokens: int | None = None
     max_cost: float | None = None
-    max_tool_calls: int | None = DEFAULT_MAX_TOOL_CALLS
+    max_tool_calls: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("max_tokens", "max_cost", "max_tool_calls"):
@@ -86,13 +82,10 @@ def account(
     cached: int = 0,
     cost: float | None = None,
 ) -> None:
-    """One model reply's spending, on the run and every run it works inside, and the model that
-    answered it (as the reply names it), on the run."""
-    if cost is None:
+    """One model reply's spending, on the run and every run it works inside."""
+    capped = any(r.agent.budget is not None and r.agent.budget.max_cost for r in _runs(runtime))
+    if cost is None and capped:
         _no_cost(model or "a model")
-    if model:
-        answered = runtime.replay.journal.answered_by
-        answered[model] = answered.get(model, 0) + 1
     for run in _runs(runtime):
         spent = run.replay.journal.spent
         spent["tokens"] = spent.get("tokens", 0) + input_tokens + output_tokens
@@ -139,11 +132,9 @@ def count_tool_call(runtime: Runtime) -> None:
 
 
 def reached(runtime: Runtime) -> str | None:
-    """The limit the run — or a run it works inside — has reached (``None``: none), unless it
-    is without its budget."""
-    if not runtime.uses("budget"):
-        return None
-    said = (run.agent.budget.over(run.replay.journal.spent) for run in _runs(runtime))
+    """The limit the run — or a run it works inside — has reached (``None``: none, or no
+    budget)."""
+    said = (_over(run) for run in _runs(runtime))
     return next((s for s in said if s is not None), None)
 
 
@@ -152,12 +143,14 @@ def stopped(runtime: Runtime, spent: str) -> None:
     run up to the one whose limit it was end ``PARTIAL`` (a parent whose budget cut its
     sub-agent's work short has a partial answer too)."""
     runs = list(_runs(runtime))
-    last = next(
-        (n for n, run in enumerate(runs) if run.agent.budget.over(run.replay.journal.spent)),
-        len(runs),
-    )
+    last = next((n for n, run in enumerate(runs) if _over(run)), len(runs))
     for run in runs[: last + 1]:
         run.budget_spent = spent
+
+
+def _over(run: Runtime) -> str | None:
+    cap: Budget | None = run.agent.budget
+    return cap.over(run.replay.journal.spent) if cap is not None else None
 
 
 @functools.cache
@@ -171,8 +164,6 @@ def _no_cost(model: str) -> None:
 
 __all__ = [
     "BUDGET_EXCEEDED",
-    "DEFAULT_MAX_TOKENS",
-    "DEFAULT_MAX_TOOL_CALLS",
     "SPENT",
     "Budget",
     "account",

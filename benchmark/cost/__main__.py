@@ -6,8 +6,8 @@
 
 Writes ``<out>.json`` (every run, and each cell's means and 95% intervals) and ``<out>.md``
 (the table). The model is a gateway model name (``--model``, else ``TRELLIS_BENCH_MODEL``,
-else ``TRELLIS_LIVE_MODEL``); its context window is ``--window``, else what ``ReAct`` detects
-(the gateway's listing, the table of known models...), and the report says which
+else ``TRELLIS_LIVE_MODEL``); its context window is ``--window`` (a local model's ``-c``), else
+unknown — the window-scaled features then off, as ``ReAct`` does — and the report says which
 (``setup.window_source``). See ``docs/evaluation.md#cost-benchmark``.
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 
 from benchmark.cost import catalog, prices, run, stats
 from benchmark.cost.variants import DEFAULT, VARIANTS
-from trellis.harness.react import detected_window
+from trellis.harness.react import window_of
 
 
 def _list(text: str) -> list[str]:
@@ -73,10 +73,10 @@ async def bench(args: argparse.Namespace) -> dict:
     variants = _list(args.variants)
     chosen = set(_list(args.sets))
     sets = [s for s in catalog.task_sets() if not chosen or s.name in chosen]
-    window = detected_window(args.model, args.window)
+    window, source = window_of(None, args.window)
     setup = {
         "model": args.model,
-        "window": window.tokens,
+        "window": window,
         "max_steps": args.max_steps,
     }
     out = Path(args.out)
@@ -100,7 +100,7 @@ async def bench(args: argparse.Namespace) -> dict:
             priced_as=_list(args.price_as),
             notes=args.note,
         )
-        report["setup"]["window_source"] = window.source
+        report["setup"]["window_source"] = source
         out.with_suffix(".json").write_text(json.dumps(report, indent=2, default=str))
         out.with_suffix(".md").write_text(stats.markdown(report))
         return report

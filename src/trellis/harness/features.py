@@ -28,18 +28,6 @@ Feature = Literal[
     # what ReAct turns on by itself (``trellis.harness.automatic``)
     "planning",
     "files",
-    "subagent_task",
-    # the turns a summary replaces saved to memory first (``automatic.Compaction``)
-    "compaction_memory",
-    # the vendor's own API for a vendor's model, and the effort of each step
-    "native_client",
-    "effort",
-    # what a run spends and how it recovers (``budget.py``, ``automatic``, the tool bridge)
-    "prompt_cache",
-    "fallback",
-    "tool_retry",
-    "structured_output",
-    "budget",
 ]
 #: The features a name turns off together: ``memory`` is its push, its pull and the records;
 #: ``mcp`` the MCP tools and Code Mode, whose scripts reach them.

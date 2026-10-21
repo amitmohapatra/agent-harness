@@ -206,8 +206,7 @@ async def _ran(
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
         within = runtime.limited(tool.timeout, key=idem)
-        retry = runtime.uses("tool_retry")
-        outcome, error = await execute(tool, args, reads=reads, within=within, retry=retry)
+        outcome, error = await execute(tool, args, reads=reads, within=within)
         if isinstance(error, RunCancelled) or (error is not None and is_pause_signal(error)):
             if not reads:
                 runtime.replay.unstart(key)  # it asked a person: it runs again on resume

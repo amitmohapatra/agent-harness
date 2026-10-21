@@ -1,13 +1,12 @@
-"""What a ``ReAct`` run spends and how it recovers: fallback models and model retries are the
-gateway's (Bifrost's ``fallbacks``; the client tries once), the prompt cache on an Anthropic
-model, an answer that does not fit ``output`` asked for once more, and the run's budget, its
-dollars what the gateway says."""
+"""What a ``ReAct`` run spends and how it recovers: model retries, fallbacks and the prompt
+cache are the gateway's (the client tries once), a fixed effort is passed through, an answer
+that does not fit ``output`` is LangChain's to ask for again, and the run's budget — given,
+never by default — counts the dollars the gateway says."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -20,11 +19,10 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import BaseModel, Field
 
-from tests.integration.test_react_native import Anthropic
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Budget, Harness, ReAct, Runtime, Settings, current, tool
-from trellis.contracts import ConfigurationError, ModelError, RunStatus
-from trellis.harness import automatic, budget, models, telemetry
+from trellis.contracts import ConfigurationError, RunStatus
+from trellis.harness import budget, react, telemetry
 
 GATEWAY = "http://gw.test/v1"
 
@@ -33,7 +31,7 @@ GATEWAY = "http://gw.test/v1"
 def _gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BIFROST_URL", GATEWAY)
     monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
-    for cached in (models.serves, models._assumed, models._said, budget._no_cost):
+    for cached in (react._unknown, budget._no_cost):
         cached.cache_clear()
     yield
 
@@ -127,55 +125,16 @@ def body_of(route: respx.Route, n: int = 0) -> dict[str, Any]:
     return json.loads(route.calls[n].request.content)
 
 
-# --------------------------------------------------------------------------- fallback
+# --------------------------------------------------------------------------- the gateway owns
 @respx.mock
-async def test_fallbacks_and_retries_are_the_gateways_and_never_a_second_layer() -> None:
+async def test_the_client_tries_once_the_gateway_retries_and_falls_back() -> None:
     chat = respx.post(f"{GATEWAY}/chat/completions").mock(
         side_effect=[httpx.Response(503), httpx.Response(200, json=completion("unused"))]
     )
-    graph = ReAct("s", "granite/g", fallback_models=["openai/gpt-6-sol", "granite/other"])
     async with harness() as h:
-        result = await h.wrap(graph, id="fb").run("hi?", user="u")
-    # the fallbacks went with the request, for the gateway to try (and to retry, as its own
-    # configuration says); its error is the run's: the client tried once, the graph has no
-    # fallback of its own
-    assert result.status is RunStatus.ERROR
-    assert body_of(chat)["fallbacks"] == ["openai/gpt-6-sol", "granite/other"]
-    assert chat.call_count == 1
-
-
-def test_fallbacks_are_for_a_gateway_model() -> None:
-    with pytest.raises(ConfigurationError, match="fallback_models are the gateway's"):
-        ReAct("s", Spending(turns=[]), fallback_models=["openai/gpt-6-sol"])
-
-
-@respx.mock
-async def test_without_fallback_none_are_sent() -> None:
-    chat = respx.post(f"{GATEWAY}/chat/completions").mock(
-        return_value=httpx.Response(200, json=completion())
-    )
-    graph = ReAct("s", "granite/g", fallback_models=["openai/gpt-6-sol"])
-    async with harness() as h:
-        await h.wrap(graph, id="fb").run("hi?", user="u", without={"fallback"})
-    assert "fallbacks" not in body_of(chat)
-
-
-@respx.mock
-async def test_the_model_that_answered_is_recorded(spans: InMemorySpanExporter) -> None:
-    runs.clear()
-    respx.post(f"{GATEWAY}/chat/completions").mock(
-        side_effect=[
-            httpx.Response(200, json=tool_call("stock", {"sku": "a-1"}, model="gpt-6-sol")),
-            httpx.Response(200, json=completion("7", model="gpt-6-sol")),
-        ]
-    )
-    graph = ReAct("s", "granite/g", fallback_models=["openai/gpt-6-sol"])
-    async with harness() as h:
-        assert (await h.wrap(graph, id="fb", tools=[stock]).run("a-1?", user="u")).answer == "7"
-    [runtime] = runs
-    assert runtime.replay.journal.answered_by == {"gpt-6-sol": 2}
-    chats = [s for s in spans.get_finished_spans() if s.name.startswith("chat ")]
-    assert {dict(s.attributes or {})["gen_ai.response.model"] for s in chats} == {"gpt-6-sol"}
+        result = await h.wrap(ReAct("s", "granite/g"), id="r").run("hi?", user="u")
+    assert result.status is RunStatus.ERROR and chat.call_count == 1
+    assert "fallbacks" not in body_of(chat)  # the virtual key's, not the code's
 
 
 async def test_without_fallbacks_a_failed_call_is_the_runs_error_as_before() -> None:
@@ -186,53 +145,18 @@ async def test_without_fallbacks_a_failed_call_is_the_runs_error_as_before() -> 
     assert "down" in result.error.message
 
 
-async def test_a_native_clients_fallback_across_vendors_goes_through_the_gateway(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    endpoint = Anthropic(errors=[529])
-    endpoint.patch(monkeypatch)
-    with respx.mock(assert_all_called=False) as mock:
-        mock.post("http://gw.test/anthropic/v1/messages").mock(return_value=httpx.Response(400))
-        generic = mock.post(f"{GATEWAY}/chat/completions")
-        graph = ReAct("s", "anthropic/claude-sonnet-5-5", fallback_models=["openai/gpt-6-sol"])
-        async with harness() as h:
-            result = await h.wrap(graph, id="native").run("hi?", user="u")
-        assert not generic.called
-    assert result.status is RunStatus.ERROR
-    [sent] = endpoint.requests  # the gateway tried the fallback; the client not again
-    assert sent["fallbacks"] == ["openai/gpt-6-sol"] and sent["model"] == "claude-sonnet-5-5"
-
-
-# --------------------------------------------------------------------------- prompt cache
-async def test_an_anthropic_models_calls_are_cached_and_their_cached_tokens_counted(
-    monkeypatch: pytest.MonkeyPatch, spans: InMemorySpanExporter
-) -> None:
-    endpoint = Anthropic(usage={"cache_read_input_tokens": 40, "cache_creation_input_tokens": 5})
-    endpoint.patch(monkeypatch)
-    with respx.mock(assert_all_called=False) as mock:
-        mock.post("http://gw.test/anthropic/v1/messages").mock(return_value=httpx.Response(400))
-        async with harness() as h:
-            agent = h.wrap(ReAct("s", "anthropic/claude-sonnet-5-5"), id="cache")
-            result = await agent.run("hi?", user="u")
-            await agent.run("hi?", user="u", without={"prompt_cache"})
-    assert result.answer == "hi"
-    cached, uncached = endpoint.requests
-    assert cached.get("cache_control") == {"type": "ephemeral", "ttl": "5m"}
-    assert "cache_control" not in uncached
-    [chat, _] = [s for s in spans.get_finished_spans() if s.name.startswith("chat ")]
-    attributes = dict(chat.attributes or {})
-    assert attributes["gen_ai.usage.cache_read.input_tokens"] == 40
-    assert attributes["gen_ai.usage.cache_creation.input_tokens"] == 5
-
-
 @respx.mock
-async def test_the_prompt_cache_leaves_any_other_model_as_it_is() -> None:
+async def test_effort_is_passed_through_as_it_is() -> None:
     chat = respx.post(f"{GATEWAY}/chat/completions").mock(
         return_value=httpx.Response(200, json=completion())
     )
     async with harness() as h:
-        await h.wrap(ReAct("s", "granite/g"), id="cache").run("hi?", user="u")
-    assert "cache_control" not in chat.calls[0].request.content.decode()
+        await h.wrap(ReAct("s", "granite/g", effort="low"), id="e").run("hi?", user="u")
+        await h.wrap(ReAct("s", "granite/g"), id="n").run("hi?", user="u")
+    assert body_of(chat, 0)["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in body_of(chat, 1)
+    with pytest.raises(ConfigurationError, match="effort is for a model name"):
+        ReAct("s", Spending(turns=[]), effort="low")
 
 
 # --------------------------------------------------------------------------- structured output
@@ -258,7 +182,7 @@ async def test_a_valid_structured_answer_is_the_answer(output: Any) -> None:
     assert answer == {"sku": "a-1", "units": 7}
 
 
-async def test_an_answer_that_does_not_fit_is_asked_for_once_more() -> None:
+async def test_an_answer_that_does_not_fit_is_asked_for_again_by_langchain() -> None:
     model = Spending(
         turns=[("Count", {"sku": "a-1", "units": "many"}), ("Count", {"sku": "a-1", "units": 7})]
     )
@@ -267,57 +191,6 @@ async def test_an_answer_that_does_not_fit_is_asked_for_once_more() -> None:
     assert result.answer == Count(sku="a-1", units=7)
     told = model.seen[1][-1].text  # LangChain's tool strategy says what was wrong
     assert "Failed to parse structured output" in told and "units" in told
-
-
-async def test_a_second_answer_that_does_not_fit_fails_the_run_saying_why() -> None:
-    wrong = ("Count", {"sku": "a-1", "units": "many"})
-    model = Spending(turns=[wrong, wrong, wrong])
-    async with Harness(config=Settings()) as h:
-        result = await h.wrap(ReAct("s", model, output=Count), id="so").run("a-1?", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "did not fit the output schema twice" in result.error.message
-    assert len(model.seen) == 2
-
-
-async def test_without_structured_output_langchain_asks_again_as_it_does() -> None:
-    wrong = ("Count", {"sku": "a-1", "units": "many"})
-    model = Spending(turns=[wrong, wrong, ("Count", {"sku": "a-1", "units": 7})])
-    async with Harness(config=Settings()) as h:
-        result = await h.wrap(ReAct("s", model, output=Count), id="so").run(
-            "a-1?", user="u", without={"structured_output"}
-        )
-    assert result.answer == Count(sku="a-1", units=7) and len(model.seen) == 3
-
-
-async def test_a_provider_strategys_refusal_is_repaired_here(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from langchain.agents.structured_output import StructuredOutputValidationError
-
-    calls: list[Any] = []
-
-    async def handler(request: Any) -> Any:
-        calls.append(request.messages)
-        if len(calls) < 3:
-            raise StructuredOutputValidationError(
-                "Count", ValueError("units: not a number"), AIMessage("x")
-            )
-        return "fixed"
-
-    monkeypatch.setattr(automatic, "on", lambda feature: True)
-    request = SimpleNamespace(
-        response_format=Count,
-        messages=[],
-        state={"messages": []},
-        override=lambda **c: SimpleNamespace(**{**vars(request), **c}),
-    )
-    middleware = automatic.StructuredRepair()
-    with pytest.raises(ModelError, match="did not fit the output schema twice: units"):
-        await middleware.awrap_model_call(request, handler)  # type: ignore[arg-type]
-    assert calls[1][-1].text.startswith(automatic.REPAIR)
-    calls.clear()
-    calls.append([])  # the second call fails, the repair answers
-    assert await middleware.awrap_model_call(request, handler) == "fixed"  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- budget
@@ -358,8 +231,8 @@ async def test_without_a_budget_there_is_no_limit_but_spending_is_counted() -> N
     runs.clear()
     model = Spending(turns=[("stock", {"sku": "a-1"}), "a-1: 7"])
     async with Harness(config=Settings()) as h:
-        agent = h.wrap(ReAct("s", model), id="b", tools=[stock], budget=Budget(max_tokens=1))
-        result = await agent.run("a-1?", user="u", without={"budget"})
+        agent = h.wrap(ReAct("s", model), id="b", tools=[stock])  # no budget: no cap
+        result = await agent.run("a-1?", user="u")
     assert result.status is RunStatus.SUCCESS
     assert runs[0].replay.journal.spent["tokens"] == 220  # both replies, counted
 
@@ -409,11 +282,3 @@ async def test_a_structured_answer_at_the_budget_is_asked_for_without_other_tool
         result = await agent.run("a-1?", user="u")
     assert result.status is RunStatus.PARTIAL and result.answer == Count(sku="a-1", units=7)
     assert model.requests[-1]["tools"] == ["Count"]  # only the answer's own tool
-
-
-def test_the_answer_tools_of_a_given_strategy_are_its_schemas() -> None:
-    from langchain.agents.structured_output import ToolStrategy
-
-    assert automatic._answer_tools(ToolStrategy(Count)) == {"Count"}
-    assert automatic._answer_tools(None) == set()
-    assert automatic._answer_tools(SCHEMA) == {"Count"}

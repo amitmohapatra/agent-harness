@@ -1144,14 +1144,8 @@ def _appended(request: ModelRequest[Any], text: str) -> SystemMessage:
 
 
 # --------------------------------------------------------------------------- checkpoints
-#: The checkpoints a ``RunCheckpointer`` keeps per graph namespace (the latest and those
-#: before it): a run can be forked from any of them (``agent.fork``).
-CHECKPOINT_HISTORY: Final = 20
-
-
 class RunCheckpointer(BaseCheckpointSaver[int]):
-    """A checkpointer that keeps the latest :data:`CHECKPOINT_HISTORY` checkpoints — and, in a
-    harness run whose
+    """A checkpointer that keeps the latest checkpoint only — and, in a harness run whose
     ``thread_id`` is the run (``LangGraphAdapter`` sees to it), keeps it in the run's journal
     (``Journal.graph``), saved with the run's progress and with its pause. A resume in any
     worker continues where the graph stopped: the model is not asked again, a summary is not
@@ -1187,10 +1181,7 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         record = self._slot(thread_id).get(ns) or {}
         wanted = get_checkpoint_id(config)
         latest = record.get("id")
-        if wanted and wanted != latest:
-            record = next((r for r in record.get("history", []) if r["id"] == wanted), {})
-            latest = record.get("id")
-        if latest is None:
+        if latest is None or (wanted and wanted != latest):
             return None
         parent = record.get("parent")
         return CheckpointTuple(
@@ -1217,10 +1208,8 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         found = [
             tuple_
             for thread_id in threads
-            for ns, record in list(self._slot(thread_id).items())
-            for checkpoint_id in [record.get("id"), *[r["id"] for r in record.get("history", [])]]
-            if checkpoint_id is not None
-            and (tuple_ := self.get_tuple(_config(thread_id, ns, checkpoint_id))) is not None
+            for ns in list(self._slot(thread_id))
+            if (tuple_ := self.get_tuple(_config(thread_id, ns, None))) is not None
             and all(tuple_.metadata.get(k) == v for k, v in (filter or {}).items())
             and (before is None or _id(tuple_) < str(get_checkpoint_id(before)))
         ]
@@ -1235,19 +1224,13 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     ) -> RunnableConfig:
         thread_id, ns = _where(config)
         slot = self._slot(thread_id)
-        before = slot.get(ns) or {}
-        writes = [w for w in before.get("writes", []) if w[0] >= checkpoint["id"]]
-        history = before.get("history", [])
-        if "checkpoint" in before:  # the latest goes into the history, newest first
-            kept = {k: before[k] for k in ("id", "checkpoint", "metadata", "parent")}
-            history = [kept, *history][: CHECKPOINT_HISTORY - 1]
+        writes = [w for w in (slot.get(ns) or {}).get("writes", []) if w[0] >= checkpoint["id"]]
         slot[ns] = {
             "id": checkpoint["id"],
             "checkpoint": self._dumped(checkpoint),
             "metadata": self._dumped(get_checkpoint_metadata(config, metadata)),
             "parent": _configurable(config).get("checkpoint_id"),
             "writes": writes,
-            "history": history,
         }
         return _config(thread_id, ns, checkpoint["id"])
 
@@ -1328,14 +1311,11 @@ def _id(found: CheckpointTuple) -> str:
     return str(_configurable(found.config)["checkpoint_id"])
 
 
-def _config(thread_id: str, ns: str, checkpoint_id: str) -> RunnableConfig:
-    return {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": ns,
-            "checkpoint_id": checkpoint_id,
-        }
-    }
+def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfig:
+    configurable: dict[str, Any] = {"thread_id": thread_id, "checkpoint_ns": ns}
+    if checkpoint_id is not None:
+        configurable["checkpoint_id"] = checkpoint_id
+    return {"configurable": configurable}
 
 
 __all__ = [

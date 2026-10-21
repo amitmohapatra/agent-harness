@@ -3,15 +3,10 @@ middleware used as it is, the harness's code only the trigger and the glue that 
 governed, journaled and resumable. A task that does not need one never sees it: a short task's
 model calls are what they were before any of these existed (the tools, the instructions).
 
-Each is one trigger (a small function of the request or the run) and the LangChain or Deep
-Agents part it turns on. For every task: the vendor's own client (``native_client``), each
-step's effort (``effort``), the prompt cache (``prompt_cache``), the gateway's fallbacks
-(``fallback``), the run's budget (``budget``) and one repair of a structured answer
-(``structured_output``).
-
 * **A long task** — :func:`long_task`: once the model has made :data:`LONG_AFTER` calls in this
   invocation, or the request asks for steps (a list of :data:`STEP_ITEMS` items or more, "step
-  by step", "a plan") — on a model whose window has room for them (:data:`MIN_WINDOW`) gets:
+  by step", "a plan") — on a model whose window is known and has room for them
+  (:data:`MIN_WINDOW`; an unknown window: off) gets:
 
   * ``planning`` — LangChain's ``TodoListMiddleware`` (:class:`Planning`): the ``write_todos``
     tool and its instructions;
@@ -19,25 +14,18 @@ step's effort (``effort``), the prompt cache (``prompt_cache``), the gateway's f
     ``edit_file`` besides ``read_file`` (:class:`ScratchFiles` offers them), on a
     :class:`JournalBackend`: the files are the graph's state, so the run's journal keeps them
     (a pause, a crash, another worker), each at most :data:`MAX_FILE_CHARS` and all of a run's
-    at most :data:`MAX_RUN_CHARS`;
-  * ``subagent_task`` — Deep Agents' ``SubAgentMiddleware`` (:class:`Helpers`): the ``task``
-    tool, a general-purpose helper doing a part of the work in its own context. Each call is a
-    child run of the same agent (as ``agent.as_tool()`` makes one: governed, journaled, its
-    pause the parent's, cancelled with it), without ``subagent_task`` itself — a helper starts
-    no helper — and at most :data:`MAX_HELPERS` at once per run.
+    at most :data:`MAX_RUN_CHARS`.
 
-``without={"planning"}`` (``"files"``, ``"subagent_task"``) turns one off, for an agent or a
-run: the model is not offered it, and a call of it is refused as not available.
+* **A budget** given (``h.wrap(budget=)``) — :class:`Budgeted`: once it is spent, one more call
+  without tools for the best answer with what the run has.
+
+``without={"planning"}`` (``"files"``) turns one off, for an agent or a run: the model is not
+offered it, and a call of it is refused as not available.
 """
 
 from __future__ import annotations
 
-import asyncio
-import functools
-import json
-import logging
 import re
-import weakref
 from collections.abc import Awaitable, Callable, Collection
 from typing import Annotated, Any, Final, NotRequired
 
@@ -46,12 +34,6 @@ from deepagents.backends.protocol import EditResult, WriteResult
 from deepagents.backends.utils import file_data_to_string
 from deepagents.middleware import FilesystemMiddleware
 from deepagents.middleware.filesystem import _file_data_reducer
-from deepagents.middleware.subagents import SubAgentMiddleware
-from deepagents.middleware.summarization import (
-    SummarizationMiddleware,
-    SummarizationToolMiddleware,
-    compute_summarization_defaults,
-)
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
@@ -59,23 +41,14 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 from langchain.agents.middleware.todo import TodoListMiddleware
-from langchain.agents.structured_output import StructuredOutputValidationError
-from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import RunnableLambda
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from trellis.contracts import ConfigurationError, ModelError, ToolStatus
-from trellis.harness import budget, models
+from trellis.harness import budget
 from trellis.harness.features import Feature
-from trellis.harness.journal import content_key
-from trellis.harness.middleware import ANSWER_CHECK, WRITE_CHECK, _named
-from trellis.harness.runtime import Runtime, current
-from trellis.harness.tools import bridge
-from trellis.harness.tools.convert import text_of
-
-log = logging.getLogger("trellis.run")
+from trellis.harness.middleware import _named
+from trellis.harness.runtime import current
 
 #: The smallest context window the long-task tools are offered in, in tokens: together they
 #: cost about 2,600 tokens of instructions and definitions on every call, which a smaller
@@ -91,25 +64,12 @@ _CUE: Final = re.compile(r"\bstep[- ]by[- ]step\b|\bmulti-?step\b|\b(?:a|the|you
 TODOS: Final = "write_todos"
 #: The scratch file tools a long task is offered (``read_file`` reads paged results anyway).
 SCRATCH: Final = frozenset({"ls", "write_file", "edit_file"})
-#: The helper tool, and its one kind of helper.
-TASK: Final = "task"
-HELPER: Final = "general-purpose"
-HELPER_DESCRIPTION: Final = (
-    "A general-purpose helper with the same tools as you, working in a context of its own: give "
-    "it one self-contained part of a long task (what to find or do, and what to answer with); "
-    "it answers when it is done. Several parts that do not depend on each other can go to "
-    "helpers at once."
-)
-#: Helpers one run has working at once (more wait their turn).
-MAX_HELPERS: Final = 4
 #: A file the model writes holds at most this many characters; all of a run's at most
 #: :data:`MAX_RUN_CHARS`. What the harness saves itself (a large result, a summarized
 #: history) is not counted.
 MAX_FILE_CHARS: Final = 100_000
 MAX_RUN_CHARS: Final = 1_000_000
 RESERVED: Final = ("/large_tool_results/", "/conversation_history/")
-#: How the checks ``AnswerCheck`` asks begin (a check is a deciding step).
-_CHECKS: Final = (ANSWER_CHECK.split(".")[0], WRITE_CHECK.split("{")[0])
 #: What a call of a feature the run is without reads.
 NOT_AVAILABLE: Final = "{tool} is not available in this run"
 
@@ -149,13 +109,13 @@ def long_task(request: ModelRequest[Any]) -> bool:
 
 
 class _LongTasks:
-    """What the long-task middleware share: the model's context window (``None``: not known,
-    taken as large enough), and whether this call gets their tools."""
+    """What the long-task middleware share: the model's context window (``None``: not known —
+    no room is assumed, so they are off), and whether this call gets their tools."""
 
     window: int | None = None
 
     def wanted(self, feature: Feature, request: ModelRequest[Any]) -> bool:
-        roomy = self.window is None or self.window >= MIN_WINDOW
+        roomy = self.window is not None and self.window >= MIN_WINDOW
         return roomy and on(feature) and long_task(request)
 
 
@@ -175,115 +135,7 @@ def refused(call: dict[str, Any]) -> ToolMessage:
     )
 
 
-# --------------------------------------------------------------------------- the model
-class NativeClient(AgentMiddleware):
-    """A model named by its vendor's name asked through the vendor's own API on the gateway
-    (``native_client``: ``ChatAnthropic`` on the gateway's Anthropic endpoint, ``ChatOpenAI`` on
-    its Responses API), not the generic chat completions the graph was built with: the
-    vendor's caching, effort and tool search then work. Without it, the generic client."""
-
-    def __init__(self, native: Any) -> None:
-        super().__init__()
-        self.native = native
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        if on("native_client"):
-            return await handler(request.override(model=self.native))
-        return await handler(request)
-
-
-#: The effort of a routine step, and of a step that decides more (``effort``).
-ROUTINE: Final = "low"
-DECIDING: Final = "high"
-
-
-class Effort(AgentMiddleware):
-    """How hard a model that reasons thinks, per step (``effort``): :data:`DECIDING` for the
-    steps that decide the run — its first call (the plan), the step after a tool failed, a
-    check of an answer or of a change before it is made — :data:`ROUTINE` for the others.
-    ``level`` fixes it for every step. A model that takes no effort is sent none (a local
-    model: nothing changes); a level it does not take is the nearest it does."""
-
-    def __init__(self, level: str | None = None) -> None:
-        super().__init__()
-        if level is not None and level not in models.EFFORTS:
-            raise ConfigurationError(f"effort is one of {', '.join(models.EFFORTS)}")
-        self.level = level
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        levels = models.effort_levels(request.model)
-        if not levels or not on("effort"):
-            return await handler(request)
-        level = models.nearest(self.level or step_effort(request), levels)
-        settings = {**request.model_settings, "reasoning_effort": level}
-        return await handler(request.override(model_settings=settings))
-
-
-def step_effort(request: ModelRequest[Any]) -> str:
-    """:data:`DECIDING` for the run's first call, the step after a failed tool call, and a
-    check (an ``AnswerCheck`` message last); :data:`ROUTINE` otherwise."""
-    last = request.messages[-1] if request.messages else None
-    checking = isinstance(last, HumanMessage) and last.text.startswith(_CHECKS)
-    failed = isinstance(last, ToolMessage) and last.status == "error"
-    return DECIDING if checking or failed or calls_made(request) == 0 else ROUTINE
-
-
-# --------------------------------------------------------------------------- spending
-class PromptCache(AnthropicPromptCachingMiddleware):
-    """LangChain's ``AnthropicPromptCachingMiddleware`` on the calls that reach an Anthropic
-    model through its own API (``native_client``): the conversation's prefix — the
-    instructions, the tools (sorted), the memory context, the history — is marked for the
-    prompt cache (``prompt_cache``). Every other model is left as it is: OpenAI's caching is
-    automatic, and the order is the same for it. Named as LangChain's, so one given to
-    ``ReAct(middleware=)`` replaces it."""
-
-    def __init__(self) -> None:
-        super().__init__(unsupported_model_behavior="ignore")
-
-    @property
-    def name(self) -> str:
-        return AnthropicPromptCachingMiddleware.__name__
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> Any:
-        if not on("prompt_cache"):
-            return await handler(request)
-        return await super().awrap_model_call(request, handler)
-
-
-class GatewayFallbacks(AgentMiddleware):
-    """``ReAct(fallback_models=)``: sent with every model call as Bifrost's own ``fallbacks``
-    (``provider/model``), so the gateway — the one place that falls back, as it does for the
-    fallbacks configured on the virtual key or the provider — tries each in order when the
-    model fails (``fallback``)."""
-
-    def __init__(self, names: Collection[str]) -> None:
-        super().__init__()
-        self.names = list(names)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> Any:
-        if not on("fallback"):
-            return await handler(request)
-        settings = dict(request.model_settings)
-        settings["extra_body"] = {**(settings.get("extra_body") or {}), "fallbacks": self.names}
-        return await handler(request.override(model_settings=settings))
-
-
+# --------------------------------------------------------------------------- the budget
 class Budgeted(AgentMiddleware):
     """The run's budget (``budget``; ``trellis.harness.budget``; ``ModelHooks`` counts what
     every model reply spent): once it — the run's, or a run it works inside — is spent, one
@@ -306,70 +158,6 @@ class Budgeted(AgentMiddleware):
             if request.tools:
                 request = request.override(tool_choice="none")
         return await handler(request)
-
-
-class StructuredRepair(AgentMiddleware):
-    """An answer that does not fit ``ReAct(output=)``'s schema (``structured_output``): the
-    model is told what was wrong and asked once more — by LangChain's tool strategy (its error
-    tool message), or here (:data:`REPAIR`) when the provider's strategy refused it — and a
-    second answer that does not fit either fails the run, saying why. Without it, LangChain's
-    own: the tool strategy asks again until the step limit, a provider's fails at once."""
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        if request.response_format is None or not on("structured_output"):
-            return await handler(request)
-        if _failed_answers(request) >= 2:
-            raise ModelError(
-                "the answer did not fit the output schema twice; it was told what was wrong "
-                "once and answered wrong again",
-                source="langgraph",
-            )
-        try:
-            return await handler(request)
-        except StructuredOutputValidationError as exc:
-            told = [
-                *request.messages,
-                exc.ai_message,
-                HumanMessage(content=f"{REPAIR}\n{exc.source}"),
-            ]
-            try:
-                return await handler(request.override(messages=told))
-            except StructuredOutputValidationError as again:
-                raise ModelError(
-                    f"the answer did not fit the output schema twice: {again.source}",
-                    source="langgraph",
-                ) from again
-
-
-#: What a model is told when its answer did not fit the output schema.
-REPAIR: Final = (
-    "That answer does not fit the schema the answer must follow. Answer again so it does:"
-)
-
-
-def _failed_answers(request: ModelRequest[Any]) -> int:
-    """The answers of this invocation that the output schema refused (LangChain answers each
-    with an error tool message under the output tool's name)."""
-    names = _answer_tools(request.response_format)
-    count = 0
-    for message in _history(request):
-        if isinstance(message, HumanMessage):
-            count = 0
-        elif isinstance(message, ToolMessage) and message.name in names:
-            count += message.text.startswith("Error")
-    return count
-
-
-def _answer_tools(response_format: Any) -> set[str]:
-    """The name of the tool an answer to ``response_format`` (``ReAct(output=)``: a pydantic
-    model or a JSON schema) is given with: its schema's."""
-    schema = getattr(response_format, "schema", response_format)
-    named = schema.get("title") if isinstance(schema, dict) else getattr(schema, "__name__", None)
-    return {named} if isinstance(named, str) else set()
 
 
 # --------------------------------------------------------------------------- planning
@@ -510,177 +298,3 @@ class ScratchFiles(_LongTasks, AgentMiddleware):
         if request.tool_call["name"] in SCRATCH and not on("files"):
             return refused(dict(request.tool_call))
         return await handler(request)
-
-
-# --------------------------------------------------------------------------- compaction
-class Compaction(SummarizationMiddleware):
-    """Deep Agents' summarization (built as ``create_summarization_middleware`` builds it), the
-    turns it summarizes away saved to the memory service first (``compaction_memory``): the
-    service keeps their facts, which the summary may drop. The write is the background
-    writes' (a failed one is spooled on disk); compaction never waits for it. With memory off
-    it summarizes as before, said once."""
-
-    @classmethod
-    def of(cls, model: Any, backend: Any) -> Compaction:
-        defaults = compute_summarization_defaults(model)
-        return cls(
-            model=model,
-            backend=backend,
-            trigger=defaults["trigger"],
-            keep=defaults["keep"],
-            truncate_args_settings=defaults["truncate_args_settings"],
-        )
-
-    async def _aoffload_to_backend(
-        self, backend: Any, messages: list[Any], session_id: str
-    ) -> str | None:
-        runtime = current()
-        if runtime is not None and runtime.uses("compaction_memory"):
-            await _saved(runtime, self._filter_summary_messages(messages))
-        return await super()._aoffload_to_backend(backend, messages, session_id)
-
-
-async def _saved(runtime: Runtime, messages: list[Any]) -> None:
-    """``messages`` saved to the run's memory, as (role, text)."""
-    pairs = [(_role(m), _said(m)) for m in messages]
-    # not the memory context (memory's own) nor the question (the transcript's)
-    said = [(r, t) for r, t in pairs if t and r != "system" and t != runtime.task]
-    memory = runtime.run_memory
-    if memory is None:
-        _unsaved()
-        return
-    if not said:
-        return
-    compaction = content_key("compacted", {"said": said})
-    await runtime.agent.harness.writes.submit(
-        "memory.compacted",
-        lambda: memory.record_compacted(said, runtime.run_id, compaction),
-        events=runtime.events,
-        record=memory.record(
-            "record_compacted",
-            messages=[list(m) for m in said],
-            run_id=runtime.run_id,
-            compaction=compaction,
-        ),
-    )
-
-
-def _role(message: Any) -> str:
-    return {"human": "user", "ai": "assistant", "tool": "tool"}.get(message.type, "system")
-
-
-def _said(message: Any) -> str:
-    calls = (
-        [f"{c['name']}({json.dumps(c['args'], default=str)})" for c in message.tool_calls]
-        if isinstance(message, AIMessage)
-        else []
-    )
-    return "\n".join([message.text, *calls]).strip()
-
-
-@functools.cache
-def _unsaved() -> None:
-    log.warning("compaction is not saved to memory: the run has no memory (MEMORY_URL)")
-
-
-class CompactNow(_LongTasks, SummarizationToolMiddleware):
-    """Deep Agents' ``compact_conversation`` tool, offered on a long task (``files``: it moves
-    the history into the run's files): the model compacts its own context when it judges a
-    phase done — eligible from about half the summarization trigger, as Deep Agents gates it."""
-
-    def __init__(self, summarization: Any, *, window: int | None = None) -> None:
-        super().__init__(summarization)
-        self.window = window
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        if self.wanted("files", request):
-            return await handler(request)
-        return await handler(without_tools(request, {COMPACT}))
-
-
-#: Deep Agents' tool that compacts the conversation.
-COMPACT: Final = "compact_conversation"
-
-
-# --------------------------------------------------------------------------- helpers
-def _unused(_: Any) -> Any:  # pragma: no cover - Helpers runs the task tool itself
-    raise RuntimeError("the task tool runs as a child run (Helpers)")
-
-
-class Helpers(_LongTasks, SubAgentMiddleware):
-    """Deep Agents' ``SubAgentMiddleware``: the ``task`` tool, offered on a long task
-    (``subagent_task``), with one general-purpose helper. A call runs as a child run of the
-    run's own agent through the harness's tool bridge (``agent.as_tool()``'s machinery:
-    governed, journaled, resumed from its journal after a crash, its pause the parent's,
-    cancelled with the parent), without ``subagent_task`` (a helper calls no helper), at most
-    ``concurrency`` at once per run. Named as Deep Agents', so a ``SubAgentMiddleware`` given
-    to ``ReAct(middleware=)`` replaces it."""
-
-    def __init__(
-        self, backend: Any, *, concurrency: int = MAX_HELPERS, window: int | None = None
-    ) -> None:
-        super().__init__(
-            backend=backend,
-            subagents=[
-                {
-                    "name": HELPER,
-                    "description": HELPER_DESCRIPTION,
-                    "runnable": RunnableLambda(_unused),
-                }
-            ],
-        )
-        self.concurrency = concurrency
-        self.window = window
-        self._slots: weakref.WeakKeyDictionary[Runtime, asyncio.Semaphore] = (
-            weakref.WeakKeyDictionary()
-        )
-
-    @property
-    def name(self) -> str:
-        return SubAgentMiddleware.__name__
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        if self.wanted("subagent_task", request):
-            return await super().awrap_model_call(request, handler)
-        return await handler(without_tools(request, {TASK}))
-
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
-    ) -> ToolMessage | Command[Any]:
-        call = request.tool_call
-        if call["name"] != TASK:
-            return await handler(request)
-        runtime = current()
-        if runtime is None or not runtime.uses("subagent_task"):
-            return refused(dict(call))
-        from trellis.harness.subagents import SubAgent  # noqa: PLC0415 - imports adapters
-
-        [helper] = await SubAgent(
-            runtime.agent,
-            name=TASK,
-            description=HELPER_DESCRIPTION,
-            side_effects=None,
-            without={"subagent_task"},
-        ).resolve()
-        slots = self._slots.setdefault(runtime, asyncio.Semaphore(self.concurrency))
-        async with slots:
-            asked = {"message": str(call["args"].get("description", ""))}
-            outcome = await bridge.call(helper, asked, call_id=call["id"])
-        return ToolMessage(
-            content=text_of(outcome.output),
-            tool_call_id=str(call["id"]),
-            name=TASK,
-            status="error"
-            if outcome.status in (ToolStatus.ERROR, ToolStatus.TIMEOUT)
-            else "success",
-        )

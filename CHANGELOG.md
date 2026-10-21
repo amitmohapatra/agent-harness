@@ -12,39 +12,22 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   tool) and by governance is asked once — governance counts the framework's approval, kept in
   the run's journal; a hook's `Deny` still wins. `h.wrap` logs each tool both gate.
 
-- `ReAct` saves the turns a summary replaces to the memory service first, each once
-  (`compaction_memory`), and offers Deep Agents' `compact_conversation` on a long task. Rewind:
-  a run keeps its graph's last 20 checkpoints, `agent.checkpoints(run_id)` lists them and
-  `agent.fork(run_id, checkpoint_id)` starts a new run from one, the calls already made
-  replayed (a run holding a change of unknown effect is refused).
+- Budgets, per agent and opt-in (`h.wrap(budget=Budget(max_tokens=, max_cost=, max_tool_calls=))`;
+  none given, no cap): counted on the run's journal — so a resume goes on from what was spent
+  and a sub-agent's spending counts toward its parent's. At a limit no new tool call starts, a
+  `ReAct` gives its best answer with what it has, and the run ends `PARTIAL`, its result's error
+  `BUDGET_EXCEEDED`. Dollars are what the gateway says each call cost; a tenant's or a team's
+  budget is the gateway's.
 
-- Budgets: every run has one (`h.wrap(budget=Budget(max_tokens=, max_cost=, max_tool_calls=))`,
-  default 2,000,000 tokens and 200 tool calls), counted on its journal — so a resume goes on
-  from what was spent and a sub-agent's spending counts toward its parent's. At a limit no new
-  tool call starts, a `ReAct` gives its best answer with what it has, and the run ends `PARTIAL`
-  with `BUDGET_EXCEEDED` (`without={"budget"}`). Dollars are what the gateway says each call
-  cost; a tenant's or a team's budget is the gateway's.
+- `ReAct(output=)` takes a JSON schema as well as a pydantic model; `ReAct(effort=)` sends a fixed
+  `reasoning_effort` with every call of a model name; `ReAct(settings=)` takes the gateway's
+  address and key in code. A read tool's retry waits what an error's `Retry-After` says when
+  there is time left, else gives up. Cached input tokens are on the `chat` span.
 
-- `ReAct` caches the stable start of every call on an Anthropic model (LangChain's
-  `AnthropicPromptCachingMiddleware`, `prompt_cache`; cached tokens on the `chat` span), sends
-  `ReAct(fallback_models=[...])` with every call as Bifrost's own `fallbacks` (`fallback`;
-  the answering model recorded), and asks once more for an answer that does not fit `output`
-  — now a pydantic model or a JSON schema — then fails clearly (`structured_output`). A read
-  tool's retry waits what an error's `Retry-After` says when there is time left, else gives
-  up (`tool_retry`).
-
-- `ReAct` takes a model's context window from its LangChain profile (the one LangChain bundles
-  for a vendor's model name too; never fetched), else 128k said once — `context_window=` wins —
-  and scales every threshold by it; it asks a vendor's model through the vendor's own API on
-  the gateway when the gateway serves it (`ChatAnthropic`,
-  OpenAI's Responses API; `native_client`), and sets each step's reasoning effort on a model
-  that takes one (`effort`, `ReAct(effort=)`). The cost benchmark records the window it used.
-
-- `ReAct` plans, keeps scratch files and hands parts of a long task to a helper — LangChain's
-  `TodoListMiddleware`, Deep Agents' file tools and Deep Agents' `task` tool, each a child run
-  of the same agent — once the model has made three calls or the request asks for steps, on a
-  window of 32,000 tokens or more; a shorter task is sent what it was before. `without=` turns
-  each off: `planning`, `files`, `subagent_task` ([react.md](docs/frameworks/react.md#the-middleware)).
+- `ReAct` plans and keeps scratch files on a long task — LangChain's `TodoListMiddleware` and
+  Deep Agents' file tools — once the model has made three calls or the request asks for steps,
+  on a known window of 32,000 tokens or more; a shorter task is sent what it was before.
+  `without=` turns each off: `planning`, `files` ([react.md](docs/frameworks/react.md#the-middleware)).
 
 - `make bench-cost` (`python -m benchmark.cost`): the cost and accuracy of a `ReAct` agent over
   tool catalogues of 10, 50, 100 and 500 tools, against whatever model is configured — input,
@@ -61,10 +44,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
-- One owner per concern: model retries and fallbacks are the gateway's (`ReAct`'s client makes
-  one attempt, where it made three), a model's window is what it says of itself (its LangChain
-  profile, else 128k), its effort levels its LangChain profile's, a run's
-  dollars the gateway's cost. No copied tables of windows, prices or effort levels.
+- One owner per concern (the architecture review, ADR 0003): model retries, fallbacks and prompt
+  caching are the gateway's — `ReAct`'s client makes one attempt, where it made three (set the
+  provider's `network_config.max_retries` in Bifrost); a model's window is `context_window=`, else
+  its chat model's LangChain profile — when neither says, clearing old tool results is off (it
+  assumed 128k before), said once; a run's dollars are the gateway's cost.
 
 - A function tool's description is its docstring without the sections (`Args:`, `Returns:`,
   `Raises:`...), every other paragraph kept (was: the first paragraph only), and each parameter

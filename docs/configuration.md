@@ -132,17 +132,8 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 | `mcp` | `BIFROST_URL` | the MCP tools the virtual key allows (or those of `mcp=`'s Virtual MCPs), Code Mode included | no MCP tools, and the gateway is not asked for them (`h.tools(without={"mcp"})` for a graph's; `mcp=[]` on `wrap` or `h.tools` says the same for every run of the agent) |
 | `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
 | `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
-| `planning` | `ReAct`, a long task, a window of 32,000 tokens or more | LangChain's `TodoListMiddleware`: `write_todos` and its instructions ([react.md](frameworks/react.md#the-middleware)) | not offered; a call answers that it is not available |
-| `files` | the same | Deep Agents' scratch file tools: `ls`, `write_file`, `edit_file` on the run's journal, and `compact_conversation` | not offered (paged results are still read with `read_file`); a call answers that it is not available |
-| `native_client` | `ReAct` with a vendor's model name (`anthropic/...`, `openai/...`) whose own API the gateway serves | `ChatAnthropic` on the gateway's Anthropic endpoint, or `ChatOpenAI` on its Responses API ([react.md](frameworks/react.md)) | the gateway's chat completions (`ChatOpenAI`) |
-| `effort` | `ReAct`, a model that takes a reasoning effort | high effort on the steps that decide the run, low on the others | no effort sent |
-| `subagent_task` | the same | Deep Agents' `task` tool: a general-purpose helper, each call a child run of the same agent | not offered; a call answers that it is not available |
-| `compaction_memory` | `ReAct`, `MEMORY_URL`, a summary of the history | the turns the summary replaces saved to the memory service first (each once) | summarized without saving |
-| `prompt_cache` | `ReAct` with an Anthropic chat model | LangChain's `AnthropicPromptCachingMiddleware`: the stable start of every call cached, its cached tokens counted on the run and its `chat` span | nothing marked for caching |
-| `fallback` | `ReAct(fallback_models=[...])` | a failed model call tried on each fallback in order by the gateway (Bifrost's `fallbacks`, sent with the call) | the error, as without fallbacks (the fallbacks configured on the gateway still apply) |
-| `tool_retry` | always | a read (or idempotent) tool retried after an error that may pass, waiting what its `Retry-After` says when there is time left ([reliability.md](reliability.md#retries)) | every tool call made once |
-| `structured_output` | `ReAct(output=...)` | an answer that does not parse into `output` asked for once more, saying what was wrong; then a clear `ModelError` | the first parse error is the run's error |
-| `budget` | always (`h.wrap(budget=...)`, else `Budget()`) | tokens, dollars (the gateway's cost) and tool calls counted on the run's journal; at a limit no new tool call, a final answer, the run `PARTIAL` (`BUDGET_EXCEEDED`) ([api.md](api.md#budget)) | counted, never enforced |
+| `planning` | `ReAct`, a long task, a known window of 32,000 tokens or more | LangChain's `TodoListMiddleware`: `write_todos` and its instructions ([react.md](frameworks/react.md#the-middleware)) | not offered; a call answers that it is not available |
+| `files` | the same | Deep Agents' scratch file tools: `ls`, `write_file`, `edit_file` on the run's journal | not offered (paged results are still read with `read_file`); a call answers that it is not available |
 
 A name not in the table is refused (`ConfigurationError`, naming them). Not switchable, because
 they are automatic and deterministic: governance and approvals, the journal and replay, the

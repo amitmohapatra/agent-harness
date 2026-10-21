@@ -140,9 +140,8 @@ class Agent:
         self.timeout = timeout
         #: what the harness does not do for any of its runs (``h.wrap(without=)``)
         self.without = features(without)
-        #: the most one of its runs may spend (``budget.py``; the default ``Budget()`` unless
-        #: ``h.wrap(budget=)`` says)
-        self.budget = budget or Budget()
+        #: the most each of its runs may spend (``budget.py``; ``None``: no cap)
+        self.budget = budget
         #: the hooks around its runs, model calls and tool calls: the harness's, then its own
         self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)
@@ -329,46 +328,6 @@ class Agent:
             self._unwatched(run_id)
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
-
-    async def checkpoints(self, run_id: str, *, tenant: str | None = None) -> list[str]:
-        """The graph checkpoints a run keeps, newest first (a ``ReAct`` run, or a graph with a
-        ``RunCheckpointer``: its last 20), to fork it from (:meth:`fork`). A run that has
-        ended keeps none: its journal ends with it."""
-        tenant = await self.harness.tenant(tenant)
-        return (await self._journal_of(run_id, tenant)).checkpoints()
-
-    async def fork(
-        self,
-        run_id: str,
-        checkpoint_id: str,
-        *,
-        tenant: str | None = None,
-        without: Collection[Feature] = (),
-    ) -> Result:
-        """A new run that starts where ``run_id``'s graph was at ``checkpoint_id`` (one of
-        :meth:`checkpoints`) and goes on from there, in this process — rewind and try again,
-        with this agent (another model, other tools) if it is a different one. The calls the
-        run made are replayed, never made again; a run holding a change whose effect is unknown
-        is refused. The new run's journal names the run and checkpoint it came from."""
-        tenant = await self.harness.tenant(tenant)
-        parent = await self.harness.runs.get(run_id, tenant=tenant)
-        if parent is None:
-            raise ConfigurationError(f"no run {run_id}")
-        journal = (await self._journal_of(run_id, tenant)).forked(run_id, checkpoint_id)
-        record = await self._opened(
-            parent.input,
-            user=parent.user_id or "",
-            thread=parent.thread_id,
-            tenant=tenant,
-            without=without,
-        )
-        return await pipeline.attempt(self, record, parent.input, journal=journal)
-
-    async def _journal_of(self, run_id: str, tenant: str) -> Journal:
-        held = await self.harness.runs.get(run_id, tenant=tenant)
-        if held is None:
-            raise ConfigurationError(f"no run {run_id}")
-        return await Journal.read(held.checkpoint, self.harness.runs.artifacts, tenant=tenant)
 
     async def resume(
         self,
@@ -770,7 +729,12 @@ class Agent:
                 pushed = await memory.context(
                     runtime.task,
                     tools=own or None,
-                    window=not self.adapter.keeps_conversation(self.target),
+                    # the framework keeps the thread itself (a checkpointer; an OpenAI Agents
+                    # ``session`` given as a run option): memory's window is not sent again
+                    window=not (
+                        self.adapter.keeps_conversation(self.target)
+                        or runtime.framework_options.get("session") is not None
+                    ),
                     hints=hints,
                     budget=self.context_budget,
                 )

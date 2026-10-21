@@ -238,7 +238,7 @@ async def test_the_middleware_run_in_their_order(
     ]:
         recorded(cls, label)
     model = ScriptedChat([("stock", {"sku": "a"}), "7"])
-    graph = ReAct(system="s", model=model, middleware=[Mine()])
+    graph = ReAct(system="s", model=model, middleware=[Mine()], context_window=128_000)
     await harness.wrap(graph, id="order", tools=[stock]).run("x", user="u")
     model_order = ["files", "tools", "stall", "steps", "clear", "summary", "mine", "hooks"]
     first_call = [s.split()[1] for s in seen[: len(model_order)]]

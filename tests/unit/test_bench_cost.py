@@ -279,7 +279,9 @@ async def test_the_command_writes_the_json_and_the_table(
     assert json.loads(out.with_suffix(".json").read_text())["model"] == "m"
     assert "| 10 | baseline |" in out.with_suffix(".md").read_text()
     assert report["cells"][0]["dollars"].keys() == set(prices.REFERENCE)  # m is not priced
-    assert report["setup"]["window_source"] == "default"  # nothing said what m's window is
+    assert (
+        report["setup"]["window_source"] == "unknown"
+    )  # nothing said what m's window is: its features off
     assert "not priced" in stats.markdown(report)
 
 

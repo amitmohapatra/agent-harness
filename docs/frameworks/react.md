@@ -46,37 +46,33 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 ```text
 ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None, effort=None,
-      fallback_models=())
+      tool_guidance=False, answer_check=False, capabilities=None, effort=None, settings=None)
 ```
 
-* `model` — a Bifrost model name: a `ChatOpenAI` on `BIFROST_URL` (needed when `ReAct` is
-  called) with the agent's virtual key (`BIFROST_VIRTUAL_KEY`), the gateway's deny-all MCP
-  scope (the harness gives the tools), `timeout=model_timeout`, 2 retries of its own and the
-  window as its profile. A vendor's model (`anthropic/...`, `openai/...`) is asked through the
-  vendor's own API on the gateway when the gateway serves it — `ChatAnthropic` on its
-  Anthropic endpoint, `ChatOpenAI` on its Responses API — so the vendor's caching, effort and
-  tool search work (`native_client`; an empty request probes the endpoint once: nothing is
-  generated); otherwise the `ChatOpenAI` above, said once in the log. Or any LangChain chat
-  model, used as it is (never replaced).
+* `model` — a Bifrost model name: a `ChatOpenAI` on the gateway's chat completions
+  (`BIFROST_URL`, needed when `ReAct` is called) with the agent's virtual key
+  (`BIFROST_VIRTUAL_KEY`), the gateway's deny-all MCP scope (the harness gives the tools),
+  `timeout=model_timeout` and no retries of its own: the gateway owns retries (a provider's
+  `network_config.max_retries`, 0 by default — set it), fallbacks (the virtual key's) and
+  prompt caching (`prompt_cache.auto_inject`). Or any LangChain chat model, used as it is
+  (never replaced).
 * `output` — a Pydantic model or a JSON schema the answer is parsed into (LangChain's
   `response_format`: the provider's structured output when LangChain knows the model has it,
-  else a tool the model answers with). An answer that does not fit is asked for once more,
-  saying what was wrong; a second is a `ModelError` saying so (`structured_output`).
+  else a tool the model answers with, asked again when its answer does not fit — within
+  `max_steps`).
 * `model_timeout` — the most one model call may take, in seconds, the gateway's retries and
   fallbacks included; within what is left of the run's `timeout=`/`deadline=`.
 * `context_window` — the model's window in tokens; given, it wins. Unset, the model's
-  LangChain profile (`max_input_tokens`): the model object's, or the one LangChain bundles for a
-  vendor's model name — never fetched; when none says, 128k, said once in the log (give it for
-  a local model: a llama.cpp server's `-c`). Where the number came from is logged. Every
-  threshold below is a share of it.
-* `effort` — the reasoning effort of every step of a model that takes one; unset, each step's
-  own (`effort`, below).
-* `fallback_models` — gateway model names tried in order when a model call fails
-  (`fallback`): sent with every call as Bifrost's own `fallbacks` (as the fallbacks configured
-  on the virtual key are), the gateway the one place that falls back; the model that answered
-  is in the `chat` span and the run's journal (`answered_by`). For a model name only (a chat
-  model of your own is refused them).
+  LangChain profile (`model.profile["max_input_tokens"]`: a chat model of LangChain's that knows
+  the model, or a `ChatOpenAI` whose model name LangChain knows). When neither says, the
+  window-scaled parts are off — clearing old tool results and the long-task tools — said once
+  in the log, and Deep Agents' summarization uses its own thresholds: give it for a local model
+  (a llama.cpp server's `-c`) or a prefixed vendor name. Where the number came from is logged.
+* `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`, the
+  same on every step; the gateway passes it on to the provider). For a chat model of your own,
+  set it on that model.
+* `settings` — the gateway's address and key (`Harness(config=)`'s `Settings`); unset, the
+  environment's.
 * `prompt` — a prompt (`"triage"`, `"triage@3"`, a `Prompt`) from the prompt sources — code,
   `PROMPTS_DIR`, Langfuse, the gateway ([prompts.md](../prompts.md)) — looked up at the run's
   start and pinned for it (a resume reads the same one): a stored prompt of the gateway's is
@@ -98,16 +94,16 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 | Middleware | What it does |
 |---|---|
 | `FilesystemMiddleware` (Deep Agents) on a journal backend | a tool result over 20,000 tokens is saved as a file in the graph's state (`/large_tool_results/<call id>`), a head-and-tail preview in its place; `read_file` reads it by lines (OpenAI Agents and Claude get the same from the harness: [tools.md](../tools.md#large-results)). The files are in a channel the run's journal keeps whole, so they are still there after a pause, a crash or a move to another worker |
-| `ContextEditingMiddleware` + `ClearToolUsesEdit` (LangChain) | past half the window, the older tool results (all but the last 3) are cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a provider's prompt cache breaks rarely |
-| `create_summarization_middleware` (Deep Agents) | past 85% of the window, the older turns are summarized by one model call, the last 10% kept; the turns it replaced are saved where `read_file` reads them (`/conversation_history/...`); oversized tool arguments in older turns are truncated first; a context overflow is summarized and retried. The turns a summary replaces are saved to the memory service first, each once (`compaction_memory`; with memory off, summarized as before, said once) |
+| `ContextEditingMiddleware` + `ClearToolUsesEdit` (LangChain) | a known window only: past half of it, the older tool results (all but the last 3) are cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a provider's prompt cache breaks rarely |
+| `create_summarization_middleware` (Deep Agents) | past 85% of the window (Deep Agents' own thresholds when the window is not known), the older turns are summarized by one model call, the last 10% kept; the turns it replaced are saved where `read_file` reads them (`/conversation_history/...`); oversized tool arguments in older turns are truncated first; a context overflow is summarized and retried. |
 | `PatchToolCallsMiddleware` (Deep Agents) | a tool call left with no answer (a crash, a cancel) gets one, so the conversation stays valid |
 | `response_format` (LangChain) | `output=` |
 | parallel tool calls (LangGraph) | the calls of one step run at once, each in its own task |
 
 **Native, on when a task needs them** (`trellis.harness.automatic`) — a long task: from the
 model's third call of a run's invocation, or at once when the request asks for steps (a list of
-three items or more, "step by step", "a plan"), on a model whose window is at least 32,000
-tokens (together they cost about 2,600 tokens a call). A shorter task is sent exactly what it
+three items or more, "step by step", "a plan"), on a model whose window is known and at least
+32,000 tokens (together they cost about 2,600 tokens a call). A shorter task is sent exactly what it
 was before they existed. Each is off with `without=` (the model is not offered it; a call of it
 answers that it is not available):
 
@@ -115,22 +111,13 @@ answers that it is not available):
 |---|---|
 | `TodoListMiddleware` (LangChain), `planning` | the `write_todos` tool and its instructions: a plan the model keeps |
 | `FilesystemMiddleware`'s scratch tools (Deep Agents), `files` | `ls`, `write_file` and `edit_file` beside `read_file`: notes and drafts kept as files, one at most 100,000 characters, a run's at most 1,000,000 |
-| Deep Agents' `compact_conversation` tool, `files` | the model compacts its own context when a phase is done (eligible from about half the summarization trigger, as Deep Agents gates it) |
-| `SubAgentMiddleware` (Deep Agents), `subagent_task` | the `task` tool: a general-purpose helper with the same tools does a self-contained part in a context of its own. Each call is a child run of the same agent, as `agent.as_tool()` makes one ([subagents.md](../subagents.md)): governed, journaled, continued from its journal after a crash, its question the parent's, cancelled with the parent. A helper starts no helper; at most 4 work at once per run |
+A `TodoListMiddleware` or `FilesystemMiddleware` given to `ReAct(middleware=)` replaces the
+automatic one (it is then always on). Delegation is your code's: a wrapped agent's
+`agent.as_tool()` ([subagents.md](../subagents.md)).
 
-A `TodoListMiddleware`, `FilesystemMiddleware` or `SubAgentMiddleware` given to
-`ReAct(middleware=)` replaces the automatic one (it is then always on).
-
-**Automatic for every task**, each off with `without=`:
-
-| What (`without=` name) | What it does |
-|---|---|
-| the vendor's own API, `native_client` | a vendor's model named by name asked through its own API on the gateway (above) |
-| effort, `effort` | a model that reasons (its LangChain profile lists effort levels) thinks hard on the steps that decide the run — its first call, the step after a tool failed, an `AnswerCheck` check — and little on the others; `effort=` fixes it. A model that takes no effort (a local one) is sent none |
-| the prompt cache, `prompt_cache` | an Anthropic model's calls have their stable start — the instructions, the tools, the history — cached (LangChain's `AnthropicPromptCachingMiddleware`); OpenAI's caching is automatic. Cached tokens are on the `chat` span and the run's budget |
-| fallback models, `fallback` | with `fallback_models=`: the gateway tries each in order when a call fails |
-| structured output repair, `structured_output` | with `output=`: an answer that does not fit asked for once more |
-| the budget, `budget` | once the run's budget ([api.md](../api.md#budget)) — or its parent's — is spent: one more call, without tools, for the best answer with what it has; the run ends `PARTIAL` (`BUDGET_EXCEEDED`) |
+**With a budget** (`h.wrap(budget=Budget(...))`, [api.md](../api.md#budget)): once the run's —
+or its parent's — is spent, one more call without tools for the best answer with what it has;
+the run ends `PARTIAL`. No budget given, no cap.
 
 **The harness's** (`trellis.harness.middleware`) — only what the native middleware does not do:
 
@@ -142,7 +129,7 @@ A `TodoListMiddleware`, `FilesystemMiddleware` or `SubAgentMiddleware` given to
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed (no such tool, arguments that do not fit, an error, a timeout), stop the run with a `ModelError` |
 | `read_result` (a tool) | reads a cleared tool result again, by its call's id, in pieces |
 | `ReadTools` | `read_file` offered only once there is a file to read, `read_result` once a result was cleared: a small model offered them from the start reads nothing, again and again (both stay callable) |
-| `RunCheckpointer` | the graph's checkpoints kept in the run's journal, the last 20: a resume — after a pause, a crash or a requeue — continues the graph where it stopped, and `agent.fork(run_id, checkpoint_id)` starts a new run from an earlier one ([api.md](../api.md#agentcheckpoints-agentfork)) |
+| `RunCheckpointer` | the graph's checkpoint kept in the run's journal, the latest only: a resume — after a pause, a crash or a requeue — continues the graph where it stopped |
 | `ToolGuidance` (`tool_guidance=True`) | how to choose among tools, added to the instructions of every call that offers tools ([below](#tool-choice)) |
 | `AnswerCheck` (`answer_check=True`) | the draft answer checked against the request once, the tools still needed called ([below](#tool-choice)) |
 
@@ -153,7 +140,7 @@ shows what the model is sent). Each works the same in any `create_agent` or Deep
 |---|---|
 | `TodoListMiddleware()` (LangChain) | a `write_todos` plan the model keeps from the first call (by default only a long task gets one) |
 | `FilesystemMiddleware()` (Deep Agents) | the whole virtual filesystem (`ls`, `write_file`, `edit_file`, `glob`, `grep`): replaces the default `read_file`-only one |
-| `SubAgentMiddleware(...)` (Deep Agents) | the `task` tool with sub-agents of the graph's own, run by Deep Agents (the automatic helper's calls are child runs; a wrapped agent's `as_tool()` is the harness's way, [subagents.md](../subagents.md)) |
+| `SubAgentMiddleware(...)` (Deep Agents) | the `task` tool with sub-agents of the graph's own, run by Deep Agents (a wrapped agent's `as_tool()` is the harness's way, [subagents.md](../subagents.md)) |
 | `HumanInTheLoopMiddleware(...)` (LangChain) | the framework's own approvals (the harness's are a tool's `ask`, [interrupts.md](../interrupts.md)) |
 | `ToolCallLimitMiddleware(...)` (LangChain) | a cap on the calls of a tool, or of all |
 | `PIIMiddleware(...)` (LangChain) | PII redacted, masked or refused in what the model reads |
