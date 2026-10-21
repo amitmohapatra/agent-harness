@@ -16,7 +16,7 @@ score, or ``None`` when it has nothing to say about this case. Built in:
   the call that paused counts as made;
 * :func:`llm_judge` — a judge model scores the answer against plain-language criteria (strict
   JSON ``{score, reasoning}`` at temperature 0). Which model, and through which virtual key,
-  is the deployment's (``TRELLIS_JUDGE_MODEL``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), never the code's.
+  is the deployment's (the gateway's judge alias, ``TRELLIS_JUDGE_VIRTUAL_KEY``), never the code's.
 
 What evaluation reaches — Langfuse, the judge's gateway and model — is an
 :class:`EvalServices`: ``EvalServices.from_env()``, or a wrapped agent's own (``agent.evals``).
@@ -33,7 +33,7 @@ builds experiments from: ``telemetry.Experiment``).
   ``async (input) -> answer`` otherwise — evaluated, and scored; :class:`EvalReport` says how
   each item went and the mean of each evaluator.
 * **Online** — :func:`judge` scores one case from any code. A wrapped agent does it by itself:
-  ``Harness(judges=[...])`` — after a sampled successful run (``TRELLIS_JUDGE_SAMPLE``, by the
+  ``Harness(judges=[...])`` — after a sampled successful run (``TRELLIS_EVAL_SAMPLE``, by the
   run id) each judge runs in the background writes queue, never on the request path, and its
   score lands on the run's trace. A judge that fails is a warning, never a failed run.
 """
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -269,20 +270,18 @@ class EvalReport:
 class EvalServices:
     """What evaluation reaches: Langfuse (``None``: scores are ``score`` spans only, and a
     dataset must be given as items), the judge's gateway, and the model :func:`llm_judge` asks —
-    a judge's own (``llm_judge(model=)``), else ``judge_model`` (``TRELLIS_JUDGE_MODEL``, a
-    Bifrost model name; a chat-completions object is asked as it is), else ``fallback_model``
-    (the gateway model name a wrapped ``ReAct`` was built with, logged once: a model grading
-    itself is biased; with none, ``llm_judge`` is refused). The deployment chooses the judge:
-    :meth:`from_env` reads it from the environment, and a wrapped agent's (``agent.evals``)
-    are its harness's."""
+    a judge's own (``llm_judge(model=)``), else ``judge_model`` (the deprecated
+    ``TRELLIS_JUDGE_MODEL``; a chat-completions object is asked as it is), else the gateway's
+    judge alias :data:`JUDGE_ALIAS`, which the Bifrost admin routes to a model — never the
+    judged agent's own. An alias the gateway does not route turns the judges off, said once.
+    :meth:`from_env` reads the deployment from the environment, and a wrapped agent's
+    (``agent.evals``) are its harness's."""
 
     langfuse: telemetry.Langfuse | None = None
     judge_gateway: Gateway | None = None
     judge_model: Any = None
-    fallback_model: str | None = None
     #: where ``llm_judge(prompt=)`` is looked up (``None``: the judge's gateway only)
     prompts: PromptSources | None = None
-    _shares_logged: bool = field(default=False, init=False, repr=False)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> EvalServices:
@@ -312,24 +311,9 @@ class EvalServices:
 
     def model(self, named: str | None = None) -> Any:
         """The chat model the judge asks: ``named`` (a judge's own, ``llm_judge(model=)``),
-        else the judge's model (``TRELLIS_JUDGE_MODEL``), each through the judge's gateway;
-        else the gateway model the judged agent was named with (logged once: a model grading
-        its own answers is biased — set a separate, stronger judge model)."""
-        model = named or self.judge_model
-        if model is None:
-            model = self.fallback_model
-            if model is None:
-                raise ConfigurationError(
-                    "llm_judge needs a judge model: set TRELLIS_JUDGE_MODEL (a gateway model "
-                    "name; TRELLIS_JUDGE_VIRTUAL_KEY for its own key) or llm_judge(model=) — "
-                    "another, stronger model than the agent's"
-                )
-            if not self._shares_logged:
-                self._shares_logged = True
-                log.warning(
-                    "TRELLIS_JUDGE_MODEL is unset: the judge shares the model of the agent it "
-                    "judges (set a different, stronger model so it does not grade itself)"
-                )
+        else the judge's model (``judge_model``), else the gateway's judge alias
+        (:data:`JUDGE_ALIAS`), each through the judge's gateway."""
+        model = named or self.judge_model or JUDGE_ALIAS
         if not isinstance(model, str):
             return model
         if self.judge_gateway is None:
@@ -693,7 +677,39 @@ class _Named:
     prompt: PromptPin | None = None
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
-        return await self.gateway.complete(messages, model=self.model, prompt=self.prompt, **body)
+        try:
+            return await self.gateway.complete(
+                messages, model=self.model, prompt=self.prompt, **body
+            )
+        except Exception as exc:
+            if self.model == JUDGE_ALIAS and _status(exc) in (400, 404):
+                _unrouted()
+                raise ConfigurationError(
+                    f"the judge alias {JUDGE_ALIAS!r} is not routed in the gateway: the judges "
+                    "are off (route it in Bifrost, or give llm_judge(model=))"
+                ) from exc
+            raise
+
+
+#: The model name the judge asks unless a judge names its own: an alias the Bifrost admin
+#: routes to the judging model (another, stronger model than the agents'), on the judge's
+#: virtual key — the deployment chooses it at runtime, no redeploy.
+JUDGE_ALIAS: Final = "trellis-judge"
+
+
+def _status(exc: BaseException) -> int | None:
+    """The HTTP status a gateway error carries (bifrost-sdk's ``status``)."""
+    status = getattr(exc, "status", None)
+    return status if isinstance(status, int) else None
+
+
+@functools.cache
+def _unrouted() -> None:
+    log.warning(
+        "the judge alias %r is not routed in the gateway: the judges are off (route it in "
+        "Bifrost, or give llm_judge(model=))",
+        JUDGE_ALIAS,
+    )
 
 
 def _message(reply: dict[str, Any]) -> dict[str, Any]:
@@ -740,11 +756,16 @@ async def judge(
     trace_id = case.trace_id or (telemetry.trace_hex(case.run_id) if case.run_id else None)
     scores: list[EvalScore] = []
     failed: dict[str, str] = {}
+    # the judge's gateway calls say whose run they judge (Bifrost's dimensions), unless the
+    # online judging already said more (its agent and tenant)
+    dims = {"run": case.run_id, "purpose": "judge"} if case.run_id else {"purpose": "judge"}
+    outer = telemetry.current_attribution()
     for evaluator in judges:
         name = name_of(evaluator)
         token = _services.set(services)
         try:
-            score = await evaluator(case)
+            with telemetry.attributed(outer or dims):
+                score = await evaluator(case)
         except Exception as exc:
             failed[name] = f"{type(exc).__name__}: {exc}"
             log.warning("evaluator %s failed on run %s: %s", name, ref, exc)

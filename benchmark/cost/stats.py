@@ -59,6 +59,48 @@ COLUMNS: Final = (
 )
 
 
+def _seconds(value: float | None) -> str:
+    return "—" if value is None else f"{value:,.2f}"
+
+
+def latency(report: dict[str, Any]) -> list[str]:
+    """Each cell's model call seconds (p50, p95, over every call of its runs) and CPU seconds
+    per run of each measured process, then each process's peak memory."""
+    names = list(
+        dict.fromkeys(
+            key.split(":", 1)[1]
+            for cell in report["cells"]
+            for key in cell["stats"]
+            if key.startswith("cpu_seconds:")
+        )
+    )
+    lines = [
+        "",
+        "Model call seconds (p50 and p95 over every call of the cell's runs) and CPU seconds "
+        "per run of each process:",
+        "",
+        "| tools | variant | calls | p50 s | p95 s | "
+        + " | ".join(f"CPU s ({n})" for n in names)
+        + (" |" if names else "|"),
+        "|---|---|---|---|---|" + "---|" * len(names),
+    ]
+    for cell in report["cells"]:
+        calls = cell["stats"].get("model_call_seconds") or {}
+        lines.append(
+            f"| {cell['size']} | {cell['variant']} | {calls.get('n', 0)} | "
+            f"{_seconds(calls.get('p50'))} | {_seconds(calls.get('p95'))} | "
+            + " | ".join(shown(cell["stats"].get(f"cpu_seconds:{n}"), 2) for n in names)
+            + (" |" if names else "")
+        )
+    peaks = report.get("processes") or {}
+    if peaks:
+        lines += ["", "Peak resident memory at the end of the run (MB):", ""]
+        for name, p in peaks.items():
+            peak = p.get("peak_rss_mb")
+            lines.append(f"* {name}: {'—' if peak is None else f'{peak:,.0f}'}")
+    return lines
+
+
 def markdown(report: dict[str, Any]) -> str:
     """The report as markdown: per catalogue size and variant, the per-run means with their
     95% intervals, then the dollars per run at each price."""
@@ -101,6 +143,7 @@ def markdown(report: dict[str, Any]) -> str:
                 f"{shown(got.get('seconds'), 1)} | {shown(got.get('tool_coverage'), 2)} | "
                 f"{shown(got.get('success'), 2)} |"
             )
+    lines += latency(report)
     others = [m for m in report["priced_as"] if m != report["model_price"]]
     if others:
         lines += [

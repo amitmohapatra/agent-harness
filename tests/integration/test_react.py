@@ -121,7 +121,6 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
         config=Settings(bifrost_url="http://gw.test/v1", bifrost_virtual_key="vk")
     ) as h:
         agent = h.wrap(graph, id="named")
-        assert agent.evals.fallback_model == "provider/model"
         result = await agent.run("x", user="u")
     assert result.answer == "hi"
     request = route.calls[0].request
@@ -139,8 +138,8 @@ def test_each_gateway_model_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")
     made: list[httpx.AsyncClient] = []
 
-    def client() -> httpx.AsyncClient:
-        made.append(httpx.AsyncClient())
+    def client(**params: Any) -> httpx.AsyncClient:
+        made.append(httpx.AsyncClient(**params))
         return made[-1]
 
     monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", client)
@@ -238,7 +237,7 @@ async def test_the_middleware_run_in_their_order(
     ]:
         recorded(cls, label)
     model = ScriptedChat([("stock", {"sku": "a"}), "7"])
-    graph = ReAct(system="s", model=model, middleware=[Mine()])
+    graph = ReAct(system="s", model=model, middleware=[Mine()], context_window=128_000)
     await harness.wrap(graph, id="order", tools=[stock]).run("x", user="u")
     model_order = ["files", "tools", "stall", "steps", "clear", "summary", "mine", "hooks"]
     first_call = [s.split()[1] for s in seen[: len(model_order)]]

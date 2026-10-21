@@ -288,7 +288,7 @@ async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
     memory_service.unsupported = 0
     scored: list[Any] = []
     monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append(args))
-    settings = Settings(grounding_sample=1.0)
+    settings = Settings(eval_sample=1.0)
     async with Harness(config=settings, memory=memory_service.client()) as h:
 
         async def fn(input: str, agent: Runtime) -> str:

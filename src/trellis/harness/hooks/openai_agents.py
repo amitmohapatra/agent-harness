@@ -4,7 +4,8 @@ A wrapped agent's runs get it from the harness (``Runner.run(..., hooks=ModelHoo
 that runs the SDK itself passes its hooks: ``Runner.run(agent, input,
 hooks=ModelHooks(Audit()))``. The SDK reports its model calls (``on_llm_start``,
 ``on_llm_end``) and takes nothing back: a call a ``before_model`` hook returns is not sent
-instead, and a failed call is not reported (``on_error`` sees the run's failure).
+instead, and a failed call is not reported (``on_error`` sees the run's failure). In a run,
+every reply's usage counts toward the run's budget (``budget.py``).
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from typing import Any
 from agents import Agent, RunContextWrapper, RunHooks
 from agents.items import ModelResponse
 
+from trellis.harness import budget
 from trellis.harness.hooks import Hooks, ModelCall, running
+from trellis.harness.runtime import current
 
 
 class ModelHooks(RunHooks[Any]):
@@ -41,4 +44,16 @@ class ModelHooks(RunHooks[Any]):
     async def on_llm_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse
     ) -> None:
-        await running(*self.given).answered(self._calls.pop(agent.name), response)
+        call = self._calls.pop(agent.name)
+        runtime = current()
+        if runtime is not None:  # what the run spent (``budget.py``)
+            usage = response.usage
+            details = getattr(usage, "input_tokens_details", None)
+            budget.account(
+                runtime,
+                model=call.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached=int(getattr(details, "cached_tokens", 0) or 0),
+            )
+        await running(*self.given).answered(call, response)

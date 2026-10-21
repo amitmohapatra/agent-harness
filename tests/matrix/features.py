@@ -56,6 +56,7 @@ from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
 from trellis.harness.sandbox import sandbox
 from trellis.harness.skills import LOAD_SKILL
+from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
 
 # --------------------------------------------------------------------------- not applicable
@@ -564,7 +565,14 @@ async def prompts(w: World) -> None:
     assert made[0]["x-bf-prompt-version"] == "1"  # outside a run: as resolved when made
     pins = {(p["prompt"], p["version"]) for p in o.custom("prompt")}
     assert pins == {("triage", "2")}, o.custom("prompt")  # every attempt: the run's start's
-    assert sent == [{**NO_GATEWAY_TOOLS, "x-bf-prompt-id": "p-triage", "x-bf-prompt-version": "2"}]
+    [request] = sent
+    prompt = {
+        k: v for k, v in request.items() if not k.startswith(DIMENSION) and k != "traceparent"
+    }
+    assert prompt == {**NO_GATEWAY_TOOLS, "x-bf-prompt-id": "p-triage", "x-bf-prompt-version": "2"}
+    # and the run's attribution (H6): its Bifrost dimensions, the user only as a hash
+    assert request[f"{DIMENSION}run"] == o.run_id and request[f"{DIMENSION}agent"]
+    assert request[f"{DIMENSION}user"] != USER and len(request[f"{DIMENSION}user"]) == 16
     if "tracing" in w.switched:  # the run's agent span says it too
         runs = [dict(s.attributes or {}) for s in w.spans()]
         said = [a for a in runs if a.get("trellis.run_id") == o.run_id]

@@ -39,7 +39,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections import deque
+import time
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, runtime_checkable
@@ -50,6 +51,7 @@ from croniter import croniter
 from trellis.contracts import (
     AgentError,
     ArtifactRef,
+    ConfigurationError,
     Interrupt,
     InterruptDecision,
     InterruptResolution,
@@ -75,6 +77,11 @@ from trellis.runs.client import LEASE_SECONDS
 
 #: Items a listing page holds when the caller names no limit (agent-runs' default).
 PAGE_LIMIT: Final = 50
+#: How many finished runs :class:`LocalRuns` keeps — the most recently finished — and for how
+#: long, in seconds: an in-process store never grows without bound. Paused, queued and running
+#: runs are always kept. A deployment keeps its runs in agent-runs (``RUNS_URL``).
+KEEP_FINISHED: Final = 1_000
+KEEP_FINISHED_SECONDS: Final = 3600.0
 
 
 class RunArtifacts(Protocol):
@@ -199,9 +206,30 @@ class LocalRuns:
     ``tenant=`` is checked as agent-runs checks a key's tenant: a run of another tenant is not
     there; without one, every tenant's runs are. A run's working time (``worked_seconds``)
     grows each time it stops running, as agent-runs keeps it; its limits are the attempts'
-    to keep (``pipeline.Budget``)."""
+    to keep (``pipeline.Budget``).
 
-    def __init__(self) -> None:
+    It keeps the ``keep_finished`` most recently finished runs (:data:`KEEP_FINISHED`), each
+    for at most ``keep_finished_seconds`` (:data:`KEEP_FINISHED_SECONDS`), with their artifacts:
+    an older one is forgotten (``get`` answers ``None``), so a long-lived process does not grow.
+    Paused, queued and running runs are never forgotten."""
+
+    def __init__(
+        self,
+        *,
+        keep_finished: int = KEEP_FINISHED,
+        keep_finished_seconds: float = KEEP_FINISHED_SECONDS,
+    ) -> None:
+        if keep_finished < 0 or keep_finished_seconds < 0:
+            raise ConfigurationError("LocalRuns keeps a number of finished runs from 0")
+        self.keep_finished = keep_finished
+        self.keep_finished_seconds = keep_finished_seconds
+        #: the finished runs, oldest first, and when each finished (``time.monotonic``)
+        self._finished: OrderedDict[str, float] = OrderedDict()
+        #: artifact id -> the runs that uploaded it; run id -> its artifacts
+        self._artifact_runs: dict[str, set[str]] = {}
+        self._run_artifacts: dict[str, set[str]] = {}
+        #: run id -> the schedule tick that queued it (``_fired``'s key)
+        self._fired_by_run: dict[str, str] = {}
         self._runs: dict[str, RunRecord] = {}
         self._queue: deque[str] = deque()
         #: runs that were ever queued: a resume sends them back to the queue
@@ -465,7 +493,37 @@ class LocalRuns:
             {**record.model_dump(), **changes, "status": status, "updated_at": moment}
         )
         self._runs[moved.run_id] = moved
+        if status.final:
+            self._finished[moved.run_id] = time.monotonic()
+            self._finished.move_to_end(moved.run_id)
+            self._forget()
         return moved
+
+    def _forget(self) -> None:
+        """Past the cap, or past their time, the oldest finished runs go, with what is theirs."""
+        horizon = time.monotonic() - self.keep_finished_seconds
+        while self._finished:
+            run_id, finished = next(iter(self._finished.items()))
+            if len(self._finished) <= self.keep_finished and finished >= horizon:
+                return
+            del self._finished[run_id]
+            self._drop(run_id)
+
+    def _drop(self, run_id: str) -> None:
+        self._runs.pop(run_id, None)
+        self._queued.discard(run_id)
+        self._leases.pop(run_id, None)
+        self._running_since.pop(run_id, None)
+        self._cancelling.pop(run_id, None)  # (a finished run is in no queue: claim, cancel)
+        tick = self._fired_by_run.pop(run_id, None)
+        if tick is not None:
+            self._fired.pop(tick, None)
+        for artifact_id in self._run_artifacts.pop(run_id, set()):
+            owners = self._artifact_runs.get(artifact_id, set())
+            owners.discard(run_id)
+            if not owners:
+                self._artifact_runs.pop(artifact_id, None)
+                self._artifacts.pop(artifact_id, None)
 
     def _expire_leases(self, now: datetime) -> None:
         for run_id, (_, until) in list(self._leases.items()):
@@ -510,6 +568,7 @@ class LocalRuns:
                 concurrency_key=getattr(schedule, "concurrency_key", None),
             )
             run_id = self._fired[key] = self._start(start, RunStatus.QUEUED).run_id
+            self._fired_by_run[run_id] = key
             schedule = self._schedules[schedule.schedule_id] = schedule.model_copy(
                 update={
                     "last_fired_at": now,
@@ -545,6 +604,8 @@ class LocalArtifacts:
         digest = hashlib.sha256(data).hexdigest()
         artifact_id = f"art_{digest[:24]}"
         self._runs._artifacts[artifact_id] = (record.tenant_id, data)
+        self._runs._artifact_runs.setdefault(artifact_id, set()).add(run_id)
+        self._runs._run_artifacts.setdefault(run_id, set()).add(artifact_id)
         return ArtifactRef(
             artifact_id=artifact_id,
             type="blob",

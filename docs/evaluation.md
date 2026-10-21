@@ -7,7 +7,7 @@ annotation queues live there. Trellis fills it two ways:
 |---|---|---|
 | What | an agent run over a dataset, every answer scored | live runs scored as they happen |
 | Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, evaluators)` | automatic: `Harness(judges=[...])`, and the sampled grounding check |
-| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (`TRELLIS_JUDGE_SAMPLE`, or `sample=`) |
+| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (`TRELLIS_EVAL_SAMPLE`, or `sample=`) |
 | When | now: the call returns an `EvalReport` | after the run — in the background writes queue, never on the request path, when wrapped |
 | Where the scores go | each run's trace (Langfuse scores, and a `score` span); a Langfuse dataset's runs are linked to the dataset run | each run's trace (or the trace a case names) |
 
@@ -43,8 +43,8 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
 ```
 
 * **Automatic.** With memory on, a sampled share of successful runs is checked against the
-  context it was given (`TRELLIS_GROUNDING_SAMPLE`, [memory.md](memory.md)), and with `judges=`
-  a sampled share is judged (`TRELLIS_JUDGE_SAMPLE`, [Online](#online-judges) below).
+  context it was given (`TRELLIS_EVAL_SAMPLE`, [memory.md](memory.md)), and with `judges=`
+  a sampled share is judged (the same `TRELLIS_EVAL_SAMPLE`, [Online](#online-judges) below).
   Nothing to call.
 * **`h.evaluate`** runs each item through the normal pipeline — memory, tools, governance and
   approvals, the agent's time limit (`h.wrap(timeout=)`: a hung item ends `TIMEOUT`, an
@@ -178,32 +178,33 @@ is a `ConfigurationError`.
 
 #### The judge's model
 
-**Which model, and whose budget, is configuration:**
+**Which model is the gateway's; whose budget is the deployment's:**
 
 | | |
 |---|---|
 | `llm_judge(criteria, model="name")` | this judge's own Bifrost model name: two judges of one run may ask two models |
-| `TRELLIS_JUDGE_MODEL` | else, the Bifrost model name every judge asks, through `BIFROST_URL` |
+| the judge alias `trellis-judge` | else, the model name every judge asks through `BIFROST_URL`: an alias the Bifrost admin routes to the judging model, changed at runtime with no redeploy (`TRELLIS_JUDGE_MODEL`, deprecated, still names one for a release) |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the virtual key the judge's calls go through; unset: `BIFROST_VIRTUAL_KEY` |
 
-A judge model, once set, is always the one asked: the judge never silently becomes the agent's
-model. Each score says which model gave it — the comment ends `[judge: <model>]`, its `score`
-span carries `trellis.score.model`, and a log line names it.
+The judge never becomes the judged agent's own model. An alias the gateway does not route
+(it answers 404) turns the judges off: each judge's failure says so in the report's `failed`,
+and the log says it once. Each score says which model gave it — the comment ends
+`[judge: <model>]`, its `score` span carries `trellis.score.model`, and a log line names it.
+Every judge call carries Bifrost's dimensions of the run it judges (`x-bf-dim-run`, and online
+also its agent, tenant and hashed user) with `x-bf-dim-purpose: judge`, so its spend is
+attributed in Bifrost's logs and metrics.
 
-Set a **different, stronger model than the agent's**: a model grading its own answers is
-biased towards them. Give the judge **its own virtual key**: its spend is then budgeted,
-rate-limited and reported in Bifrost apart from the agents' traffic. With no judge model set,
-a wrapped `ReAct` built with a gateway model name is judged by that model
-(`agent.evals.fallback_model`), and the harness logs once per agent that the judge shares the
-agent's model. Any other judged agent — a `ReAct` given a model object, a graph, a function —
-and any code judged through `EvalServices.from_env()` then gets no judge score, with the reason
-in the report's `failed` (`"llm_judge needs a judge model: set TRELLIS_JUDGE_MODEL ..."`).
+Route the alias to a **different, stronger model than the agent's**: a model grading its own
+answers is biased towards them. Give the judge **its own virtual key**: its spend is then
+budgeted, rate-limited and reported in Bifrost apart from the agents' traffic, so evaluation
+can never exhaust production's budget. Bifrost's semantic cache is not used for judges: a
+verdict replayed for a merely similar answer would be wrong.
 
 **Cost.** Every judged answer is one judge model call (two when the first reply is malformed),
 with a prompt of the criteria plus the case — up to about 32 000 characters. Offline that is
 one call per item and judge; online it is one per *sampled* run and judge: at the default 10 %
 sample, 1 000 runs a day cost about 100 judge calls a day per judge. Sample down
-(`TRELLIS_JUDGE_SAMPLE`), judge offline on a dataset instead, or use a cheaper deterministic
+(`TRELLIS_EVAL_SAMPLE`), judge offline on a dataset instead, or use a cheaper deterministic
 evaluator where one will do.
 
 ## Offline: `evaluate` and `h.evaluate`
@@ -297,10 +298,10 @@ id (no `expected`). Its score goes on
 the run's trace; a judge that fails is a `warning` event on the run's stream (`judge_failed`)
 and a log line.
 
-**`TRELLIS_JUDGE_SAMPLE`** is the share of runs judged, 0 to 1. Unset, it is 0.1 when the harness
-has judges (and nothing is judged without judges). The run id decides — salted apart from the
-grounding sample (`TRELLIS_GROUNDING_SAMPLE`), so the two samples are independent — so a run is
-either always or never judged, whichever process asks. `judge(..., sample=rate)` from code you
+**`TRELLIS_EVAL_SAMPLE`** is the share of runs evaluated, 0 to 1 — judged (with judges) and
+checked for grounding (with memory) — 0.1 when unset; `without={"judges"}` or
+`{"grounding"}` turns one of the two off. The run id decides — salted apart for the judges,
+so the two samples are independent — so a run is either always or never judged, whichever process asks. `judge(..., sample=rate)` from code you
 do not wrap samples the same way ([blocks/evaluation.md](blocks/evaluation.md#online-judge)).
 
 ## Langfuse setup
@@ -344,7 +345,7 @@ make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
 | Tasks | ten, from the tool-choice sets the live suite uses — the store set ([`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py)) and the held-out help desk and travel sets (`tests/live/heldout.py`): six short (two parts, a change behind approval, a read that sounds like a change), three long (four and five parts, each served by its own tool) and a large result — a help desk export of about 100,000 characters, past what `ReAct` pages. The report gives every figure for all of them and by length |
 | Catalogues | 10, 50, 100 and 500 tools (`--sizes`): each set's own tools, then distractors — 500 synthetic but realistic MCP-style tools (`<server>-<tool>`) of 25 servers (code hosting, CRM, billing, HR, monitoring, DNS...), list / get / create / update / delete of four kinds of record each, every one described and with a typed, described JSON schema; none is about the tasks' domains. The order is fixed, so a run is reproducible |
 | Variants | `baseline`: plain tools, everything off (`create_agent` with only what runs the harness's tools and bounds the loop; `without={"code_mode", "hints"}`). `main`: `ReAct` as it is built — result paging, context editing, summarization, `ToolGuidance` off, Code Mode where it applies (gateway MCP servers; the catalogues here are the agent's own tools, so it does not). `main-paging`, `main-context_editing`, `main-summarization`: `main` with that one piece off. A new feature is one more entry of `benchmark/cost/variants.py`, measured against these (`--variants`) |
-| Per run | input, output and cached tokens (as the model reports them), model calls (every chat model call of the run, a summarization's included), wall time, `tool_coverage` (the share of the task's needed tools called; for a run that ended in an error, from the calls it made) and task success (every needed tool called, no broader one, every other check of the task passed — `contains`, `picks`) |
+| Per run | input, output and cached tokens (as the model reports them), model calls (every chat model call of the run, a summarization's included) and each call's seconds (the report gives their p50 and p95 per cell), wall time, the CPU seconds of the benchmark's own process and of each `--watch name=pid` process (the model server, the gateway; the report adds each one's peak memory), `tool_coverage` (the share of the task's needed tools called; for a run that ended in an error, from the calls it made) and task success (every needed tool called, no broader one, every other check of the task passed — `contains`, `picks`) |
 | Cost | `benchmark/cost/prices.py`: dollars per million tokens, cached input and cache writes priced apart, each price with its source and the date it was read. A model not in the table is reported with its tokens and no dollars; `--price-as` prices the same tokens at listed models' rates as well (an estimate: their tokenizers count differently) |
 | Report | `build/bench-cost.json` (every run, each cell's means and 95% intervals — Student's t over the runs) and `build/bench-cost.md` (the table), written after every cell |
 
@@ -390,3 +391,43 @@ at those models' rates, an estimate), vendor prompt caching (the cached tokens a
 own prefix cache), the tool hints (they need the memory service), Code Mode (it needs gateway
 MCP servers), and the full task set at 50 tools (about 65 minutes per variant on this
 machine; the travel set ran).
+
+### The gate
+
+`make bench-gate` (`python -m benchmark.cost.gate NOW BASELINE`) compares a report with the
+stored baseline, cell by cell (catalogue size and variant) on the tasks both ran, and exits
+non-zero when a cell is worse past its margin: a success rate lower by more than
+`--success-margin` (0.15: a small model's runs vary), or mean input tokens higher by more than
+`--token-margin` (10%) on the successful runs of the tasks both reports did (a run that stopped
+early sent fewer tokens for less work: counting it would reward failing). Better passes — the gate is non-inferiority, not equality — and a cell
+only one report measured is listed, not failed.
+
+`.github/workflows/bench.yml` runs it where a gateway serving the baseline's model is
+configured (the repository variable `BENCH_BIFROST_URL` and the secret
+`BENCH_BIFROST_VIRTUAL_KEY`; without them the job is skipped): the smoke set (10 tools, one
+repeat) on a pull request, the 10- and 50-tool catalogues nightly.
+
+## Load benchmark
+
+`make bench-load` (`python -m benchmark.load`) runs many `ReAct` runs at once — a tool call and
+an answer each — on one and on two worker processes (`--workers 1,2`), at each level of
+concurrency (`--levels 1,10,50,100`, split across the workers, `--rounds` runs per lane), and
+reports per level the throughput (runs a second), the run latency's p50, p95 and p99, the
+errors, and each process's CPU seconds and peak memory (the workers, and `--watch name=pid`).
+The climb stops for a worker count at the first level that hits a limit — errors past
+`--max-errors` (5%), a p95 past `--max-p95`, or under `--min-free-mb` of the machine's memory
+free before the level starts — and the report says which.
+
+```bash
+make bench-load                                            # no model: the harness alone
+make bench-load LOAD_ARGS="--model provider/model --leak-minutes 30"
+```
+
+Without `--model` the model is `Paced`, a scripted model that answers after `--pace` seconds:
+the latency and the CPU are the harness's own, under load. `--leak-minutes` then runs one
+worker at `--leak-concurrency` for that long, sampling its resident memory, and reports the
+growth from the end of the warm-up (the first fifth) to the end, in MB and per run.
+
+Each worker is a process with its own harness (memory, the run store and tracing off, as in the
+cost benchmark), so the processes share nothing: the run store's queue (`h.worker`) is not in
+the measured path. Writes `build/bench-load.json` and `.md`.

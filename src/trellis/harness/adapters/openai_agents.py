@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
+import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar, Final
@@ -37,6 +39,8 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import reason_of
+
+log = logging.getLogger("trellis.harness")
 
 #: ``Runner.run``'s arguments the harness gives itself: the agent (a clone carrying the harness
 #: tools), its input (with the memory context, or the resumed state) and the run's hooks.
@@ -63,6 +67,24 @@ class _Continue:
     #: an edit: the tool and its edited arguments, approved when the model calls it with them
     tool: str | None = None
     edited: dict[str, Any] | None = None
+
+
+@functools.cache
+def sdk_tracing_said() -> bool:
+    """Say once, when an agent is wrapped, that the SDK's own tracing — which exports to
+    OpenAI unless turned off — is left as the application set it (``True`` when said)."""
+    from agents.tracing import get_trace_provider
+
+    provider = get_trace_provider()
+    disabled = getattr(provider, "_disabled", False)
+    if disabled:
+        return False
+    log.info(
+        "the OpenAI Agents SDK's own tracing is on and exports to OpenAI: the harness leaves it "
+        "as you set it (agents.set_tracing_disabled(True), or OPENAI_AGENTS_DISABLE_TRACING=1, "
+        "turns it off); the run's trace is the harness's and the gateway's"
+    )
+    return True
 
 
 class OpenAIAgentsAdapter:
@@ -186,12 +208,16 @@ class OpenAIAgentsAdapter:
     # ------------------------------------------------------------------ internals
     @staticmethod
     def _agent(target: Any, run: Invocation) -> Any:
-        if not run.native_tools:
-            return target
+        from trellis.harness.tools.convert.openai_agents import governed
+
+        # the agent's own tools governed, on a copy (the agent you wrapped is not changed)
+        own = [governed(t) for t in target.tools]
         # a tool the agent carries already (built with h.tools: read_file, say) is not added twice
         carried = {getattr(t, "name", None) for t in target.tools}
-        added = [t for t in run.native_tools if t.name not in carried]
-        return target.clone(tools=[*target.tools, *added])
+        added = [t for t in run.native_tools or () if t.name not in carried]
+        if not added and all(a is b for a, b in zip(own, target.tools, strict=True)):
+            return target
+        return target.clone(tools=[*own, *added])
 
     @staticmethod
     async def _input(agent: Any, native_input: Any) -> Any:

@@ -1,11 +1,13 @@
 """What a model's tokens cost: US dollars per million tokens, each price with its source and
 the date it was read. Cached input (a prompt-cache read) is priced apart from the rest of the
-input, and so is a cache write where the provider charges one.
+input, and so is a cache write where the provider charges one. The cost benchmark prices runs
+with it (a run's own ``max_cost`` budget counts what the gateway says a call cost, not this).
+``--price-as`` prices the same tokens at listed models' rates as well, marked as an estimate
+(another model's tokenizer counts the same text differently).
 
 A gateway model name (``provider/model``, ``openrouter/openai/model``) is looked up by its
-last part. A model that is not here is reported with its tokens and no dollars (never a
-guessed price); ``--price-as`` prices the same tokens at listed models' rates as well, marked
-as an estimate (another model's tokenizer counts the same text differently).
+last part. A model that is not here has no price (never a guessed one): its tokens are counted,
+its dollars are not.
 """
 
 from __future__ import annotations
@@ -49,8 +51,6 @@ PRICES: Final[dict[str, Price]] = {
     # local models: tokens are measured, dollars are not charged
     "granite-3.3-2b": Price(0.0, 0.0, 0.0, None, LOCAL),
 }
-#: The models a local run is also priced as, by default (an estimate: see the module).
-REFERENCE: Final = ("claude-sonnet-5-5", "gpt-6-sol")
 
 
 def price_of(model: str) -> Price | None:
@@ -76,3 +76,7 @@ def dollars(
         + written * write
         + output_tokens * price.output
     ) / 1_000_000
+
+
+#: The models a local run is also priced as, by default (an estimate: see the module).
+REFERENCE: Final = ("claude-sonnet-5-5", "gpt-6-sol")

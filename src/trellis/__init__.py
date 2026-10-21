@@ -22,6 +22,7 @@ __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent, RunHandle
+    from trellis.harness.budget import Budget
     from trellis.harness.harness import Harness
     from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite
     from trellis.harness.react import ReAct
@@ -51,11 +52,13 @@ _EXPORTS = {
     "Result": "trellis.harness.result",
     "Runtime": "trellis.harness.runtime",
     "Settings": "trellis.harness.settings",
+    "Budget": "trellis.harness.budget",
 }
 
 __all__ = [
     "Agent",
     "Ask",
+    "Budget",
     "Deny",
     "Harness",
     "Hooks",

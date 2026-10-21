@@ -95,13 +95,14 @@ from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from trellis.contracts import ConfigurationError, ModelError, ToolStatus
+from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
+from trellis.harness import budget
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
 from trellis.harness.repository import pinned
 from trellis.harness.runtime import DEFERRED, Runtime, current
-from trellis.harness.telemetry import model_span, usage
+from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import Tool, arguments_of, not_run
@@ -160,6 +161,83 @@ class _Step:
     finished: set[str]
     stopped: BaseException | None = None
     turn: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+
+#: The tools that only change the graph's own state (no effect outside the run, kept by its
+#: checkpoint): a ``GovernTools`` lets them through. Deep Agents' file tools are among them
+#: on its default ``StateBackend``; on a backend that writes to a real disk, give the graph
+#: governed tools instead (``h.tools``).
+STATE_TOOLS: Final = frozenset(
+    {"write_todos", "read_result", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+)
+
+
+class GovernTools(AgentMiddleware):
+    """The framework's own tools of a ``create_agent`` or Deep Agents graph — those not built
+    with ``h.tools`` — run as the harness's are (``h.governance_middleware()``; ``ReAct`` has
+    it): governance decides each call (the catalog's risk, else the tool's declared one in its
+    ``metadata["side_effects"]``, else its MCP-style annotations, else ``write``: announced),
+    a person approves when it asks, and the call is journaled (a resume does not run it again),
+    timed and traced. The harness's tools and the graph's state tools (:data:`STATE_TOOLS`)
+    are let through as they are."""
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        runtime = current()
+        call = request.tool_call
+        own = request.tool
+        if (
+            runtime is None
+            or own is None
+            or call["name"] in runtime.toolbox
+            or call["name"] in STATE_TOOLS
+        ):
+            return await handler(request)
+
+        async def run(args: dict[str, Any]) -> Any:
+            done = await handler(request.override(tool_call={**call, "args": args}))
+            if isinstance(done, ToolMessage) and done.status == "error":
+                raise ToolError(text_of(done.content), source="tools")
+            return text_of(getattr(done, "content", done))
+
+        spec = ToolSpec(
+            name=call["name"],
+            description=own.description or call["name"],
+            input_schema=_schema_of(own),
+            side_effects=side_effects_of(own.metadata),
+        )
+        outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
+        return ToolMessage(
+            content=text_of(outcome.output),
+            tool_call_id=str(call["id"]),
+            name=call["name"],
+            status="error" if outcome.status in FAILED else "success",
+        )
+
+
+def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
+    """A framework tool's risk as it declares it: ``side_effects`` (``read``, ``write``,
+    ``irreversible``), else MCP-style annotations (``readOnlyHint``: read, ``destructiveHint``:
+    irreversible), else ``write``."""
+    found = dict(metadata or {})
+    declared = found.get("side_effects")
+    if declared in ("read", "write", "irreversible"):
+        return str(declared)
+    hints = found.get("annotations") or {}
+    if isinstance(hints, Mapping) and hints.get("readOnlyHint"):
+        return "read"
+    if isinstance(hints, Mapping) and hints.get("destructiveHint"):
+        return "irreversible"
+    return "write"
+
+
+def _schema_of(tool: Any) -> dict[str, Any]:
+    from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: PLC0415
+
+    return dict(convert_to_openai_tool(tool)["function"].get("parameters") or {})
 
 
 class HarnessTools(AgentMiddleware):
@@ -386,8 +464,12 @@ class ModelHooks(AgentMiddleware):
         timeout: float | None = None,
         prompt: str | Prompt | None = None,
         prompt_vars: dict[str, Any] | None = None,
+        gateway: bool = False,
     ) -> None:
         super().__init__()
+        #: the model is the gateway's: every call carries the run's Bifrost dimensions and
+        #: its ``traceparent`` (``telemetry.gateway_headers``)
+        self.gateway = gateway
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
         if isinstance(prompt, str):
@@ -439,6 +521,12 @@ class ModelHooks(AgentMiddleware):
             request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", _said(request), extra=extra) as span:
+            if self.gateway:  # in the model's span: the gateway's span of the call joins it
+                sent = request.model_settings.get("extra_headers") or {}
+                headers = {**sent, **gateway_headers()}
+                request = request.override(
+                    model_settings={**request.model_settings, "extra_headers": headers}
+                )
             try:
                 async with _limited(runtime, self.timeout):
                     reply = await handler(request)
@@ -448,6 +536,8 @@ class ModelHooks(AgentMiddleware):
                 if error is exc:
                     raise
                 raise error from exc
+            if runtime is not None:  # what the run spent (``budget.py``)
+                budget.account_reply(runtime, reply)
             await hooks.answered(call, reply)
             _replied(span, reply)
         return reply
@@ -593,7 +683,8 @@ def _replied(span: Any, reply: ModelResponse[Any]) -> None:
     if message is None:
         return
     metadata = message.response_metadata or {}
-    counts = message.usage_metadata or {}
+    counts: dict[str, Any] = dict(message.usage_metadata or {})
+    details = counts.get("input_token_details") or {}
     reason = metadata.get("finish_reason")
     usage(
         span,
@@ -601,6 +692,8 @@ def _replied(span: Any, reply: ModelResponse[Any]) -> None:
         input_tokens=counts.get("input_tokens"),
         output_tokens=counts.get("output_tokens"),
         finish_reasons=[reason] if isinstance(reason, str) else [],
+        cached_tokens=details.get("cache_read"),
+        written_tokens=details.get("cache_creation"),
     )
     span_output(span, message.text or _spoken(message).get("tool_calls"))
 

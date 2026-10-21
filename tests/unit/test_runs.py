@@ -320,3 +320,77 @@ async def test_a_released_run_goes_back_on_the_queue_with_its_progress() -> None
     await runs.release("run_1", "w2")  # no progress to save: the one there is kept
     kept = await runs.get("run_1")
     assert kept is not None and kept.checkpoint == {"calls": {"k": [1]}}
+
+
+# --------------------------------------------------------------------------- retention
+async def finished(runs: LocalRuns, run_id: str) -> None:
+    await runs.start(start(run_id))
+    await runs.finish(run_id, RunStatus.SUCCESS, output="ok")
+
+
+async def test_finished_runs_are_kept_up_to_the_cap_and_others_always() -> None:
+    """An in-process store never grows without bound (I9): the most recently finished runs
+    are kept, up to ``keep_finished``; paused, queued and running ones always."""
+    runs = LocalRuns(keep_finished=3)
+    await runs.start(start("run_paused"))
+    await runs.pause(interrupt("run_paused"))
+    await runs.start(start("run_running"))
+    await runs.start(start("run_queued"), queue=True)
+    for n in range(1000):
+        await finished(runs, f"run_{n}")
+    assert len(runs._runs) == 6 and len(runs._finished) == 3
+    assert await runs.get("run_0") is None and await runs.get("run_999") is not None
+    for kept in ("run_paused", "run_running", "run_queued"):
+        assert await runs.get(kept) is not None
+    assert runs._queued == {"run_queued"} and list(runs._queue) == ["run_queued"]
+
+
+async def test_finished_runs_go_after_their_time_with_their_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("trellis.harness.runs.time.monotonic", lambda: clock[0])
+    runs = LocalRuns(keep_finished_seconds=60)
+    await runs.start(start("run_a"))
+    shared = await runs.artifacts.upload("run_a", b"same", tenant="t")
+    own = await runs.artifacts.upload("run_a", b"mine", tenant="t")
+    await runs.finish("run_a", RunStatus.SUCCESS)
+    await runs.start(start("run_b"))
+    await runs.artifacts.upload("run_b", b"same", tenant="t")
+    clock[0] += 61
+    await runs.finish("run_b", RunStatus.ERROR)  # a finish forgets what is past its time
+    assert await runs.get("run_a") is None and await runs.get("run_b") is not None
+    assert await runs.artifacts.download(own.artifact_id) is None
+    assert await runs.artifacts.download(shared.artifact_id) == b"same"  # still run_b's
+    clock[0] += 61
+    await finished(runs, "run_c")
+    assert await runs.artifacts.download(shared.artifact_id) is None
+    assert runs._artifact_runs == {} and set(runs._run_artifacts) == set()
+
+
+async def test_a_forgotten_scheduled_run_takes_its_tick_along() -> None:
+    runs = LocalRuns(keep_finished=0)
+    schedule = await runs.schedules.create(
+        ScheduleSpec(tenant_id="t", agent_id="a", name="n", cadence="daily", on_behalf_of="u")
+    )
+    runs._schedules[schedule.schedule_id] = schedule.model_copy(
+        update={"next_fire_at": datetime.now(UTC) - timedelta(seconds=1)}
+    )
+    fired = await runs.claim("w", ["a"])
+    assert fired is not None and len(runs._fired) == 1
+    await runs.finish(fired.run.run_id, RunStatus.SUCCESS, worker_id="w")
+    assert runs._fired == {} and runs._fired_by_run == {} and runs._runs == {}
+
+
+async def test_a_cancelled_queued_run_leaves_the_queue_when_it_is_forgotten() -> None:
+    runs = LocalRuns(keep_finished=0)
+    await runs.start(start("run_q"), queue=True)
+    await runs.cancel("run_q", reason="no")
+    assert list(runs._queue) == [] and runs._runs == {}
+
+
+def test_retention_is_a_number_from_0() -> None:
+    from trellis.contracts import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="from 0"):
+        LocalRuns(keep_finished=-1)

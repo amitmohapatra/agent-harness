@@ -18,8 +18,10 @@ from tests.support.memory import FakeMemoryService
 from tests.support.models import Script, ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
+from trellis.harness import evals as evals_module
 from trellis.harness import telemetry
 from trellis.harness.evals import (
+    JUDGE_ALIAS,
     EvalCase,
     EvalItem,
     EvalOutput,
@@ -36,8 +38,8 @@ from trellis.harness.evals import (
 )
 
 LF = "https://lf.test"
-#: Langfuse's credentials as the OTLP headers carry them (what reaches its public API too).
-OTLP = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": LF}
+#: Langfuse's own settings (its key pair, its host): what reaches its public API.
+LANGFUSE = {"langfuse_public_key": "pk", "langfuse_secret_key": "sk", "langfuse_host": LF}
 GW = "http://gw.test/v1"
 
 
@@ -79,7 +81,7 @@ class JudgeOrAnswer(ScriptedChat):
 
 
 def langfuse_harness(service: FakeMemoryService | None = None, **settings: Any) -> Harness:
-    config = Settings(**{"otlp_headers": OTLP, **settings})
+    config = Settings(**{**LANGFUSE, **settings})
     return Harness(config=config, memory=service.client() if service is not None else None)
 
 
@@ -236,7 +238,7 @@ async def test_a_plain_callable_is_evaluated_with_the_services_the_environment_n
     france, italy, boom = report.items
     assert (france.status, france.output, france.trace_url) == ("success", "Paris", None)
     assert france.scores == [EvalScore("exact_match", True)]
-    assert "TRELLIS_JUDGE_MODEL" in france.failed["llm_judge"]  # no judge model in the env
+    assert "BIFROST_URL" in france.failed["llm_judge"]  # no gateway in the env: no judge alias
     assert italy.scores == [] and italy.status == "success"
     assert (boom.status, boom.error, boom.output) == (
         "error",
@@ -279,7 +281,7 @@ async def test_a_long_answer_is_grounded_on_the_head_verify_takes(
     async def answers(input: str, agent: Runtime) -> str:
         return long
 
-    settings = Settings(grounding_sample=1.0)
+    settings = Settings(eval_sample=1.0)
     async with Harness(config=settings, memory=memory_service.client()) as h:
         assert (await h.wrap(answers, id="long").run("refunds?", user="u")).answer == long
         await h.writes.drain()
@@ -481,7 +483,7 @@ async def test_grounding_gives_no_score_for_an_answer_with_no_claim(
 ) -> None:
     memory_service.claims = 0
     memory_service.unsupported = 0
-    async with langfuse_harness(memory_service, otlp_headers={}, grounding_sample=0.0) as h:
+    async with langfuse_harness(memory_service, langfuse_public_key=None, eval_sample=0.0) as h:
         report = await h.evaluate(h.wrap(capital, id="c"), [{"input": "France"}], [grounding()])
     assert report.items[0].scores == [] and len(memory_service.named("verify")) == 1
 
@@ -603,7 +605,7 @@ async def test_the_judge_asks_the_judge_model_through_bifrost_with_the_judge_key
 
 
 @respx.mock
-async def test_without_a_judge_key_or_model_the_agents_are_used(
+async def test_without_a_judge_model_the_gateways_judge_alias_is_asked(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("BIFROST_URL", GW)
@@ -629,9 +631,38 @@ async def test_without_a_judge_key_or_model_the_agents_are_used(
             await h.evaluate(agent, [{"input": "France"}] * 2, [llm_judge("ok?")])
     judge_calls = [c for c in chat.calls if b"strict evaluator" in c.request.content]
     assert len(judge_calls) == 2
-    assert all(json.loads(c.request.content)["model"] == "agents/small" for c in judge_calls)
+    assert all(json.loads(c.request.content)["model"] == JUDGE_ALIAS for c in judge_calls)
     assert all(c.request.headers["authorization"] == "Bearer agent-key" for c in judge_calls)
-    assert caplog.text.count("the judge shares the model of the agent it judges") == 1
+    # whose run each judge call was for, and its trace (Bifrost's dimensions, traceparent)
+    assert all(c.request.headers["x-bf-dim-purpose"] == "judge" for c in judge_calls)
+    assert all(c.request.headers["x-bf-dim-run"].startswith("run_") for c in judge_calls)
+
+
+@respx.mock
+async def test_an_alias_the_gateway_does_not_route_turns_the_judges_off(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    evals_module._unrouted.cache_clear()
+    respx.post(f"{GW.rsplit('/v1', 1)[0]}/mcp").mock(
+        return_value=httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
+    )
+    respx.post(f"{GW}/chat/completions").mock(return_value=httpx.Response(404))
+    settings = Settings(bifrost_url=GW, bifrost_virtual_key="k")
+    with caplog.at_level(logging.WARNING, logger="trellis.evals"):
+        async with Harness(config=settings) as h:
+            report = await h.evaluate(
+                h.wrap(capital, id="c"), [{"input": "France"}] * 2, [llm_judge("ok?")]
+            )
+    assert "is not routed in the gateway" in report.items[0].failed["llm_judge"]
+    said = [r for r in caplog.records if r.message.startswith(f"the judge alias {JUDGE_ALIAS!r}")]
+    # a named model the gateway refuses is that error, not the alias's
+    respx.post(f"{GW}/chat/completions").mock(return_value=httpx.Response(404))
+    async with Harness(config=settings) as h:
+        report = await h.evaluate(
+            h.wrap(capital, id="c2"), [{"input": "France"}], [llm_judge("ok?", model="m/x")]
+        )
+    assert report.items[0].failed["llm_judge"].startswith("NotFoundError")
+    assert len(said) == 1  # said once, whatever the number of judged items
 
 
 def gateway_judging(models: dict[str, str]) -> Any:
@@ -716,7 +747,7 @@ async def test_a_judge_with_no_model_to_ask_is_an_evaluator_failure(harness: Har
     report = await harness.evaluate(
         harness.wrap(capital, id="c"), [{"input": "France"}], [llm_judge("ok?")]
     )
-    assert "TRELLIS_JUDGE_MODEL" in report.items[0].failed["llm_judge"]
+    assert "BIFROST_URL" in report.items[0].failed["llm_judge"]  # the judge alias: a gateway's
     async with Harness(config=Settings(judge_model="judges/strong")) as h:
         report = await h.evaluate(
             h.wrap(capital, id="c"), [{"input": "France"}], [llm_judge("ok?")]
@@ -724,13 +755,11 @@ async def test_a_judge_with_no_model_to_ask_is_an_evaluator_failure(harness: Har
     assert "BIFROST_URL" in report.items[0].failed["llm_judge"]
 
 
-async def test_a_react_with_a_model_object_gives_the_judge_no_model_to_fall_back_on(
-    harness: Harness,
-) -> None:
+async def test_the_judge_never_falls_back_to_the_agents_model(harness: Harness) -> None:
     model = JudgeOrAnswer([])
     agent = harness.wrap(ReAct(system="s", model=model), id="geo")
     report = await harness.evaluate(agent, [{"input": "France"}], [llm_judge("ok?")])
-    assert "TRELLIS_JUDGE_MODEL" in report.items[0].failed["llm_judge"]
+    assert "BIFROST_URL" in report.items[0].failed["llm_judge"] and model.judged == []
 
 
 # --------------------------------------------------------------------------- judge, services
@@ -745,7 +774,7 @@ async def test_judge_scores_a_case_from_any_code_on_the_trace_it_names() -> None
 
     trace = "0af7651916cd43dd8448eb211c80319c"  # the team's own tracing made it
     case = EvalCase(input="q", output="Paris", expected="Paris", trace_id=trace)
-    async with EvalServices(langfuse=telemetry.Langfuse(LF, OTLP["authorization"])) as services:
+    async with EvalServices(langfuse=telemetry.Langfuse(LF, "Basic cGs6c2s=")) as services:
         given, failed = await judge(case, [exact_match(), broken], services=services)
     assert given == [EvalScore("exact_match", True)]
     assert failed == {"broken": "RuntimeError: judge down"}
@@ -762,18 +791,23 @@ async def test_judge_judges_a_stable_sample_of_runs(sample: float, judged: bool)
         await judge(EvalCase("q", "a"), [exact_match()], services=EvalServices(), sample=0.5)
 
 
-async def test_the_services_come_from_the_environment_alone() -> None:
+async def test_the_services_come_from_the_environment_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the Langfuse keys export the spans too: not from this test process
+    monkeypatch.setattr(telemetry, "configure", lambda settings: False)
     environment = {
         "BIFROST_URL": GW,
         "BIFROST_VIRTUAL_KEY": "agent-key",
         "TRELLIS_JUDGE_VIRTUAL_KEY": "eval-key",
         "TRELLIS_JUDGE_MODEL": "judges/strong",
-        "OTEL_EXPORTER_OTLP_HEADERS": f"Authorization=Basic cGs6c2s=,x-langfuse-host={LF}",
+        "LANGFUSE_PUBLIC_KEY": "pk",
+        "LANGFUSE_SECRET_KEY": "sk",
+        "LANGFUSE_BASE_URL": LF,
     }
     async with EvalServices.from_env(environment) as services:
         assert services.langfuse is not None and services.langfuse.host == LF
         assert services.judge_gateway is not None and services.judge_model == "judges/strong"
-        assert services.fallback_model is None
     empty = EvalServices.from_env({})
     assert (empty.langfuse, empty.judge_gateway, empty.judge_model) == (None, None, None)
     await empty.aclose()
@@ -785,8 +819,7 @@ async def test_a_wrapped_agent_judges_with_the_harness_services_and_its_own_mode
         agent = h.wrap(ReAct(system="s", model=model), id="geo")
         assert agent.evals is agent.evals  # one per agent
         assert agent.evals.langfuse is h.evals.langfuse
-        assert agent.evals.fallback_model is None  # a model object names no gateway model
-        assert h.wrap(capital, id="c").evals.fallback_model is None
+        assert agent.evals is h.evals  # the harness's: the judge is the gateway's alias
 
 
 # --------------------------------------------------------------------------- online
@@ -798,7 +831,7 @@ async def test_online_judges_score_sampled_runs_in_the_background(
     scored: list[tuple[Any, ...]] = []
     monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append((*args, kw)))
     async with Harness(
-        config=Settings(judge_sample=sample), judges=[llm_judge("Helpful?", name="helpful")]
+        config=Settings(eval_sample=sample), judges=[llm_judge("Helpful?", name="helpful")]
     ) as h:
         h.evals.judge_model = model
         result = await h.wrap(capital, id="c").run("France", user="u")
@@ -822,7 +855,7 @@ async def test_online_judges_grade_a_structured_answer_as_its_json() -> None:
         graded.append(case.output)
         return None
 
-    async with Harness(config=Settings(judge_sample=1.0), judges=[seen]) as h:
+    async with Harness(config=Settings(eval_sample=1.0), judges=[seen]) as h:
         await h.wrap(structured, id="s").run("France", user="u")
         await h.writes.drain()
     assert graded == ['{"country": "France", "city": "Paris"}']
@@ -831,8 +864,10 @@ async def test_online_judges_grade_a_structured_answer_as_its_json() -> None:
 async def test_judges_default_to_a_tenth_of_runs_and_none_without_judges() -> None:
     async with Harness(config=Settings(), judges=[contains()]) as h:
         assert h.judge_sample == 0.1
-    async with Harness(config=Settings(judge_sample=0.5)) as h:
-        assert h.judge_sample == 0.5 and h.judges == []
+    async with Harness(config=Settings(eval_sample=0.5), judges=[contains()]) as h:
+        assert h.judge_sample == 0.5
+    async with Harness(config=Settings(eval_sample=0.5)) as h:
+        assert h.judge_sample == 0.0 and h.judges == []
 
 
 async def test_an_online_judge_that_fails_is_a_warning_not_a_failed_run() -> None:
@@ -842,7 +877,7 @@ async def test_an_online_judge_that_fails_is_a_warning_not_a_failed_run() -> Non
     async def no_answer(input: str, agent: Runtime) -> dict[str, str]:
         return {"not": "text"}
 
-    async with Harness(config=Settings(judge_sample=1.0), judges=[broken]) as h:
+    async with Harness(config=Settings(eval_sample=1.0), judges=[broken]) as h:
         events = [e async for e in h.wrap(capital, id="c").stream("France", user="u")]
         await h.writes.drain()
         assert events[-1].type.value == "RUN_FINISHED"
@@ -857,7 +892,7 @@ async def test_an_online_judge_failure_reaches_the_runs_listeners() -> None:
         raise RuntimeError("judge down")
 
     seen: list[Any] = []
-    async with Harness(config=Settings(judge_sample=1.0), judges=[broken]) as h:
+    async with Harness(config=Settings(eval_sample=1.0), judges=[broken]) as h:
         agent = h.wrap(capital, id="c")
         record = await agent._opened("France", user="u", thread=None, tenant=None)
         await pipeline.attempt(agent, record, "France", listener=seen.append)

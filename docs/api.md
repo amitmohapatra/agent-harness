@@ -9,6 +9,7 @@ modules (last section). What each environment variable does, and what is automat
 from trellis import (
     Agent,
     Ask,
+    Budget,
     Deny,
     Harness,
     Hooks,
@@ -42,7 +43,7 @@ spans and closes the clients it built; a block you give is yours to close.
 | Argument | Default | What it is |
 |---|---|---|
 | `config` | `Settings.from_env()` | the deployment as fields, instead of the environment ([Settings](#settings)) |
-| `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns`, or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
+| `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns(keep_finished=1000, keep_finished_seconds=3600)` (the finished runs it keeps, and how long), or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
 | `memory` | a `MemoryClient` with `MEMORY_URL`, else none | `trellis.memory.MemoryClient`; `False`: no memory whatever `MEMORY_URL` says ([memory.md](memory.md)) |
 | `gateway` | a `Gateway` with `BIFROST_URL`, else none | `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`; `False`: no gateway ([gateway.md](gateway.md)) |
 | `governance` | the memory service's tool catalog, per tenant (with memory), else the tools' own risks | a `Governance`, used for every tenant ([governance.md](governance.md)) |
@@ -58,7 +59,7 @@ spans and closes the clients it built; a block you give is yours to close.
 
 ```text
 h.wrap(target, *, id, tools=(), version=None, mcp=None, skills=(), timeout=None, without=(),
-       hooks=(), framework_options=None) -> Agent
+       hooks=(), framework_options=None, budget=None) -> Agent
 ```
 
 Attach the harness to `target`: a compiled LangGraph graph (Deep Agents and `ReAct` included),
@@ -76,6 +77,7 @@ framework is detected from its type and not modified.
 | `without` | `()` | what the harness does not do for any of its runs ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `hooks` | `()` | this agent's hooks, after the harness's ([hooks.md](hooks.md)) |
 | `framework_options` | none | the framework's own options for every run's call, passed through ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
+| `budget` | none: no cap | the most each run may spend, a sub-agent's run counted toward its parent's ([`Budget`](#budget)) |
 
 A framework installed outside the range this release was tested with is said once in the log
 when its first target is wrapped ([versioning.md](versioning.md)).
@@ -92,6 +94,17 @@ LangChain tools (`framework="langgraph"` or `"deepagents"`), `FunctionTool`s
 (functions, `skills(...)`, `sandbox()`, `agent.as_tool()`...), the MCP tools (`mcp=`: those of
 these Virtual MCPs) and the memory tools; `without=` leaves features' tools out
 ([tools.md](tools.md#tools-built-into-the-agent-htools)).
+
+### h.governance_middleware
+
+```text
+h.governance_middleware() -> AgentMiddleware
+```
+
+A LangChain middleware that runs a `create_agent` or Deep Agents graph's own tools (those not
+built with `h.tools`) as harness tools are: governed, asked when governance asks, journaled,
+timed and traced ([governance.md](governance.md)). Add it when you build the graph; `ReAct` has
+it. An OpenAI Agents agent's own tools need nothing: `h.wrap` governs them on a copy.
 
 ### h.prompt, h.prompt_messages, h.model_headers
 
@@ -259,7 +272,7 @@ a function target.
 ```text
 ReAct(system, model, *, output=None, max_steps=None, max_repeats=None, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None)
+      tool_guidance=False, answer_check=False, capabilities=None, effort=None, settings=None)
 ```
 
 A tool-calling agent for teams with no framework: a LangChain v1 `create_agent` graph with the
@@ -268,18 +281,38 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | Argument | Default | What it is |
 |---|---|---|
 | `system` | required | the instructions (may be `""` with a `prompt`) |
-| `model` | required | a Bifrost model name (a `ChatOpenAI` on `BIFROST_URL`) or any LangChain chat model |
-| `output` | none | a pydantic model the answer is parsed into |
+| `model` | required | a Bifrost model name (a `ChatOpenAI` on `BIFROST_URL`, no retries of its own: the gateway's) or any LangChain chat model |
+| `output` | none | a pydantic model or a JSON schema the answer is parsed into (LangChain's `response_format`) |
 | `max_steps` | 12 | model calls with tools, then one more without |
 | `max_repeats` | 3 | identical calls in a row that stop the run |
 | `model_timeout` | none | the most one model call may take, in seconds |
-| `context_window` | the model's profile, else 128,000 | the model's window in tokens |
+| `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `prompt`, `prompt_vars` | none | a prompt of the prompt sources, pinned for the run, and its variables ([prompts.md](prompts.md)) |
 | `middleware` | `()` | more LangChain or Deep Agents middleware; one named like a default replaces it |
 | `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |
 | `tool_guidance` | `False` | how to choose among tools, added to every call's instructions (`ToolGuidance`; [tool choice](frameworks/react.md#tool-choice)) |
 | `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |
 | `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
+| `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
+| `settings` | the environment's | the gateway's address and key (`Settings`, as `Harness(config=)` takes) |
+
+## Budget
+
+```text
+Budget(max_tokens=None, max_cost=None, max_tool_calls=None)
+```
+
+The most one run may spend, set per agent (`h.wrap(budget=)`; none given: no cap, spending
+still counted): tokens (input and output, every model call), US dollars (what the gateway says
+each call cost — Bifrost's `usage.cost`; a call it put no cost on is counted in tokens, said
+once when a dollar cap is set) and harness tool calls; `None` is no limit. A sub-agent's
+spending counts toward its parent's, and a resumed run goes on from what it spent. At a limit
+no new tool call starts (the calls under way finish), a `ReAct` is asked once more, with no
+tools, for its best answer, and the run ends `PARTIAL`, its result's error `BUDGET_EXCEEDED`.
+What is counted: the model replies of a `ReAct` (and any graph with `ModelHooks`) and of an
+OpenAI Agents run (tokens; its dollars are not reported), and every harness tool call of any
+framework; a Claude Agent SDK run's model use is not counted. A tenant's or a team's budget is
+the gateway's (Bifrost's virtual-key budgets).
 
 ## Tools
 

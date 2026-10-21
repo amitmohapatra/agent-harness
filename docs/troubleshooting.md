@@ -46,7 +46,7 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | the approval is asked twice | a framework gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`) and the harness's both gate the tool | gate each tool in one place ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)) |
 | no MCP tools | no `BIFROST_URL`, the key allows none, `without={"mcp"}`, or `mcp=[]` | check the key's MCP allow-list ([gateway.md](gateway.md)) |
 | an MCP tool is missing | the gateway would run it itself (Agent Mode: `tools_to_auto_execute`) | take it off the client's auto-execute list ([gateway.md](gateway.md#what-the-gateway-never-does-for-a-run)) |
-| the model is offered only some tools | tool hints narrow from 5 tools on | nothing, or `without={"hints"}` ([tools.md](tools.md#tool-hints-what-the-model-is-offered)) |
+| the model is offered only some tools | tool hints narrow from 5 tools on | nothing, or `without={"tool_search"}` ([tools.md](tools.md#tool-hints-what-the-model-is-offered)) |
 | `execute_tool_code` instead of the server's tools | Code Mode: 3+ read-only Code Mode servers or 20+ tools | nothing, or `without={"code_mode"}` ([tools.md](tools.md#code-mode)) |
 | `"<tool> was not run: ... Call it again with arguments that fit its schema"` | the model's arguments did not fit the tool's schema | nothing: the model reads it and calls again |
 | "of unknown effect" in a tool result | a write timed out, or was running when its worker died: it is never run again blind | check the target system with the call's idempotency key ([reliability.md](reliability.md#unknown-outcomes)) |
@@ -55,12 +55,12 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 
 | You see | Why | Do |
 |---|---|---|
-| `agent.context` is `None` | memory is off (`MEMORY_URL` unset, `without={"memory"}`/`{"memory_push"}`) or the context read failed (a `warning` event) | check the environment and the run's events ([memory.md](memory.md)) |
+| `agent.context` is `None` | memory is off (`MEMORY_URL` unset, `without={"memory"}`) or the context read failed (a `warning` event) | check the environment and the run's events ([memory.md](memory.md)) |
 | `ConfigurationError: memory is off for this run` | `trellis.current().memory` with memory off | set `MEMORY_URL`, or check `agent.uses("memory_pull")` first |
 | `warning` events about writes, `trellis.writes.undelivered` | memory writes given up after retries | set `TRELLIS_SPOOL_DIR` on a volume that outlives the process ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | a person's feedback does not change memory | human feedback waits for the tenant administrator's review | approve it in the memory service; the trace score is there already |
-| no judge scores | no judge model (`TRELLIS_JUDGE_MODEL`, a judge's `model=`, or a `ReAct` built with a model name) | set `TRELLIS_JUDGE_MODEL` ([evaluation.md](evaluation.md#the-judges-model)) |
-| few runs judged | online judges score a sample (`TRELLIS_JUDGE_SAMPLE`, 0.1 by default) | raise the sample |
+| no judge scores | the judge alias `trellis-judge` is not routed in Bifrost (the log says so once), or no `BIFROST_URL` | route the alias in Bifrost, or give `llm_judge(model=)` ([evaluation.md](evaluation.md#the-judges-model)) |
+| few runs judged | online judges score a sample (`TRELLIS_EVAL_SAMPLE`, 0.1 by default) | raise the sample |
 | no traces | no `OTEL_EXPORTER_OTLP_ENDPOINT`, no Langfuse keys and no provider of your own | set it ([observability.md](observability.md#export)) |
 | a value shows as `[redacted]` in a span | its name or value looks like a secret | expected; redact more with a hook of your own ([observability.md](observability.md#redaction)) |
 

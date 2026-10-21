@@ -348,7 +348,7 @@ class SkillSources(Chain[ResolvedSkill]):
     (:meth:`of`: ``SKILLS_DIR``, Bifrost)."""
 
     kind = "skill"
-    hint = "pass Harness(skills=[...]) or Skill objects, or set SKILLS_DIR or BIFROST_URL"
+    hint = "pass Harness(skills=[skills_dir(...), ...]) or Skill objects, or set BIFROST_URL"
 
     def __init__(self, sources: Sequence[SkillSource] = ()) -> None:
         super().__init__(sources)

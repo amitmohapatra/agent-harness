@@ -23,7 +23,11 @@ from trellis.harness import telemetry
 from trellis.harness.evals import EvalItem, EvalServices, evaluate, exact_match
 
 LF = "https://lf.test"
-OTLP = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": LF}
+LANGFUSE: dict[str, Any] = {
+    "langfuse_public_key": "pk",
+    "langfuse_secret_key": "sk",
+    "langfuse_host": LF,
+}
 PREFIX = "langfuse.experiment."
 
 
@@ -107,7 +111,7 @@ async def test_a_langfuse_dataset_run_is_linked_and_on_every_span_of_its_runs(
         respx.mock,
         link=httpx.Response(200, json={"id": "dri-1", "datasetRunId": "dsr-1"}),
     )
-    async with Harness(config=Settings(otlp_headers=OTLP)) as h:
+    async with Harness(config=Settings(**LANGFUSE)) as h:
         report = await h.evaluate(
             geo_agent(h, 2),
             "capitals",
@@ -172,7 +176,7 @@ async def test_a_refused_link_still_marks_the_spans_with_one_fallback_id(
     spans: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
 ) -> None:
     langfuse_dataset(respx.mock, link=httpx.Response(404, json={"message": "gone in v4"}))
-    async with Harness(config=Settings(otlp_headers=OTLP)) as h:
+    async with Harness(config=Settings(**LANGFUSE)) as h:
         report = await h.evaluate(geo_agent(h, 2), "capitals", [], run_name="v4", concurrency=1)
     assert "was not linked to dataset run v4" in caplog.text
     assert report.dataset_run_url is None
@@ -196,7 +200,7 @@ async def test_a_callables_items_are_linked_and_on_every_span_of_their_traces(
         with telemetry._tracer.start_as_current_span("my framework's step"):
             return {"France": "Paris"}.get(country, "Rome")
 
-    langfuse = telemetry.Langfuse.of(Settings(otlp_headers=OTLP))
+    langfuse = telemetry.Langfuse.of(Settings(**LANGFUSE))
     async with EvalServices(langfuse=langfuse) as services:
         report = await evaluate(
             capitals,

@@ -24,6 +24,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
+from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
+
 from trellis.contracts import (
     AgentError,
     ConfigurationError,
@@ -146,7 +148,8 @@ async def execute(
     began = time.monotonic()
     try:
         async with within or asyncio.timeout(tool.timeout):
-            output = await retried(once, retries=retries_of(tool.spec, reads=reads))
+            retries = retries_of(tool.spec, reads=reads)
+            output = await retried(once, retries=retries)
     except Exception as exc:
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
             return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
@@ -175,18 +178,68 @@ async def execute(
     return ToolOutcome(tool=tool.name, output=output, attempts=attempts), None
 
 
-async def retried(call: Callable[[], Awaitable[Any]], *, retries: int) -> Any:
+async def retried(
+    call: Callable[[], Awaitable[Any]],
+    *,
+    retries: int,
+    left: Callable[[], float | None] | None = None,
+) -> Any:
     """``call()``, tried again up to ``retries`` times after an error that may pass, with a
-    jittered backoff. The caller's timeout bounds the whole of it."""
-    attempt = 0
-    while True:
-        try:
+    jittered backoff — or, when the error says when to come back (``Retry-After``), then: a
+    wait longer than the time ``left`` (the run's, the call's) is not waited, the error is
+    raised. The caller's timeout bounds the whole of it."""
+
+    def passes(exc: BaseException) -> bool:
+        if is_pause_signal(exc) or not isinstance(exc, Exception):
+            return False
+        if not AgentError.of(exc).retryable:
+            return False
+        after, remaining = retry_after(exc), (left or _left)()
+        return after is None or remaining is None or after <= remaining
+
+    def wait(state: RetryCallState) -> float:
+        backoff = random.uniform(0, RETRY_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
+        error = state.outcome.exception() if state.outcome is not None else None
+        return max(backoff, (retry_after(error) if error is not None else None) or 0.0)
+
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(retries + 1),
+        retry=retry_if_exception(passes),
+        wait=wait,
+        sleep=asyncio.sleep,
+        reraise=True,
+    ):
+        with attempt:
             return await call()
-        except Exception as exc:
-            if attempt == retries or is_pause_signal(exc) or not AgentError.of(exc).retryable:
-                raise
-        await asyncio.sleep(random.uniform(0, RETRY_BACKOFF_SECONDS * 2**attempt))
-        attempt += 1
+    raise AssertionError("unreachable: tenacity returns or raises")  # pragma: no cover
+
+
+def retry_after(exc: BaseException) -> float | None:
+    """When an error says to come back, in seconds: its own ``retry_after``, or the
+    ``Retry-After`` header of the HTTP response it carries (seconds; a date is not read)."""
+    for held in (exc, exc.__cause__):
+        if held is None:
+            continue
+        said = getattr(held, "retry_after", None)
+        response = getattr(held, "response", None)
+        headers = getattr(response, "headers", None)
+        if said is None and headers is not None:
+            said = headers.get("retry-after")
+        if said is None:
+            continue
+        try:
+            return max(0.0, float(said))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _left() -> float | None:
+    """The time the code running now may still take (``Runtime.remaining``), in a run."""
+    from trellis.harness.runtime import current  # noqa: PLC0415 - runtime imports tools
+
+    runtime = current()
+    return runtime.remaining() if runtime is not None else None
 
 
 async def invoked(fn: Callable[..., Any], /, **kwargs: Any) -> Any:

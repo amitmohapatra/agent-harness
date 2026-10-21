@@ -7,13 +7,104 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- Every gateway call says whose run it is and joins its trace: Bifrost dimension headers
+  (`x-bf-dim-tenant`, `-agent`, `-run`, and a hash of the user, never the id) and the W3C
+  `traceparent`, on `ReAct`'s calls, the judge's (`x-bf-dim-purpose: judge`) and
+  `h.model_headers()` (read per request). The OpenAI Agents SDK's own trace export is left as
+  set, said once.
+
+- A framework's own tools are governed: an OpenAI Agents agent's `FunctionTool`s by `h.wrap`,
+  on a copy of the agent; a `create_agent` or Deep Agents graph's tools through
+  `h.governance_middleware()` (`ReAct` has it) — decided by risk (the catalog's, else the
+  tool's declared `side_effects` or annotations, else `write`), asked when governance asks,
+  journaled, timed and traced. The graph's state tools are let through.
+
+- One approval per call: a tool held by the framework's own approval gate
+  (`HumanInTheLoopMiddleware`, Deep Agents' `interrupt_on`, an OpenAI Agents `needs_approval`
+  tool) and by governance is asked once — governance counts the framework's approval, kept in
+  the run's journal; a hook's `Deny` still wins. `h.wrap` logs each tool both gate.
+
+- Budgets, per agent and opt-in (`h.wrap(budget=Budget(max_tokens=, max_cost=, max_tool_calls=))`;
+  none given, no cap): counted on the run's journal — so a resume goes on from what was spent
+  and a sub-agent's spending counts toward its parent's. At a limit no new tool call starts, a
+  `ReAct` gives its best answer with what it has, and the run ends `PARTIAL`, its result's error
+  `BUDGET_EXCEEDED`. Dollars are what the gateway says each call cost; a tenant's or a team's
+  budget is the gateway's.
+
+- `ReAct(output=)` takes a JSON schema as well as a pydantic model; `ReAct(effort=)` sends a fixed
+  `reasoning_effort` with every call of a model name; `ReAct(settings=)` takes the gateway's
+  address and key in code. A read tool's retry waits what an error's `Retry-After` says when
+  there is time left, else gives up. Cached input tokens are on the `chat` span.
+
+- `ReAct` plans and keeps scratch files on a long task — LangChain's `TodoListMiddleware` and
+  Deep Agents' file tools — once the model has made three calls or the request asks for steps,
+  on a known window of 32,000 tokens or more; a shorter task is sent what it was before.
+  `without=` turns each off: `planning`, `files` ([react.md](docs/frameworks/react.md#the-middleware)).
+
 - `make bench-cost` (`python -m benchmark.cost`): the cost and accuracy of a `ReAct` agent over
   tool catalogues of 10, 50, 100 and 500 tools, against whatever model is configured — input,
   output and cached tokens, model calls, wall time, `tool_coverage` and task success per run,
   dollars from a price table with sources (`benchmark/cost/prices.py`), means and 95%
   intervals per variant as JSON and markdown ([evaluation.md](docs/evaluation.md#cost-benchmark)).
 
+### Fixed
+
+- A long-lived process without `RUNS_URL` no longer grows with every run: `LocalRuns` kept
+  every finished run forever (about 4 kB each; the 30-minute load check grew 130 MB over 38,758
+  runs). It now keeps the last 1,000 finished runs for an hour each, with their artifacts
+  (`LocalRuns(keep_finished=, keep_finished_seconds=)`); paused, queued and running runs are
+  always kept. agent-runs (`RUNS_URL`) stays the durable store for production.
+- A `ReAct` run's files — a large result saved by `FilesystemMiddleware`, a summarized history
+  — were lost on a resume (Deep Agents keeps them in a `DeltaChannel`, which needs every
+  earlier checkpoint, and the run keeps only the latest): they are now in a channel the
+  journal keeps whole.
+
 ### Changed
+
+- The deprecated `TRELLIS_GROUNDING_SAMPLE` and `TRELLIS_JUDGE_SAMPLE` (and the matching
+  `Settings` fields) are read as `TRELLIS_EVAL_SAMPLE` taking the larger of the two, so setting
+  one to 0 no longer turns the other off; turn one part off with `without={"grounding"}` or
+  `without={"judges"}`.
+- The cost benchmark records each model call's seconds (p50 and p95 per cell) and the CPU
+  seconds per run of its own process and of each `--watch name=pid` one (the model server, the
+  gateway), with their peak memory. `make bench-gate` checks a report against the stored
+  baseline (non-inferiority: success within 0.15, input tokens within 10% on the runs both did), run by
+  `.github/workflows/bench.yml` where a gateway is configured; `make bench-load` measures many
+  runs at once on one and two worker processes and checks for a memory leak.
+- The retry loops (read-only tool retries, background memory writes, A2A push
+  notifications) run on `tenacity`, now a direct dependency; the attempts, waits and
+  `Retry-After` handling are unchanged.
+- The judge asks the gateway's judge alias `trellis-judge` (routed by the Bifrost admin) unless a
+  judge names its model; it never falls back to the judged agent's model. An alias the gateway
+  does not route turns the judges off, said once. Bifrost's semantic cache is not used for
+  judges.
+
+- `without=` has fewer names: `memory`, `tool_search` (the tool hints and memory's `tool_search`
+  tool), `mcp`, `code_mode`, `skills`, `judges`, `grounding`, `planning`, `files`, and the
+  umbrella `react_auto` (`planning` and `files`). `memory` now also turns the narrowing off.
+  `memory_push`, `memory_pull`, `records` and `hints` still work for a release, with a warning.
+
+- Configuration: each setting in one layer. The environment holds endpoints and keys
+  (`TRELLIS_JUDGE_VIRTUAL_KEY` kept: evaluation's own budget), one `TRELLIS_EVAL_SAMPLE` for
+  grounding and judges, `TRELLIS_SPOOL_DIR` (default: the XDG state folder, except in a
+  container or serverless runtime, said once) and `SANDBOX`; the tools' own variables are read
+  under their own names — the OpenTelemetry SDK's exporter reads `OTEL_EXPORTER_OTLP_*` itself
+  (`..._TRACES_ENDPOINT` honoured), `service.name` is only a default under `OTEL_SERVICE_NAME`
+  (fixed: it overrode it), the agents' version is `OTEL_RESOURCE_ATTRIBUTES`' `service.version`,
+  Langfuse is `LANGFUSE_BASE_URL` and its keys (scores no longer read from OTLP headers), and the
+  Docker daemon is found as docker-py finds it (`DOCKER_HOST`, the docker context, the socket).
+  Deprecated, read for one release with a warning naming the replacement: `PROMPTS_DIR`,
+  `SKILLS_DIR`, `TRELLIS_AGENT_VERSION`, `TRELLIS_WORKER_CONCURRENCY`, `SANDBOX_IMAGE`,
+  `TRELLIS_JUDGE_MODEL`, `TRELLIS_GROUNDING_SAMPLE`, `TRELLIS_JUDGE_SAMPLE`, `LANGFUSE_HOST`.
+  A startup log line names what the harness is connected to, and `trellis doctor` prints every
+  setting with its source, checks each service and key, the spool and the Docker daemon, and
+  suggests what to set. Each prompt and skill source in use is logged.
+
+- One owner per concern (the architecture review, ADR 0003): model retries, fallbacks and prompt
+  caching are the gateway's — `ReAct`'s client makes one attempt, where it made three (set the
+  provider's `network_config.max_retries` in Bifrost); a model's window is `context_window=`, else
+  its chat model's LangChain profile — when neither says, clearing old tool results is off (it
+  assumed 128k before), said once; a run's dollars are the gateway's cost.
 
 - A function tool's description is its docstring without the sections (`Args:`, `Returns:`,
   `Raises:`...), every other paragraph kept (was: the first paragraph only), and each parameter

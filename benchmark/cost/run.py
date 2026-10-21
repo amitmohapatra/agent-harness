@@ -5,9 +5,11 @@ catalogue is the whole tool set).
 
 Per run it records what the model was sent and answered — input, output and cached tokens
 and the model calls, counted from every chat model call the run made (a LangChain callback,
-so a summarization call counts too, not only the loop's) — the wall time, ``tool_coverage``
-(the share of the task's needed tools called: the evaluator's score, or, for a run that
-ended in an error, from the calls it made before) and task success.
+so a summarization call counts too, not only the loop's) and each call's seconds — the wall
+time, the CPU seconds of this process and of each watched one (``--watch``: the model server,
+the gateway), ``tool_coverage`` (the share of the task's needed tools called: the
+evaluator's score, or, for a run that ended in an error, from the calls it made before) and
+task success.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import os
 import platform
 import re
 import time
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
@@ -27,6 +29,7 @@ from typing import Any, Final
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.tracers.context import register_configure_hook
 
+from benchmark import procstat
 from benchmark.cost import catalog, prices, stats
 from benchmark.cost.variants import VARIANTS, Setup
 from trellis import Harness, Hooks, Settings
@@ -44,7 +47,7 @@ ANSWER_CHARS: Final = 300
 
 class Meter(BaseCallbackHandler):
     """Every chat model call made while it is current (:func:`metered`): how many, how many
-    failed, and the tokens their replies report."""
+    failed, the tokens their replies report and how long each took."""
 
     run_inline = True  # counted in the run's own task, not a thread
 
@@ -59,9 +62,21 @@ class Meter(BaseCallbackHandler):
         self.cache_reported = False
         #: the prompt tokens of the calls the server refused as too long, as it counted them
         self.refused_tokens = 0
+        #: each call's seconds, from its start to its reply or error
+        self.seconds: list[float] = []
+        self._started: dict[Any, float] = {}
+
+    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
+        self._started[kwargs.get("run_id")] = time.monotonic()
+
+    def _ended(self, kwargs: dict[str, Any]) -> None:
+        began = self._started.pop(kwargs.get("run_id"), None)
+        if began is not None:
+            self.seconds.append(time.monotonic() - began)
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         self.calls += 1
+        self._ended(kwargs)
         for generations in response.generations:
             for generation in generations:
                 usage = getattr(getattr(generation, "message", None), "usage_metadata", None)
@@ -77,6 +92,7 @@ class Meter(BaseCallbackHandler):
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         self.calls += 1
+        self._ended(kwargs)
         self.failed += 1
         refused = REFUSED.search(str(error))
         if refused:
@@ -147,8 +163,10 @@ def row_of(
     seconds: float,
     *,
     approval: bool = False,
+    cpu: Mapping[str, float | None] | None = None,
 ) -> dict[str, Any]:
-    """One run, as the report keeps it (``approval``: its task asks for a change)."""
+    """One run, as the report keeps it (``approval``: its task asks for a change; ``cpu``: the
+    CPU seconds each process used during it)."""
     scores = {s.name: s for s in result.scores}
     needed = task["metadata"]["needed_tools"]
     scored = scores.get("tool_coverage")
@@ -173,6 +191,8 @@ def row_of(
         "failed_model_calls": meter.failed,
         "refused_prompt_tokens": meter.refused_tokens,
         "seconds": round(seconds, 2),
+        "model_call_seconds": [round(s, 3) for s in meter.seconds],
+        "cpu_seconds": {k: None if v is None else round(v, 3) for k, v in (cpu or {}).items()},
         "answer": result.output[:ANSWER_CHARS] if isinstance(result.output, str) else None,
     }
     return row | {"success": succeeded(row, approval=approval)}
@@ -190,10 +210,13 @@ async def run_cell(
     progress: Any = print,
     done: Collection[tuple[Any, ...]] = (),
     on_row: Callable[[dict[str, Any]], None] | None = None,
+    watch: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Every task of ``sets`` ``repeats`` times on catalogues of ``size`` tools, as
     ``variant``: one row per run, each given to ``on_row`` as it ends. A run whose
-    :func:`key` is in ``done`` (measured before: ``--resume``) is not run again."""
+    :func:`key` is in ``done`` (measured before: ``--resume``) is not run again. ``watch``:
+    the other processes (name: pid) whose CPU seconds each run records."""
+    pids = {HARNESS: None, **(watch or {})}
     rows = []
     for taskset in sets:
         todo = [
@@ -219,6 +242,7 @@ async def run_cell(
         )
         for repeat, task in todo:
             called.tools = []
+            cpu_before = {name: procstat.cpu_seconds(pid) for name, pid in pids.items()}
             began = time.monotonic()
             with metered() as meter:
                 report = await h.evaluate(
@@ -236,6 +260,7 @@ async def run_cell(
                 list(called.tools),
                 time.monotonic() - began,
                 approval=bool(changes & set(task["metadata"]["needed_tools"])),
+                cpu=_used(cpu_before, pids),
             )
             row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
             rows.append(row)
@@ -248,6 +273,24 @@ async def run_cell(
                 f"{row['seconds']}s  {row['task']}"
             )
     return rows
+
+
+#: This process, as ``cpu_seconds`` and ``processes`` name it.
+HARNESS: Final = "harness"
+
+
+def _used(before: Mapping[str, float | None], pids: Mapping[str, int | None]) -> dict[str, Any]:
+    used: dict[str, float | None] = {}
+    for name, pid in pids.items():
+        now, then = procstat.cpu_seconds(pid), before.get(name)
+        used[name] = None if now is None or then is None else now - then
+    return used
+
+
+def processes(watch: Mapping[str, int] | None = None) -> dict[str, dict[str, float | None]]:
+    """Each process's peak resident memory so far, in MB: this one and the watched ones."""
+    pids: dict[str, int | None] = {HARNESS: None, **(watch or {})}
+    return {name: {"peak_rss_mb": procstat.peak_rss_mb(pid)} for name, pid in pids.items()}
 
 
 def key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -277,6 +320,15 @@ def summary(
     for key in FIGURES:
         values = [float(r[key]) for r in rows if r.get(key) is not None]
         found[key] = stats.interval(values)
+    calls = [s for r in rows for s in r.get("model_call_seconds", [])]
+    found["model_call_seconds"] = {
+        "p50": procstat.percentile(calls, 50),
+        "p95": procstat.percentile(calls, 95),
+        "n": len(calls),
+    }
+    for name in dict.fromkeys(n for r in rows for n in r.get("cpu_seconds", {})):
+        used = [r["cpu_seconds"][name] for r in rows if r["cpu_seconds"].get(name) is not None]
+        found[f"cpu_seconds:{name}"] = stats.interval(used)
     own = model.rsplit("/", 1)[-1] if prices.price_of(model) else None
     dollars = {}
     for name in dict.fromkeys(n for n in (own, *priced_as) if n):
@@ -321,6 +373,7 @@ def report_of(
     setup: dict[str, Any],
     priced_as: Sequence[str],
     notes: Sequence[str] = (),
+    watch: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """The report: the settings, every cell's statistics and every run."""
     env = environment()
@@ -360,6 +413,7 @@ def report_of(
         "priced_as": list(priced_as),
         "prices": {name: asdict(price) for name, price in shown.items()},
         "notes": list(notes),
+        "processes": processes(watch),
         "cells": cells,
         "runs": rows,
     }

@@ -12,22 +12,62 @@ preview naming where; ``read_file`` (with them, enabled once the run keeps one) 
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
 from agents import FunctionTool
 from agents.tool_context import ToolContext
 
+from trellis.contracts import ToolSpec
 from trellis.harness.runtime import current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
-__all__ = ["FIX_ARGUMENTS", "arguments_of", "convert"]
+__all__ = ["FIX_ARGUMENTS", "arguments_of", "convert", "governed"]
+
+#: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
+#: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
+MADE: Final = "_trellis_made"
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
-    return [*(_one(t) for t in tools), _read_file()]
+    made = [*(_one(t) for t in tools), _read_file()]
+    for tool in made:
+        setattr(tool.on_invoke_tool, MADE, True)
+    return made
+
+
+def governed(tool: Any) -> Any:
+    """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
+    harness's are — governance (the catalog's risk, else ``write``: announced), a person when
+    it asks, the journal (a resume does not run a call again), its time and its trace — as a
+    copy: the agent's own tool is not changed. Anything else is returned as it is."""
+    if not isinstance(tool, FunctionTool) or getattr(tool.on_invoke_tool, MADE, False):
+        return tool
+    original = tool.on_invoke_tool
+
+    async def invoke(context: ToolContext[Any], arguments: str) -> Any:
+        args = arguments_of(arguments)
+        if isinstance(args, str) or current() is None:
+            return await original(context, arguments)
+
+        async def run(given: dict[str, Any]) -> Any:
+            return await original(context, json.dumps(given))
+
+        spec = ToolSpec(
+            name=tool.name,
+            description=tool.description or tool.name,
+            input_schema=tool.params_json_schema,
+            side_effects="write",
+        )
+        outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
+        return results.readable(outcome.output)
+
+    setattr(invoke, MADE, True)
+    return dataclasses.replace(tool, on_invoke_tool=invoke)
 
 
 def _one(tool: Tool) -> FunctionTool:

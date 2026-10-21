@@ -33,7 +33,7 @@ the grounding check verifies the answer against.
   tools section (next step, argument values found in memory, what is missing) and its `tools`
   (`[{name, confidence}]`, confidence 0–1), which narrow the tools the model is offered
   ([tools.md](tools.md)). One call: the harness asks for no hints of its own;
-  `without={"hints"}` keeps the learned skills and offers every tool.
+  `without={"tool_search"}` keeps the learned skills and offers every tool.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
 it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
@@ -113,7 +113,7 @@ precedence **human > judge > system**:
   cancelled run says nothing about the agent). Never "no exception = success" on its own: the
   judge and people outrank it.
 * **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
-  (`TRELLIS_GROUNDING_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
+  (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim, or a context that held no

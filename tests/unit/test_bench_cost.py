@@ -260,11 +260,14 @@ def test_the_command_needs_a_model_and_known_variants_and_prices(
         [],
         ["--model", "m", "--variants", "nope"],
         ["--model", "m", "--price-as", "nope"],
+        ["--model", "m", "--watch", "server"],
+        ["--model", "m", "--watch", "=12"],
     ):
         with pytest.raises(SystemExit):
             cli.arguments(argv)
     monkeypatch.setenv("TRELLIS_LIVE_MODEL", "granite/granite-3.3-2b")
     assert cli.arguments([]).model == "granite/granite-3.3-2b"
+    assert cli.arguments(["--watch", "server=12"]).watch == {"server": 12}
 
 
 async def test_the_command_writes_the_json_and_the_table(
@@ -273,13 +276,22 @@ async def test_the_command_writes_the_json_and_the_table(
     monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: Settings()))
     monkeypatch.setattr(cli.run, "run_cell", _one_row)
     out = tmp_path / "bench"
-    args = cli.arguments(["--model", "m", "--sizes", "10", "--sets", "travel", "--out", str(out)])
+    args = cli.arguments(
+        ["--model", "m", "--sizes", "10", "--sets", "travel", "--out", str(out), "--watch", "me=1"]
+    )
     report = await cli.bench(args)
     assert len(report["cells"]) == 2  # both variants
     assert json.loads(out.with_suffix(".json").read_text())["model"] == "m"
     assert "| 10 | baseline |" in out.with_suffix(".md").read_text()
     assert report["cells"][0]["dollars"].keys() == set(prices.REFERENCE)  # m is not priced
+    assert (
+        report["setup"]["window_source"] == "unknown"
+    )  # nothing said what m's window is: its features off
     assert "not priced" in stats.markdown(report)
+    assert set(report["processes"]) == {"harness", "me"}
+    table = stats.markdown(report)
+    assert "| 10 | main | 2 | 0.20 | 0.29 | 0.50 | — |" in table
+    assert "* harness: " in table and "* me: " in table
 
 
 async def _one_row(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
@@ -299,6 +311,8 @@ async def _one_row(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
         "success": True,
         "errored": False,
         "length": "short",
+        "model_call_seconds": [0.1, 0.3],
+        "cpu_seconds": {"harness": 0.5, "me": None},
     }
     if run.key(row) in kwargs["done"]:
         return []
@@ -360,3 +374,28 @@ def test_a_paused_run_succeeds_only_when_its_task_asks_for_a_change() -> None:
     broader = paused | {"coverage_comment": "x called though not needed"}
     assert not run.succeeded(broader | {"status": "success"}, approval=False)
     assert run.succeeded(paused | {"status": "success", "tool_coverage": None}, approval=False)
+
+
+def test_the_meter_times_each_call_from_its_start() -> None:
+    meter = run.Meter()
+    meter.on_chat_model_start({}, [], run_id="a")
+    meter.on_chat_model_start({}, [], run_id="b")
+    meter.on_llm_end(LLMResult(generations=[]), run_id="a")
+    meter.on_llm_error(RuntimeError("x"), run_id="b")
+    meter.on_llm_end(LLMResult(generations=[]), run_id="never started")
+    assert len(meter.seconds) == 2 and all(s >= 0 for s in meter.seconds)
+
+
+def test_a_process_is_measured_from_proc() -> None:
+    from benchmark import procstat
+
+    used = procstat.cpu_seconds()
+    assert used is not None and used > 0
+    assert (procstat.rss_mb() or 0) > 0 and (procstat.peak_rss_mb() or 0) >= (
+        procstat.rss_mb() or 0
+    )
+    assert procstat.cpu_seconds(2**22 + 1) is None and procstat.rss_mb(2**22 + 1) is None
+    assert procstat._status(None, "NoSuchKey") is None
+    assert procstat.percentile([], 50) is None and procstat.percentile([3.0], 95) == 3.0
+    assert procstat.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 50) == 3.0
+    assert run._used({"me": None}, {"me": None}) == {"me": None}

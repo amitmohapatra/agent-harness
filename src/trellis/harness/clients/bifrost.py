@@ -26,6 +26,7 @@ from bifrost_sdk import Bifrost, MCPLog, Options, ToolDef
 from bifrost_sdk.admin import Admin, Skill
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
+from trellis.harness import telemetry
 from trellis.harness.fresh import Fresh
 from trellis.harness.identity import identity_headers
 from trellis.harness.repository import RETRY_SECONDS, TTL_SECONDS, NotFound, pinned
@@ -265,7 +266,17 @@ class Gateway:
         stay within it: the caller bounds them)."""
         runtime = current()
         timeout = runtime.remaining() if runtime else None
-        options = prompt.options() if prompt is not None else None
+        options = prompt.options() if prompt is not None else Options()
+        headers = telemetry.gateway_headers()  # whose run, and its trace
+        dims = {
+            k.removeprefix(telemetry.DIMENSION_PREFIX): v
+            for k, v in headers.items()
+            if k.startswith(telemetry.DIMENSION_PREFIX)
+        }
+        extra = {k: v for k, v in headers.items() if not k.startswith(telemetry.DIMENSION_PREFIX)}
+        options = options.merged(
+            dimensions={**options.dimensions, **dims}, extra={**options.extra, **extra}
+        )
         return await self.client.complete(messages, timeout=timeout, options=options, **body)
 
     # ------------------------------------------------------------------ repositories

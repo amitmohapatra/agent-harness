@@ -65,7 +65,7 @@ sequenceDiagram
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
   W-)Mem: POST /v1/feedback (system: confirm)
-  W-)Mem: POST /v1/verify (sampled: TRELLIS_GROUNDING_SAMPLE) → grounding score
+  W-)Mem: POST /v1/verify (sampled: TRELLIS_EVAL_SAMPLE) → grounding score
   W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
   Agent->>Runs: get(run_id, tenant=)
@@ -486,7 +486,7 @@ sequenceDiagram
     P-->>H: Result + the run's tool calls (the trajectory)
     H->>Mem: grounding: POST /v1/verify {bundle_id, answer}
     H->>H: called / tool_sequence: read EvalCase.trajectory
-    H->>GW: llm_judge: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL, temperature 0)
+    H->>GW: llm_judge: POST /v1/chat/completions (the judge alias, temperature 0)
     GW-->>H: {"score", "reasoning"} (malformed → asked once more)
     H->>LF: POST /api/public/scores (each score, on the run's trace)
   end
@@ -511,11 +511,11 @@ sequenceDiagram
 
   User->>P: await agent.run(question, user=)
   P->>Runs: finish(SUCCESS, answer)
-  P->>P: sampled(run_id, TRELLIS_JUDGE_SAMPLE)? and not without judges
+  P->>P: sampled(run_id, TRELLIS_EVAL_SAMPLE)? and not without judges
   P-)W: submit judge.<name> (one per judge)
   P-->>User: Result(SUCCESS, answer): nothing waits for the judges
   W->>J: judge(EvalCase(question, answer, context, memory, run_id, trajectory), [one judge])
-  J->>GW: POST /v1/chat/completions (TRELLIS_JUDGE_MODEL)
+  J->>GW: POST /v1/chat/completions (the judge alias)
   GW-->>J: {"score", "reasoning"}
   J->>LF: POST /api/public/scores on the run's trace (and a score span)
   Note over W,J: a judge that fails is a warning event and a log line, never a failed run

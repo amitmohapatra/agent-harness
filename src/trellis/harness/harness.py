@@ -18,13 +18,12 @@ import logging
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, Final, Literal, TypeVar
 
-from bifrost_sdk import NO_GATEWAY_TOOLS
-
 from trellis.contracts import ConfigurationError, FeedbackVerdict, RunStatus, ToolSpec
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import ToolFormat
 from trellis.harness.agent import Agent
+from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
@@ -35,7 +34,13 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
-from trellis.harness.prompts import ModelPrompts, Prompt, PromptSource, PromptSources
+from trellis.harness.prompts import (
+    GatewayHeaders,
+    ModelPrompts,
+    Prompt,
+    PromptSource,
+    PromptSources,
+)
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
@@ -82,8 +87,6 @@ KEY_RETRY_SECONDS: Final = 30.0
 NOT_CONFIGURED: Final = "not configured"
 #: How a person's verdict reads as a Langfuse score.
 VERDICT_SCORES: Final = {"confirm": 1.0, "approve": 1.0, "edit": 0.5, "correct": 0.0, "reject": 0.0}
-#: The share of successful runs online judges score when ``TRELLIS_JUDGE_SAMPLE`` is unset.
-JUDGE_SAMPLE: Final = 0.1
 #: Paused runs one inbox page asks for (agent-runs' page limit), and the pages one inbox read
 #: follows at most: past that the newest are returned and a warning is logged.
 INBOX_LIMIT: Final = 500
@@ -110,7 +113,7 @@ class Harness:
     ``SKILLS_DIR``, the gateway).
 
     ``judges`` are the online evaluators every sampled successful run is scored by
-    (``TRELLIS_JUDGE_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
+    (``TRELLIS_EVAL_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
     (``trellis.harness.hooks.Hooks``) run around every run, model call and tool call of every
     agent it wraps, before each agent's own."""
 
@@ -154,9 +157,7 @@ class Harness:
         self.judges: list[Evaluator] = list(judges)
         #: the hooks of every agent wrapped here
         self.hooks: list[Hooks] = list(hooks)
-        self.judge_sample = (
-            s.judge_sample if s.judge_sample is not None else JUDGE_SAMPLE if judges else 0.0
-        )
+        self.judge_sample = s.eval_sample if judges else 0.0
         if builds_memory:
             memory = self._making(MemoryClient(s.memory_url, api_key=s.api_key))
         self.memory = Memory(memory) if memory else None
@@ -195,6 +196,16 @@ class Harness:
         self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
         self.evals.prompts = self.prompts
         telemetry.configure(s)
+        log.info(
+            "trellis harness: gateway %s, memory %s, runs %s, spool %s, traces %s, sandbox %s "
+            "(python -m trellis.harness.doctor prints each setting and its source)",
+            s.bifrost_url or "off",
+            s.memory_url or "off",
+            s.runs_url or "in process",
+            s.spool_dir or "none",
+            "on" if telemetry.exporting() else "off",
+            s.sandbox or "none",
+        )
 
     # ------------------------------------------------------------------ attaching
     def wrap(
@@ -210,6 +221,7 @@ class Harness:
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
         framework_options: Mapping[str, Any] | None = None,
+        budget: Budget | None = None,
     ) -> Agent:
         """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
         ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
@@ -230,7 +242,9 @@ class Harness:
         framework's own options for every run's call, passed through unchanged (a LangGraph
         config's keys, ``Runner.run``'s arguments, ``ClaudeAgentOptions`` fields; each
         framework's page says which the harness keeps for itself): a run's own
-        (``run``/``stream``/``start``/``schedule(framework_options=)``) go over them."""
+        (``run``/``stream``/``start``/``schedule(framework_options=)``) go over them.
+        ``budget`` is the most one of its runs may spend — tokens, dollars, tool calls
+        (``trellis.harness.budget``; none given: no cap)."""
         agent = Agent(
             self,
             target,
@@ -243,6 +257,7 @@ class Harness:
             without=without,
             hooks=hooks,
             framework_options=framework_options,
+            budget=budget,
         )
         if agent.id in self.agents:
             raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
@@ -280,7 +295,7 @@ class Harness:
         tools = await self.resolve(mine, tenant=tenant, mcp=bundles, without=off)
         if self.memory is not None and "memory_pull" not in off:
             scope = self.memory.scoped(tenant)
-            tools.extend(await self.memory_tools(scope))
+            tools.extend(t for t in await self.memory_tools(scope) if t.feature not in off)
         native = convert(tool_format, tools)
         if tool_format == "langchain" and native:
             for tool in native:
@@ -437,6 +452,17 @@ class Harness:
         message)."""
         return await self.prompts.messages(ref, **values)
 
+    def governance_middleware(self) -> Any:
+        """A LangChain middleware that runs the framework's own tools of a ``create_agent`` or
+        Deep Agents graph — those not built with :meth:`tools` — as the harness's tools are:
+        governed, approved when governance asks, journaled, timed and traced
+        (``middleware.GovernTools``). Add it when you build the graph:
+        ``create_agent(..., middleware=[h.governance_middleware()])``; ``ReAct`` has it. An
+        OpenAI Agents agent's own tools are governed by ``h.wrap`` itself, on a copy."""
+        from trellis.harness.middleware import GovernTools  # noqa: PLC0415 - the react extra
+
+        return GovernTools()
+
     async def model_headers(self, *, prompt: str | None = None) -> Mapping[str, str]:
         """The headers to give a framework's own model client pointed at the gateway
         (``AsyncOpenAI(default_headers=...)``, ``ChatOpenAI(default_headers=...)``): the
@@ -454,7 +480,7 @@ class Harness:
         version on each call; the Claude Code CLI's ``ANTHROPIC_CUSTOM_HEADERS`` get it as the
         CLI starts."""
         if prompt is None:
-            return dict(NO_GATEWAY_TOOLS)
+            return GatewayHeaders()
         return await self.model_prompts.headers(prompt)
 
     async def aclose(self) -> None:
@@ -600,7 +626,11 @@ class Harness:
     async def memory_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
         return [
-            Tool(spec, _memory_call(spec), feature="memory_pull")
+            Tool(
+                spec,
+                _memory_call(spec),
+                feature="tool_search" if spec.name == TOOL_SEARCH else "memory_pull",
+            )
             for spec in await run_memory.agent_tools()
         ]
 

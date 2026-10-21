@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -34,6 +35,8 @@ from trellis.harness.fresh import Fresh
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
+
+log = logging.getLogger("trellis.sources")
 
 #: What separates a prompt's or a skill's name from the version it is pinned to.
 PINNED: Final = "@"
@@ -85,6 +88,8 @@ class Chain[T]:
 
     def __init__(self, sources: Sequence[Source[T]] = ()) -> None:
         self.sources = list(sources)
+        for source in self.sources:  # every source in use, said where it is set up
+            log.info("%s source: %s", self.kind, source.label)
 
     @property
     def labels(self) -> list[str]:

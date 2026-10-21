@@ -547,8 +547,12 @@ async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
     scores = respx.post("https://lf.test/api/public/scores").mock(
         return_value=httpx.Response(200, json={"id": "x"})
     )
-    otlp = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": "https://lf.test"}
-    async with harness_with(memory_service, otlp_headers=otlp, grounding_sample=1.0) as h:
+    langfuse = {
+        "langfuse_public_key": "pk",
+        "langfuse_secret_key": "sk",
+        "langfuse_host": "https://lf.test",
+    }
+    async with harness_with(memory_service, **langfuse, eval_sample=1.0) as h:
 
         async def fn(input: str, agent: Runtime) -> str:
             return "you prefer email"
@@ -574,7 +578,7 @@ async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
 async def test_a_structured_answer_is_verified_as_its_json(
     memory_service: FakeMemoryService,
 ) -> None:
-    async with harness_with(memory_service, grounding_sample=1.0) as h:
+    async with harness_with(memory_service, eval_sample=1.0) as h:
 
         async def fn(input: str, agent: Runtime) -> dict[str, str]:
             return {"contact": "email"}
@@ -589,7 +593,7 @@ async def test_an_unsampled_run_is_not_verified(memory_service: FakeMemoryServic
     async def fn(input: str, agent: Runtime) -> str:
         return "answer"
 
-    async with harness_with(memory_service, grounding_sample=0.0) as h:
+    async with harness_with(memory_service, eval_sample=0.0) as h:
         await h.wrap(fn, id="n").run("q", user="u")
         await h.writes.drain()
     assert memory_service.named("verify") == []
@@ -604,8 +608,12 @@ async def test_feedback_fans_out_to_langfuse_and_the_memory_service(
         return_value=httpx.Response(200, json={"id": "x"})
     )
     # (an OTLP endpoint would install a global exporter: the scores API is reached by name)
-    otlp = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": "https://lf.test"}
-    async with harness_with(memory_service, otlp_headers=otlp) as h:
+    langfuse = {
+        "langfuse_public_key": "pk",
+        "langfuse_secret_key": "sk",
+        "langfuse_host": "https://lf.test",
+    }
+    async with harness_with(memory_service, **langfuse) as h:
 
         async def fn(input: str, agent: Runtime) -> str:
             return "12"

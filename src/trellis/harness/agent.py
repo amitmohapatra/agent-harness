@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
-import functools
 import json
 import logging
 from collections.abc import (
@@ -44,15 +42,14 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, pipeline, sandbox, skills
+from trellis.harness import compat, pipeline, sandbox, skills, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
-    MODEL_METADATA,
     context_window,
-    metadata_of,
 )
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
+from trellis.harness.budget import Budget
 from trellis.harness.clients.memory import RunMemory, context_budget
 from trellis.harness.evals import (
     EvalCase,
@@ -125,6 +122,7 @@ class Agent:
         without: Collection[Feature] = (),
         hooks: Sequence[Hooks] = (),
         framework_options: Mapping[str, Any] | None = None,
+        budget: Budget | None = None,
     ):
         if timeout is not None and timeout <= 0:
             raise ConfigurationError(f"{id}: a timeout is a number of seconds over 0")
@@ -138,11 +136,24 @@ class Agent:
         self.timeout = timeout
         #: what the harness does not do for any of its runs (``h.wrap(without=)``)
         self.without = features(without)
+        #: the most each of its runs may spend (``budget.py``; ``None``: no cap)
+        self.budget = budget
         #: the hooks around its runs, model calls and tool calls: the harness's, then its own
         self.hooks = Chain([*harness.hooks, *hooks])
         self.adapter = detect(target)
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
+        if self.adapter.name == "openai_agents":  # its SDK's own tracing: left as set, said
+            from trellis.harness.adapters.openai_agents import sdk_tracing_said  # noqa: PLC0415
+
+            sdk_tracing_said()
+        for gated in sorted(gated_tools(target)):
+            log.warning(
+                "%s: %s is approved in the framework's own gate: governance counts that "
+                "approval, so each call is asked once",
+                id,
+                gated,
+            )
         #: the framework's own options for every run's call (``h.wrap(framework_options=)``):
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
@@ -172,14 +183,11 @@ class Agent:
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
 
-    @functools.cached_property
+    @property
     def evals(self) -> EvalServices:
-        """What this agent's runs are evaluated with: the harness's services, the judge falling
-        back to the gateway model a ``ReAct`` target was named with when
-        ``TRELLIS_JUDGE_MODEL`` is unset."""
-        model = metadata_of(self.target).get(MODEL_METADATA)
-        named = model if isinstance(model, str) else None
-        return dataclasses.replace(self.harness.evals, fallback_model=named)
+        """What this agent's runs are evaluated with: the harness's services (the judge is the
+        gateway's judge alias, never the agent's own model)."""
+        return self.harness.evals
 
     # ------------------------------------------------------------------ running
     async def run(
@@ -718,7 +726,12 @@ class Agent:
                 pushed = await memory.context(
                     runtime.task,
                     tools=own or None,
-                    window=not self.adapter.keeps_conversation(self.target),
+                    # the framework keeps the thread itself (a checkpointer; an OpenAI Agents
+                    # ``session`` given as a run option): memory's window is not sent again
+                    window=not (
+                        self.adapter.keeps_conversation(self.target)
+                        or runtime.framework_options.get("session") is not None
+                    ),
                     hints=hints,
                     budget=self.context_budget,
                 )
@@ -804,7 +817,7 @@ class Agent:
             or pushed is None
             or not text
             or not runtime.uses("grounding")
-            or not sampled(runtime.run_id, self.harness.settings.grounding_sample)
+            or not sampled(runtime.run_id, self.harness.settings.eval_sample)
         ):
             return
         bundle_id, run_id, traced = pushed.bundle_id, runtime.run_id, runtime.trace_run
@@ -818,7 +831,7 @@ class Agent:
         await self.harness.writes.submit("memory.verify", work, events=runtime.events)
 
     async def judged(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
-        """On a sampled run (``TRELLIS_JUDGE_SAMPLE``), each of the harness's online judges in
+        """On a sampled run (``TRELLIS_EVAL_SAMPLE``), each of the harness's online judges in
         the background — never on the request path — as ``judge(case, [it], services=self.evals)``,
         its score on the run's trace; the case's output is the answer as :func:`graded`. A judge
         that fails is a warning."""
@@ -841,11 +854,13 @@ class Agent:
             trajectory=list(runtime.replay.journal.trajectory),
         )
         services, events = self.evals, runtime.events
+        dims = {**telemetry.attribution(runtime), "purpose": "judge"}
         for evaluator in judges:
             name = name_of(evaluator)
 
             async def work(evaluator: Evaluator = evaluator, name: str = name) -> None:
-                _, failed = await judge(case, [evaluator], services=services)
+                with telemetry.attributed(dims):  # the judge's calls: whose run they judge
+                    _, failed = await judge(case, [evaluator], services=services)
                 if failed:
                     events.warning("judge_failed", f"judge {name}: {failed[name]}")
 
@@ -1036,6 +1051,22 @@ def graded(answer: Any) -> str:
     if answer is None or isinstance(answer, str):
         return answer or ""
     return json.dumps(pipeline.jsonable(answer), default=str)
+
+
+def gated_tools(target: Any) -> set[str]:
+    """The tools a target's own approval gate holds: LangChain's
+    ``HumanInTheLoopMiddleware`` (Deep Agents' ``interrupt_on``) in a compiled graph, an
+    OpenAI Agents tool with ``needs_approval``."""
+    gated: set[str] = set()
+    for node in (getattr(target, "nodes", None) or {}).values():
+        owner = getattr(getattr(getattr(node, "bound", None), "func", None), "__self__", None)
+        gates = getattr(owner, "interrupt_on", None)
+        if type(owner).__name__ == "HumanInTheLoopMiddleware" and isinstance(gates, dict):
+            gated |= {name for name, config in gates.items() if config}
+    for tool in getattr(target, "tools", None) or []:
+        if getattr(tool, "needs_approval", False) and isinstance(getattr(tool, "name", None), str):
+            gated.add(tool.name)
+    return gated
 
 
 def _kept_as_json(framework_options: Mapping[str, Any] | None) -> None:

@@ -40,10 +40,27 @@ def reached(service: FakeMemoryService) -> set[str]:
     return {c.name for c in service.calls} & MEMORY_CALLS
 
 
+def test_a_retired_name_still_works_and_says_its_replacement(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from trellis.harness import features as module
+
+    module._deprecated.cache_clear()
+    with caplog.at_level("WARNING", logger="trellis.harness"):
+        assert features(["hints"]) == {"hints"}
+        assert features(["memory_pull"]) == {"memory_pull", "tool_search"}
+        features(["hints"])
+    said = [r.message for r in caplog.records if "is deprecated" in r.message]
+    assert len(said) == 2 and "use tool_search" in said[0]
+
+
 def test_without_names_features_and_refuses_anything_else() -> None:
-    assert features(["memory", "judges"]) == {"memory_push", "memory_pull", "records", "judges"}
+    memory = {"memory_push", "memory_pull", "records", "hints", "tool_search"}
+    assert features(["memory", "judges"]) == {*memory, "judges"}
     assert features(["mcp"]) == {"mcp", "code_mode"}
-    every = "memory, memory_push, memory_pull, records, judges, grounding, hints, code_mode"
+    assert features(["tool_search"]) == {"hints", "tool_search"}
+    assert features(["react_auto"]) == {"planning", "files"}
+    every = "memory, tool_search, mcp, code_mode, skills, judges, grounding, planning, files"
     with pytest.raises(
         ConfigurationError, match=f"names no feature 'memroy': the features are {every}"
     ):
@@ -75,7 +92,7 @@ async def test_a_run_without_memory_reaches_no_memory_on_every_adapter(
         assert reached(memory_service) == set()
         record = await h.runs.get(alone.run_id)
         assert record is not None and record.metadata == {
-            "without": ["memory_pull", "memory_push", "records"]
+            "without": ["hints", "memory_pull", "memory_push", "records", "tool_search"]
         }
         remembered = await agent.run("How many A-1?", user="ada")  # everything on again
         await h.writes.drain()
@@ -98,7 +115,7 @@ async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService
 
     defs = [Def(f"wiki-t{i}", "wiki") for i in range(20)]  # read only: Code Mode
     gateway = cast("Gateway", StubGateway([*defs, Def("erp-pay", "erp", annotations=None)]))
-    settings = Settings(grounding_sample=1.0, judge_sample=1.0)
+    settings = Settings(eval_sample=1.0)
     async with Harness(
         config=settings, memory=memory_service.client(), gateway=gateway, judges=[judge]
     ) as h:
@@ -295,7 +312,9 @@ async def test_a_queued_run_and_its_sub_agents_keep_its_without(
         [summary] = [r async for r in h.runs.iterate(parent_run_id=handle.run_id)]
         child_run = await h.runs.get(summary.run_id)
         assert child_run is not None
-        assert child_run.metadata == {"without": ["memory_pull", "memory_push", "records"]}
+        assert child_run.metadata == {
+            "without": ["hints", "memory_pull", "memory_push", "records", "tool_search"]
+        }
     assert reached(memory_service) == set()
 
 

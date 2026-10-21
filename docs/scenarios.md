@@ -60,7 +60,7 @@ decides ([governance.md](governance.md)).
 | Your own code to read or write memory (a node, a tool, a function target) | `trellis.current().memory` — the memory SDK's verbs, already scoped to the run's tenant, user, agent, run and thread |
 | A file the user's runs should cite | `await h.add_document(file, user=..., thread=None)` |
 | A person's verdict on a run (thumbs up/down, a correction) | `await h.feedback(run_id, verdict, correction=None)` — a Langfuse score now, memory's `human` feedback once the tenant administrator approves it |
-| The run's outcome to teach memory | nothing: `SUCCESS`/`ERROR` are the run's `system` feedback; a sampled share (`TRELLIS_GROUNDING_SAMPLE`, 10 % by default) is checked for grounding |
+| The run's outcome to teach memory | nothing: `SUCCESS`/`ERROR` are the run's `system` feedback; a sampled share (`TRELLIS_EVAL_SAMPLE`, 10 % by default) is checked for grounding |
 | No memory at all (tests, a stateless tool agent) | leave `MEMORY_URL` unset |
 
 ## Pausing for a person
@@ -164,10 +164,10 @@ chat thread on one (sticky sessions): its events are buffered in the process tha
 | You want | Use |
 |---|---|
 | A score for every item of a test set, before shipping | `await h.evaluate(agent, "dataset-name" or [items], [exact_match(), llm_judge("...")])`: each item through the real pipeline, scores on the traces, a Langfuse dataset run, an `EvalReport` |
-| Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_JUDGE_SAMPLE`) judged in the background |
-| A judge that does not grade itself, on its own budget | `TRELLIS_JUDGE_MODEL` (a stronger model than the agent's) and `TRELLIS_JUDGE_VIRTUAL_KEY` |
+| Quality on live traffic | `Harness(judges=[llm_judge("...")])`: a sampled share of runs (`TRELLIS_EVAL_SAMPLE`) judged in the background |
+| A judge that does not grade itself, on its own budget | the judge alias `trellis-judge` routed in Bifrost to a stronger model than the agent's, and `TRELLIS_JUDGE_VIRTUAL_KEY` |
 | Which tools a run called, in what order, with what arguments | `called("lookup", before="refund")`, `tool_sequence([...])`, or your own reading `case.trajectory` ([evaluation.md](evaluation.md#trajectories)) |
-| Every run's answer checked against what memory gave it, cheaply | nothing: the sampled grounding check (`TRELLIS_GROUNDING_SAMPLE`, 10 %); `grounding()` makes it an explicit evaluator |
+| Every run's answer checked against what memory gave it, cheaply | nothing: the sampled grounding check (`TRELLIS_EVAL_SAMPLE`, 10 %); `grounding()` makes it an explicit evaluator |
 | An exact or partial match against an expected answer | `exact_match()`, `contains()` (offline: they need `expected`) |
 | A check of your own | any `async (EvalCase) -> EvalScore \| None` in the evaluators or judges |
 | Evaluation of an agent you do not wrap | `evaluate(any_async_callable, dataset, [...])` and `judge(case, [...], services=...)` from `trellis.harness.evals` ([blocks/evaluation.md](blocks/evaluation.md)) |

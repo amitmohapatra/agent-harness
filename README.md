@@ -150,13 +150,12 @@ only `trellis.memory`, `trellis.runs` or `trellis.contracts` installs that one s
 
 ## Configuration
 
-The environment, and nothing else: `BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, `TRELLIS_API_KEY`,
-`MEMORY_URL`, `RUNS_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
-`TRELLIS_SPOOL_DIR`, `TRELLIS_WORKER_CONCURRENCY`, `TRELLIS_AGENT_VERSION`,
-`TRELLIS_GROUNDING_SAMPLE`, `TRELLIS_JUDGE_MODEL`, `TRELLIS_JUDGE_VIRTUAL_KEY`,
-`TRELLIS_JUDGE_SAMPLE`, `PROMPTS_DIR`, `SKILLS_DIR`, `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`,
-`LANGFUSE_SECRET_KEY`, `SANDBOX`, `SANDBOX_IMAGE`. Each one, its default, an example and what
-it turns on: [docs/configuration.md](docs/configuration.md) (and
+The environment holds the endpoints and keys: `BIFROST_URL`, `BIFROST_VIRTUAL_KEY`,
+`TRELLIS_JUDGE_VIRTUAL_KEY` (optional), `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL`,
+`TRELLIS_EVAL_SAMPLE` (optional), `TRELLIS_SPOOL_DIR` and `SANDBOX`; the tools' own standard
+variables (`OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`) are read by their SDKs. Everything else is in
+code; `trellis doctor` prints each setting and where it came from. Each one, its default, an
+example and what it turns on: [docs/configuration.md](docs/configuration.md) (and
 [`.env.example`](.env.example)). A real deployment, from running services to a configured
 application: [docs/onboarding.md](docs/onboarding.md).
 

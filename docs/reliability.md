@@ -96,10 +96,11 @@ run's own limit still bounds them.
 
 **How.** `ReAct(system=..., model="provider/model", model_timeout=30)`.
 
-**Automatic.** The model client of a `ReAct` built with a model name retries a completion on a
-timeout, `408`/`409`/`429`/`5xx` or a dropped connection (3 attempts in all, honouring
-`Retry-After`); those retries happen *inside* `model_timeout`, and what is left of the run
-bounds them all. A model error left is a `ModelError`, retryable for those causes (a queued run
+**Automatic.** The model client of a `ReAct` built with a model name makes one attempt: the
+gateway is the one place that retries a model call (a provider's `network_config.max_retries`
+in Bifrost, 0 by default: set it) and falls back (the virtual key's fallbacks), so
+attempts never multiply. All of it happens *inside* `model_timeout`, and what is left of the
+run bounds it. A model error left is a `ModelError`, retryable for those causes (a queued run
 is queued again, its graph continuing from its checkpoint).
 
 **On failure.** The run fails `ERROR` with a `ModelError` that says
@@ -157,8 +158,8 @@ memory service's transcript say what it did until then.
 **What.** A call that only reads (or whose tool says it is idempotent) is tried again after an
 error that may pass; a call that does more runs once.
 
-**When.** Always; there is nothing to set. The tool's side effects decide — as governance sees
-them: the catalog's `risk` over the tool's own declaration.
+**When.** Always; there is nothing to set. The tool's side effects decide — as
+governance sees them: the catalog's `risk` over the tool's own declaration.
 
 **Where.** Every harness tool call, every adapter; `governed` in Way 2 (`side_effects="read"`).
 
@@ -174,6 +175,10 @@ function tool is when `@tool(idempotent=True)` says so (it hands its service the
 `trellis.current().idempotency_key`), and a tool of your own source when its
 `ToolSpec(idempotent=True)` does.
 
+An error that says when to come back (its `retry_after`, or the `Retry-After` seconds of the
+HTTP response it carries) is retried after that wait instead — unless the wait is longer than
+the time the call and the run have left, when it is not waited and the error is the outcome.
+
 **On failure.** The last error is the outcome the model reads (`"<tool> failed: ..."`), as
 before.
 
@@ -185,7 +190,8 @@ them bounds them.
 | Layer | What it retries | How often, how long | Bounded by |
 |---|---|---|---|
 | Bifrost SDK (the judge's models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | the run's time |
-| `ReAct`'s model client (`ChatOpenAI`) | a timeout, a dropped connection, `408/409/429/5xx` | 3 attempts, the openai client's backoff, `Retry-After` | `model_timeout`, the run's time |
+| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | nothing: the gateway retries | 1 attempt | `model_timeout`, the run's time |
+| Bifrost (the gateway) | a model call, per a provider's `network_config.max_retries` (default 0), then the virtual key's fallbacks | its configuration | `model_timeout`, the run's time |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
 | runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |
@@ -401,7 +407,10 @@ line naming both versions.
 * **Cancelling an in-process run from another process** ([cancel](#cancel)).
 * **Without `RUNS_URL`**, `LocalRuns` keeps the working time, leases, cancels and releases as
   agent-runs does, but nothing survives a restart and nothing enforces a limit for a run no
-  attempt is working on (the attempts themselves still stop on time).
+  attempt is working on (the attempts themselves still stop on time). It keeps the last 1,000
+  finished runs, each for an hour (`LocalRuns(keep_finished=, keep_finished_seconds=)`), with
+  their artifacts, so a long-lived process does not grow; paused, queued and running runs are
+  always kept. agent-runs (`RUNS_URL`) is the durable store for production.
 
 ## Run it
 
