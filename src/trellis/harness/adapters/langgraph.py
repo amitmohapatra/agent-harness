@@ -4,7 +4,11 @@
   string input becomes one user message; any other state dict passes through untouched).
   The context message has a fixed id, so a checkpointed thread holds at most one — each turn
   replaces it in place (``add_messages``) — and it leaves out the recent conversation, which
-  the checkpointer already holds;
+  the checkpointer already holds. Where memory keeps the conversation instead, its recent
+  messages follow the context as LangChain's own — ``HumanMessage``, ``AIMessage`` with its
+  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay;
+* transcript: the messages the run added after the question — tool calls and their results
+  with the answer — so the conversation memory keeps replays as the framework's would;
 * run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the
   run's thread (or the run id);
 * pause: with a checkpointer, ``trellis.current().ask`` *is* LangGraph's ``interrupt``, and a
@@ -37,7 +41,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar, Final
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution
@@ -50,6 +54,7 @@ from trellis.harness.adapters.base import (
     ToolFormat,
 )
 from trellis.harness.asking import answer_of
+from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
 from trellis.harness.runtime import DEFERRED, MARKER, reason_of
 
@@ -69,6 +74,8 @@ MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
 class LangGraphAdapter:
     name: ClassVar[str] = "langgraph"
 
+    replays_history = True
+
     def __init__(self, target: Any = None) -> None:
         #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
         #: converts them itself, so nothing is converted for it here
@@ -84,10 +91,13 @@ class LangGraphAdapter:
     def keeps_conversation(self, target: Any) -> bool:
         return _checkpointed(target) and not run_scoped(target)
 
-    def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
+    def prepare_input(
+        self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
+    ) -> Any:
         from langchain_core.messages import SystemMessage
 
         system = [SystemMessage(content=context, id=CONTEXT_MESSAGE_ID)] if context else []
+        system += [langchain_message(said) for said in history]
         if isinstance(input, str):
             return {"messages": [*system, {"role": "user", "content": input}]}
         if isinstance(input, list):
@@ -129,11 +139,15 @@ class LangGraphAdapter:
     def extract(self, target: Any, output: Any) -> Extracted:
         state = output.value
         answer: Any = None
+        messages: list[Any] = []
         if isinstance(state, dict):
+            messages = state.get("messages") or []
             answer = state.get("structured_response")
             if answer is None:
-                answer = _last_ai_text(state.get("messages") or [])
-        transcript = [("assistant", answer)] if isinstance(answer, str) and answer else []
+                answer = _last_ai_text(messages)
+        transcript = added(messages) or (
+            [Said(Speaker.ASSISTANT, answer)] if isinstance(answer, str) and answer else []
+        )
         pause = None
         # a call waiting for its turn behind a pause asks nothing (``DEFERRED``)
         raised = [
@@ -327,12 +341,60 @@ def _checkpointed(target: Any) -> bool:
     return isinstance(getattr(target, "checkpointer", None), BaseCheckpointSaver)
 
 
+def langchain_message(said: Said) -> Any:
+    """``said`` as LangChain's own message: an assistant's with its tool calls, a tool's with
+    the call it answers."""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+    if said.role is Speaker.USER:
+        return HumanMessage(content=said.content)
+    if said.role is Speaker.ASSISTANT:
+        calls = [
+            {"id": c.id, "name": c.name, "args": dict(c.arguments), "type": "tool_call"}
+            for c in said.tool_calls
+        ]
+        return AIMessage(content=said.content, tool_calls=calls)
+    if said.role is Speaker.TOOL:
+        return ToolMessage(content=said.content, tool_call_id=said.tool_call_id or "")
+    return SystemMessage(content=said.content)
+
+
+def added(messages: Sequence[Any]) -> list[Said]:
+    """What the run said after its question (the last user message): each answer with the
+    tool calls it made, and their results; ``[]`` without a question."""
+    asked = next(
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if getattr(messages[i], "type", None) == "human"
+        ),
+        None,
+    )
+    if asked is None:
+        return []
+    out: list[Said] = []
+    for m in messages[asked + 1 :]:
+        kind = getattr(m, "type", None)
+        if kind == "ai":
+            calls = tuple(
+                Called(c["id"] or "", c["name"], c.get("args") or {})
+                for c in getattr(m, "tool_calls", None) or ()
+            )
+            if calls or _text(m):
+                out.append(Said(Speaker.ASSISTANT, _text(m), tool_calls=calls))
+        elif kind == "tool":
+            out.append(Said(Speaker.TOOL, _text(m), tool_call_id=m.tool_call_id))
+    return out
+
+
+def _text(message: Any) -> str:
+    """A message's text (its text parts, when its content is a list of them)."""
+    text = message.text if isinstance(getattr(message, "text", None), str) else message.content
+    return text if isinstance(text, str) else ""
+
+
 def _last_ai_text(messages: list[Any]) -> str | None:
     for message in reversed(messages):
-        if getattr(message, "type", None) == "ai":
-            text = (
-                message.text if isinstance(getattr(message, "text", None), str) else message.content
-            )
-            if isinstance(text, str) and text:
-                return text
+        if getattr(message, "type", None) == "ai" and (text := _text(message)):
+            return text
     return None

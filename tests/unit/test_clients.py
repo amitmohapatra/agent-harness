@@ -16,7 +16,8 @@ from trellis.contracts import ToolCall, ToolError, ToolOutcome
 from trellis.harness import runtime as runtime_module
 from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory
+from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory, Window
+from trellis.harness.history import Called, Said, Speaker, recorded
 from trellis.harness.identity import Identity
 
 GATEWAY = "http://gw.test"
@@ -159,7 +160,7 @@ async def test_the_key_says_who_the_deployment_is() -> None:
 async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
     service = FakeMemoryService()
     run = memory(service).bind(identity())
-    pushed = await run.context("q", tools=["erp-get_stock"], window=False, hints=True)
+    pushed = await run.context("q", tools=["erp-get_stock"], window=Window.NONE, hints=True)
     assert pushed.rendered.startswith(service.context_text)
     assert pushed.bundle_id is not None and pushed.bundle_id.startswith("bnd_")
     [call] = service.named("context")
@@ -173,6 +174,18 @@ async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
     }
     assert call.body["tools"] == {"available": ["erp-get_stock"], "k": 8}
     assert call.body["token_budget"] == 2000 and call.body["window"] is False
+    assert "window_format" not in call.body  # the service's default
+
+
+async def test_the_window_is_asked_for_in_the_form_the_framework_takes() -> None:
+    service = FakeMemoryService()
+    run = memory(service).bind(identity())
+    await run.context("q", tools=None, window=Window.RENDERED, hints=True)
+    await run.context("q", tools=None, window=Window.MESSAGES, hints=True)
+    rendered, messages = service.named("context")
+    assert rendered.body["window"] is True and "window_format" not in rendered.body
+    assert messages.body["window"] is True and messages.body["window_format"] == "messages"
+    assert service.violations == []
 
 
 async def test_agent_tools_are_listed_once_and_tiered_read_or_write() -> None:
@@ -195,13 +208,28 @@ async def test_agent_tools_are_listed_once_and_tiered_read_or_write() -> None:
 async def test_records_carry_idempotency() -> None:
     service = FakeMemoryService()
     run = memory(service).bind(identity())
-    await run.record_messages([("user", "hi"), ("assistant", "hello")], "run_1", 2)
+    await run.record_messages(
+        [
+            Said(Speaker.USER, "hi"),
+            Said(Speaker.ASSISTANT, "", (Called("c1", "lookup", {"q": "hi"}),)),
+            Said(Speaker.TOOL, "found", tool_call_id="c1"),
+            Said(Speaker.ASSISTANT, "hello"),
+        ],
+        "run_1",
+        2,
+    )
     [batch] = service.named("messages")
     # each message names itself, so a re-recorded attempt stores it once
     assert [(m["role"], m["source_message_id"]) for m in batch.body["messages"]] == [
         ("USER", "run_1:user:0"),
         ("ASSISTANT", "run_1:2:msg:1"),
+        ("TOOL", "run_1:2:msg:2"),
+        ("ASSISTANT", "run_1:2:msg:3"),
     ]
+    call, result = batch.body["messages"][1:3]
+    assert call["tool_calls"] == [{"id": "c1", "name": "lookup", "arguments": {"q": "hi"}}]
+    assert result["kind"] == "INTERNAL" and result["tool_call_id"] == "c1"
+    assert service.violations == []
     assert {m["source_system"] for m in batch.body["messages"]} == {"trellis-harness"}
     await run.record_tool(
         ToolCall(tool="t", args={"a": 1}, task="q", step=1), ToolOutcome(tool="t", output=2)
@@ -276,7 +304,17 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
     )
     assert decision is not None
     records = [
+        # as spooled before tool calls were kept, and as spooled now
         run.record("record_messages", messages=[["user", "hi"]], run_id="run_1", attempt=1),
+        run.record(
+            "record_messages",
+            messages=[
+                recorded(Said(Speaker.ASSISTANT, "", (Called("c1", "erp-get", {"sku": "1"}),))),
+                recorded(Said(Speaker.TOOL, "7", tool_call_id="c1")),
+            ],
+            run_id="run_1",
+            attempt=1,
+        ),
         run.record(
             "record_tool",
             call=call.model_dump(mode="json"),
@@ -296,6 +334,7 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
         await work()
     assert [c.name for c in service.calls] == [
         "messages",
+        "messages",
         "record_tool",
         "feedback",
         "feedback",
@@ -303,5 +342,10 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
     ]
     assert all(c.scope.get("tenant_id") == "acme" for c in service.calls)
     assert service.named("messages")[0].body["messages"][0]["source_message_id"] == "run_1:user:0"
+    call_message, result = service.named("messages")[1].body["messages"]
+    assert call_message["tool_calls"] == [
+        {"id": "c1", "name": "erp-get", "arguments": {"sku": "1"}}
+    ]
+    assert result["tool_call_id"] == "c1" and result["kind"] == "INTERNAL"
     assert memory.replay({"op": "unknown", "scope": {}, "args": {}}) is None
     await memory.client.aclose()

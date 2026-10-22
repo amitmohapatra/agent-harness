@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Final
 
@@ -44,6 +44,7 @@ from trellis.contracts import (
     ToolSpec,
 )
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
+from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import selected_env
 from trellis.harness.runtime import Paused
@@ -122,11 +123,15 @@ class ClaudeAdapter:
     tool_format: ToolFormat = "claude"
     fixed_tools: bool = False
     narrows: Narrowing = "run"
+    #: a query takes one prompt, not a conversation: memory's window is in the context's text
+    replays_history = False
 
     def keeps_conversation(self, target: Any) -> bool:
         return False
 
-    def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
+    def prepare_input(
+        self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
+    ) -> Any:
         prompt = input if isinstance(input, str) else json.dumps(input, default=str)
         return ClaudeInput(prompt=prompt, context=context)
 
@@ -148,13 +153,13 @@ class ClaudeAdapter:
     def extract(self, target: Any, output: Any) -> Extracted:
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
-        transcript: list[Any] = []
+        transcript: list[Said] = []
         answer: Any = None
         for message in output:
             if isinstance(message, AssistantMessage):
                 text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
                 if text:
-                    transcript.append(("assistant", text))
+                    transcript.append(Said(Speaker.ASSISTANT, text))
             elif isinstance(message, ResultMessage):
                 if message.is_error:
                     raise ClaudeRunError("; ".join(message.errors or []) or message.subtype)

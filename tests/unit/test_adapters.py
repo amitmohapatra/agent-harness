@@ -50,6 +50,7 @@ from trellis.harness.adapters.openai_agents import (
     _Continue,
 )
 from trellis.harness.evals import _unfenced
+from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Journal, Pending
 
 # --------------------------------------------------------------------------- the query
@@ -170,7 +171,7 @@ def test_structured_output_outranks_the_result_text() -> None:
         None, [said, _result(result="text", structured_output={"n": 1})]
     )
     assert extracted.answer == {"n": 1}
-    assert extracted.transcript == [("assistant", "thinking")]
+    assert extracted.transcript == [Said(Speaker.ASSISTANT, "thinking")]
 
 
 async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.MonkeyPatch) -> None:

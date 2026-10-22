@@ -34,6 +34,7 @@ from trellis.contracts import (
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
+from trellis.harness.history import Said
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
 from trellis.runs import LeaseLostError
@@ -103,6 +104,9 @@ class Runtime:
     run_memory: RunMemory | None = None
     #: the pushed memory context, as the framework's system message carries it
     context: str | None = None
+    #: where memory keeps the conversation and the framework replays it as messages: the
+    #: thread's recent messages (``[]``: none yet); ``None`` where it does not
+    history: list[Said] | None = None
     #: how far memory covered the question (its ``evidence_status``: ``COMPLETE``,
     #: ``INCOMPLETE``, ``INSUFFICIENT``), when a context was pushed
     evidence: str | None = None

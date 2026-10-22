@@ -104,10 +104,10 @@ register_configure_hook(_METER, inheritable=True)
 
 
 @contextmanager
-def metered() -> Iterator[Meter]:
-    """A :class:`Meter` of every chat model call made in this context (and the tasks it
-    starts) until the block ends."""
-    meter = Meter()
+def metered(meter: Meter | None = None) -> Iterator[Meter]:
+    """A :class:`Meter` (``meter``, or a new one) of every chat model call made in this
+    context (and the tasks it starts) until the block ends."""
+    meter = meter or Meter()
     token = _METER.set(meter)
     try:
         yield meter

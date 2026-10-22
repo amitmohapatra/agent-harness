@@ -51,7 +51,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
-from trellis.harness.clients.memory import RunMemory, context_budget
+from trellis.harness.clients.memory import RunMemory, Window, context_budget
 from trellis.harness.evals import (
     EvalCase,
     EvalServices,
@@ -63,6 +63,7 @@ from trellis.harness.evals import (
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
 from trellis.harness.gateways import Capability, missing
+from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
@@ -93,6 +94,9 @@ MEMORY: Final = frozenset(COVERS["memory"])
 SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.model_fields)
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
+#: How long a turn's transcript may take to write before the run returns, where memory keeps
+#: the conversation; past it the write is queued (``writes``) and the run returns.
+TURN_WRITE_SECONDS: Final = 5.0
 #: What the model is told when memory has nothing for the question (``evidence_status``
 #: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
 #: the user's history, instead of a confident guess the memory never held.
@@ -737,17 +741,13 @@ class Agent:
             return None
         own = runtime.tool_names()
         hints = runtime.uses("hints")
+        window = self.window(runtime)
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
                     runtime.task,
                     tools=own or None,
-                    # the framework keeps the thread itself (a checkpointer; an OpenAI Agents
-                    # ``session`` given as a run option): memory's window is not sent again
-                    window=not (
-                        self.adapter.keeps_conversation(self.target)
-                        or runtime.framework_options.get("session") is not None
-                    ),
+                    window=window,
                     hints=hints,
                     budget=self.context_budget,
                 )
@@ -755,6 +755,10 @@ class Agent:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
                 return None
             output(span, pushed.rendered)
+        if window is Window.MESSAGES:
+            runtime.history = from_window(
+                pushed.conversation.messages if pushed.conversation else []
+            )
         # candidates the model is offered; no candidates at all narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
         if hints and candidates and self.adapter.narrows != "none":
@@ -769,6 +773,18 @@ class Agent:
             data={"chars": len(rendered), "evidence_status": status},
         )
         return pushed
+
+    def window(self, runtime: Runtime) -> Window:
+        """How this run's context carries the thread's recent messages: not at all where the
+        framework keeps the thread itself (a checkpointer; an OpenAI Agents ``session`` given
+        as a run option); else as the framework's own messages where it replays them, in the
+        context's text where it does not."""
+        if (
+            self.adapter.keeps_conversation(self.target)
+            or runtime.framework_options.get("session") is not None
+        ):
+            return Window.NONE
+        return Window.MESSAGES if self.adapter.replays_history else Window.RENDERED
 
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
@@ -785,22 +801,36 @@ class Agent:
                 ),
             )
 
-    async def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
-        """The attempt's transcript, whether the run succeeded, paused or failed."""
+    async def recorded_run(self, runtime: Runtime, messages: Sequence[Said]) -> None:
+        """The attempt's transcript, whether the run succeeded, paused or failed. Where memory
+        keeps the conversation (``runtime.history``), it is written before the run returns, so
+        the next turn's window holds it wherever that turn runs; a write that fails there is
+        queued like every other (:mod:`trellis.harness.writes`: retried, spooled)."""
         memory = runtime.run_memory
-        if memory is not None and runtime.uses("records") and messages:
-            run_id, attempt = runtime.run_id, runtime.attempt
-            await self.harness.writes.submit(
-                "memory.transcript",
-                lambda: memory.record_messages(messages, run_id, attempt),
-                events=runtime.events,
-                record=memory.record(
-                    "record_messages",
-                    messages=[list(m) for m in messages],
-                    run_id=run_id,
-                    attempt=attempt,
-                ),
-            )
+        if memory is None or not runtime.uses("records") or not messages:
+            return
+        run_id, attempt = runtime.run_id, runtime.attempt
+        if runtime.history is not None:
+            try:
+                async with asyncio.timeout(TURN_WRITE_SECONDS):
+                    await memory.record_messages(messages, run_id, attempt)
+                return
+            except Exception as exc:
+                log.warning(
+                    "the turn could not be written before the run returned; it is queued",
+                    extra={"run_id": run_id, "error_class": type(exc).__name__},
+                )
+        await self.harness.writes.submit(
+            "memory.transcript",
+            lambda: memory.record_messages(messages, run_id, attempt),
+            events=runtime.events,
+            record=memory.record(
+                "record_messages",
+                messages=[recorded(m) for m in messages],
+                run_id=run_id,
+                attempt=attempt,
+            ),
+        )
 
     async def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on

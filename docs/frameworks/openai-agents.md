@@ -105,7 +105,7 @@ agent = h.wrap(
 
 | | |
 |---|---|
-| Memory push | the context as a leading `system` message of the input (a string input becomes a user message after it) |
+| Memory push | the context as a leading `system` message of the input (a string input becomes a user message after it); without a `session`, memory keeps the conversation and its recent turns follow as the SDK's own input items — messages, `function_call`, `function_call_output` — as a session would replay them, each run's items written back before it returns |
 | Memory pull | the memory tools are added to the copy per run |
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used; your own tools are never narrowed |

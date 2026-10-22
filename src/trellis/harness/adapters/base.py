@@ -1,8 +1,11 @@
 """The adapter contract: four functions per framework, and one check.
 
-* ``prepare_input(target, input, context)`` — the framework's input, with the pushed memory
-  context as a system message (``keeps_conversation(target)``: the target holds the thread's
-  messages itself, so the context is asked for without the recent conversation);
+* ``prepare_input(target, input, context, history)`` — the framework's input, with the pushed
+  memory context as a system message (``keeps_conversation(target)``: the target holds the
+  thread's messages itself, so the context is asked for without the recent conversation) and,
+  where memory keeps the conversation, its recent messages (``history``) as the framework's own
+  messages, as its checkpoint would replay them (``replays_history``; a framework that takes
+  no history of messages gets them in the context's text instead);
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
@@ -30,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Literal, Protocol
 
 from trellis.contracts import ConfigurationError, InterruptResolution
+from trellis.harness.history import Said
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime
 from trellis.harness.tools.base import Tool
@@ -40,7 +44,6 @@ FRAMEWORK_OPTIONS: Final = "framework_options"
 
 ToolFormat = Literal["langchain", "openai_agents", "claude", "none"]
 Narrowing = Literal["turn", "run", "none"]
-Role = Literal["user", "assistant"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +73,9 @@ class NativePause:
 @dataclass(frozen=True, slots=True)
 class Extracted:
     answer: Any
-    transcript: list[tuple[Role, str]] = field(default_factory=list)
+    #: what the agent said in this attempt - its tool calls and their results too, where the
+    #: framework reports them - in order
+    transcript: list[Said] = field(default_factory=list)
     pause: NativePause | None = None
 
 
@@ -91,10 +96,19 @@ class Adapter(Protocol):
     #: at wrap time, and the harness tools come from ``h.tools(...)`` instead
     fixed_tools: bool
     narrows: Narrowing
+    #: the framework takes a conversation's history as its own messages (``prepare_input``'s
+    #: ``history``); else memory's window comes in the context's text
+    replays_history: bool
 
     def keeps_conversation(self, target: Any) -> bool: ...
 
-    def prepare_input(self, target: Any, input: Any, context: str | None) -> Any: ...
+    def prepare_input(
+        self,
+        target: Any,
+        input: Any,
+        context: str | None,
+        history: Sequence[Said] = (),
+    ) -> Any: ...
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any: ...
 

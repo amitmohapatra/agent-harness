@@ -59,6 +59,7 @@ from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
+from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
@@ -524,7 +525,7 @@ async def _invoked(
     """The framework's part: its input (resumed where it paused), the run's tools in its
     format, and what it produced."""
     adapter, target = agent.adapter, agent.target
-    native_input = adapter.prepare_input(target, input, runtime.context)
+    native_input = adapter.prepare_input(target, input, runtime.context, runtime.history or ())
     if pending is not None and resolution is not None:
         native_input = adapter.resume_input(target, native_input, pending, resolution)
     run_tools = [] if adapter.fixed_tools else tools
@@ -775,13 +776,14 @@ async def _recorded(
         log.info("run %s was already recorded as %s", run_id, record.status.value)
 
 
-def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[tuple[str, str]]:
-    """The attempt's messages: the question, then what the agent said (its answer, when the
-    framework reports no transcript of its own)."""
-    said: list[tuple[str, str]] = list(extracted.transcript) if extracted is not None else []
+def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[Said]:
+    """The attempt's messages: the question, then what the agent said - its tool calls and
+    their results too, where the framework reports them (its answer, when the framework
+    reports no transcript of its own)."""
+    said: list[Said] = list(extracted.transcript) if extracted is not None else []
     if not said and extracted is not None and isinstance(extracted.answer, str):
-        said = [("assistant", extracted.answer)] if extracted.answer else []
-    return [("user", runtime.task), *said] if runtime.task else said
+        said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
+    return [Said(Speaker.USER, runtime.task), *said] if runtime.task else said
 
 
 async def _settle_cancelled(
