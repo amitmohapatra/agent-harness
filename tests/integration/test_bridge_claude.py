@@ -17,9 +17,7 @@ from claude_agent_sdk import ClaudeAgentOptions, InMemorySessionStore
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunStatus
-from trellis.harness import bridges
-from trellis.harness.bounded import SAID_ONCE, LRUSet
-from trellis.harness.bridges.claude import JournalSessions
+from trellis.harness.bridges.claude import JournalSessions, _said_local
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
@@ -38,7 +36,7 @@ def refund(order: str) -> str:
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     refunds.clear()
-    monkeypatch.setattr(bridges, "_said", LRUSet(maxsize=SAID_ONCE))
+    _said_local.cache_clear()
 
 
 def machine(tmp_path: Path, name: str, script: list[dict[str, Any]], **fields: Any) -> Any:
@@ -154,8 +152,8 @@ class DurableStore:
         return await self.kept.load(key)
 
 
-def said(caplog: pytest.LogCaptureFixture, bridge: str) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.__dict__.get("bridge") == bridge]
+def said(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "Claude's session is kept" in r.getMessage()]
 
 
 async def test_options_with_their_own_store_keep_it(
@@ -168,14 +166,11 @@ async def test_options_with_their_own_store_keep_it(
     with caplog.at_level(logging.WARNING, logger="trellis.harness"):
         for agent in (ram, ram, kept):
             assert (await agent.run("hi", user="ada")).status is RunStatus.SUCCESS
-    [warning] = said(caplog, "claude_session")
-    message = warning.getMessage()
-    assert (
-        "ram: its InMemorySessionStore keeps Claude's session in this process's memory" in message
+    [warning] = said(caplog)
+    assert warning.__dict__["agent_id"] == "ram" and warning.__dict__["store"] == (
+        "InMemorySessionStore"
     )
-    assert (
-        "runs the query again from its prompt" in message and "a durable session store" in message
-    )
+    assert "runs the query again from its prompt" in warning.getMessage()
     assert in_ram._store and durable.kept._store  # each team's store got its session
 
 
@@ -187,8 +182,8 @@ async def test_file_checkpointing_keeps_the_session_on_the_local_disk_and_says_s
     with caplog.at_level(logging.WARNING, logger="trellis.harness"):
         for _ in range(2):
             assert (await agent.run("hi", user="ada")).status is RunStatus.SUCCESS
-    [warning] = said(caplog, "claude_session")
-    assert "leave enable_file_checkpointing off" in warning.getMessage()
+    [warning] = said(caplog)
+    assert warning.__dict__["store"] == "enable_file_checkpointing"
 
 
 async def test_a_memory_service_that_is_down_leaves_the_prompt_without_context(

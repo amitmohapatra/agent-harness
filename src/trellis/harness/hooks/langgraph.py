@@ -1,12 +1,8 @@
-"""The run's LangChain callbacks: the hook every model call and tool call of a graph's run
-reaches — its subgraphs, its ``Send`` branches and a Deep Agent's ``task`` sub-agents included,
-since LangGraph hands the run's callbacks to everything it runs inside it.
-
-* every model reply's usage (and the gateway's cost) counts toward the run's budget
-  (``budget.py``) — the ``ModelHooks`` middleware then counts nothing again;
-* a Deep Agent's ``task`` call is a native helper of the run (``bridges.helpers``): its run
-  record (lineage) and its turns.
-"""
+"""The run's LangChain callbacks for the helpers a graph spawns itself: LangGraph hands the
+run's callbacks to everything it runs inside it — its subgraphs, its ``Send`` branches, a Deep
+Agent's ``task`` sub-agents — so a ``task`` call is seen starting and ending here, and is a
+native helper of the run (``bridges.helpers``: its run record, its turns). What every model
+call spends is counted by ``accounting``, the one owner of that."""
 
 from __future__ import annotations
 
@@ -14,35 +10,25 @@ from typing import Any, Final
 from uuid import UUID
 
 from langchain_core.callbacks import AsyncCallbackHandler
-from langchain_core.outputs import LLMResult
 
 from trellis.contracts.errors import is_pause_signal
-from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
-from trellis.harness.runtime import Runtime
 
 #: Deep Agents' sub-agent tool, and the arguments it takes (``SubAgentMiddleware``).
 TASK: Final = "task"
 TASK_ARGUMENTS: Final = frozenset({"description", "subagent_type"})
 
 
-class GraphCallbacks(AsyncCallbackHandler):
-    """The callbacks of one attempt of a graph's run (``runtime``)."""
+class HelperCallbacks(AsyncCallbackHandler):
+    """The helper callbacks of one attempt of a graph's run."""
 
     #: a helper's record is written before its sub-agent runs, and a failure to write it is
     #: the run's (LangChain would only log it)
     run_inline = True
     raise_error = True
 
-    def __init__(self, runtime: Runtime, helpers: Helpers) -> None:
-        self.runtime = runtime
+    def __init__(self, helpers: Helpers) -> None:
         self.helpers = helpers
-
-    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
-        for generations in response.generations:
-            message = getattr(generations[0], "message", None) if generations else None
-            if message is not None:
-                budget.account_reply(self.runtime, message)
 
     async def on_tool_start(
         self,

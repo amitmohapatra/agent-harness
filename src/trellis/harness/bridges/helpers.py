@@ -1,5 +1,5 @@
 """Native helpers: the agents a framework spawns itself inside a run — a Deep Agent's ``task``
-sub-agents, an OpenAI agent handed off to or called as a tool (``Agent.as_tool``), Claude's
+sub-agents, an OpenAI agent called as a tool (``Agent.as_tool``), Claude's
 ``agents=`` subagents — each a child of the run, reached through the framework's own hooks
 (the spawning stays the framework's):
 
@@ -48,7 +48,6 @@ class Kind(StrEnum):
     """How the framework spawned the helper."""
 
     TASK = "task"  # Deep Agents' ``task`` tool
-    HANDOFF = "handoff"  # an OpenAI agent handed off to
     AGENT_TOOL = "agent_tool"  # an OpenAI agent called as a tool (``Agent.as_tool``)
     SUBAGENT = "subagent"  # Claude's ``agents=`` (its ``Agent``/``Task`` tool)
 

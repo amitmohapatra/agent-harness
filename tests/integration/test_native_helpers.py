@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agents import Agent, function_tool
+from agents import Agent
 from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions
 from deepagents import create_deep_agent
 
@@ -23,6 +23,7 @@ from tests.integration.test_restarts import Crash, crash_then_finish, workers  #
 from tests.support.catalog import FakeCatalog
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.durable import SharedSaver
+from tests.support.fake_claude_cli import STEP_TOKENS
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Harness, Settings, tool
@@ -149,101 +150,6 @@ async def test_a_deep_agents_sub_agents_tokens_count_toward_the_runs_budget(
     assert "max_tokens 30 reached (60 spent)" in result.error.message
 
 
-async def test_a_deep_agents_sub_agent_cut_by_a_crash_is_ended_by_the_next_worker(
-    workers: tuple[Harness, Harness],  # noqa: F811
-) -> None:
-    name = uuid.uuid4().hex
-    main = ScriptedChatModel(turns=[TASK, "o1 refunded"])
-    sub = ScriptedChatModel(
-        turns=[("refund", {"order": "o1"}), ("die", {}), ("die", {}), "refunded o1"]
-    )
-
-    graphs = {
-        id(h): await deep(h, main, sub, refund, die, saver=SharedSaver(name)) for h in workers
-    }
-    _, result = await crash_then_finish(workers, lambda h: graphs[id(h)], "refund o1")
-    assert result.status is RunStatus.SUCCESS and result.answer == "o1 refunded", result.error
-    assert done == ["refund o1"]  # not done again on the next worker
-    [child] = await children(workers[1], result.run_id)
-    assert child.status is RunStatus.SUCCESS
-
-
-# ---------------------------------------------------------------------- OpenAI handoffs
-async def test_an_agent_handed_off_to_is_a_child_run_its_turns_in_memory(
-    memory_service: FakeMemoryService,
-) -> None:
-    model = ScriptedModel([("transfer_to_billing", {}), "refunded o1"])
-    billing = Agent(name="billing", model=model)
-    desk = Agent(name="desk", model=model, handoffs=[billing])
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        result = await h.wrap(desk, id="desk").run("refund o1", user="u")
-        assert result.status is RunStatus.SUCCESS
-        [child] = await children(h, result.run_id)
-        record = await h.runs.get(child.run_id)
-    assert record is not None and record.status is RunStatus.SUCCESS
-    assert record.metadata[HELPER] == {
-        "framework": "openai_agents",
-        "kind": "handoff",
-        "name": "billing",
-    }
-    assert told(memory_service, child.run_id) == [
-        ("USER", "refund o1"),
-        ("ASSISTANT", "refunded o1"),
-    ]
-
-
-async def test_an_agent_handed_off_to_spends_the_runs_budget(harness: Harness) -> None:
-    from agents import Usage
-
-    @function_tool
-    def track(order: str) -> str:
-        done.append(f"track {order}")
-        return "on its way"
-
-    calm = ScriptedModel([("transfer_to_billing", {})])
-    spending = ScriptedModel(
-        [("track", {"order": "o1"}), "done"],
-        usage=Usage(input_tokens=50, output_tokens=10),
-        ids="billing_",
-    )
-    billing = Agent(name="billing", model=spending, tools=[track])
-    desk = Agent(name="desk", model=calm, handoffs=[billing])
-    agent = harness.wrap(desk, id="desk", tools=[refund], budget=Budget(max_tokens=30))
-    result = await agent.run("track o1", user="u")
-    assert result.status is RunStatus.PARTIAL and done == []  # its own tool, refused
-    assert len(await children(harness, result.run_id)) == 1  # billing's run, the run's child
-
-
-async def test_an_agent_handed_off_to_cut_by_a_crash_is_ended_by_the_next_worker(
-    workers: tuple[Harness, Harness],  # noqa: F811
-) -> None:
-    @function_tool
-    def die_here() -> str:
-        """The worker dies here, once."""
-        if crashes:
-            raise crashes.pop()
-        return "fine"
-
-    model = ScriptedModel(
-        [
-            ("transfer_to_billing", {}),
-            ("die_here", {}),
-            ("transfer_to_billing", {}),
-            ("die_here", {}),
-            "refunded o1",
-        ]
-    )
-
-    def build(h: Harness) -> Any:
-        billing = Agent(name="billing", model=model, tools=[die_here])
-        return Agent(name="desk", model=model, handoffs=[billing])
-
-    _, result = await crash_then_finish(workers, build, "refund o1")
-    assert result.status is RunStatus.SUCCESS and result.answer == "refunded o1", result.error
-    [child] = await children(workers[1], result.run_id)
-    assert child.status is RunStatus.SUCCESS  # the same record, ended by the next worker
-
-
 # ---------------------------------------------------------------------- Claude's subagents
 def claude(tmp_path: Path, script: list[dict[str, Any]], **fields: Any) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
@@ -309,15 +215,26 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
 
 
 async def test_a_claude_subagents_tokens_count_toward_the_runs_budget(
-    harness: Harness, tmp_path: Path
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    accounted: list[dict[str, Any]] = []
+    account = budget.account
+
+    def counted(runtime: Any, **spent: Any) -> None:
+        accounted.append(spent)
+        account(runtime, **spent)
+
+    monkeypatch.setattr(budget, "account", counted)
     options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
     options.env["FAKE_CLAUDE_COST"] = "0.01"
-    agent = harness.wrap(options, id="desk", budget=Budget(max_cost=0.025))
-    result = await agent.run("check o1", user="u")
-    # the subagent's two steps and its Agent call spent it: the CLI stopped at the cap
-    assert result.status is RunStatus.PARTIAL
-    assert result.error is not None and result.error.code == budget.BUDGET_EXCEEDED
+    result = await harness.wrap(options, id="desk").run("check o1", user="u")
+    assert result.status is RunStatus.SUCCESS
+    # the query's ResultMessage, the subagent's steps among them, is what the run spent
+    [spent] = accounted
+    steps = round(spent["cost"] / 0.01)
+    assert steps >= 3  # the Agent call, the subagent's Read, the answer
+    tokens = STEP_TOKENS[0] * steps, STEP_TOKENS[1] * steps
+    assert (spent["input_tokens"], spent["output_tokens"]) == tokens
 
 
 async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(

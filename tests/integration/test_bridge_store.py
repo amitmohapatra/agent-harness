@@ -21,8 +21,7 @@ from langgraph.store.memory import InMemoryStore
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, current
 from trellis.contracts import ConfigurationError, RunStatus
-from trellis.harness import bridges
-from trellis.harness.bounded import SAID_ONCE, LRUSet
+from trellis.harness.adapters.langgraph import _own_store
 from trellis.harness.bridges.store import MAX_CHARS, MemoryStore
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
@@ -63,8 +62,8 @@ async def reads(state: State, runtime: GraphRuntime[None]) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def _forget_what_was_said(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bridges, "_said", LRUSet(maxsize=SAID_ONCE))
+def _forget_what_was_said() -> None:
+    _own_store.cache_clear()
 
 
 async def test_a_graph_without_a_store_stores_in_the_memory_service(
@@ -106,7 +105,7 @@ async def test_what_one_conversation_stored_another_reads(
     assert other.status is RunStatus.SUCCESS and seen[2] is None
 
 
-async def test_with_memory_on_a_graphs_own_store_is_not_used_beside_it(
+async def test_a_graphs_own_store_is_kept_and_said_once(
     memory_harness: Harness, memory_service: FakeMemoryService, caplog: pytest.LogCaptureFixture
 ) -> None:
     own = InMemoryStore()
@@ -116,10 +115,11 @@ async def test_with_memory_on_a_graphs_own_store_is_not_used_beside_it(
             assert (await agent.run({"topic": "tides"}, user="ada", thread=thread)).status is (
                 RunStatus.SUCCESS
             )
-    said = [r for r in caplog.records if "own store is not used" in r.getMessage()]
-    assert len(said) == 1 and said[0].__dict__["bridge"] == "store"
-    assert memory_service.named("remember")  # the memory service is the store
-    assert await own.aget(PREFS, "topic") is None  # the graph's own is not written beside it
+    said = [r for r in caplog.records if "a store of its own" in r.getMessage()]
+    assert len(said) == 1 and said[0].__dict__["store"] == "InMemoryStore"
+    assert not memory_service.named("remember")  # the memory service is not put beside it
+    stored = await own.aget(PREFS, "topic")
+    assert stored is not None and stored.value == {"text": "tides", "n": 1}
 
 
 async def test_without_memory_a_graphs_own_store_is_its_store(
@@ -359,9 +359,3 @@ async def test_a_worker_that_dies_after_a_put_leaves_one_item(
         await first.aclose()
         await second.aclose()
     assert len([m for m in memory_service.memories.values() if m["current"]]) == 1
-
-
-def test_what_the_bridges_said_once_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bridges, "_said", LRUSet(maxsize=2))
-    said = [bridges.said(k, "x", extra={}) for k in ("a", "b", "a", "c", "b", "a")]
-    assert said == [True, True, False, True, False, True]  # a forgotten past the bound

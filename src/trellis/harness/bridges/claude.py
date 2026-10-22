@@ -20,16 +20,20 @@ to put it behind.
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.harness.bridges import said
-from trellis.harness.bridges.history import DURABLE_INSTEAD, in_ram
+from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.history import in_ram
 from trellis.harness.journal import Journal
 
 if TYPE_CHECKING:
     from claude_agent_sdk import HookContext, HookInput
     from claude_agent_sdk.types import SyncHookJSONOutput
+
+log = logging.getLogger("trellis.harness")
 
 #: The hook event the context is added at.
 PROMPT_EVENT: Final = "UserPromptSubmit"
@@ -45,47 +49,35 @@ def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dic
     ) -> SyncHookJSONOutput:
         return {"hookSpecificOutput": {"hookEventName": PROMPT_EVENT, "additionalContext": context}}
 
-    return with_hook(hooks, PROMPT_EVENT, HookMatcher(hooks=[add_context]))
-
-
-def with_hook(
-    hooks: Mapping[str, Sequence[Any]] | None, event: str, matcher: Any
-) -> dict[str, Any]:
-    """The options' hooks with ``matcher`` added at ``event``, after theirs."""
     own = dict(hooks or {})
-    own[event] = [*own.get(event, ()), matcher]
+    own[PROMPT_EVENT] = [*own.get(PROMPT_EVENT, ()), HookMatcher(hooks=[add_context])]
     return own
 
 
 def session_store(options: Any, journal: Journal, agent_id: str) -> Any | None:
-    """The store a query's session is kept in — the run's per-step state, the journal's: the
-    run's journal (:class:`JournalSessions`), unless the options keep it themselves (``None``):
-    their own store — durable unless it is one kept in RAM (``bridges.history.in_ram``, said
-    once) — or file checkpointing, which the SDK keeps on the local disk only (said once)."""
+    """The store a query's session is kept in: the run's journal (:class:`JournalSessions`),
+    unless the options keep it themselves (``None``) — their own store (one kept in RAM only,
+    ``history.in_ram``, is said once), or file checkpointing, which the SDK keeps on the local
+    disk only (said once)."""
     own = options.session_store
     if own is not None:
         if in_ram(own):
-            said(
-                f"claude_session:{agent_id}",
-                "%s: its %s keeps Claude's session in this process's memory only: a resume on "
-                "another worker runs the query again from its prompt; give it %s",
-                agent_id,
-                type(own).__name__,
-                DURABLE_INSTEAD["claude_agent_sdk"],
-                extra={"agent_id": agent_id, "store": type(own).__name__},
-            )
+            _said_local(agent_id, type(own).__name__)
         return None
     if not options.enable_file_checkpointing:
         return JournalSessions(journal)
-    said(
-        f"claude_session:{agent_id}",
-        "%s: the options checkpoint Claude's files on this machine's disk, so the session is "
-        "kept there and not in the run's journal: a resume elsewhere runs the query again from "
-        "its prompt; leave enable_file_checkpointing off to keep it in the journal",
-        agent_id,
-        extra={"agent_id": agent_id},
-    )
+    _said_local(agent_id, "enable_file_checkpointing")
     return None
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent and store, of the most recent
+def _said_local(agent_id: str, store: str) -> None:
+    log.warning(
+        "Claude's session is kept on this machine only, not in the run's journal: a resume on "
+        "another worker runs the query again from its prompt (give the options no "
+        "session_store and no enable_file_checkpointing to keep it in the journal)",
+        extra={"agent_id": agent_id, "store": store},
+    )
 
 
 class JournalSessions:
@@ -122,4 +114,4 @@ def _name(key: Mapping[str, Any]) -> str:
     return f"{key['session_id']}/{subpath}" if subpath else str(key["session_id"])
 
 
-__all__ = ["PROMPT_EVENT", "JournalSessions", "session_store", "with_context", "with_hook"]
+__all__ = ["PROMPT_EVENT", "JournalSessions", "session_store", "with_context"]

@@ -170,12 +170,6 @@ async def test_a_claude_subagents_call_starts_it_and_its_result_ends_it() -> Non
     ]
 
 
-def test_the_options_own_max_budget_is_the_sdks_cap() -> None:
-    from trellis.harness.adapters.claude import _left
-
-    assert _left(SimpleNamespace(), SimpleNamespace(max_budget_usd=2)) == 2.0  # type: ignore[arg-type]
-
-
 def test_the_runs_callbacks_go_beside_the_ones_it_was_given() -> None:
     from langchain_core.callbacks import AsyncCallbackManager, StdOutCallbackHandler
 
@@ -187,36 +181,3 @@ def test_the_runs_callbacks_go_beside_the_ones_it_was_given() -> None:
     given = AsyncCallbackManager(handlers=[theirs])
     manager = _with_handler(given, StdOutCallbackHandler())
     assert len(manager.handlers) == 2 and given.handlers == [theirs]  # theirs: unchanged
-
-
-async def test_a_reply_without_a_message_counts_nothing() -> None:
-    from langchain_core.outputs import Generation, LLMResult
-
-    from trellis.harness.hooks.langgraph import GraphCallbacks
-
-    spent: dict[str, Any] = {}
-    run = SimpleNamespace(replay=SimpleNamespace(journal=SimpleNamespace(spent=spent)), parent=None)
-    run.agent = SimpleNamespace(budget=None)
-    callbacks = GraphCallbacks(run, Helpers(run, "langgraph"))  # type: ignore[arg-type]
-    await callbacks.on_llm_end(LLMResult(generations=[[], [Generation(text="plain")]]))
-    assert spent == {}
-
-
-async def test_a_handoff_back_to_the_starting_agent_is_no_helper() -> None:
-    from trellis.harness.hooks.openai_agents import ModelHooks
-
-    helpers = Recorded()
-    hooks = ModelHooks(helpers=helpers, starting="desk")  # type: ignore[arg-type]
-    desk, billing = SimpleNamespace(name="desk"), SimpleNamespace(name="billing")
-    await hooks.on_handoff(None, desk, billing)
-    await hooks.on_handoff(None, billing, desk)
-    await hooks.on_agent_end(None, desk, ["not text"])
-    assert [(c[0], c[1]) for c in helpers.calls] == [
-        ("end", "desk"),
-        ("start", "billing"),
-        ("end", "billing"),
-        ("end", "desk"),
-    ]
-    plain = ModelHooks()  # code that runs the SDK itself: no helpers
-    await plain.on_handoff(None, desk, billing)
-    await plain.on_agent_end(None, billing, "done")

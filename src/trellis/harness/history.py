@@ -52,6 +52,7 @@ def _sqlite_in_memory(store: Any) -> bool:
 IN_RAM: Final[Mapping[str, Callable[[Any], bool]]] = {
     "langgraph.checkpoint.memory.InMemorySaver": _always,
     "agents.memory.sqlite_session.SQLiteSession": _sqlite_in_memory,
+    "claude_agent_sdk._internal.session_store.InMemorySessionStore": _always,
 }
 
 
