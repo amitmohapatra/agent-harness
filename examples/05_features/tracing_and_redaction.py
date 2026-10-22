@@ -1,9 +1,10 @@
-"""Tracing and redaction: the OTel GenAI spans every run makes, and what never leaves the process.
+"""Tracing and redaction: the OTel GenAI spans every run makes, and the credentials they never hold.
 
 Every attempt of a run is an ``invoke_agent`` span in one trace per run, with an
 ``execute_tool`` span per tool call (and ``chat`` per model call of a ``ReAct``). Span
 attributes pass the redactor first: a value under a secret-looking name is dropped, a value
-that looks like a credential is dropped, an e-mail address is masked, a long value is cut.
+that looks like a credential is dropped, a long value is cut. Personal data (the e-mail
+address here) is yours to mask, with an ``on_output`` hook for what users see (docs/hooks.md).
 
 The harness uses the OTel API only. ``OTEL_EXPORTER_OTLP_ENDPOINT`` (a collector's), or
 Langfuse's own keys alone, install an exporter; here the example installs its own in-memory

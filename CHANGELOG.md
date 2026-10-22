@@ -15,6 +15,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   and answer are written back before the run returns (queued past 5 s or when memory is down),
   so the next turn reads them wherever it runs. `trellis.harness.history` holds the policy and
   the messages (`Said`, `from_window`). Needs the memory service's `window_format="messages"`.
+- Redaction masks credentials in traces only. Span attributes still lose secret-named fields,
+  bearer tokens, JWTs, `sk-` keys and key-like blobs; e-mail addresses are no longer masked
+  (personal data is the domain's to define). The run's event stream (`agent.stream`, AG-UI,
+  A2A task updates and pushes), its answer, the memory service's transcript, tool records and
+  spool, and the journal now carry values as they are, so memory search and recall see the
+  real data.
 
 ### Fixed
 
@@ -34,6 +40,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   (`ApprovalRuleError`).
 
 ### Added
+
+- `Hooks.on_output(item) -> item`: mask what a user is shown. It runs, in order (the harness's
+  hooks, then the agent's), on the answer `agent.run`/`agent.resume`/`RunHandle.result` return
+  (`OutputKind.ANSWER`) and every event of `agent.stream`, `agent.events` and `serve_chat`'s
+  AG-UI stream (`OutputKind.EVENT`); what it returns is sent. It never touches memory, the
+  journal, A2A, traces or what the model and tools see. A hook that raises is logged and the
+  item is withheld (`WITHHELD`), never sent as it was; with no hook overriding it nothing is
+  wrapped.
 
 - Learned approval suggestions are accepted automatically when the tool catalog refreshes
   (the memory service's accept endpoint), except for a tool at the highest risk, which waits for

@@ -38,8 +38,9 @@ are still there on replay. A pause arrives as `RUN_FINISHED` with an `interrupt`
 (`interrupts[0]`: `id`, `reason` lower-cased, `message` the question, `toolCallId`,
 `responseSchema` = `expects`, and under `metadata` what a client renders as it is: `ui`, `options` (strings or `{value, label, description}`), `multiple`, `ui_schema`, `component`, `props`, `payload`/`payload_ref`, `tool_call`, `assignee`, `deadline`); a
 failure as `RUN_ERROR`; a cancellation as `RUN_FINISHED` with a `cancelled` outcome. A tool
-call's arguments (`TOOL_CALL_ARGS`) and output (`TOOL_CALL_RESULT`) and `CUSTOM` events arrive
-redacted; the answer and the interrupt as they are ([observability.md](observability.md#redaction)).
+call's arguments (`TOOL_CALL_ARGS`) and output (`TOOL_CALL_RESULT`), `CUSTOM` events, the answer
+and the interrupt arrive as they are, through the agent's `on_output` hooks
+([hooks.md](hooks.md#mask-what-the-ui-sees)).
 
 How a resume entry becomes a decision: `decision` wins when present; `status: "cancelled"` is
 `CANCEL`; a question is `ANSWER` with `payload`; an approval is `APPROVE` for `true`, `REJECT`
@@ -107,8 +108,9 @@ The task id is the run id, the context id the thread. Task states follow the run
 `submitted`, `RUNNING` `working` (text deltas and progress — tool calls, context, custom events
 — arrive as working updates), `PAUSED` `input-required` with the question, `SUCCESS`
 `completed` with the answer as the artifact `result`, `ERROR`/`TIMEOUT` `failed`,
-`CANCELLED` `canceled`. A tool call's arguments and output arrive redacted, in the updates and
-in push notifications ([observability.md](observability.md#redaction)). A task this process does not hold (a restart, another replica) is
+`CANCELLED` `canceled`. A tool call's arguments and output arrive as they are, in the updates and
+in push notifications: A2A is the deployment's own agents talking
+([observability.md](observability.md#redaction)). A task this process does not hold (a restart, another replica) is
 rebuilt from the run record when its own user asks for it.
 
 The next message on an `input-required` task resumes it, as the person it belongs to (another

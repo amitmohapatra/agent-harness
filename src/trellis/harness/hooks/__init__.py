@@ -34,11 +34,20 @@ hooks run in order — the harness's, then the agent's. Where they fire:
   ``ReAct`` included); the OpenAI Agents SDK reports its calls only. The Claude Agent SDK's
   model calls are the CLI's, and a plain function makes none: no model hooks there;
 * ``on_error(stage, error)`` — a run that failed or ran out of time (``"run"``), a model call
-  that failed (``"model"``), a tool call that failed or timed out (``"tool"``).
+  that failed (``"model"``), a tool call that failed or timed out (``"tool"``);
+* ``on_output(item)`` — what leaves for the user, and only that: the answer ``agent.run``,
+  ``agent.resume`` and ``RunHandle.result`` return (:attr:`OutputKind.ANSWER`), and every event
+  of ``agent.stream``, ``agent.events`` and ``serve_chat``'s AG-UI stream — text deltas, tool
+  calls, custom events, the finish with its result (:attr:`OutputKind.EVENT`). What it returns
+  is what is sent: mask your users' personal data here. Memory, the journal, A2A, the run's
+  log, traces and what the model and the tools see are not touched. It is synchronous (it runs
+  on every streamed delta, in order: keep it fast, no I/O), and with no hook overriding it
+  nothing is wrapped at all.
 
 A hook that raises fails what it hooks — the call (an error the framework sees), or the run —
 except ``on_run_end`` and ``on_error``, which run once the outcome is decided: what they raise
-is logged.
+is logged, and ``on_output``, which fails closed: what it raises is logged and the item is sent
+as :data:`WITHHELD` instead, never as it was.
 """
 
 from __future__ import annotations
@@ -47,9 +56,10 @@ import dataclasses
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Final, Literal
 
-from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
+from trellis.contracts import RunEvent, RunEventType, ToolCall, ToolOutcome, ToolStatus
 from trellis.harness.runtime import current
 
 if TYPE_CHECKING:
@@ -107,6 +117,44 @@ class ModelCall:
     system: Any = None
 
 
+class OutputKind(StrEnum):
+    """What an :class:`Output` holds."""
+
+    #: the run's answer, as ``agent.run``/``agent.resume``/``RunHandle.result`` return it
+    ANSWER = "answer"
+    #: one event of the run's stream as a user is shown it (``agent.stream``, AG-UI)
+    EVENT = "event"
+
+
+#: What the user is sent in place of an item whose ``on_output`` hook raised.
+WITHHELD: Final = "[withheld: an on_output hook failed]"
+
+
+@dataclass(frozen=True, slots=True)
+class Output:
+    """One thing leaving for the user: ``value`` is the answer (``ANSWER``) or a
+    :class:`~trellis.contracts.RunEvent` (``EVENT``). Return it, or ``replace(value=...)``."""
+
+    kind: OutputKind
+    value: Any
+
+    def replace(self, value: Any) -> Output:
+        return Output(self.kind, value)
+
+    def withheld(self) -> Output:
+        """This item with nothing of what it carried: the answer :data:`WITHHELD`; an event
+        of the same type and ids whose data is withheld (a finish keeps its outcome)."""
+        if self.kind is OutputKind.ANSWER:
+            return self.replace(WITHHELD)
+        event: RunEvent = self.value
+        data = {"result": WITHHELD} if event.type is RunEventType.RUN_FINISHED else {}
+        if "delta" in event.data:
+            data["delta"] = WITHHELD
+        if "tool" in event.data:
+            data["tool"] = event.data["tool"]
+        return self.replace(event.model_copy(update={"data": {"withheld": WITHHELD, **data}}))
+
+
 class Hooks:
     """Subclass and override what you need; each method does nothing by default."""
 
@@ -131,6 +179,9 @@ class Hooks:
     async def on_error(self, stage: Stage, error: Exception) -> None:
         return None
 
+    def on_output(self, item: Output) -> Output:
+        return item
+
 
 class Chain:
     """Hooks run in order: what the harness calls them through. Empty, it is false, and the
@@ -138,6 +189,8 @@ class Chain:
 
     def __init__(self, hooks: Sequence[Hooks]) -> None:
         self.hooks = list(hooks)
+        #: the hooks that override ``on_output``: none, and nothing sent is wrapped
+        self.shows = [h for h in self.hooks if type(h).on_output is not Hooks.on_output]
 
     def __bool__(self) -> bool:
         return bool(self.hooks)
@@ -179,6 +232,27 @@ class Chain:
             outcome = await hook.after_tool(call, outcome)
         return outcome
 
+    def shown(self, item: Output) -> Output:
+        """``item`` as the ``on_output`` hooks leave it, in order; withheld when one raises."""
+        for hook in self.shows:
+            try:
+                item = hook.on_output(item)
+            except Exception:
+                log.exception("on_output of %s failed: the item is withheld", type(hook).__name__)
+                return item.withheld()
+        return item
+
+    def answer(self, result: Result) -> Result:
+        """``result`` as its user gets it: the answer through the ``on_output`` hooks."""
+        if not self.shows or result.answer is None:
+            return result
+        shown = self.shown(Output(OutputKind.ANSWER, result.answer))
+        return result.model_copy(update={"answer": shown.value})
+
+    def event(self, event: RunEvent) -> RunEvent:
+        """``event`` as a user watching the run is shown it (the ``on_output`` hooks)."""
+        return self.shown(Output(OutputKind.EVENT, event)).value if self.shows else event
+
     async def failed(self, stage: Stage, error: Exception) -> None:
         for hook in self.hooks:
             try:
@@ -219,4 +293,15 @@ def read(note: dict[str, Any] | None) -> Deny | Ask | None:
     return Deny(**fields) if note["kind"] == "Deny" else Ask(**fields)
 
 
-__all__ = ["Ask", "Deny", "Hooks", "ModelCall", "Rewrite", "Stage", "Verdict"]
+__all__ = [
+    "WITHHELD",
+    "Ask",
+    "Deny",
+    "Hooks",
+    "ModelCall",
+    "Output",
+    "OutputKind",
+    "Rewrite",
+    "Stage",
+    "Verdict",
+]

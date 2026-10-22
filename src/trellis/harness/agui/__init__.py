@@ -311,7 +311,7 @@ class _Surface:
         execute: Callable[[Callable[[RunEvent], None]], Awaitable[Result]],
     ) -> None:
         def listen(event: RunEvent) -> None:
-            translated = translate(event)
+            translated = translate(self.agent.hooks.event(event))
             if translated is not None:
                 buffer.publish(translated, final=event.type is RunEventType.RUN_FINISHED)
 

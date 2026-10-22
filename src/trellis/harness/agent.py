@@ -67,7 +67,6 @@ from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
-from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, reason_of, run_of
@@ -240,7 +239,7 @@ class Agent:
             without=without,
             framework_options=framework_options,
         )
-        return await pipeline.attempt(self, record, input)
+        return self.hooks.answer(await pipeline.attempt(self, record, input))
 
     async def stream(
         self,
@@ -270,7 +269,7 @@ class Agent:
         async for event in self._events(
             lambda listen: pipeline.attempt(self, record, input, listener=listen)
         ):
-            yield event
+            yield self.hooks.event(event)
 
     async def start(
         self,
@@ -375,7 +374,7 @@ class Agent:
             comment=comment,
             remember=remember,
         )
-        return await self._continue(record, resolution)
+        return self.hooks.answer(await self._continue(record, resolution))
 
     async def schedule(
         self,
@@ -646,7 +645,7 @@ class Agent:
         store = event_log(self.harness.runs)
         if store is not None:
             async for entry in store.stream_events(run_id, after=after, tenant=tenant):
-                yield entry.event
+                yield self.hooks.event(entry.event)
             return
         record = await self.harness.runs.get(run_id, tenant=tenant)
         if record is None or record.agent_id != self.id:
@@ -661,7 +660,7 @@ class Agent:
             runtime.events.listen(queue.put_nowait)
         try:
             while (event := await queue.get()) is not None:
-                yield event
+                yield self.hooks.event(event)
                 if event.type is RunEventType.RUN_FINISHED and event.outcome not in (
                     RunOutcome.INTERRUPT,
                     None,
@@ -790,7 +789,6 @@ class Agent:
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
         if memory is not None and runtime.uses("records") and call.tool not in _pull(self):
-            call, outcome = _redacted(call, outcome)
             await self.harness.writes.submit(
                 "memory.record_tool",
                 lambda: memory.record_tool(call, outcome),
@@ -933,7 +931,7 @@ class Agent:
                     latency_ms=entry.latency_ms,
                     error_class="MCPToolError" if entry.error else None,
                 )
-                await memory.record_tool(*_redacted(call, outcome))
+                await memory.record_tool(call, outcome)
 
         await self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
 
@@ -1136,16 +1134,6 @@ def _json(value: Any) -> bool:
     return True
 
 
-def _redacted(call: ToolCall, outcome: ToolOutcome) -> tuple[ToolCall, ToolOutcome]:
-    """A tool call as the memory service's tool records get it: its arguments and output
-    redacted (``redaction.py``), as everything leaving the process is; the model and the tool
-    had them as they are."""
-    return (
-        call.model_copy(update={"args": REDACTOR.redact_input(call.args)}),
-        outcome.model_copy(update={"output": REDACTOR.redact_output(outcome.output)}),
-    )
-
-
 def _pull(agent: Agent) -> frozenset[str]:
     """The memory service's own tools are recorded by the service, not again by the harness."""
     listed = agent.harness.memory.listed if agent.harness.memory is not None else None
@@ -1182,7 +1170,7 @@ class RunHandle:
                     await asyncio.sleep(exc.retry_after or POLL_SECONDS * 4)
                     continue
                 if record.status is RunStatus.PAUSED or record.final:
-                    return Result.of(record)
+                    return self.agent.hooks.answer(Result.of(record))
                 await asyncio.sleep(POLL_SECONDS)
 
 

@@ -361,8 +361,8 @@ async def grounding(w: World) -> None:
 
 
 async def redaction(w: World) -> None:
-    shown = REDACTOR.redact_input({"email": EMAIL, "api_key": SECRET})
-    assert EMAIL not in json.dumps(shown) and SECRET not in json.dumps(shown), shown
+    shown = json.dumps(REDACTOR.redact_input({"email": EMAIL, "api_key": SECRET}))
+    assert SECRET not in shown and EMAIL in shown, shown  # credentials only
 
 
 async def remote_agent(w: World) -> None:

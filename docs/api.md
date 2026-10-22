@@ -14,6 +14,8 @@ from trellis import (
     Harness,
     Hooks,
     ModelCall,
+    Output,
+    OutputKind,
     ReAct,
     Result,
     Rewrite,
@@ -370,9 +372,11 @@ document's operations as tools, one per `operationId` ([tools.md](tools.md)).
 
 `Hooks` — subclass and override `on_run_start(run)`, `on_run_end(run, result)`,
 `before_model(call) -> ModelCall | None`, `after_model(call, reply)`, `before_tool(call) ->
-None | Deny | Ask | Rewrite`, `after_tool(call, outcome) -> outcome`, `on_error(stage, error)`.
+None | Deny | Ask | Rewrite`, `after_tool(call, outcome) -> outcome`, `on_error(stage, error)`,
+`on_output(item) -> item` (synchronous: what a user is shown).
 `Deny(reason)`, `Ask(question, assignee=None, component=None, props=None)`, `Rewrite(args)`,
-`ModelCall(framework, messages, model=None, system=None)` ([hooks.md](hooks.md)).
+`ModelCall(framework, messages, model=None, system=None)`, `Output(kind, value)` with
+`replace(value)`, `OutputKind` (`ANSWER`, `EVENT`) ([hooks.md](hooks.md#mask-what-the-ui-sees)).
 
 ## current
 

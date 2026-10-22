@@ -84,7 +84,7 @@ said:
   memory keeps the conversation the transcript is written before the run returns (at most 5 s,
   then queued like the rest), so the next turn's window holds it wherever that turn runs;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
-  Mode's nested calls from Bifrost's log — their arguments and outputs redacted
+  Mode's nested calls from Bifrost's log — their arguments and outputs as they are
   ([observability.md](observability.md#redaction));
 * approve/reject/edit decisions as `TOOL_CALL` feedback.
 

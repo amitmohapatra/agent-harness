@@ -121,9 +121,9 @@ not be paused.
   `sandbox_exec` asks a person before every command, an `approve_when` on its `command`
   argument before some ([governance.md](governance.md));
 * *journaled* — a resumed run reads every command's recorded output and runs nothing again;
-* *recorded and redacted* — the arguments and the output on the run's stream and in the memory
-  service's tool records pass the redactor (a credential a command printed is
-  `[redacted]` there); the model gets them as they are;
+* *recorded* — the arguments and the output on the run's stream and in the memory service's
+  tool records, as they are; the command's span masks credentials, and an `on_output` hook
+  masks what a user sees ([hooks.md](hooks.md#mask-what-the-ui-sees));
 * *bounded* — at most the source's `timeout` and what is left of the run's time; a command past
   it is **killed, with everything it started** (its process group), and the model reads
   `"sandbox_exec timed out after 120s; it may or may not have taken effect: check before

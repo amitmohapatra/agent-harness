@@ -1,11 +1,15 @@
-"""What leaves the process is redacted, once, where it leaves: a tool call's arguments and
-output on the run's event stream (``agent.stream``, AG-UI, A2A task updates and push bodies)
-and in the memory service's tool records. The tool and the model get the values as they are."""
+"""What leaves the process, and who masks it: traces mask credentials (``redaction.py``);
+everything else carries values as they are — the run's events, its answer, memory, A2A, the
+run's record — and what a user is shown passes the ``on_output`` hooks (``Hooks.on_output``):
+the answer ``agent.run`` returns and every event of ``agent.stream`` and AG-UI. The tool and
+the model always get the values as they are."""
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,30 +20,33 @@ from a2a.types import (
     SendMessageRequest,
     TaskPushNotificationConfig,
 )
+from agents import Agent as OpenAIAgent
 from fastapi import FastAPI
 from google.protobuf.json_format import MessageToDict
+from langchain.agents import create_agent
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.integration.test_a2a_server import URL, asgi, caller, connect
+from tests.integration.test_claude import options
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
-from trellis import Harness, ReAct, Runtime, Settings, tool
+from tests.support.openai_model import ScriptedModel
+from trellis import Harness, Hooks, Output, OutputKind, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType
 from trellis.harness import telemetry
 from trellis.harness.a2a import push
 from trellis.harness.agui.sse import decode
 from trellis.harness.events import LOG, RunEvents
+from trellis.harness.hooks import WITHHELD, Chain
 from trellis.harness.identity import Identity
-from trellis.harness.redaction import DEFAULT as REDACTOR
 
 EMAIL = "ada@example.com"
 SECRET = "sk-live0123456789abcdefghij"
 CARD = "4111 1111 1111 1111"
 ARGS = {"email": EMAIL, "api_key": SECRET}
-SHOWN_ARGS = {"email": "[email]", "api_key": "[redacted]"}
-SHOWN_OUTPUT = {"sent_to": "[email]", "receipt": "[redacted]"}
+OUTPUT = {"sent_to": EMAIL, "receipt": SECRET}
 received: list[dict[str, str]] = []
 
 
@@ -53,7 +60,27 @@ def notify(email: str, api_key: str) -> dict[str, str]:
 async def notifying(input: Any, agent: Runtime) -> str:
     await agent.tools.call("notify", **ARGS)
     agent.log("notified", card_number=CARD, customer=EMAIL)
-    return "sent"
+    return f"sent to {EMAIL}"
+
+
+def masked(text: str) -> str:
+    return text.replace(EMAIL, "[email]").replace(SECRET, "[key]").replace(CARD, "[card]")
+
+
+class Mask(Hooks):
+    """A team's own masking of what its users see."""
+
+    def on_output(self, item: Output) -> Output:
+        if item.kind is OutputKind.ANSWER:
+            return item.replace(masked(item.value))
+        event = item.value
+        data = json.loads(masked(json.dumps(event.data)))
+        return item.replace(event.model_copy(update={"data": data}))
+
+
+class Boom(Hooks):
+    def on_output(self, item: Output) -> Output:
+        raise RuntimeError("the masking service is down")
 
 
 @pytest.fixture(autouse=True)
@@ -62,36 +89,54 @@ def _reset() -> None:
 
 
 def leaked(text: str) -> bool:
-    """Whether a value left unredacted: the values themselves, never a fragment of one (a
+    """Whether a value is there as it is: the values themselves, never a fragment of one (a
     random id — a run's, an event's — holds any four digits now and then)."""
     return EMAIL in text or SECRET in text or CARD in text
 
 
-async def test_the_event_stream_carries_tool_calls_redacted(harness: Harness) -> None:
+def dumped(events: list[Any]) -> str:
+    return json.dumps([e.model_dump(mode="json") for e in events])
+
+
+async def test_the_event_stream_and_the_answer_carry_values_as_they_are(harness: Harness) -> None:
     agent = harness.wrap(notifying, id="notifier", tools=[notify])
     events = [e async for e in agent.stream("go", user="u")]
     data = {e.type: e.data for e in events if e.tool_call_id is not None}
-    assert data[RunEventType.TOOL_CALL_ARGS]["args"] == SHOWN_ARGS
-    assert data[RunEventType.TOOL_CALL_RESULT]["output"] == SHOWN_OUTPUT
+    assert data[RunEventType.TOOL_CALL_ARGS]["args"] == ARGS
+    assert data[RunEventType.TOOL_CALL_RESULT]["output"] == OUTPUT
     [logged] = [e.data for e in events if e.data.get("name") == LOG]
-    assert logged["card_number"] == "[redacted]" and logged["customer"] == "[email]"
-    assert received == [ARGS]  # the tool itself got the values as they are
+    assert logged["card_number"] == CARD and logged["customer"] == EMAIL
+    assert (await agent.run("go", user="u")).answer == f"sent to {EMAIL}"
+    assert agent.hooks.shows == []  # no on_output hook: nothing sent is wrapped
+    assert received == [ARGS, ARGS]
+
+
+async def test_an_on_output_hook_masks_the_answer_and_the_stream_not_the_record() -> None:
+    async with Harness(config=Settings(), hooks=[Mask()]) as harness:
+        agent = harness.wrap(notifying, id="notifier", tools=[notify])
+        events = [e async for e in agent.stream("go", user="u")]
+        result = await agent.run("go", user="u")
+        record = await harness.runs.get(result.run_id, tenant=await harness.tenant())
+    assert not leaked(dumped(events)) and "[key]" in dumped(events)
+    assert result.answer == "sent to [email]"
+    assert record is not None and record.output == f"sent to {EMAIL}"  # the run's own record
+    assert received == [ARGS, ARGS]  # the tool got the values as they are
 
 
 async def test_the_model_reads_the_tool_output_as_it_is(harness: Harness) -> None:
     model = ScriptedChat([("notify", ARGS), "done"])
     agent = harness.wrap(ReAct(system="You notify.", model=model), id="react", tools=[notify])
-    events = [e async for e in agent.stream("go", user="u")]
+    [e async for e in agent.stream("go", user="u")]
     told = model.requests[1]["messages"][-1]
     assert told["role"] == "tool" and SECRET in told["content"] and EMAIL in told["content"]
-    assert not leaked(json.dumps([e.model_dump(mode="json") for e in events]))
 
 
-async def test_reacts_chat_spans_carry_the_conversation_redacted(
+async def test_traces_mask_credentials_only(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A ``chat`` span's input and output hold the model's tool calls, whose arguments are JSON
-    text, and the tool results as the model read them: redacted like everything else."""
+    text, and the tool results as the model read them: the key masked, the address kept
+    (personal data is the team's to mask, in its own hooks)."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -102,11 +147,11 @@ async def test_reacts_chat_spans_carry_the_conversation_redacted(
     chats = [s for s in exporter.get_finished_spans() if s.name.startswith("chat")]
     assert len(chats) == 2
     shown = json.dumps([dict(s.attributes or {}) for s in chats])
-    assert not leaked(shown) and "[redacted]" in shown and "[email]" in shown
+    assert SECRET not in shown and "[redacted]" in shown and EMAIL in shown
     assert received == [ARGS]
 
 
-def test_a_value_is_redacted_once_and_a_long_output_is_a_preview() -> None:
+def test_a_long_output_is_a_preview_and_nothing_is_built_unheard() -> None:
     identity = Identity(tenant="t", user="u", agent_id="a", run_id="r", thread="r")
     events, seen = RunEvents(identity.context()), []
     events.tool(RunEventType.TOOL_CALL_RESULT, "c1", output="x" * 5000)
@@ -115,13 +160,13 @@ def test_a_value_is_redacted_once_and_a_long_output_is_a_preview() -> None:
     events.tool(RunEventType.TOOL_CALL_ARGS, "c1", args=long)
     events.tool(RunEventType.TOOL_CALL_RESULT, "c1", output=[{"n": i} for i in range(500)])
     args, output = seen[0].data["args"], seen[1].data["output"]
-    assert args == REDACTOR.redact_input(long) and args["token"] == "[redacted]"
+    assert args == long
     assert isinstance(output, str) and output.endswith("…") and len(output) == 2001
     assert events.sequence == 2  # nothing was built while nobody listened
 
 
-async def test_an_agui_stream_carries_tool_calls_redacted() -> None:
-    async with Harness(config=Settings()) as harness:
+async def chat(hooks: list[Hooks]) -> str:
+    async with Harness(config=Settings(), hooks=hooks) as harness:
         app = FastAPI()
         harness.wrap(notifying, id="chat", tools=[notify]).serve_chat(
             app, identity=lambda request: "u1"
@@ -131,10 +176,65 @@ async def test_an_agui_stream_carries_tool_calls_redacted() -> None:
                 "/agui/run",
                 json={"threadId": "t1", "messages": [{"id": "m", "role": "user", "content": "go"}]},
             )
-    events = {e["type"]: e for _, e in decode(response.text)}
-    assert json.loads(events["TOOL_CALL_ARGS"]["delta"]) == SHOWN_ARGS
-    assert json.loads(events["TOOL_CALL_RESULT"]["content"]) == SHOWN_OUTPUT
-    assert not leaked(response.text) and received == [ARGS]
+    return response.text
+
+
+async def test_an_agui_stream_is_what_the_on_output_hooks_leave() -> None:
+    assert leaked(await chat([]))
+    shown = await chat([Mask()])
+    events = {e["type"]: e for _, e in decode(shown)}
+    assert json.loads(events["TOOL_CALL_ARGS"]["delta"]) == {"email": "[email]", "api_key": "[key]"}
+    assert json.loads(events["TOOL_CALL_RESULT"]["content"])["receipt"] == "[key]"
+    assert not leaked(shown) and received == [ARGS, ARGS]
+
+
+async def test_a_raising_on_output_hook_withholds_what_it_was_given(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async with Harness(config=Settings(), hooks=[Boom()]) as harness:
+        agent = harness.wrap(notifying, id="boom", tools=[notify])
+        with caplog.at_level(logging.ERROR, logger="trellis.hooks"):
+            events = [e async for e in agent.stream("go", user="u")]
+            result = await agent.run("go", user="u")
+    assert result.answer == WITHHELD and not leaked(dumped(events))
+    finished = events[-1]
+    assert finished.type is RunEventType.RUN_FINISHED and finished.data["result"] == WITHHELD
+    assert any("on_output of Boom failed" in r.getMessage() for r in caplog.records)
+    shown = await chat([Boom()])
+    assert not leaked(shown) and "RUN_FINISHED" in shown
+
+
+def test_the_harness_hooks_show_first_then_the_agents() -> None:
+    order: list[str] = []
+
+    class Named(Hooks):
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def on_output(self, item: Output) -> Output:
+            order.append(self.name)
+            return item.replace(f"{item.value}+{self.name}")
+
+    chain = Chain([Named("harness"), Hooks(), Named("agent")])
+    assert chain.shown(Output(OutputKind.ANSWER, "a")).value == "a+harness+agent"
+    assert order == ["harness", "agent"] and len(chain.shows) == 2
+
+
+@pytest.mark.parametrize("framework", ["react", "langgraph", "openai_agents", "claude"])
+async def test_every_framework_shows_its_answer_through_the_hooks(
+    framework: str, tmp_path: Path
+) -> None:
+    said = f"write to {EMAIL}"
+    target = {
+        "react": lambda: ReAct(system="s", model=ScriptedChat([said])),
+        "langgraph": lambda: create_agent(ScriptedChat([said]), tools=[]),
+        "openai_agents": lambda: OpenAIAgent(name="o", model=ScriptedModel([said])),
+        "claude": lambda: options(tmp_path, [{"text": said}]),
+    }[framework]()
+    async with Harness(config=Settings(), hooks=[Mask()]) as harness:
+        agent = harness.wrap(target, id=f"show-{framework}")
+        result = await agent.run("hi", user="u")
+    assert result.answer == "write to [email]"
 
 
 @pytest.fixture
@@ -156,10 +256,10 @@ async def a2a_pushes(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[byte
     yield bodies
 
 
-async def test_a2a_task_updates_and_pushes_carry_tool_calls_redacted(
+async def test_a2a_task_updates_and_pushes_carry_values_as_they_are(
     a2a_pushes: list[bytes],
 ) -> None:
-    async with Harness(config=Settings()) as harness:
+    async with Harness(config=Settings(), hooks=[Mask()]) as harness:
         app = FastAPI()
         harness.wrap(notifying, id="greeter", tools=[notify]).serve_a2a(app, URL)
         async with asgi(app) as http:
@@ -171,29 +271,44 @@ async def test_a2a_task_updates_and_pushes_carry_tool_calls_redacted(
             )
             responses = [r async for r in client.send_message(request, context=caller())]
     updates = json.dumps([MessageToDict(r) for r in responses])
-    assert '"[redacted]"' in updates and '"[email]"' in updates
-    assert not leaked(updates) and received == [ARGS]
-    assert a2a_pushes and not any(leaked(body.decode()) for body in a2a_pushes)
-    assert any(b"[redacted]" in body for body in a2a_pushes)
+    assert SECRET in updates and EMAIL in updates and received == [ARGS]
+    assert a2a_pushes and any(SECRET in body.decode() for body in a2a_pushes)
 
 
-async def test_the_memory_services_tool_records_are_redacted(
-    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+async def test_memory_gets_tool_records_and_the_transcript_as_they_are(
+    memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spooled: list[dict[str, Any] | None] = []
-    submit = memory_harness.writes.submit
+    async with Harness(
+        config=Settings(), memory=memory_service.client(), hooks=[Mask()]
+    ) as memory_harness:
+        submit = memory_harness.writes.submit
 
-    async def keep(label: str, work: Any, **kw: Any) -> None:
-        if label == "memory.record_tool":
-            spooled.append(kw.get("record"))
-        await submit(label, work, **kw)
+        async def keep(label: str, work: Any, **kw: Any) -> None:
+            if label == "memory.record_tool":
+                spooled.append(kw.get("record"))
+            await submit(label, work, **kw)
 
-    monkeypatch.setattr(memory_harness.writes, "submit", keep)
-    agent = memory_harness.wrap(notifying, id="notifier", tools=[notify])
-    assert (await agent.run("go", user="u")).answer == "sent"
-    await memory_harness.writes.drain()
+        monkeypatch.setattr(memory_harness.writes, "submit", keep)
+        agent = memory_harness.wrap(notifying, id="notifier", tools=[notify])
+        assert (await agent.run("go", user="u")).answer == "sent to [email]"
+        await memory_harness.writes.drain()
     [call] = [c for c in memory_service.named("record_tool") if c.body["tool"] == "notify"]
-    assert call.body["args"] == SHOWN_ARGS and call.body["output"] == SHOWN_OUTPUT
+    assert call.body["args"] == ARGS and call.body["output"] == OUTPUT
     [record] = spooled  # what the spool keeps if the write cannot be delivered
-    assert record is not None and not leaked(json.dumps(record))
-    assert received == [ARGS]
+    assert record is not None and leaked(json.dumps(record))
+    transcript = json.dumps([c.body for c in memory_service.named("messages")])
+    assert EMAIL in transcript and received == [ARGS]
+
+
+def test_a_withheld_event_keeps_its_shape_and_none_of_its_values() -> None:
+    identity = Identity(tenant="t", user="u", agent_id="a", run_id="r", thread="r")
+    events, seen = RunEvents(identity.context()), []
+    events.listen(seen.append)
+    events.text(RunEventType.TEXT_MESSAGE_CONTENT, "m1", delta=f"mail {EMAIL}")
+    events.tool(RunEventType.TOOL_CALL_START, "c1", tool="notify", args=ARGS)
+    item = Output(OutputKind.EVENT, seen[0])
+    assert Hooks().on_output(item) is item  # the default sends it as it is
+    text, call = (Output(OutputKind.EVENT, e).withheld().value for e in seen)
+    assert text.data == {"withheld": WITHHELD, "delta": WITHHELD}
+    assert call.data == {"withheld": WITHHELD, "tool": "notify"}

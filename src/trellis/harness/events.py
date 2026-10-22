@@ -10,11 +10,11 @@ holds the watchers' copies of those last events (:meth:`~RunEvents.settle`), has
 write them, records the ending, and only then releases them: whoever reads
 ``RUN_FINISHED`` finds the run already paused or ended.
 
-The stream leaves the process (AG-UI, A2A task updates and push notifications), so what tools
-were called with and returned, and the data of custom events, pass the redactor here, once,
-for every listener (``redaction.py``); a tool's output is then cut to a preview. The model and
-the tool itself get the values as they are. The answer and the pause are not redacted: they
-are what the user asked for and what the person answering needs.
+Events carry values as they are: what tools were called with, a preview of what they returned
+(cut, not masked), the data of custom events, the answer. What a user is shown passes the
+``on_output`` hooks at the edge that shows it (``agent.stream``, ``agent.events``, AG-UI), so
+a team masks its own personal data there; A2A and the run's log get the events as they are.
+Traces mask credentials (``redaction.py``).
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from trellis.contracts import (
     RunEventType,
     RunOutcome,
 )
-from trellis.harness.redaction import DEFAULT as REDACTOR
 
 Listener = Callable[[RunEvent], None]
 _Written = TypeVar("_Written")
@@ -138,17 +137,16 @@ class RunEvents:
         self.emit(type, message_id=message_id, data=data)
 
     def tool(self, type: RunEventType, tool_call_id: str, **data: Any) -> None:
-        """A step of a tool call: its ``args`` and ``output`` redacted, the output a preview."""
+        """A step of a tool call: its ``args`` and ``output``, the output a preview."""
         if self.quiet:
             return
-        redacted = REDACTOR.redact_input(data)
-        if "output" in redacted:
-            redacted["output"] = _preview(redacted["output"])
-        self.emit(type, tool_call_id=tool_call_id, data=redacted)
+        if "output" in data:
+            data["output"] = _preview(data["output"])
+        self.emit(type, tool_call_id=tool_call_id, data=data)
 
     def custom(self, name: str, **data: Any) -> None:
         if not self.quiet:
-            self.emit(RunEventType.CUSTOM, data={"name": name, **REDACTOR.redact_input(data)})
+            self.emit(RunEventType.CUSTOM, data={"name": name, **data})
 
     def warning(self, code: str, message: str) -> None:
         self.custom(WARNING, code=code, message=message)
