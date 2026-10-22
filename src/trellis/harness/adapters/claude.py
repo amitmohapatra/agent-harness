@@ -5,11 +5,12 @@
   tools as one in-process MCP server (``mcp__trellis__*``) beside the team's own servers — a
   ``mcp_servers`` given as a config file or JSON text is read, since the SDK serves an
   in-process server only from a dict;
-* permissions: the SDK's own ``can_use_tool`` — a harness tool is let through (the bridge is
-  its check); any other tool the CLI asks about (Claude Code's built-ins: ``Bash``,
-  ``Write``...; a team's own MCP server's) is decided as a harness call is — the run's hooks,
-  governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`), a person when it asks — then by the
-  team's own ``can_use_tool``, when it has one;
+* permissions: the SDK's own ``PreToolUse`` hook, which the CLI runs before every tool call
+  whatever its ``permission_mode`` or ``allowed_tools`` (where ``can_use_tool`` is skipped) — a
+  harness tool is let through (the bridge is its check); any other (Claude Code's built-ins:
+  ``Bash``, ``Write``...; a team's own MCP server's) is decided as a harness call is — the run's
+  hooks, governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`), a person when it asks — then by
+  the team's own ``can_use_tool``, when it has one, asked by the hook;
 * pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
   ends). The session the CLI kept (``ResultMessage.session_id``) is in the run's journal, and
   the next attempt resumes it (``resume=``): Claude goes on from where it was — its built-in
@@ -21,7 +22,8 @@
   reads them as it starts, once per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``system_prompt`` (the memory context is
-  appended to it), ``can_use_tool`` (the harness asks it after governance, as the target's)
+  appended to it), ``hooks`` (the governance hook goes after theirs), ``can_use_tool`` (the
+  harness's hook asks it after governance, as the target's)
   and ``mcp_servers`` (the harness's ``trellis`` server goes beside them; a server of that name
   is refused). Refused: the fields that choose the session a query continues, and the
   permission prompt tool (:data:`OWNED`).
@@ -33,7 +35,7 @@ import dataclasses
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, Final
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
 
 from trellis.contracts import (
     ConfigurationError,
@@ -50,6 +52,9 @@ from trellis.harness.prompts import selected_env
 from trellis.harness.runtime import Paused
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
+
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
 #: What Claude Code's built-in tools do, as governance sees them (the tool catalog's word
 #: overrides it): reads run, writes run and are announced, ``Bash`` asks. Any other tool the
@@ -73,6 +78,8 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: as an agent-runs artifact (50 MiB: a journal over a checkpoint's size travels as one) —
 #: escaped as JSON, twice that at most.
 CLI_MESSAGE_BYTES: Final = 2 * 50 * 1024 * 1024
+#: The hook event every tool call is governed at.
+TOOL_EVENT: Final = "PreToolUse"
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -126,8 +133,8 @@ class ClaudeAdapter:
     #: a query takes one prompt, not a conversation: memory's window is in the context's text
     replays_history = False
 
-    def keeps_conversation(self, target: Any) -> bool:
-        return False
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        return None
 
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
@@ -275,12 +282,14 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
 
     if options.permission_prompt_tool_name:
         raise ConfigurationError(
-            "the harness decides Claude's tool permissions with can_use_tool: give your own "
-            "permission check as can_use_tool (the harness asks it after governance), not "
+            "the harness decides Claude's tool calls with a PreToolUse hook: give your own "
+            "permission check as can_use_tool (the hook asks it after governance), not "
             "permission_prompt_tool_name"
         )
     changes: dict[str, Any] = {
-        "can_use_tool": _permission(options.can_use_tool),
+        "hooks": _with_governance(options.hooks, options.can_use_tool),
+        # the hook asks the team's callback itself: the CLI has no permission prompt to make
+        "can_use_tool": None,
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
     }
     if context:
@@ -296,32 +305,60 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
     return dataclasses.replace(options, **changes)
 
 
-def _permission(own: Any) -> Any:
-    """The options' ``can_use_tool``: a harness tool runs (the bridge decides about it); any
-    other is the run's decision (``bridge.permitted``: hooks, governance, a person), then
-    ``own``'s, the team's callback, with the arguments as they were decided."""
-    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+def _with_governance(hooks: Mapping[str, Any] | None, own: Any) -> dict[str, Any]:
+    """The options' hooks with the governance hook (:func:`_governance`) after theirs."""
+    given = dict(hooks or {})
+    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(own)]
+    return given
+
+
+def _governance(own: Any) -> Any:
+    """The ``PreToolUse`` hook every tool call goes through, in every permission mode: a
+    harness tool runs (the bridge decides about it); any other is the run's decision
+    (``bridge.permitted``: hooks, governance, a person), then ``own``'s — the team's
+    ``can_use_tool`` — with the arguments as they were decided."""
+    from claude_agent_sdk import HookMatcher, PermissionResultAllow, ToolPermissionContext
 
     from trellis.harness.tools.convert.claude import SERVER, WAITING
 
-    async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
+    async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
+        name, args = given["tool_name"], dict(given.get("tool_input") or {})
         if name.startswith(f"mcp__{SERVER}__"):
-            return PermissionResultAllow()
+            return _decided("allow")
         side_effects = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
         try:
             decided = await bridge.permitted(ToolSpec(name=name, side_effects=side_effects), args)
-        except Paused:
-            return PermissionResultDeny(message=WAITING, interrupt=True)
+        except Paused:  # the run pauses: Claude stops here, and the resume goes on
+            return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         if isinstance(decided, ToolOutcome):
-            return PermissionResultDeny(message=str(decided.output))
+            return _decided("deny", str(decided.output))
         if own is None:
-            return PermissionResultAllow(updated_input=decided.args)
-        verdict = await own(name, decided.args, context)
-        if isinstance(verdict, PermissionResultAllow) and verdict.updated_input is None:
-            return dataclasses.replace(verdict, updated_input=decided.args)
-        return verdict
+            return _decided("allow", updated=decided.args)
+        verdict = await own(name, decided.args, ToolPermissionContext(tool_use_id=tool_use_id))
+        if isinstance(verdict, PermissionResultAllow):
+            return _decided("allow", updated=verdict.updated_input or decided.args)
+        refused = _decided("deny", verdict.message)
+        return {**refused, "continue_": False} if verdict.interrupt else refused
 
-    return can_use_tool
+    return HookMatcher(hooks=[pre_tool_use])
+
+
+def _decided(
+    decision: Literal["allow", "deny"],
+    reason: str | None = None,
+    *,
+    updated: dict[str, Any] | None = None,
+) -> SyncHookJSONOutput:
+    """A ``PreToolUse`` hook's answer."""
+    said: PreToolUseHookSpecificOutput = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+    }
+    if reason is not None:
+        said["permissionDecisionReason"] = reason
+    if updated is not None:
+        said["updatedInput"] = updated
+    return {"hookSpecificOutput": said}
 
 
 def configured_servers(configured: Any) -> dict[str, Any]:

@@ -44,7 +44,7 @@ from trellis.harness.governance.catalog import (
     digest,
     entry,
 )
-from trellis.harness.governance.decision import Action, Decision, decide
+from trellis.harness.governance.decision import Action, ApprovalRuleError, Decision, decide
 from trellis.harness.hooks import Chain, Deny, Hooks, denied
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
@@ -309,4 +309,12 @@ async def _settled(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 
-__all__ = ["Action", "Decision", "Denied", "Governance", "Rejected", "governed"]
+__all__ = [
+    "Action",
+    "ApprovalRuleError",
+    "Decision",
+    "Denied",
+    "Governance",
+    "Rejected",
+    "governed",
+]

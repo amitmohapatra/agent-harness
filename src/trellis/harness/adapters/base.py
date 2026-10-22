@@ -1,11 +1,12 @@
 """The adapter contract: four functions per framework, and one check.
 
 * ``prepare_input(target, input, context, history)`` — the framework's input, with the pushed
-  memory context as a system message (``keeps_conversation(target)``: the target holds the
-  thread's messages itself, so the context is asked for without the recent conversation) and,
-  where memory keeps the conversation, its recent messages (``history``) as the framework's own
-  messages, as its checkpoint would replay them (``replays_history``; a framework that takes
-  no history of messages gets them in the context's text instead);
+  memory context as a system message (``thread_store(target, options)``: the store the
+  framework keeps the thread's messages in; when ``history.owner`` says it owns them, the
+  context is asked for without the recent conversation) and, where memory owns the
+  conversation and the framework keeps no store, its recent messages (``history``) as the
+  framework's own messages, as its checkpoint would replay them (``replays_history``; a
+  framework that takes no history of messages gets them in the context's text instead);
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
@@ -100,7 +101,7 @@ class Adapter(Protocol):
     #: ``history``); else memory's window comes in the context's text
     replays_history: bool
 
-    def keeps_conversation(self, target: Any) -> bool: ...
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None: ...
 
     def prepare_input(
         self,

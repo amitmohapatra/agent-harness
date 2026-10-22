@@ -18,15 +18,23 @@ from typing_extensions import TypedDict
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
-from trellis.contracts import ConfigurationError, ToolSpec
+from trellis.contracts import ConfigurationError, HarnessError, ToolSpec
 from trellis.harness import writes as writes_module
 from trellis.harness.clients.memory import Memory
-from trellis.harness.governance import Action, Decision, Governance, Rejected, governed
+from trellis.harness.governance import (
+    Action,
+    ApprovalRuleError,
+    Decision,
+    Governance,
+    Rejected,
+    governed,
+)
 from trellis.harness.governance import catalog as catalog_module
 from trellis.harness.governance.catalog import (
     CATALOG_UNREAD,
     GOVERNANCE_STALE_SECONDS,
     GOVERNANCE_TTL_SECONDS,
+    TOP_RISK,
     MemoryCatalog,
     Rule,
     entry,
@@ -107,6 +115,20 @@ def test_a_rule_that_cannot_be_read_asks_on_every_call(source: str) -> None:
     """An administrator's rule is data, not code: one that does not parse fails closed."""
     decision = decide("po", "read", source, {"amount": 1})
     assert decision.asks and "could not be checked" in decision.reason
+
+
+def test_a_rule_that_cannot_be_evaluated_never_allows_is_typed_and_logged_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("ERROR", logger="trellis.harness"):
+        first = decide("wire", "read", "amount >>> 1", {"amount": 1})
+        again = decide("wire", "read", "amount >>> 1", {"amount": 2})
+    assert first.asks and again.asks  # fails closed, even for a tool that only reads
+    assert isinstance(first.error, ApprovalRuleError) and isinstance(first.error, HarnessError)
+    assert first.error.code == "APPROVAL_RULE_INVALID"
+    assert first.error.details == {"tool": "wire", "rule": "amount >>> 1", "reason": "ValueError"}
+    said = [r for r in caplog.records if "approval rule could not be evaluated" in r.getMessage()]
+    assert len(said) == 1  # once per rule
 
 
 def test_an_unread_catalog_asks() -> None:
@@ -238,6 +260,83 @@ async def test_no_names_ask_the_catalog_nothing() -> None:
     catalog = FakeCatalog()
     assert await Governance(catalog).rules([]) == {}
     assert catalog.asked == []
+
+
+# --------------------------------------------------------------------------- learned suggestions
+
+
+async def test_an_accepted_suggestion_stops_a_repeated_pause(
+    clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalog = FakeCatalog({"po": Rule(risk="write", approve_when="amount > 10")})
+    governance = Governance(catalog)
+    assert (await governance.check("po", {"amount": 50})).asks  # a person approves, again...
+    catalog.suggest("po", "amount > 1000")  # ...and the service learns from it
+    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    with caplog.at_level("INFO", logger="trellis.governance"):
+        decision = await governance.check("po", {"amount": 50})
+    assert decision.announces and decision.rule == "amount > 1000"  # no pause any more
+    assert catalog.accepted == ["sug_1"]
+    [said] = [r for r in caplog.records if "accepted automatically" in r.getMessage()]
+    assert said.tool == "po" and said.suggestion_id == "sug_1"  # type: ignore[attr-defined]
+    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    await governance.check("po", {"amount": 50})
+    assert catalog.accepted == ["sug_1"]  # accepted once
+
+
+async def test_a_top_risk_tool_is_not_relaxed_automatically(clock: Clock) -> None:
+    catalog = FakeCatalog({"wire": Rule(risk=TOP_RISK)})
+    catalog.suggest("wire", "amount > 1000")
+    catalog.suggest("unasked", "x > 1")  # a tool governance was not asked about
+    governance = Governance(catalog)
+    assert (await governance.check("wire", {"amount": 5})).asks
+    assert catalog.accepted == []  # a person accepts it, or not
+
+
+async def test_suggestions_that_cannot_be_read_or_accepted_wait_for_the_next_refresh(
+    clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalog = FakeCatalog({"po": Rule(risk="write", approve_when="amount > 10")})
+    catalog.suggest("po", "amount > 1000")
+    catalog.suggestions_fail = {"read"}
+    governance = Governance(catalog)
+    with caplog.at_level("WARNING", logger="trellis.governance"):
+        for _ in range(2):
+            assert (await governance.check("po", {"amount": 50})).asks
+            clock.now += GOVERNANCE_TTL_SECONDS + 1
+        catalog.suggestions_fail = {"accept"}
+        assert (await governance.check("po", {"amount": 50})).asks
+    unread = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert len(unread) == 1  # said once while they cannot be read
+    assert any("could not be accepted" in r.getMessage() for r in caplog.records)
+    catalog.suggestions_fail = set()
+    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    assert (await governance.check("po", {"amount": 50})).announces
+
+
+async def test_the_memory_catalog_lists_and_accepts_suggestions() -> None:
+    suggestion = {
+        "id": "sug_1",
+        "tool": "po",
+        "arg_shape": "{}",
+        "suggestion": "auto_approve",
+        "approvals": 5,
+        "rejections": 0,
+        "edits": 0,
+        "support": 5,
+        "approve_rate": 1.0,
+        "accepted": False,
+        "agent_id": None,
+        "rule": "amount > 1000",
+    }
+    service = FakeMemoryService(
+        catalog={"po": {"risk": "write", "approve_when": "amount > 10"}}, suggestions=[suggestion]
+    )
+    catalog = MemoryCatalog(service.client().bind(tenant_id="acme"))
+    [found] = await catalog.suggestions()
+    assert found.id == "sug_1" and not found.accepted
+    assert await catalog.accept("sug_1") == Rule(risk="write", approve_when="amount > 1000")
+    assert [s.accepted for s in await catalog.suggestions()] == [True]
 
 
 # --------------------------------------------------------------------------- the memory service

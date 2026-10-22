@@ -202,9 +202,10 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     # no context and no harness tools: the options as they were, the permission check and
     # the room for a large tool result added
     [sent] = seen
-    assert sent.can_use_tool is not None and sent.resume is None
+    assert sent.can_use_tool is None and sent.resume is None
+    assert sent.hooks is not None and len(sent.hooks["PreToolUse"]) == 1
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
-    assert dataclasses.replace(sent, can_use_tool=None, max_buffer_size=None) == options
+    assert dataclasses.replace(sent, hooks=None, max_buffer_size=None) == options
 
 
 # --------------------------------------------------------------------------- LangGraph

@@ -57,6 +57,8 @@ ROUTES: Final = [
     ("POST", r"/v1/verify", "verify"),
     ("POST", r"/v1/messages", "messages"),
     ("GET", r"/v1/tools", "catalog"),
+    ("GET", r"/v1/tools/approval-suggestions", "suggestions"),
+    ("POST", r"/v1/tools/approval-suggestions/(?P<suggestion_id>[^/]+)/accept", "accept"),
     ("PUT", r"/v1/tools/catalog", "put_catalog"),
     ("PUT", r"/v1/agents/model-key", "model_key"),
     ("POST", r"/v1/documents", "add_document"),
@@ -85,6 +87,9 @@ class FakeMemoryService:
     role: str = "service"
     #: the catalog by tool name: risk / approve_when / annotations / side_effects
     catalog: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: the approval suggestions learned (as the service answers them, plus the ``rule`` an
+    #: accepted one writes into its tool's ``approve_when``)
+    suggestions: list[dict[str, Any]] = field(default_factory=list)
     #: tool-hint candidates (names), in rank order; ``None``: the first available one
     candidates: list[str] | None = None
     #: the context answers without a ``tools`` field at all
@@ -445,6 +450,16 @@ class FakeMemoryService:
     def _catalog(self, call: Call) -> dict[str, Any]:
         names = call.query.get_list("names")
         return {"tools": [_catalog_tool(n, self.catalog[n]) for n in names if n in self.catalog]}
+
+    def _suggestions(self, call: Call) -> dict[str, Any]:
+        return {"suggestions": self.suggestions}
+
+    def _accept(self, call: Call) -> dict[str, Any]:
+        found = next(s for s in self.suggestions if s["id"] == call.path["suggestion_id"])
+        found["accepted"] = True
+        tool = self.catalog.setdefault(found["tool"], {})
+        tool["approve_when"] = found["rule"]
+        return _catalog_tool(found["tool"], tool)
 
     def _put_catalog(self, call: Call) -> dict[str, Any]:
         return {"tools": [_catalog_tool(t["name"], t) for t in call.body["tools"]]}

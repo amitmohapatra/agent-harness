@@ -32,8 +32,8 @@ class FunctionAdapter:
     #: the function reads its input as it is: memory's window is in ``agent.context``
     replays_history = False
 
-    def keeps_conversation(self, target: Any) -> bool:
-        return False
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        return None
 
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()

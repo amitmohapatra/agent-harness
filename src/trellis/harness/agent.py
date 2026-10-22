@@ -42,7 +42,7 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, pipeline, sandbox, skills, telemetry
+from trellis.harness import compat, history, pipeline, sandbox, skills, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -776,15 +776,16 @@ class Agent:
 
     def window(self, runtime: Runtime) -> Window:
         """How this run's context carries the thread's recent messages: not at all where the
-        framework keeps the thread itself (a checkpointer; an OpenAI Agents ``session`` given
-        as a run option); else as the framework's own messages where it replays them, in the
-        context's text where it does not."""
-        if (
-            self.adapter.keeps_conversation(self.target)
-            or runtime.framework_options.get("session") is not None
-        ):
+        framework owns the thread (a durable store, ``history.owner``); as the framework's own
+        messages where memory owns it, the framework keeps no store and replays messages; in
+        the context's text otherwise (a store kept in RAM replays the thread itself while the
+        process lives: the window is never given twice)."""
+        store = self.adapter.thread_store(self.target, runtime.framework_options)
+        if history.owner(store, agent_id=self.id) is history.Owner.FRAMEWORK:
             return Window.NONE
-        return Window.MESSAGES if self.adapter.replays_history else Window.RENDERED
+        if store is None and self.adapter.replays_history:
+            return Window.MESSAGES
+        return Window.RENDERED
 
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
