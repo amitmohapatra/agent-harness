@@ -442,3 +442,33 @@ async def test_a_checkpointer_kept_in_ram_leaves_memorys_window_on(
     agent = memory_harness.wrap(graph, id=f"saver_{durable}")
     await agent.run("hi", user="u1")
     assert memory_service.named("context")[-1].body.get("window") is not durable
+
+
+async def test_the_graphs_context_and_durability_pass_through(harness: Harness) -> None:
+    from dataclasses import dataclass
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.runtime import Runtime as GraphRuntime
+
+    @dataclass
+    class Ctx:
+        tier: str
+
+    class State(TypedDict):
+        seen: NotRequired[str]
+
+    async def look(state: State, runtime: GraphRuntime[Ctx]) -> dict[str, Any]:
+        return {"seen": runtime.context.tier}
+
+    graph = StateGraph(State, context_schema=Ctx)
+    graph.add_node("look", look)
+    graph.add_edge(START, "look")
+    graph.add_edge("look", END)
+    saver = InMemorySaver()
+    agent = harness.wrap(graph.compile(checkpointer=saver), id="ctx")
+    options = {"context": Ctx(tier="gold"), "durability": "exit", "recursion_limit": 5}
+    result = await agent.run({}, user="u1", thread="t1", framework_options=options)
+    assert result.status is RunStatus.SUCCESS, result.error
+    state = await agent.target.aget_state({"configurable": {"thread_id": "t1"}})
+    assert state.values == {"seen": "gold"}

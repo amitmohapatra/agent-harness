@@ -339,8 +339,10 @@ async def test_a_session_keeps_the_thread_so_memorys_window_is_not_sent(
 ) -> None:
     model = ScriptedModel(["one", "two"])
     agent = memory_harness.wrap(Agent(name="s", model=model), id="sess")
+    in_ram = SQLiteSession("s1")  # kept in RAM only: memory's window keeps the history
+    await agent.run("hi", user="u1", framework_options={"session": in_ram})
+    # given none, the run's session is memory's thread, which owns the history the same way
     await agent.run("hi", user="u1")
-    await agent.run("hi", user="u1", framework_options={"session": object()})
     windows = [c.body.get("window") for c in memory_service.named("context")]
     assert windows[-2:] == [True, False]
 

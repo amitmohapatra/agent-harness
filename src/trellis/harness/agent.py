@@ -780,11 +780,17 @@ class Agent:
         the context's text otherwise (a store kept in RAM replays the thread itself while the
         process lives: the window is never given twice)."""
         store = self.adapter.thread_store(self.target, runtime.framework_options)
-        if history.owner(store, agent_id=self.id) is history.Owner.FRAMEWORK:
-            return Window.NONE
+        if self.owner(runtime, store) is history.Owner.FRAMEWORK or store is history.MEMORY_THREAD:
+            return Window.NONE  # the framework's store holds it, or reads memory's thread itself
         if store is None and self.adapter.replays_history:
             return Window.MESSAGES
         return Window.RENDERED
+
+    def owner(self, runtime: Runtime, store: Any = ...) -> history.Owner:
+        """Who owns the run's conversation (``history.owner``) — of ``store`` when it was read."""
+        if store is ...:
+            store = self.adapter.thread_store(self.target, runtime.framework_options)
+        return history.owner(store, agent_id=self.id)
 
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
@@ -802,14 +808,14 @@ class Agent:
 
     async def recorded_run(self, runtime: Runtime, messages: Sequence[Said]) -> None:
         """The attempt's transcript, whether the run succeeded, paused or failed. Where memory
-        keeps the conversation (``runtime.history``), it is written before the run returns, so
+        owns the conversation (``history.owner``), it is written before the run returns, so
         the next turn's window holds it wherever that turn runs; a write that fails there is
         queued like every other (:mod:`trellis.harness.writes`: retried, spooled)."""
         memory = runtime.run_memory
         if memory is None or not runtime.uses("records") or not messages:
             return
         run_id, attempt = runtime.run_id, runtime.attempt
-        if runtime.history is not None:
+        if self.owner(runtime) is history.Owner.MEMORY:
             try:
                 async with asyncio.timeout(TURN_WRITE_SECONDS):
                     await memory.record_messages(messages, run_id, attempt)

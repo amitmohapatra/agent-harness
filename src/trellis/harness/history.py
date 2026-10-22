@@ -8,8 +8,10 @@ both, and :func:`owner` says which:
 * ``Owner.FRAMEWORK`` — the framework was given a durable store (it survives a worker restart,
   and a replica elsewhere reads it): memory's window is left out;
 * ``Owner.MEMORY`` — the framework keeps no store, or one kept in this process's memory only
-  (:data:`IN_RAM`), lost on a restart: memory's window owns the history. A store kept in RAM is
-  said once per agent and store type.
+  (:data:`IN_RAM`), lost on a restart, or its store is memory's own thread
+  (:data:`MEMORY_THREAD`: an OpenAI Agents run's session): memory owns the history, and each
+  run's turns are written before it returns. A store kept in RAM is said once per agent and
+  store type.
 
 A store of a type :data:`IN_RAM` does not name is taken as durable: the harness cannot see
 where an unknown store keeps its data, and a team that brings one (``PostgresSaver``, a Redis
@@ -70,7 +72,18 @@ def _sqlite_in_memory(store: Any) -> bool:
 IN_RAM: Final[Mapping[str, Callable[[Any], bool]]] = {
     "langgraph.checkpoint.memory.InMemorySaver": _always,
     "agents.memory.sqlite_session.SQLiteSession": _sqlite_in_memory,
+    "claude_agent_sdk._internal.session_store.InMemorySessionStore": _always,
 }
+
+
+class MemoryThread:
+    """The thread store that is the memory service's own thread, which the framework reads
+    through a slot of its own (an OpenAI Agents run's ``bridges.session.MemorySession``):
+    memory owns the history, and its window is not pushed again."""
+
+
+#: The one :class:`MemoryThread`: what an adapter's ``thread_store`` names.
+MEMORY_THREAD: Final = MemoryThread()
 
 
 def in_ram(store: Any) -> bool:
@@ -84,7 +97,7 @@ def in_ram(store: Any) -> bool:
 
 def owner(store: Any | None, *, agent_id: str) -> Owner:
     """Who owns the history, given the thread ``store`` the framework keeps (``None``: none)."""
-    if store is None:
+    if store is None or store is MEMORY_THREAD:
         return Owner.MEMORY
     if in_ram(store):
         _said_in_ram(agent_id, type(store).__name__)
@@ -159,6 +172,22 @@ def from_window(messages: Sequence[WindowMessage]) -> list[Said]:
     ]
 
 
+def answered(said: Sequence[Said]) -> list[Said]:
+    """``said`` (oldest first) as a model API takes it: an assistant message whose calls are
+    not all answered in it (a run stopped between a call and its result, a read that cut one
+    off) is kept without its calls, and not at all when it said nothing; a result whose call
+    is not kept is left out."""
+    results = {s.tool_call_id for s in said if s.role is Speaker.TOOL}
+    kept: list[Said] = []
+    for s in said:
+        whole = not s.tool_calls or all(c.id in results for c in s.tool_calls)
+        message = s if whole else Said(s.role, s.content)
+        if message.role is Speaker.TOOL or message.content or message.tool_calls:
+            kept.append(message)
+    calls = {c.id for s in kept for c in s.tool_calls}
+    return [s for s in kept if s.role is not Speaker.TOOL or s.tool_call_id in calls]
+
+
 def recorded(said: Said) -> dict[str, Any]:
     """``said`` as the memory service's message: a tool result is INTERNAL, as the service
     keeps every tool step; the rest is the visible chat."""
@@ -194,10 +223,13 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
 __all__ = [
     "INTERNAL",
     "IN_RAM",
+    "MEMORY_THREAD",
     "Called",
+    "MemoryThread",
     "Owner",
     "Said",
     "Speaker",
+    "answered",
     "from_window",
     "in_ram",
     "owner",

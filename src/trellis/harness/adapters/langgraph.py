@@ -33,14 +33,26 @@
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
   stopped, and it holds no conversation of its own (the memory service gives the recent turns);
+* store: a graph compiled without a store of its own is run, while memory is on, with the
+  memory service as its long-term store (``bridges.store.MemoryStore``: ``runtime.store``,
+  ``get_store()``, Deep Agents' ``StoreBackend``); a graph's own store is kept (said once);
+* helpers: a Deep Agent's ``task`` sub-agent is a child run of the run (``bridges.helpers``,
+  through the run's LangChain callbacks: ``hooks.langgraph``). Its tool calls are governed as
+  the run's (``h.tools``), and its model calls count toward the run's budget (``accounting``),
+  as are those of the graph's subgraphs and ``Send`` branches, which run inside the run;
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
   ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; the harness's
-  ``configurable.thread_id`` wins over one given.
+  ``configurable.thread_id`` wins over one given. The graph's own run arguments
+  (:data:`RUN_ARGUMENTS`: ``context`` for a ``context_schema``, ``durability``) go to the call
+  beside it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
+import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar, Final
 
@@ -54,9 +66,13 @@ from trellis.harness.adapters.base import (
     ToolFormat,
 )
 from trellis.harness.asking import answer_of
+from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
-from trellis.harness.runtime import DEFERRED, MARKER, reason_of
+from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
+
+log = logging.getLogger("trellis.harness")
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"
@@ -69,6 +85,8 @@ HARNESS_TOOLS: Final = "trellis_harness_tools"
 CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
 #: The qualified name of a ``create_agent`` graph's async model node (Deep Agents' too).
 MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
+#: The graph's own run arguments a run's framework options may carry, beside its config.
+RUN_ARGUMENTS: Final = ("context", "durability")
 
 
 class LangGraphAdapter:
@@ -113,9 +131,20 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        return await self._graph(target).ainvoke(
-            _continued(target, native_input, run), self._config(target, run), version="v2"
-        )
+        helpers = Helpers(run.runtime, self.name)
+        error: BaseException | None = None
+        try:
+            return await self._graph(target, run.runtime).ainvoke(
+                _continued(target, native_input, run),
+                self._config(target, run, helpers),
+                version="v2",
+                **_run_arguments(run.runtime),
+            )
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            await helpers.closed(error)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from langchain_core.messages import AIMessage
@@ -123,23 +152,32 @@ class LangGraphAdapter:
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
-        async for part in self._graph(target).astream(
-            _continued(target, native_input, run),
-            self._config(target, run),
-            stream_mode=["messages", "values"],
-            version="v2",
-        ):
-            if part["type"] == "messages":
-                chunk = part["data"][0]
-                if (
-                    isinstance(chunk, AIMessage)
-                    and isinstance(chunk.content, str)
-                    and chunk.content
-                ):
-                    yield chunk.content
-            elif part["type"] == "values":
-                values = part["data"]
-                interrupts = part["interrupts"] or interrupts
+        helpers = Helpers(run.runtime, self.name)
+        error: BaseException | None = None
+        try:
+            async for part in self._graph(target, run.runtime).astream(
+                _continued(target, native_input, run),
+                self._config(target, run, helpers),
+                stream_mode=["messages", "values"],
+                version="v2",
+                **_run_arguments(run.runtime),
+            ):
+                if part["type"] == "messages":
+                    chunk = part["data"][0]
+                    if (
+                        isinstance(chunk, AIMessage)
+                        and isinstance(chunk.content, str)
+                        and chunk.content
+                    ):
+                        yield chunk.content
+                elif part["type"] == "values":
+                    values = part["data"]
+                    interrupts = part["interrupts"] or interrupts
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            await helpers.closed(error)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -196,31 +234,84 @@ class LangGraphAdapter:
     def check_options(self, options: Mapping[str, Any]) -> None:
         from langchain_core.runnables import RunnableConfig
 
-        known = list(RunnableConfig.__annotations__)
+        known = [*RunnableConfig.__annotations__, *RUN_ARGUMENTS]
         unknown = [key for key in options if key not in known]
         if unknown:
             raise ConfigurationError(
-                f"framework_options for a graph are RunnableConfig keys: "
+                f"framework_options for a graph are RunnableConfig keys and its run arguments: "
                 f"{', '.join(map(repr, unknown))} is none of {', '.join(known)}"
             )
         if not isinstance(options.get("configurable", {}), Mapping):
             raise ConfigurationError("framework_options' configurable is a dict")
 
-    def _graph(self, target: Any) -> Any:
-        """The graph run for ``target``: its narrowing copy, when it has one."""
-        return target if self.narrowed is None else self.narrowed
+    def _graph(self, target: Any, runtime: Runtime) -> Any:
+        """The graph run for ``target``: its narrowing copy, when it has one — given the
+        memory service as its store (:func:`memory_store`) when it has none of its own."""
+        graph = target if self.narrowed is None else self.narrowed
+        store = memory_store(target, runtime)
+        return graph if store is None else graph.copy({"store": store})
 
     @staticmethod
-    def _config(target: Any, run: Invocation) -> dict[str, Any]:
-        """The run's config: its framework options, the harness's thread id over theirs."""
+    def _config(target: Any, run: Invocation, helpers: Helpers) -> dict[str, Any]:
+        """The run's config: its framework options (less its run arguments), the harness's
+        thread id over theirs, and the run's helper callbacks (``hooks.langgraph``) beside
+        theirs."""
+        from trellis.harness.hooks.langgraph import HelperCallbacks
+
         runtime = run.runtime
         if _checkpointed(target):
             from langgraph.types import interrupt
 
             runtime.suspend = interrupt
-        options = runtime.framework_options
+        options = {k: v for k, v in runtime.framework_options.items() if k not in RUN_ARGUMENTS}
         thread = thread_of(target, runtime)
-        return {**options, "configurable": {**options.get("configurable", {}), "thread_id": thread}}
+        return {
+            **options,
+            "callbacks": _with_handler(options.get("callbacks"), HelperCallbacks(helpers)),
+            "configurable": {**options.get("configurable", {}), "thread_id": thread},
+        }
+
+
+def _with_handler(given: Any, handler: Any) -> Any:
+    """The run's callbacks: ``handler`` beside the ones the run was given (a list of handlers,
+    or a callback manager — copied, the given one is not changed)."""
+    if given is None:
+        return [handler]
+    if isinstance(given, list):
+        return [*given, handler]
+    manager = given.copy()
+    manager.add_handler(handler, inherit=True)
+    return manager
+
+
+def _run_arguments(runtime: Runtime) -> dict[str, Any]:
+    """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`)."""
+    options = runtime.framework_options
+    return {key: options[key] for key in RUN_ARGUMENTS if key in options}
+
+
+def memory_store(target: Any, runtime: Runtime) -> Any | None:
+    """The store a run of ``target`` is given (``bridges.store.MemoryStore``): the memory
+    service while memory is on for the run, its memory tools too (``memory_pull``: the store is
+    the graph reading memory), and the graph was compiled with no store of its own (one it has
+    is kept, said once); else ``None`` — the graph runs as it was built."""
+    if runtime.run_memory is None or not runtime.uses("memory_pull"):
+        return None
+    if getattr(target, "store", None) is not None:
+        _own_store(runtime.agent_id, type(target.store).__name__)
+        return None
+    from trellis.harness.bridges.store import MemoryStore
+
+    return MemoryStore(runtime.run_memory.ctx, asyncio.get_running_loop())
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent and store type, of the most recent
+def _own_store(agent_id: str, store: str) -> None:
+    log.warning(
+        "the graph was compiled with a store of its own: it keeps it, and its long-term memory "
+        "is not the memory service's (compile it without one to use the memory service)",
+        extra={"agent_id": agent_id, "store": store},
+    )
 
 
 def _narrowed(target: Any) -> Any | None:

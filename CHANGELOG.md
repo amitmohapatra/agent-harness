@@ -8,10 +8,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 ### Changed
 
 - Memory's window as the conversation itself: where memory owns a thread and the framework
-  keeps no store (`ReAct`, a LangGraph graph without a checkpointer, an OpenAI agent without a
-  session), the thread's recent turns arrive as the framework's own messages — LangChain
-  `HumanMessage`/`AIMessage` with `tool_calls`/`ToolMessage`, OpenAI Agents input items — after
-  the one memory system message, not as text inside it. Each run's question, tool calls, results
+  keeps no store (`ReAct`, a LangGraph graph without a checkpointer), the thread's recent turns
+  arrive as LangChain's own messages — `HumanMessage`/`AIMessage` with `tool_calls`/
+  `ToolMessage` — after the one memory system message, not as text inside it; an OpenAI agent's
+  memory session gives the SDK the same turns as input items, its tool calls and results
+  included. Each run's question, tool calls, results
   and answer are written back before the run returns (queued past 5 s or when memory is down),
   so the next turn reads them wherever it runs. `trellis.harness.history` holds the policy and
   the messages (`Said`, `from_window`). Needs the memory service's `window_format="messages"`.
@@ -48,6 +49,19 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   journal, A2A, traces or what the model and tools see. A hook that raises is logged and the
   item is withheld (`WITHHELD`), never sent as it was; with no hook overriding it nothing is
   wrapped.
+- Native slots backed by our services (`trellis.harness.bridges`), with no new settings and
+  each framework's defaults kept without `MEMORY_URL`: the memory service as a LangGraph/Deep
+  Agents `BaseStore` (only when the graph has none; its own is kept, said once), as an OpenAI
+  Agents `Session` (only when the run has none), and as a Claude `UserPromptSubmit` context
+  hook. Every turn is still recorded to memory by the harness. `without={"memory"}` turns them
+  off.
+- Durable runs: Claude's session kept in the run's journal as the SDK's `SessionStore`
+  (progress saved before each step), so a resume on another worker continues it; the OpenAI
+  `RunState` of a pause resumes on any worker.
+- Native helpers as child runs (lineage, turns in memory, budget, governance): a Deep Agents
+  `task`, an OpenAI `Agent.as_tool` call, a Claude `agents=` subagent.
+- P4: LangGraph `context=` (a `context_schema`) and `durability` pass through
+  `framework_options`. P7: Claude's usage and cost are read from its `ResultMessage`.
 
 - Learned approval suggestions are accepted automatically when the tool catalog refreshes
   (the memory service's accept endpoint), except for a tool at the highest risk, which waits for

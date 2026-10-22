@@ -21,6 +21,8 @@ SECRET: Final = "sk-live0123456789abcdefghij"
 HUGE: Final = MAX_CHECKPOINT_BYTES + 1
 #: How long ``wait`` waits at most (a cancel or a time limit ends it sooner).
 WAIT_SECONDS: Final = 1.0
+#: How long ``hold`` holds at most: far past any run time limit a cell sets, which ends it.
+HOLD_SECONDS: Final = 10.0
 
 
 class Desk:
@@ -108,6 +110,17 @@ class Desk:
             return "waited"
 
         return wait
+
+    def hold(self) -> Any:
+        @tool(side_effects="read")
+        async def hold() -> str:
+            """Hold until the run's time runs out."""
+            self.started.set()
+            await asyncio.sleep(HOLD_SECONDS)
+            self.done.append(("hold", {}))
+            return "held"
+
+        return hold
 
     # ------------------------------------------------------------------ people
     def size(self) -> Any:

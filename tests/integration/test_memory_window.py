@@ -136,7 +136,7 @@ async def test_a_function_target_gets_the_window_in_its_context_text(
     assert seen == [memory_service.context_text]
 
 
-async def test_an_openai_agent_replays_the_window_as_input_items(
+async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_items(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedModel([("lookup", {"q": "a"}), "found a", "you asked about a"])
@@ -150,11 +150,14 @@ async def test_an_openai_agent_replays_the_window_as_input_items(
     await agent.run("find a", user="u1", thread=THREAD)
     await agent.run("what did I ask?", user="u1", thread=THREAD)
     items = model.inputs[-1]
-    kinds = [i.get("type") or i.get("role") for i in items if i.get("role") != "system"]
+    said = [i for i in items if i.get("role") != "system"]
+    kinds = [i.get("type") or i.get("role") for i in said]
     assert kinds == ["user", "function_call", "function_call_output", "assistant", "user"]
-    call, output = items[2], items[3]
+    call, output = said[1], said[2]
     assert call["name"] == "lookup" and output["call_id"] == call["call_id"]
     assert output["output"] == "result a"
+    # memory's thread is the session: the context carries no window besides it
+    assert all("window_format" not in c.body for c in memory_service.named("context"))
 
 
 async def test_turns_run_at_once_on_one_thread_are_each_recorded_whole(

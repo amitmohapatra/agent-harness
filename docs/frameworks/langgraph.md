@@ -69,6 +69,7 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 |---|---|
 | Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a durable checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it). Without one (`ReAct`, a `create_agent` graph without a checkpointer) memory keeps the conversation: its recent turns follow the context as LangChain's own messages — `HumanMessage`, `AIMessage` with its `tool_calls`, `ToolMessage` — as a checkpointer would replay them, and each run's question, tool calls, results and answer are written back before it returns. An `InMemorySaver` (`MemorySaver`) loses the thread on a restart, so memory's window stays on with it, in the context's text (the saver replays the thread while the process lives), said once (`trellis.harness.history`). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
 | Memory pull | the memory tools are in `h.tools(...)` |
+| Long-term store | a graph compiled without a `store` gets the memory service as its `BaseStore` per run (`runtime.store`, `get_store()`): each item one memory of the user's. A graph compiled with its own store keeps it (said once); `without={"memory"}` (or `memory_pull`) leaves the graph as built |
 | Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
 | Tool hints | the context is asked for with the toolbox's names (5 or more); a `create_agent` graph built with `h.tools` is then offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found — its own tools untouched (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`) |
@@ -137,7 +138,8 @@ those may be resumed in another process, give every process a shared, durable ch
 `framework_options=` (on `h.wrap`, or a run's own on `run`/`stream`/`start`) goes into the config
 the harness calls `ainvoke`/`astream` with: `recursion_limit`, `configurable` keys your nodes
 read, `tags`, `metadata`, `callbacks`. The run's thread is the harness's: its
-`configurable.thread_id` wins over one given. Another key is refused when you wrap or run
+`configurable.thread_id` wins over one given. The graph's own run arguments `context` (for a
+`context_schema`) and `durability` go to the call beside the config. Another key is refused when you wrap or run
 ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
 
 ```python

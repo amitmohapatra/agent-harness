@@ -20,13 +20,15 @@ from openai.types.responses import (
 )
 
 from trellis.harness.adapters.langgraph import LangGraphAdapter, added, langchain_message
-from trellis.harness.adapters.openai_agents import OpenAIAgentsAdapter, input_items, said_in
+from trellis.harness.adapters.openai_agents import OpenAIAgentsAdapter, said_in
+from trellis.harness.bridges.session import input_items
 from trellis.harness.history import (
     INTERNAL,
     Called,
     Owner,
     Said,
     Speaker,
+    answered,
     from_window,
     in_ram,
     owner,
@@ -113,14 +115,12 @@ def test_langgraph_reports_what_the_run_added_after_its_question() -> None:
     assert added([AIMessage("no question")]) == []
 
 
-def test_openai_agents_get_the_window_as_input_items() -> None:
-    items = OpenAIAgentsAdapter().prepare_input(None, "And b?", None, TURN)
-    assert items == [
+def test_openai_agents_read_the_thread_as_input_items() -> None:
+    assert [i for said in answered(TURN) for i in input_items(said)] == [
         {"role": "user", "content": "How many a?"},
         {"type": "function_call", "call_id": "c1", "name": "stock", "arguments": '{"sku": "a"}'},
         {"type": "function_call_output", "call_id": "c1", "output": "7"},
         {"role": "assistant", "content": "7 units."},
-        {"role": "user", "content": "And b?"},
     ]
     spoke = Said(Speaker.ASSISTANT, "Let me check.", (CALL,))
     assert [i.get("role") or i["type"] for i in input_items(spoke)] == [
@@ -129,8 +129,15 @@ def test_openai_agents_get_the_window_as_input_items() -> None:
     ]
     # a message that said nothing and called nothing is still a message
     assert input_items(Said(Speaker.USER, "")) == [{"role": "user", "content": ""}]
-    # nothing remembered yet: the input stays as it was given
+    # the session carries the history: the input stays as it was given
     assert OpenAIAgentsAdapter().prepare_input(None, "hi", None, ()) == "hi"
+
+
+def test_a_call_and_its_result_are_never_parted() -> None:
+    unanswered = Said(Speaker.ASSISTANT, "Checking.", (CALL,))
+    silent = Said(Speaker.ASSISTANT, "", (CALL,))
+    orphan = Said(Speaker.TOOL, "7", tool_call_id="gone")
+    assert answered([unanswered, silent, orphan]) == [Said(Speaker.ASSISTANT, "Checking.")]
 
 
 def _message(agent: OpenAIAgent, text: str) -> MessageOutputItem:

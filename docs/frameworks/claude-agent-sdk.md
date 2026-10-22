@@ -90,7 +90,10 @@ after any of yours:
 
 | | |
 |---|---|
-| Memory push | the context is appended to the options' `system_prompt` (a string, a `preset`'s `append`, a `custom` prompt); with no system prompt it is the system prompt |
+| Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks; the options' `system_prompt` is left as you wrote it |
+| Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
+| Spending | each query's usage and `total_cost_usd`, read from its `ResultMessage` (subagents included), count toward the run's budget |
+| Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
@@ -123,7 +126,7 @@ harness calls already made are not made again; the built-ins run again.
 `framework_options=` sets `ClaudeAgentOptions` fields on the run's copy of the options (on
 `h.wrap` for every run, on `run`/`stream`/`start` for one, over the agent's): `max_turns`,
 `model`, `permission_mode`, `cwd`... before the harness's own changes, which merge with them —
-a `system_prompt` gets the memory context appended, a `can_use_tool` is asked after governance
+`hooks` get the governance and context hooks after theirs, a `can_use_tool` is asked after governance
 as the target's would be, and `mcp_servers` get the harness's `trellis` server beside them (one
 of that name is refused). The session is the harness's (`resume`, `continue_conversation`) and so
 is the permission prompt (`permission_prompt_tool_name`): both refused, as is a name that is not
@@ -152,8 +155,6 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
 * No model hooks: the CLI makes the model calls ([hooks.md](../hooks.md)).
 * A session resumes on the machine whose CLI holds it (or a shared `session_store`);
   elsewhere the query runs again from its prompt (above).
-* A `system_prompt` given as a prompt file is read by the CLI; the context has no place in it
-  and is not added (use a string or a preset with `append`).
 * Large results: a tool's result comes back from the CLI in one message (as the model reads it),
   which the SDK reads into a buffer of `max_buffer_size` bytes (1 MiB by default: a message
   over it fails the run with `CLIJSONDecodeError`). A harness tool's large result is cut before

@@ -32,12 +32,13 @@ the grounding check verifies the answer against.
   replays the thread while the process lives and loses it on a restart: memory's window stays
   on there, in the context's text (`## Recent conversation`), never as messages next to the
   store's own.
-* Otherwise memory keeps the conversation, and a framework that replays one as messages
-  (LangGraph — `ReAct`, `create_agent`, Deep Agents — and the OpenAI Agents SDK) gets it as its
-  own: `window_format="messages"`, and the recent turns follow the context message as the
-  framework's messages — `HumanMessage`, `AIMessage` with its `tool_calls`, `ToolMessage`; the
-  SDK's input items, `function_call` and `function_call_output` — exactly the shape its
-  checkpoint or session would replay, while the context stays one system message without them.
+* Otherwise memory keeps the conversation, and a framework that replays one as messages gets
+  it as its own. LangGraph (`ReAct`, `create_agent`, Deep Agents): `window_format="messages"`,
+  and the recent turns follow the context message as `HumanMessage`, `AIMessage` with its
+  `tool_calls`, `ToolMessage` — exactly what a checkpointer would replay — while the context
+  stays one system message without them. The OpenAI Agents SDK: its session is the memory
+  service's thread (`bridges.session.MemorySession`), read as the SDK's input items
+  (`function_call`, `function_call_output` included), so the window is not pushed again.
   A target that takes one prompt (the Claude Agent SDK, a function) gets them in the context's
   text as before (`## Recent conversation`).
 * The request carries the run's own tool names: the context then includes the skills the agent

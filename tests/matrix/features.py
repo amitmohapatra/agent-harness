@@ -270,13 +270,23 @@ async def cancel(w: World) -> None:
     assert finished[-1].outcome is not None and finished[-1].outcome.value == "cancelled"
 
 
+#: The run time limit of ``run_timeout``: it must run out in the tool, after the model asked
+#: for it, not before the first model call. A run reaches its tool in ~10-40 ms here, but a
+#: loaded CI runner (8 shards at once) was measured past 0.4 s before the first model call
+#: (the run then timed out with no model called): 2 s leaves that margin five times over, and
+#: ``hold`` holds far longer, so the limit still ends the run.
+RUN_LIMIT: Final = 2.0
+
+
 async def run_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.wait()], [("wait", {"seconds": 30})], timeout=0.4)
+    o = await w.go([d.hold()], [("hold", {})], timeout=RUN_LIMIT)
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
     assert o.record.error is not None and o.record.error.code == "run_timeout"
-    assert o.record.timeout_seconds == 0.4
+    assert o.record.timeout_seconds == RUN_LIMIT
+    # the limit ran out where the cell means it to: in the tool, which the model asked for
+    assert d.started.is_set() and d.ran("hold") == []
 
 
 # --------------------------------------------------------------------------- sub-agents
@@ -1327,10 +1337,11 @@ async def hook_models(w: World) -> None:
 # --------------------------------------------------------------------------- a run's own options
 async def run_options_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.wait()], [("wait", {"seconds": 30})], run={"timeout": 0.4})
+    o = await w.go([d.hold()], [("hold", {})], run={"timeout": RUN_LIMIT})
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.timeout_seconds == 0.4
+    assert o.record.timeout_seconds == RUN_LIMIT
+    assert d.started.is_set() and d.ran("hold") == []  # it ran out in the tool (``RUN_LIMIT``)
 
 
 async def run_options_queue(w: World) -> None:
