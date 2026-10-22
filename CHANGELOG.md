@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## Unreleased
 
+### Changed
+
+- Memory's window as the conversation itself: where memory owns a thread and the framework
+  keeps no store (`ReAct`, a LangGraph graph without a checkpointer, an OpenAI agent without a
+  session), the thread's recent turns arrive as the framework's own messages — LangChain
+  `HumanMessage`/`AIMessage` with `tool_calls`/`ToolMessage`, OpenAI Agents input items — after
+  the one memory system message, not as text inside it. Each run's question, tool calls, results
+  and answer are written back before the run returns (queued past 5 s or when memory is down),
+  so the next turn reads them wherever it runs. `trellis.harness.history` holds the policy and
+  the messages (`Said`, `from_window`). Needs the memory service's `window_format="messages"`.
+
 ### Fixed
 
 - OpenAI Agents: the tools of every agent reachable through `handoffs` (recursively, on copies)

@@ -2,7 +2,8 @@
 memory service's window — measured (``python -m benchmark.thread``, under ``heavy.sh``):
 
 * ``framework``: a ``create_agent`` graph with its own checkpointer (the thread is the
-  conversation): the harness sends no memory window (``keeps_conversation``);
+  conversation), one the harness takes as the thread's owner (:func:`own_thread`): it sends no
+  memory window (``history.owner``);
 * ``memory``: the same graph without a checkpointer (as ``ReAct``'s checkpoint is the run's
   own): the memory service's window gives the recent turns;
 * ``framework-restart`` / ``memory-restart``: the same, with the memory service's worker
@@ -107,14 +108,47 @@ class Variant(StrEnum):
 DEFAULT_VARIANTS: Final = (Variant.FRAMEWORK, Variant.MEMORY)
 
 
+#: What a checkpointer does, all handed to the ``InMemorySaver`` inside :func:`own_thread`.
+SAVER_METHODS: Final = (
+    "get_tuple",
+    "list",
+    "put",
+    "put_writes",
+    "delete_thread",
+    "aget_tuple",
+    "alist",
+    "aput",
+    "aput_writes",
+    "adelete_thread",
+    "get_next_version",
+)
+
+
+def own_thread() -> Any:
+    """The framework's own thread, owned by it as a durable checkpointer's would be: the
+    harness leaves memory's window out (``history.owner``; an ``InMemorySaver`` itself would
+    get memory's window as text, as a store lost on a restart does), so the variant measures
+    the thread alone. It keeps the thread in this process (an ``InMemorySaver`` inside), so a
+    restart loses it."""
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    inner = InMemorySaver()
+
+    def handed(name: str) -> Callable[..., Any]:
+        return lambda self, *args, **kwargs: getattr(inner, name)(*args, **kwargs)
+
+    saver = type("OwnThread", (BaseCheckpointSaver,), {n: handed(n) for n in SAVER_METHODS})
+    return saver(serde=inner.serde)
+
+
 def framework_target(model: str) -> Any:
     from langchain.agents import create_agent
-    from langgraph.checkpoint.memory import InMemorySaver
 
     from trellis.harness.react import _gateway_model
 
     chat = _gateway_model(model, timeout=None, effort=None, settings=None)
-    return create_agent(chat, tools=[], system_prompt=SYSTEM, checkpointer=InMemorySaver())
+    return create_agent(chat, tools=[], system_prompt=SYSTEM, checkpointer=own_thread())
 
 
 def memory_target(model: str) -> Any:

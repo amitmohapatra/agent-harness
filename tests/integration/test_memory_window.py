@@ -14,6 +14,7 @@ from agents import Agent as OpenAIAgent
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
+from benchmark.thread.__main__ import own_thread
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
@@ -97,15 +98,20 @@ async def test_multilingual_turns_reach_the_model_as_said(
     ]
 
 
-async def test_a_framework_that_keeps_the_thread_gets_no_window(
-    memory_harness: Harness, memory_service: FakeMemoryService
+@pytest.mark.parametrize("durable", [True, False], ids=["durable", "in-ram"])
+async def test_a_framework_that_keeps_the_thread_replays_it_once(
+    memory_harness: Harness, memory_service: FakeMemoryService, durable: bool
 ) -> None:
     model = ScriptedChat(["one", "two"])
-    graph = create_agent(model, tools=[], checkpointer=InMemorySaver())
-    agent = memory_harness.wrap(graph, id="kept")
+    graph = create_agent(model, tools=[], checkpointer=own_thread() if durable else InMemorySaver())
+    agent = memory_harness.wrap(graph, id=f"kept-{durable}")
     await agent.run("first", user="u1", thread=THREAD)
     await agent.run("second", user="u1", thread=THREAD)
-    assert all(c.body["window"] is False for c in memory_service.named("context"))
+    asked = memory_service.named("context")
+    # a durable store owns the thread: no window; one kept in RAM gets memory's window as
+    # text (a restart loses the store), never as messages next to the ones it replays
+    assert all(c.body["window"] is not durable for c in asked)
+    assert all("window_format" not in c.body for c in asked)
     # its own thread replays the first turn, once
     assert _said(model.script.requests[-1]) == [
         ("user", "first"),

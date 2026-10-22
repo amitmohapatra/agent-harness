@@ -24,10 +24,14 @@ by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the fram
 message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what
 the grounding check verifies the answer against.
 
-* `window=false` when the framework keeps the thread's messages itself (a LangGraph graph with
-  a checkpointer): the service leaves the recent conversation out. Such a graph's context
-  message has a fixed id (`trellis-memory-context`), so its thread holds one that each turn
-  replaces.
+* `window=false` when the framework keeps the thread's messages itself in a durable store (a
+  LangGraph graph with a durable checkpointer, an OpenAI Agents session on a file;
+  `trellis.harness.history.owner`): the service leaves the recent conversation out. Such a
+  graph's context message has a fixed id (`trellis-memory-context`), so its thread holds one
+  that each turn replaces. A store kept in RAM only (`InMemorySaver`, `SQLiteSession(":memory:")`)
+  replays the thread while the process lives and loses it on a restart: memory's window stays
+  on there, in the context's text (`## Recent conversation`), never as messages next to the
+  store's own.
 * Otherwise memory keeps the conversation, and a framework that replays one as messages
   (LangGraph — `ReAct`, `create_agent`, Deep Agents — and the OpenAI Agents SDK) gets it as its
   own: `window_format="messages"`, and the recent turns follow the context message as the

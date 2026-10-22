@@ -3,14 +3,18 @@ turn for each owner."""
 
 from __future__ import annotations
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from benchmark.thread.__main__ import (
     CONVERSATIONS,
     RESTART_BEFORE_TURN,
     Variant,
     markdown,
+    own_thread,
     percentile,
     summary,
 )
+from trellis.harness.history import Owner, owner
 
 
 def test_the_report_gives_recall_tokens_and_overhead_per_turn_for_each_owner() -> None:
@@ -56,3 +60,15 @@ def test_the_variants_say_who_owns_the_thread_and_whether_they_restart() -> None
     assert Variant.FRAMEWORK.framework_thread and not Variant.FRAMEWORK.restarts
     assert Variant.MEMORY_RESTART.restarts and not Variant.MEMORY_RESTART.framework_thread
     assert Variant.FRAMEWORK_RESTART.restarts and Variant.FRAMEWORK_RESTART.framework_thread
+
+
+async def test_the_framework_variant_owns_its_thread_and_a_new_one_starts_empty() -> None:
+    saver = own_thread()
+    assert owner(saver, agent_id="b") is Owner.FRAMEWORK
+    assert owner(InMemorySaver(), agent_id="b") is Owner.MEMORY
+    config = {"configurable": {"thread_id": "t", "checkpoint_ns": ""}}
+    checkpoint = {"v": 1, "id": "c1", "ts": "", "channel_values": {}, "channel_versions": {}}
+    await saver.aput(config, checkpoint, {}, {})
+    assert (await saver.aget_tuple(config)).checkpoint["id"] == "c1"
+    assert [c async for c in saver.alist(config)]
+    assert await own_thread().aget_tuple(config) is None  # a restart's new saver
