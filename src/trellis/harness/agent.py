@@ -42,7 +42,7 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, pipeline, sandbox, skills, telemetry
+from trellis.harness import compat, history, pipeline, sandbox, skills, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -742,12 +742,13 @@ class Agent:
                 pushed = await memory.context(
                     runtime.task,
                     tools=own or None,
-                    # the framework keeps the thread itself (a checkpointer; an OpenAI Agents
-                    # ``session`` given as a run option): memory's window is not sent again
-                    window=not (
-                        self.adapter.keeps_conversation(self.target)
-                        or runtime.framework_options.get("session") is not None
-                    ),
+                    # the framework keeps the thread itself, durably (``history``): memory's
+                    # window is not sent again
+                    window=history.owner(
+                        self.adapter.thread_store(self.target, runtime.framework_options),
+                        agent_id=self.id,
+                    )
+                    is history.Owner.MEMORY,
                     hints=hints,
                     budget=self.context_budget,
                 )

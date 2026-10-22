@@ -67,7 +67,7 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 
 | | |
 |---|---|
-| Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
+| Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a durable checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it); an `InMemorySaver` (`MemorySaver`) loses the thread on a restart, so memory's window stays on with it, said once (`trellis.harness.history`). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
 | Memory pull | the memory tools are in `h.tools(...)` |
 | Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |

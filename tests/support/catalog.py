@@ -9,6 +9,7 @@ from typing import Any
 from trellis.contracts import Feedback
 from trellis.harness.governance.catalog import Rule
 from trellis.memory.errors import ValidationError
+from trellis.memory.models import ApprovalSuggestion
 
 
 class FakeCatalog:
@@ -22,6 +23,44 @@ class FakeCatalog:
         self.down = False
         #: how many publishes are refused (not retried by the background writes)
         self.refuse_publish = 0
+        #: the approval suggestions learned, and the rule each writes when accepted
+        self.suggested: list[ApprovalSuggestion] = []
+        self.learned: dict[str, str] = {}
+        self.accepted: list[str] = []
+        #: whether reading (``"read"``) or accepting (``"accept"``) suggestions fails
+        self.suggestions_fail: set[str] = set()
+
+    def suggest(self, tool: str, rule: str) -> None:
+        """A suggestion learned for ``tool``: accepted, ``rule`` is its ``approve_when``."""
+        found = f"sug_{len(self.suggested) + 1}"
+        self.suggested.append(
+            ApprovalSuggestion(
+                id=found,
+                tool=tool,
+                arg_shape="{}",
+                suggestion="auto_approve",
+                approvals=5,
+                rejections=0,
+                edits=0,
+                support=5,
+                approve_rate=1.0,
+            )
+        )
+        self.learned[found] = rule
+
+    async def suggestions(self) -> Sequence[ApprovalSuggestion]:
+        if "read" in self.suggestions_fail:
+            raise ConnectionError("suggestions are down")
+        return [s.model_copy(update={"accepted": s.id in self.accepted}) for s in self.suggested]
+
+    async def accept(self, suggestion_id: str) -> Rule:
+        if "accept" in self.suggestions_fail:
+            raise ConnectionError("accepting is down")
+        tool = next(s.tool for s in self.suggested if s.id == suggestion_id)
+        self.accepted.append(suggestion_id)
+        self.rules[tool] = Rule(self.rules[tool].risk, approve_when=self.learned[suggestion_id])
+        self.version += 1
+        return self.rules[tool]
 
     async def read(
         self, names: Sequence[str], *, etag: str | None = None

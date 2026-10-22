@@ -43,8 +43,12 @@ if result.interrupt:  # create_po asks a person
 tools the virtual key allows and, memory on, the memory tools). Your own `function_tool`s keep
 working and are left untouched; they are not governed, journaled or recorded by the harness.
 
-**Handoffs.** `wrap(tools=...)` reaches the agent you wrap. A specialist reached by a handoff
-gets harness tools when it is built:
+**Handoffs.** `wrap(tools=...)` reaches the agent you wrap. Every agent reachable through its
+`handoffs` (recursively, cycles included) runs as a copy whose own tools are governed like the
+wrapped agent's — hooks, the catalog's rules, the journal; your agents are not changed. A
+`Handoff` object (`handoff(agent, ...)`) hides its agent until it is invoked, so that agent's
+tools are not governed (said once at the first run): hand off to the `Agent` itself. A
+specialist that needs harness tools gets them when it is built:
 
 ```python
 refunds = Agent(
@@ -160,7 +164,8 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 
 * A resume after a harness approval re-runs the conversation: the model is asked again for the
   steps before the pause (their tool calls replay from the journal).
-* The SDK's sessions (`session=`) are yours to pass (`framework_options={"session": ...}`): with one, the SDK keeps the thread, so the memory context is pushed without the recent conversation (memory's window), as for a checkpointed LangGraph graph. Long-term memory stays the memory service's.
+* The SDK's sessions (`session=`) are yours to pass (`framework_options={"session": ...}`), as are `conversation_id`, `previous_response_id` and `auto_previous_response_id` (OpenAI's servers keep the thread): with a durable one, the SDK keeps the thread, so the memory context is pushed without the recent conversation (memory's window), as for a checkpointed LangGraph graph. A `SQLiteSession(":memory:")` is kept in RAM only and lost on a restart: memory's window stays on, and a warning says so once (`trellis.harness.history`). Long-term memory stays the memory service's.
+* Token budgets (`Budget(max_tokens=...)`) are enforced on every run: the harness always passes its `RunHooks`, which count each reply's usage, whether or not the agent has hooks.
 * A `RunConfig` object given to one in-process run (`run`/`stream`) is not kept with its record:
   a resume runs with the agent's (put it on `h.wrap`, or give it as a dict).
 

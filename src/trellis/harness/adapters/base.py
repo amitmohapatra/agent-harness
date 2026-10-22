@@ -1,8 +1,9 @@
 """The adapter contract: four functions per framework, and one check.
 
 * ``prepare_input(target, input, context)`` — the framework's input, with the pushed memory
-  context as a system message (``keeps_conversation(target)``: the target holds the thread's
-  messages itself, so the context is asked for without the recent conversation);
+  context as a system message (``thread_store(target, options)``: the store the framework keeps
+  the thread's messages in; when ``history.owner`` says it owns them, the context is asked for
+  without the recent conversation);
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
@@ -92,7 +93,7 @@ class Adapter(Protocol):
     fixed_tools: bool
     narrows: Narrowing
 
-    def keeps_conversation(self, target: Any) -> bool: ...
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None: ...
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any: ...
 

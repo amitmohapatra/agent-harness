@@ -5,7 +5,28 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## Unreleased
 
+### Fixed
+
+- OpenAI Agents: the tools of every agent reachable through `handoffs` (recursively, on copies)
+  are governed — hooks, the catalog's rules, the journal; a `Handoff` object whose agent is
+  hidden is said once. The harness's `RunHooks` are always passed, so a token budget is enforced
+  without any hooks.
+- Claude Agent SDK: built-in tools are governed by the SDK's own `PreToolUse` hook, so
+  `allowed_tools`, `acceptEdits` and `bypassPermissions` no longer bypass governance; your
+  `can_use_tool` is asked by that hook.
+- History owner: one policy (`trellis.harness.history`) with a registry of RAM-only stores. A
+  LangGraph `InMemorySaver`/`MemorySaver` or an OpenAI `SQLiteSession(":memory:")` no longer
+  turns memory's window off (warned once); OpenAI `conversation_id`/`previous_response_id`/
+  `auto_previous_response_id` count as the framework keeping the thread.
+- An `approve_when` rule that cannot be evaluated asks a person (never allows), is logged once
+  per rule, and is recorded on the run as an `APPROVAL_RULE_INVALID` warning
+  (`ApprovalRuleError`).
+
 ### Added
+
+- Learned approval suggestions are accepted automatically when the tool catalog refreshes
+  (the memory service's accept endpoint), except for a tool at the highest risk, which waits for
+  a person; each acceptance is logged and `trellis doctor` lists the accepted ones.
 
 - `python -m benchmark.thread`: who keeps a conversation's history across runs, the framework's
   own thread or the memory service's window, measured on recall and input tokens per turn.

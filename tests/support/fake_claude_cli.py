@@ -12,6 +12,12 @@ the "model" read). ``FAKE_CLAUDE_RECORD`` names a file the CLI writes what it wa
 (system prompt, allowed tools, the session it resumes, prompt, its
 ``ANTHROPIC_CUSTOM_HEADERS``) to.
 
+Hooks: the ``PreToolUse`` hooks the SDK registered (its ``initialize`` request) are called before
+every tool call, before any permission rule, as the real CLI calls them: ``allow`` runs it (with
+their ``updatedInput``), ``deny`` refuses it, ``continue: false`` stops the turn; with no decision
+the permission rules go on — ``--allowedTools``, ``--permission-mode`` (``bypassPermissions``:
+any tool, ``acceptEdits``: an edit, run without asking), then ``can_use_tool``.
+
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
 the temporary directory): the steps done so far — a tool call that failed or paused is not done.
 ``--resume=<id>`` goes on after them, as the real CLI continues a conversation; a session it
@@ -23,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import uuid
@@ -32,6 +39,8 @@ from typing import Any
 SERVER = os.environ.get("FAKE_CLAUDE_SERVER", "trellis")
 #: What the harness's tools answer when the run paused (``tools.convert.claude.WAITING``).
 WAITING = "Waiting for a person's approval."
+#: The tools ``--permission-mode acceptEdits`` lets run without asking.
+EDITS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
 
 
@@ -55,6 +64,52 @@ class Cli:
     def __init__(self) -> None:
         self.requests = 0
         self.mcp_ready = False
+        #: the hooks the SDK registered, by event (its ``initialize`` request)
+        self.hooks: dict[str, Any] = {}
+
+    def pre_tool_use(self, session: str, name: str, args: dict[str, Any], tool_id: str) -> dict:
+        """What the ``PreToolUse`` hooks matching ``name`` decide (the first decision)."""
+        for matcher in self.hooks.get("PreToolUse") or []:
+            pattern = matcher.get("matcher")
+            if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
+                continue
+            for callback in matcher.get("hookCallbackIds") or []:
+                answer = self.control(
+                    {
+                        "subtype": "hook_callback",
+                        "callback_id": callback,
+                        "input": {
+                            "session_id": session,
+                            "transcript_path": "",
+                            "cwd": os.getcwd(),
+                            "hook_event_name": "PreToolUse",
+                            "tool_name": name,
+                            "tool_input": args,
+                            "tool_use_id": tool_id,
+                        },
+                        "tool_use_id": tool_id,
+                    }
+                )
+                said = answer.get("hookSpecificOutput") or {}
+                if said.get("permissionDecision") or answer.get("continue") is False:
+                    return answer
+        return {}
+
+    def allowed(
+        self, session: str, name: str, args: dict[str, Any], tool_id: str
+    ) -> dict[str, Any]:
+        """What the ``PreToolUse`` hooks, then the permission rules, decide about a call."""
+        hooked = self.pre_tool_use(session, name, args, tool_id)
+        decided = hooked.get("hookSpecificOutput") or {}
+        if decided.get("permissionDecision") == "deny" or hooked.get("continue") is False:
+            return {
+                "behavior": "deny",
+                "message": decided.get("permissionDecisionReason", "denied"),
+                "interrupt": hooked.get("continue") is False,
+            }
+        if decided.get("permissionDecision") == "allow":
+            return {"behavior": "allow", "updatedInput": decided.get("updatedInput", args)}
+        return self.permission(name, args, tool_id)
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
@@ -105,9 +160,17 @@ class Cli:
             self.mcp_ready = True
 
     def permission(self, name: str, args: dict[str, Any], tool_id: str) -> dict[str, Any]:
-        """What the SDK's ``can_use_tool`` says about a call (allowed when it is not asked)."""
+        """What the SDK's ``can_use_tool`` says about a call — not asked, as the real CLI does
+        not ask it, for a tool in ``--allowedTools``, any tool under ``bypassPermissions`` and
+        an edit under ``acceptEdits`` (allowed then)."""
         allowed = (argument("--allowedTools") or "").split(",")
-        if argument("--permission-prompt-tool") != "stdio" or name in allowed:
+        mode = argument("--permission-mode")
+        if (
+            argument("--permission-prompt-tool") != "stdio"
+            or name in allowed
+            or mode == "bypassPermissions"
+            or (mode == "acceptEdits" and name in EDITS)
+        ):
             return {"behavior": "allow"}
         return self.control(
             {
@@ -174,7 +237,7 @@ class Cli:
         name = builtin or f"mcp__{SERVER}__{item['tool']}"
         args = item.get("args", {})
         send(assistant(session, [{"type": "tool_use", "id": tool_id, "name": name, "input": args}]))
-        permission = self.permission(name, args, tool_id)
+        permission = self.allowed(session, name, args, tool_id)
         allowed = permission.get("behavior", "allow") == "allow"
         error = not allowed
         if allowed and builtin:
@@ -253,6 +316,8 @@ def main() -> None:
         kind = message.get("type")
         if kind == "control_request":
             request = message["request"]
+            if request.get("subtype") == "initialize":
+                cli.hooks = request.get("hooks") or {}
             send(
                 {
                     "type": "control_response",

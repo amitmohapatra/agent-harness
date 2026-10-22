@@ -24,10 +24,11 @@ Turn = str | tuple[str, Args] | list[tuple[str, Args]]
 class ScriptedModel(Model):
     """Each call answers with the next turn: text, ``(tool, args)`` for a tool call (``args``
     as text: the arguments exactly as written), or a list of them for several calls in one
-    response."""
+    response. ``usage`` is every reply's (none counted by default)."""
 
-    def __init__(self, turns: list[Turn]) -> None:
+    def __init__(self, turns: list[Turn], usage: Usage | None = None) -> None:
         self.turns = list(turns)
+        self.usage = usage or Usage()
         self.inputs: list[Any] = []
         self.system: list[str | None] = []
         #: the tool names each call was offered
@@ -71,7 +72,7 @@ class ScriptedModel(Model):
     ) -> ModelResponse:
         self.tools.append([t.name for t in tools])
         return ModelResponse(
-            output=self._next(input, system_instructions), usage=Usage(), response_id=None
+            output=self._next(input, system_instructions), usage=self.usage, response_id=None
         )
 
     async def stream_response(  # type: ignore[override]
