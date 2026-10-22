@@ -27,6 +27,7 @@ from typing import Any, Final, Protocol
 
 from trellis.contracts import Feedback, ToolSpec
 from trellis.harness.bounded import LRUSet
+from trellis.harness.tools.base import SideEffect, ToolOrigin
 from trellis.memory import MemoryContext
 from trellis.memory.models import SideEffects
 
@@ -112,7 +113,7 @@ def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, ob
         "source": spec.source,
         "server": spec.server,
     }
-    if spec.source != "mcp" and spec.side_effects in ("read", "write", "irreversible"):
+    if spec.source != ToolOrigin.MCP and spec.side_effects in tuple(SideEffect):
         stored["side_effects"] = spec.side_effects
     if annotations:
         stored["annotations"] = dict(annotations)
@@ -154,7 +155,7 @@ class Rules:
         self._asked_at = now
         try:
             rules, etag = await self._catalog.read(list(self._names), etag=self._etag)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - unreadable: every non-read call asks
             if not self._unread:
                 log.warning(
                     "the tool catalog could not be read (%s: %s): until it can, every tool "

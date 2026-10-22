@@ -15,15 +15,22 @@ worker thread (:func:`invoked`), and a call that timed out told to the model as
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
+import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Final, Literal, Protocol
 
+from jsonschema import SchemaError
+from jsonschema.exceptions import relevance
+from jsonschema.protocols import Validator
+from jsonschema.validators import validator_for
 from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
 
 from trellis.contracts import (
@@ -36,26 +43,36 @@ from trellis.contracts import (
     ToolStatus,
 )
 from trellis.contracts.errors import is_pause_signal
+from trellis.harness.bounded import MAXSIZE
 from trellis.harness.features import Feature
 
+log = logging.getLogger("trellis.harness")
+
 SideEffects = Literal["read", "write", "irreversible"]
+
+
+class SideEffect(StrEnum):
+    """What a tool does (:data:`SideEffects`), for comparing a value read as text."""
+
+    READ = "read"
+    WRITE = "write"
+    IRREVERSIBLE = "irreversible"
+
+
+class ToolOrigin(StrEnum):
+    """Where a tool comes from (the contracts' ``ToolSpec.source``)."""
+
+    LOCAL = "local"
+    MCP = "mcp"
+    MEMORY = "memory"
+    OPENAPI = "openapi"
+    A2A = "a2a"
+
 
 #: What an unknown tool is assumed to do: something, but nothing a person must approve.
 DEFAULT_SIDE_EFFECTS: SideEffects = "write"
 
 Runner = Callable[[dict[str, Any]], Awaitable[Any]]
-
-#: A JSON schema ``type`` and the Python values that are one (a bool is not a number).
-JSON_TYPES: Final[dict[str, tuple[type, ...]]] = {
-    "string": (str,),
-    "integer": (int,),
-    "number": (int, float),
-    "boolean": (bool,),
-    "array": (list,),
-    "object": (dict,),
-    "null": (type(None),),
-}
-
 
 #: Retries of a call that only reads (or is idempotent) after an error that may pass (the
 #: error's own ``retryable``, or its category's): within the call's timeout, after a random
@@ -150,7 +167,7 @@ async def execute(
         async with within or asyncio.timeout(tool.timeout):
             retries = retries_of(tool.spec, reads=reads)
             output = await retried(once, retries=retries)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the outcome the model reads
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
             return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
         if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
@@ -198,7 +215,7 @@ async def retried(
         return after is None or remaining is None or after <= remaining
 
     def wait(state: RetryCallState) -> float:
-        backoff = random.uniform(0, RETRY_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
+        backoff = random.uniform(0, RETRY_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))  # noqa: S311 - jitter, not a secret
         error = state.outcome.exception() if state.outcome is not None else None
         return max(backoff, (retry_after(error) if error is not None else None) or 0.0)
 
@@ -292,25 +309,49 @@ def arguments_of(raw: str | None) -> dict[str, Any] | str:
 
 
 def arguments_problem(schema: dict[str, Any], args: dict[str, Any]) -> str | None:
-    """Why ``args`` do not fit a tool's input ``schema``, or ``None``: a light check — required
-    fields, the basic types of the declared ones, unknown fields where none are allowed; the
-    tool itself validates the rest (a local tool through pydantic). What every call is checked
-    with before it runs (``tools.bridge``), and a reviewer's edited arguments
-    (``Agent.resume``)."""
-    missing = [name for name in schema.get("required") or [] if name not in args]
-    if missing:
+    """Why ``args`` do not fit a tool's input ``schema`` (JSON Schema, validated by
+    ``jsonschema``), or ``None``: the missing required fields, the unknown ones where none are
+    allowed, else the first other mismatch (a type, an enum, a bound...). A schema that is not
+    valid JSON Schema checks nothing (said once): the tool itself validates its arguments.
+    What every call is checked with before it runs (``tools.bridge``), and a reviewer's edited
+    arguments (``Agent.resume``)."""
+    validator = _validator(json.dumps(schema, sort_keys=True, default=str))
+    if validator is None:
+        return None
+    errors = list(validator.iter_errors(args))
+    if not errors:
+        return None
+    # the arguments as a whole (the schema's own ``required`` and ``properties``) first
+    top = {e.validator for e in errors if not e.path}
+    missing = [n for n in schema.get("required") or [] if n not in args]
+    if "required" in top and missing:
         return f"missing required argument(s): {', '.join(missing)}"
-    properties: dict[str, Any] = schema.get("properties") or {}
-    if schema.get("additionalProperties") is False:
-        unknown = [name for name in args if name not in properties]
-        if unknown:
-            return f"unknown argument(s): {', '.join(unknown)}"
-    for name, value in args.items():
-        expected = (properties.get(name) or {}).get("type")
-        allowed = JSON_TYPES.get(expected) if isinstance(expected, str) else None
-        if allowed is None:
-            continue
-        wrong_bool = isinstance(value, bool) and expected != "boolean"
-        if wrong_bool or not isinstance(value, allowed):
-            return f"{name} must be of type {expected}"
-    return None
+    closed = schema.get("additionalProperties") is False  # declared here, not by a $ref
+    unknown = [n for n in args if closed and n not in (schema.get("properties") or {})]
+    if "additionalProperties" in top and unknown:
+        return f"unknown argument(s): {', '.join(unknown)}"
+    error = min(errors, key=relevance)
+    where = ".".join(str(p) for p in error.absolute_path)
+    if error.validator == "type":
+        expected = error.validator_value
+        kinds = " or ".join(expected) if isinstance(expected, list) else str(expected)
+        return f"{where or 'the arguments'} must be of type {kinds}"
+    return f"{where}: {error.message}" if where else error.message
+
+
+@functools.lru_cache(maxsize=MAXSIZE)
+def _validator(schema: str) -> Validator | None:
+    """The validator of a tool's input schema (as sorted JSON: one per schema, kept), or
+    ``None`` for one that is not valid JSON Schema."""
+    loaded = json.loads(schema)
+    cls = validator_for(loaded)
+    try:
+        cls.check_schema(loaded)
+    except SchemaError as exc:
+        log.warning(
+            "a tool's input schema is not valid JSON Schema (%s): its arguments are not "
+            "checked before it runs",
+            exc.message,
+        )
+        return None
+    return cls(loaded)

@@ -29,6 +29,8 @@ dependencies = [
   "croniter>=6",
   "opentelemetry-api>=1.44",
   "tenacity>=9.1",
+  # compat.py: the tested framework ranges, as version specifiers
+  "packaging>=24",
 ]
 
 [project.scripts]
@@ -116,21 +118,36 @@ src = ["src", "tests"]
 extend-exclude = [".claude"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PL", "RUF", "ASYNC", "T20"]
-ignore = ["PLR0913", "PLR2004", "B008"]
+# C90: complexity; TRY: exception handling; BLE: blind excepts (each deliberate one says why
+# in its noqa); S: bandit's security checks
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PL", "RUF", "ASYNC", "T20", "C90", "TRY", "BLE", "S"]
+# TRY003: an exception says what to do in its message, where it is raised (the house style)
+ignore = ["PLR0913", "PLR2004", "B008", "TRY003"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.isort]
 known-first-party = ["trellis", "benchmark"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["PLR2004", "T20", "PLC0415", "E501", "PLR0915"]
-"examples/**" = ["T20", "PLC0415"]
+"tests/**" = ["PLR2004", "T20", "PLC0415", "E501", "PLR0915", "S101"]
+# an example asserts what it shows, as a test does (make examples runs them)
+"examples/**" = ["T20", "PLC0415", "S101"]
 # the cost benchmark imports the react extra when it builds a variant
 "benchmark/**" = ["PLC0415"]
-# the distractor servers' table, one kind of record a line
-"benchmark/cost/catalog.py" = ["E501"]
+# the distractor servers' table, one kind of record a line (and its random sample)
 # Adapters import their framework on first use, never at module import.
 "src/trellis/harness/adapters/**" = ["PLC0415"]
+# Files other branches are changing now (-bridges, -react-best, -memuse, -fwbench): their
+# asserts and deliberate broad excepts are annotated there, and these entries go with it.
+"src/trellis/harness/adapters/openai_agents.py" = ["PLC0415", "S101"]
+"src/trellis/harness/agent.py" = ["BLE001", "S101"]
+"src/trellis/harness/runtime.py" = ["BLE001", "S101"]
+"src/trellis/harness/telemetry.py" = ["S101"]
+"src/trellis/harness/tools/bridge.py" = ["S101"]
+"src/trellis/harness/clients/memory.py" = ["S101"]
+"benchmark/cost/catalog.py" = ["E501", "S311"]
 "src/trellis/harness/tools/convert/**" = ["PLC0415"]
 "src/trellis/harness/a2a/**" = ["PLC0415"]
 "src/trellis/harness/agui/**" = ["PLC0415"]
@@ -148,3 +165,31 @@ typeCheckingMode = "standard"
 # that for editable installs: ``make typings`` links trellis.contracts, trellis.memory and
 # trellis.runs where pyright looks first.
 stubPath = "typings"
+# Beyond "standard": a private name of another module or class (a framework's internals
+# break on its next release), a deprecated API, a comparison that is always the same, a
+# match that misses a case.
+reportPrivateUsage = "error"
+reportDeprecated = "error"
+reportUnnecessaryComparison = "error"
+reportMatchNotExhaustive = "error"
+# Exceptions, by file: each says why. The last environment is everything else.
+executionEnvironments = [
+  { root = "src/trellis/harness/agent.py", extraPaths = ["src", "."], reportDeprecated = "none" },
+  { root = "src/trellis/harness/runtime.py", extraPaths = ["src", "."], reportDeprecated = "none" },
+  { root = "src/trellis/harness/middleware.py", extraPaths = ["src", "."], reportPrivateUsage = "none", reportDeprecated = "none" },
+  { root = "src/trellis/harness/automatic.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "src/trellis/harness/telemetry.py", extraPaths = ["src", "."], reportDeprecated = "none", reportUnnecessaryComparison = "none" },
+  { root = "src/trellis/harness/clients/memory.py", extraPaths = ["src", "."], reportMatchNotExhaustive = "none" },
+  { root = "benchmark/cost/run.py", extraPaths = ["src", "."], reportDeprecated = "none" },
+  { root = "src/trellis/harness/a2a/executor.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "src/trellis/harness/agui/__init__.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "src/trellis/harness/evals.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "src/trellis/harness/pipeline.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "src/trellis/harness/subagents.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "src/trellis/harness/runs.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "benchmark/cost/variants.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "benchmark/thread", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "benchmark/load/__main__.py", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = "tests", extraPaths = ["src", "."], reportPrivateUsage = "none" },
+  { root = ".", extraPaths = ["src", "."] },
+]

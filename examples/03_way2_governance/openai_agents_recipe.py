@@ -231,8 +231,7 @@ async def main() -> None:
         runs, services, (scope, pushed), run_id=run.run_id, question=question, answer=answer
     )
     for client in (gov, runs, services, memory):
-        if client is not None:
-            await client.aclose()
+        await client.aclose()
 
 
 if __name__ == "__main__":

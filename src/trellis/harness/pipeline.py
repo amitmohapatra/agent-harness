@@ -60,6 +60,7 @@ from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
 from trellis.harness.identity import Identity
+from trellis.harness.invariants import present
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
@@ -244,8 +245,7 @@ async def _attempt(
     except RunCancelled as exc:
         runtime.cancelled = str(exc)
     except asyncio.CancelledError as exc:
-        task = asyncio.current_task()
-        assert task is not None
+        task = present(asyncio.current_task(), "an attempt runs in a task")
         # ``agent.cancel`` ends the run CANCELLED with its reason, and its task goes on;
         # otherwise the caller went away (a closed stream): the run ends here. A worker's run
         # is the worker's to end — CANCELLED here only when someone asked (its heartbeat said
@@ -258,7 +258,7 @@ async def _attempt(
             if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
                 await sandbox.ended(agent, journal.sandbox, identity.run_id)
             raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the run's failure is its result
         # a framework may wrap or swallow the pause: the runtime is what says it paused
         if runtime.pending is None:
             error = exc
@@ -385,8 +385,8 @@ async def _concluded(
         await agent.hooks.failed("run", error)
         result = await _failed(agent, runtime, failure, extracted)
     else:
-        assert extracted is not None
-        result = await _succeeded(agent, runtime, extracted, pushed)
+        done = present(extracted, "an attempt that did not fail extracted its output")
+        result = await _succeeded(agent, runtime, done, pushed)
     if not _again(runtime, result):
         await sandbox.ended(agent, journal.sandbox, runtime.run_id)
     return result

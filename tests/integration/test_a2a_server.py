@@ -241,7 +241,7 @@ async def test_a_push_url_that_is_not_public_https_is_refused_at_registration(
     task_id = task_id_of(await send(client, "ask me"))
     with pytest.raises(A2AError):
         await client.create_task_push_notification_config(
-            TaskPushNotificationConfig(task_id=task_id, url="http://localhost/hook", token="t"),
+            TaskPushNotificationConfig(task_id=task_id, url="http://localhost/hook", token="t"),  # noqa: S106 - a fake secret of the test
             context=caller(),
         )
 
@@ -275,7 +275,7 @@ async def test_a_push_is_signed_with_the_registered_token() -> None:
     configs = InMemoryPushNotificationConfigStore()
     await configs.set_info(
         "run-1",
-        TaskPushNotificationConfig(task_id="run-1", url="https://93.184.216.34/hook", token="tok"),
+        TaskPushNotificationConfig(task_id="run-1", url="https://93.184.216.34/hook", token="tok"),  # noqa: S106 - a fake secret of the test
         ServerCallContext(),
     )
     notifier = PushNotifier(

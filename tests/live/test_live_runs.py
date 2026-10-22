@@ -10,7 +10,7 @@ import signal
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -173,7 +173,7 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
 
 # --------------------------------------------------------------------------- worker processes
 @contextmanager
-def worker_process(suffix: str, ledger: Path) -> Iterator[subprocess.Popen[bytes]]:
+def worker_process(suffix: str, ledger: Path) -> Generator[subprocess.Popen[bytes]]:
     """``python -m trellis.harness.worker tests.live.worker_app:h`` with this session's agents."""
     env = {**os.environ, "TRELLIS_LIVE_SUFFIX": suffix, "TRELLIS_LIVE_LEDGER": str(ledger)}
     process = subprocess.Popen(

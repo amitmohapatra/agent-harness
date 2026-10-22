@@ -317,7 +317,7 @@ async def test_the_catalog_governs_the_sandbox_tools_like_any_other() -> None:
 async def test_what_a_command_prints_is_redacted_on_its_way_out(
     memory_harness: Harness, memory_service: Any
 ) -> None:
-    secret = "sk-live0123456789abcdef"
+    secret = "sk-live0123456789abcdef"  # noqa: S105 - a fake secret of the test
     provider = FakeSandboxes()
     keyed = sandbox(provider, SandboxSpec(files={"key.txt": secret}))
 

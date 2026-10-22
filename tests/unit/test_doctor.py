@@ -123,7 +123,7 @@ def test_the_daemon_is_found_as_docker_py_finds_it(tmp_path: Path) -> None:
     assert docker_host({"DOCKER_CONFIG": str(config), "DOCKER_CONTEXT": "default"}) == (
         f"unix://{DOCKER_SOCKET}"
     )
-    assert DockerSandbox(socket="/tmp/d.sock").host == "unix:///tmp/d.sock"
+    assert DockerSandbox(socket="/tmp/d.sock").host == "unix:///tmp/d.sock"  # noqa: S108 - a path in a container, not here
     assert DockerSandbox(host="tcp://x:1").host == "tcp://x:1"
 
 

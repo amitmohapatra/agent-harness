@@ -13,7 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +24,7 @@ import httpx
 
 HOST: Final = "http://langfuse.test"
 PUBLIC: Final = "pk-lf-test"
-SECRET: Final = "sk-lf-test"
+SECRET: Final = "sk-lf-test"  # noqa: S105 - a fake secret of the test
 PATH: Final = "/api/public/v2/prompts/"
 
 
@@ -84,7 +84,7 @@ class LangfusePrompts:
         return httpx.Response(status, json=body)
 
     @contextmanager
-    def serve(self) -> Iterator[str]:
+    def serve(self) -> Generator[str]:
         """This fake over HTTP on this machine, for as long as the block runs: its base URL."""
         fake = self
 

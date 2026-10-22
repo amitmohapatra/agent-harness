@@ -161,7 +161,10 @@ src/trellis/
     journal.py         what a re-run needs: answers and tool outputs keyed by content; the
                        checkpoint (or an artifact reference past 1 MiB); sub-agents' journals
     features.py        without=: the features a run or an agent turns off (Feature)
+    frameworks.py      each framework the harness wraps, outside its adapter: its tool format for
+                       h.tools, its distributions, whether a target has tools of its own
     compat.py          the framework versions this release was tested with; the wrap-time warning
+    invariants.py      present(): a guarantee of the harness's own code, checked without assert
     hooks/             Hooks and how they chain; openai_agents: model hooks through RunHooks
     middleware.py      LangChain v1 middleware: HarnessTools, ModelHooks, StepLimit, StallGuard,
                        ReadTools, read_result, RunCheckpointer; ToolGuidance, AnswerCheck (opt-in)
@@ -183,11 +186,12 @@ src/trellis/
     settings.py        the environment
     telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; Langfuse client
     redaction.py       what may leave the process
-    logs.py            JSON log lines (the worker CLI's, or the application's own)
+    logs.py            JSON log lines, their extra fields redacted (the worker CLI's, or yours)
     testing.py         Reviewer and Decide (trellis.testing)
     runs.py            RunStore (the part of trellis.runs.RunsClient the harness calls) and
                        LocalRuns (the same store in process, when RUNS_URL is unset)
-    worker/            Worker: trellis.runs.Worker running wrapped agents; __main__: the CLI
+    worker/            Worker: trellis.runs.Worker running wrapped agents (its startup heap frozen
+                       out of the collector's sight); __main__: the CLI
     adapters/          detect(target) and one adapter per framework (base, langgraph,
                        openai_agents, claude, function)
     governance/        the run / announce / ask decision, usable without Harness: decision,

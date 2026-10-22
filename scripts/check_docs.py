@@ -167,7 +167,7 @@ class Block:
 def markdown_files() -> list[Path]:
     """Tracked Markdown, plus new files not yet added (a check before a commit sees them)."""
     command = ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.md"]
-    out = subprocess.run(
+    out = subprocess.run(  # noqa: S603 - our own command, fixed arguments
         command, cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout.split()
     return sorted(ROOT / p for p in set(out) if not p.startswith(EXCLUDED) and (ROOT / p).is_file())
@@ -270,7 +270,7 @@ def _modules(package: str) -> Iterator[Any]:
             continue
         try:
             yield importlib.import_module(info.name)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - a snippet that does not parse is skipped
             continue
 
 

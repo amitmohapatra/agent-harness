@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Iterator, Sequence
+from http import HTTPStatus
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
@@ -182,7 +183,7 @@ def mcp_fixture() -> Iterator[str]:
         pytest.skip("needs the local MCP servers: TRELLIS_LIVE_MCP_URL=http://127.0.0.1:<port>/mcp")
     started = None
     if not _reachable(MCP_URL.rsplit("/", 1)[0], "/"):
-        started = subprocess.Popen(
+        started = subprocess.Popen(  # noqa: S603 - our own command, fixed arguments
             [sys.executable, "-m", "tests.live.mcp_fixture", MCP_URL],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -213,7 +214,7 @@ async def _connected(url: str) -> None:
             # a persistent client reconnects; one that connects per call (the gateway answers
             # 400 to a reconnect) lists its tools again on refresh
             reconnected = await api.post(f"/api/mcp/client/{client_id}/reconnect")
-            if reconnected.status_code == httpx.codes.BAD_REQUEST:
+            if reconnected.status_code == HTTPStatus.BAD_REQUEST:
                 await api.post(f"/api/mcp/client/{client_id}/refresh-tools")
         for _ in range(60):  # a reconnect lists the client's tools again in the background
             listed = {c.id: c.tools for c in await bf.mcp.clients()}

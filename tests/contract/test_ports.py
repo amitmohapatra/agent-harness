@@ -80,4 +80,4 @@ def test_importing_trellis_loads_no_framework_and_contracts_stay_cheap() -> None
         "loaded = {m.split('.')[0] for m in sys.modules}\n"
         "assert not loaded & {'langgraph', 'langchain_core', 'agents', 'claude_agent_sdk', 'a2a', 'fastapi'}, loaded\n"
     )
-    subprocess.run([sys.executable, "-c", code], check=True, env={"PATH": ""})
+    subprocess.run([sys.executable, "-c", code], check=True, env={"PATH": ""})  # noqa: S603 - our own command, fixed arguments

@@ -12,7 +12,8 @@ nothing to set. An application of its own installs :class:`JSONFormatter` the us
     logging.basicConfig(level=logging.INFO, handlers=[handler])
 
 Each line has ``time`` (ISO 8601, UTC), ``level``, ``logger``, ``message``, every ``extra``
-field (``run_id``...), and ``exception`` when there is one.
+field (``run_id``...) redacted as spans and events are (``redaction.py``: a secret under any
+name, a credential-shaped value), and ``exception`` when there is one.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import json
 import logging
 from datetime import UTC, datetime
 from typing import IO, Any, Final
+
+from trellis.harness.redaction import DEFAULT
 
 #: The attributes every ``LogRecord`` has: anything else on one is an ``extra`` field.
 _STANDARD: Final = frozenset(
@@ -38,7 +41,8 @@ class JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        line.update({k: v for k, v in vars(record).items() if k not in _STANDARD})
+        extra = {k: v for k, v in vars(record).items() if k not in _STANDARD}
+        line.update(DEFAULT.redact_input(extra))
         if record.exc_info:
             line["exception"] = self.formatException(record.exc_info)
         return json.dumps(line, default=str)

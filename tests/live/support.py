@@ -7,7 +7,7 @@ import json
 import socket
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Final
@@ -137,7 +137,7 @@ def free_port() -> int:
 
 
 @contextmanager
-def serving(app: Any, port: int) -> Iterator[None]:
+def serving(app: Any, port: int) -> Generator[None]:
     """``app`` served by uvicorn on ``port`` (a real socket) in a thread, until the block ends."""
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)

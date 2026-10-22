@@ -42,7 +42,7 @@ from trellis.harness.clients.bifrost import Gateway, code_mode_tools
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.tools.base import Source, Tool
+from trellis.harness.tools.base import SideEffect, Source, Tool, ToolOrigin
 from trellis.harness.tools.lint import lint
 from trellis.harness.tools.mcp import MCPSource, side_effects_of
 
@@ -137,7 +137,7 @@ async def _not_auto_executed(gateway: Gateway, defs: list[ToolDef]) -> list[Tool
     management API cannot be read."""
     try:
         auto = await gateway.auto_executed()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - an optional check: logged
         log.info("the MCP clients' Agent Mode lists were not checked: %s", exc)
         return defs
     kept: list[ToolDef] = []
@@ -254,8 +254,8 @@ def _scriptable(
     def reads(tool: Tool) -> bool:
         rule = rules.get(tool.name)
         if rule is None:
-            return tool.spec.side_effects == "read"
-        return rule.risk == "read" and rule.approve_when is None
+            return tool.spec.side_effects == SideEffect.READ
+        return rule.risk == SideEffect.READ and rule.approve_when is None
 
     by_server: dict[str, list[Tool]] = defaultdict(list)
     code_mode: dict[str, bool] = {}
@@ -274,14 +274,14 @@ def _scriptable(
 
 def _linted(listing: Listing) -> None:
     """What makes the listed tools hard to choose among (``tools.lint``), each a warning."""
-    specs = [t.spec for t in listing.local if t.spec.source != "memory"]
+    specs = [t.spec for t in listing.local if t.spec.source != ToolOrigin.MEMORY]
     for finding in lint([*specs, *(_spec(d) for d in listing.defs)]):
         log.warning("tool choice: %s", finding)
 
 
 async def _publish(governance: Governance, listing: Listing) -> None:
     """Every tool to the catalog: MCP tools with their annotations instead of side effects."""
-    specs = [t.spec for t in listing.local if t.spec.source != "memory"]
+    specs = [t.spec for t in listing.local if t.spec.source != ToolOrigin.MEMORY]
     specs.extend(_spec(d) for d in listing.defs)
     hints = {
         d.name: d.annotations.model_dump(by_alias=True, exclude_none=True)

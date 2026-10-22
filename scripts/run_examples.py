@@ -50,7 +50,7 @@ def run(path: Path, environ: dict[str, str]) -> tuple[Path, bool, float, str]:
     started = time.monotonic()
     command = [sys.executable, "-m", module(path)]
     try:
-        done = subprocess.run(
+        done = subprocess.run(  # noqa: S603 - our own command, fixed arguments
             command,
             cwd=ROOT,
             env=environ,

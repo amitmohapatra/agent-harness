@@ -75,6 +75,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Fixed
 
+- A tool catalog rule (`approve_when`) that cannot be evaluated now fails closed with a typed
+  error: every call of the tool asks (a read too), the rule is logged at `ERROR` once, and the
+  run gets a `warning` event `APPROVAL_RULE_INVALID` (`RuleError` on `Decision.error`). Before,
+  any exception there was swallowed without a word; a bug outside the rule is now raised.
+- A tool call's arguments are checked against its whole input schema with `jsonschema` (enums,
+  bounds, nested objects, `$ref`) instead of a hand-written subset; a schema that is not JSON
+  Schema checks nothing and says so once.
+- The JSON log lines redact their `extra` fields as spans and events are.
 - `handle.result()` waits out agent-runs' request budget (429, its `Retry-After`) and polls
   again, instead of failing the wait.
 - Every piece of the harness's own client-side state is bounded, so a long-lived process
@@ -96,6 +104,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Changed
 
+- Quality pass: `packaging` decides the tested framework ranges (`compat.py`, a new core
+  dependency); what the harness knows of each framework outside its adapter is registered in
+  one place (`frameworks.py`: `h.tools` formats, `compat` distributions, a target's own tools);
+  `Rejected`, `Denied` (`PolicyDeniedError`) and `InputRequired` (`HarnessError`) join the
+  typed error hierarchy; `Writes(limits=WriteLimits(...))`; the interrupt field lists derive
+  from the contract's `Interrupt`; HTTP statuses are `HTTPStatus`; asserts in the harness's own
+  code are explicit checks; the worker freezes its startup heap (`gc.freeze`), which removes
+  its 169 ms full-collection pause. Lint: ruff `C90` (12), `TRY`, `BLE`, `S`; pyright
+  `reportPrivateUsage`, `reportDeprecated`, `reportUnnecessaryComparison`,
+  `reportMatchNotExhaustive`.
 - Deprecated, working for one release with a warning naming the replacement:
   `h.wrap(mcp=[...])` and `h.tools(mcp=[...])` (`mcp("name")` in `tools=[...]`; `mcp=[]` is
   `without={"mcp"}`) and `agent.as_tool()` (the agent itself in `tools=[...]`; a sub-agent's

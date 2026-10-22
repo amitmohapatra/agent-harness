@@ -58,6 +58,12 @@ implementation, not two. The language has comparisons, `and`/`or`/`not`, `in`, l
 lists, dotted argument paths, and `shape`. `shape` is the call's argument shape, which approval
 decisions are pooled by.
 
+A rule that cannot be evaluated (it does not parse) fails closed: every call of the tool asks,
+whatever its risk — a read too. The broken rule is logged at `ERROR` once per tool and rule,
+and the run deciding the call gets a `warning` event with the code `APPROVAL_RULE_INVALID`; the
+decision carries the error (`Decision.error`, a `RuleError`, a `PolicyDeniedError`). Fix the
+rule in the catalog: governance never treats a broken rule as "no approval needed".
+
 **Governance fails closed.** A rule that does not parse, or cannot be evaluated on a call,
 asks. With memory off there is no catalog, and the tools' own risks decide.
 

@@ -46,10 +46,25 @@ def test_every_framework_an_adapter_runs_on_has_a_tested_range() -> None:
     assert set(compat.FRAMEWORKS) == {"langgraph", "openai_agents", "claude_agent_sdk", "function"}
 
 
+def test_every_adapter_is_registered_once_and_h_tools_names_its_formats() -> None:
+    from typing import get_args
+
+    from trellis.harness.adapters.claude import ClaudeAdapter
+    from trellis.harness.adapters.function import FunctionAdapter
+    from trellis.harness.adapters.langgraph import LangGraphAdapter
+    from trellis.harness.adapters.openai_agents import OpenAIAgentsAdapter
+    from trellis.harness.frameworks import BY_NAME, REGISTERED
+    from trellis.harness.harness import FORMATS, Framework
+
+    adapters = [LangGraphAdapter, OpenAIAgentsAdapter, ClaudeAdapter, FunctionAdapter]
+    assert sorted(BY_NAME) == sorted(a.name for a in adapters) and len(REGISTERED) == len(BY_NAME)
+    assert set(FORMATS) == set(get_args(Framework))  # the type h.tools(framework=) is checked by
+
+
 def test_versions_compare_by_their_release_numbers() -> None:
-    assert compat.release("0.2.160") == (0, 2, 160)
-    assert compat.release("1.4.0rc1") == (1, 4, 0)
-    assert compat.release("dev") == ()
+    assert compat.tested("langchain", "1.4.0rc1")  # a pre-release is its release
+    assert compat.tested("langgraph", "1.2.11+local")
+    assert not compat.tested("langgraph", "dev")  # not a version: outside every range
     assert compat.tested("langgraph", "1.2.11")
     assert compat.tested("langgraph", "1.2")
     assert not compat.tested("langgraph", "1.3.0")
@@ -65,7 +80,7 @@ def test_an_untested_framework_is_said_once_at_wrap_time(
 ) -> None:
     versions = {"openai-agents": "0.30.1"}
     monkeypatch.setattr(compat, "installed", versions.get)
-    monkeypatch.setattr(compat, "_warned", set())
+    compat._said.cache_clear()
     from agents import Agent
 
     caplog.set_level(logging.WARNING, logger="trellis.harness")
@@ -73,14 +88,16 @@ def test_an_untested_framework_is_said_once_at_wrap_time(
     h.wrap(Agent(name="one"), id="one")
     h.wrap(Agent(name="two"), id="two")  # the same distribution: not said again
     warned = [r.getMessage() for r in caplog.records if "trellis-harness was tested" in r.message]
-    assert warned == [
+    message = (
         "openai-agents 0.30.1 is installed, but this trellis-harness was tested with "
         "openai-agents>=0.22.3,<0.23: use a newer trellis-harness (docs/versioning.md)"
-    ]
+    )
+    assert warned == [message]
+    assert compat.check("openai_agents") == [message]  # still out of range, not said again
+    assert len([r for r in caplog.records if "trellis-harness was tested" in r.message]) == 1
 
 
 def test_a_tested_or_missing_framework_says_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(compat, "_warned", set())
     monkeypatch.setattr(compat, "installed", {"langgraph": "1.2.11"}.get)
     assert compat.check("langgraph") == []  # in range; the others are not installed
     assert compat.check("function") == []

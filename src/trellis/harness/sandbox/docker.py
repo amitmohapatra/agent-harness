@@ -26,8 +26,9 @@ import posixpath
 import tarfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Final
 
@@ -54,6 +55,9 @@ SNAPSHOT: Final = "trellis.snapshot_of"
 WORKDIR: Final = "/workspace"
 #: The most processes a sandbox may have at once.
 PIDS_LIMIT: Final = 512
+#: The header of each frame of an exec's multiplexed output: the stream (1 byte), 3 bytes of
+#: padding and the frame's size (4 bytes, big-endian).
+FRAME_HEADER: Final = 8
 #: What is kept of a command's output, per stream: its end (the rest is cut, and says so).
 OUTPUT_BYTES: Final = 256 * 1024
 #: How long one call of the Engine API may take (a command's output and a pull: as long as
@@ -115,9 +119,9 @@ class DockerSandbox:
                 "hosts (use a provider that can, or an egress proxy)"
             )
         config = self._config(ref, spec)
-        async with self._client() as client:
+        async with self.client() as client:
             response = await client.post("/containers/create", params={"name": ref.id}, json=config)
-            if response.status_code == 404:  # the image is not here yet
+            if response.status_code == HTTPStatus.NOT_FOUND:  # the image is not here yet
                 if ref.snapshot is not None:
                     raise SandboxLost(
                         f"the sandbox {ref.id} and its snapshot are gone", source="tools"
@@ -126,32 +130,33 @@ class DockerSandbox:
                 response = await client.post(
                     "/containers/create", params={"name": ref.id}, json=config
                 )
-            if response.status_code != 409:  # 409: it exists, an earlier attempt made it
+            # a conflict: it exists, an earlier attempt made it
+            if response.status_code != HTTPStatus.CONFLICT:
                 _checked(response, ref)
             files = {} if ref.snapshot is not None else spec.files
             await _running(client, ref, files)
         return Container(self, ref)
 
     async def attach(self, ref: SandboxRef) -> Container:
-        async with self._client() as client:
+        async with self.client() as client:
             await _running(client, ref, {})
         return Container(self, ref)
 
     async def delete(self, ref: SandboxRef) -> None:
-        async with self._client() as client:
+        async with self.client() as client:
             gone = await client.delete(f"/containers/{ref.id}", params={"force": "true"})
-            if gone.status_code != 404:
+            if gone.status_code != HTTPStatus.NOT_FOUND:
                 _checked(gone, ref)
             snapshots = {"filters": _filter({SNAPSHOT: ref.id})}  # its own images, none other
             images = await client.get("/images/json", params=snapshots)
             for image in _checked(images, ref).json():
                 removed = await client.delete(f"/images/{image['Id']}", params={"force": "true"})
-                if removed.status_code != 404:
+                if removed.status_code != HTTPStatus.NOT_FOUND:
                     _checked(removed, ref)
 
     async def labelled(self, labels: Mapping[str, str]) -> list[SandboxRef]:
         params = {"all": "true", "filters": _filter(labels)}
-        async with self._client() as client:
+        async with self.client() as client:
             found = _checked(await client.get("/containers/json", params=params), None).json()
         return [
             SandboxRef(
@@ -163,14 +168,14 @@ class DockerSandbox:
         ]
 
     async def pause(self, ref: SandboxRef) -> None:
-        async with self._client() as client:
+        async with self.client() as client:
             paused = await client.post(f"/containers/{ref.id}/pause")
-            if paused.status_code != 409:  # 409: paused already
+            if paused.status_code != HTTPStatus.CONFLICT:  # paused already
                 _checked(paused, ref)
 
     async def snapshot(self, ref: SandboxRef) -> str:
         params = {"container": ref.id, "repo": "trellis-snapshot", "tag": ref.id}
-        async with self._client() as client:
+        async with self.client() as client:
             labels = {**ref.labels, SNAPSHOT: ref.id}
             committed = await client.post("/commit", params=params, json={"Labels": labels})
             return str(_checked(committed, ref).json()["Id"])
@@ -198,7 +203,7 @@ class DockerSandbox:
         }
 
     @asynccontextmanager
-    async def _client(self) -> AsyncIterator[httpx.AsyncClient]:
+    async def client(self) -> AsyncGenerator[httpx.AsyncClient]:
         if self.host.startswith("unix://"):
             transport = httpx.AsyncHTTPTransport(uds=self.host.removeprefix("unix://"))
             base = f"http://docker/{API_VERSION}"
@@ -229,7 +234,7 @@ class Container:
         timeout: float | None = None,  # noqa: ASYNC109 - the command's, killed past it
         env: Mapping[str, str] | None = None,
     ) -> ExecResult:
-        pid_file = f"/tmp/.trellis-exec-{uuid.uuid4().hex}"
+        pid_file = f"/tmp/.trellis-exec-{uuid.uuid4().hex}"  # noqa: S108 - a path inside the sandbox container
         config = {
             "Cmd": ["sh", "-c", WRAPPER, pid_file, command],
             "AttachStdout": True,
@@ -237,7 +242,7 @@ class Container:
             "WorkingDir": WORKDIR,
             "Env": [f"{name}={value}" for name, value in (env or {}).items()],
         }
-        async with self.provider._client() as client:
+        async with self.provider.client() as client:
             made = await client.post(f"/containers/{self.ref.id}/exec", json=config)
             exec_id = _checked(made, self.ref).json()["Id"]
             try:
@@ -251,11 +256,14 @@ class Container:
 
     async def read(self, path: str) -> bytes:
         where = _absolute(path)
-        async with self.provider._client() as client:
+        async with self.provider.client() as client:
             response = await client.get(
                 f"/containers/{self.ref.id}/archive", params={"path": where}
             )
-        if response.status_code == 404 and "Could not find the file" in response.text:
+        if (
+            response.status_code == HTTPStatus.NOT_FOUND
+            and "Could not find the file" in response.text
+        ):
             raise ToolError(f"there is no file {where} in the sandbox", source="tools")
         archive = _checked(response, self.ref).content
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
@@ -266,13 +274,13 @@ class Container:
             return content.read()
 
     async def write(self, path: str, data: bytes) -> None:
-        async with self.provider._client() as client:
+        async with self.provider.client() as client:
             await _put(client, self.ref, {path: data})
 
     async def _kill(self, pid_file: str) -> None:
         """Kill the command whose process id ``pid_file`` holds, and what it started."""
         config = {"Cmd": ["sh", "-c", KILL, pid_file]}
-        async with self.provider._client() as client:
+        async with self.provider.client() as client:
             made = await client.post(f"/containers/{self.ref.id}/exec", json=config)
             if made.is_success:
                 await client.post(f"/exec/{made.json()['Id']}/start", json={"Detach": False})
@@ -284,7 +292,7 @@ async def _running(
     """The container ``ref`` names, checked to be the run's and running: a new one gets its
     ``files`` before it starts, a paused one is resumed, a stopped one started again."""
     found = await client.get(f"/containers/{ref.id}/json")
-    if found.status_code == 404:
+    if found.status_code == HTTPStatus.NOT_FOUND:
         raise SandboxLost(f"the sandbox {ref.id} is gone", source="tools")
     info = _checked(found, ref).json()
     labels = info["Config"]["Labels"] or {}
@@ -333,13 +341,13 @@ async def _output(client: httpx.AsyncClient, exec_id: str, ref: SandboxRef) -> t
             _checked(got, ref)
         async for chunk in got.aiter_bytes():
             pending += chunk
-            while len(pending) >= 8:
-                size = int.from_bytes(pending[4:8], "big")
-                if len(pending) < 8 + size:
+            while len(pending) >= FRAME_HEADER:
+                size = int.from_bytes(pending[4:FRAME_HEADER], "big")
+                if len(pending) < FRAME_HEADER + size:
                     break
                 if pending[0] in streams:
-                    streams[pending[0]].add(bytes(pending[8 : 8 + size]))
-                del pending[: 8 + size]
+                    streams[pending[0]].add(bytes(pending[FRAME_HEADER : FRAME_HEADER + size]))
+                del pending[: FRAME_HEADER + size]
     return streams[1].text(), streams[2].text()
 
 
@@ -384,12 +392,16 @@ def _checked(response: httpx.Response, ref: SandboxRef | None) -> httpx.Response
         message = str(response.json().get("message"))
     except ValueError:
         message = response.text
-    if ref is not None and response.status_code == 404 and "No such container" in message:
+    if (
+        ref is not None
+        and response.status_code == HTTPStatus.NOT_FOUND
+        and "No such container" in message
+    ):
         raise SandboxLost(f"the sandbox {ref.id} is gone", source="tools")
     raise ToolError(
         f"Docker answered {response.status_code}: {message}",
         source="tools",
-        retryable=response.status_code >= 500,
+        retryable=response.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR,
     )
 
 

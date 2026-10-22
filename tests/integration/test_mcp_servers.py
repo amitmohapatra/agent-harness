@@ -48,7 +48,7 @@ def free_port() -> int:
 def http_server() -> Iterator[str]:
     """The server over HTTP, its every request needing the token ``t0k``."""
     port = free_port()
-    process = subprocess.Popen(
+    process = subprocess.Popen(  # noqa: S603 - our own command, fixed arguments
         [sys.executable, str(SERVER), "http", str(port)],
         env={**os.environ, "TOKEN": "t0k"},
         stdout=subprocess.DEVNULL,
@@ -141,7 +141,7 @@ async def test_a_server_that_died_is_started_again(harness: Harness, tmp_path: P
 async def test_without_mcp_the_server_is_not_started(harness: Harness) -> None:
     source = local()
     result = await names_and(toolbox, harness, source, without={"mcp"})
-    assert result.answer == [] and source._connection._task is None
+    assert result.answer == [] and source.connection._task is None
 
 
 # --------------------------------------------------------------------------- HTTP

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,9 @@ from trellis import Harness, Settings
 from trellis.contracts import ConfigurationError, ToolSpec
 from trellis.harness import writes as writes_module
 from trellis.harness.clients.memory import Memory
-from trellis.harness.governance import Action, Decision, Governance, Rejected, governed
+from trellis.harness.governance import Action, Decision, Governance, Rejected, RuleError, governed
 from trellis.harness.governance import catalog as catalog_module
+from trellis.harness.governance import decision as decision_module
 from trellis.harness.governance.catalog import (
     CATALOG_UNREAD,
     GOVERNANCE_STALE_SECONDS,
@@ -106,7 +108,35 @@ def test_the_rules_are_the_memory_services_expression_language(
 def test_a_rule_that_cannot_be_read_asks_on_every_call(source: str) -> None:
     """An administrator's rule is data, not code: one that does not parse fails closed."""
     decision = decide("po", "read", source, {"amount": 1})
-    assert decision.asks and "could not be checked" in decision.reason
+    assert decision.asks and "could not be checked" in decision.reason  # never allowed
+    assert isinstance(decision.error, RuleError) and decision.error.code == "APPROVAL_RULE_INVALID"
+    assert decision.error.to_error().category == "POLICY"
+    assert decision.error.details == {"tool": "po", "rule": source}
+
+
+def test_a_broken_rule_is_logged_at_error_once_per_rule(caplog: pytest.LogCaptureFixture) -> None:
+    decision_module._broken.cache_clear()
+    caplog.set_level(logging.ERROR, logger="trellis.harness")
+    for amount in (1, 2, 3):
+        assert decide("po", "write", "amount >", {"amount": amount}).asks
+    assert decide("po", "write", "amount <", {"amount": 1}).asks  # another rule: said too
+    said = [r for r in caplog.records if "could not be evaluated" in r.getMessage()]
+    assert [r.levelno for r in said] == [logging.ERROR, logging.ERROR]
+    assert said[0].getMessage().startswith("the approval rule 'amount >' of po could not be")
+
+
+def test_a_rule_error_outside_a_mistake_of_the_rule_is_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the evaluator's own error means a broken rule; a bug elsewhere is raised (the call
+    then fails: it does not run either)."""
+
+    def bug(rule: str, args: object) -> bool:
+        raise KeyError("a bug")
+
+    monkeypatch.setattr(decision_module, "evaluate", bug)
+    with pytest.raises(KeyError):
+        decide("po", "write", "amount > 1", {"amount": 2})
 
 
 def test_an_unread_catalog_asks() -> None:

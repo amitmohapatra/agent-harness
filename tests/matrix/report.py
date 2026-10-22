@@ -45,7 +45,7 @@ def read(paths: Iterable[Path]) -> dict[str, Result]:
     """Every cell's result in the junit files (a later file wins a cell run twice)."""
     found: dict[str, Result] = {}
     for path in paths:
-        for case in ET.parse(path).getroot().iter("testcase"):
+        for case in ET.parse(path).getroot().iter("testcase"):  # noqa: S314 - our own junit files
             name = case.get("name", "")
             if not name.startswith("test_cell[") or parse_cell(name) is None:
                 continue
@@ -209,7 +209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"no junit results: run make matrix first ({DEFAULT_JUNIT})", file=sys.stderr)
         return 2
     seconds = sum(
-        float(s.get("time") or 0) for p in paths for s in ET.parse(p).getroot().iter("testsuite")
+        float(s.get("time") or 0)
+        for p in paths
+        for s in ET.parse(p).getroot().iter("testsuite")  # noqa: S314 - our own junit files
     )
     text = render(read(paths), seconds)
     args.out.parent.mkdir(parents=True, exist_ok=True)

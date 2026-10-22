@@ -218,7 +218,7 @@ async def test_langfuse_down_the_last_copy_stands_and_a_prompt_never_read_says_s
 
 
 def test_langfuse_is_its_cloud_unless_a_host_is_named() -> None:
-    assert langfuse_prompts(public_key="p", secret_key="s").host == "https://cloud.langfuse.com"
+    assert langfuse_prompts(public_key="p", secret_key="s").host == "https://cloud.langfuse.com"  # noqa: S106 - a fake secret of the test
 
 
 # --------------------------------------------------------------------------- Bifrost

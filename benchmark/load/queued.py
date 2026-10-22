@@ -123,7 +123,7 @@ async def drive(
                 try:
                     handle = await queued.start(TASK, user=f"load-{n}", thread=f"load-{n}-{t}")
                     result = await handle.result(timeout=plan.run_seconds)
-                except Exception as exc:  # a failed run is a measured error
+                except Exception as exc:  # noqa: BLE001 - a failed run is a measured error
                     errors.append(f"{type(exc).__name__}: {exc}"[:200])
                     continue
                 if result.status.value.lower() != "success":

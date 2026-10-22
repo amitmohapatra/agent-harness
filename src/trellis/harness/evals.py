@@ -70,6 +70,7 @@ from trellis.harness import pipeline, telemetry
 from trellis.harness.clients.bifrost import Gateway, PromptPin
 from trellis.harness.gateways import OpenAICompatible, model_gateway, unserved
 from trellis.harness.identity import Identity
+from trellis.harness.invariants import present
 from trellis.harness.journal import Journal
 from trellis.harness.prompts import BifrostPrompts, Prompt, PromptSources
 from trellis.harness.repository import pinned
@@ -795,7 +796,7 @@ async def judge(
         try:
             with telemetry.attributed(outer or dims):
                 score = await evaluator(case)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - an evaluator's failure is a score not given
             failed[name] = f"{type(exc).__name__}: {exc}"
             log.warning("evaluator %s failed on run %s: %s", name, ref, exc)
             continue
@@ -816,7 +817,7 @@ async def judge(
                 run_id=case.run_id,
                 model=score.model,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a score not posted is logged
             log.warning("score %s of run %s was not posted: %s", score.name, ref, exc)
     return scores, failed
 
@@ -883,7 +884,7 @@ class _Run:
                     metadata=self.metadata,
                     description=self.description,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - linking is best effort, logged
                 log.warning("run %s was not linked to dataset run %s: %s", run_id, self.name, exc)
         self.dataset_run_id = self.dataset_run_id or linked
         return telemetry.Experiment(
@@ -1048,7 +1049,7 @@ async def _item(
         paused = result.interrupt if result.status is RunStatus.PAUSED else None
         if paused is not None:
             await agent.resume(paused.interrupt_id, "cancel", reviewer=EVAL_REVIEWER)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the item's failure is its result
         log.warning("evaluation item failed: %s", exc)
         return _result(services, item, None, "error", run_id, error=f"{type(exc).__name__}: {exc}")
     trajectory: list[Step] = list(journal.trajectory)
@@ -1093,11 +1094,11 @@ async def _item(
 def _paused(interrupt: Interrupt) -> ToolOutcome:
     """The outcome of the call a run paused on, on its trajectory: not run, waiting for a
     person (the evaluation cancels the run)."""
-    assert interrupt.tool_call is not None  # an approval's
+    call = present(interrupt.tool_call, "a run paused for approval names its call")
     return ToolOutcome(
-        tool=interrupt.tool_call.tool,
+        tool=call.tool,
         status=ToolStatus.CANCELLED,
-        output=f"{interrupt.tool_call.tool} paused for approval",
+        output=f"{call.tool} paused for approval",
         metadata={PAUSED: True},
     )
 
@@ -1124,7 +1125,7 @@ async def _called(
             returned = await target(item.input)
             output = returned if isinstance(returned, EvalOutput) else EvalOutput(returned)
             telemetry.output(span, output.answer)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the item's failure is its result
         log.warning("evaluation item failed: %s", exc)
         return _result(services, item, None, "error", run_id, error=f"{type(exc).__name__}: {exc}")
     case = EvalCase(

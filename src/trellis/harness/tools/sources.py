@@ -29,6 +29,7 @@ from trellis.harness.runtime import current
 from trellis.harness.tools.base import (
     DEFAULT_SIDE_EFFECTS,
     REMOTE_TIMEOUT_SECONDS,
+    SideEffect,
     SideEffects,
     Source,
     Tool,
@@ -218,7 +219,7 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
     try:  # the annotations as the function's module means them (``from __future__ import
         # annotations`` leaves them strings, which pydantic cannot resolve from here)
         hints = typing.get_type_hints(fn, include_extras=True)
-    except Exception:  # a name it cannot resolve: the annotations as written
+    except (NameError, TypeError, AttributeError):  # unresolvable: the annotations as written
         hints = {}
     for param in inspect.signature(fn).parameters.values():
         if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
@@ -363,7 +364,7 @@ def _operation_tool(
         query = {k: v for k, v in args.items() if located.get(k) == "query"}
         runtime = current()
         key = runtime.idempotency_key if runtime is not None else None
-        headers = {"Idempotency-Key": key} if key and side_effects != "read" else None
+        headers = {"Idempotency-Key": key} if key and side_effects != SideEffect.READ else None
         response = await client.request(
             method.upper(), url, params=query, json=args.get("body"), headers=headers
         )

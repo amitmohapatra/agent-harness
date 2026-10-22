@@ -43,7 +43,7 @@ from trellis.runs.webhooks import parse_delivery, sign, verify_signature
 TENANT = "default"  # the tenant your key speaks for (a development key's: default)
 AGENT = "refunds"
 LIMIT = 100  # a refund above it waits for a person
-SECRET = "whsec_example"  # offline: the secret a subscription's create returns once
+SECRET = "whsec_example"  # noqa: S105 - offline: the secret a subscription's create returns once
 
 
 # --------------------------------------------------------------------------- the handler

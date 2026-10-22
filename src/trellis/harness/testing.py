@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from trellis.contracts import (
+    ConfigurationError,
     Interrupt,
     InterruptDecision,
     InterruptReason,
@@ -108,7 +109,8 @@ class Reviewer:
 
     async def answer(self, agent: Agent, result: Result) -> Result:
         """Answer the one pause ``result`` is (``agent.resume``), as the script says."""
-        assert result.interrupt is not None, f"run {result.run_id} is not paused"
+        if result.interrupt is None:
+            raise ConfigurationError(f"run {result.run_id} is not paused: nothing to answer")
         given = self.resolution(result.interrupt)
         return await agent.resume(
             given.interrupt_id,

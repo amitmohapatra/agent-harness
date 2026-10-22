@@ -279,7 +279,7 @@ async def test_model_hooks_rewrite_the_call_and_the_span_carries_it_redacted(
         return text
 
     hooks = Recording()
-    secret = "sk-abcdefghijklmnopqrstu"
+    secret = "sk-abcdefghijklmnopqrstu"  # noqa: S105 - a fake secret of the test
     model = ScriptedChatModel(
         turns=[("echo", {"text": "hi", "api_key": "k1"}), ("echo", {"text": secret}), "done"]
     )

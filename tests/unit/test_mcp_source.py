@@ -44,7 +44,7 @@ def connected(source: MCPSource, client: FakeClient) -> MCPSource:
     async def give() -> Any:
         return client
 
-    source._connection.client = give  # type: ignore[method-assign]
+    source.connection.client = give  # type: ignore[method-assign]
     return source
 
 

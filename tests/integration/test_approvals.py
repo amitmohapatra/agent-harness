@@ -338,3 +338,43 @@ async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness
     assert again.interrupt is not None
     scanned = await Reviewer({"The scan of page 1?": {"pages": 1}}).settle(agent, again)
     assert scanned.answer == {"pages": 1}
+
+
+async def test_a_broken_catalog_rule_fails_closed_and_is_recorded_on_the_run(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The catalog is the source of truth: a rule that does not parse never lets a call run
+    unasked — not even a read — and the run's events say which rule is broken."""
+    memory_service.catalog = {"look": {"side_effects": "read", "approve_when": "amount >"}}
+    looked: list[int] = []
+
+    @tool(side_effects="read")
+    def look(amount: int) -> str:
+        """Look an amount up."""
+        looked.append(amount)
+        return "seen"
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return str(await agent.tools.call("look", amount=5))
+
+    agent = memory_harness.wrap(fn, id="looker", tools=[look])
+    events = [e async for e in agent.stream("look", user="ada")]
+    warnings = [
+        e.data for e in events if e.type is RunEventType.CUSTOM and e.data["name"] == "warning"
+    ]
+    assert [w["code"] for w in warnings] == ["APPROVAL_RULE_INVALID"]
+    assert "'amount >' of look could not be evaluated" in warnings[0]["message"]
+    finished = events[-1]
+    assert finished.type is RunEventType.RUN_FINISHED, finished
+    assert finished.data["interrupt"]["tool_call"]["tool"] == "look"  # asked a person
+    assert looked == []  # asked, not run
+
+
+async def test_a_reviewer_refuses_a_run_that_is_not_paused(harness: Harness) -> None:
+    async def fn(input: str, agent: Runtime) -> str:
+        return "done"
+
+    agent = harness.wrap(fn, id="unpaused")
+    result = await agent.run("x", user="u")
+    with pytest.raises(ConfigurationError, match="is not paused: nothing to answer"):
+        await Reviewer({}).answer(agent, result)

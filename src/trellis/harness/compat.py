@@ -10,11 +10,17 @@ never refuses: the run may well work, but nobody has proven it.
 
 from __future__ import annotations
 
+import functools
 import logging
-import re
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from typing import Final
+
+from packaging.specifiers import SpecifierSet
+from packaging.version import InvalidVersion, Version
+
+from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.frameworks import REGISTERED
 
 log = logging.getLogger("trellis.harness")
 
@@ -30,41 +36,26 @@ TESTED: Final[Mapping[str, tuple[str, str]]] = {
     "claude-agent-sdk": ("0.2.160", "0.3"),
     "a2a-sdk": ("1.1", "1.2"),
 }
-#: The distributions each adapter runs on (by the adapter's name), checked when a target of
-#: its type is wrapped; one that is not installed is not checked.
-FRAMEWORKS: Final[Mapping[str, tuple[str, ...]]] = {
-    "langgraph": ("langgraph", "langchain-core", "langchain", "deepagents", "langchain-openai"),
-    "openai_agents": ("openai-agents",),
-    "claude_agent_sdk": ("claude-agent-sdk",),
-    "function": (),
-}
+#: The distributions each adapter runs on (by the adapter's name: ``frameworks.py``), checked
+#: when a target of its type is wrapped; one that is not installed is not checked.
+FRAMEWORKS: Final[Mapping[str, tuple[str, ...]]] = {r.name: r.distributions for r in REGISTERED}
 #: What the warning tells the reader to do.
 ADVICE: Final = "use a newer trellis-harness (docs/versioning.md)"
 
-#: The distributions already warned about in this process: one warning each.
-_warned: set[str] = set()
-
-
-def release(text: str) -> tuple[int, ...]:
-    """A version's release numbers (``"0.2.160"`` → ``(0, 2, 160)``; a pre-release or local
-    suffix is ignored: ``"1.4.0rc1"`` → ``(1, 4, 0)``)."""
-    numbers = re.match(r"\d+(?:\.\d+)*", text.strip())
-    return tuple(int(n) for n in numbers.group(0).split(".")) if numbers else ()
-
 
 def tested(distribution: str, installed: str) -> bool:
-    """Whether ``installed`` is in the range ``distribution`` was tested with (a distribution
-    with no range is not the harness's to judge)."""
+    """Whether ``installed`` is in the range ``distribution`` was tested with, by its release
+    numbers (a pre-release or local suffix is ignored: ``1.4.0rc1`` is ``1.4.0``; a version
+    that is not one is outside every range). A distribution with no range is not the
+    harness's to judge."""
     if distribution not in TESTED:
         return True
-    low, high = (release(v) for v in TESTED[distribution])
-    found = release(installed)
-    width = max(len(low), len(high), len(found))
-
-    def padded(v: tuple[int, ...]) -> tuple[int, ...]:
-        return v + (0,) * (width - len(v))
-
-    return padded(low) <= padded(found) < padded(high)
+    low, high = TESTED[distribution]
+    try:
+        release = Version(installed).base_version
+    except InvalidVersion:
+        return False
+    return SpecifierSet(f">={low},<{high}").contains(release)
 
 
 def installed(distribution: str) -> str | None:
@@ -76,22 +67,25 @@ def installed(distribution: str) -> str | None:
 
 
 def check(adapter: str) -> list[str]:
-    """Warn, once per distribution and process, about each distribution ``adapter`` runs on
-    whose installed version is outside its tested range; the warnings given now."""
-    given = []
+    """What is said about each distribution ``adapter`` runs on whose installed version is
+    outside its tested range: a warning, once per distribution and version in a process."""
+    untested = []
     for distribution in FRAMEWORKS.get(adapter, ()):
         found = installed(distribution)
-        if found is None or distribution in _warned or tested(distribution, found):
-            continue
-        _warned.add(distribution)
-        low, high = TESTED[distribution]
-        message = (
-            f"{distribution} {found} is installed, but this trellis-harness was tested with "
-            f"{distribution}>={low},<{high}: {ADVICE}"
-        )
-        log.warning(message, extra={"distribution": distribution, "installed": found})
-        given.append(message)
-    return given
+        if found is not None and not tested(distribution, found):
+            untested.append(_said(distribution, found))
+    return untested
 
 
-__all__ = ["ADVICE", "FRAMEWORKS", "TESTED", "check", "installed", "release", "tested"]
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per distribution and version
+def _said(distribution: str, found: str) -> str:
+    low, high = TESTED[distribution]
+    message = (
+        f"{distribution} {found} is installed, but this trellis-harness was tested with "
+        f"{distribution}>={low},<{high}: {ADVICE}"
+    )
+    log.warning(message, extra={"distribution": distribution, "installed": found})
+    return message
+
+
+__all__ = ["ADVICE", "FRAMEWORKS", "TESTED", "check", "installed", "tested"]

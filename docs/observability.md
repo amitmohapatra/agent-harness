@@ -66,7 +66,8 @@ Prometheus metrics (claims, rate-limited requests, the ticker) are at its `/metr
 The harness logs through `logging` (`trellis.*` loggers; the run's id and the like as `extra`
 fields) and leaves the configuration to the application. The worker it starts itself
 (`python -m trellis.harness.worker`) logs JSON lines to stderr — `time`, `level`, `logger`,
-`message`, every `extra` field, `exception` — when stderr is not a terminal (a container, a
+`message`, every `extra` field (redacted as spans are: a secret's name or a credential-shaped
+value is masked), `exception` — when stderr is not a terminal (a container, a
 service manager), and text when it is: nothing to set. An application installs the same
 formatter with `handler.setFormatter(trellis.harness.logs.JSONFormatter())`.
 

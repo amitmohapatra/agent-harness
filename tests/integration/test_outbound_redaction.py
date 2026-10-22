@@ -35,7 +35,7 @@ from trellis.harness.identity import Identity
 from trellis.harness.redaction import DEFAULT as REDACTOR
 
 EMAIL = "ada@example.com"
-SECRET = "sk-live0123456789abcdefghij"
+SECRET = "sk-live0123456789abcdefghij"  # noqa: S105 - a fake secret of the test
 CARD = "4111 1111 1111 1111"
 ARGS = {"email": EMAIL, "api_key": SECRET}
 SHOWN_ARGS = {"email": "[email]", "api_key": "[redacted]"}
@@ -115,7 +115,7 @@ def test_a_value_is_redacted_once_and_a_long_output_is_a_preview() -> None:
     events.tool(RunEventType.TOOL_CALL_ARGS, "c1", args=long)
     events.tool(RunEventType.TOOL_CALL_RESULT, "c1", output=[{"n": i} for i in range(500)])
     args, output = seen[0].data["args"], seen[1].data["output"]
-    assert args == REDACTOR.redact_input(long) and args["token"] == "[redacted]"
+    assert args == REDACTOR.redact_input(long) and args["token"] == "[redacted]"  # noqa: S105 - a fake secret of the test
     assert isinstance(output, str) and output.endswith("…") and len(output) == 2001
     assert events.sequence == 2  # nothing was built while nobody listened
 
@@ -164,7 +164,7 @@ async def test_a2a_task_updates_and_pushes_carry_tool_calls_redacted(
         harness.wrap(notifying, id="greeter", tools=[notify]).serve_a2a(app, URL)
         async with asgi(app) as http:
             client = await connect(http)
-            hook = TaskPushNotificationConfig(url="https://hooks.example.com/a2a", token="tok")
+            hook = TaskPushNotificationConfig(url="https://hooks.example.com/a2a", token="tok")  # noqa: S106 - a fake secret of the test
             request = SendMessageRequest(
                 message=new_message([new_text_part("go")], role=Role.ROLE_USER),
                 configuration=SendMessageConfiguration(task_push_notification_config=hook),

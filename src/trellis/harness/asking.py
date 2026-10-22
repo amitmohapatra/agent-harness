@@ -41,7 +41,9 @@ from trellis.runs.answers import schema_problem
 
 
 class RunCancelled(Exception):
-    """A person cancelled the run while answering it."""
+    """A person cancelled the run while answering it. A control signal that ends the run
+    ``CANCELLED``, not a failure: deliberately not a ``HarnessError``, so no handler of
+    failures catches it on its way out."""
 
 
 @dataclass(frozen=True)

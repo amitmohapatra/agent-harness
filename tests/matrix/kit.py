@@ -16,7 +16,7 @@ UNKNOWN: Final = (
     "calling it again"
 )
 EMAIL: Final = "ada@example.com"
-SECRET: Final = "sk-live0123456789abcdefghij"
+SECRET: Final = "sk-live0123456789abcdefghij"  # noqa: S105 - a fake secret of the test
 #: A tool output larger than a checkpoint may be (the journal goes to an artifact).
 HUGE: Final = MAX_CHECKPOINT_BYTES + 1
 #: How long ``wait`` waits at most (a cancel or a time limit ends it sooner).

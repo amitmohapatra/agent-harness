@@ -157,7 +157,7 @@ def cells() -> Iterator[Cell]:
                     for selection in _selections(feature):
                         # a gap or bug of the feature holds where the feature is on
                         held = note if on_in(feature, way, selection) else None
-                        if held is None and way != "way2":
+                        if held is None:
                             held = _known(feature.id, adapter, way, mode, selection)
                         yield Cell(
                             cell_id(feature.id, adapter, way, mode, selection.id),

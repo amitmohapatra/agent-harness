@@ -30,6 +30,7 @@ from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.features import Feature, features
+from trellis.harness.frameworks import tool_formats
 from trellis.harness.fresh import Fresh
 from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
@@ -68,14 +69,9 @@ log = logging.getLogger("trellis.harness")
 _Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient, PromptSources, SkillSources)
 
 Framework = Literal["langgraph", "deepagents", "openai_agents", "claude_agent_sdk"]
-#: The native tool format each framework's agents are built with, by the framework's adapter
-#: name (Deep Agents builds a LangGraph graph: LangChain tools too).
-FORMATS: Final[dict[str, ToolFormat]] = {
-    "langgraph": "langchain",
-    "deepagents": "langchain",
-    "openai_agents": "openai_agents",
-    "claude_agent_sdk": "claude",
-}
+#: The native tool format each framework's agents are built with, by the names ``tools``
+#: takes (``frameworks.py``; Deep Agents builds a LangGraph graph: LangChain tools too).
+FORMATS: Final[dict[str, ToolFormat]] = tool_formats()
 #: The metadata key on a LangChain tool built by :meth:`Harness.tools`: which call built it.
 TOOLBOX: Final = "trellis_toolbox"
 #: The tenant of a deployment with no memory service (development: nothing to ask).

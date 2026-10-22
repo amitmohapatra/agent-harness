@@ -389,9 +389,10 @@ does not fit its question, with a `ConfigurationError` saying why, and the run k
   fit what was asked: 'five' is not of type 'integer'` — and, with no `expects`, be one of the
   `options` when there are some (`the answer 'M' is not one of the options ['S', 'L']`);
 * an `edit` of a question (a review) must fit `expects` the same way;
-* an `edit` of a tool call must fit the tool's input schema — its required arguments, the
-  basic types of the declared ones, no unknown ones where the schema allows none (`the edited
-  arguments do not fit refund: amount must be of type number`) — when the agent's toolbox lists
+* an `edit` of a tool call must fit the tool's input schema, validated as JSON Schema — its
+  required arguments, no unknown ones where the schema allows none, then the types, enums and
+  bounds of the rest (`the edited arguments do not fit refund: amount must be of type number`)
+  — when the agent's toolbox lists
   the tool at that moment. A tool it cannot list then (an MCP tool whose server is down) is
   left to the call: the tool checks its arguments when it runs, and a failure is a result the
   model reads.

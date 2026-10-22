@@ -398,13 +398,16 @@ def test_a_worker_logs_json_lines_unless_a_terminal_reads_them() -> None:
     record = logging.LogRecord("trellis.run", logging.ERROR, "f", 1, "boom", None, None)
     record.run_id = "r2"
     try:
-        raise ValueError("bad")
+        raise ValueError("bad")  # noqa: TRY301 - the test raises to exercise the handler
     except ValueError:
         import sys
 
         record.exc_info = sys.exc_info()
+    record.api_key = "k-123"  # an extra field that is a secret: redacted, as spans are
+    record.attempts = 3
     parsed = json.loads(logs.JSONFormatter().format(record))
     assert parsed["run_id"] == "r2" and "ValueError: bad" in parsed["exception"]
+    assert parsed["api_key"] != "k-123" and parsed["attempts"] == 3
 
     class Terminal(io.StringIO):
         def isatty(self) -> bool:

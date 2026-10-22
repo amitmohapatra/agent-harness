@@ -36,7 +36,7 @@ log = logging.getLogger("trellis.a2a.push")
 
 EVENT_NAME: Final = "a2a.task_update"
 #: A2A's own header for the token a caller registered.
-TOKEN_HEADER: Final = "X-A2A-Notification-Token"
+TOKEN_HEADER: Final = "X-A2A-Notification-Token"  # noqa: S105 - a header's name, not a secret
 URL_MAX_CHARS: Final = 2048
 LOCAL_SUFFIXES: Final = (".localhost", ".local", ".internal")
 ATTEMPTS: Final = 3
@@ -137,7 +137,7 @@ class PushNotifier(PushNotificationSender):
             headers[SIGNATURE_HEADER] = sign(token, int(time.time()), body)
             try:
                 response = await self._client.post(target, content=body, headers=headers)
-                if response.status_code < 300:
+                if response.is_success:
                     return True
                 failure = f"HTTP {response.status_code}"
             except httpx.HTTPError as exc:

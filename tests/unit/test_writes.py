@@ -15,7 +15,7 @@ import pytest
 from trellis.contracts import AgentExecutionContext, RunEvent
 from trellis.harness import writes as module
 from trellis.harness.events import RunEvents
-from trellis.harness.writes import SPOOL_FILE, Writes
+from trellis.harness.writes import SPOOL_FILE, WriteLimits, Writes
 from trellis.memory.errors import DependencyUnavailableError, ValidationError
 
 
@@ -114,10 +114,7 @@ def test_the_loop_shutting_down_drains_the_queue() -> None:
 async def test_a_full_queue_holds_the_writer_until_there_is_room(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(module, "MAX_PENDING", 1)
-    monkeypatch.setattr(module, "WRITERS", 1)
-    monkeypatch.setattr(module, "SUBMIT_WAIT_SECONDS", 5.0)
-    writes, done = Writes(), []
+    writes, done = Writes(limits=WriteLimits(max_pending=1, writers=1, submit_wait_seconds=5.0)), []
     gate = asyncio.Event()
 
     async def held() -> None:
@@ -146,8 +143,7 @@ async def test_a_full_queue_holds_the_writer_until_there_is_room(
 async def test_a_queue_that_stays_full_gives_the_write_up_and_says_so(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(module, "MAX_PENDING", 1)
-    writes = Writes(spool=tmp_path)
+    writes = Writes(spool=tmp_path, limits=WriteLimits(max_pending=1))
     events, seen = run_events()
     gate = asyncio.Event()
 
@@ -218,15 +214,16 @@ async def test_a_spool_line_nothing_can_replay_is_dropped_loudly(
 async def test_a_replay_larger_than_the_queue_keeps_the_rest_for_later(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(module, "MAX_PENDING", 1)
-    monkeypatch.setattr(module, "WRITERS", 0)  # nobody drains: the queue stays full
     lines = [json.dumps({"op": "x", "scope": {}, "args": {"n": n}}) for n in range(3)]
     (tmp_path / SPOOL_FILE).write_text("\n".join(lines) + "\n")
 
     async def nothing() -> None:
         return None
 
-    writes = Writes(spool=tmp_path, replay=lambda record: nothing)
+    # nobody drains: the queue stays full
+    writes = Writes(
+        spool=tmp_path, replay=lambda record: nothing, limits=WriteLimits(max_pending=1, writers=0)
+    )
     writes.start()
     kept = (tmp_path / SPOOL_FILE).read_text().splitlines()
     assert [json.loads(line)["args"]["n"] for line in kept] == [1, 2]
@@ -253,9 +250,7 @@ async def test_an_unwritable_spool_loses_the_write_and_says_why(
 async def test_a_shutdown_past_the_drain_bound_keeps_or_counts_what_is_left(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(module, "DRAIN_SECONDS", 0.05)
-    monkeypatch.setattr(module, "WRITERS", 1)
-    writes = Writes(spool=tmp_path)
+    writes = Writes(spool=tmp_path, limits=WriteLimits(drain_seconds=0.05, writers=1))
     started = asyncio.Event()
 
     async def stuck() -> None:
@@ -276,9 +271,7 @@ def test_a_loop_stopped_mid_write_keeps_the_cut_write(
 ) -> None:
     """asyncio.run returning cancels the writers; the drain bound passes with the write
     still hanging, so it is kept."""
-    monkeypatch.setattr(module, "DRAIN_SECONDS", 0.05)
-    monkeypatch.setattr(module, "WRITERS", 1)
-    writes = Writes(spool=tmp_path)
+    writes = Writes(spool=tmp_path, limits=WriteLimits(drain_seconds=0.05, writers=1))
 
     async def main() -> None:
         started = asyncio.Event()

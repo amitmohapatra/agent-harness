@@ -14,6 +14,7 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Final
 
@@ -22,6 +23,8 @@ import httpx
 from trellis.harness.gateways import CAPABILITIES, ModelGateway, model_gateway
 from trellis.harness.settings import DEPRECATED, Settings, sourced
 
+#: How many trailing characters of a secret are shown (of one at least twice as long).
+SECRET_SHOWN: Final = 4
 #: The settings whose values are secrets: shown as set, never as their value.
 SECRETS: Final = frozenset(
     {
@@ -50,7 +53,11 @@ def shown(field: str, value: Any) -> str:
         return "unset"
     if field in SECRETS:
         text = str(value)
-        return f"set (...{text[-4:]})" if isinstance(value, str) and len(text) > 8 else "set"
+        return (
+            f"set (...{text[-SECRET_SHOWN:]})"
+            if isinstance(value, str) and len(text) > SECRET_SHOWN * 2
+            else "set"
+        )
     return str(value)
 
 
@@ -164,7 +171,7 @@ async def _reached(
         return Check(name, False, f"{url} cannot be reached ({type(exc).__name__})")
     if response.status_code in (401, 403):
         return Check(name, False, f"{url} refused the key ({response.status_code})")
-    if response.is_success or (found_ok and response.status_code == 404):
+    if response.is_success or (found_ok and response.status_code == HTTPStatus.NOT_FOUND):
         return Check(name, True, f"{url} answered, the key taken")
     return Check(name, False, f"{url} answered {response.status_code}")
 
@@ -184,7 +191,7 @@ async def _docker() -> Check:
 
     provider = DockerSandbox()
     try:
-        async with provider._client() as client:
+        async with provider.client() as client:
             response = await client.get("/_ping")
     except httpx.HTTPError as exc:
         return Check("docker", False, f"{provider.host} cannot be reached ({type(exc).__name__})")

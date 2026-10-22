@@ -31,7 +31,8 @@ from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
-from trellis.contracts import ConfigurationError, ToolError, ToolSpec
+from trellis.contracts import ConfigurationError, HarnessError, ToolError, ToolSpec
+from trellis.harness.invariants import present
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool
 
 if TYPE_CHECKING:
@@ -120,7 +121,7 @@ class MCPSource:
             raise ConfigurationError(f"mcp(name={name!r}) has no letter or digit to name tools")
         #: each listed tool's annotations, as the catalog takes them (``tools.toolbox``)
         self.annotations: dict[str, dict[str, Any]] = {}
-        self._connection = _Connection(self._client)
+        self.connection = _Connection(self._client)
 
     def __repr__(self) -> str:
         return f"mcp({self.target!r})"
@@ -138,7 +139,7 @@ class MCPSource:
         """The server's tools, listed through the connection (every page)."""
         if self.virtual is not None:
             raise ConfigurationError(f"{self!r} is listed by the gateway, not resolved")
-        client = await self._connection.client()
+        client = await self.connection.client()
         server = self.server or self._own_name(client)
         listed: list[Any] = []
         cursor = None
@@ -177,13 +178,13 @@ class MCPSource:
         from mcp import MCPError  # noqa: PLC0415 - the mcp extra
         from mcp.types import CONNECTION_CLOSED  # noqa: PLC0415
 
-        client = await self._connection.client()
+        client = await self.connection.client()
         try:
             result = await client.call_tool(name, args)
         except Exception as exc:
             if isinstance(exc, MCPError) and exc.code != CONNECTION_CLOSED:
                 raise ToolError(f"{self.server}: {exc}") from exc  # the server's answer
-            self._connection.broken()  # opened again at the next call
+            self.connection.broken()  # opened again at the next call
             raise ToolError(
                 f"the MCP server {self.server} cannot be reached: {exc}", retryable=True
             ) from exc
@@ -198,12 +199,12 @@ class MCPSource:
         return named or self.transport.fallback_name(self.target) or UNNAMED
 
     def _client(self) -> Client:
-        assert self.transport.client is not None  # a Virtual MCP opens no connection
-        return self.transport.client(self)
+        opened = present(self.transport.client, "a Virtual MCP opens no connection")
+        return opened(self)
 
     async def aclose(self) -> None:
         """Close the connection (a stdio server's process ends with it)."""
-        await self._connection.aclose()
+        await self.connection.aclose()
 
 
 class McpKind(StrEnum):
@@ -242,7 +243,7 @@ def _http_client(source: MCPSource) -> Client:
     if not source.headers:
         return sdk.Client(source.target)
     http = sdk.shared._httpx_utils.create_mcp_http_client(headers=source.headers)
-    source._connection.closing.append(http)
+    source.connection.closing.append(http)
     transport = sdk.client.streamable_http.streamable_http_client(source.target, http_client=http)
     return sdk.Client(transport)
 
@@ -250,7 +251,8 @@ def _http_client(source: MCPSource) -> Client:
 def _stdio_client(source: MCPSource) -> Client:
     sdk = _sdk()
     target = source.target
-    assert isinstance(target, Stdio)
+    if not isinstance(target, Stdio):  # pragma: no cover - only stdio targets come here
+        raise HarnessError(f"internal error: {target!r} is not a stdio target")
     params = sdk.client.stdio.StdioServerParameters(
         command=target.command,
         args=list(target.args),
@@ -325,8 +327,7 @@ class _Connection:
         loop = asyncio.get_running_loop()
         if self._loop is not loop:
             self._loop, self._lock, self._client = loop, asyncio.Lock(), None
-        assert self._lock is not None
-        async with self._lock:
+        async with present(self._lock, "the lock is made with the loop"):
             if self._client is None or self._task is None or self._task.done():
                 self._client = await self._open(loop)
         return self._client
@@ -343,7 +344,7 @@ class _Connection:
                 async with client as opened:
                     ready.set_result(opened)
                     await stop.wait()
-            except BaseException as exc:  # the server's failure, said to whoever waits
+            except BaseException as exc:  # noqa: BLE001 - the server's failure, said to whoever waits
                 if not ready.done():
                     ready.set_exception(exc)
                 else:

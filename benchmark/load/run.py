@@ -129,7 +129,7 @@ async def work(plan: Plan) -> Measured:
             t = time.monotonic()
             try:
                 result = await wrapped.run(TASK, user=f"load-{n}", thread=f"load-{n}")
-            except Exception as exc:  # a failed run is a measured error
+            except Exception as exc:  # noqa: BLE001 - a failed run is a measured error
                 measured.errors.append(f"{type(exc).__name__}: {exc}"[:200])
                 return
             if result.status is not RunStatus.SUCCESS:

@@ -12,7 +12,7 @@ import io
 import json
 import re
 import tarfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -54,7 +54,7 @@ class FakeDocker:
         self.snapshots: dict[str, dict[str, bytes]] = {}
 
     @contextmanager
-    def running(self) -> Iterator[FakeDocker]:
+    def running(self) -> Generator[FakeDocker]:
         with respx.mock(base_url=f"http://docker/{API_VERSION}", assert_all_called=False) as api:
             api.route(path__regex=r".*").mock(side_effect=self._handle)
             yield self

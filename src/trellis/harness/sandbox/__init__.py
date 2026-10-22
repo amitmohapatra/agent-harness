@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec, stable_id
 from trellis.harness.bounded import LRU
+from trellis.harness.invariants import present
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.sandbox.base import (
     AGENT,
@@ -258,7 +259,7 @@ async def paused(runtime: Runtime) -> None:
             journal.sandbox = _recorded(ref.model_copy(update={"snapshot": snapshot}))
         if isinstance(provider, SupportsPause):
             await provider.pause(ref)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best effort: a warning
         runtime.events.warning(EVENT, f"the sandbox {ref.id} was not snapshotted and paused: {exc}")
         return
     runtime.events.custom(EVENT, action="paused", sandbox=ref.id)
@@ -277,7 +278,7 @@ async def ended(agent: Agent, recorded: dict[str, Any] | None, run_id: str) -> N
         return
     try:
         await source.provider_for(agent.harness.settings).delete(ref)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best effort: logged
         log.warning("the sandbox %s of run %s was not deleted: %s", ref.id, run_id, exc)
         return
     log.info("the sandbox %s of run %s was deleted", ref.id, run_id)
@@ -323,9 +324,7 @@ def _source(agent: Agent) -> SandboxSource | None:
 
 
 def _running() -> Runtime:
-    runtime = current()
-    assert runtime is not None  # the bridge runs a tool inside a run
-    return runtime
+    return present(current(), "the bridge runs a tool inside a run")
 
 
 def _recorded(ref: SandboxRef) -> dict[str, Any]:

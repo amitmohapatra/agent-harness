@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from abc import abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -50,6 +51,7 @@ from trellis.contracts import ConfigurationError, HarnessError
 from trellis.harness import telemetry
 from trellis.harness.bounded import LRU
 from trellis.harness.clients.bifrost import Gateway, PromptPin
+from trellis.harness.invariants import present
 from trellis.harness.journal import content_key
 from trellis.harness.repository import (
     BIFROST,
@@ -550,7 +552,7 @@ class ModelPrompts:
         for ref in list(self.refs):
             try:
                 await self.sources.pin(ref, runtime, kind=MODEL_PROMPT)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - not pinned: a warning on the run
                 runtime.events.warning(
                     "prompt_unavailable", f"the stored prompt {ref!r} was not pinned: {exc}"
                 )
@@ -569,15 +571,13 @@ class ModelPrompts:
         return runtime
 
 
-class GatewayHeaders(Mapping[str, str]):
-    """``h.model_headers()``: the gateway's deny-all MCP scope, and — read each time they are
-    read, so a client that keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends them
-    per request — the run's Bifrost dimensions and its ``traceparent``."""
+class _LiveHeaders(Mapping[str, str]):
+    """Headers read each time they are read (:meth:`now`), so a client that keeps the mapping
+    (``AsyncOpenAI(default_headers=...)``) sends them as they are at each request."""
 
+    @abstractmethod
     def now(self) -> dict[str, str]:
-        from trellis.harness.telemetry import gateway_headers  # noqa: PLC0415
-
-        return {**NO_GATEWAY_TOOLS, **gateway_headers()}
+        """The headers a request made now sends."""
 
     def __getitem__(self, name: str) -> str:
         return self.now()[name]
@@ -588,11 +588,22 @@ class GatewayHeaders(Mapping[str, str]):
     def __len__(self) -> int:
         return len(self.now())
 
+
+class GatewayHeaders(_LiveHeaders):
+    """``h.model_headers()``: the gateway's deny-all MCP scope, and — read each time they are
+    read, so a client that keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends them
+    per request — the run's Bifrost dimensions and its ``traceparent``."""
+
+    def now(self) -> dict[str, str]:
+        from trellis.harness.telemetry import gateway_headers  # noqa: PLC0415
+
+        return {**NO_GATEWAY_TOOLS, **gateway_headers()}
+
     def __repr__(self) -> str:
         return f"GatewayHeaders({self.now()!r})"
 
 
-class ModelHeaders(Mapping[str, str]):
+class ModelHeaders(_LiveHeaders):
     """``h.model_headers(prompt=)``: the gateway's deny-all MCP scope and a stored prompt's
     selection (``x-bf-prompt-id``, ``x-bf-prompt-version``), read each time they are read — a
     model client that keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends, on each
@@ -612,23 +623,12 @@ class ModelHeaders(Mapping[str, str]):
         pin = self._owner.selection(self._ref) or self._resolved
         return {**NO_GATEWAY_TOOLS, **pin.options().headers(), **gateway_headers()}
 
-    def __getitem__(self, name: str) -> str:
-        return self.now()[name]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.now())
-
-    def __len__(self) -> int:
-        return len(self.now())
-
     def __repr__(self) -> str:
         return f"ModelHeaders({self._ref!r}: {self.now()!r})"
 
 
 def _selection(found: ResolvedPrompt) -> PromptPin:
-    pin = found.pin()
-    assert pin is not None  # the gateway's prompts are selected by their id
-    return pin
+    return present(found.pin(), "the gateway's prompts are selected by their id")
 
 
 def selected(runtime: Runtime, prompt_id: str | None) -> ResolvedPrompt | None:

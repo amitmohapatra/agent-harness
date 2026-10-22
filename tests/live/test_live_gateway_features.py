@@ -482,7 +482,7 @@ def test_langchains_mcp_adapters_on_the_gateway(ops: str, ops_key: str, tmp_path
     for name in ("VIRTUAL_ENV", "PYTHONPATH"):  # not the harness's environment
         env.pop(name, None)
     command = [uv, "run", "--no-project", "--with", "langchain-mcp-adapters==0.3.2"]
-    done = subprocess.run(
+    done = subprocess.run(  # noqa: S603 - our own command, fixed arguments
         [*command, "--with", "langchain-core", "python", "-I", "-c", LANGCHAIN_MCP],
         cwd=tmp_path,
         env=env,

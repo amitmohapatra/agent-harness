@@ -130,7 +130,7 @@ async def test_a_command_says_its_exit_code_and_output_and_its_env_reaches_it() 
     assert noisy.stdout.startswith("[4 bytes cut]\n") and noisy.stdout.endswith("tail")
     assert len(noisy.stdout.split("\n", 1)[1]) == OUTPUT_BYTES
     _, cmd, config = docker.execs["exec0"]
-    assert cmd[:3] == ["sh", "-c", WRAPPER] and cmd[3].startswith("/tmp/.trellis-exec-")
+    assert cmd[:3] == ["sh", "-c", WRAPPER] and cmd[3].startswith("/tmp/.trellis-exec-")  # noqa: S108 - a path in a container, not here
     assert cmd[4] == "echo hi" and config["Env"] == ["TOKEN=t"] and config["WorkingDir"] == WORKDIR
 
 
@@ -172,7 +172,7 @@ async def test_files_are_read_and_written_where_the_commands_run() -> None:
     with docker.running():
         box = await made(docker)
         await box.write("src/app.py", b"print(1)")
-        await box.write("/tmp/x", b"x")
+        await box.write("/tmp/x", b"x")  # noqa: S108 - a path in a container, not here
         assert await box.read("src/app.py") == await box.read("/workspace/src/app.py")
         with pytest.raises(ToolError, match="there is no file /workspace/nope in the sandbox"):
             await box.read("nope")

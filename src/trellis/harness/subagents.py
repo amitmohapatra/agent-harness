@@ -46,11 +46,12 @@ from trellis.contracts import (
     stable_id,
 )
 from trellis.harness import pipeline
-from trellis.harness.adapters.langgraph import bound_tools
+from trellis.harness.frameworks import BY_NAME
+from trellis.harness.invariants import present
 from trellis.harness.journal import Journal, content_key
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, current
-from trellis.harness.tools.base import SideEffects, Tool
+from trellis.harness.tools.base import SideEffect, SideEffects, Tool
 from trellis.harness.tools.mcp import side_effects_of
 from trellis.harness.tools.toolbox import listed
 from trellis.runs import ConflictError
@@ -74,22 +75,12 @@ INPUT: Final = {
     "required": ["message"],
     "additionalProperties": False,
 }
-#: What a child's question carries over to its parent's interrupt.
-ASKED: Final = (
-    "reason",
-    "question",
-    "ui",
-    "expects",
-    "options",
-    "multiple",
-    "ui_schema",
-    "component",
-    "props",
-    "payload_ref",
-    "tool_call",
-    "assignee",
-    "deadline",
-    "escalate_to",
+#: What a child's question carries over to its parent's interrupt: every field of the
+#: contract's ``Interrupt`` but its identity, its own payload (merged apart) and its time.
+ASKED: Final = tuple(
+    name
+    for name in Interrupt.model_fields
+    if name not in {"interrupt_id", "tenant_id", "run_id", "payload", "created_at"}
 )
 
 
@@ -122,8 +113,7 @@ class SubAgent:
     async def _run(self, args: dict[str, Any]) -> Any:
         """The child run for this call: started, or found again by its id and continued; its
         output, or its pause as the parent's."""
-        parent = current()
-        assert parent is not None  # the bridge runs a tool inside a run
+        parent = present(current(), "the bridge runs a tool inside a run")
         child = self.agent
         start = await child._start(
             args["message"],
@@ -139,8 +129,7 @@ class SubAgent:
         )
         result = await self._continued(parent, await child.harness.runs.start(start))
         while result.status is RunStatus.PAUSED:
-            assert result.interrupt is not None
-            asked = result.interrupt
+            asked = present(result.interrupt, "a paused run has its interrupt")
             named = {
                 "agent_id": child.id,
                 "run_id": asked.run_id,
@@ -176,8 +165,10 @@ class SubAgent:
         this process: a child is never queued, and a cancel never reaches it this way — the
         parent's ends the parent, and :func:`cancel_children` the child)."""
         child = self.agent
-        record = await child.harness.runs.get(asked.run_id, tenant=parent.tenant)
-        assert record is not None
+        record = present(
+            await child.harness.runs.get(asked.run_id, tenant=parent.tenant),
+            "a child run asking its parent is in the run store",
+        )
         resolution = answer.model_copy(
             update={"interrupt_id": asked.interrupt_id, "run_id": asked.run_id}
         )
@@ -235,21 +226,14 @@ async def _side_effects(agent: Agent) -> SideEffects:
     listing = await listed(agent.sources, gateway=agent.harness.gateway)
     effects = [t.spec.side_effects for t in listing.local]
     effects.extend(side_effects_of(d.annotations) for d in listing.defs)
-    return "read" if all(effect == "read" for effect in effects) else "write"
+    return "read" if all(effect == SideEffect.READ for effect in effects) else "write"
 
 
 def _unseen(agent: Agent) -> bool:
     """Whether the target has tools of its framework's own, which the harness does not run:
     Claude's built-in tools, an OpenAI Agents agent's own tools or handoffs, a graph's tools
     not built with ``h.tools``."""
-    from trellis.harness.harness import TOOLBOX  # noqa: PLC0415 - harness imports agent
-
-    target, framework = agent.target, agent.adapter.name
-    if framework == "claude_agent_sdk":
-        return True
-    if framework == "openai_agents":
-        return bool(target.tools or target.handoffs)
-    return any(TOOLBOX not in (getattr(t, "metadata", None) or {}) for t in bound_tools(target))
+    return BY_NAME[agent.adapter.name].own_tools(agent.target)
 
 
 def _described(agent: Agent) -> str:

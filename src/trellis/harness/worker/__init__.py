@@ -9,7 +9,10 @@ holds finish for a grace period before it releases the rest (cancelled with
 worker at once). This module hands it each claimed run's agent (``Agent.execute``: the next
 attempt, with the run's checkpoint as its journal and the working time its lease says is
 left) and, around the loop, the harness's background writes: started before the first claim
-(it replays what an earlier process spooled), drained when the loop ends.
+(it replays what an earlier process spooled), drained when the loop ends. Before the first
+claim, what the process holds by then (its imports, its agents) is frozen out of the garbage
+collector's sight (``gc.freeze``): a long-lived worker's full collections then scan only what
+its runs make, and do not pause it for the whole heap.
 
     h.worker([agent]).run()                         # in your own process
     python -m trellis.harness.worker app.main:h     # every agent wrapped by that Harness
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 from collections.abc import Awaitable, Sequence
 from typing import TYPE_CHECKING
 
@@ -84,6 +88,7 @@ class Worker:
 
     async def _writing(self, loop: Awaitable[None]) -> None:
         self.harness.writes.start()  # replays what an earlier process could not deliver
+        gc.freeze()  # what the process holds now lives as long as it does (see the module)
         try:
             await loop
         finally:

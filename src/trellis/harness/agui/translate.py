@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any, Final
 
-from trellis.contracts.runs import RunEvent, RunEventType, RunOutcome
+from trellis.contracts.runs import Interrupt, RunEvent, RunEventType, RunOutcome
 from trellis.harness.agui.events import (
     AGUIEvent,
     AGUIEventType,
@@ -151,21 +151,18 @@ def _finished(event: RunEvent, base: dict[str, Any]) -> AGUIEvent:
     )
 
 
-#: What of an interrupt an AG-UI client gets under ``metadata``: the control and the
-#: options, several picks, the form's widget hints, the asker's own screen and its data, the
-#: data shown (inline or by reference), the call under approval, and whose it is by when.
-SHOWN: Final = (
-    "ui",
-    "options",
-    "multiple",
-    "ui_schema",
-    "component",
-    "props",
-    "payload",
-    "payload_ref",
-    "tool_call",
-    "assignee",
-    "deadline",
+#: The interrupt's fields an AG-UI entry carries as its own: its id, reason, message and
+#: response schema.
+MAPPED: Final = frozenset({"interrupt_id", "reason", "question", "expects"})
+#: What of an interrupt an AG-UI client gets under ``metadata`` — every other field of the
+#: contract's ``Interrupt`` but its run's identity, the escalation and its time: the control
+#: and the options, several picks, the form's widget hints, the asker's own screen and its
+#: data, the data shown (inline or by reference), the call under approval, and whose it is by
+#: when.
+SHOWN: Final = tuple(
+    name
+    for name in Interrupt.model_fields
+    if name not in MAPPED and name not in {"tenant_id", "run_id", "escalate_to", "created_at"}
 )
 
 

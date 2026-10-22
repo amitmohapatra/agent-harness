@@ -386,7 +386,7 @@ class SkillSources(Chain[ResolvedSkill]):
                     skill = await own.resolve(name, version)
                 else:  # a version an earlier harness journaled, or none: resolve it now
                     skill = await self.find(name, entry if isinstance(entry, str) else version)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a skill no source gives: a warning
                 found.problems[name] = str(exc)
                 continue
             found.skills[name] = skill

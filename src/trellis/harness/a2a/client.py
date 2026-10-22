@@ -37,7 +37,7 @@ from a2a.types import (
 )
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, TransportProtocol
 
-from trellis.contracts import ToolError, ToolSpec
+from trellis.contracts import HarnessError, ToolError, ToolSpec
 from trellis.harness.a2a.identity import EXTENSION_URI
 from trellis.harness.a2a.translate import TERMINAL_STATES, value_part, values
 from trellis.harness.identity import identity_headers
@@ -58,12 +58,15 @@ SCHEMA: Final = {
 OnInput = Callable[[str], Any]
 
 
-class InputRequired(Exception):
+class InputRequired(HarnessError):
     """The remote task waits for an answer and no ``on_input`` was given: answer it with
     ``reply(task_id, answer)``."""
 
+    code = "INPUT_REQUIRED"
+    source = "a2a"
+
     def __init__(self, question: str, task_id: str) -> None:
-        super().__init__(question)
+        super().__init__(question, details={"task_id": task_id})
         self.question = question
         self.task_id = task_id
 

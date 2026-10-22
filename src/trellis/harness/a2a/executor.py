@@ -204,7 +204,7 @@ class RunExecutor(AgentExecutor):
                         or update.state == TaskState.TASK_STATE_INPUT_REQUIRED
                     )
                     await self._apply(updater, task_id, update)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - the task fails, not the server
             log.warning("A2A task %s failed: %s", task_id, exc)
         if not finished and self._settle(task_id):
             await updater.update_status(

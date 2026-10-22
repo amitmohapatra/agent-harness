@@ -105,7 +105,7 @@ class RunLog:
                 self.closed = True  # another worker has the run: write nothing more
                 self._pending.clear()
                 return
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - an undelivered batch is counted
                 self._dropped(len(batch), f"{type(exc).__name__}: {exc}")
             del self._pending[: len(batch)]
 

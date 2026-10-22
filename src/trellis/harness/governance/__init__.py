@@ -29,6 +29,7 @@ from trellis.contracts import (
     InterruptDecision,
     InterruptReason,
     InterruptResolution,
+    PolicyDeniedError,
     ToolCall,
     ToolOutcome,
     ToolSpec,
@@ -44,11 +45,12 @@ from trellis.harness.governance.catalog import (
     digest,
     entry,
 )
-from trellis.harness.governance.decision import Action, Decision, decide
+from trellis.harness.governance.decision import Action, Decision, RuleError, decide
 from trellis.harness.hooks import Chain, Deny, Hooks, denied
+from trellis.harness.invariants import present
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
-from trellis.harness.tools.base import Tool, execute, invoked
+from trellis.harness.tools.base import SideEffect, Tool, execute, invoked
 from trellis.memory import MemoryClient
 
 #: How a publish is sent: given the entries and the send itself, run it — the harness queues it
@@ -59,17 +61,21 @@ Verdict = Literal["approve", "reject", "edit"]
 VERDICTS: Final = frozenset({"approve", "reject", "edit"})
 
 
-class Rejected(Exception):
+class Rejected(PolicyDeniedError):
     """The call was not run: the person who was asked rejected it."""
+
+    code = "APPROVAL_REJECTED"
 
     def __init__(self, decision: Decision) -> None:
         super().__init__(f"{decision.tool} was not run: the approver rejected it")
         self.decision = decision
 
 
-class Denied(Exception):
+class Denied(PolicyDeniedError):
     """The call was not run: a ``before_tool`` hook denied it (``outcome``: what the model
     reads)."""
+
+    code = "TOOL_CALL_DENIED"
 
     def __init__(self, outcome: ToolOutcome) -> None:
         super().__init__(str(outcome.output))
@@ -132,7 +138,7 @@ class Governance:
         if self._rules is not None:
             rules = await self._rules.get([tool])
             if rules is None:
-                if side_effects != "read":
+                if side_effects != SideEffect.READ:
                     return decide(tool, side_effects, CATALOG_UNREAD, args)
             elif (rule := rules.get(tool)) is not None:
                 return decide(tool, rule.risk, rule.approve_when, args)
@@ -220,8 +226,10 @@ class Governance:
         context = AgentExecutionContext.create(
             tenant_id=self.tenant, agent_id=self.agent_id, agent_run_id=run_id, user_id=user
         )
-        record = resolution.to_feedback(interrupt, context)
-        assert record is not None  # an approve, reject or edit of a call is always feedback
+        record = present(
+            resolution.to_feedback(interrupt, context),
+            "an approve, reject or edit of a call is always feedback",
+        )
         await self.catalog.feedback(record)
 
     async def aclose(self) -> None:
@@ -293,7 +301,7 @@ def governed(
                 )
         elif decision.announces and on_announce is not None:
             await _settled(on_announce(decision))
-        outcome, error = await execute(tool, args, reads=decision.risk == "read")
+        outcome, error = await execute(tool, args, reads=decision.risk == SideEffect.READ)
         if error is not None:
             await chain.failed("tool", error)
         outcome = await chain.done(hooked.model_copy(update={"args": args}), outcome)
@@ -309,4 +317,4 @@ async def _settled(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 
-__all__ = ["Action", "Decision", "Denied", "Governance", "Rejected", "governed"]
+__all__ = ["Action", "Decision", "Denied", "Governance", "Rejected", "RuleError", "governed"]

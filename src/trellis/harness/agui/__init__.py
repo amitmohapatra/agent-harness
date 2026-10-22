@@ -36,6 +36,7 @@ import inspect
 import logging
 import math
 from collections.abc import AsyncIterator, Awaitable, Callable
+from http import HTTPStatus
 from importlib import metadata
 from typing import TYPE_CHECKING, Any, Final
 
@@ -147,7 +148,7 @@ def _refusals(*statuses: int) -> dict[int | str, dict[str, Any]]:
     return {
         status: {
             "description": why[status],
-            "content": problem | (validation if status == 422 else {}),
+            "content": problem | (validation if status == HTTPStatus.UNPROCESSABLE_ENTITY else {}),
         }
         for status in statuses
     }
@@ -382,10 +383,10 @@ def _router(surface: _Surface, path: str) -> APIRouter:
             buffer = surface.hub.get(run_id)
             if buffer is None:
                 return EventStream(await surface.logged(run_id, user, start))
-            if buffer.user != user:
-                raise HTTPException(404, f"no run {run_id} here")
         except HTTPException as exc:
             return _problem(exc, request)
+        if buffer.user != user:
+            return _problem(HTTPException(HTTPStatus.NOT_FOUND, f"no run {run_id} here"), request)
         return EventStream(_sse(buffer, start))
 
     @router.post(
@@ -440,7 +441,7 @@ def _problem(exc: HTTPException, request: Request) -> JSONResponse:
         detail=str(exc.detail),
         instance=request.url.path,
         code=code,
-        retryable=exc.status_code == 429,
+        retryable=exc.status_code == HTTPStatus.TOO_MANY_REQUESTS,
     )
     return JSONResponse(
         body.model_dump(),

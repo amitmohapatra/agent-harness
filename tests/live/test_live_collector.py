@@ -41,7 +41,7 @@ AUTH = "Basic cGstbGY6c2stbGY="
 def _docker() -> bool:
     if shutil.which("docker") is None:
         return False
-    return subprocess.run(["docker", "info"], capture_output=True, check=False).returncode == 0
+    return subprocess.run(["docker", "info"], capture_output=True, check=False).returncode == 0  # noqa: S607 - a tool on the PATH, on purpose
 
 
 needs_docker = pytest.mark.skipif(not _docker(), reason="needs docker")
@@ -81,12 +81,12 @@ class _Langfuse(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def collector() -> Iterator[str]:
-    receiver = ThreadingHTTPServer(("0.0.0.0", _free_port()), _Langfuse)
+    receiver = ThreadingHTTPServer(("0.0.0.0", _free_port()), _Langfuse)  # noqa: S104 - the collector listens for the test
     threading.Thread(target=receiver.serve_forever, daemon=True).start()
     otlp, health = _free_port(), _free_port()
     name = f"trellis-collector-{uuid.uuid4().hex[:6]}"
-    subprocess.run(
-        [
+    subprocess.run(  # noqa: S603 - our own command, fixed arguments
+        [  # noqa: S607 - a tool on the PATH, on purpose
             "docker", "run", "-d", "--rm", "--name", name,
             "-p", f"{otlp}:4318", "-p", f"{health}:13133",
             "--add-host", "host.docker.internal:host-gateway",
@@ -109,7 +109,7 @@ def collector() -> Iterator[str]:
             time.sleep(0.5)
         yield f"http://127.0.0.1:{otlp}"
     finally:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)  # noqa: S603, S607 - our own command, fixed arguments; a tool on the PATH, on purpose
         receiver.shutdown()
 
 

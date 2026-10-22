@@ -35,7 +35,7 @@ import os
 import random
 from collections.abc import Awaitable, Callable
 from contextvars import Context
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -69,6 +69,20 @@ Replay = Callable[[dict[str, Any]], Work | None]
 
 
 @dataclass(frozen=True, slots=True)
+class WriteLimits:
+    """The queue's bounds; each one not given is its module default, read when the limits are
+    made (:data:`WRITERS`, :data:`MAX_PENDING`...)."""
+
+    writers: int = field(default_factory=lambda: WRITERS)
+    max_pending: int = field(default_factory=lambda: MAX_PENDING)
+    submit_wait_seconds: float = field(default_factory=lambda: SUBMIT_WAIT_SECONDS)
+    drain_seconds: float = field(default_factory=lambda: DRAIN_SECONDS)
+    attempts: int = field(default_factory=lambda: WRITE_ATTEMPTS)
+    backoff_seconds: float = field(default_factory=lambda: WRITE_BACKOFF_SECONDS)
+    max_spool_bytes: int = field(default_factory=lambda: MAX_SPOOL_BYTES)
+
+
+@dataclass(frozen=True, slots=True)
 class _Item:
     label: str
     work: Work
@@ -80,11 +94,16 @@ class _Item:
 class Writes:
     """The queue and its workers, bound to the event loop that first used them. ``spool`` is
     the directory undelivered writes are kept in; ``replay`` turns a kept record back into its
-    write."""
+    write; ``limits`` bound the queue (:class:`WriteLimits`)."""
 
     def __init__(
-        self, *, spool: str | os.PathLike[str] | None = None, replay: Replay | None = None
+        self,
+        *,
+        spool: str | os.PathLike[str] | None = None,
+        replay: Replay | None = None,
+        limits: WriteLimits | None = None,
     ) -> None:
+        self._limits = limits or WriteLimits()
         self._queue: asyncio.Queue[_Item] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._workers: list[asyncio.Task[None]] = []
@@ -116,13 +135,11 @@ class Writes:
         when it cannot be delivered."""
         item = _Item(label, work, events, record)
         queue = self._ensure()
-        try:
+        with contextlib.suppress(asyncio.QueueFull):
             queue.put_nowait(item)
             return
-        except asyncio.QueueFull:
-            pass
         try:
-            async with asyncio.timeout(SUBMIT_WAIT_SECONDS):
+            async with asyncio.timeout(self._limits.submit_wait_seconds):
                 await queue.put(item)
         except TimeoutError:
             self._give_up(item, "the write queue stayed full")
@@ -136,7 +153,7 @@ class Writes:
         """Drain (at most :data:`DRAIN_SECONDS`), then stop the workers: what is still queued
         is spooled or counted lost."""
         try:
-            async with asyncio.timeout(DRAIN_SECONDS):
+            async with asyncio.timeout(self._limits.drain_seconds):
                 await self.drain()
         except TimeoutError:
             self._hurry = True  # the bound is spent: the workers give the rest up at once
@@ -154,14 +171,14 @@ class Writes:
         loop = asyncio.get_running_loop()
         if self._queue is None or self._loop is not loop:
             self._loop = loop
-            self._queue = asyncio.Queue(MAX_PENDING)
+            self._queue = asyncio.Queue(self._limits.max_pending)
             # in a context of their own: the workers outlive the run that happened to start
             # them, and belong to none (``trellis.current()`` is ``None`` there)
             self._workers = [
                 loop.create_task(
                     self._work(self._queue), name=f"trellis-writes-{i}", context=Context()
                 )
-                for i in range(WRITERS)
+                for i in range(self._limits.writers)
             ]
             self._replayed(self._queue)
         return self._queue
@@ -184,7 +201,7 @@ class Writes:
         pending = [cut] if cut is not None else []
         current: _Item | None = None
         try:
-            async with asyncio.timeout(0 if self._hurry else DRAIN_SECONDS):
+            async with asyncio.timeout(0 if self._hurry else self._limits.drain_seconds):
                 while pending or not queue.empty():
                     current = pending.pop() if pending else queue.get_nowait()
                     try:
@@ -201,12 +218,14 @@ class Writes:
                 self._give_up(undelivered, "still undelivered when the process stopped")
 
     async def _attempt(self, item: _Item) -> None:
+        backoff = self._limits.backoff_seconds
+
         def wait(state: RetryCallState) -> float:  # full jitter, not a secret
-            return random.uniform(0, WRITE_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
+            return random.uniform(0, backoff * 2 ** (state.attempt_number - 1))  # noqa: S311 - jitter, not a secret
 
         try:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(WRITE_ATTEMPTS),
+                stop=stop_after_attempt(self._limits.attempts),
                 retry=retry_if_exception(_passing),
                 wait=wait,
                 sleep=asyncio.sleep,
@@ -216,7 +235,7 @@ class Writes:
                     await item.work()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a write never fails the run
             self._give_up(item, f"{type(exc).__name__}: {exc}", keep=_passing(exc))
 
     def _give_up(self, item: _Item, reason: str, *, keep: bool = True) -> None:
@@ -243,7 +262,7 @@ class Writes:
         try:
             self._spool.mkdir(parents=True, exist_ok=True)
             held = path.stat().st_size if path.exists() else 0
-            if held + len(line) + 1 > MAX_SPOOL_BYTES:
+            if held + len(line) + 1 > self._limits.max_spool_bytes:
                 if not self._full:
                     log.error(
                         "the write spool %s is full (%d bytes): writes given up are lost "
@@ -255,8 +274,8 @@ class Writes:
                 return False
             with path.open("a", encoding="utf-8") as spool:
                 spool.write(line + "\n")
-        except OSError as exc:
-            log.error("the write spool %s cannot be written: %s", self._spool, exc)
+        except OSError:
+            log.exception("the write spool %s cannot be written", self._spool)
             return False
         return True
 
@@ -277,8 +296,8 @@ class Writes:
             try:
                 record = json.loads(line)
                 work = self._replay(record)
-            except (ValueError, KeyError, TypeError) as exc:
-                log.error("a spooled write cannot be read, dropped: %s: %.200s", exc, line)
+            except (ValueError, KeyError, TypeError):
+                log.exception("a spooled write cannot be read, dropped: %.200s", line)
                 continue
             if work is None:
                 log.error("nothing here replays the spooled write %.200s", line)

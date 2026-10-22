@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import logging
 import runpy
 import sys
@@ -96,13 +97,16 @@ async def test_run_starts_the_background_writes_and_drains_them_when_stopped(
     monkeypatch.setattr(harness.writes, "drain", draining)
     agent = harness.wrap(echo, id="echo")
     worker = harness.worker([agent])
+    gc.unfreeze()
     task = asyncio.create_task(worker.run())
     handle = await agent.start("late work", user="u")  # queued while the worker idles
     assert (await handle.result(timeout=5)).answer == "late work"
     assert calls == ["start"]
+    assert gc.get_freeze_count() > 0  # what it held at its start: out of the collector's sight
     worker.stop()
     await asyncio.wait_for(task, 5)
     assert calls == ["start", "drain"]
+    gc.unfreeze()
 
 
 async def test_cancelling_a_running_worker_leaves_the_runs_it_holds_to_their_leases(

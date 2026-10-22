@@ -521,7 +521,7 @@ async def mcp_servers(w: World) -> None:
     server = mcp(stdio(sys.executable, str(MCP_SERVER)), name="notes")
     if "mcp" in w.without:
         o = (await w.go([d.lookup(), server], [("lookup", {"topic": "x"})])).succeeded()
-        assert server._connection._task is None
+        assert server.connection._task is None
         return
     o = (await w.go([d.lookup(), server], [("notes-read_note", {"path": "a.md"})])).succeeded()
     assert "note at a.md" in o.text, o.answer

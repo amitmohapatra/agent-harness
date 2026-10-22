@@ -328,15 +328,40 @@ def test_the_schema_check_knows_the_basic_json_types() -> None:
             "flag": {"type": "boolean"},
             "any": {},
             "either": {"type": ["string", "null"]},
-            "odd": {"type": "decimal"},
+            "size": {"enum": ["S", "M"]},
+            "address": {"type": "object", "required": ["zip"]},
         }
     }
     assert arguments_problem(schema, {"n": 1, "x": 1.5, "flag": True, "any": [1]}) is None
-    assert arguments_problem(schema, {"either": None, "odd": "1.0", "extra": 1}) is None
+    assert arguments_problem(schema, {"either": None, "extra": 1}) is None
     assert arguments_problem(schema, {"n": True}) == "n must be of type integer"
     assert arguments_problem(schema, {"x": "1"}) == "x must be of type number"
     assert arguments_problem(schema, {"flag": 1}) == "flag must be of type boolean"
+    assert arguments_problem(schema, {"either": 1}) == "either must be of type string or null"
+    # the whole of JSON Schema, not only the basic types (jsonschema)
+    assert arguments_problem(schema, {"size": "XL"}) == "size: 'XL' is not one of ['S', 'M']"
+    assert arguments_problem(schema, {"address": {}}) == "address: 'zip' is a required property"
     assert arguments_problem({}, {"a": 1}) is None
+    # a schema whose rules are elsewhere ($ref): jsonschema's own words
+    referred = {
+        "$ref": "#/$defs/A",
+        "$defs": {"A": {"required": ["x"], "additionalProperties": False}},
+    }
+    assert arguments_problem(referred, {}) == "'x' is a required property"
+    assert arguments_problem(referred, {"x": 1, "y": 2}).startswith("Additional properties")  # type: ignore[union-attr]
+    assert arguments_problem({"type": "object"}, []) == "the arguments must be of type object"  # type: ignore[arg-type]
+
+
+def test_a_schema_that_is_not_json_schema_checks_nothing_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from trellis.harness.tools.base import arguments_problem
+
+    odd = {"properties": {"n": {"type": "decimal"}}}
+    assert arguments_problem(odd, {"n": True}) is None  # the tool validates its own
+    assert arguments_problem(odd, {"n": "1.0"}) is None
+    said = [r.getMessage() for r in caplog.records if "not valid JSON Schema" in r.getMessage()]
+    assert len(said) == 1  # once per schema
 
 
 async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
