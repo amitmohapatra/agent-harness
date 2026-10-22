@@ -43,16 +43,27 @@ async def test_each_service_is_reached_with_its_key(tmp_path: Path) -> None:
     respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(200, json={}))
     respx.get("http://mem.test/v1/keys/self").mock(return_value=httpx.Response(401))
     respx.get("http://runs.test/v1/runs/doctor-check").mock(return_value=httpx.Response(404))
+    learned = [
+        {"tool": "po", "suggestion": "auto_approve", "accepted": True},
+        {"tool": "wire", "suggestion": "auto_approve", "accepted": False},
+    ]
+    respx.get("http://mem.test/v1/tools/approval-suggestions").mock(
+        return_value=httpx.Response(200, json={"suggestions": learned})
+    )
     settings = Settings.from_env({**ENV, "TRELLIS_SPOOL_DIR": str(tmp_path)})
     found = {c.name: c for c in await doctor.checks(settings)}
     assert found["gateway"].ok and found["runs"].ok and found["spool"].ok
     assert not found["memory"].ok and "refused the key (401)" in found["memory"].said
+    assert found["approval_rules"].said == "accepted: po (auto_approve)"  # wire waits
 
 
 @respx.mock
 async def test_a_service_down_or_failing_is_a_failed_check(tmp_path: Path) -> None:
     respx.get("http://gw.test/v1/models").mock(side_effect=httpx.ConnectError("down"))
     respx.get("http://mem.test/v1/keys/self").mock(return_value=httpx.Response(500))
+    respx.get("http://mem.test/v1/tools/approval-suggestions").mock(
+        return_value=httpx.Response(403)
+    )
     blocked = tmp_path / "file"
     blocked.write_text("not a folder")
     settings = Settings.from_env(
@@ -61,6 +72,7 @@ async def test_a_service_down_or_failing_is_a_failed_check(tmp_path: Path) -> No
     found = {c.name: c for c in await doctor.checks(settings)}
     assert "cannot be reached (ConnectError)" in found["gateway"].said
     assert found["memory"].said.endswith("answered 500") and "runs" not in found
+    assert not found["approval_rules"].ok and found["approval_rules"].said.endswith("403")
     assert not found["spool"].ok
 
 
@@ -134,3 +146,14 @@ def test_a_context_without_a_host_is_the_local_socket(tmp_path: Path) -> None:
     (meta / "meta.json").write_text(json.dumps({"Endpoints": {"docker": {"Host": ""}}}))
     (config / "config.json").write_text(json.dumps({"currentContext": "odd"}))
     assert docker_host({"DOCKER_CONFIG": str(config)}) == f"unix://{DOCKER_SOCKET}"
+
+
+@respx.mock
+async def test_approval_rules_that_cannot_be_listed_fail_the_check() -> None:
+    respx.get("http://mem.test/v1/keys/self").mock(return_value=httpx.Response(200))
+    respx.get("http://mem.test/v1/tools/approval-suggestions").mock(
+        side_effect=httpx.ConnectError("down")
+    )
+    settings = Settings.from_env({"MEMORY_URL": "http://mem.test", "TRELLIS_API_KEY": "k"})
+    found = {c.name: c for c in await doctor.checks(settings)}
+    assert "cannot be reached (ConnectError)" in found["approval_rules"].said

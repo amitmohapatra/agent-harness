@@ -24,10 +24,10 @@ by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the fram
 message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what
 the grounding check verifies the answer against.
 
-* `window=false` when the framework owns the conversation's history
-  ([below](#who-owns-a-conversations-history)): the service leaves the recent conversation out.
-  A checkpointed graph's context message has a fixed id (`trellis-memory-context`), so its
-  thread holds one that each turn replaces.
+* `window=false` when the framework keeps the thread's messages itself (a LangGraph graph with
+  a checkpointer): the service leaves the recent conversation out. Such a graph's context
+  message has a fixed id (`trellis-memory-context`), so its thread holds one that each turn
+  replaces.
 * The request carries the run's own tool names: the context then includes the skills the agent
   learned for the task ([skills.md](skills.md#learned-skills)) and, with 5 or more tools, the
   tools section (next step, argument values found in memory, what is missing) and its `tools`
@@ -37,31 +37,6 @@ the grounding check verifies the answer against.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
 it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
-
-## Who owns a conversation's history
-
-One policy, for every framework (`trellis/harness/bridges/history.py`, `thread_for`): a
-conversation's history across runs has one owner, never two.
-
-| The framework's thread store | Owner | The window |
-|---|---|---|
-| durable, given by the team (LangGraph's `PostgresSaver`, a `SQLiteSession` on a file, any store not known as RAM-only) | the framework | off |
-| none, and the framework has a slot the memory service fills (OpenAI Agents: `MemorySession`) | the framework, on the memory service's thread | off |
-| kept in RAM (`InMemorySaver`/`MemorySaver`, `SQLiteSession(":memory:")`, Claude's `InMemorySessionStore`) | memory's window (the store is lost with its worker; said once, naming the durable store to use) | on |
-| none (a graph without a checkpointer, Claude, a function) | memory's window | on |
-
-A store type the harness does not know is taken as durable: where it keeps its data is the
-team's choice. With memory off, a RAM-only store is said once to lose the history on a restart.
-The per-step state of a run (its checkpoint, its resume) is the journal's and agent-runs',
-whoever owns the history.
-
-The policy is one constant (`POLICY`): today `DURABLE_THREAD`, as above. `MEMORY_WINDOW` makes
-memory's window the owner of every conversation's history: a framework then works on the run's
-own thread in the journal (a graph on `RunCheckpointer`, an OpenAI agent without a session), and
-only a durable store the team gave explicitly keeps the window off. Long-term memory has one
-owner too: with memory on, a framework's own long-term store (a LangGraph `BaseStore`) is not
-used beside the memory service, which is the graph's store
-([langgraph.md](frameworks/langgraph.md#native-slots-the-memory-service-behind-the-graphs-store)).
 
 ## Pull
 

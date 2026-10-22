@@ -1,13 +1,9 @@
-"""The adapter contract: four functions per framework, two for the history's owner, and one check.
+"""The adapter contract: four functions per framework, and one check.
 
-* ``runs(target, agent_id=, memory=)`` — the target the harness runs, at wrap time: the
-  framework's own, or a copy on the run's own thread where the history policy says so
-  (``bridges.history``);
-* ``keeps_conversation(target, runtime)`` — whether the framework owns the conversation's history
-  in this run (``bridges.history.thread_for``, the one policy): then the pushed context is asked
-  for without the recent conversation;
 * ``prepare_input(target, input, context)`` — the framework's input, with the pushed memory
-  context as a system message (or the framework's own slot for it);
+  context as a system message (``thread_store(target, options)``: the store the framework keeps
+  the thread's messages in; when ``history.owner`` says it owns them, the context is asked for
+  without the recent conversation);
 * ``invoke(target, native_input, run)`` / ``stream(...)`` — run it (the stream yields text
   deltas, then an :class:`Output` with what ``invoke`` would have returned);
 * ``extract(target, output)`` — the answer, the transcript, and the framework's own pause;
@@ -97,9 +93,7 @@ class Adapter(Protocol):
     fixed_tools: bool
     narrows: Narrowing
 
-    def runs(self, target: Any, *, agent_id: str, memory: bool) -> Any: ...
-
-    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool: ...
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None: ...
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any: ...
 

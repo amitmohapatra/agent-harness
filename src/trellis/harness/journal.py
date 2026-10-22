@@ -117,9 +117,6 @@ class Journal(BaseModel):
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None
-    #: the transcripts of the framework's own sessions, by session, as its session store
-    #: mirrors them (``bridges.claude.JournalSessions``): a resume on any machine continues them
-    transcripts: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     #: the sandbox the run's sandbox tools work in, as its reference (``sandbox.SandboxRef``):
     #: recorded as soon as it exists, so every later attempt works in the same one
     sandbox: dict[str, Any] | None = None

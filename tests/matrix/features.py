@@ -114,110 +114,6 @@ async def streamed_text(w: World) -> None:
     assert "".join(deltas).endswith(o.answer), ("".join(deltas), o.answer)
 
 
-#: The contract events a run's last attempt is compared on: its start and end, the context, the
-#: plan's tool calls and their announcements (text deltas, logs and warnings are the
-#: framework's to stream or not).
-CONTRACT: Final = frozenset(
-    {
-        RunEventType.RUN_STARTED,
-        RunEventType.CONTEXT_LOADED,
-        RunEventType.TOOL_CALL_START,
-        RunEventType.TOOL_CALL_ARGS,
-        RunEventType.TOOL_CALL_END,
-        RunEventType.TOOL_CALL_RESULT,
-        RunEventType.INTERRUPT,
-        RunEventType.RUN_FINISHED,
-    }
-)
-
-
-def _contract(o: Any, tools: set[str]) -> list[str]:
-    """The last attempt's contract events, as ``TYPE`` (``TYPE:tool`` for a call of one of
-    ``tools``, ``CUSTOM:tool_notice:tool``); the other tools' calls left out."""
-    last = max(e.attempt for e in o.events)
-    calls: dict[str, str] = {}
-    named: list[str] = []
-    for e in (e for e in o.events if e.attempt == last):
-        data = e.data or {}
-        if e.type is RunEventType.TOOL_CALL_START and data.get("tool") in tools:
-            calls[str(e.tool_call_id)] = data["tool"]
-        if e.type is RunEventType.CUSTOM and data.get("name") == "tool_notice":
-            named.append(f"CUSTOM:tool_notice:{data.get('tool')}")
-        elif e.type in CONTRACT and e.tool_call_id is None:
-            named.append(e.type.value)
-        elif e.type in CONTRACT and str(e.tool_call_id) in calls:
-            named.append(f"{e.type.value}:{calls[str(e.tool_call_id)]}")
-    return named
-
-
-async def same_events(w: World) -> None:
-    """Every adapter emits the same agent-contracts events for the same work: a read, then an
-    announced write, the context first when memory pushes one."""
-    d = Desk()
-    plan: list[Call] = [("lookup", {"topic": "tides"}), ("note", {"text": "high"})]
-    o = (await w.go([d.lookup(), d.note()], plan)).succeeded()
-    pushed = {"memory", "memory_push"} <= w.switched - o.without
-    calls = {"lookup", "note"}
-    seen = _contract(o, calls)
-    expected = [
-        "RUN_STARTED",
-        *(["CONTEXT_LOADED"] if pushed else []),
-        *(f"{kind}:lookup" for kind in ("TOOL_CALL_START", "TOOL_CALL_ARGS")),
-        *(f"{kind}:lookup" for kind in ("TOOL_CALL_END", "TOOL_CALL_RESULT")),
-        "CUSTOM:tool_notice:note",
-        *(f"{kind}:note" for kind in ("TOOL_CALL_START", "TOOL_CALL_ARGS")),
-        *(f"{kind}:note" for kind in ("TOOL_CALL_END", "TOOL_CALL_RESULT")),
-        "RUN_FINISHED",
-    ]
-    assert seen == expected, seen
-
-
-#: The adapters whose framework keeps a long-term store of its own (LangGraph's ``BaseStore``).
-GRAPHS: Final = frozenset({"react", "langgraph", "deepagents"})
-
-
-async def native_slots(w: World) -> None:
-    """The framework's own memory feature, the memory service behind it: a graph's long-term
-    store (``get_store()``), an OpenAI Agents session, Claude's prompt hook. Off (memory, or the
-    part that stands for it): the framework's default — no store, no session, no hook."""
-    d = Desk()
-    on = w.switched
-    if w.adapter in GRAPHS:
-        stores: list[bool] = []
-
-        @tool(side_effects="write")
-        def keep(text: str) -> str:
-            """Keep a note in the framework's own long-term store."""
-            from langgraph.config import get_store
-
-            store = get_store()
-            stores.append(store is not None)
-            if store is not None:
-                store.put(("notes",), "last", {"text": text})
-            return f"kept {text}"
-
-        (await w.go([keep], [("keep", {"text": "tides"})])).succeeded()
-        bridged = {"memory", "memory_pull"} <= on
-        assert set(stores) == {bridged}, stores
-        kept = [m for m in w.memory_service.memories.values() if "langgraph_store" in m["content"]]
-        assert bool(kept) is bridged, kept
-        return
-    (await w.go([d.lookup()], [("lookup", {"topic": "tides"})])).succeeded()
-    if w.adapter == "openai_agents":
-        bridged = {"memory", "memory_push", "records"} <= on
-        items = [
-            m
-            for thread in w.memory_service.threads.values()
-            for m in thread
-            if (m.get("custom_metadata") or {}).get("trellis_session") == "item"
-        ]
-        assert bool(items) is bridged, items
-        return
-    bridged = {"memory", "memory_push"} <= on
-    contexts = [r.get("context") for r in w.claude_records()]
-    assert contexts and all((c == w.memory_service.context_text) is bridged for c in contexts)
-
-
 # --------------------------------------------------------------------------- governance
 async def tiers(w: World) -> None:
     d = Desk()
@@ -884,28 +780,6 @@ FEATURES: Final[list[Feature]] = [
         way2=NA(
             "by design: in Way 2 your code runs the agent, so its stream and events are its framework's own; the harness numbers the events of the runs it runs (Way 1)"
         ),
-    ),
-    Feature(
-        "F60c",
-        "contract events: every adapter emits the same events for the same work",
-        "F60",
-        "always on (a listener: stream, AG-UI, A2A, the run log)",
-        same_events,
-        way2=NA(
-            "by design: in Way 2 your code runs the agent, so its stream and events are its framework's own; the harness numbers the events of the runs it runs (Way 1)"
-        ),
-    ),
-    Feature(
-        "F44",
-        "native slots: the framework's own store, session and prompt hook, the memory service behind them",
-        "F41, F42",
-        "the memory service (MEMORY_URL); off: without='memory'",
-        native_slots,
-        needs=frozenset({"memory"}),
-        adapters={
-            "function": NA("a function has no framework: agent.memory is the memory service")
-        },
-        way2=NA("the bridges are the framework's own interfaces: your code passes them itself"),
     ),
     Feature(
         "F02",

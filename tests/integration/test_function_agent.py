@@ -287,18 +287,3 @@ async def test_a_resume_without_the_journal_still_answers_the_right_question(
     forgetful = record.model_copy(update={"metadata": {}})
     done = await agent._continue(forgetful, resolution)
     assert done.status is RunStatus.SUCCESS and done.answer == "blue"
-
-
-async def test_an_async_generator_streams_each_part_and_answers_with_them_all(
-    harness: Harness,
-) -> None:
-    async def write(input: str, agent: Runtime) -> Any:
-        yield "refunded "
-        await agent.tools.call("lookup", order="o1")
-        yield "o1"
-
-    agent = harness.wrap(write, id="writer", tools=[lookup])
-    events = [e async for e in agent.stream("go", user="u1")]
-    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
-    assert deltas == ["refunded ", "o1"] and events[-1].data["result"] == "refunded o1"
-    assert (await agent.run("go", user="u1")).answer == "refunded o1"

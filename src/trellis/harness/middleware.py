@@ -47,6 +47,8 @@ import asyncio
 import base64
 import contextlib
 import copy
+import functools
+import itertools
 import json
 import logging
 import re
@@ -96,8 +98,10 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
-from trellis.harness import budget
-from trellis.harness.bounded import LRU
+from trellis.harness import (
+    accounting,  # noqa: F401 - every model call accounted
+)
+from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
@@ -165,6 +169,8 @@ class _Step:
     turn: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
+#: The tool sets whose LangChain tools a :class:`HarnessTools` keeps converted, at most.
+TOOLSETS: Final = 64
 #: The tools that only change the graph's own state (no effect outside the run, kept by its
 #: checkpoint): a ``GovernTools`` lets them through. Deep Agents' file tools are among them
 #: on its default ``StateBackend``; on a backend that writes to a real disk, give the graph
@@ -250,6 +256,11 @@ class HarnessTools(AgentMiddleware):
         self._steps: weakref.WeakKeyDictionary[Runtime, dict[str, _Step]] = (
             weakref.WeakKeyDictionary()
         )
+        #: each tool set's LangChain tools, by its tools (kept: the toolbox gives a tenant's
+        #: runs the same ``Tool``s, so a run converts none), the most recent :data:`TOOLSETS`
+        self._toolsets: LRU[tuple[int, ...], tuple[tuple[Tool, ...], dict[str, BaseTool]]] = LRU(
+            TOOLSETS
+        )
 
     async def awrap_model_call(
         self,
@@ -261,11 +272,21 @@ class HarnessTools(AgentMiddleware):
             return await handler(request)
         harness = self._tools.get(runtime)
         if harness is None:
-            made = converted.convert(list(runtime.toolbox.values()))
-            harness = self._tools[runtime] = {t.name: t for t in made}
+            harness = self._tools[runtime] = self._converted(runtime)
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         return await handler(request.override(tools=sorted([*own, *offered], key=_named)))
+
+    def _converted(self, runtime: Runtime) -> dict[str, BaseTool]:
+        """The run's tools as LangChain's, by name: its tool set's, converted once."""
+        tools = tuple(runtime.toolbox.values())
+        # by the tools' identity (a ``Tool`` holds its schema, a dict: not hashable); the
+        # entry keeps them, so no id is reused while it is kept
+        _, made = self._toolsets.setdefault(
+            tuple(map(id, tools)),
+            lambda: (tools, {t.name: t for t in converted.convert(list(tools))}),
+        )
+        return made
 
     async def awrap_tool_call(
         self,
@@ -298,13 +319,9 @@ class HarnessTools(AgentMiddleware):
         call's place in it."""
         call_id = request.tool_call["id"]
         messages = request.state.get("messages", []) if isinstance(request.state, dict) else []
-        at, message = next(
-            (
-                (n, m)
-                for n, m in reversed(list(enumerate(messages)))
-                if isinstance(m, AIMessage) and any(c["id"] == call_id for c in m.tool_calls)
-            ),
-            (len(messages), AIMessage(content="", tool_calls=[request.tool_call])),
+        at, message = _calling(messages, call_id) or (
+            len(messages),
+            AIMessage(content="", tool_calls=[request.tool_call]),
         )
         calls = message.tool_calls
         # where the step is in the conversation, and what it is: a model may reuse call ids
@@ -316,6 +333,16 @@ class HarnessTools(AgentMiddleware):
             ran = {w for w in writes if runtime.replay.journal.calls.get(_ran(key, w))}
             step = steps[key] = _Step(key, runtime.next_step(len(calls)), writes, ran)
         return step, next(n for n, c in enumerate(calls) if c["id"] == call_id)
+
+
+def _calling(messages: Sequence[AnyMessage], call_id: str | None) -> tuple[int, AIMessage] | None:
+    """The latest model message making the call ``call_id``, and where it is: read from the
+    end (it is the latest step's, but for a resume's)."""
+    for n in range(len(messages) - 1, -1, -1):
+        message = messages[n]
+        if isinstance(message, AIMessage) and any(c["id"] == call_id for c in message.tool_calls):
+            return n, message
+    return None
 
 
 def _writes(tool: Tool | None) -> bool:
@@ -419,6 +446,7 @@ def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
     tool); the harness runs graphs asynchronously, so only the async model node is changed."""
     code = node.__code__
     if HANDLER not in code.co_freevars:
+        _unnarrowed(node.__qualname__)
         return None
     cells = dict(zip(code.co_freevars, node.__closure__ or (), strict=True))
     given = cells[HANDLER].cell_contents
@@ -433,6 +461,18 @@ def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
     runnable = copy.copy(model.bound)
     runnable.afunc = narrowed
     return graph.copy({"nodes": {**graph.nodes, "model": model.copy({"bound": runnable})}})
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per node, of the most recent
+def _unnarrowed(node: str) -> None:
+    """Said when a graph's model node, named as ``create_agent``'s, is not of the shape this
+    harness reads (a LangChain release it was not tested with): its tools are not narrowed."""
+    log.warning(
+        "the graph's model node %s is not of the shape the harness reads (no %s): the run's "
+        "tool narrowing is off for it; use the LangChain release trellis-harness pins",
+        node,
+        HANDLER,
+    )
 
 
 def _named(tool: BaseTool | dict[str, Any]) -> str:
@@ -517,7 +557,7 @@ class ModelHooks(AgentMiddleware):
         if call is not asked:
             request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
-        with model_span(name or "model", _said(request), extra=extra) as span:
+        with model_span(name or "model", lambda: _said(request), extra=extra) as span:
             if self.gateway:  # in the model's span: the gateway's span of the call joins it
                 sent = request.model_settings.get("extra_headers") or {}
                 headers = {**sent, **gateway_headers()}
@@ -533,9 +573,6 @@ class ModelHooks(AgentMiddleware):
                 if error is exc:
                     raise
                 raise error from exc
-            # what the run spent (``budget.py``), unless the run's callbacks counted it
-            if runtime is not None and not runtime.replies_counted:
-                budget.account_reply(runtime, reply)
             await hooks.answered(call, reply)
             _replied(span, reply)
         return reply
@@ -776,7 +813,7 @@ class StallGuard(AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        history = list(request.state.get("messages", []))
+        history = request.state.get("messages", [])
         failing = _failing(history)
         if failing >= ERROR_STREAK:
             raise ModelError(
@@ -786,7 +823,8 @@ class StallGuard(AgentMiddleware):
         reply = await handler(request)
         message = _ai(reply)
         if message is not None and message.tool_calls:
-            steps = _steps(history)
+            # a stall needs only the latest steps: no more than max_repeats - 1 are looked at
+            steps = list(itertools.islice(_steps(history), self.max_repeats - 1))
             for call in message.tool_calls:
                 key = _call_key(call)
                 streak = 1
@@ -807,32 +845,36 @@ def _call_key(call: Any) -> str:
     return content_key("stall", call["name"], call["args"])
 
 
-def _turn_messages(history: list[AnyMessage]) -> list[AnyMessage]:
-    """The messages since the last user message (this invocation's steps)."""
+def _turn_back(history: Sequence[AnyMessage]) -> Iterator[AnyMessage]:
+    """This invocation's messages (since the last user message), the latest first — read from
+    the end, as far as the caller reads."""
     for n in range(len(history) - 1, -1, -1):
-        if isinstance(history[n], HumanMessage):
-            return history[n + 1 :]
-    return history
+        message = history[n]
+        if isinstance(message, HumanMessage):
+            return
+        yield message
 
 
-def _steps(history: list[AnyMessage]) -> list[set[str]]:
+def _steps(history: Sequence[AnyMessage]) -> Iterator[set[str]]:
     """The calls of each step of this invocation, the latest first."""
-    return [
-        {_call_key(c) for c in m.tool_calls}
-        for m in reversed(_turn_messages(history))
-        if isinstance(m, AIMessage)
-    ]
+    for message in _turn_back(history):
+        if isinstance(message, AIMessage):
+            yield {_call_key(c) for c in message.tool_calls}
 
 
-def _failing(history: list[AnyMessage]) -> int:
-    """How many of the latest steps had every call fail."""
-    results = {m.tool_call_id: m.status for m in history if isinstance(m, ToolMessage)}
+def _failing(history: Sequence[AnyMessage]) -> int:
+    """How many of the latest steps had every call fail: read from the end, a step's results
+    (after it) before the step, as far as the first step with a call that did not fail."""
+    statuses: dict[str, str] = {}
     streak = 0
-    for message in reversed(_turn_messages(history)):
+    for message in _turn_back(history):
+        if isinstance(message, ToolMessage):
+            statuses[message.tool_call_id] = message.status
+            continue
         if not isinstance(message, AIMessage):
             continue
-        statuses = [results.get(c["id"] or "") for c in message.tool_calls]
-        if not statuses or any(s != "error" for s in statuses):
+        made = [statuses.get(c["id"] or "") for c in message.tool_calls]
+        if not made or any(s != "error" for s in made):
             break
         streak += 1
     return streak
@@ -855,7 +897,7 @@ def read_result(most: int = READ_LIMIT) -> BaseTool:
         text = next(
             (
                 m.content
-                for m in state.get("messages", [])
+                for m in reversed(state.get("messages", []))
                 if isinstance(m, ToolMessage) and m.tool_call_id == id
             ),
             None,
@@ -1336,14 +1378,17 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         checkpoint_id = _configurable(config)["checkpoint_id"]
         record = self._slot(thread_id).setdefault(ns, {})
         kept: list[list[Any]] = record.setdefault("writes", [])
+        # by (checkpoint, task, index), in the order kept: a write of a key it holds is the
+        # same write (kept), unless a special one (a negative index), which replaces it
+        found = {(w[0], w[1], w[2]): w for w in kept}
         for n, (channel, value) in enumerate(writes):
             index = WRITES_IDX_MAP.get(channel, n)
-            same = [w for w in kept if w[0] == checkpoint_id and w[1] == task_id and w[2] == index]
-            if same and index >= 0:
+            key = (checkpoint_id, task_id, index)
+            if key in found and index >= 0:
                 continue
-            for old in same:
-                kept.remove(old)
-            kept.append([checkpoint_id, task_id, index, channel, self._dumped(value), task_path])
+            found.pop(key, None)
+            found[key] = [checkpoint_id, task_id, index, channel, self._dumped(value), task_path]
+        kept[:] = found.values()
 
     def delete_thread(self, thread_id: str) -> None:
         """Forget a thread kept outside a run (a run's own goes with its journal)."""

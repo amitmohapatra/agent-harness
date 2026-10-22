@@ -67,9 +67,8 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 
 | | |
 |---|---|
-| Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
+| Memory push | the context for the question arrives as a leading `SystemMessage` with the fixed id `trellis-memory-context` — with a durable checkpointer, one per thread, replaced each turn, and asked for *without* the recent conversation (the checkpointer holds it); an `InMemorySaver` (`MemorySaver`) loses the thread on a restart, so memory's window stays on with it, said once (`trellis.harness.history`). The input: a string (one user message), a message list, or a dict with `messages`; any other state dict passes through untouched (read `trellis.current().context` in a node) |
 | Memory pull | the memory tools are in `h.tools(...)` |
-| Long-term store | a graph compiled without a store runs with the memory service as its `BaseStore` ([native slots](#native-slots-the-memory-service-behind-the-graphs-store)) |
 | Records | the transcript (the question and the final AI message), every harness tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every harness tool call goes through the bridge, governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
 | Tool hints | the context is asked for with the toolbox's names (5 or more); a `create_agent` graph built with `h.tools` is then offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found — its own tools untouched (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`) |
@@ -79,38 +78,6 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 
 The answer is the state's `structured_response` (a `response_format`) or the last AI message's
 text.
-
-## Native slots: the memory service behind the graph's store
-
-The call stays `h.wrap(graph, id=...)`; nothing else is configured. LangGraph's own long-term
-memory is the graph's store (`BaseStore`: `runtime.store` in a node, `get_store()` in a tool,
-Deep Agents' `StoreBackend`). A graph compiled **without** a store is run with
-`trellis.harness.bridges.store.MemoryStore` while the run has memory (`MEMORY_URL`) and its
-memory tools (not `without={"memory"}`):
-
-| The store's | The memory service's |
-|---|---|
-| `put(namespace, key, value)` | one memory of the run's user (`USER`: every conversation and agent of theirs), its text the item as JSON; a key held already is superseded, the same value writes nothing |
-| `put(..., None)` / `delete` | `forget` |
-| `get`, `list_namespaces`, `search` without a query | the user's memory inventory |
-| `search(..., query=...)` | the service's ranked recall, in its order (`filter=` with `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte` applies) |
-
-What the graph stores is then retrieved into the user's other agents' context like anything
-they learned. With memory on, a graph's own store (`compile(store=...)`) is not used beside it
-— one owner for long-term memory — and the log says so once; memory off — the deployment's or
-the run's `without={"memory"}` — runs the graph as it was built: on its own store, or none. A memory service that fails
-fails the store call (the memory SDK's error), as every memory call does; nothing is kept
-elsewhere. The store holds what a memory holds: at most 8,000 characters of JSON an item, no
-TTL, no `index=` of its own (both refused).
-
-The checkpointer is the other slot, for the conversation's history across runs; one policy
-decides its owner for every framework ([memory.md](../memory.md#who-owns-a-conversations-history)):
-a **durable** checkpointer of the graph's own (`PostgresSaver`, any store the harness does not
-know as RAM-only) owns it, and memory's window is left out; an `InMemorySaver` (`MemorySaver`)
-does not — it is lost with its worker — so memory's window carries the conversation, and the log
-says so once, naming `PostgresSaver` as the fix (with memory off: that the history will not
-survive a restart). A graph built with the harness's `RunCheckpointer` (as `ReAct` is) keeps its
-checkpoint in the run's journal: the run's own step state, never the conversation's.
 
 ## Approvals and pauses
 

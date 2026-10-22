@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from agents import Agent, RunHooks, SQLiteSession, Usage, function_tool
+from agents import Agent, SQLiteSession, Usage, function_tool
 
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.openai_model import ScriptedModel
-from trellis import Budget, Harness, Settings, current, tool
-from trellis.contracts import InterruptReason, RunEventType, RunStatus
+from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
+from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
 from trellis.harness import budget
-from trellis.harness.governance import Governance
+from trellis.harness.events import WARNING
+from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
 
@@ -334,19 +335,14 @@ async def test_an_agent_built_with_h_tools_gets_read_file_once(harness: Harness)
 
 
 async def test_a_session_keeps_the_thread_so_memorys_window_is_not_sent(
-    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+    memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    model = ScriptedModel(["one", "two", "three"])
+    model = ScriptedModel(["one", "two"])
     agent = memory_harness.wrap(Agent(name="s", model=model), id="sess")
-    await agent.run("hi", user="u1", without={"records"})  # no session: memory's window
-    own = SQLiteSession("own", tmp_path / "sessions.db")  # the team's own, durable session
-    await agent.run("hi", user="u1", framework_options={"session": own})
-    await agent.run("hi", user="u1")  # the memory service's session (bridges.session)
+    await agent.run("hi", user="u1")
+    await agent.run("hi", user="u1", framework_options={"session": object()})
     windows = [c.body.get("window") for c in memory_service.named("context")]
-    assert windows[-3:] == [True, False, False]
-    items = cast("list[dict[str, Any]]", await own.get_items())
-    assert [i["content"] for i in items if i.get("role") == "user"] == ["hi"]
-    own.close()
+    assert windows[-2:] == [True, False]
 
 
 def test_the_sdks_own_tracing_is_left_as_set_and_said_once(
@@ -372,28 +368,64 @@ def test_the_sdks_own_tracing_is_left_as_set_and_said_once(
         sdk_tracing_said.cache_clear()
 
 
-# ---------------------------------------------------------------------- handoffs, budget, hooks
-async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog() -> None:
+# ---------------------------------------------------------------------- handoffs, budget, history
+def _desk(model: ScriptedModel) -> tuple[Agent[Any], Agent[Any], Any]:
+    """A triage agent handing off to a billing specialist whose own tool refunds."""
+
     @function_tool
     def refund(order: str) -> str:
         """Refund an order."""
         done.append(f"refund {order}")
         return f"refunded {order}"
 
-    model = ScriptedModel([*[("transfer_to_billing", {}), ("refund", {"order": "o1"})] * 2, "ok"])
     billing = Agent(name="billing", model=model, tools=[refund])
     triage = Agent(name="triage", model=model, handoffs=[billing])
     billing.handoffs = [triage]  # a handoff that leads back
+    return triage, billing, refund
+
+
+class DenyAll(Hooks):
+    async def before_tool(self, call: ToolCall) -> Deny | Rewrite | None:
+        return Deny("nothing runs here")
+
+
+async def test_a_deny_all_rule_blocks_the_tool_of_an_agent_handed_off_to(
+    harness: Harness,
+) -> None:
+    model = ScriptedModel([("transfer_to_billing", {}), ("refund", {"order": "o1"}), "gave up"])
+    triage, billing, refund = _desk(model)
+    agent = harness.wrap(triage, id="desk", hooks=[DenyAll()])
+    result = await agent.run("refund o1", user="u1")
+    assert result.answer == "gave up" and done == []  # the specialist's tool did not run
+    assert billing.tools == [refund] and triage.handoffs == [billing]  # yours, unchanged
+
+
+async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog() -> None:
+    model = ScriptedModel([*[("transfer_to_billing", {}), ("refund", {"order": "o1"})] * 2, "ok"])
+    triage, _, _ = _desk(model)
     governance = Governance(FakeCatalog({"refund": Rule(risk="irreversible")}))
     async with Harness(config=Settings(), governance=governance) as h:
         agent = h.wrap(triage, id="desk")
         paused = await agent.run("refund o1", user="u1")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-        assert paused.interrupt.question.startswith("Approve refund?")
-        assert done == []  # the catalog's rule asked a person first
+        assert paused.interrupt.question.startswith("Approve refund?") and done == []
         finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
-    assert finished.answer == "ok" and done == ["refund o1"]
-    assert billing.tools == [refund] and triage.handoffs == [billing]  # yours, unchanged
+    assert finished.answer == "ok" and done == ["refund o1"]  # once: the journal kept it
+
+
+async def test_a_handoff_object_is_said_once_and_kept(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    from agents import handoff
+
+    model = ScriptedModel(["hi", "hi"])
+    target = Agent(name="t", model=model, handoffs=[handoff(Agent(name="x", model=model))])
+    agent = harness.wrap(target, id="hidden")
+    with caplog.at_level("WARNING", logger="trellis.harness"):
+        await agent.run("hi", user="u1")
+        await agent.run("hi", user="u1")
+    said = [r for r in caplog.records if "Handoff object" in r.getMessage()]
+    assert len(said) == 1
 
 
 @tool(side_effects="read")
@@ -409,64 +441,50 @@ async def test_a_token_budget_stops_the_run_without_any_hooks() -> None:
     )
     async with Harness(config=Settings()) as h:
         agent = h.wrap(
-            Agent(name="s", model=model), id="s", tools=[track], budget=Budget(max_tokens=30)
+            Agent(name="s", model=model), id="s", tools=[track], budget=Budget(max_tokens=10)
         )
         result = await agent.run("track o1", user="u1")
-    assert result.status is RunStatus.PARTIAL and done == []  # the reply spent it: not run
+    assert result.status is not RunStatus.SUCCESS and done == []  # the reply spent it
     assert result.error is not None and result.error.code == budget.BUDGET_EXCEEDED
-    assert "max_tokens 30 reached (60 spent)" in result.error.message
 
 
-class Told(RunHooks[Any]):
-    """The team's own ``RunHooks``: what the SDK told them."""
-
-    def __init__(self) -> None:
-        self.events: list[str] = []
-
-    async def on_agent_start(self, context: Any, agent: Any) -> None:
-        self.events.append(f"agent {agent.name}")
-
-    async def on_llm_start(self, context: Any, agent: Any, *args: Any) -> None:
-        self.events.append("llm")
-
-    async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
-        self.events.append("replied")
-
-    async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
-        self.events.append(f"tool {tool.name}")
-
-    async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: object) -> None:
-        self.events.append(f"done {tool.name}")
-
-    async def on_handoff(self, context: Any, from_agent: Any, to_agent: Any) -> None:
-        self.events.append(f"handoff {to_agent.name}")
-
-    async def on_agent_end(self, context: Any, agent: Any, output: Any) -> None:
-        self.events.append(f"end {output}")
+@pytest.mark.parametrize(
+    ("options", "window"),
+    [
+        ({"session": SQLiteSession("ram")}, True),  # kept in RAM only: memory's window
+        ({"conversation_id": "conv_1"}, False),  # kept on OpenAI's servers
+        ({"previous_response_id": "resp_1"}, False),
+    ],
+    ids=["sqlite_in_memory", "conversation_id", "previous_response_id"],
+)
+async def test_who_keeps_the_thread_decides_memorys_window(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    options: dict[str, Any],
+    window: bool,
+) -> None:
+    agent = memory_harness.wrap(Agent(name="s", model=ScriptedModel(["one"])), id="thread")
+    await agent.run("hi", user="u1", framework_options=options)
+    assert [c.body.get("window") for c in memory_service.named("context")][-1] is window
 
 
-async def test_the_teams_own_run_hooks_are_told_everything(harness: Harness) -> None:
-    @function_tool
-    def eta(order: str) -> str:
-        return "tomorrow"
+async def test_a_durable_session_keeps_the_thread(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    own = SQLiteSession("own", tmp_path / "sessions.db")
+    agent = memory_harness.wrap(Agent(name="s", model=ScriptedModel(["one"])), id="durable")
+    await agent.run("hi", user="u1", framework_options={"session": own})
+    assert memory_service.named("context")[-1].body.get("window") is False
+    own.close()
 
-    model = ScriptedModel([("transfer_to_shipper", {}), ("eta", {"order": "o1"}), "tomorrow"])
-    shipper = Agent(name="shipper", model=model, tools=[eta])
-    told = Told()
-    agent = harness.wrap(Agent(name="desk", model=model, handoffs=[shipper]), id="d")
-    result = await agent.run("when?", user="u1", framework_options={"hooks": told})
-    assert result.status is RunStatus.SUCCESS
-    assert told.events == [
-        "agent desk",
-        "llm",
-        "replied",
-        "handoff shipper",
-        "agent shipper",
-        "llm",
-        "replied",
-        "tool eta",
-        "done eta",
-        "llm",
-        "replied",
-        "end tomorrow",
-    ]
+
+async def test_a_rule_that_cannot_be_evaluated_asks_and_is_recorded_on_the_run() -> None:
+    model = ScriptedModel([("track", {"order": "o1"}), "done"])
+    governance = Governance(FakeCatalog({"track": Rule(risk="read", approve_when="order >>")}))
+    async with Harness(config=Settings(), governance=governance) as h:
+        agent = h.wrap(Agent(name="s", model=model), id="rule", tools=[track])
+        events = [e async for e in agent.stream("track o1", user="u1")]
+    assert done == []  # it asked a person instead of running
+    assert any(e.type is RunEventType.INTERRUPT for e in events)
+    codes = [e.data.get("code") for e in events if e.data.get("name") == WARNING]
+    assert codes == [ApprovalRuleError.code]

@@ -170,9 +170,9 @@ scores, failed = await judge(
 
 | | This recipe (Way 2) | Wrapped (Way 1) |
 |---|---|---|
-| where the pause lives | the session id in the checkpoint; a new query resumes it | the same: the session id in the run's journal, resumed by the next attempt — with the session itself, kept there by the SDK's `SessionStore`, so any machine resumes it — and the journal, so no harness call is made twice |
+| where the pause lives | the session id in the checkpoint; a new query resumes it | the same: the session id in the run's journal, resumed by the next attempt — and the journal, so no harness call is made twice |
 | governance | `can_use_tool` asking `check`, for every tool Claude calls | the harness's own tools (an in-process MCP server, `mcp__trellis__*`) through the bridge; Claude Code's built-ins through a `can_use_tool` of the harness's (risk by tool, hooks, approvals), then yours |
-| recording, memory push | yours | automatic; the context added to every prompt by a `UserPromptSubmit` hook |
+| recording, memory push | yours | automatic; the context appended to `system_prompt` |
 | evaluation, serving | `judge(...)` where you choose; serving is yours | judges in the background; `serve_chat`, `serve_a2a` |
 
 To run both ways in one deployment, see [mixing.md](mixing.md).

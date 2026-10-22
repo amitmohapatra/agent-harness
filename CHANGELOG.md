@@ -5,39 +5,29 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## Unreleased
 
-### Changed
+### Fixed
 
-- The Claude adapter runs each query on the SDK's `ClaudeSDKClient` (disconnected when the run
-  pauses), and its memory context no longer changes the options' `system_prompt`.
+- OpenAI Agents: the tools of every agent reachable through `handoffs` (recursively, on copies)
+  are governed — hooks, the catalog's rules, the journal; a `Handoff` object whose agent is
+  hidden is said once. The harness's `RunHooks` are always passed, so a token budget is enforced
+  without any hooks.
+- Claude Agent SDK: built-in tools are governed by the SDK's own `PreToolUse` hook, so
+  `allowed_tools`, `acceptEdits` and `bypassPermissions` no longer bypass governance; your
+  `can_use_tool` is asked by that hook.
+- History owner: one policy (`trellis.harness.history`) with a registry of RAM-only stores. A
+  LangGraph `InMemorySaver`/`MemorySaver` or an OpenAI `SQLiteSession(":memory:")` no longer
+  turns memory's window off (warned once); OpenAI `conversation_id`/`previous_response_id`/
+  `auto_previous_response_id` count as the framework keeping the thread.
+- An `approve_when` rule that cannot be evaluated asks a person (never allows), is logged once
+  per rule, and is recorded on the run as an `APPROVAL_RULE_INVALID` warning
+  (`ApprovalRuleError`).
 
 ### Added
 
-- Native slots, the platform's services behind them (`trellis.harness.bridges`): each framework
-  keeps its own feature, and `h.wrap(agent, id=...)` configures nothing more.
-  - LangGraph, Deep Agents and `ReAct`: a graph compiled without a store runs with the memory
-    service as its `BaseStore` (`MemoryStore`: each item a memory of the run's user; `put` of a
-    key held supersedes it, `delete` forgets it, a search with a query is the service's recall).
-  - OpenAI Agents SDK: a run given no `session` keeps its conversation in the memory service's
-    thread (`MemorySession`): the next run on the thread continues it, a run run again from its
-    input is one turn, the transcript is not written twice and the window is left to the session.
-  - Claude Agent SDK: the memory context goes with every prompt as a `UserPromptSubmit` hook
-    (`additionalContext`) instead of being appended to the system prompt; the session is kept in
-    the run's journal as the SDK's `SessionStore` (`JournalSessions`), so a paused run, or one
-    whose worker died, continues its session on any machine (progress saved before each step).
-  - One owner for long-term memory: with memory on, a graph's own `BaseStore` is not used beside
-    the memory service (said once; `without={"memory"}` runs it on its own). A team's own
-    session or session store is kept; memory off leaves the framework's default; a memory
-    service that fails fails the call.
-  - One policy for a conversation's history across runs, used by every adapter
-    (`bridges.history.thread_for`): a durable thread store the framework was given owns it;
-    else the memory service's thread through the framework's slot (OpenAI Agents); else
-    memory's window. A store kept only in RAM — `InMemorySaver`, `SQLiteSession(":memory:")`,
-    Claude's `InMemorySessionStore` — no longer turns memory's window off: it is lost with its
-    worker, said once with the fix (`PostgresSaver`); an unknown store is taken as durable. The
-    policy is one constant: `MEMORY_WINDOW` makes memory's window own every history, the
-    framework working on the run's own thread in the journal.
-  - The framework matrix checks the slots (`F44`) and that every adapter emits the same
-    agent-contracts events for the same work (`F60c`).
+- Learned approval suggestions are accepted automatically when the tool catalog refreshes
+  (the memory service's accept endpoint), except for a tool at the highest risk, which waits for
+  a person; each acceptance is logged and `trellis doctor` lists the accepted ones.
+
 - `python -m benchmark.thread`: who keeps a conversation's history across runs, the framework's
   own thread or the memory service's window, measured on recall and input tokens per turn.
   Measured on Granite through Bifrost with the memory service: recall 1.00 vs 0.92, 202 vs 214

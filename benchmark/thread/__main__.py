@@ -1,32 +1,18 @@
 """Who should own a conversation's history across runs — the framework's own thread, or the
-memory service's window — measured (``python -m benchmark.thread``, under ``heavy.sh``), with
-the worker restarted mid-conversation:
+memory service's window — measured (``python -m benchmark.thread``, under ``heavy.sh``):
 
-* ``framework``: a ``create_agent`` graph on a durable checkpointer of its own, LangGraph's
-  ``AsyncPostgresSaver`` (``--postgres``, a private database): its thread owns the history and
-  the harness sends no memory window (``bridges.history``: ``Thread.OWN``);
-* ``framework-journal``: the same graph on the harness's journal-backed ``RunCheckpointer`` (its
-  checkpoint in the run's journal, in agent-runs): the run's own thread, durable but per run, so
-  memory's window carries the conversation;
-* ``framework-ram``: the same graph on LangGraph's ``InMemorySaver``: kept in the worker's
-  memory, so by the policy memory's window carries the conversation (said once);
-* ``memory``: the same graph without a checkpointer: memory's window gives the recent turns.
+* ``framework``: a ``create_agent`` graph with its own checkpointer (the thread is the
+  conversation): the harness sends no memory window (``keeps_conversation``);
+* ``memory``: the same graph without a checkpointer (as ``ReAct``'s checkpoint is the run's
+  own): the memory service's window gives the recent turns.
 
-They differ in nothing else — the same model, instructions, no tools. After turn
-:data:`RESTART_AFTER` the worker is restarted: its harness closed, a new one opened and the
-graph built again, as a new worker process would (agent-runs, the memory service and the
-model keep running). So what is measured is the history's owner, and whether it outlives a
-worker.
+The two differ in nothing else — the same model, instructions, no tools — so what is measured
+is the history's owner.
 
-All on the same model by name (the gateway the environment names), memory on (``MEMORY_URL``:
-records, the context) and the run store agent-runs (``RUNS_URL``: a private instance), the
-same conversations: facts said in the first turns, asked back in the later ones. Per turn: the
-input tokens the model was sent, the seconds, and whether its input held any of the
-conversation's facts (``history``); per recall turn: whether the answer holds the fact. The
-decision rule (:func:`decision`): a variant whose model lost the history after the restart loses
-outright; of the others, the memory window wins only with recall at least the framework
-thread's and at least :data:`TOKEN_SAVING` fewer input tokens. Writes ``<out>.json`` and
-``<out>.md``."""
+Both on the same model by name (the gateway the environment names), memory on (``MEMORY_URL``:
+records, the context), the same conversations: facts said in the first turns, asked back in
+the later ones. Per turn: the input tokens the model was sent, the seconds; per recall turn:
+whether the answer holds the fact. Writes ``<out>.json`` and ``<out>.md``."""
 
 from __future__ import annotations
 
@@ -37,15 +23,10 @@ import statistics
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
-from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
-from langchain_core.tracers.context import register_configure_hook
-
-from benchmark.cost.run import Meter
+from benchmark.cost.run import metered
 from trellis import Harness, Settings
 
 SYSTEM = "You are a support assistant. Answer in one short sentence."
@@ -82,147 +63,54 @@ CONVERSATIONS: list[tuple[list[str], dict[int, str]]] = [
         {3: "14", 4: "Pro"},
     ),
 ]
-#: The worker is restarted after this many turns (between turns 2 and 3).
-RESTART_AFTER: Final = 2
-#: How much fewer input tokens the memory window needs, at least, to win (with recall at least
-#: the framework thread's).
-TOKEN_SAVING: Final = 0.20
-#: The variant the memory window is compared with (the framework's thread, kept durably), and
-#: the memory window's.
-FRAMEWORK: Final = "framework"
-MEMORY: Final = "memory"
 
 
-class Heard(Meter):
-    """A :class:`Meter` that also keeps the text of the last request the model was sent."""
+def framework_target(model: str) -> Any:
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.sent = ""
+    from trellis.harness.react import _gateway_model
 
-    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
-        super().on_chat_model_start(serialized, messages, **kwargs)
-        self.sent = "\n".join(str(m.content) for batch in messages for m in batch)
+    chat = _gateway_model(model, timeout=None, effort=None, settings=None)
+    return create_agent(chat, tools=[], system_prompt=SYSTEM, checkpointer=InMemorySaver())
 
 
-_HEARD: ContextVar[Heard | None] = ContextVar("trellis_bench_heard", default=None)
-register_configure_hook(_HEARD, inheritable=True)
-
-
-@contextmanager
-def heard() -> Iterator[Heard]:
-    """A :class:`Heard` of every chat model call made in this context until the block ends."""
-    listener = Heard()
-    token = _HEARD.set(listener)
-    try:
-        yield listener
-    finally:
-        _HEARD.reset(token)
-
-
-def _graph(model: str, checkpointer: Any) -> Any:
+def memory_target(model: str) -> Any:
     from langchain.agents import create_agent
 
     from trellis.harness.react import _gateway_model
 
     chat = _gateway_model(model, timeout=None, effort=None, settings=None)
-    return create_agent(chat, tools=[], system_prompt=SYSTEM, checkpointer=checkpointer)
+    return create_agent(chat, tools=[], system_prompt=SYSTEM)
 
 
-@asynccontextmanager
-async def postgres(dsn: str) -> AsyncIterator[Any]:
-    """LangGraph's own durable checkpointer, for one worker's life (its connections)."""
-    from langgraph.checkpoint.postgres.aio import (  # pyright: ignore[reportMissingImports]
-        AsyncPostgresSaver,
-    )
-
-    async with AsyncPostgresSaver.from_conn_string(dsn) as saver:
-        await saver.setup()
-        yield saver
-
-
-@asynccontextmanager
-async def given(checkpointer: Any) -> AsyncIterator[Any]:
-    yield checkpointer
-
-
-def _journal() -> Any:
-    from trellis.harness.middleware import RunCheckpointer
-
-    return RunCheckpointer()
-
-
-def _ram() -> Any:
-    from langgraph.checkpoint.memory import InMemorySaver
-
-    return InMemorySaver()
-
-
-#: Each variant's checkpointer for one worker's life, from the Postgres DSN (built again by the
-#: restarted worker).
-SAVERS: Final[dict[str, Callable[[str | None], AbstractAsyncContextManager[Any]]]] = {
-    FRAMEWORK: lambda dsn: postgres(_dsn(dsn)),
-    "framework-journal": lambda dsn: given(_journal()),
-    "framework-ram": lambda dsn: given(_ram()),
-    MEMORY: lambda dsn: given(None),
-}
-
-
-def _dsn(dsn: str | None) -> str:
-    if dsn is None:
-        raise SystemExit("the framework variant runs on PostgreSQL: --postgres <dsn>")
-    return dsn
-
-
-def config() -> Settings:
-    """The environment's settings, tracing off; the memory service and agent-runs required."""
-    found = Settings.from_env().model_copy(update={"otlp_endpoint": None})
-    if found.memory_url is None or found.runs_url is None:
-        raise SystemExit("the memory service and agent-runs are needed: MEMORY_URL and RUNS_URL")
-    return found
-
-
-async def converse(
-    variant: str, model: str, repeat: int, dsn: str | None = None
-) -> list[dict[str, Any]]:
-    """Each conversation in ``variant``, its worker restarted after :data:`RESTART_AFTER`
-    turns: a harness of its own (a worker's life) for the turns before, and one for those
-    after, each with the graph built again."""
+async def converse(h: Harness, target: Any, variant: str, repeat: int) -> list[dict[str, Any]]:
     rows = []
     for n, (turns, expected) in enumerate(CONVERSATIONS):
-        agent_id = f"thread-{variant}-{n}-{repeat}-{uuid.uuid4().hex[:6]}"
+        agent = h.wrap(target, id=f"thread-{variant}-{n}-{repeat}-{uuid.uuid4().hex[:6]}")
         thread, user = f"conv-{uuid.uuid4().hex[:8]}", f"bench-{uuid.uuid4().hex[:6]}"
-        facts = [fact.lower() for fact in expected.values()]
-        for start, stop in ((0, RESTART_AFTER), (RESTART_AFTER, len(turns))):
-            async with (
-                SAVERS[variant](dsn) as checkpointer,
-                Harness(config=config(), gateway=False) as h,
-            ):
-                agent = h.wrap(_graph(model, checkpointer), id=agent_id)
-                for i in range(start, stop):
-                    began = time.monotonic()
-                    with heard() as listener:
-                        result = await agent.run(turns[i], user=user, thread=thread)
-                    seconds = time.monotonic() - began
-                    await h.writes.drain()  # the turn recorded before the next asks for it
-                    answer = result.answer if isinstance(result.answer, str) else str(result.answer)
-                    row = {
-                        "variant": variant,
-                        "conversation": n,
-                        "repeat": repeat,
-                        "turn": i,
-                        "after_restart": i >= RESTART_AFTER,
-                        "status": result.status.value,
-                        "input_tokens": listener.input_tokens,
-                        "model_calls": listener.calls,
-                        "seconds": round(seconds, 2),
-                        "history": any(fact in listener.sent.lower() for fact in facts),
-                        "answer": (answer or "")[:200],
-                    }
-                    if i in expected:
-                        row["recalled"] = expected[i].lower() in (answer or "").lower()
-                    rows.append(row)
-                    sys.stdout.write(json.dumps(row) + "\n")
+        for i, text in enumerate(turns):
+            began = time.monotonic()
+            with metered() as meter:
+                result = await agent.run(text, user=user, thread=thread)
+            seconds = time.monotonic() - began
+            await h.writes.drain()  # the turn recorded before the next asks for the window
+            answer = result.answer if isinstance(result.answer, str) else str(result.answer)
+            row = {
+                "variant": variant,
+                "conversation": n,
+                "repeat": repeat,
+                "turn": i,
+                "status": result.status.value,
+                "input_tokens": meter.input_tokens,
+                "model_calls": meter.calls,
+                "seconds": round(seconds, 2),
+                "answer": (answer or "")[:200],
+            }
+            if i in expected:
+                row["recalled"] = expected[i].lower() in (answer or "").lower()
+            rows.append(row)
+            sys.stdout.write(json.dumps(row) + "\n")
     return rows
 
 
@@ -231,7 +119,6 @@ def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for variant in dict.fromkeys(r["variant"] for r in rows):
         mine = [r for r in rows if r["variant"] == variant]
         recall = [r["recalled"] for r in mine if "recalled" in r]
-        later = [r["history"] for r in mine if r.get("after_restart")]
         by_turn = {
             t: statistics.fmean(r["input_tokens"] for r in mine if r["turn"] == t)
             for t in sorted({r["turn"] for r in mine})
@@ -239,7 +126,6 @@ def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         found[variant] = {
             "recall": sum(recall) / len(recall) if recall else None,
             "recall_n": len(recall),
-            "history_after_restart": sum(later) / len(later) if later else None,
             "errors": sum(r["status"].lower() != "success" for r in mine),
             "input_tokens_by_turn": by_turn,
             "input_tokens_mean": statistics.fmean(r["input_tokens"] for r in mine),
@@ -248,74 +134,43 @@ def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return found
 
 
-def decision(found: dict[str, Any]) -> str:
-    """The owner by the rule: a variant whose model lost the history after the restart loses
-    outright; between the framework's durable thread and the memory window, the window wins only
-    with recall at least the thread's and :data:`TOKEN_SAVING` fewer input tokens."""
-    lost = [v for v, s in found.items() if s["history_after_restart"] != 1.0]
-    said = [f"{v} loses outright (its model lost the history after the restart)" for v in lost]
-    standing = [v for v in (FRAMEWORK, MEMORY) if v in found and v not in lost]
-    if standing != [FRAMEWORK, MEMORY]:
-        said.append(f"the owner is {standing[0]}" if standing else "no variant stands")
-        return "; ".join(said)
-    thread, window = found[FRAMEWORK], found[MEMORY]
-    saving = 1 - window["input_tokens_mean"] / thread["input_tokens_mean"]
-    wins = window["recall"] >= thread["recall"] and saving >= TOKEN_SAVING
-    said.append(
-        f"the memory window saves {saving:.0%} of the input tokens at recall "
-        f"{window['recall']:.2f} vs {thread['recall']:.2f}: the owner is "
-        f"{MEMORY if wins else FRAMEWORK}"
-    )
-    return "; ".join(said)
-
-
 def markdown(report: dict[str, Any]) -> str:
     lines = [
         f"# Thread history: framework thread vs memory window ({report['model']})",
         "",
-        f"{len(CONVERSATIONS)} conversations of 5 turns, {report['repeats']} repeat(s), the "
-        f"worker restarted after turn {RESTART_AFTER}; recall: the later turns' answers holding "
-        "the fact said in the first turns; history: the model's input held the facts after the "
-        "restart.",
+        f"{len(CONVERSATIONS)} conversations of 5 turns, {report['repeats']} repeat(s); recall: "
+        "the later turns' answers holding the fact said in the first turns.",
         "",
-        "| variant | recall | history after restart | errors | input tokens, mean per turn "
-        "| by turn (1-5) | seconds per turn |",
-        "|---|---|---|---|---|---|---|",
+        "| variant | recall | errors | input tokens, mean per turn | by turn (1-5) "
+        "| seconds per turn |",
+        "|---|---|---|---|---|---|",
     ]
     for variant, s in report["summary"].items():
         turns = " / ".join(f"{v:,.0f}" for v in s["input_tokens_by_turn"].values())
         recall = "—" if s["recall"] is None else f"{s['recall']:.2f} (n={s['recall_n']})"
-        kept = s["history_after_restart"]
-        history = "—" if kept is None else f"{kept:.2f}"
         lines.append(
-            f"| {variant} | {recall} | {history} | {s['errors']} | {s['input_tokens_mean']:,.0f} "
-            f"| {turns} | {s['seconds_mean']:.1f} |"
+            f"| {variant} | {recall} | {s['errors']} | {s['input_tokens_mean']:,.0f} | {turns} | "
+            f"{s['seconds_mean']:.1f} |"
         )
-    return "\n".join([*lines, "", f"Decision: {report['decision']}."]) + "\n"
+    return "\n".join(lines) + "\n"
 
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    for repeat in range(args.repeats):
-        for variant in args.variants:
-            rows += await converse(variant, args.model, repeat, args.postgres)
-    found = summary(rows)
-    return {
-        "model": args.model,
-        "repeats": args.repeats,
-        "restart_after": RESTART_AFTER,
-        "summary": found,
-        "decision": decision(found),
-        "runs": rows,
-    }
+    config = Settings.from_env().model_copy(update={"runs_url": None, "otlp_endpoint": None})
+    async with Harness(config=config, gateway=False) as h:
+        if h.memory is None:
+            raise SystemExit("the memory service is needed: MEMORY_URL")
+        for repeat in range(args.repeats):
+            rows += await converse(h, framework_target(args.model), "framework", repeat)
+            rows += await converse(h, memory_target(args.model), "memory", repeat)
+    return {"model": args.model, "repeats": args.repeats, "summary": summary(rows), "runs": rows}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m benchmark.thread", description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--repeats", type=int, default=1)
-    parser.add_argument("--variants", nargs="+", default=list(SAVERS), choices=list(SAVERS))
-    parser.add_argument("--postgres", help="a database for the framework's durable checkpointer")
     parser.add_argument("--out", default="build/bench-thread")
     args = parser.parse_args(argv)
     report = asyncio.run(main_async(args))

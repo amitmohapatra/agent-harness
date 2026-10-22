@@ -36,17 +36,14 @@ def detect(target: Any) -> Adapter:
 
         if isinstance(target, ClaudeAgentOptions):
             return ClaudeAdapter()
-    if any(
-        check(candidate)
-        for check in (inspect.iscoroutinefunction, inspect.isasyncgenfunction)
-        # an object with an async __call__ too
-        for candidate in (target, getattr(target, "__call__", None))  # noqa: B004
+    if inspect.iscoroutinefunction(target) or inspect.iscoroutinefunction(
+        getattr(target, "__call__", None)  # noqa: B004 - an object with an async __call__
     ):
         return FunctionAdapter()
     raise ConfigurationError(
         f"cannot wrap {type(target).__name__}: pass a compiled LangGraph graph (Deep Agents "
         "included, ReAct(...) among them), an OpenAI Agents Agent, ClaudeAgentOptions, or an async "
-        "function (input, agent) -> answer (an async generator streams its text)"
+        "function (input, agent) -> answer"
     )
 
 

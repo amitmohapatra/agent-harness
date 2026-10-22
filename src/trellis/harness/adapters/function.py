@@ -1,5 +1,4 @@
-"""A plain async function ``(input, agent) -> answer`` — or an async generator, whose strings
-are streamed as they come and make the answer together — where ``agent`` is the run's
+"""A plain async function ``(input, agent) -> answer``, where ``agent`` is the run's
 :class:`~trellis.harness.runtime.Runtime` (the same object ``trellis.current()`` returns).
 
 The memory context is ``agent.context`` (and a leading system message when the input is a
@@ -9,7 +8,6 @@ message list); tools are called with ``await agent.tools.call(name, **args)``; a
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, ClassVar
 
@@ -22,9 +20,7 @@ from trellis.harness.adapters.base import (
     ToolFormat,
     no_options,
 )
-from trellis.harness.bridges.history import owns, thread_for
 from trellis.harness.journal import Pending
-from trellis.harness.runtime import Runtime
 
 
 class FunctionAdapter:
@@ -33,14 +29,8 @@ class FunctionAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "none"
 
-    def runs(self, target: Any, *, agent_id: str, memory: bool) -> Any:
-        return target
-
-    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
-        """No thread store across runs (the history policy's ``bridges.history``): memory's
-        window carries the conversation."""
-        memory = runtime.run_memory is not None
-        return owns(thread_for(None, bridged=False, agent_id=runtime.agent_id, memory=memory))
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        return None
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         if context and isinstance(input, list):
@@ -48,19 +38,10 @@ class FunctionAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        if not _generates(target):
-            return await target(native_input, run.runtime)
-        return "".join([part async for part in _texts(target(native_input, run.runtime))])
+        return await target(native_input, run.runtime)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
-        if not _generates(target):
-            yield Output(await target(native_input, run.runtime))
-            return
-        said: list[str] = []
-        async for part in _texts(target(native_input, run.runtime)):
-            said.append(part)
-            yield part
-        yield Output("".join(said))
+        yield Output(await target(native_input, run.runtime))
 
     def extract(self, target: Any, output: Any) -> Extracted:
         return Extracted(
@@ -79,17 +60,3 @@ class FunctionAdapter:
 
     def check_options(self, options: Mapping[str, Any]) -> None:
         no_options(options, "a function target", "it reads what it needs from its input")
-
-
-def _generates(target: Any) -> bool:
-    """Whether ``target`` is an async generator function (or an object whose ``__call__`` is)."""
-    return inspect.isasyncgenfunction(target) or inspect.isasyncgenfunction(
-        getattr(target, "__call__", None)  # noqa: B004 - an object with an async __call__
-    )
-
-
-async def _texts(parts: AsyncIterator[Any]) -> AsyncIterator[str]:
-    """What an async generator target yields, as text: its strings (anything else is not said)."""
-    async for part in parts:
-        if isinstance(part, str) and part:
-            yield part

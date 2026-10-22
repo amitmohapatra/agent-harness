@@ -29,17 +29,9 @@
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
   stopped, and it holds no conversation of its own (the memory service gives the recent turns);
-* store: a graph compiled without a store of its own is run with the memory service as its
-  long-term store (``bridges.store.MemoryStore``: ``runtime.store``, ``get_store()``, Deep
-  Agents' ``StoreBackend``) while the run has memory and its memory tools; a graph's own store
-  is kept (said once);
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
   ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; the harness's
-  ``configurable.thread_id`` wins over one given. The graph's own run arguments
-  (:data:`RUN_ARGUMENTS`: ``context`` for ``create_agent(context_schema=)``, ``durability``) go
-  to the call beside it;
-* streaming: the text of each AI message chunk (a string or content blocks), and what a node or
-  tool writes to the graph's stream (``get_stream_writer()``) as a ``graph_write`` event.
+  ``configurable.thread_id`` wins over one given.
 """
 
 from __future__ import annotations
@@ -58,11 +50,8 @@ from trellis.harness.adapters.base import (
     ToolFormat,
 )
 from trellis.harness.asking import answer_of
-from trellis.harness.bridges import said
-from trellis.harness.bridges.helpers import Helpers
-from trellis.harness.bridges.history import Thread, owns, thread_for
 from trellis.harness.journal import Journal, Pending
-from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
+from trellis.harness.runtime import DEFERRED, MARKER, reason_of
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"
@@ -73,13 +62,6 @@ HITL: Final = "langchain_hitl"
 HARNESS_TOOLS: Final = "trellis_harness_tools"
 #: The id of the memory context message: one per thread, replaced every turn.
 CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
-#: The keyword arguments of ``ainvoke``/``astream`` a run may give beside its config: the graph's
-#: runtime context (``create_agent(context_schema=)``, a node's ``runtime.context``) and how it
-#: saves its checkpoints.
-RUN_ARGUMENTS: Final = ("context", "durability")
-#: The ``CUSTOM`` event name of what a node or tool wrote to the graph's stream
-#: (``get_stream_writer()``).
-GRAPH_WRITE: Final = "graph_write"
 #: The qualified name of a ``create_agent`` graph's async model node (Deep Agents' too).
 MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
 
@@ -88,6 +70,9 @@ class LangGraphAdapter:
     name: ClassVar[str] = "langgraph"
 
     def __init__(self, target: Any = None) -> None:
+        # every model call of the graph accounted to the run's budget, ModelHooks or not
+        from trellis.harness import accounting  # noqa: F401
+
         #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
         #: converts them itself, so nothing is converted for it here
         per_call = HARNESS_TOOLS in (getattr(target, "channels", None) or {})
@@ -95,34 +80,15 @@ class LangGraphAdapter:
         self.fixed_tools = not per_call
         #: the graph run in its place: a ``create_agent`` graph whose model calls narrow its
         #: bound tools to those the run offers (``None``: ``target`` itself is run)
-        self.per_call = per_call
         self.narrowed = None if per_call else _narrowed(target)
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
 
-    def runs(self, target: Any, *, agent_id: str, memory: bool) -> Any:
-        """The graph the harness runs: ``target``, or — where the history policy puts the
-        framework on the run's own thread (``bridges.history``: ``Thread.RUN``) — a copy of it on
-        the harness's ``RunCheckpointer``, its checkpoint in the run's journal."""
-        if run_scoped(target):
-            return target
-        own = target.checkpointer if _checkpointed(target) else None
-        if thread_for(own, bridged=False, agent_id=agent_id, memory=memory) is not Thread.RUN:
-            return target
-        from trellis.harness.middleware import RunCheckpointer
-
-        graph = target.copy({"checkpointer": RunCheckpointer()})
-        self.narrowed = None if self.per_call else _narrowed(graph)
-        return graph
-
-    def keeps_conversation(self, target: Any, runtime: Runtime) -> bool:
-        """Whether the graph's own checkpointer owns the conversation's history
-        (``bridges.history``: a durable one does; the run's own, or one kept in RAM, does not)."""
-        if run_scoped(target):
-            return False
-        own = target.checkpointer if _checkpointed(target) else None
-        memory = runtime.run_memory is not None
-        return owns(thread_for(own, bridged=False, agent_id=runtime.agent_id, memory=memory))
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        """The graph's checkpointer, unless it checkpoints into its run."""
+        if not _checkpointed(target) or run_scoped(target):
+            return None
+        return target.checkpointer
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         from langchain_core.messages import SystemMessage
@@ -137,21 +103,9 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        helpers = Helpers(run.runtime, self.name)
-        error: BaseException | None = None
-        graph, config = self._graph(target, run), self._config(target, run, helpers)
-        try:
-            return await graph.ainvoke(
-                await _continued(graph, target, native_input, run, config),
-                config,
-                version="v2",
-                **_run_arguments(run),
-            )
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            await helpers.closed(error)
+        return await self._graph(target).ainvoke(
+            _continued(target, native_input, run), self._config(target, run), version="v2"
+        )
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from langchain_core.messages import AIMessage
@@ -159,33 +113,23 @@ class LangGraphAdapter:
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
-        helpers = Helpers(run.runtime, self.name)
-        error: BaseException | None = None
-        graph, config = self._graph(target, run), self._config(target, run, helpers)
-        try:
-            async for part in graph.astream(
-                await _continued(graph, target, native_input, run, config),
-                config,
-                stream_mode=["messages", "values", "custom"],
-                version="v2",
-                **_run_arguments(run),
-            ):
-                if part["type"] == "messages":
-                    chunk = part["data"][0]
-                    # the text of a string or of content blocks (an Anthropic model's, reasoning's)
-                    text = chunk.text if isinstance(chunk, AIMessage) else ""
-                    if text:
-                        yield text
-                elif part["type"] == "custom":
-                    run.runtime.events.custom(GRAPH_WRITE, value=part["data"])
-                else:  # "values"
-                    values = part["data"]
-                    interrupts = part["interrupts"] or interrupts
-        except BaseException as exc:
-            error = exc
-            raise
-        finally:
-            await helpers.closed(error)
+        async for part in self._graph(target).astream(
+            _continued(target, native_input, run),
+            self._config(target, run),
+            stream_mode=["messages", "values"],
+            version="v2",
+        ):
+            if part["type"] == "messages":
+                chunk = part["data"][0]
+                if (
+                    isinstance(chunk, AIMessage)
+                    and isinstance(chunk.content, str)
+                    and chunk.content
+                ):
+                    yield chunk.content
+            elif part["type"] == "values":
+                values = part["data"]
+                interrupts = part["interrupts"] or interrupts
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -238,84 +182,31 @@ class LangGraphAdapter:
     def check_options(self, options: Mapping[str, Any]) -> None:
         from langchain_core.runnables import RunnableConfig
 
-        known = [*RunnableConfig.__annotations__, *RUN_ARGUMENTS]
+        known = list(RunnableConfig.__annotations__)
         unknown = [key for key in options if key not in known]
         if unknown:
             raise ConfigurationError(
-                f"framework_options for a graph are RunnableConfig keys and the run's own "
-                f"arguments: {', '.join(map(repr, unknown))} is none of {', '.join(known)}"
+                f"framework_options for a graph are RunnableConfig keys: "
+                f"{', '.join(map(repr, unknown))} is none of {', '.join(known)}"
             )
         if not isinstance(options.get("configurable", {}), Mapping):
             raise ConfigurationError("framework_options' configurable is a dict")
 
-    def _graph(self, target: Any, run: Invocation) -> Any:
-        """The graph run for ``target``: its narrowing copy, when it has one — given the
-        run's store (the memory service: ``bridges.store``) when it has none of its own."""
-        graph = target if self.narrowed is None else self.narrowed
-        store = run_store(target, run.runtime)
-        return graph if store is None else graph.copy({"store": store})
+    def _graph(self, target: Any) -> Any:
+        """The graph run for ``target``: its narrowing copy, when it has one."""
+        return target if self.narrowed is None else self.narrowed
 
     @staticmethod
-    def _config(target: Any, run: Invocation, helpers: Helpers) -> dict[str, Any]:
-        """The run's config: its framework options, the harness's thread id over theirs, and
-        the run's callbacks (``hooks.langgraph.GraphCallbacks``: its spending, its helpers)
-        beside theirs."""
-        from trellis.harness.hooks.langgraph import GraphCallbacks
-
+    def _config(target: Any, run: Invocation) -> dict[str, Any]:
+        """The run's config: its framework options, the harness's thread id over theirs."""
         runtime = run.runtime
         if _checkpointed(target):
             from langgraph.types import interrupt
 
             runtime.suspend = interrupt
-        options = {k: v for k, v in runtime.framework_options.items() if k not in RUN_ARGUMENTS}
+        options = runtime.framework_options
         thread = thread_of(target, runtime)
-        runtime.replies_counted = True  # by the callbacks: the middleware counts none again
-        callbacks = _with_handler(options.get("callbacks"), GraphCallbacks(runtime, helpers))
-        return {
-            **options,
-            "callbacks": callbacks,
-            "configurable": {**options.get("configurable", {}), "thread_id": thread},
-        }
-
-
-def _with_handler(given: Any, handler: Any) -> Any:
-    """The run's callbacks: ``handler`` beside the ones the run was given (a list of handlers,
-    or a callback manager — copied, the given one is not changed)."""
-    if given is None:
-        return [handler]
-    if isinstance(given, list):
-        return [*given, handler]
-    manager = given.copy()
-    manager.add_handler(handler, inherit=True)
-    return manager
-
-
-def _run_arguments(run: Invocation) -> dict[str, Any]:
-    """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`)."""
-    options = run.runtime.framework_options
-    return {key: options[key] for key in RUN_ARGUMENTS if key in options}
-
-
-def run_store(target: Any, runtime: Any) -> Any | None:
-    """The store a run of ``target`` is given (``bridges.store.MemoryStore``): with memory on
-    for the run and its memory tools not turned off (``without=``), the memory service is the
-    graph's long-term store — a store it was compiled with is not used beside it (said once);
-    ``None`` otherwise (the graph's own store, or none, as it was built)."""
-    if runtime.run_memory is None or not runtime.uses("memory_pull"):
-        return None
-    if getattr(target, "store", None) is not None:
-        said(
-            f"store:{runtime.agent_id}",
-            "%s: the graph's own store is not used while memory is on: the memory service is "
-            "its long-term store (without={'memory'} runs it on its own store)",
-            runtime.agent_id,
-            extra={"agent_id": runtime.agent_id},
-        )
-    import asyncio
-
-    from trellis.harness.bridges.store import MemoryStore
-
-    return MemoryStore(runtime.run_memory.ctx, asyncio.get_running_loop())
+        return {**options, "configurable": {**options.get("configurable", {}), "thread_id": thread}}
 
 
 def _narrowed(target: Any) -> Any | None:
@@ -356,23 +247,18 @@ def run_scoped(target: Any) -> bool:
     return isinstance(target.checkpointer, RunCheckpointer)
 
 
-async def _continued(
-    graph: Any, target: Any, native_input: Any, run: Invocation, config: dict[str, Any]
-) -> Any:
-    """What the graph is run with. Run again without a decision to resume with (after a crash,
-    or an error that may pass), a graph continues the turn it was cut in from its checkpoint
-    (``None``) rather than starting a new turn: one whose checkpoint the run's journal holds,
-    or one on a checkpointer of its own whose thread has steps still to run."""
+def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
+    """What the graph is run with: a graph whose checkpoint the run's journal holds, run again
+    without a decision to resume with (after a crash, or an error that may pass), continues
+    from it (``None``) rather than starting a new turn."""
     from langgraph.types import Command
 
-    if isinstance(native_input, Command):
-        return native_input
-    if run_scoped(target):
-        return None if run.runtime.replay.journal.graph else native_input
-    if _checkpointed(target) and run.runtime.attempt > 1:
-        state = await graph.aget_state(config)
-        if state.next:  # the turn a crash cut, its next steps checkpointed
-            return None
+    if (
+        not isinstance(native_input, Command)
+        and run_scoped(target)
+        and run.runtime.replay.journal.graph
+    ):
+        return None
     return native_input
 
 

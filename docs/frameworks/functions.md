@@ -56,8 +56,7 @@ the bridge runs once), and code outside them runs again on each attempt.
 
 ## Native or ours
 
-A function has no framework slot to bridge (no store, session or prompt hook): `agent.memory`
-is the memory service itself, `agent.context` its context. A function has no framework of its own to bring skills, prompts or a sandbox: use the
+A function has no framework of its own to bring skills, prompts or a sandbox: use the
 harness's — `h.wrap(fn, skills=[...])`, `await h.prompt(...)`, `tools=[sandbox()]` — every call
 governed and journaled ([skills.md](../skills.md#native-or-ours),
 [prompts.md](../prompts.md#native-or-ours),

@@ -4,21 +4,15 @@ scripted chat model. Deep Agents has its own file."""
 from __future__ import annotations
 
 import re
-import uuid
-from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict
 
 import pytest
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.config import get_stream_writer
-from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.runtime import Runtime as GraphRuntime
+from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.durable import SharedSaver
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
@@ -205,11 +199,13 @@ async def test_the_memory_context_leads_the_messages(
 
 
 async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conversation(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from trellis.harness import history
+
+    monkeypatch.setattr(history, "IN_RAM", {})  # the checkpointer taken as durable
     model = ScriptedChatModel(turns=["first", "second"])
-    durable = SharedSaver(f"helper-{uuid.uuid4().hex}")  # a durable checkpointer (PostgresSaver)
-    graph = create_agent(model, tools=[], system_prompt="You help.", checkpointer=durable)
+    graph = create_agent(model, tools=[], system_prompt="You help.", checkpointer=InMemorySaver())
     agent = memory_harness.wrap(graph, id="helper")
     for question in ("one?", "two?"):
         assert (await agent.run(question, user="u1", thread="th")).status is RunStatus.SUCCESS
@@ -428,47 +424,21 @@ async def test_a_graphs_interrupt_that_cannot_be_asked_fails_the_run_saying_why(
     assert re.search(why, result.error.message), result.error.message
 
 
-# ---------------------------------------------------------------------- run arguments, streaming
-@dataclass
-class Shop:
-    name: str
-
-
-def greet(state: MessagesState, runtime: GraphRuntime[Shop]) -> dict[str, Any]:
-    """A node reading the graph's runtime context, writing to its stream and answering in
-    content blocks (as an Anthropic model does)."""
-    shop = runtime.context.name if runtime.context is not None else "the shop"
-    get_stream_writer()({"step": "greet", "shop": shop})
-    blocks = [
-        {"type": "reasoning", "reasoning": "be brief"},
-        {"type": "text", "text": f"welcome to {shop}"},
-    ]
-    return {"messages": [AIMessage(content=blocks)]}
-
-
-def shop_graph(checkpointer: Any = None) -> Any:
-    graph = StateGraph(MessagesState, context_schema=Shop)
-    graph.add_node("greet", greet)
-    graph.add_edge(START, "greet")
-    graph.add_edge("greet", END)
-    return graph.compile(checkpointer=checkpointer)
-
-
-async def test_the_graphs_runtime_context_and_durability_go_to_the_run(harness: Harness) -> None:
-    agent = harness.wrap(shop_graph(SharedSaver(uuid.uuid4().hex)), id="shop")
-    options = {"context": Shop(name="Tidewater"), "durability": "exit"}
-    result = await agent.run("hi", user="u1", framework_options=options)
-    assert result.status is RunStatus.SUCCESS and result.answer == "welcome to Tidewater"
-
-
-async def test_streaming_carries_content_block_text_and_what_the_graph_writes(
-    harness: Harness,
+@pytest.mark.parametrize("durable", [False, True], ids=["in_ram", "durable"])
+async def test_a_checkpointer_kept_in_ram_leaves_memorys_window_on(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    monkeypatch: pytest.MonkeyPatch,
+    durable: bool,
 ) -> None:
-    agent = harness.wrap(shop_graph(), id="shop")
-    events = [e async for e in agent.stream("hi", user="u1")]
-    text = "".join(
-        e.data.get("delta", "") for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT
-    )
-    assert text == "welcome to the shop"  # the text block's, not the reasoning's
-    written = [e.data for e in events if e.type is RunEventType.CUSTOM]
-    assert {"name": "graph_write", "value": {"step": "greet", "shop": "the shop"}} in written
+    """An ``InMemorySaver`` loses the thread on a restart: memory's window keeps it. A durable
+    checkpointer (here: the RAM-only registry emptied) keeps the thread itself: no window."""
+    from trellis.harness import history
+
+    if durable:
+        monkeypatch.setattr(history, "IN_RAM", {})
+    model = ScriptedChatModel(turns=["hello"])
+    graph = await agent_graph(memory_harness, model, checkpointer=InMemorySaver())
+    agent = memory_harness.wrap(graph, id=f"saver_{durable}")
+    await agent.run("hi", user="u1")
+    assert memory_service.named("context")[-1].body.get("window") is not durable
