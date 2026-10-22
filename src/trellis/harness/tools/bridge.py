@@ -307,6 +307,8 @@ async def _decided(
     be, or the outcome of a call the approver rejected."""
     governance = runtime.agent.harness.governance(runtime.tenant)
     decision = await governance.check(spec.name, call.args, side_effects=spec.side_effects)
+    if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
+        runtime.events.warning(decision.error.code, decision.error.message)
     if asked is not None:
         decision = decision.asking(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props

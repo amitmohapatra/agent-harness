@@ -1,8 +1,10 @@
 """``trellis doctor`` (``python -m trellis.harness.doctor``): the effective settings and where
 each came from — the environment variable, derived, detected, or the default — secrets
 redacted; which gateway serves model names and what it cannot do (``trellis.harness.gateways``);
-whether each service is reachable and takes its key; whether the spool can be
-written and the Docker daemon answers; and what to set. It changes nothing: it suggests.
+whether each service is reachable and takes its key; the approval rules accepted from the
+memory service's learned suggestions (governance accepts them automatically, but for a tool at
+the highest risk); whether the spool can be written and the Docker daemon answers; and what to
+set. It changes nothing: it suggests.
 
 Exit code ``0`` when every check passes, ``1`` otherwise."""
 
@@ -35,6 +37,8 @@ SECRETS: Final = frozenset(
 )
 #: How long each check waits for its service, in seconds.
 CHECK_SECONDS: Final = 3.0
+#: Where the memory service lists the approval suggestions it learned.
+SUGGESTIONS_PATH: Final = "/v1/tools/approval-suggestions"
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,7 @@ async def checks(settings: Settings, environ: Mapping[str, str] | None = None) -
         found = await asyncio.gather(
             _gateway(client, model_gateway(settings, env)),
             _memory(client, settings),
+            _approval_rules(client, settings),
             _runs(client, settings),
         )
     done = [c for c in found if c is not None]
@@ -140,6 +145,23 @@ async def _memory(client: httpx.AsyncClient, s: Settings) -> Check | None:
         return None
     headers = {"Authorization": f"Bearer {s.api_key or ''}"}
     return await _reached(client, "memory", f"{s.memory_url.rstrip('/')}/v1/keys/self", headers)
+
+
+async def _approval_rules(client: httpx.AsyncClient, s: Settings) -> Check | None:
+    """The learned approval suggestions accepted so far, each by its tool and kind."""
+    if not s.memory_url:
+        return None
+    url = f"{s.memory_url.rstrip('/')}{SUGGESTIONS_PATH}"
+    headers = {"Authorization": f"Bearer {s.api_key or ''}"}
+    try:
+        response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        return Check("approval_rules", False, f"{url} cannot be reached ({type(exc).__name__})")
+    if not response.is_success:
+        return Check("approval_rules", False, f"{url} answered {response.status_code}")
+    found = response.json().get("suggestions") or []
+    accepted = [f"{x['tool']} ({x['suggestion']})" for x in found if x.get("accepted")]
+    return Check("approval_rules", True, f"accepted: {', '.join(accepted) or 'none'}")
 
 
 async def _runs(client: httpx.AsyncClient, s: Settings) -> Check | None:

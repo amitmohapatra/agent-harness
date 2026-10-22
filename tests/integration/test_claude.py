@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
 
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
@@ -67,7 +68,7 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     cli = started_with(tmp_path)
     # read_file is listed from the start: the CLI lists a server's tools once
     assert cli["tools"] == ["refund", "read_file"] and cli["allowed_tools"] is None
-    assert cli["permission_prompt_tool"] == "stdio"  # the harness's can_use_tool decides
+    assert cli["permission_prompt_tool"] is None  # the harness's PreToolUse hook decides
     assert cli["system_prompt"] == "You refund."
     assert target.mcp_servers == {}  # the team's options are untouched
 
@@ -374,3 +375,34 @@ async def test_a_kept_result_is_read_in_pages_after_a_pause(
     assert finished.answer == (
         f'11  row 11\n12  row 12\n…[29988 more lines: read_file(file_path="{KEPT}", offset=12)]'
     )
+
+
+class DenyAll(Hooks):
+    async def before_tool(self, call: ToolCall) -> Deny | Rewrite | None:
+        return Deny("nothing runs here")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        {},
+        {"allowed_tools": ["Bash", "Write"]},
+        {"permission_mode": "acceptEdits"},
+        {"permission_mode": "bypassPermissions"},
+    ],
+    ids=["default", "allowed_tools", "acceptEdits", "bypassPermissions"],
+)
+async def test_built_in_tools_are_governed_in_every_permission_mode(
+    harness: Harness, tmp_path: Path, mode: dict[str, Any]
+) -> None:
+    """The CLI skips ``can_use_tool`` for allowed tools and under ``acceptEdits`` and
+    ``bypassPermissions``: the harness's ``PreToolUse`` hook governs every call regardless."""
+    script = [
+        {"builtin": "Write", "args": {"file_path": "a.txt"}},
+        {"builtin": "Bash", "args": {"command": "rm -rf /"}},
+        {"text": "said: {last}"},
+    ]
+    agent = harness.wrap(options(tmp_path, script, **mode), id="locked", hooks=[DenyAll()])
+    result = await agent.run("work", user="u1")
+    assert result.answer == "said: Bash was not run: nothing runs here"
+    assert built_ins(tmp_path) == []  # neither ran

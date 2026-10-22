@@ -29,8 +29,8 @@ class FunctionAdapter:
     fixed_tools: bool = False
     narrows: Narrowing = "none"
 
-    def keeps_conversation(self, target: Any) -> bool:
-        return False
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        return None
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         if context and isinstance(input, list):

@@ -81,8 +81,11 @@ class LangGraphAdapter:
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
 
-    def keeps_conversation(self, target: Any) -> bool:
-        return _checkpointed(target) and not run_scoped(target)
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        """The graph's checkpointer, unless it checkpoints into its run."""
+        if not _checkpointed(target) or run_scoped(target):
+            return None
+        return target.checkpointer
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
         from langchain_core.messages import SystemMessage
