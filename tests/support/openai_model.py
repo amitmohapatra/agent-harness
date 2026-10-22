@@ -24,11 +24,13 @@ Turn = str | tuple[str, Args] | list[tuple[str, Args]]
 class ScriptedModel(Model):
     """Each call answers with the next turn: text, ``(tool, args)`` for a tool call (``args``
     as text: the arguments exactly as written), or a list of them for several calls in one
-    response. ``usage`` is every reply's (none counted by default)."""
+    response. ``usage`` is every reply's (none counted by default); ``ids`` prefixes its call
+    ids (two models in one run each their own)."""
 
-    def __init__(self, turns: list[Turn], usage: Usage | None = None) -> None:
+    def __init__(self, turns: list[Turn], usage: Usage | None = None, ids: str = "") -> None:
         self.turns = list(turns)
         self.usage = usage or Usage()
+        self.ids = ids
         self.inputs: list[Any] = []
         self.system: list[str | None] = []
         #: the tool names each call was offered
@@ -51,8 +53,8 @@ class ScriptedModel(Model):
         calls = turn if isinstance(turn, list) else [turn]
         return [
             ResponseFunctionToolCall(
-                id=f"fc_{len(self.inputs)}" + (f"_{n}" if n else ""),
-                call_id=f"call_{len(self.inputs)}" + (f"_{n}" if n else ""),
+                id=f"fc_{self.ids}{len(self.inputs)}" + (f"_{n}" if n else ""),
+                call_id=f"call_{self.ids}{len(self.inputs)}" + (f"_{n}" if n else ""),
                 type="function_call",
                 name=name,
                 arguments=args if isinstance(args, str) else json.dumps(args),

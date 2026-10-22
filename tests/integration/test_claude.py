@@ -257,8 +257,10 @@ async def test_a_session_the_cli_no_longer_holds_is_run_again_from_its_prompt(
     harness: Harness, tmp_path: Path
 ) -> None:
     refunds.clear()
+    script = [{"tool": "refund", "args": {"order": "o4"}}, {"text": "done"}]
     agent = harness.wrap(
-        options(tmp_path, [{"tool": "refund", "args": {"order": "o4"}}, {"text": "done"}]),
+        # files checkpointed on this machine's disk: the session is not kept in the journal
+        options(tmp_path, script, enable_file_checkpointing=True),
         id="moved",
         tools=[refund],
     )
@@ -288,12 +290,23 @@ async def test_a_permission_prompt_tool_of_the_teams_own_is_refused(
     assert "give your own permission check as can_use_tool" in result.error.message
 
 
-async def test_the_context_is_appended_to_the_system_prompt(
+async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
-    target = options(tmp_path, [{"text": "email"}], system_prompt="You help.")
-    await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
-    assert started_with(tmp_path)["system_prompt"] == f"You help.\n\n{memory_service.context_text}"
+    target = options(tmp_path, [{"text": "told: {context}"}], system_prompt="You help.")
+    result = await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
+    assert result.answer == f"told: {memory_service.context_text}"
+    started = started_with(tmp_path)
+    assert started["system_prompt"] == "You help."  # the team's, as it wrote it
+    assert started["context"] == memory_service.context_text
+
+
+async def test_without_memory_no_context_hook_is_registered(
+    harness: Harness, tmp_path: Path
+) -> None:
+    target = options(tmp_path, [{"text": "told: {context}"}])
+    result = await harness.wrap(target, id="helper").run("reach me how?", user="u1")
+    assert result.answer == "told: " and started_with(tmp_path)["context"] == ""
 
 
 async def test_the_hints_narrow_the_tools_for_the_run(

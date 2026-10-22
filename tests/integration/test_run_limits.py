@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from trellis.contracts import (
     RunStatus,
     ToolError,
 )
+from trellis.harness import pipeline
 from trellis.harness.a2a import remote
 from trellis.harness.events import RunEvents
 from trellis.harness.runs import LocalRuns
@@ -535,3 +537,48 @@ async def test_a_call_cut_short_still_ends_on_the_stream_on_every_adapter(
     assert result.data["status"] == cut and result.data["output"] == CUT[cut].format(tool="wait")
     assert len({e.tool_call_id for e in events[ended - 2 : ended + 2]}) == 1
     assert kinds[-1] is RunEventType.RUN_FINISHED
+
+
+class SlowChatModel(ScriptedChatModel):
+    """A model whose every answer takes ``delay`` seconds: the run's time runs out while a
+    model call is in flight."""
+
+    delay: float = 5.0
+
+    async def _agenerate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any
+    ) -> Any:
+        await asyncio.sleep(self.delay)
+        return self._generate(messages, stop, None, **kw)
+
+
+def _slow_graph(kind: str) -> Any:
+    model = SlowChatModel(turns=["too late"])
+    if kind == "react":
+        return ReAct(system="You answer.", model=model)
+    from langchain.agents import create_agent
+
+    from trellis.harness.middleware import ModelHooks
+
+    return create_agent(model, tools=[], middleware=[ModelHooks()])
+
+
+@pytest.mark.parametrize("kind", ["react", "langgraph"])
+async def test_a_deadline_during_a_model_call_ends_the_run_timeout(
+    harness: Harness, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model call is bounded by what is left of the run's time: when that bound fires, the
+    run is out of time — ``TIMEOUT``, not the model's ``MODEL_ERROR``. A slow machine sets the
+    run up slowly, after its time began: the model call's bound then fires before the attempt's
+    own clock, and its error reaches the attempt first (here: 0.1s of setup)."""
+    started = pipeline._started
+
+    def slow_setup(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(0.1)
+        return started(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_started", slow_setup)
+    agent = harness.wrap(_slow_graph(kind), id=f"slow-model-{kind}")
+    result = await agent.run("hi", user="u", timeout=0.3)
+    assert result.status is RunStatus.TIMEOUT, result.error
+    assert result.error is not None and result.error.code == "run_timeout"

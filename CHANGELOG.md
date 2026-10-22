@@ -24,6 +24,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ### Added
 
+- Native slots backed by our services (`trellis.harness.bridges`), with no new settings and
+  each framework's defaults kept without `MEMORY_URL`: the memory service as a LangGraph/Deep
+  Agents `BaseStore` (only when the graph has none; its own is kept, said once), as an OpenAI
+  Agents `Session` (only when the run has none), and as a Claude `UserPromptSubmit` context
+  hook. Every turn is still recorded to memory by the harness. `without={"memory"}` turns them
+  off.
+- Durable runs: Claude's session kept in the run's journal as the SDK's `SessionStore`
+  (progress saved before each step), so a resume on another worker continues it; the OpenAI
+  `RunState` of a pause resumes on any worker.
+- Native helpers as child runs (lineage, turns in memory, budget, governance): a Deep Agents
+  `task`, an OpenAI `Agent.as_tool` call, a Claude `agents=` subagent.
+- P4: LangGraph `context=` (a `context_schema`) and `durability` pass through
+  `framework_options`. P7: Claude's usage and cost are read from its `ResultMessage`.
+
 - Learned approval suggestions are accepted automatically when the tool catalog refreshes
   (the memory service's accept endpoint), except for a tool at the highest risk, which waits for
   a person; each acceptance is logged and `trellis doctor` lists the accepted ones.

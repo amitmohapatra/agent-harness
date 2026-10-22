@@ -24,6 +24,8 @@ class ScriptedChatModel(BaseChatModel):
     seen: list[list[BaseMessage]] = Field(default_factory=list)
     #: what each call was bound with: the tools' names, ``tool_choice`` and the settings
     requests: list[dict[str, Any]] = Field(default_factory=list)
+    #: the input and output tokens every reply reports (none by default)
+    spends: tuple[int, int] | None = None
 
     @property
     def _llm_type(self) -> str:
@@ -54,4 +56,11 @@ class ScriptedChatModel(BaseChatModel):
                     for n, (name, args) in enumerate(calls)
                 ],
             )
+        if self.spends is not None:
+            given, said = self.spends
+            message.usage_metadata = {
+                "input_tokens": given,
+                "output_tokens": said,
+                "total_tokens": given + said,
+            }
         return ChatResult(generations=[ChatGeneration(message=message)])
