@@ -77,6 +77,9 @@ class LangGraphAdapter:
     replays_history = True
 
     def __init__(self, target: Any = None) -> None:
+        # every model call of the graph accounted to the run's budget, ModelHooks or not
+        from trellis.harness import accounting  # noqa: F401
+
         #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
         #: converts them itself, so nothing is converted for it here
         per_call = HARNESS_TOOLS in (getattr(target, "channels", None) or {})
