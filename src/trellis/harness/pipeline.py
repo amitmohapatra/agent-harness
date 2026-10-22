@@ -266,7 +266,13 @@ async def _attempt(
         _call.reset(tokens[1])
         _current.reset(tokens[0])
         agent.running.pop(identity.run_id, None)
-    timed_out = budget.error if budget is not None and (clock.expired() or stopped) else None
+    # out of time: the attempt's clock ended it, its worker did, or what failed it failed past
+    # the run's time — a call bounded by what was left of it (a model call's ``TimeoutError``)
+    # fires with the clock, and its error may reach the attempt first
+    late = error is not None and runtime.ends_at is not None and time.monotonic() >= runtime.ends_at
+    timed_out = (
+        budget.error if budget is not None and (clock.expired() or stopped or late) else None
+    )
     bridge.unended(runtime, timed_out=timed_out is not None)
     result = await _concluded(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
