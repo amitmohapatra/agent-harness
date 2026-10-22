@@ -26,7 +26,7 @@ offered it, and a call of it is refused as not available.
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Annotated, Any, Final, NotRequired
 
 from deepagents.backends import StateBackend
@@ -99,8 +99,8 @@ def asks_for_steps(request: ModelRequest[Any]) -> bool:
     return len(_ITEM.findall(asked)) >= STEP_ITEMS or bool(_CUE.search(asked))
 
 
-def _history(request: ModelRequest[Any]) -> list[Any]:
-    return list((request.state or {}).get("messages", []))
+def _history(request: ModelRequest[Any]) -> Sequence[Any]:
+    return (request.state or {}).get("messages", [])
 
 
 def long_task(request: ModelRequest[Any]) -> bool:
