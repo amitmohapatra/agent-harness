@@ -21,7 +21,9 @@ from agents import FunctionTool
 from agents.tool_context import ToolContext
 
 from trellis.contracts import ToolSpec
-from trellis.harness.runtime import current
+from trellis.contracts.errors import is_pause_signal
+from trellis.harness.bridges.helpers import Helpers, Kind, text_of
+from trellis.harness.runtime import Paused, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
 
@@ -31,6 +33,8 @@ __all__ = ["FIX_ARGUMENTS", "arguments_of", "convert", "governed"]
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
 #: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
 MADE: Final = "_trellis_made"
+#: The attribute the SDK marks an agent called as a tool with (``Agent.as_tool``).
+AGENT_TOOL: Final = "_is_agent_tool"
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
@@ -40,14 +44,18 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
     return made
 
 
-def governed(tool: Any) -> Any:
+def governed(tool: Any, *, helpers: Helpers | None = None) -> Any:
     """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
     harness's are — governance (the catalog's risk, else ``write``: announced), a person when
     it asks, the journal (a resume does not run a call again), its time and its trace — as a
-    copy: the agent's own tool is not changed. Anything else is returned as it is."""
+    copy: the agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
+    is, with ``helpers``, a native helper of the run for each call (``bridges.helpers``).
+    Anything else is returned as it is."""
     if not isinstance(tool, FunctionTool) or getattr(tool.on_invoke_tool, MADE, False):
         return tool
     original = tool.on_invoke_tool
+    if helpers is not None and getattr(tool, AGENT_TOOL, False):
+        original = _helped(tool.name, original, helpers)
 
     async def invoke(context: ToolContext[Any], arguments: str) -> Any:
         args = arguments_of(arguments)
@@ -68,6 +76,33 @@ def governed(tool: Any) -> Any:
 
     setattr(invoke, MADE, True)
     return dataclasses.replace(tool, on_invoke_tool=invoke)
+
+
+def _helped(name: str, invoke: Any, helpers: Helpers) -> Any:
+    """``invoke`` (an agent tool's) as a helper of the run: started with the call's input,
+    ended with the agent's answer or its error — a pause leaves it to the next attempt, and
+    stops the run's agent too (the SDK hands the agent tool's pause back as an error text)."""
+
+    async def helped(context: ToolContext[Any], arguments: str) -> Any:
+        args = arguments_of(arguments)
+        task = args.get("input") if isinstance(args, dict) else None
+        key = context.tool_call_id
+        await helpers.start(
+            key, kind=Kind.AGENT_TOOL, name=name, task=str(task if task is not None else arguments)
+        )
+        try:
+            answer = await invoke(context, arguments)
+        except Exception as exc:
+            if not is_pause_signal(exc):
+                await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
+            raise
+        pending = helpers.runtime.pending
+        if pending is not None:  # the agent paused inside: the SDK told it as an error text
+            raise Paused(pending.interrupt)
+        await helpers.end(key, output=text_of(answer))
+        return answer
+
+    return helped
 
 
 def _one(tool: Tool) -> FunctionTool:

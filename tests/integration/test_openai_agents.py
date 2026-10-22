@@ -6,12 +6,16 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from agents import Agent, SQLiteSession, function_tool
+from agents import Agent, RunHooks, SQLiteSession, Usage, function_tool
 
+from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.openai_model import ScriptedModel
-from trellis import Harness, current, tool
+from trellis import Budget, Harness, Settings, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunStatus
+from trellis.harness import budget
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
 
 done: list[str] = []
@@ -366,3 +370,103 @@ def test_the_sdks_own_tracing_is_left_as_set_and_said_once(
     finally:
         provider.set_disabled(was)
         sdk_tracing_said.cache_clear()
+
+
+# ---------------------------------------------------------------------- handoffs, budget, hooks
+async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog() -> None:
+    @function_tool
+    def refund(order: str) -> str:
+        """Refund an order."""
+        done.append(f"refund {order}")
+        return f"refunded {order}"
+
+    model = ScriptedModel([*[("transfer_to_billing", {}), ("refund", {"order": "o1"})] * 2, "ok"])
+    billing = Agent(name="billing", model=model, tools=[refund])
+    triage = Agent(name="triage", model=model, handoffs=[billing])
+    billing.handoffs = [triage]  # a handoff that leads back
+    governance = Governance(FakeCatalog({"refund": Rule(risk="irreversible")}))
+    async with Harness(config=Settings(), governance=governance) as h:
+        agent = h.wrap(triage, id="desk")
+        paused = await agent.run("refund o1", user="u1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        assert paused.interrupt.question.startswith("Approve refund?")
+        assert done == []  # the catalog's rule asked a person first
+        finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert finished.answer == "ok" and done == ["refund o1"]
+    assert billing.tools == [refund] and triage.handoffs == [billing]  # yours, unchanged
+
+
+@tool(side_effects="read")
+def track(order: str) -> str:
+    """Track an order."""
+    done.append(f"track {order}")
+    return "on its way"
+
+
+async def test_a_token_budget_stops_the_run_without_any_hooks() -> None:
+    model = ScriptedModel(
+        [("track", {"order": "o1"}), "done"], usage=Usage(input_tokens=50, output_tokens=10)
+    )
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(
+            Agent(name="s", model=model), id="s", tools=[track], budget=Budget(max_tokens=30)
+        )
+        result = await agent.run("track o1", user="u1")
+    assert result.status is RunStatus.PARTIAL and done == []  # the reply spent it: not run
+    assert result.error is not None and result.error.code == budget.BUDGET_EXCEEDED
+    assert "max_tokens 30 reached (60 spent)" in result.error.message
+
+
+class Told(RunHooks[Any]):
+    """The team's own ``RunHooks``: what the SDK told them."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    async def on_agent_start(self, context: Any, agent: Any) -> None:
+        self.events.append(f"agent {agent.name}")
+
+    async def on_llm_start(self, context: Any, agent: Any, *args: Any) -> None:
+        self.events.append("llm")
+
+    async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
+        self.events.append("replied")
+
+    async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
+        self.events.append(f"tool {tool.name}")
+
+    async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: object) -> None:
+        self.events.append(f"done {tool.name}")
+
+    async def on_handoff(self, context: Any, from_agent: Any, to_agent: Any) -> None:
+        self.events.append(f"handoff {to_agent.name}")
+
+    async def on_agent_end(self, context: Any, agent: Any, output: Any) -> None:
+        self.events.append(f"end {output}")
+
+
+async def test_the_teams_own_run_hooks_are_told_everything(harness: Harness) -> None:
+    @function_tool
+    def eta(order: str) -> str:
+        return "tomorrow"
+
+    model = ScriptedModel([("transfer_to_shipper", {}), ("eta", {"order": "o1"}), "tomorrow"])
+    shipper = Agent(name="shipper", model=model, tools=[eta])
+    told = Told()
+    agent = harness.wrap(Agent(name="desk", model=model, handoffs=[shipper]), id="d")
+    result = await agent.run("when?", user="u1", framework_options={"hooks": told})
+    assert result.status is RunStatus.SUCCESS
+    assert told.events == [
+        "agent desk",
+        "llm",
+        "replied",
+        "handoff shipper",
+        "agent shipper",
+        "llm",
+        "replied",
+        "tool eta",
+        "done eta",
+        "llm",
+        "replied",
+        "end tomorrow",
+    ]

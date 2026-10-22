@@ -45,8 +45,15 @@ def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dic
     ) -> SyncHookJSONOutput:
         return {"hookSpecificOutput": {"hookEventName": PROMPT_EVENT, "additionalContext": context}}
 
+    return with_hook(hooks, PROMPT_EVENT, HookMatcher(hooks=[add_context]))
+
+
+def with_hook(
+    hooks: Mapping[str, Sequence[Any]] | None, event: str, matcher: Any
+) -> dict[str, Any]:
+    """The options' hooks with ``matcher`` added at ``event``, after theirs."""
     own = dict(hooks or {})
-    own[PROMPT_EVENT] = [*own.get(PROMPT_EVENT, ()), HookMatcher(hooks=[add_context])]
+    own[event] = [*own.get(event, ()), matcher]
     return own
 
 
@@ -115,4 +122,4 @@ def _name(key: Mapping[str, Any]) -> str:
     return f"{key['session_id']}/{subpath}" if subpath else str(key["session_id"])
 
 
-__all__ = ["PROMPT_EVENT", "JournalSessions", "session_store", "with_context"]
+__all__ = ["PROMPT_EVENT", "JournalSessions", "session_store", "with_context", "with_hook"]

@@ -339,3 +339,88 @@ async def test_flipped_claude_and_functions_keep_memorys_window(
 
     await restarted(memory_service, lambda: function)
     assert windows(memory_service) == [True, True]
+
+
+# ---------------------------------------------------------------------- memory keeps every turn
+def recorded(service: FakeMemoryService) -> str:
+    """Everything the memory service's threads were told."""
+    return " ".join(str(m["content"]) for kept in service.threads.values() for m in kept)
+
+
+def claude(tmp_path: Path) -> Any:
+    return ClaudeAgentOptions(
+        cli_path=CLI,
+        env={
+            "FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]),
+            "FAKE_CLAUDE_SESSIONS": str(tmp_path / uuid.uuid4().hex),
+        },
+    )
+
+
+async def function(input: Any, agent: Any) -> str:
+    return "ok"
+
+
+def durable_graph(name: str) -> Callable[[], Any]:
+    """A graph built on every worker on the same durable saver."""
+    return lambda: create_agent(
+        ScriptedChatModel(turns=["ok"]), tools=[], checkpointer=SharedSaver(name)
+    )
+
+
+#: each framework on each owner of the history: the target built on every worker, and the
+#: run's framework options
+OWNERS: dict[str, Callable[[Path], tuple[Callable[[], Any], dict[str, Any] | None]]] = {
+    "graph, durable saver": lambda tmp: (durable_graph(uuid.uuid4().hex), None),
+    "graph, in-RAM saver": lambda tmp: (
+        lambda: create_agent(
+            ScriptedChatModel(turns=["ok"]), tools=[], checkpointer=InMemorySaver()
+        ),
+        None,
+    ),
+    "openai, memory's session": lambda tmp: (
+        lambda: Agent(name="s", model=ScriptedModel(["ok"])),
+        None,
+    ),
+    "openai, durable session": lambda tmp: (
+        lambda: Agent(name="s", model=ScriptedModel(["ok"])),
+        {"session": SQLiteSession("t1", tmp / "sessions.db")},
+    ),
+    "openai, OpenAI's conversation": lambda tmp: (
+        lambda: Agent(name="s", model=ScriptedModel(["ok"])),
+        {"conversation_id": "conv_1"},
+    ),
+    "claude": lambda tmp: (lambda: claude(tmp), None),
+    "function": lambda tmp: (lambda: function, None),
+}
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("owner", list(OWNERS))
+async def test_memory_is_told_every_turn_whoever_replays_the_history(
+    owner: str,
+    policy: Policy,
+    memory_service: FakeMemoryService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(history, "POLICY", policy)
+    build, options = OWNERS[owner](tmp_path)
+    await restarted(memory_service, build, framework_options=options)
+    assert FIRST in recorded(memory_service) and SECOND in recorded(memory_service)
+    session = (options or {}).get("session")
+    if session is not None:
+        session.close()
+
+
+@pytest.mark.parametrize("server", ["conversation_id", "previous_response_id"])
+async def test_a_conversation_openai_keeps_on_its_servers_keeps_memorys_window_off(
+    server: str, memory_service: FakeMemoryService
+) -> None:
+    model = ScriptedModel(["noted", "QX-4471"])
+    await restarted(
+        memory_service, lambda: Agent(name="s", model=model), framework_options={server: "c_1"}
+    )
+    assert windows(memory_service) == [False, False]  # OpenAI's servers replay it
+    assert users(model.inputs[-1]) == [SECOND]  # only the new turn is sent
+    assert FIRST in recorded(memory_service) and SECOND in recorded(memory_service)

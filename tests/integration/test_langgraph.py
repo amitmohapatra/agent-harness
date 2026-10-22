@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass
 from typing import Any, NotRequired, TypedDict
 
 import pytest
 from langchain.agents import create_agent
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, START, StateGraph
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.runtime import Runtime as GraphRuntime
 from langgraph.types import interrupt
 
 from tests.support.chat_model import ScriptedChatModel
@@ -422,3 +426,49 @@ async def test_a_graphs_interrupt_that_cannot_be_asked_fails_the_run_saying_why(
     result = await harness.wrap(asking_graph(value), id="bad").run({"topic": "x"}, user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert re.search(why, result.error.message), result.error.message
+
+
+# ---------------------------------------------------------------------- run arguments, streaming
+@dataclass
+class Shop:
+    name: str
+
+
+def greet(state: MessagesState, runtime: GraphRuntime[Shop]) -> dict[str, Any]:
+    """A node reading the graph's runtime context, writing to its stream and answering in
+    content blocks (as an Anthropic model does)."""
+    shop = runtime.context.name if runtime.context is not None else "the shop"
+    get_stream_writer()({"step": "greet", "shop": shop})
+    blocks = [
+        {"type": "reasoning", "reasoning": "be brief"},
+        {"type": "text", "text": f"welcome to {shop}"},
+    ]
+    return {"messages": [AIMessage(content=blocks)]}
+
+
+def shop_graph(checkpointer: Any = None) -> Any:
+    graph = StateGraph(MessagesState, context_schema=Shop)
+    graph.add_node("greet", greet)
+    graph.add_edge(START, "greet")
+    graph.add_edge("greet", END)
+    return graph.compile(checkpointer=checkpointer)
+
+
+async def test_the_graphs_runtime_context_and_durability_go_to_the_run(harness: Harness) -> None:
+    agent = harness.wrap(shop_graph(SharedSaver(uuid.uuid4().hex)), id="shop")
+    options = {"context": Shop(name="Tidewater"), "durability": "exit"}
+    result = await agent.run("hi", user="u1", framework_options=options)
+    assert result.status is RunStatus.SUCCESS and result.answer == "welcome to Tidewater"
+
+
+async def test_streaming_carries_content_block_text_and_what_the_graph_writes(
+    harness: Harness,
+) -> None:
+    agent = harness.wrap(shop_graph(), id="shop")
+    events = [e async for e in agent.stream("hi", user="u1")]
+    text = "".join(
+        e.data.get("delta", "") for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT
+    )
+    assert text == "welcome to the shop"  # the text block's, not the reasoning's
+    written = [e.data for e in events if e.type is RunEventType.CUSTOM]
+    assert {"name": "graph_write", "value": {"step": "greet", "shop": "the shop"}} in written

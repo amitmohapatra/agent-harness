@@ -533,7 +533,8 @@ class ModelHooks(AgentMiddleware):
                 if error is exc:
                     raise
                 raise error from exc
-            if runtime is not None:  # what the run spent (``budget.py``)
+            # what the run spent (``budget.py``), unless the run's callbacks counted it
+            if runtime is not None and not runtime.replies_counted:
                 budget.account_reply(runtime, reply)
             await hooks.answered(call, reply)
             _replied(span, reply)

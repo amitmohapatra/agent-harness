@@ -40,6 +40,8 @@ from trellis.harness.adapters.base import (
     Output,
     ToolFormat,
 )
+from trellis.harness.bridges import said
+from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.history import Thread, owns, thread_for
 from trellis.harness.bridges.session import MemorySession, bridgeable
 from trellis.harness.journal import Pending
@@ -48,8 +50,12 @@ from trellis.harness.runtime import Runtime, reason_of
 log = logging.getLogger("trellis.harness")
 
 #: ``Runner.run``'s arguments the harness gives itself: the agent (a clone carrying the harness
-#: tools), its input (with the memory context, or the resumed state) and the run's hooks.
-OWN_ARGUMENTS: Final = ("starting_agent", "input", "hooks")
+#: tools) and its input (with the memory context, or the resumed state). Its ``hooks`` are the
+#: harness's ``ModelHooks``, which tell the team's own ``RunHooks`` everything after them.
+OWN_ARGUMENTS: Final = ("starting_agent", "input")
+#: ``Runner.run``'s arguments that keep the conversation on OpenAI's servers: the framework's
+#: thread, durable (``bridges.history``).
+SERVER_THREAD: Final = ("conversation_id", "previous_response_id", "auto_previous_response_id")
 #: The raw streaming event that carries a text delta.
 TEXT_DELTA = "response.output_text.delta"
 #: What the model reads for a call a reviewer edited (the SDK cannot run it with other
@@ -117,22 +123,32 @@ class OpenAIAgentsAdapter:
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
         from agents import Runner
 
-        agent, hooks = self._agent(target, run), _hooks(run)
-        options = _options(run, native_input)
+        helpers = Helpers(run.runtime, self.name)
+        agent, options = self._agent(target, run, helpers), _options(run, native_input)
+        hooks = _hooks(options, helpers, agent)
         given = await self._input(agent, native_input)
-        result = await Runner.run(agent, given, hooks=hooks, **options)
-        state = _edited_call(result, native_input)
-        if state is not None:  # the model called the edited tool as told: it runs, approved
-            result = await Runner.run(agent, state, hooks=hooks, **options)
+        error: BaseException | None = None
+        try:
+            result = await Runner.run(agent, given, hooks=hooks, **options)
+            state = _edited_call(result, native_input)
+            if state is not None:  # the model called the edited tool as told: it runs, approved
+                result = await Runner.run(agent, state, hooks=hooks, **options)
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            await helpers.closed(error)
         return result
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from agents import Runner
 
-        agent, hooks = self._agent(target, run), _hooks(run)
-        options = _options(run, native_input)
+        helpers = Helpers(run.runtime, self.name)
+        agent, options = self._agent(target, run, helpers), _options(run, native_input)
+        hooks = _hooks(options, helpers, agent)
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
+        error: BaseException | None = None
         try:
             async for delta in _deltas(result):
                 yield delta
@@ -141,11 +157,15 @@ class OpenAIAgentsAdapter:
                 result = Runner.run_streamed(agent, state, hooks=hooks, **options)
                 async for delta in _deltas(result):
                     yield delta
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
             # cut short (cancelled, out of time), the SDK stops its run without waiting for
             # it: its tool calls end (on the run's stream too) before the run does
             assert result.run_loop_task is not None  # set by run_streamed
             await asyncio.wait({result.run_loop_task})
+            await helpers.closed(error)
         yield Output(result)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -205,7 +225,7 @@ class OpenAIAgentsAdapter:
         if own:
             raise ConfigurationError(
                 f"framework_options {', '.join(map(repr, own))}: the harness gives Runner.run "
-                "its agent, its input and its hooks itself (hooks go on h.wrap(hooks=))"
+                "its agent and its input itself"
             )
         taken = inspect.signature(Runner.run).parameters
         unknown = [key for key in options if key not in taken]
@@ -217,17 +237,14 @@ class OpenAIAgentsAdapter:
 
     # ------------------------------------------------------------------ internals
     @staticmethod
-    def _agent(target: Any, run: Invocation) -> Any:
-        from trellis.harness.tools.convert.openai_agents import governed
-
-        # the agent's own tools governed, on a copy (the agent you wrapped is not changed)
-        own = [governed(t) for t in target.tools]
+    def _agent(target: Any, run: Invocation, helpers: Helpers) -> Any:
+        """The agent run: a copy of ``target`` carrying the harness tools beside its own, and
+        every agent it can hand off to a copy too (:func:`governed_agents`) — each one's own
+        tools governed. The agents you wrapped are not changed."""
         # a tool the agent carries already (built with h.tools: read_file, say) is not added twice
         carried = {getattr(t, "name", None) for t in target.tools}
         added = [t for t in run.native_tools or () if t.name not in carried]
-        if not added and all(a is b for a, b in zip(own, target.tools, strict=True)):
-            return target
-        return target.clone(tools=[*own, *added])
+        return governed_agents(target, added=added, agent_id=run.runtime.agent_id, helpers=helpers)
 
     @staticmethod
     async def _input(agent: Any, native_input: Any) -> Any:
@@ -247,13 +264,54 @@ class OpenAIAgentsAdapter:
 
 
 def _thread(runtime: Runtime) -> Thread:
-    """The session the run works on, by the history policy (``bridges.history``)."""
+    """The thread the run works on, by the history policy (``bridges.history``): its session,
+    or the conversation OpenAI's servers keep (:data:`SERVER_THREAD`, durable)."""
+    options = runtime.framework_options
+    server = next((options[key] for key in SERVER_THREAD if options.get(key)), None)
     return thread_for(
-        runtime.framework_options.get("session"),
+        options.get("session") or server,
         bridged=bridgeable(runtime),
         agent_id=runtime.agent_id,
         memory=runtime.run_memory is not None,
     )
+
+
+def governed_agents(target: Any, *, added: list[Any], agent_id: str, helpers: Helpers) -> Any:
+    """``target`` and every agent reachable through its handoffs, each a copy whose own tools
+    are governed (``tools.convert.openai_agents.governed``) — recursively, each agent copied
+    once, so handoffs that lead back are kept — ``added`` (the run's harness tools) on
+    ``target``'s. A ``Handoff`` object hides its agent until it is invoked: its tools cannot be
+    reached, which is said once."""
+    from agents import Agent
+
+    from trellis.harness.tools.convert.openai_agents import governed
+
+    copies: dict[int, Any] = {}
+
+    def copied(agent: Any, extra: list[Any]) -> Any:
+        found = copies.get(id(agent))
+        if found is not None:
+            return found
+        own = [governed(t, helpers=helpers) for t in agent.tools]
+        copy = copies[id(agent)] = agent.clone(tools=[*own, *extra])
+        handoffs = []
+        for handoff in agent.handoffs:
+            if isinstance(handoff, Agent):
+                handoffs.append(copied(handoff, []))
+                continue
+            said(
+                f"handoff:{agent_id}:{getattr(handoff, 'agent_name', '?')}",
+                "%s: the handoff to %s is a Handoff object, which hides its agent until it is "
+                "invoked: that agent's own tools are not governed (hand off to the Agent itself)",
+                agent_id,
+                getattr(handoff, "agent_name", "?"),
+                extra={"agent_id": agent_id},
+            )
+            handoffs.append(handoff)
+        copy.handoffs = handoffs
+        return copy
+
+    return copied(target, added)
 
 
 def _options(run: Invocation, native_input: Any) -> dict[str, Any]:
@@ -273,13 +331,13 @@ def _options(run: Invocation, native_input: Any) -> dict[str, Any]:
     return options
 
 
-def _hooks(run: Invocation) -> Any:
-    """The run's model hooks as the SDK's own ``RunHooks`` — none when it has no hooks."""
-    if not run.runtime.agent.hooks:
-        return None
+def _hooks(options: dict[str, Any], helpers: Helpers, agent: Any) -> Any:
+    """The run's ``RunHooks``: the harness's ``ModelHooks`` — every reply's usage counted toward
+    the run's budget, the run's model hooks, the agents handed off to as the run's helpers —
+    then the team's own (``hooks`` of the run's options, taken out of them)."""
     from trellis.harness.hooks.openai_agents import ModelHooks
 
-    return ModelHooks()
+    return ModelHooks(chained=options.pop("hooks", None), helpers=helpers, starting=agent.name)
 
 
 async def _deltas(result: Any) -> AsyncIterator[str]:

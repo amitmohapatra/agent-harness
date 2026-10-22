@@ -201,7 +201,14 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", Client)
     replay = SimpleNamespace(journal=Journal())
     runtime = SimpleNamespace(
-        pending=None, replay=replay, framework_options={}, agent_id="a", run_memory=None
+        pending=None,
+        replay=replay,
+        framework_options={},
+        agent_id="a",
+        run_memory=None,
+        agent=SimpleNamespace(budget=None),
+        parent=None,
+        attempt=1,
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
@@ -210,15 +217,16 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     items = [i async for i in adapter.stream(options, native, run)]
     assert items[:-1] == ["done"]
     assert isinstance(items[-1], Output) and items[-1].value == messages
-    # no context and no harness tools: the options as they were, the permission check, the
+    # no context and no harness tools: the options as they were, the governance hook, the
     # room for a large tool result and the session kept in the run's journal added
     [sent] = seen
-    assert sent.can_use_tool is not None and sent.resume is None
+    assert sent.can_use_tool is None and sent.resume is None and sent.max_budget_usd is None
+    assert [list(m.hooks) != [] for m in sent.hooks["PreToolUse"]] == [True]
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
     assert sent.session_store_flush == "eager"
     unchanged = {
-        "can_use_tool": None,
+        "hooks": None,
         "max_buffer_size": None,
         "session_store": None,
         "session_store_flush": options.session_store_flush,
@@ -261,10 +269,20 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
             yield {"type": "custom", "data": "progress"}
             yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
 
-    runtime = SimpleNamespace(thread=None, run_id="run_1", framework_options={}, run_memory=None)
+    written: list[tuple[str, dict[str, Any]]] = []
+    events = SimpleNamespace(custom=lambda name, **data: written.append((name, data)))
+    runtime = SimpleNamespace(
+        thread=None,
+        run_id="run_1",
+        framework_options={},
+        run_memory=None,
+        events=events,
+        attempt=1,
+    )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]
     assert items[0] == "hel" and len(items) == 2
+    assert written == [("graph_write", {"value": "progress"})]  # get_stream_writer()
     assert items[1].value == GraphOutput(value={"messages": []}, interrupts=())
 
 

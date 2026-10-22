@@ -175,10 +175,10 @@ async def test_claudes_options_merge_with_what_the_harness_sets(
     ("framework", "options", "said"),
     [
         ("function", {"max_turns": 1}, "which a function target does not have"),
-        ("react", {"max_turns": 1}, "RunnableConfig keys: 'max_turns' is none of"),
-        ("langgraph", {"max_turns": 1}, "RunnableConfig keys: 'max_turns' is none of"),
+        ("react", {"max_turns": 1}, "the run's own arguments: 'max_turns' is none of"),
+        ("langgraph", {"max_turns": 1}, "the run's own arguments: 'max_turns' is none of"),
         ("langgraph", {"configurable": "north"}, "configurable is a dict"),
-        ("openai_agents", {"hooks": None}, "'hooks': the harness gives Runner.run"),
+        ("openai_agents", {"input": "x"}, "'input': the harness gives Runner.run"),
         ("openai_agents", {"recursion_limit": 3}, "Runner.run takes no such argument"),
         ("claude_agent_sdk", {"recursion_limit": 3}, "no ClaudeAgentOptions field"),
         ("claude_agent_sdk", {"resume": "s1"}, "'resume' \\(the harness resumes"),

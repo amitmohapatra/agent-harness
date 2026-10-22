@@ -1,17 +1,23 @@
 """Claude Agent SDK: the target is the ``ClaudeAgentOptions`` a team already configured.
 
-* input: the prompt; the memory context goes with every prompt as Claude Code's own
-  ``UserPromptSubmit`` hook adds context (``bridges.claude.with_context``), beside the options'
-  hooks;
+* input: the prompt — text, or content blocks (an image...) sent as the SDK's streamed user
+  message; the memory context goes with every prompt as Claude Code's own ``UserPromptSubmit``
+  hook adds context (``bridges.claude.with_context``), beside the options' hooks;
 * run: ``query(prompt, options)`` on a copy of the options that also carries the harness
   tools as one in-process MCP server (``mcp__trellis__*``) beside the team's own servers — a
   ``mcp_servers`` given as a config file or JSON text is read, since the SDK serves an
   in-process server only from a dict;
-* permissions: the SDK's own ``can_use_tool`` — a harness tool is let through (the bridge is
-  its check); any other tool the CLI asks about (Claude Code's built-ins: ``Bash``,
-  ``Write``...; a team's own MCP server's) is decided as a harness call is — the run's hooks,
-  governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`), a person when it asks — then by the
-  team's own ``can_use_tool``, when it has one;
+* permissions: the SDK's own ``PreToolUse`` hook, which the CLI runs before every tool call
+  whatever its permission mode or ``allowed_tools`` (where ``can_use_tool`` is skipped) — a
+  harness tool is let through (the bridge is its check); any other (Claude Code's built-ins:
+  ``Bash``, ``Write``...; a team's own MCP server's) is decided as a harness call is — the run's
+  hooks, governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`), a person when it asks — then by
+  the team's own ``can_use_tool``, when it has one, asked by the hook;
+* spending: each query's usage and cost (``ResultMessage.usage``, ``total_cost_usd``) count
+  toward the run's budget, and a ``max_cost`` budget is the SDK's own cap on the query
+  (``max_budget_usd``, what is left of it): a query stopped there ends the run ``PARTIAL``;
+* streaming: each assistant text block — or, with ``include_partial_messages``, each text delta
+  of the SDK's ``StreamEvent`` messages;
 * pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
   ends). The session the CLI kept (``ResultMessage.session_id``) is in the run's journal, and
   the next attempt resumes it (``resume=``): Claude goes on from where it was — its built-in
@@ -25,8 +31,8 @@
   prompt the run pinned (``h.model_headers(prompt=)``) select the version it pinned — the CLI
   reads them as it starts, once per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
-  before the harness's own changes. Merged with them: ``hooks`` (the context hook goes beside
-  them), ``can_use_tool`` (the harness asks it after governance, as the target's)
+  before the harness's own changes. Merged with them: ``hooks`` (the governance and context
+  hooks go beside them), ``can_use_tool`` (the harness's hook asks it after governance)
   and ``mcp_servers`` (the harness's ``trellis`` server goes beside them; a server of that name
   is refused). Refused: the fields that choose the session a query continues, and the
   permission prompt tool (:data:`OWNED`).
@@ -38,7 +44,7 @@ import dataclasses
 import json
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
-from typing import Any, ClassVar, Final
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
 
 from trellis.contracts import (
     ConfigurationError,
@@ -48,8 +54,10 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
 )
+from trellis.harness import budget
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
-from trellis.harness.bridges.claude import session_store, with_context
+from trellis.harness.bridges.claude import session_store, with_context, with_hook
+from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.bridges.history import owns, thread_for
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import selected_env
@@ -57,9 +65,13 @@ from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
 
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
+
 #: What Claude Code's built-in tools do, as governance sees them (the tool catalog's word
-#: overrides it): reads run, writes run and are announced, ``Bash`` asks. Any other tool the
-#: CLI asks about is a write.
+#: overrides it): reads run, writes run and are announced, ``Bash`` asks; a subagent's call
+#: (``Agent``, ``Task``) only hands work on — its own calls are governed one by one. Any other
+#: tool the CLI asks about is a write.
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "Read": "read",
     "Glob": "read",
@@ -68,6 +80,8 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "WebFetch": "read",
     "WebSearch": "read",
     "TodoWrite": "read",
+    "Agent": "read",
+    "Task": "read",
     "Write": "write",
     "Edit": "write",
     "MultiEdit": "write",
@@ -112,9 +126,24 @@ RESUMED_DENIED: Final = (
 )
 
 
+#: The ``ResultMessage`` subtype of a query the SDK stopped at its ``max_budget_usd``.
+MAX_BUDGET: Final = "error_max_budget_usd"
+#: The hook event built-in tool calls are governed at.
+TOOL_EVENT: Final = "PreToolUse"
+#: The raw stream event of a text delta (``include_partial_messages``).
+TEXT_DELTA: Final = "text_delta"
+#: Claude Code's tool that runs a subagent (``agents=``): ``Agent``, named ``Task`` before.
+SUBAGENT_TOOLS: Final = frozenset({"Agent", "Task"})
+#: The subagent an ``Agent`` call runs when it names none.
+GENERAL_PURPOSE: Final = "general-purpose"
+#: Why a subagent whose call failed without saying why ended.
+SUBAGENT_FAILED: Final = "the subagent's call failed"
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class ClaudeInput:
-    prompt: str
+    #: the prompt: its text, or its content blocks (sent as a streamed user message)
+    prompt: str | list[Any]
     context: str | None
     #: the tool call a person answered about, when the run resumes from that pause
     answered: ToolCall | None = None
@@ -142,22 +171,35 @@ class ClaudeAdapter:
         return owns(thread_for(None, bridged=False, agent_id=runtime.agent_id, memory=memory))
 
     def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
-        prompt = input if isinstance(input, str) else json.dumps(input, default=str)
-        return ClaudeInput(prompt=prompt, context=context)
+        """Text, or content blocks (a list of them: the SDK's streamed user message); any other
+        input as its JSON."""
+        if isinstance(input, str | list):
+            return ClaudeInput(prompt=input, context=context)
+        return ClaudeInput(prompt=json.dumps(input, default=str), context=context)
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        return [m async for m in self._messages(target, native_input, run)]
+        return [m async for m in self._helped(target, native_input, run)]
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
-        from claude_agent_sdk import AssistantMessage, TextBlock
+        """Each assistant text block; with ``include_partial_messages``, each text delta of the
+        SDK's ``StreamEvent`` messages instead (the message they make is not said again)."""
+        from claude_agent_sdk import AssistantMessage, StreamEvent, TextBlock
 
         messages: list[Any] = []
-        async for message in self._messages(target, native_input, run):
+        streamed = False  # the current message came as deltas
+        async for message in self._helped(target, native_input, run):
             messages.append(message)
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock) and block.text:
-                        yield block.text
+            if isinstance(message, StreamEvent):
+                delta = message.event.get("delta") or {}
+                if delta.get("type") == TEXT_DELTA and delta.get("text"):
+                    streamed = True
+                    yield delta["text"]
+            elif isinstance(message, AssistantMessage):
+                if not streamed:
+                    for block in message.content:
+                        if isinstance(block, TextBlock) and block.text:
+                            yield block.text
+                streamed = False
         yield Output(messages)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -171,13 +213,16 @@ class ClaudeAdapter:
                 if text:
                     transcript.append(("assistant", text))
             elif isinstance(message, ResultMessage):
-                if message.is_error:
+                # a query stopped at the run's budget answers with what it has (PARTIAL)
+                if message.is_error and message.subtype != MAX_BUDGET:
                     raise ClaudeRunError("; ".join(message.errors or []) or message.subtype)
                 answer = (
                     message.structured_output
                     if message.structured_output is not None
                     else message.result
                 )
+                if not answer and message.subtype == MAX_BUDGET and transcript:
+                    answer = transcript[-1][1]  # the CLI's cap ends it without one: its last text
         return Extracted(answer=answer, transcript=transcript)
 
     def resume_input(
@@ -215,6 +260,22 @@ class ClaudeAdapter:
             )
 
     # ------------------------------------------------------------------ internals
+    async def _helped(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
+        """The query's messages (:meth:`_messages`), each subagent Claude runs (``agents=``)
+        a helper of the run (``bridges.helpers``) from its ``Agent`` call to that call's
+        result."""
+        helpers = Helpers(run.runtime, self.name)
+        error: BaseException | None = None
+        try:
+            async for message in self._messages(target, native_input, run):
+                await _subagents(helpers, message)
+                yield message
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            await helpers.closed(error)
+
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncIterator[Any]:
@@ -250,7 +311,7 @@ class ClaudeAdapter:
     ) -> AsyncIterator[Any]:
         """One query (``session``: the one it resumes) on the SDK's client; the session it runs
         in kept in the journal as it goes."""
-        from claude_agent_sdk import ClaudeSDKClient
+        from claude_agent_sdk import ClaudeSDKClient, ResultMessage
 
         runtime = run.runtime
         given = runtime.framework_options
@@ -260,14 +321,48 @@ class ClaudeAdapter:
         # disconnected as soon as the run pauses: the CLI process ends, and the SDK hands the
         # session store what it mirrored before the journal is saved with the pause
         async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt)
+            await client.query(prompt if isinstance(prompt, str) else _streamed(prompt))
             async for message in client.receive_response():
                 found = getattr(message, "session_id", None)
                 if isinstance(found, str):
                     runtime.replay.journal.session = found
+                if isinstance(message, ResultMessage):
+                    _spent(runtime, options, message)
                 yield message
                 if runtime.pending is not None:
                     return  # the run paused: stop here
+
+
+async def _subagents(helpers: Helpers, message: Any) -> None:
+    """A subagent's start (the main agent's ``Agent`` call: its ``subagent_type`` and
+    ``prompt``) or end (that call's result) in ``message``."""
+    from claude_agent_sdk import AssistantMessage, ToolResultBlock, ToolUseBlock, UserMessage
+
+    if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+        calls = [
+            b for b in message.content if isinstance(b, ToolUseBlock) and b.name in SUBAGENT_TOOLS
+        ]
+        for call in calls:
+            await helpers.start(
+                call.id,
+                kind=Kind.SUBAGENT,
+                name=str(call.input.get("subagent_type") or GENERAL_PURPOSE),
+                task=str(call.input.get("prompt") or call.input.get("description") or ""),
+            )
+    elif isinstance(message, UserMessage) and isinstance(message.content, list):
+        results = [b for b in message.content if isinstance(b, ToolResultBlock)]
+        for result in results:
+            text = _result_text(result.content)
+            ended = {"error": text or SUBAGENT_FAILED} if result.is_error else {"output": text}
+            await helpers.end(result.tool_use_id, **ended)
+
+
+def _result_text(content: Any) -> str:
+    """A tool result's text (a string, or its text blocks)."""
+    if isinstance(content, str):
+        return content
+    blocks = content or []
+    return "".join(b.get("text", "") for b in blocks if isinstance(b, dict))
 
 
 def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
@@ -283,22 +378,58 @@ def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     return told.format(tool=f"mcp__{SERVER}__{call.tool}" if harness else call.tool)
 
 
+async def _streamed(content: list[Any]) -> AsyncIterator[dict[str, Any]]:
+    """Content blocks as the SDK's streamed user message."""
+    yield {"type": "user", "message": {"role": "user", "content": content}}
+
+
+def _spent(runtime: Runtime, options: Any, result: Any) -> None:
+    """A query's usage and cost (its ``ResultMessage``) on the run's budget; a query the SDK
+    stopped at the run's ``max_cost`` ends the run at its budget (``PARTIAL``)."""
+    usage = result.usage or {}
+    cached = int(usage.get("cache_read_input_tokens") or 0)
+    written = int(usage.get("cache_creation_input_tokens") or 0)
+    budget.account(
+        runtime,
+        model=options.model,
+        input_tokens=int(usage.get("input_tokens") or 0) + cached + written,
+        output_tokens=int(usage.get("output_tokens") or 0),
+        cached=cached,
+        cost=result.total_cost_usd,
+    )
+    if result.subtype == MAX_BUDGET:
+        budget.stopped(runtime, budget.reached(runtime) or "max_cost reached (the SDK's cap)")
+
+
+def _left(runtime: Runtime, options: Any) -> float | None:
+    """The SDK's own cap for the query (``max_budget_usd``): the options', else what is left of
+    the run's ``max_cost`` budget (``None``: neither)."""
+    if options.max_budget_usd is not None:
+        return float(options.max_budget_usd)
+    cap = runtime.agent.budget.max_cost if runtime.agent.budget is not None else None
+    if cap is None:
+        return None
+    return max(0.0, cap - runtime.replay.journal.spent.get("cost", 0.0))
+
+
 def _options(options: Any, context: str | None, run: Invocation, session: str | None) -> Any:
     from trellis.harness.tools.convert import claude as convert
 
     if options.permission_prompt_tool_name:
         raise ConfigurationError(
-            "the harness decides Claude's tool permissions with can_use_tool: give your own "
-            "permission check as can_use_tool (the harness asks it after governance), not "
+            "the harness decides Claude's tool calls with a PreToolUse hook: give your own "
+            "permission check as can_use_tool (the hook asks it after governance), not "
             "permission_prompt_tool_name"
         )
     runtime = run.runtime
+    hooks = with_hook(options.hooks, TOOL_EVENT, _governance(options.can_use_tool))
     changes: dict[str, Any] = {
-        "can_use_tool": _permission(options.can_use_tool),
+        "hooks": with_context(hooks, context) if context else hooks,
+        # the hook asks the team's callback itself: the CLI has no permission prompt to make
+        "can_use_tool": None,
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
+        "max_budget_usd": _left(runtime, options),
     }
-    if context:
-        changes["hooks"] = with_context(options.hooks, context)
     store = session_store(options, runtime.replay.journal, runtime.agent_id)
     if store is not None:
         # each step mirrored as it is taken: the journal saved before the next holds it
@@ -315,37 +446,59 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
     return dataclasses.replace(options, **changes)
 
 
-def _permission(own: Any) -> Any:
-    """The options' ``can_use_tool``: a harness tool runs (the bridge decides about it); any
-    other is the run's decision (``bridge.permitted``: hooks, governance, a person), then
-    ``own``'s, the team's callback, with the arguments as they were decided. Before Claude takes
-    a step, the run's progress is saved — its session as mirrored so far among it — so a worker
-    that dies during the step continues the session from there, not from an earlier step."""
-    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+def _governance(own: Any) -> Any:
+    """The ``PreToolUse`` hook every tool call goes through, in every permission mode: a
+    harness tool runs (the bridge decides about it); any other is the run's decision
+    (``bridge.permitted``: hooks, governance, a person), then ``own``'s — the team's
+    ``can_use_tool`` — with the arguments as they were decided. Before Claude takes a step, the
+    run's progress is saved — its session as mirrored so far among it — so a worker that dies
+    during the step continues the session from there, not from an earlier step."""
+    from claude_agent_sdk import HookMatcher, PermissionResultAllow, ToolPermissionContext
 
     from trellis.harness.tools.convert.claude import SERVER, WAITING
 
-    async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
+    async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         runtime = current()
         assert runtime is not None  # the CLI asks inside the run it works for
         await runtime.progress(now=True)
+        name, args = given["tool_name"], dict(given.get("tool_input") or {})
         if name.startswith(f"mcp__{SERVER}__"):
-            return PermissionResultAllow()
+            return _decided("allow")
         side_effects = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
         try:
             decided = await bridge.permitted(ToolSpec(name=name, side_effects=side_effects), args)
-        except Paused:
-            return PermissionResultDeny(message=WAITING, interrupt=True)
+        except Paused:  # the run pauses: Claude stops here, and the resume goes on
+            return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         if isinstance(decided, ToolOutcome):
-            return PermissionResultDeny(message=str(decided.output))
+            return _decided("deny", str(decided.output))
         if own is None:
-            return PermissionResultAllow(updated_input=decided.args)
+            return _decided("allow", updated=decided.args)
+        context = ToolPermissionContext(tool_use_id=tool_use_id)
         verdict = await own(name, decided.args, context)
-        if isinstance(verdict, PermissionResultAllow) and verdict.updated_input is None:
-            return dataclasses.replace(verdict, updated_input=decided.args)
-        return verdict
+        if isinstance(verdict, PermissionResultAllow):
+            return _decided("allow", updated=verdict.updated_input or decided.args)
+        refused = _decided("deny", verdict.message)
+        return {**refused, "continue_": False} if verdict.interrupt else refused
 
-    return can_use_tool
+    return HookMatcher(hooks=[pre_tool_use])
+
+
+def _decided(
+    decision: Literal["allow", "deny"],
+    reason: str | None = None,
+    *,
+    updated: dict[str, Any] | None = None,
+) -> SyncHookJSONOutput:
+    """A ``PreToolUse`` hook's answer."""
+    said: PreToolUseHookSpecificOutput = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+    }
+    if reason is not None:
+        said["permissionDecisionReason"] = reason
+    if updated is not None:
+        said["updatedInput"] = updated
+    return {"hookSpecificOutput": said}
 
 
 def configured_servers(configured: Any) -> dict[str, Any]:

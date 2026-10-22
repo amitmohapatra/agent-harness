@@ -134,6 +134,9 @@ class Runtime:
     #: the framework's conversation is kept in the memory service's thread (``bridges``): it
     #: wrote the attempt's transcript, which the harness does not write again
     transcript_kept: bool = False
+    #: the framework's own hook counts every model reply of this attempt toward the budget (a
+    #: graph's callbacks: ``hooks.langgraph``) — the model middleware does not count it again
+    replies_counted: bool = False
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)

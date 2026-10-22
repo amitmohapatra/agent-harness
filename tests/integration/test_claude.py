@@ -9,12 +9,17 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
 
+from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
-from trellis import Deny, Harness, Hooks, Rewrite, current, tool
+from trellis import Budget, Deny, Harness, Hooks, Rewrite, Runtime, Settings, current, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolSpec
+from trellis.harness import budget
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
@@ -67,7 +72,8 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     cli = started_with(tmp_path)
     # read_file is listed from the start: the CLI lists a server's tools once
     assert cli["tools"] == ["refund", "read_file"] and cli["allowed_tools"] is None
-    assert cli["permission_prompt_tool"] == "stdio"  # the harness's can_use_tool decides
+    # the harness's PreToolUse hook decides: the CLI has no permission prompt to make
+    assert cli["permission_prompt_tool"] is None
     assert cli["system_prompt"] == "You refund."
     assert target.mcp_servers == {}  # the team's options are untouched
 
@@ -388,3 +394,90 @@ async def test_a_kept_result_is_read_in_pages_after_a_pause(
     assert finished.answer == (
         f'11  row 11\n12  row 12\n…[29988 more lines: read_file(file_path="{KEPT}", offset=12)]'
     )
+
+
+# ---------------------------------------------------------------------- permission modes
+@pytest.mark.parametrize(
+    ("builtin", "fields"),
+    [
+        ("Bash", {"allowed_tools": ["Bash"]}),
+        ("Bash", {"permission_mode": "bypassPermissions"}),
+        ("Edit", {"permission_mode": "acceptEdits"}),
+    ],
+    ids=["allowed_tools", "bypassPermissions", "acceptEdits"],
+)
+async def test_a_built_in_the_cli_would_run_unasked_still_asks_as_the_catalog_rules(
+    builtin: str, fields: dict[str, Any], tmp_path: Path
+) -> None:
+    """``can_use_tool`` is skipped for these — the ``PreToolUse`` hook is not."""
+    script = [{"builtin": builtin, "args": {"file_path": "a.txt"}}, {"text": "done"}]
+    governance = Governance(FakeCatalog({builtin: Rule(risk="irreversible")}))
+    async with Harness(config=Settings(), governance=governance) as h:
+        agent = h.wrap(options(tmp_path, script, **fields), id="ops")
+        asked = await agent.run("work", user="u1")
+        assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+        assert asked.interrupt.tool_call is not None and asked.interrupt.tool_call.tool == builtin
+        assert built_ins(tmp_path) == []  # not run before a person said so
+        done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    assert [b["tool"] for b in built_ins(tmp_path)] == [builtin]
+
+
+# ---------------------------------------------------------------------- spending
+seen: list[Runtime] = []
+
+
+@tool(side_effects="read")
+def probe() -> str:
+    """Note the run."""
+    runtime = current()
+    assert runtime is not None
+    seen.append(runtime)
+    return "noted"
+
+
+async def test_a_querys_usage_and_cost_count_toward_the_runs_budget(
+    harness: Harness, tmp_path: Path
+) -> None:
+    seen.clear()
+    target = options(tmp_path, [{"tool": "probe"}, {"text": "ok"}])
+    target.env["FAKE_CLAUDE_COST"] = "0.01"
+    result = await harness.wrap(target, id="spender", tools=[probe]).run("go", user="u1")
+    assert result.status is RunStatus.SUCCESS
+    spent = seen[0].replay.journal.spent
+    assert spent["tokens"] == 30 and spent["cost"] == pytest.approx(0.02)  # two steps
+
+
+async def test_a_max_cost_budget_is_the_sdks_cap_and_ends_the_run_partial(
+    harness: Harness, tmp_path: Path
+) -> None:
+    script = [{"text": "one"}, {"text": "two"}, {"text": "three"}]
+    target = options(tmp_path, script)
+    target.env["FAKE_CLAUDE_COST"] = "0.01"
+    agent = harness.wrap(target, id="spender", budget=Budget(max_cost=0.015))
+    result = await agent.run("go", user="u1")
+    assert result.status is RunStatus.PARTIAL and result.answer == "two"
+    assert result.error is not None and result.error.code == budget.BUDGET_EXCEEDED
+
+
+# ---------------------------------------------------------------------- streaming, input
+async def test_partial_messages_stream_as_the_sdks_text_deltas(
+    harness: Harness, tmp_path: Path
+) -> None:
+    target = options(tmp_path, [{"text": "refunded o1 today"}], include_partial_messages=True)
+    events = [e async for e in harness.wrap(target, id="r").stream("go", user="u1")]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert deltas == ["refunded", " o1", " today"]  # each once: the message is not said again
+    assert events[-1].data["result"] == "refunded o1 today"
+
+
+async def test_content_blocks_are_the_prompt_as_they_are(harness: Harness, tmp_path: Path) -> None:
+    blocks = [
+        {"type": "text", "text": "what is in this picture?"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"}},
+    ]
+    result = await harness.wrap(options(tmp_path, [{"text": "a cat"}]), id="v").run(
+        blocks, user="u1"
+    )
+    assert result.status is RunStatus.SUCCESS and result.answer == "a cat"
+    assert started_with(tmp_path)["prompt"] == blocks
