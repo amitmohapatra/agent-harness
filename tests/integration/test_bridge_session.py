@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from agents import Agent, SQLiteSession, Usage, function_tool
@@ -60,7 +61,8 @@ async def test_a_session_of_the_teams_own_is_kept(memory_harness: Harness) -> No
     own = SQLiteSession("mine")
     for _ in range(2):
         await agent.run("hi", user="u1", thread="t1", framework_options={"session": own})
-    asked = [i["content"] for i in await own.get_items() if i.get("role") == "user"]
+    items: list[dict[str, Any]] = [dict(i) for i in await own.get_items()]
+    asked = [i["content"] for i in items if i.get("role") == "user"]
     assert asked == ["hi", "hi"]  # the SDK kept its own session, as it was given
 
 

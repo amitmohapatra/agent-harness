@@ -56,6 +56,14 @@ result = await agent.run("Refund order o-7.", user="ada", thread="ticket-7")
 Deep Agents' own `memory=[...]` (AGENTS.md files) and `skills=[...]` are prompts it loads from
 its backend; they are independent of the memory service and can be used beside it.
 
+## Sub-agents and the store
+
+A `task` call is a child run of the run: its record names the run, its task and answer go to
+memory under its own run, its tool calls are governed as the run's (`h.tools`), and its model
+calls count toward the run's budget. A Deep Agent compiled without a `store` gets the memory
+service as its store, so a `StoreBackend` writes the user's memories
+([langgraph.md](langgraph.md#what-is-automatic)).
+
 ## Native or ours: skills, prompts, sandbox
 
 * **Skills:** for `SKILL.md` folders, use Deep Agents' own: `create_deep_agent(skills=[...])`

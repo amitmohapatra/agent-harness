@@ -38,6 +38,8 @@ def test_every_route_the_fake_serves_is_a_documented_operation() -> None:
             pattern.replace("(?P<name>[^/]+)", "tool_search")
             .replace("(?P<document_id>[^/]+)", "doc_1")
             .replace("(?P<suggestion_id>[^/]+)", "sug_1")
+            .replace("(?P<memory_id>[^/]+)", "mem_1")
+            .replace("(?P<thread_id>[^/]+)", "thr_1")
         )
         assert CONTRACT.operation(method, path) is not None, (name, method, path)
 

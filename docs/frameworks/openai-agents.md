@@ -111,6 +111,9 @@ agent = h.wrap(
 |---|---|
 | Memory push | the context as a leading `system` message of the input (a string input becomes a user message after it) |
 | Memory pull | the memory tools are added to the copy per run |
+| Session | a run given no `session` (nor a conversation OpenAI's servers keep) reads its earlier turns from the memory service's thread through the SDK's own `Session` (`MemorySession`), so memory's window is not sent beside it; every turn is recorded there by the harness, and removing items through the session is refused (`ThreadReadOnly`). A `session` of yours is kept |
+| Pauses | the SDK's saved `RunState` (a `needs_approval` tool) is kept with the run in agent-runs, so any worker resumes it |
+| Agent tools | an `Agent.as_tool` call is governed by the catalog by its tool name and is a child run (its record names the run, its turns go to memory); what its run spends counts toward the run's budget. Its agent's own tools are governed when built with `h.tools`; others are said once (the SDK runs that agent itself) |
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used; your own tools are never narrowed |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with `read_file`, enabled once there is something to read ([tools.md](../tools.md#large-results)) |

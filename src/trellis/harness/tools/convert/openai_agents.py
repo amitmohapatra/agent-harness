@@ -21,7 +21,6 @@ from agents import FunctionTool
 from agents.tool_context import ToolContext
 
 from trellis.contracts import ToolSpec
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.runtime import Paused, current
@@ -98,9 +97,8 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
         before = _spent(context.usage)
         try:
             answer = await invoke(context, arguments)
-        except Exception as exc:
-            if not is_pause_signal(exc):
-                await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # a pause leaves it open (``Helpers.end``: the run is pausing)
+            await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
             raise
         finally:
             given, said, cached = (
