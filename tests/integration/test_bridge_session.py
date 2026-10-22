@@ -75,27 +75,32 @@ async def test_without_memory_the_sdk_has_no_session(memory_harness: Harness) ->
 
 
 async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grows() -> None:
-    def message(role: str, content: str, run: str) -> MessageInfo:
+    def message(role: str, content: str, run: str, **extra: Any) -> MessageInfo:
         return MessageInfo.model_validate(
             {
                 "message_id": content,
                 "role": role,
-                "kind": "VISIBLE",
+                "kind": extra.pop("kind", "VISIBLE"),
                 "sequence": 1,
                 "content": content,
                 "agent_run_id": run,
+                **extra,
             }
         )
 
+    call = {"id": "c1", "name": "lookup", "arguments": {"q": "a"}}
     thread = [
         message("USER", "earlier", "run_0"),
-        message("TOOL", "a tool's output", "run_0"),
+        message("ASSISTANT", "", "run_0", tool_calls=[call]),
+        message("TOOL", "found a", "run_0", kind="INTERNAL", tool_call_id="c1"),
+        message("TOOL", "a result of no call", "run_0"),
+        message("AGENT", "an internal step", "run_0", kind="INTERNAL"),
         message("ASSISTANT", "said earlier", "run_0"),
         message("USER", "this run's question", "run_1"),  # an earlier attempt recorded it
     ]
 
-    async def history(*, limit: int) -> list[MessageInfo]:
-        assert limit == HISTORY_LIMIT
+    async def history(*, limit: int, include_internal: bool) -> list[MessageInfo]:
+        assert limit == HISTORY_LIMIT and include_internal
         return thread
 
     memory = SimpleNamespace(ctx=SimpleNamespace(history=history))
@@ -104,12 +109,14 @@ async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grow
     assert session.session_id == "t1"
     assert await session.get_items() == [
         {"role": "user", "content": "earlier"},
+        {"type": "function_call", "call_id": "c1", "name": "lookup", "arguments": '{"q": "a"}'},
+        {"type": "function_call_output", "call_id": "c1", "output": "found a"},
         {"role": "assistant", "content": "said earlier"},
     ]
     assert await session.get_items(limit=1) == [{"role": "assistant", "content": "said earlier"}]
     assert await session.get_items(limit=0) == []
     await session.add_items([{"role": "user", "content": "x"}])  # the harness records it
-    assert len(await session.get_items()) == 2
+    assert len(await session.get_items()) == 4
     with pytest.raises(ThreadReadOnly):
         await session.pop_item()
     with pytest.raises(ThreadReadOnly):

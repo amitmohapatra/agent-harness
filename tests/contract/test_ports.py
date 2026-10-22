@@ -48,6 +48,8 @@ def test_the_public_api_is_the_documented_one() -> None:
         "Harness",
         "Hooks",
         "ModelCall",
+        "Output",
+        "OutputKind",
         "ReAct",
         "Result",
         "Rewrite",

@@ -32,7 +32,7 @@ def test_secret_names_and_credential_values_are_dropped() -> None:
     assert out["X-Api-Key"] == REDACTED
     assert out["gen_ai.usage.input_tokens"] == 12
     assert out["note"] == REDACTED
-    assert out["who"] == "mail me at [email]"
+    assert out["who"] == "mail me at a@b.co"  # personal data is the team's to mask
 
 
 def test_long_values_are_cut_and_payloads_redacted_recursively() -> None:
@@ -43,19 +43,18 @@ def test_long_values_are_cut_and_payloads_redacted_recursively() -> None:
 
 
 def test_a_value_of_a_megabyte_is_redacted_in_linear_time() -> None:
-    """A tool's output can be large: masking e-mail addresses must not be quadratic in it."""
+    """A tool's output can be large: redacting it must not be quadratic in it."""
     started = time.perf_counter()
     out = DEFAULT.redact_output("x" * (1024 * 1024) + " write to ada.l+x@mail.example.com")
     assert time.perf_counter() - started < 1.0
     assert isinstance(out, str) and out.startswith("x" * MAX_VALUE_CHARS + "...[truncated")
-    assert DEFAULT.redact_output("x" * 3000 + "@example.com")[:10] == "[email]"
 
 
 def test_outbound_payloads_are_redacted_like_inbound_ones() -> None:
     payload = {"token": "t", "items": [{"note": "sk-abcdefghijklmnopqrstu"}, ("a@b.co", 3)]}
     assert DEFAULT.redact_output(payload) == {
         "token": REDACTED,
-        "items": [{"note": REDACTED}, ["[email]", 3]],
+        "items": [{"note": REDACTED}, ["a@b.co", 3]],
     }
     assert DEFAULT.redact_input(None) is None
 
@@ -64,7 +63,10 @@ def test_json_text_is_redacted_as_what_it_holds_and_stays_json() -> None:
     """A model's tool-call arguments and a tool result as the model reads it are JSON text."""
     arguments = json.dumps({"email": "ada@example.com", "api_key": "sk-live0123456789abcdef"})
     shown = DEFAULT.redact_input({"function": {"name": "notify", "arguments": arguments}})
-    assert json.loads(shown["function"]["arguments"]) == {"email": "[email]", "api_key": REDACTED}
+    assert json.loads(shown["function"]["arguments"]) == {
+        "email": "ada@example.com",
+        "api_key": REDACTED,
+    }
     result = json.dumps([{"receipt": "sk-live0123456789abcdef"}, "Bearer abcdefghijklmnop"])
     assert json.loads(redact_attributes({"output": result})["output"]) == [
         {"receipt": REDACTED},
@@ -92,7 +94,7 @@ def test_attribute_values_of_any_type_are_kept_safe_and_bounded() -> None:
     assert "absent" not in out
     assert out["input_tokens"] == 12 and out["password"] == 7 and out["flag"] is True
     assert out["blob"] == "<3 bytes>"
-    assert out["shape"] == '{"user": "[email]"}'
+    assert out["shape"] == '{"user": "a@b.co"}'
     assert out["odd"] == "{('a', 'b'): 1}"
     assert out["loop"] == str(circular)
     assert out["tags"] == ["agent", "react"]

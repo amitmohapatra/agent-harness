@@ -24,10 +24,23 @@ by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the fram
 message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what
 the grounding check verifies the answer against.
 
-* `window=false` when the framework keeps the thread's messages itself (a LangGraph graph with
-  a checkpointer): the service leaves the recent conversation out. Such a graph's context
-  message has a fixed id (`trellis-memory-context`), so its thread holds one that each turn
-  replaces.
+* `window=false` when the framework keeps the thread's messages itself in a durable store (a
+  LangGraph graph with a durable checkpointer, an OpenAI Agents session on a file;
+  `trellis.harness.history.owner`): the service leaves the recent conversation out. Such a
+  graph's context message has a fixed id (`trellis-memory-context`), so its thread holds one
+  that each turn replaces. A store kept in RAM only (`InMemorySaver`, `SQLiteSession(":memory:")`)
+  replays the thread while the process lives and loses it on a restart: memory's window stays
+  on there, in the context's text (`## Recent conversation`), never as messages next to the
+  store's own.
+* Otherwise memory keeps the conversation, and a framework that replays one as messages gets
+  it as its own. LangGraph (`ReAct`, `create_agent`, Deep Agents): `window_format="messages"`,
+  and the recent turns follow the context message as `HumanMessage`, `AIMessage` with its
+  `tool_calls`, `ToolMessage` — exactly what a checkpointer would replay — while the context
+  stays one system message without them. The OpenAI Agents SDK: its session is the memory
+  service's thread (`bridges.session.MemorySession`), read as the SDK's input items
+  (`function_call`, `function_call_output` included), so the window is not pushed again.
+  A target that takes one prompt (the Claude Agent SDK, a function) gets them in the context's
+  text as before (`## Recent conversation`).
 * The request carries the run's own tool names: the context then includes the skills the agent
   learned for the task ([skills.md](skills.md#learned-skills)) and, with 5 or more tools, the
   tools section (next step, argument values found in memory, what is missing) and its `tools`
@@ -59,15 +72,20 @@ context bound to the run, with all its verbs.
 
 ## What is recorded
 
-In the background, after each attempt — whether it succeeded, paused or failed:
+After each attempt — whether it succeeded, paused or failed — in the background except where
+said:
 
-* the transcript, in one batch (`history.add`) — each message named by the harness
-  (`source_system: trellis-harness`, `source_message_id`: the run for the question, which
-  every attempt asks, the attempt and position for what the agent said), so the service stores
-  a message it has already seen once. A run started with no thread — a scheduled run — is its
-  own thread (`thread = run_id`);
+* the transcript, in one batch (`history.add`) — the question, then what the agent said: its
+  tool calls (on the assistant message, `tool_calls`) and their results (`TOOL` messages naming
+  their call) with its answers, where the framework reports them (LangGraph, the OpenAI Agents
+  SDK) — each message named by the harness (`source_system: trellis-harness`,
+  `source_message_id`: the run for the question, which every attempt asks, the attempt and
+  position for what the agent said), so the service stores a message it has already seen once.
+  A run started with no thread — a scheduled run — is its own thread (`thread = run_id`). Where
+  memory keeps the conversation the transcript is written before the run returns (at most 5 s,
+  then queued like the rest), so the next turn's window holds it wherever that turn runs;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
-  Mode's nested calls from Bifrost's log — their arguments and outputs redacted
+  Mode's nested calls from Bifrost's log — their arguments and outputs as they are
   ([observability.md](observability.md#redaction));
 * approve/reject/edit decisions as `TOOL_CALL` feedback.
 

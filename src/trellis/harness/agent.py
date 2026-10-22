@@ -51,7 +51,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
-from trellis.harness.clients.memory import RunMemory, context_budget
+from trellis.harness.clients.memory import RunMemory, Window, context_budget
 from trellis.harness.evals import (
     EvalCase,
     EvalServices,
@@ -63,10 +63,10 @@ from trellis.harness.evals import (
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
 from trellis.harness.gateways import Capability, missing
+from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
-from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, reason_of, run_of
@@ -93,6 +93,9 @@ MEMORY: Final = frozenset(COVERS["memory"])
 SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.model_fields)
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
+#: How long a turn's transcript may take to write before the run returns, where memory keeps
+#: the conversation; past it the write is queued (``writes``) and the run returns.
+TURN_WRITE_SECONDS: Final = 5.0
 #: What the model is told when memory has nothing for the question (``evidence_status``
 #: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
 #: the user's history, instead of a confident guess the memory never held.
@@ -236,7 +239,7 @@ class Agent:
             without=without,
             framework_options=framework_options,
         )
-        return await pipeline.attempt(self, record, input)
+        return self.hooks.answer(await pipeline.attempt(self, record, input))
 
     async def stream(
         self,
@@ -266,7 +269,7 @@ class Agent:
         async for event in self._events(
             lambda listen: pipeline.attempt(self, record, input, listener=listen)
         ):
-            yield event
+            yield self.hooks.event(event)
 
     async def start(
         self,
@@ -371,7 +374,7 @@ class Agent:
             comment=comment,
             remember=remember,
         )
-        return await self._continue(record, resolution)
+        return self.hooks.answer(await self._continue(record, resolution))
 
     async def schedule(
         self,
@@ -642,7 +645,7 @@ class Agent:
         store = event_log(self.harness.runs)
         if store is not None:
             async for entry in store.stream_events(run_id, after=after, tenant=tenant):
-                yield entry.event
+                yield self.hooks.event(entry.event)
             return
         record = await self.harness.runs.get(run_id, tenant=tenant)
         if record is None or record.agent_id != self.id:
@@ -657,7 +660,7 @@ class Agent:
             runtime.events.listen(queue.put_nowait)
         try:
             while (event := await queue.get()) is not None:
-                yield event
+                yield self.hooks.event(event)
                 if event.type is RunEventType.RUN_FINISHED and event.outcome not in (
                     RunOutcome.INTERRUPT,
                     None,
@@ -737,18 +740,13 @@ class Agent:
             return None
         own = runtime.tool_names()
         hints = runtime.uses("hints")
+        window = self.window(runtime)
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
                     runtime.task,
                     tools=own or None,
-                    # the framework keeps the thread itself, durably (``history``): memory's
-                    # window is not sent again
-                    window=history.owner(
-                        self.adapter.thread_store(self.target, runtime.framework_options),
-                        agent_id=self.id,
-                    )
-                    is history.Owner.MEMORY,
+                    window=window,
                     hints=hints,
                     budget=self.context_budget,
                 )
@@ -756,6 +754,10 @@ class Agent:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
                 return None
             output(span, pushed.rendered)
+        if window is Window.MESSAGES:
+            runtime.history = from_window(
+                pushed.conversation.messages if pushed.conversation else []
+            )
         # candidates the model is offered; no candidates at all narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
         if hints and candidates and self.adapter.narrows != "none":
@@ -771,10 +773,28 @@ class Agent:
         )
         return pushed
 
+    def window(self, runtime: Runtime) -> Window:
+        """How this run's context carries the thread's recent messages: not at all where the
+        framework owns the thread (a durable store, ``history.owner``); as the framework's own
+        messages where memory owns it, the framework keeps no store and replays messages; in
+        the context's text otherwise (a store kept in RAM replays the thread itself while the
+        process lives: the window is never given twice)."""
+        store = self.adapter.thread_store(self.target, runtime.framework_options)
+        if self.owner(runtime, store) is history.Owner.FRAMEWORK or store is history.MEMORY_THREAD:
+            return Window.NONE  # the framework's store holds it, or reads memory's thread itself
+        if store is None and self.adapter.replays_history:
+            return Window.MESSAGES
+        return Window.RENDERED
+
+    def owner(self, runtime: Runtime, store: Any = ...) -> history.Owner:
+        """Who owns the run's conversation (``history.owner``) — of ``store`` when it was read."""
+        if store is ...:
+            store = self.adapter.thread_store(self.target, runtime.framework_options)
+        return history.owner(store, agent_id=self.id)
+
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
         memory = runtime.run_memory
         if memory is not None and runtime.uses("records") and call.tool not in _pull(self):
-            call, outcome = _redacted(call, outcome)
             await self.harness.writes.submit(
                 "memory.record_tool",
                 lambda: memory.record_tool(call, outcome),
@@ -786,22 +806,36 @@ class Agent:
                 ),
             )
 
-    async def recorded_run(self, runtime: Runtime, messages: Sequence[tuple[str, str]]) -> None:
-        """The attempt's transcript, whether the run succeeded, paused or failed."""
+    async def recorded_run(self, runtime: Runtime, messages: Sequence[Said]) -> None:
+        """The attempt's transcript, whether the run succeeded, paused or failed. Where memory
+        owns the conversation (``history.owner``), it is written before the run returns, so
+        the next turn's window holds it wherever that turn runs; a write that fails there is
+        queued like every other (:mod:`trellis.harness.writes`: retried, spooled)."""
         memory = runtime.run_memory
-        if memory is not None and runtime.uses("records") and messages:
-            run_id, attempt = runtime.run_id, runtime.attempt
-            await self.harness.writes.submit(
-                "memory.transcript",
-                lambda: memory.record_messages(messages, run_id, attempt),
-                events=runtime.events,
-                record=memory.record(
-                    "record_messages",
-                    messages=[list(m) for m in messages],
-                    run_id=run_id,
-                    attempt=attempt,
-                ),
-            )
+        if memory is None or not runtime.uses("records") or not messages:
+            return
+        run_id, attempt = runtime.run_id, runtime.attempt
+        if self.owner(runtime) is history.Owner.MEMORY:
+            try:
+                async with asyncio.timeout(TURN_WRITE_SECONDS):
+                    await memory.record_messages(messages, run_id, attempt)
+                return
+            except Exception as exc:
+                log.warning(
+                    "the turn could not be written before the run returned; it is queued",
+                    extra={"run_id": run_id, "error_class": type(exc).__name__},
+                )
+        await self.harness.writes.submit(
+            "memory.transcript",
+            lambda: memory.record_messages(messages, run_id, attempt),
+            events=runtime.events,
+            record=memory.record(
+                "record_messages",
+                messages=[recorded(m) for m in messages],
+                run_id=run_id,
+                attempt=attempt,
+            ),
+        )
 
     async def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
@@ -903,7 +937,7 @@ class Agent:
                     latency_ms=entry.latency_ms,
                     error_class="MCPToolError" if entry.error else None,
                 )
-                await memory.record_tool(*_redacted(call, outcome))
+                await memory.record_tool(call, outcome)
 
         await self.harness.writes.submit("memory.code_mode_calls", work, events=runtime.events)
 
@@ -1106,16 +1140,6 @@ def _json(value: Any) -> bool:
     return True
 
 
-def _redacted(call: ToolCall, outcome: ToolOutcome) -> tuple[ToolCall, ToolOutcome]:
-    """A tool call as the memory service's tool records get it: its arguments and output
-    redacted (``redaction.py``), as everything leaving the process is; the model and the tool
-    had them as they are."""
-    return (
-        call.model_copy(update={"args": REDACTOR.redact_input(call.args)}),
-        outcome.model_copy(update={"output": REDACTOR.redact_output(outcome.output)}),
-    )
-
-
 def _pull(agent: Agent) -> frozenset[str]:
     """The memory service's own tools are recorded by the service, not again by the harness."""
     listed = agent.harness.memory.listed if agent.harness.memory is not None else None
@@ -1152,7 +1176,7 @@ class RunHandle:
                     await asyncio.sleep(exc.retry_after or POLL_SECONDS * 4)
                     continue
                 if record.status is RunStatus.PAUSED or record.final:
-                    return Result.of(record)
+                    return self.agent.hooks.answer(Result.of(record))
                 await asyncio.sleep(POLL_SECONDS)
 
 

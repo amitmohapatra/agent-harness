@@ -109,7 +109,7 @@ agent = h.wrap(
 
 | | |
 |---|---|
-| Memory push | the context as a leading `system` message of the input (a string input becomes a user message after it) |
+| Memory push | the context as a leading `system` message of the input (a string input becomes a user message after it); without a `session`, memory keeps the conversation: the run's session is the memory service's thread (`bridges.session.MemorySession`), which gives the SDK the earlier turns as its own input items — messages, `function_call`, `function_call_output`, a call never parted from its result — and each run's items are written back before it returns |
 | Memory pull | the memory tools are added to the copy per run |
 | Session | a run given no `session` (nor a conversation OpenAI's servers keep) reads its earlier turns from the memory service's thread through the SDK's own `Session` (`MemorySession`), so memory's window is not sent beside it; every turn is recorded there by the harness, and removing items through the session is refused (`ThreadReadOnly`). A `session` of yours is kept |
 | Pauses | the SDK's saved `RunState` (a `needs_approval` tool) is kept with the run in agent-runs, so any worker resumes it |

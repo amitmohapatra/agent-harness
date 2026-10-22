@@ -338,10 +338,17 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     result = await agent.run("how many a?", user="u1")
     await memory_harness.writes.drain()
     [batch] = memory_service.named("messages")
+    # the question, the call with its result, the answer: as a checkpoint would replay them
     assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
         ("USER", "how many a?", f"{result.run_id}:user:0"),
-        ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:1"),
+        ("ASSISTANT", "", f"{result.run_id}:1:msg:1"),
+        ("TOOL", "7", f"{result.run_id}:1:msg:2"),
+        ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:3"),
     ]
+    call, answered = batch.body["messages"][1:3]
+    [made] = call["tool_calls"]
+    assert made["name"] == "stock" and made["arguments"] == {"sku": "a"}
+    assert answered["tool_call_id"] == made["id"] and answered["kind"] == "INTERNAL"
     [recorded] = memory_service.named("record_tool")
     assert recorded.body["tool"] == "stock" and recorded.body["task"] == "how many a?"
     [outcome] = memory_service.named("feedback")

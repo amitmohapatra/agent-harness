@@ -146,6 +146,8 @@ class FakeMemoryService:
     _ids: itertools.count[int] = field(default_factory=itertools.count)
     #: the ``source_message_id``s already stored (the service's own message identity)
     _stored: set[str] = field(default_factory=set)
+    #: each thread's messages as stored, in order: what a window gives back
+    threads: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     #: reads of each document so far
     _reads: dict[str, int] = field(default_factory=dict)
     #: the memories ``remember`` stored, by id, as the service lists them (a superseded or
@@ -268,7 +270,25 @@ class FakeMemoryService:
                 ]
             answer["rendered"] = rendered
         answer["token_estimate"] = len(rendered) // 4
+        if call.body.get("window", True) and call.body.get("window_format") == "messages":
+            window = self._window(call.scope.get("thread_id"))
+            if window:
+                answer["conversation"] = {"thread_id": call.scope["thread_id"], "messages": window}
         return answer
+
+    def _window(self, thread: str | None) -> list[dict[str, Any]]:
+        """The thread's replayable messages - the chat and the results of its tool calls -
+        oldest first, as the service gives them back."""
+        out = []
+        for m in self.threads.get(thread or "", []):
+            if m.get("kind", "VISIBLE") != "VISIBLE" and "tool_call_id" not in m:
+                continue
+            message = {"id": m["message_id"], "role": m["role"], "text": m["content"]}
+            for key in ("tool_calls", "tool_call_id"):
+                if key in m:
+                    message[key] = m[key]
+            out.append(message)
+        return out
 
     def _agent_tools(self, call: Call) -> dict[str, Any]:
         return {"tools": self.agent_tools}
@@ -464,6 +484,7 @@ class FakeMemoryService:
                         "attachments": [],
                         "custom_metadata": message.get("custom_metadata") or {},
                     }
+                    | {k: message[k] for k in ("tool_calls", "tool_call_id") if k in message}
                 )
         return {"messages": acks}
 

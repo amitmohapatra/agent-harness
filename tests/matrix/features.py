@@ -692,19 +692,20 @@ async def redaction(w: World) -> None:
     ]
     o = (await w.go([d.notify(), d.lookup()], plan)).succeeded()
     assert d.ran("notify") == [{"email": EMAIL, "api_key": SECRET}]  # the tool had them as is
-    leaks = {
+    # traces mask credentials, and only credentials: personal data is the team's to mask
+    spans = json.dumps([dict(s.attributes or {}) for s in w.spans()], default=str)
+    assert SECRET not in spans, "a credential reached a trace"
+    # everything else carries values as they are (what a user sees passes on_output hooks)
+    verbatim = {
         "events": json.dumps([e.model_dump(mode="json") for e in o.events]),
-        "surface": json.dumps(o.surface, default=str),
-        "spans": json.dumps([dict(s.attributes or {}) for s in w.spans()], default=str),
         "memory tool records": json.dumps(
             [c.body for c in w.memory_service.named("record_tool")], default=str
         ),
-        "memory transcript": json.dumps(
-            [c.body for c in w.memory_service.named("messages")], default=str
-        ),
     }
-    leaked = [where for where, text in leaks.items() if EMAIL in text or SECRET in text]
-    assert not leaked, f"left the process unredacted in: {leaked}"
+    if "memory" not in w.switched:
+        del verbatim["memory tool records"]
+    masked = [where for where, text in verbatim.items() if SECRET not in text]
+    assert not masked, f"masked where values go as they are: {masked}"
 
 
 # --------------------------------------------------------------------------- tools
@@ -1174,7 +1175,7 @@ FEATURES: Final[list[Feature]] = [
     ),
     Feature(
         "F61",
-        "redaction: nothing secret leaves the process",
+        "redaction: credentials never reach a trace; the rest goes as it is",
         "F61",
         "always on",
         redaction,

@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import AgentError, RunStart, RunStatus, stable_id
 from trellis.contracts.errors import is_pause_signal
+from trellis.harness.history import Said, Speaker, recorded
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -57,7 +58,7 @@ class Helper:
     """One open helper: its run, and what it was told and said so far."""
 
     run_id: str
-    said: list[tuple[str, str]] = field(default_factory=list)
+    said: list[Said] = field(default_factory=list)
 
 
 class Helpers:
@@ -91,7 +92,7 @@ class Helpers:
                 metadata={HELPER: {"framework": self.framework, "kind": kind, "name": name}},
             )
         )
-        self._open[key] = Helper(run_id, [("user", task)])
+        self._open[key] = Helper(run_id, [Said(Speaker.USER, task)])
         log.info(
             "helper started",
             extra={"run_id": parent.run_id, "helper_run_id": run_id, "helper": name},
@@ -108,7 +109,7 @@ class Helpers:
         if helper is None:
             return
         if output:
-            helper.said.append(("assistant", output))
+            helper.said.append(Said(Speaker.ASSISTANT, output))
         runs = self.runtime.agent.harness.runs
         record = await runs.get(helper.run_id, tenant=self.runtime.tenant)
         # a helper a re-run took up again after it ended (before a crash) is ended already
@@ -164,7 +165,7 @@ class Helpers:
                 error=AgentError(code=UNFINISHED, message=NOT_CONTINUED),
                 tenant=parent.tenant,
             )
-            await self._recorded(Helper(run_id, [("user", str(record.input))]))
+            await self._recorded(Helper(run_id, [Said(Speaker.USER, str(record.input))]))
 
     async def _recorded(self, helper: Helper) -> None:
         """The helper's turns, in the memory service under its own run (the run's records
@@ -183,7 +184,7 @@ class Helpers:
             events=parent.events,
             record=scoped.record(
                 "record_messages",
-                messages=[list(m) for m in messages],
+                messages=[recorded(m) for m in messages],
                 run_id=helper.run_id,
                 attempt=1,
             ),

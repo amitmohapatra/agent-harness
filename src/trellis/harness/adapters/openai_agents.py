@@ -1,6 +1,9 @@
 """OpenAI Agents SDK ``Agent``\\ s.
 
-* input: a message list, the memory context first as a ``system`` message;
+* input: a message list, the memory context first as a ``system`` message; where memory keeps
+  the conversation (no ``session`` given), its recent messages follow as the SDK's own input
+  items — messages, ``function_call`` and ``function_call_output`` — as a session replays them;
+* transcript: the run's new items — its answers, its tool calls and their results — in order;
 * run: ``Runner.run``/``Runner.run_streamed`` on a clone of the agent carrying the harness
   tools next to its own (the caller's agent is never changed) — and every agent it can hand off
   to cloned too, recursively, each one's own tools governed (:func:`governed_agents`) — with
@@ -36,7 +39,7 @@ import functools
 import inspect
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Final
 
@@ -51,7 +54,8 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
-from trellis.harness.bridges.session import MEMORY_THREAD, MemorySession
+from trellis.harness.bridges.session import MemorySession
+from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, reason_of
 
@@ -117,6 +121,9 @@ class OpenAIAgentsAdapter:
     tool_format: ToolFormat = "openai_agents"
     fixed_tools: bool = False
     narrows: Narrowing = "turn"
+    #: its history comes through its session: the run's own, or the memory service's thread
+    #: (``bridges.session.MemorySession``), never as messages in the input
+    replays_history = False
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The run's ``session``, or the conversation OpenAI's servers keep
@@ -124,7 +131,9 @@ class OpenAIAgentsAdapter:
         memory on is given (``bridges.session``)."""
         return _thread_store(options)
 
-    def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
+    def prepare_input(
+        self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
+    ) -> Any:
         system = [{"role": "system", "content": context}] if context else []
         if isinstance(input, str):
             return [*system, {"role": "user", "content": input}] if system else input
@@ -181,14 +190,7 @@ class OpenAIAgentsAdapter:
         yield Output(result)
 
     def extract(self, target: Any, output: Any) -> Extracted:
-        from agents import ItemHelpers, MessageOutputItem
-
-        transcript = [
-            ("assistant", text)
-            for item in output.new_items
-            if isinstance(item, MessageOutputItem)
-            and (text := ItemHelpers.text_message_output(item))
-        ]
+        transcript = said_in(output.new_items)
         pause = None
         if output.interruptions:
             item = output.interruptions[0]
@@ -388,6 +390,49 @@ def _edited_call(result: Any, native_input: Any) -> Any:
             state.approve(item)
             return state
     return None
+
+
+def said_in(items: Sequence[Any]) -> list[Said]:
+    """A run's new items as messages, in order: the function calls one model response made,
+    together, on one assistant message (with what it said, when it said something first), and
+    their results. A hosted tool's call and result (web search, a computer) are the SDK's own
+    and are not replayed."""
+    from agents import ItemHelpers, MessageOutputItem, ToolCallItem, ToolCallOutputItem
+    from openai.types.responses import ResponseFunctionToolCall
+
+    out: list[Said] = []
+    for item in items:
+        if isinstance(item, MessageOutputItem):
+            if text := ItemHelpers.text_message_output(item):
+                out.append(Said(Speaker.ASSISTANT, text))
+        elif isinstance(item, ToolCallItem) and isinstance(item.raw_item, ResponseFunctionToolCall):
+            raw = item.raw_item
+            args = _arguments(raw)
+            call = Called(
+                raw.call_id,
+                raw.name,
+                args if isinstance(args, dict) else {"arguments": raw.arguments},
+            )
+            last = out[-1] if out else None
+            if last is not None and last.role is Speaker.ASSISTANT:
+                # no result between them: the same model response
+                out[-1] = Said(Speaker.ASSISTANT, last.content, (*last.tool_calls, call))
+            else:
+                out.append(Said(Speaker.ASSISTANT, "", (call,)))
+        elif isinstance(item, ToolCallOutputItem) and (answers := _function_output(item.raw_item)):
+            out.append(Said(Speaker.TOOL, _output(item.output), tool_call_id=answers))
+    return out
+
+
+def _function_output(raw: Any) -> str | None:
+    """The call a function call's result answers; ``None`` for a hosted tool's result."""
+    if isinstance(raw, dict) and raw.get("type") == "function_call_output":
+        return str(raw["call_id"])
+    return None
+
+
+def _output(output: Any) -> str:
+    return output if isinstance(output, str) else json.dumps(output, default=str)
 
 
 def _arguments(item: Any) -> Any:

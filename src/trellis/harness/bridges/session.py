@@ -4,8 +4,9 @@ An agent run without a session of its own (``framework_options={"session": ...}`
 conversation OpenAI's servers keep) is given a :class:`MemorySession` while memory is on for
 the run: the SDK reads the conversation's earlier turns from it, as from its own sessions —
 and they are the messages of the run's thread in the memory service, which every agent of the
-user's learns from. The session owns the history (``history.owner``), so the memory service
-leaves the recent conversation out of the pushed context.
+user's learns from. Memory owns the history (``history.MEMORY_THREAD``) and the session is
+how the SDK reads it, so the memory service leaves the recent conversation out of the pushed
+context, and each run's turns are written before it returns: the next run reads them.
 
 The memory service is the source of truth: every turn is recorded there by the harness (the
 run's transcript), so what the SDK adds to the session is not written a second time, and the
@@ -18,17 +19,19 @@ failure is the SDK's (the run fails).
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ErrorCategory, HarnessError
+from trellis.harness.history import Said, Speaker, answered, said_of
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
 
 #: The newest messages a read of the thread returns (the service's largest page).
 HISTORY_LIMIT: Final = 500
-#: The thread's roles the SDK reads, as the SDK names them.
-ROLES: Final = {"USER": "user", "ASSISTANT": "assistant"}
+#: The thread's roles the SDK reads: the chat, and the results of the tool calls made in it.
+ROLES: Final = frozenset({"USER", "ASSISTANT", "TOOL"})
 
 
 class ThreadReadOnly(HarnessError):
@@ -37,15 +40,6 @@ class ThreadReadOnly(HarnessError):
 
     code = "THREAD_READ_ONLY"
     category = ErrorCategory.MEMORY
-
-
-class MemoryThread:
-    """The thread store of a run whose session is the memory service's thread
-    (``history.owner``: durable, so memory's window is left out)."""
-
-
-#: The one :class:`MemoryThread`: what the adapter's ``thread_store`` names.
-MEMORY_THREAD: Final = MemoryThread()
 
 
 class MemorySession:
@@ -59,15 +53,21 @@ class MemorySession:
         self.session_id = runtime.thread or runtime.run_id
 
     async def get_items(self, limit: int | None = None) -> list[Any]:
-        """The thread's earlier turns, oldest first (``limit``: the newest that many)."""
+        """The thread's earlier turns, oldest first (``limit``: the newest that many), as the
+        SDK's input items: the messages with the tool calls made in them and their results, a
+        call and its result never parted (``history.answered``)."""
         assert self.runtime.run_memory is not None
-        messages = await self.runtime.run_memory.ctx.history(limit=HISTORY_LIMIT)
+        ctx = self.runtime.run_memory.ctx
+        messages = await ctx.history(limit=HISTORY_LIMIT, include_internal=True)
         run_id = self.runtime.run_id
-        items = [
-            {"role": ROLES[m.role], "content": m.content}
+        said = [
+            said_of({"role": m.role, "content": m.content, **(m.model_extra or {})})
             for m in messages
-            if m.role in ROLES and (m.model_extra or {}).get("agent_run_id") != run_id
+            if m.role in ROLES
+            and (m.kind == "VISIBLE" or (m.model_extra or {}).get("tool_call_id"))
+            and (m.model_extra or {}).get("agent_run_id") != run_id
         ]
+        items = [item for s in answered(said) for item in input_items(s)]
         return items if limit is None else items[-limit:] if limit > 0 else []
 
     async def add_items(self, items: list[Any]) -> None:
@@ -80,4 +80,33 @@ class MemorySession:
         raise ThreadReadOnly("the conversation is the memory service's thread: it only grows")
 
 
-__all__ = ["HISTORY_LIMIT", "MEMORY_THREAD", "MemorySession", "MemoryThread", "ThreadReadOnly"]
+def input_items(said: Said) -> list[dict[str, Any]]:
+    """``said`` as the SDK's input items: a message, then one ``function_call`` per call it
+    made; a tool's result as its ``function_call_output``."""
+    if said.role is Speaker.TOOL:
+        return [
+            {"type": "function_call_output", "call_id": said.tool_call_id, "output": said.content}
+        ]
+    items: list[dict[str, Any]] = (
+        [{"role": said.role.value, "content": said.content}]
+        if said.content or not said.tool_calls
+        else []
+    )
+    items += [
+        {
+            "type": "function_call",
+            "call_id": c.id,
+            "name": c.name,
+            "arguments": json.dumps(dict(c.arguments), default=str),
+        }
+        for c in said.tool_calls
+    ]
+    return items
+
+
+__all__ = [
+    "HISTORY_LIMIT",
+    "MemorySession",
+    "ThreadReadOnly",
+    "input_items",
+]

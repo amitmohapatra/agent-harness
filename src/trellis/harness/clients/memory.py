@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from enum import StrEnum
 from typing import Any, Final
 
 from trellis.contracts import Feedback as Decision
 from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance.catalog import MemoryCatalog
+from trellis.harness.history import Said, Speaker, recorded, said_of
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.models import (
@@ -44,6 +46,17 @@ SOURCE_SYSTEM: Final = "trellis-harness"
 #: cannot be reached, the last listing is kept and asked for again after the retry interval.
 AGENT_TOOLS_TTL_SECONDS: Final = 600.0
 AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
+
+
+class Window(StrEnum):
+    """Whether, and how, a run's context carries the thread's recent messages."""
+
+    #: left out: the framework keeps the conversation itself
+    NONE = "none"
+    #: as a section of the rendered context (a framework that takes no history of messages)
+    RENDERED = "rendered"
+    #: verbatim, for the framework to replay as its own conversation
+    MESSAGES = "messages"
 
 
 class Memory:
@@ -99,7 +112,7 @@ class Memory:
         args = record["args"]
         match record["op"]:
             case "record_messages":
-                messages = [(role, content) for role, content in args["messages"]]
+                messages = [said_of(m) for m in args["messages"]]
                 return lambda: run.record_messages(messages, args["run_id"], args["attempt"])
             case "record_tool":
                 call = ToolCall.model_validate(args["call"])
@@ -136,16 +149,22 @@ class RunMemory:
         query: str,
         *,
         tools: Sequence[str] | None,
-        window: bool,
+        window: Window,
         hints: bool,
         budget: int = CONTEXT_TOKEN_BUDGET,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
         skills it learned for the task and - unless ``hints`` is off - the tools that fit.
-        ``window=False`` when the framework keeps the thread's messages itself: the service
-        then leaves the recent conversation out."""
+        ``window``: the thread's recent messages left out (``Window.NONE``: the framework
+        keeps them itself), in the rendered text (``RENDERED``), or verbatim as
+        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own."""
         return await self.ctx.context(
-            query, token_budget=budget, tools=tools, hints=hints, window=window
+            query,
+            token_budget=budget,
+            tools=tools,
+            hints=hints,
+            window=window is not Window.NONE,
+            window_format="messages" if window is Window.MESSAGES else "rendered",
         )
 
     # ------------------------------------------------------------------ pull
@@ -160,22 +179,20 @@ class RunMemory:
         return await self.ctx.tool_hints(task, available=list(available))
 
     # ------------------------------------------------------------------ records
-    async def record_messages(
-        self, messages: Sequence[tuple[str, str]], run_id: str, attempt: int
-    ) -> None:
-        """One attempt's transcript, in one request. Each message names itself (the run for
-        the question, which every attempt asks; the attempt and position for what the agent
-        said), and the service stores a message it has seen before once."""
+    async def record_messages(self, messages: Sequence[Said], run_id: str, attempt: int) -> None:
+        """One attempt's transcript - its tool calls and their results with it - in one
+        request. Each message names itself (the run for the question, which every attempt
+        asks; the attempt and position for what the agent said), and the service stores a
+        message it has seen before once."""
         batch = [
-            {
-                "role": role.upper(),
-                "content": content,
+            recorded(said)
+            | {
                 "source_system": SOURCE_SYSTEM,
                 "source_message_id": f"{run_id}:user:{index}"
-                if role == "user"
+                if said.role is Speaker.USER
                 else f"{run_id}:{attempt}:msg:{index}",
             }
-            for index, (role, content) in enumerate(messages)
+            for index, said in enumerate(messages)
         ]
         await self.ctx.history.add(batch, idempotency_key=f"{run_id}:{attempt}:transcript")
 
