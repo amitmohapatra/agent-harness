@@ -335,7 +335,7 @@ class HarnessTools(AgentMiddleware):
         return step, next(n for n, c in enumerate(calls) if c["id"] == call_id)
 
 
-def _calling(messages: Sequence[AnyMessage], call_id: str) -> tuple[int, AIMessage] | None:
+def _calling(messages: Sequence[AnyMessage], call_id: str | None) -> tuple[int, AIMessage] | None:
     """The latest model message making the call ``call_id``, and where it is: read from the
     end (it is the latest step's, but for a resume's)."""
     for n in range(len(messages) - 1, -1, -1):

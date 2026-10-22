@@ -12,6 +12,7 @@ deployment (the harness then warns and runs the graph un-narrowed, ``middleware.
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 from deepagents.middleware.filesystem import _file_data_reducer
 from langchain.agents import create_agent
@@ -26,7 +27,7 @@ from trellis.harness.middleware import HANDLER
 
 def test_create_agents_model_node_is_of_the_shape_the_narrowing_reads() -> None:
     graph = create_agent(ScriptedChatModel(turns=[]), tools=[])
-    node = graph.nodes["model"].bound.afunc
+    node = graph.nodes["model"].bound.afunc  # pyright: ignore[reportAttributeAccessIssue]
     assert node.__qualname__ == MODEL_NODE
     assert HANDLER in node.__code__.co_freevars
     assert _narrowed(graph) is not None
@@ -34,7 +35,9 @@ def test_create_agents_model_node_is_of_the_shape_the_narrowing_reads() -> None:
 
 
 def test_deep_agents_merges_file_states_with_its_reducer() -> None:
-    merged = _file_data_reducer({"/a": {"content": ["x"]}}, {"/b": {"content": ["y"]}})
+    left: Any = {"/a": {"content": ["x"]}}
+    right: Any = {"/b": {"content": ["y"]}}
+    merged = _file_data_reducer(left, right)
     assert set(merged) == {"/a", "/b"}
 
 
