@@ -14,8 +14,8 @@ from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, Permissi
 
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
-from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolSpec
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolSpec
+from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED, native_spec
 from trellis.harness.journal import content_key
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
@@ -422,3 +422,37 @@ async def test_built_in_tools_are_governed_in_every_permission_mode(
     result = await agent.run("work", user="u1")
     assert result.answer == "said: Bash was not run: nothing runs here"
     assert built_ins(tmp_path) == []  # neither ran
+
+
+async def test_calls_claude_runs_itself_are_recorded_with_their_result_and_duration(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Its built-ins and its own MCP servers' tools run in the CLI: their ``PostToolUse`` (or
+    ``PostToolUseFailure``) records each as the run's tool call — on the stream, in the memory
+    service with its result or error and how long it took — while a harness tool's call is the
+    bridge's, recorded once."""
+    script = [
+        {"builtin": "Read", "args": {"file_path": "orders.csv"}},
+        {"builtin": "Grep", "args": {"pattern": "o3"}, "fails": "no such file"},
+        {"tool": "lookup", "args": {"sku": "A-1"}},
+        {"text": "done: {last}"},
+    ]
+
+    @tool(side_effects="read")
+    def lookup(sku: str) -> str:
+        """Units of a SKU."""
+        return f"{sku}: 3"
+
+    agent = memory_harness.wrap(options(tmp_path, script), id="ops", tools=[lookup])
+    events = [e async for e in agent.stream("check o3", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS
+    await memory_harness.writes.drain()
+    recorded = {c.body["tool"]: c.body for c in memory_service.calls if c.name == "record_tool"}
+    assert set(recorded) == {"Read", "Grep", "lookup"}  # the harness tool once, by the bridge
+    assert recorded["Read"]["status"] == "ok" and recorded["Read"]["output"] == "Read ran"
+    assert recorded["Read"]["latency_ms"] >= 0
+    assert recorded["Grep"]["status"] == "error" and recorded["Grep"]["output"] == "no such file"
+    results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert [r["tool"] for r in results] == ["Read", "Grep", "lookup"]
+    assert native_spec("mcp__crm__find").server == "crm"
+    assert native_spec("Bash").side_effects == "irreversible"

@@ -4,7 +4,9 @@ OpenAI Agents SDK and the Claude Agent SDK (the real SDK driving the scripted CL
 makes the plan's calls in order and answers ``FINAL`` with the last result it read
 (``tests.support.planned``), so a test sees what reached the model. ``system`` is the
 instructions the framework's agent is built with (a function has none), and ``seen`` gets the
-model built — for the Claude Agent SDK, the file its CLI records what it was started with in."""
+model built — for the Claude Agent SDK, the file its CLI records what it was started with in.
+``stall`` makes every model call take that long before it answers (a function target asks a
+LangChain chat model first, so it has one): a stalled provider."""
 
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ class Builder(Protocol):
         *,
         system: str = ...,
         seen: list[Any] | None = ...,
+        stall: float = ...,
     ) -> Awaitable[Built]: ...
 
 
@@ -51,8 +54,13 @@ async def _function(
     *,
     system: str = SYSTEM,
     seen: list[Any] | None = None,
+    stall: float = 0.0,
 ) -> Built:
+    model = PlannedChatModel(plan=[], stall=stall)
+
     async def follow(input: Any, agent: Runtime) -> str:
+        if stall:
+            await model.ainvoke(str(input))
         results = [text_of(await agent.tools.call(name, **args)) for name, args in plan]
         return FINAL.replace("{last}", results[-1] if results else "")
 
@@ -67,8 +75,9 @@ async def _react(
     *,
     system: str = SYSTEM,
     seen: list[Any] | None = None,
+    stall: float = 0.0,
 ) -> Built:
-    model = PlannedChat(plan)
+    model = PlannedChat(plan, stall=stall)
     _saw(seen, model)
     return ReAct(system=system, model=model), tools
 
@@ -81,8 +90,9 @@ async def _langgraph(
     *,
     system: str = SYSTEM,
     seen: list[Any] | None = None,
+    stall: float = 0.0,
 ) -> Built:
-    model = PlannedChatModel(plan=plan)
+    model = PlannedChatModel(plan=plan, stall=stall)
     _saw(seen, model)
     built = await h.tools(*tools, framework="langgraph")
     return create_agent(model, tools=built, system_prompt=system), []
@@ -96,8 +106,9 @@ async def _deepagents(
     *,
     system: str = SYSTEM,
     seen: list[Any] | None = None,
+    stall: float = 0.0,
 ) -> Built:
-    model = PlannedChatModel(plan=plan)
+    model = PlannedChatModel(plan=plan, stall=stall)
     _saw(seen, model)
     built = await h.tools(*tools, framework="deepagents")
     return create_deep_agent(model=model, tools=built, system_prompt=system), []
@@ -111,8 +122,9 @@ async def _openai_agents(
     *,
     system: str = SYSTEM,
     seen: list[Any] | None = None,
+    stall: float = 0.0,
 ) -> Built:
-    model = PlannedModel(plan)
+    model = PlannedModel(plan, stall=stall)
     _saw(seen, model)
     return OpenAIAgent(name="worker", instructions=system, model=model), tools
 
@@ -125,8 +137,11 @@ async def _claude(
     *,
     system: str = SYSTEM,
     seen: list[Any] | None = None,
+    stall: float = 0.0,
 ) -> Built:
     script = [{"tool": name, "args": args} for name, args in plan] + [{"text": FINAL}]
+    if stall:
+        script.insert(0, {"stall": stall})
     record = tmp / f"cli-{uuid.uuid4().hex[:6]}.json"
     _saw(seen, record)
     options = ClaudeAgentOptions(

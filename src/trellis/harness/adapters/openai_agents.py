@@ -43,7 +43,14 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Final
 
-from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution
+from trellis.contracts import (
+    ConfigurationError,
+    InterruptDecision,
+    InterruptResolution,
+    ToolOutcome,
+    ToolSpec,
+    ToolStatus,
+)
 from trellis.harness.adapters.base import (
     Extracted,
     Invocation,
@@ -58,6 +65,8 @@ from trellis.harness.bridges.session import MemorySession
 from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, reason_of
+from trellis.harness.tools import bridge
+from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS
 
 log = logging.getLogger("trellis.harness")
 
@@ -444,3 +453,67 @@ def _arguments(item: Any) -> Any:
         return json.loads(item.arguments or "{}")
     except ValueError:
         return None
+
+
+#: The tools a provider runs itself, inside the model's step, by the type of the item that
+#: reports a call of one: the name it is recorded under (a hosted MCP server's tool: its own).
+HOSTED: Final[dict[str, str]] = {
+    "file_search_call": "file_search",
+    "web_search_call": "web_search",
+    "code_interpreter_call": "code_interpreter",
+    "image_generation_call": "image_generation",
+    "mcp_call": "hosted_mcp",
+}
+#: A hosted call's status that is no failure.
+HOSTED_DONE: Final = frozenset({"completed", "searching", "in_progress", "interpreting"})
+
+
+async def hosted_calls(runtime: Runtime, items: Sequence[Any], *, started: float) -> None:
+    """The provider's hosted tool calls in one model reply (``items``: its output), recorded
+    as the run's tool calls (``tools.bridge.observed``): each with what it was asked, what it
+    found (its results, never an image's bytes), whether it failed, and the duration of the
+    step it ran in (``started``: when the step began)."""
+    for item in items:
+        kind = getattr(item, "type", None)
+        name = HOSTED.get(kind) if isinstance(kind, str) else None
+        if name is None:
+            continue
+        server = None
+        if kind == "mcp_call":  # a hosted MCP server's tool: by its own name, from its server
+            name, server = str(item.name), str(item.server_label)
+        args, output = _hosted(item)
+        failed = getattr(item, "status", "completed") not in HOSTED_DONE or bool(
+            getattr(item, "error", None)
+        )
+        outcome = ToolOutcome(
+            tool=name,
+            status=ToolStatus.ERROR if failed else ToolStatus.OK,
+            output=output,
+            error_class="HostedToolError" if failed else None,
+        )
+        source = "local" if server is None else "mcp"
+        spec = ToolSpec(name=name, source=source, server=server, side_effects=DEFAULT_SIDE_EFFECTS)
+        ref = str(getattr(item, "id", None) or f"{runtime.run_id}:{name}")
+        await bridge.observed(runtime, spec, args, outcome, ref=ref, started=started)
+
+
+def _hosted(item: Any) -> tuple[dict[str, Any], Any]:
+    """What a hosted call was asked (its arguments) and what came of it, as plain data."""
+    kind = item.type
+    if kind == "file_search_call":
+        results = [
+            {"file": r.filename, "score": r.score} for r in (item.results or ()) if r is not None
+        ]
+        return {"queries": list(item.queries or ())}, {"results": results}
+    if kind == "web_search_call":
+        action = item.action.model_dump(exclude_none=True) if item.action is not None else {}
+        return action, {"status": item.status}
+    if kind == "code_interpreter_call":
+        outputs = [o.model_dump(exclude_none=True) for o in item.outputs or ()]
+        return {"code": item.code or ""}, {"outputs": outputs}
+    if kind == "image_generation_call":
+        return {}, {"revised_prompt": getattr(item, "revised_prompt", None)}
+    args = _arguments(item)
+    error = item.error
+    output = item.output if error is None else error.model_dump(mode="json", exclude_none=True)
+    return (args if isinstance(args, dict) else {"arguments": item.arguments}), output

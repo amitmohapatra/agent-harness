@@ -22,11 +22,12 @@ from tests.support.adapters import BUILDERS
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call, PlannedChat, PlannedChatModel, PlannedModel
 from trellis import Ask, Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, Runtime, Settings, tool
-from trellis.contracts import ModelError, RunEventType, RunStatus, ToolCall, ToolOutcome
+from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolOutcome
 from trellis.harness.governance import Decision, Denied, Governance, governed
 from trellis.harness.hooks.openai_agents import ModelHooks as RunHooks
 from trellis.harness.middleware import ModelHooks as Middleware
 from trellis.harness.result import Result
+from trellis.harness.runtime import ModelTimeout
 
 paid: list[int] = []
 quoted: list[str] = []
@@ -269,16 +270,11 @@ async def test_react_model_calls_go_through_the_hooks(harness: Harness) -> None:
 async def test_a_react_model_call_out_of_time_is_a_model_error_the_hooks_see(
     harness: Harness,
 ) -> None:
-    class Slow(ScriptedChatModel):
-        async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
-            await asyncio.sleep(5)
-            raise AssertionError("never")
-
     hooks = Redacting()
-    target = ReAct(system="s", model=Slow(turns=[]), model_timeout=0.01)
+    target = ReAct(system="s", model=ScriptedChatModel(turns=[], stall=5), model_timeout=0.01)
     result = await harness.wrap(target, id="slow", hooks=[hooks]).run("q", user="u")
     assert result.status is RunStatus.ERROR
-    assert hooks.errors[0] == ("model", ModelError.__name__)
+    assert hooks.errors[0] == ("model", ModelTimeout.__name__)  # a ModelError
 
 
 @pytest.mark.parametrize("deep", [False, True], ids=["create_agent", "deepagents"])

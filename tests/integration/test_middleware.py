@@ -6,7 +6,6 @@ the task, and the checkpoint kept in the run."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from typing import Any, cast
 
 import httpx2
@@ -14,14 +13,11 @@ import openai
 import pytest
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, Hooks, ModelCall, Settings, current, tool
 from trellis.contracts import ConfigurationError, ModelError, RunEventType, RunStatus
-from trellis.harness import telemetry
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
     LAST_STEP,
@@ -36,15 +32,6 @@ from trellis.harness.middleware import (
     read_result,
 )
 from trellis.harness.prompts import PromptSources, ResolvedPrompt
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
 
 
 @tool(side_effects="read")
@@ -333,8 +320,8 @@ async def test_a_model_call_past_its_time_is_a_retryable_model_error(harness: Ha
     agent = harness.wrap(target, id="slow")
     result = await agent.run("x", user="u")
     assert result.error is not None
-    assert result.error.message == "the model did not answer within 0.05s"
-    assert result.error.retryable
+    assert result.error.message == "the model did not answer within 0.05s: the step stalled"
+    assert result.error.retryable and result.error.code == "MODEL_TIMEOUT"
     assert isinstance(hooks.errors[0], ModelError)
     with pytest.raises(ModelError, match="did not answer"):
         await graph(Slow(turns=[]), ModelHooks(timeout=0.05)).ainvoke(

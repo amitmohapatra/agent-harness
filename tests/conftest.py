@@ -9,10 +9,14 @@ from typing import Any
 import httpx
 import pytest
 from agents import set_tracing_disabled
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support import memory as fake_memory
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
+from trellis.harness import telemetry
 
 set_tracing_disabled(True)
 
@@ -70,6 +74,16 @@ def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
             super().__init__(**kwargs)
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", OnHttpx)
+
+
+@pytest.fixture
+def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
+    """The spans the harness ends during the test, in memory."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
+    yield exporter
 
 
 @pytest.fixture

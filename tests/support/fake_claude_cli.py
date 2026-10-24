@@ -17,7 +17,10 @@ before a turn, as the real CLI calls them, and the ``additionalContext`` they an
 (``context``) and is what ``{context}`` in a scripted text stands for. The ``PreToolUse`` hooks
 are called before every tool call, before any permission rule: ``allow`` runs it (with their
 ``updatedInput``), ``deny`` refuses it, ``continue: false`` stops the turn; with no decision the
-permission rules go on (``--allowedTools``, then ``can_use_tool``).
+permission rules go on (``--allowedTools``, then ``can_use_tool``). After a call that ran, the
+``PostToolUse`` hooks are called with its result, or the ``PostToolUseFailure`` hooks with its
+error (``{"builtin": ..., "fails": "why"}`` scripts a built-in that fails). ``{"stall":
+seconds}`` is a step on which the "model" sends nothing for that long (then goes on).
 
 Spending: every result carries usage (:data:`STEP_TOKENS` a step) and a cost
 (``FAKE_CLAUDE_COST`` a step); past ``--max-budget-usd`` the query stops with the real CLI's
@@ -41,6 +44,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -129,6 +133,46 @@ class Cli:
                 if said.get("permissionDecision") or answer.get("continue") is False:
                     return answer
         return {}
+
+    def post_tool_use(
+        self,
+        session: str,
+        name: str,
+        args: dict[str, Any],
+        tool_id: str,
+        *,
+        content: list[dict[str, Any]],
+        error: str | None,
+    ) -> None:
+        """A call that ran, to the ``PostToolUse`` hooks matching ``name`` (its result) or —
+        it failed — the ``PostToolUseFailure`` ones (its error), as the real CLI reports it."""
+        event = "PostToolUse" if error is None else "PostToolUseFailure"
+        given: dict[str, Any] = {
+            "session_id": session,
+            "transcript_path": "",
+            "cwd": os.getcwd(),
+            "hook_event_name": event,
+            "tool_name": name,
+            "tool_input": args,
+            "tool_use_id": tool_id,
+        }
+        if error is None:
+            given["tool_response"] = content
+        else:
+            given["error"] = error
+        for matcher in self.hooks.get(event) or []:
+            pattern = matcher.get("matcher")
+            if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
+                continue
+            for callback in matcher.get("hookCallbackIds") or []:
+                self.control(
+                    {
+                        "subtype": "hook_callback",
+                        "callback_id": callback,
+                        "input": given,
+                        "tool_use_id": tool_id,
+                    }
+                )
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
@@ -267,6 +311,9 @@ class Cli:
         """One step of the script: a text, a subagent or a tool call. What it said (``None``:
         no text), the text of its result, whether it is done, whether a check stopped the
         turn, and how many steps of a subagent's own it took."""
+        if "stall" in item:  # the model says nothing for a while, then goes on
+            time.sleep(float(item["stall"]))
+            return None, read, True, False, 0
         if "text" in item:
             said = item["text"].replace("{last}", read).replace("{context}", context)
             if "--include-partial-messages" in sys.argv:
@@ -375,18 +422,24 @@ class Cli:
         permission = self.allowed(session, name, args, tool_id)
         allowed = permission.get("behavior", "allow") == "allow"
         error = not allowed
+        ran = permission.get("updatedInput", args)
         if allowed and builtin:
-            ran = permission.get("updatedInput", args)
             with open(os.environ["FAKE_CLAUDE_BUILTINS"], "a") as log:
                 log.write(json.dumps({"tool": builtin, "args": ran}) + "\n")
-            content = [{"type": "text", "text": f"{builtin} ran"}]
+            failure = item.get("fails")
+            error = failure is not None
+            text = f"{builtin} failed: {failure}" if error else f"{builtin} ran"
+            content = [{"type": "text", "text": text}]
+            self.post_tool_use(session, name, ran, tool_id, content=content, error=failure)
         elif allowed:
-            called = self.call_tool(item["tool"], permission.get("updatedInput", args))
+            called = self.call_tool(item["tool"], ran)
             answered = called.get("result") or {}
             error = bool(answered.get("isError")) or "error" in called
             content = answered.get("content") or [
                 {"type": "text", "text": json.dumps(called.get("error"))}
             ]
+            failed = "".join(c.get("text", "") for c in content) if error else None
+            self.post_tool_use(session, name, ran, tool_id, content=content, error=failed)
         else:
             content = [{"type": "text", "text": permission.get("message", "denied")}]
         read = "".join(c.get("text", "") for c in content if isinstance(c, dict))

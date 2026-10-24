@@ -6,17 +6,20 @@ role, the agents' model key, its readiness (``/health/ready``) and its version (
 the approval rules accepted from the
 memory service's learned suggestions — learned and accepted per agent: those of each agent the
 key may act as, and of each ``--agent`` named (governance accepts them automatically, but for a
-tool at the highest risk); whether the spool can be written and the Docker daemon answers; and
-what to set. It changes nothing: it suggests.
+tool at the highest risk); whether the spool can be written, and the memory writes that failed
+and wait in it ("records failing"); whether the Docker daemon answers; and what to set. It
+changes nothing: it suggests.
 
 Exit code ``0`` when every check passes, ``1`` otherwise."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -52,6 +55,8 @@ MODEL_KEY_PATH: Final = "/v1/agents/model-key"
 #: The memory service's readiness answers that still serve (``degraded``: an optional
 #: dependency is down).
 READY: Final = frozenset({"ready", "degraded"})
+#: The check of the memory writes that failed and wait in the spool.
+RECORDS: Final = "records failing"
 #: How ``may_act_as`` names an agent a key may act as.
 AGENT_PRINCIPAL: Final = "agent:"
 
@@ -131,6 +136,7 @@ async def checks(
     done = [c for c in (gateway, *memory, rules, runs) if c is not None]
     if settings.spool_dir:
         done.append(_spool(settings.spool_dir))
+        done.append(_records(settings.spool_dir))
     if settings.sandbox == "docker":
         done.append(await _docker())
     return done
@@ -369,6 +375,34 @@ def _spool(folder: str) -> Check:
     except OSError as exc:
         return Check("spool", False, f"{folder} cannot be written ({exc.strerror or exc})")
     return Check("spool", True, f"{folder} can be written")
+
+
+def _records(folder: str) -> Check:
+    """Memory writes that failed — tool records, transcripts, outcomes, decisions — kept in
+    the spool for the next start to deliver (``writes.py``): the "records failing" check, which
+    fails while any wait there, counting them by kind."""
+    from trellis.harness.writes import SPOOL_FILE  # noqa: PLC0415 - writes imports telemetry
+
+    kinds: Counter[str] = Counter()
+    for path in sorted(Path(folder).glob(f"{SPOOL_FILE}*")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            return Check(RECORDS, False, f"{path} cannot be read ({exc.strerror or exc})")
+        for line in lines:
+            try:
+                kinds[str(json.loads(line).get("op") or "unknown")] += 1
+            except (ValueError, AttributeError):
+                kinds["unreadable"] += 1
+    if not kinds:
+        return Check(RECORDS, True, f"no memory write waits in {folder}")
+    waiting = ", ".join(f"{op}: {n}" for op, n in sorted(kinds.items()))
+    return Check(
+        RECORDS,
+        False,
+        f"{sum(kinds.values())} memory write(s) failed and wait in {folder} ({waiting}): they "
+        "are delivered at the next start; check the memory service (memory ready above)",
+    )
 
 
 async def _docker() -> Check:

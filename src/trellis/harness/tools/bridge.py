@@ -40,6 +40,8 @@ import asyncio
 import time
 from typing import Any, Final
 
+from opentelemetry.trace import StatusCode
+
 from trellis.contracts import (
     InterruptDecision,
     RunEventType,
@@ -116,6 +118,37 @@ async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutc
         return denied(call, verdict)
     _, call, rejected = await _decided(runtime, spec, call, verdict)
     return call if rejected is None else rejected
+
+
+async def observed(
+    runtime: Runtime,
+    spec: ToolSpec,
+    args: dict[str, Any],
+    outcome: ToolOutcome,
+    *,
+    ref: str,
+    started: float,
+) -> None:
+    """A call its framework ran itself and reported once it ran — a provider's hosted tool (an
+    OpenAI agent's file search, web search, code interpreter: run inside the model's step),
+    Claude Code's built-ins (after its ``PreToolUse`` decision, ``permitted``): on the run's
+    stream, counted, traced with its duration (``started``: ``time.time()`` when it began) and
+    recorded in the memory service, as a harness call is. Nothing is run or journaled here."""
+    call = ToolCall(
+        tool=spec.name, args=args, task=runtime.task, step=runtime.next_step(), idempotency_key=ref
+    )
+    outcome.latency_ms = round(max(0.0, time.time() - started) * 1000, 3)
+    start_time = int(started * 1e9)
+    with tool_span(
+        spec.name, ref, args, source=spec.source, action="run", start_time=start_time
+    ) as span:
+        span_output(span, outcome.output, key="gen_ai.tool.call.result")
+        if not outcome.ok:
+            span.set_status(StatusCode.ERROR, str(outcome.status.value))
+    runtime.used.add(spec.name)
+    _events(runtime, ref, call, outcome)
+    metrics.tool_called(spec.name, outcome.status.value)
+    await runtime.agent.record_tool(runtime, call, outcome)
 
 
 async def _called(

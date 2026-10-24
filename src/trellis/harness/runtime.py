@@ -24,13 +24,16 @@ from pydantic import BaseModel
 from trellis.contracts import (
     AgentPaused,
     ConfigurationError,
+    ErrorCategory,
     Interrupt,
     InterruptReason,
     InterruptResolution,
+    ModelError,
     Option,
     ToolCall,
     ToolError,
 )
+from trellis.harness import telemetry
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
@@ -59,6 +62,24 @@ INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
+
+#: The most one model call — a step, the provider's hosted tools it runs included — may go
+#: without an answer when nothing tighter bounds it (a ``call_timeout``, the run's time left):
+#: past it the step has stalled, and the run ends with a :class:`ModelTimeout`.
+STALL_SECONDS: Final = 600.0
+#: The message a stalled step's watchdog cancels the attempt with.
+STALLED: Final = "trellis: the model call stalled"
+
+
+class ModelTimeout(ModelError):
+    """A model call (a step) got no answer within its bound: ``min(call timeout, the run's
+    time left)``, else :data:`STALL_SECONDS`. A ``TIMEOUT`` error, retryable (a stalled
+    provider may answer the next time); ``details``: the ``step`` and its ``seconds``."""
+
+    code = "MODEL_TIMEOUT"
+    category = ErrorCategory.TIMEOUT
+    retryable = True
+
 
 _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=None)
 
@@ -174,6 +195,10 @@ class Runtime:
     _saved_at: float | None = None
     #: one progress save at a time, so a later save never lands before an earlier one
     _saving: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    #: the model calls under way, each with the watchdog that ends the attempt when it stalls
+    _watched: dict[str, asyncio.TimerHandle] = field(default_factory=dict, repr=False)
+    #: the step that stalled (its watchdog cancelled the attempt): the attempt's error
+    stalled: ModelTimeout | None = None
 
     # ------------------------------------------------------------------ the memory context
     @property
@@ -304,6 +329,47 @@ class Runtime:
                 yield
         finally:
             _call.reset(token)
+
+    # ------------------------------------------------------------------ stalls
+    def model_started(self, key: str, seconds: float | None = None) -> None:
+        """A model call (``key``: the framework's id of it) began: its watchdog ends the
+        attempt with a :class:`ModelTimeout` unless :meth:`model_ended` comes within
+        ``seconds`` (else :data:`STALL_SECONDS`). The run's own time left bounds it too: the
+        run ends ``TIMEOUT`` when that comes first. A key already watched is watched anew."""
+        self.model_ended(key)
+        bound = STALL_SECONDS if seconds is None else seconds
+        loop = asyncio.get_running_loop()
+        self._watched[key] = loop.call_later(bound, self._stall, key, bound)
+
+    def model_ended(self, key: str) -> None:
+        """The model call ``key`` answered (or failed): its watchdog is off."""
+        found = self._watched.pop(key, None)
+        if found is not None:
+            found.cancel()
+
+    def unwatched(self) -> None:
+        """The attempt ended: every watchdog still on is off."""
+        for handle in self._watched.values():
+            handle.cancel()
+        self._watched.clear()
+
+    def _stall(self, key: str, seconds: float) -> None:
+        self._watched.pop(key, None)
+        task = self.running_in
+        if self.stalled is not None or task is None or task.done():
+            return
+        self.stalled = ModelTimeout(
+            f"the model did not answer within {seconds:g}s: the step stalled",
+            details={"step": key, "seconds": seconds},
+            source=self.agent.adapter.name,
+        )
+        log.warning("run %s: %s", self.run_id, self.stalled.message)
+        self.events.warning(ModelTimeout.code.lower(), self.stalled.message)
+        attributes = {"trellis.step": key, "trellis.step.seconds": seconds}
+        telemetry.failure(
+            self.trace_run, self.run_id, "model_timeout", self.stalled.message, attributes
+        )
+        task.cancel(STALLED)
 
     # ------------------------------------------------------------------ progress
     async def progress(self, *, now: bool) -> None:

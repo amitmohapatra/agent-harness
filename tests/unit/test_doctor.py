@@ -310,3 +310,36 @@ def test_the_cli_names_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     for wrong in (["--agent"], ["--verbose"]):
         with pytest.raises(SystemExit, match="usage: trellis doctor"):
             doctor.main(wrong, {})
+
+
+def test_records_failing_lists_the_memory_writes_waiting_in_the_spool(tmp_path: Path) -> None:
+    from trellis.harness.writes import SPOOL_FILE
+
+    found = doctor._records(str(tmp_path))
+    assert found.ok and found.name == "records failing"
+    lines = [
+        json.dumps({"label": "memory.record_tool", "op": "record_tool"}),
+        json.dumps({"label": "memory.record_tool", "op": "record_tool"}),
+        json.dumps({"label": "memory.transcript", "op": "record_messages"}),
+        "not json",
+    ]
+    (tmp_path / SPOOL_FILE).write_text("\n".join(lines[:3]) + "\n")
+    (tmp_path / f"{SPOOL_FILE}.7.replaying").write_text(lines[3] + "\n")
+    failing = doctor._records(str(tmp_path))
+    assert not failing.ok
+    assert failing.said.startswith("4 memory write(s) failed and wait in")
+    assert "(record_messages: 1, record_tool: 2, unreadable: 1)" in failing.said
+
+
+def test_records_that_cannot_be_read_fail_the_check(tmp_path: Path) -> None:
+    from trellis.harness.writes import SPOOL_FILE
+
+    (tmp_path / SPOOL_FILE).mkdir()  # not a file
+    found = doctor._records(str(tmp_path))
+    assert not found.ok and "cannot be read" in found.said
+
+
+@respx.mock
+async def test_the_spool_and_its_waiting_records_are_checked(tmp_path: Path) -> None:
+    found = {c.name: c for c in await doctor.checks(Settings(spool_dir=str(tmp_path)))}
+    assert found["spool"].ok and found["records failing"].ok

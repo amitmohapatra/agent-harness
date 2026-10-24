@@ -13,6 +13,13 @@
   ``Bash``, ``Write``...; a team's own MCP server's) is decided as a harness call is — the run's
   hooks, governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`), a person when it asks — then by
   the team's own ``can_use_tool``, when it has one, asked by the hook;
+* records: every call Claude runs itself (its built-ins, its own MCP servers' tools, a subagent's
+  calls) is recorded as the run's tool calls once it ran — its result or its error, and how long
+  it took — through the SDK's own ``PostToolUse`` / ``PostToolUseFailure`` hooks
+  (``tools.bridge.observed``); the harness's own tools are recorded by the bridge;
+* stalls: the query is watched for a stall — a model step that sends nothing for
+  ``runtime.STALL_SECONDS`` (the time a tool call runs, from ``PreToolUse`` to its
+  ``PostToolUse``, not counted) ends the run with a ``ModelTimeout``;
 * spending: each query's usage and cost (its ``ResultMessage``) count toward the run's budget;
 * helpers: each subagent Claude runs (``agents=``, its ``Agent`` tool) is a child run of the run
   (``bridges.helpers``), from its call to that call's result; its own tool calls go through the
@@ -41,6 +48,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
@@ -52,6 +60,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
     ToolSpec,
+    ToolStatus,
 )
 from trellis.harness import budget
 from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
@@ -92,8 +101,12 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: as an agent-runs artifact (50 MiB: a journal over a checkpoint's size travels as one) —
 #: escaped as JSON, twice that at most.
 CLI_MESSAGE_BYTES: Final = 2 * 50 * 1024 * 1024
-#: The hook event every tool call is governed at.
+#: The hook event every tool call is governed at, and the ones that report it ran or failed.
 TOOL_EVENT: Final = "PreToolUse"
+RAN_EVENT: Final = "PostToolUse"
+FAILED_EVENT: Final = "PostToolUseFailure"
+#: The key a query's model steps are watched for a stall under (``Runtime.model_started``).
+STEP: Final = "claude_agent_sdk"
 #: When the SDK hands the session store a step: as soon as the CLI mirrors it.
 SESSION_FLUSH: Final = "eager"
 #: Claude Code's tool that runs a subagent (``agents=``): ``Agent``, named ``Task`` before.
@@ -307,18 +320,24 @@ class ClaudeAdapter:
         runtime = run.runtime
         given = runtime.framework_options
         target = dataclasses.replace(target, **given) if given else target
-        options = _options(target, native_input.context, run, session)
+        steps = Steps(runtime)
+        options = _options(target, native_input.context, run, session, steps)
         prompt = native_input.prompt if session is None else _resumed(native_input, run)
-        async for message in query(prompt=prompt, options=options):
-            found = getattr(message, "session_id", None)
-            if isinstance(found, str):
-                runtime.replay.journal.session = found
-            if isinstance(message, ResultMessage):
-                _spent(runtime, options, message)
-            yield message
-            if runtime.pending is not None:
-                # the run paused: stop here; the CLI process goes with it
-                return
+        steps.waiting()
+        try:
+            async for message in query(prompt=prompt, options=options):
+                steps.waiting()  # the next message is the next step's
+                found = getattr(message, "session_id", None)
+                if isinstance(found, str):
+                    runtime.replay.journal.session = found
+                if isinstance(message, ResultMessage):
+                    _spent(runtime, options, message)
+                yield message
+                if runtime.pending is not None:
+                    # the run paused: stop here; the CLI process goes with it
+                    return
+        finally:
+            runtime.model_ended(STEP)
 
 
 async def _subagents(helpers: Helpers, message: Any) -> None:
@@ -346,9 +365,13 @@ async def _subagents(helpers: Helpers, message: Any) -> None:
 
 
 def _result_text(content: Any) -> str:
-    """A tool result's text (a string, or its text blocks)."""
+    """A tool result's text (a string, its text blocks, or the text a built-in's structured
+    response holds)."""
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        found = content.get("content", content.get("output", content.get("stdout")))
+        return _result_text(found) if found is not None else json.dumps(content, default=str)
     return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
 
 
@@ -381,7 +404,37 @@ def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     return told.format(tool=f"mcp__{SERVER}__{call.tool}" if harness else call.tool)
 
 
-def _options(options: Any, context: str | None, run: Invocation, session: str | None) -> Any:
+class Steps:
+    """One query's steps as the stall watchdog sees them (``Runtime.model_started``): Claude is
+    waited on from one message to the next, except while a tool call runs (from its
+    ``PreToolUse`` to its ``PostToolUse``: a tool's own time is not a stalled model); and the
+    calls under way, by Claude's id, with when each began (what ``PostToolUse`` records)."""
+
+    __slots__ = ("calls", "runtime")
+
+    def __init__(self, runtime: Runtime) -> None:
+        self.runtime = runtime
+        #: the tool calls under way: their name, arguments and start (``time.time()``)
+        self.calls: dict[str, tuple[str, dict[str, Any], float]] = {}
+
+    def waiting(self) -> None:
+        """Claude is to answer now (unless a call runs): watched for a stall."""
+        if not self.calls:
+            self.runtime.model_started(STEP)
+
+    def started(self, call_id: str, name: str, args: dict[str, Any]) -> None:
+        self.calls[call_id] = (name, args, time.time())
+        self.runtime.model_ended(STEP)
+
+    def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
+        found = self.calls.pop(call_id, None)
+        self.waiting()
+        return found
+
+
+def _options(
+    options: Any, context: str | None, run: Invocation, session: str | None, steps: Steps
+) -> Any:
     from trellis.harness.tools.convert import claude as convert
 
     if options.permission_prompt_tool_name:
@@ -391,7 +444,7 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
             "permission_prompt_tool_name"
         )
     runtime = run.runtime
-    hooks = _with_governance(options.hooks, options.can_use_tool)
+    hooks = _with_governance(options.hooks, options.can_use_tool, steps)
     changes: dict[str, Any] = {
         "hooks": with_context(hooks, context) if context else hooks,
         # the hook asks the team's callback itself: the CLI has no permission prompt to make
@@ -414,14 +467,18 @@ def _options(options: Any, context: str | None, run: Invocation, session: str | 
     return dataclasses.replace(options, **changes)
 
 
-def _with_governance(hooks: Mapping[str, Any] | None, own: Any) -> dict[str, Any]:
-    """The options' hooks with the governance hook (:func:`_governance`) after theirs."""
+def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) -> dict[str, Any]:
+    """The options' hooks with the governance hook (:func:`_governance`) and the record hooks
+    (:func:`_recorded`) after theirs."""
     given = dict(hooks or {})
-    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(own)]
+    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(own, steps)]
+    recorded = _recorded(steps)
+    for event in (RAN_EVENT, FAILED_EVENT):
+        given[event] = [*given.get(event, ()), recorded]
     return given
 
 
-def _governance(own: Any) -> Any:
+def _governance(own: Any, steps: Steps) -> Any:
     """The ``PreToolUse`` hook every tool call goes through, in every permission mode: a
     harness tool runs (the bridge decides about it); any other is the run's decision
     (``bridge.permitted``: hooks, governance, a person), then ``own``'s — the team's
@@ -437,7 +494,9 @@ def _governance(own: Any) -> Any:
         assert runtime is not None  # the CLI asks inside the run it works for
         await runtime.progress(now=True)
         name, args = given["tool_name"], dict(given.get("tool_input") or {})
+        call_id = tool_use_id or str(given.get("tool_use_id") or name)
         if name.startswith(f"mcp__{SERVER}__"):
+            steps.started(call_id, name, args)  # the bridge records it
             return _decided("allow")
         side_effects = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
         try:
@@ -447,14 +506,57 @@ def _governance(own: Any) -> Any:
         if isinstance(decided, ToolOutcome):
             return _decided("deny", str(decided.output))
         if own is None:
+            steps.started(call_id, name, decided.args)
             return _decided("allow", updated=decided.args)
         verdict = await own(name, decided.args, ToolPermissionContext(tool_use_id=tool_use_id))
         if isinstance(verdict, PermissionResultAllow):
-            return _decided("allow", updated=verdict.updated_input or decided.args)
+            ran = verdict.updated_input or decided.args
+            steps.started(call_id, name, ran)
+            return _decided("allow", updated=ran)
         refused = _decided("deny", verdict.message)
         return {**refused, "continue_": False} if verdict.interrupt else refused
 
     return HookMatcher(hooks=[pre_tool_use])
+
+
+def _recorded(steps: Steps) -> Any:
+    """The ``PostToolUse`` / ``PostToolUseFailure`` hook: a call Claude ran itself (a built-in,
+    its own MCP servers' tools), recorded as the run's (``tools.bridge.observed``) with its
+    result or its error and its duration (from its ``PreToolUse``); a harness tool's call is
+    the bridge's. Either way the stall watch goes on once no call runs."""
+    from claude_agent_sdk import HookMatcher
+
+    from trellis.harness.tools.convert.claude import SERVER
+
+    async def post_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
+        call_id = tool_use_id or str(given.get("tool_use_id") or given.get("tool_name"))
+        found = steps.ended(call_id)
+        name = str(given.get("tool_name") or "")
+        if name.startswith(f"mcp__{SERVER}__"):
+            return {}
+        _, args, started = found or (name, dict(given.get("tool_input") or {}), time.time())
+        failed = given.get("hook_event_name") == FAILED_EVENT
+        outcome = ToolOutcome(
+            tool=name,
+            status=ToolStatus.ERROR if failed else ToolStatus.OK,
+            output=given.get("error") if failed else _result_text(given.get("tool_response")),
+            error_class="ClaudeToolError" if failed else None,
+        )
+        spec = native_spec(name)
+        await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
+        return {}
+
+    return HookMatcher(hooks=[post_tool_use])
+
+
+def native_spec(name: str) -> ToolSpec:
+    """A tool Claude runs itself, as the harness records and publishes it: a built-in by its
+    risk (:data:`BUILTIN_SIDE_EFFECTS`), an MCP server's tool (``mcp__<server>__<tool>``) by its
+    server."""
+    parts = name.split("__")
+    if len(parts) >= 3 and parts[0] == "mcp":
+        return ToolSpec(name=name, source="mcp", server=parts[1])
+    return ToolSpec(name=name, side_effects=BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS))
 
 
 def _decided(

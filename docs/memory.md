@@ -117,8 +117,13 @@ Every write above is queued and the run moves on (`writes.py`); four writers dra
   other process at its first write). The service stores a replayed write that had in fact
   landed once (every write carries its idempotency key or message id). Without the directory,
   or for a write that is not data (the sampled grounding check, the model key, Code Mode
-  calls read back from the gateway), it is lost: counted (`trellis.writes.failed`) and, during a
-  run, a `warning` event.
+  calls read back from the gateway), it is lost.
+* Either way a write given up is never only a warning: it is counted (`trellis.writes.failed`,
+  and `trellis.writes.undelivered` with `outcome` `spooled` or `lost`), a `write_failed <label>`
+  span with an error status in the run's trace, a `write_failed` warning event while the run's
+  stream is open, and an error in the log — the first time each kind of write fails in the
+  process, a warning after that. `trellis doctor`'s "records failing" check fails while any
+  write waits in the spool, counting them by kind.
 
 So: delivered at least once while the process lives or, with a spool directory on a volume that
 outlives the process, after its next start; never silently dropped.

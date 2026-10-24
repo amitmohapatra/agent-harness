@@ -57,7 +57,8 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 |---|---|---|
 | `agent.context` is `None` | memory is off (`MEMORY_URL` unset, `without={"memory"}`) or the context read failed (a `warning` event) | check the environment and the run's events ([memory.md](memory.md)) |
 | `ConfigurationError: memory is off for this run` | `trellis.current().memory` with memory off | set `MEMORY_URL`, or check `agent.uses("memory_pull")` first |
-| `warning` events about writes, `trellis.writes.undelivered` | memory writes given up after retries | set `TRELLIS_SPOOL_DIR` on a volume that outlives the process ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
+| `warning` events about writes, `trellis.writes.undelivered`, `trellis doctor` "records failing" | memory writes given up after retries | check the memory service; set `TRELLIS_SPOOL_DIR` on a volume that outlives the process ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
+| a run ended `MODEL_TIMEOUT` ("the step stalled") | a model call got no answer within its bound | the provider is slow or down; a `ReAct`'s `model_timeout` or the run's `timeout` ([reliability.md](reliability.md#stalled-model-calls)) |
 | a person's feedback does not change memory | human feedback waits for the tenant administrator's review | approve it in the memory service; the trace score is there already |
 | no judge scores | the judge alias `trellis-judge` is not routed in Bifrost (the log says so once), or no `BIFROST_URL` | route the alias in Bifrost, or give `llm_judge(model=)` ([evaluation.md](evaluation.md#the-judges-model)) |
 | few runs judged | online judges score a sample (`TRELLIS_EVAL_SAMPLE`, 0.1 by default) | raise the sample |

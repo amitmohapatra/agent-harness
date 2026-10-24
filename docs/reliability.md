@@ -18,6 +18,7 @@ rules where it has the same pieces: `governed` for your own tools, `trellis.runs
 |---|---|---|
 | [Tool timeouts](#tool-timeouts) | `@tool(timeout=)`, `openapi(timeout=)`, `a2a(timeout=)`, `governed(timeout=)` | MCP calls and every call bounded by what is left of the run |
 | [Model timeouts](#model-timeouts) | `ReAct(model_timeout=)` | the gateway's own retries stay inside it |
+| [Stalled model calls](#stalled-model-calls) | nothing: every target's model calls are watched | a stalled step ends the run with a `TIMEOUT` step error, recorded and traced |
 | [Run time limit and deadline](#run-time-limit-and-deadline) | `run`/`stream`/`start(timeout=, deadline=)` | the clock survives a crash; workers stop in time |
 | [Retries](#retries) | — | reads retried, writes run once |
 | [Idempotency keys](#idempotency-keys) | the tool hands `trellis.current().idempotency_key` to its service | OpenAPI, A2A and MCP calls carry it |
@@ -103,10 +104,39 @@ attempts never multiply. All of it happens *inside* `model_timeout`, and what is
 run bounds it. A model error left is a `ModelError`, retryable for those causes (a queued run
 is queued again, its graph continuing from its checkpoint).
 
-**On failure.** The run fails `ERROR` with a `ModelError` that says
-`"the model did not answer within 30s"`, `retryable` true: a queued run goes back on the
+**On failure.** The run fails `ERROR` with a `ModelTimeout` (code `MODEL_TIMEOUT`, category
+`TIMEOUT`) that says `"the model did not answer within 30s: the step stalled"`, `retryable`
+true: a queued run goes back on the
 queue for a later attempt ([run retries](#retries)), and its model steps already journaled
 are not asked again.
+
+## Stalled model calls
+
+**What.** Every model call of every target — a step, the provider's hosted tools it runs
+included (an OpenAI agent's file search, web search, code interpreter) — is watched from its
+start to its answer. One that gets no answer within its bound has stalled: the run ends with a
+clear `TIMEOUT` step error instead of hanging or answering something generic.
+
+**Bound.** `min(call timeout, the run's time left)`: a `ReAct`'s `model_timeout`, else
+`STALL_SECONDS` (600 s, `trellis.harness.runtime`); the run's own `timeout` and `deadline` bound
+it too (then the run ends `TIMEOUT`, below).
+
+**Where it is watched.** Every LangChain chat model call made in a run (a `ReAct`, a
+`create_agent` or Deep Agents graph, a hand-built graph's model, a function's own LangChain
+model), through a callback on every LangChain run; an OpenAI Agents run through its `RunHooks`
+(`on_llm_start` to `on_llm_end`); a Claude query from one CLI message to the next, the time a
+tool call runs (its `PreToolUse` to its `PostToolUse`) not counted. A function's model of
+another kind is bounded by the run's time only.
+
+**On a stall.** The run ends `ERROR` with a `ModelTimeout`: code `MODEL_TIMEOUT`, category
+`TIMEOUT`, `retryable` true (a queued run is queued again), `details` naming the step and its
+bound. A `model_timeout` warning event and a `model_timeout` span with an error status are in
+the run's stream and trace.
+
+The provider's hosted tool calls are recorded as the run's tool calls once their step answered:
+what each was asked, what it found (never an image's bytes), whether it failed, and the step's
+duration (`tools.bridge.observed`). A Claude built-in's call is recorded the same way, with its
+own duration, by its `PostToolUse` hook.
 
 ## Run time limit and deadline
 

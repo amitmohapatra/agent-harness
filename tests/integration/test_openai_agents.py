@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -490,3 +491,80 @@ async def test_a_rule_that_cannot_be_evaluated_asks_and_is_recorded_on_the_run()
     assert any(e.type is RunEventType.INTERRUPT for e in events)
     codes = [e.data.get("code") for e in events if e.data.get("name") == WARNING]
     assert codes == [ApprovalRuleError.code]
+
+
+async def test_the_providers_hosted_tool_calls_are_recorded_with_the_steps_duration(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """File search, web search, the code interpreter, image generation and a hosted MCP
+    server's tool run at the provider, inside the model's step: each call a reply carries is
+    recorded as the run's — what it was asked, what it found (never an image's bytes), whether
+    it failed, the step's duration — on the stream and in the memory service."""
+    from openai.types.responses import (
+        ResponseCodeInterpreterToolCall,
+        ResponseFileSearchToolCall,
+        ResponseFunctionWebSearch,
+    )
+    from openai.types.responses.mcp_tool_call_error import McpToolExecutionError
+    from openai.types.responses.response_file_search_tool_call import Result
+    from openai.types.responses.response_function_web_search import ActionSearch
+    from openai.types.responses.response_output_item import ImageGenerationCall, McpCall
+
+    from tests.support.openai_model import Items
+
+    hosted = Items(
+        ResponseFileSearchToolCall(
+            id="fs_1",
+            type="file_search_call",
+            status="completed",
+            queries=["returns policy"],
+            results=[Result(filename="policy.pdf", score=0.9)],
+        ),
+        ResponseFunctionWebSearch(
+            id="ws_1",
+            type="web_search_call",
+            status="completed",
+            action=ActionSearch(type="search", query="carrier delays"),
+        ),
+        ResponseCodeInterpreterToolCall(
+            id="ci_1",
+            type="code_interpreter_call",
+            status="completed",
+            code="print(2 + 2)",
+            container_id="c1",
+            outputs=[],
+        ),
+        ImageGenerationCall(
+            id="ig_1", type="image_generation_call", status="completed", result="aGVsbG8="
+        ),
+        McpCall(
+            id="mcp_1",
+            type="mcp_call",
+            name="find_order",
+            server_label="crm",
+            arguments='{"order": "o3"}',
+            error=McpToolExecutionError(type="mcp_tool_execution_error", content="refused"),
+        ),
+    )
+    model = ScriptedModel([hosted, "Here is what I found."])
+    agent = memory_harness.wrap(Agent(name="research", model=model), id="research")
+    events = [e async for e in agent.stream("look it up", user="u1")]
+    await memory_harness.writes.drain()
+    recorded = {c.body["tool"]: c.body for c in memory_service.calls if c.name == "record_tool"}
+    assert set(recorded) == {
+        "file_search",
+        "web_search",
+        "code_interpreter",
+        "image_generation",
+        "find_order",
+    }
+    assert recorded["file_search"]["args"] == {"queries": ["returns policy"]}
+    assert recorded["web_search"]["args"]["query"] == "carrier delays"
+    assert recorded["code_interpreter"]["args"] == {"code": "print(2 + 2)"}
+    assert "aGVsbG8=" not in json.dumps(recorded["image_generation"])  # never the bytes
+    assert recorded["find_order"]["status"] == "error"
+    assert recorded["find_order"]["output"]["content"] == "refused"
+    assert recorded["find_order"]["args"] == {"order": "o3"}
+    assert all(r["latency_ms"] is not None for r in recorded.values())
+    results = [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert sorted(results) == sorted(recorded)

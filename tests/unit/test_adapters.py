@@ -179,8 +179,15 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     spent: list[dict[str, Any]] = []
     monkeypatch.setattr(budget, "account", lambda runtime, **given: spent.append(given))
     replay = SimpleNamespace(journal=Journal())
+    watched: list[tuple[str, str]] = []
     runtime = SimpleNamespace(
-        pending=None, replay=replay, framework_options={}, agent_id="a", attempt=1
+        pending=None,
+        replay=replay,
+        framework_options={},
+        agent_id="a",
+        attempt=1,
+        model_started=lambda key: watched.append(("started", key)),
+        model_ended=lambda key: watched.append(("ended", key)),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
@@ -193,6 +200,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert spent == [
         {"model": None, "input_tokens": 17, "output_tokens": 5, "cached": 4, "cost": 0.25}
     ]
+    # the query watched for a stall from its start, anew at each message, until it ended
+    assert watched[0] == ("started", "claude_agent_sdk") and watched[-1][0] == "ended"
+    assert watched.count(("started", "claude_agent_sdk")) == 1 + len(messages)
     # no context and no harness tools: the options as they were, the permission check and
     # the room for a large tool result and the run's journal as the session store added
     [sent] = seen
@@ -418,3 +428,12 @@ def test_mcp_servers_given_as_text_or_a_file_are_read() -> None:
     assert configured_servers('{"mcpServers": {"b": {"type": "http"}}}') == {"b": {"type": "http"}}
     with pytest.raises(ConfigurationError, match="no mcpServers"):
         configured_servers('{"servers": {}}')
+
+
+def test_a_built_ins_structured_response_reads_as_its_text() -> None:
+    from trellis.harness.adapters.claude import _result_text
+
+    assert _result_text({"stdout": "ok", "stderr": ""}) == "ok"
+    assert _result_text({"content": [{"type": "text", "text": "a"}]}) == "a"
+    assert _result_text({"file": {"path": "x"}}) == '{"file": {"path": "x"}}'
+    assert _result_text(None) == ""

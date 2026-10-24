@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -18,7 +19,17 @@ from openai.types.responses import (
 
 #: a call's arguments: an object, or the text the model wrote (which may not be JSON)
 Args = dict[str, Any] | str
-Turn = str | tuple[str, Args] | list[tuple[str, Args]]
+
+
+class Items:
+    """A turn given as the response's output items themselves (a provider's hosted tool calls
+    beside its message)."""
+
+    def __init__(self, *items: Any) -> None:
+        self.items = items
+
+
+Turn = str | tuple[str, Args] | list[tuple[str, Args]] | Items
 
 
 class ScriptedModel(Model):
@@ -27,8 +38,12 @@ class ScriptedModel(Model):
     response. ``usage`` is every reply's (none counted by default); ``ids`` prefixes its call
     ids (two models in one run each their own)."""
 
-    def __init__(self, turns: list[Turn], usage: Usage | None = None, ids: str = "") -> None:
+    def __init__(
+        self, turns: list[Turn], usage: Usage | None = None, ids: str = "", stall: float = 0.0
+    ) -> None:
         self.turns = list(turns)
+        #: how long every call takes before it answers (a stalled provider)
+        self.stall = stall
         self.usage = usage or Usage()
         self.ids = ids
         self.inputs: list[Any] = []
@@ -40,6 +55,8 @@ class ScriptedModel(Model):
         self.inputs.append(input)
         self.system.append(system)
         turn = self.turns.pop(0)
+        if isinstance(turn, Items):  # the response's output items as they are (hosted calls)
+            return list(turn.items)
         if isinstance(turn, str):
             return [
                 ResponseOutputMessage(
@@ -73,6 +90,8 @@ class ScriptedModel(Model):
         **kwargs: Any,
     ) -> ModelResponse:
         self.tools.append([t.name for t in tools])
+        if self.stall:
+            await asyncio.sleep(self.stall)
         return ModelResponse(
             output=self._next(input, system_instructions), usage=self.usage, response_id=None
         )
@@ -80,6 +99,8 @@ class ScriptedModel(Model):
     async def stream_response(  # type: ignore[override]
         self, system_instructions: str | None, input: Any, *args: Any, **kwargs: Any
     ) -> AsyncIterator[Any]:
+        if self.stall:
+            await asyncio.sleep(self.stall)
         output = self._next(input, system_instructions)
         for item in output:
             if isinstance(item, ResponseOutputMessage):

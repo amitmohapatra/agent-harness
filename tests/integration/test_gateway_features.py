@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -20,8 +20,6 @@ from agents import OpenAIChatCompletionsModel
 from claude_agent_sdk import ClaudeAgentOptions
 from langchain.agents import create_agent
 from openai import AsyncOpenAI
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import SecretStr
 
@@ -30,7 +28,7 @@ from tests.support.gateway import URL, FakeGateway, SkillVersions
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, skills, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import fresh, telemetry
+from trellis.harness import fresh
 from trellis.harness.clients import bifrost
 from trellis.harness.evals import EvalCase, EvalServices, judge, llm_judge
 from trellis.harness.middleware import ModelHooks
@@ -60,15 +58,6 @@ async def h(fake: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
     settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
     async with Harness(config=settings, gateway=fake.gateway()) as made:
         yield made
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
 
 
 @tool(side_effects="irreversible")

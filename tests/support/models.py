@@ -4,6 +4,7 @@ what the judge asks (``complete``)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -101,9 +102,16 @@ class ScriptedChat(ChatOpenAI):
 
     script: Any = Field(default=None, exclude=True)
 
-    def __init__(self, turns: Sequence[Turn] = (), **kwargs: Any) -> None:
+    def __init__(self, turns: Sequence[Turn] = (), *, stall: float = 0.0, **kwargs: Any) -> None:
+        """``stall``: how long the endpoint takes before each answer (a stalled provider)."""
         script = kwargs.pop("script", None) or Script(turns)
-        client = httpx.AsyncClient(transport=httpx.MockTransport(script.handle))
+
+        async def slow(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(stall)
+            return script.handle(request)
+
+        handler = slow if stall else script.handle
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         super().__init__(  # type: ignore[call-arg]
             model=kwargs.pop("model", "scripted"),
             api_key="scripted",  # type: ignore[arg-type]

@@ -7,7 +7,6 @@ cancelling the parent cancels it."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -15,8 +14,6 @@ import pytest
 from agents import Agent as OpenAIAgent
 from agents import function_tool
 from langchain.agents import create_agent
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.chat_model import ScriptedChatModel
@@ -330,15 +327,6 @@ async def test_a_child_has_what_is_left_of_its_parents_time_and_its_deadline(
     assert kid.timeout_seconds is not None and kid.timeout_seconds <= 0.3
     assert kid.deadline == deadline
     assert kid.final  # it stopped with its parent
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
 
 
 async def test_a_childs_spans_are_in_its_parents_trace_under_the_call(

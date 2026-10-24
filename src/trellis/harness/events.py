@@ -62,12 +62,14 @@ PREVIEW_CHARS: Final = 2000
 class RunEvents:
     """One attempt's emitter. ``sequence`` is per attempt, as the contract orders it."""
 
-    __slots__ = ("_held", "_listeners", "_sinks", "attempt", "context", "sequence")
+    __slots__ = ("_held", "_listeners", "_sinks", "attempt", "context", "sequence", "trace_run")
 
     def __init__(self, context: AgentExecutionContext, attempt: int = 1) -> None:
         self.context = context
         self.attempt = attempt
         self.sequence = 0
+        #: the run whose trace the attempt's spans are in (a sub-agent's: its parent's)
+        self.trace_run: str | None = None
         self._listeners: list[Listener] = []
         self._sinks: list[Sink] = []
         self._held: list[RunEvent] | None = None

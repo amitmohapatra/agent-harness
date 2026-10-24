@@ -5,7 +5,9 @@ work bounded by the latest step rather than the whole conversation (A1-A6)."""
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Sequence
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -95,7 +97,7 @@ def test_outside_a_run_nothing_is_accounted() -> None:
     from trellis.harness.accounting import UsageAccounting
 
     reply = LLMResult(generations=[[ChatGeneration(message=AIMessage(content="x"))]])
-    UsageAccounting().on_llm_end(reply)  # no run: nothing to account, nothing raised
+    UsageAccounting().on_llm_end(reply, run_id=uuid.uuid4())  # no run: nothing to account
 
 
 # --------------------------------------------------------------------------- R3
@@ -195,9 +197,12 @@ def test_a_text_reply_or_a_note_in_the_turn_changes_nothing(monkeypatch: Any) ->
     from trellis.harness import accounting
 
     accounted: list[Any] = []
-    monkeypatch.setattr(accounting, "current", object)
+    run = SimpleNamespace(model_ended=lambda key: None)
+    monkeypatch.setattr(accounting, "current", lambda: run)
     monkeypatch.setattr(accounting.budget, "account_reply", lambda *a: accounted.append(a))
-    accounting.UsageAccounting().on_llm_end(LLMResult(generations=[[Generation(text="x")]]))
+    accounting.UsageAccounting().on_llm_end(
+        LLMResult(generations=[[Generation(text="x")]]), run_id=uuid.uuid4()
+    )
     assert accounted == []  # a completion model's text reply carries no chat usage
     noted = [*conversation(1), SystemMessage(content="a note")]
     assert mw._failing(noted) == 1

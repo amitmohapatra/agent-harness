@@ -111,7 +111,8 @@ _meter = otel_metrics.get_meter(TRACER_NAME)
 _runs = _meter.create_counter("trellis.runs", description="runs finished, by outcome")
 _tools = _meter.create_counter("trellis.tool_calls", description="tool calls, by status")
 _writes = _meter.create_counter(
-    "trellis.writes.failed", description="background writes that failed"
+    "trellis.writes.failed",
+    description="background writes that failed (given up: kept in the spool, or lost)",
 )
 _undelivered = _meter.create_counter(
     "trellis.writes.undelivered",
@@ -397,9 +398,17 @@ def _root_span(run_id: str, name: str, attributes: dict[str, Any]) -> Iterator[t
 
 @contextmanager
 def tool_span(
-    name: str, call_id: str, args: Any, *, source: str, action: str
+    name: str,
+    call_id: str,
+    args: Any,
+    *,
+    source: str,
+    action: str,
+    start_time: int | None = None,
 ) -> Iterator[trace.Span]:
-    with _tracer.start_as_current_span(f"execute_tool {name}") as current:
+    """A tool call's ``execute_tool`` span; ``start_time`` (ns since the epoch) for a call its
+    framework ran itself and reported after it ran (it ends now)."""
+    with _tracer.start_as_current_span(f"execute_tool {name}", start_time=start_time) as current:
         if current.is_recording():
             attributes = {
                 "gen_ai.operation.name": "execute_tool",
@@ -534,6 +543,23 @@ def score_span(
         current.add_event("score", redact_attributes({"name": name, "value": value}))
         if current.is_recording():
             _experimented(current)
+
+
+def failure(
+    trace_run: str, run_id: str, name: str, reason: str, attributes: Mapping[str, Any]
+) -> None:
+    """Something that failed for a run outside any span of its own — a background write the
+    memory service did not take (``writes.py``), a model call that stalled (``Runtime``'s
+    watchdog) — as a span with an error status in the run's trace (``trace_run``'s: a
+    sub-agent's run is in its parent's), ``reason`` its event."""
+    kind = name.split(" ", 1)[0]
+    given = {"trellis.run_id": run_id, "error.type": kind, **attributes}
+    parent = _parent(trace_id_of(trace_run), f"{trace_run}:root")
+    with _tracer.start_as_current_span(
+        name, context=parent, attributes=redact_attributes(given)
+    ) as current:
+        current.add_event(kind, redact_attributes({"reason": reason}))
+        current.set_status(trace.Status(trace.StatusCode.ERROR, reason[:PROPAGATED_MAX_CHARS]))
 
 
 def _text(value: Any) -> str:

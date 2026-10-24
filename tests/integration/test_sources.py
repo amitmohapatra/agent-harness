@@ -6,15 +6,13 @@ the source changed; a name no source has, and Langfuse down, said plainly."""
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import respx
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support import langfuse as lf
@@ -23,7 +21,7 @@ from tests.support.models import ScriptedChat
 from tests.support.planned import FINAL, PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, skills, tool
 from trellis.contracts import RunEvent, RunEventType, RunStatus
-from trellis.harness import fresh, telemetry
+from trellis.harness import fresh
 from trellis.harness.evals import EvalCase, EvalServices, judge, llm_judge
 from trellis.harness.prompts import Prompt, PromptSources
 from trellis.harness.repository import TTL_SECONDS
@@ -57,15 +55,6 @@ async def h(folders: Path) -> AsyncIterator[Harness]:
     skills_ = [TONE, skills_dir(folders / "skills")]
     async with Harness(config=settings, skills=skills_) as made:
         yield made
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
 
 
 @tool(side_effects="read")

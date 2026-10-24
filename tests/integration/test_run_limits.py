@@ -23,6 +23,7 @@ from tests.support.planned import Call
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import (
     ConfigurationError,
+    ErrorCategory,
     RunEvent,
     RunEventType,
     RunOutcome,
@@ -247,11 +248,13 @@ async def test_a_model_call_past_its_timeout_fails_the_run_retryably(harness: Ha
     agent = harness.wrap(ReAct(system="s", model=Slow(turns=[]), model_timeout=0.05), id="slow")
     result = await agent.run("q", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.code == "MODEL_ERROR" and result.error.retryable
-    assert result.error.message == "the model did not answer within 0.05s"
+    assert result.error.code == "MODEL_TIMEOUT" and result.error.retryable
+    assert result.error.category is ErrorCategory.TIMEOUT
+    assert result.error.message == "the model did not answer within 0.05s: the step stalled"
     gives_up = harness.wrap(ReAct(system="s", model=GivesUp(turns=[])), id="gives-up")
     failed = await gives_up.run("q", user="u")
-    assert failed.error is not None and failed.error.message == "the model did not answer"
+    assert failed.error is not None
+    assert failed.error.message == "the model did not answer: the step stalled"
 
 
 # --------------------------------------------------------------------------- version

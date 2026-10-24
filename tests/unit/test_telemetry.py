@@ -5,29 +5,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Iterator
 
 import httpx
 import pytest
 import respx
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from trellis import Settings
 from trellis.harness import telemetry
 from trellis.harness.redaction import REDACTED
 from trellis.harness.telemetry import Langfuse, RunTrace
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
-
 
 RUN = RunTrace(
     run_id="run_1", agent_id="support", tenant="acme", user="u1", thread="th", framework="react"

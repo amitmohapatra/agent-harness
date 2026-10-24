@@ -68,8 +68,8 @@ class _Planned(Script):
 class PlannedChat(ScriptedChat):
     """A gateway model (``ReAct``: a ``ChatOpenAI`` on a scripted endpoint)."""
 
-    def __init__(self, plan: Sequence[Call], final: str = FINAL) -> None:
-        super().__init__(script=_Planned(plan, final))
+    def __init__(self, plan: Sequence[Call], final: str = FINAL, *, stall: float = 0.0) -> None:
+        super().__init__(script=_Planned(plan, final), stall=stall)
 
     def said(self) -> str:
         return json.dumps([r["messages"] for r in self.requests], default=str)
@@ -78,8 +78,8 @@ class PlannedChat(ScriptedChat):
 class PlannedModel(ScriptedModel):
     """An OpenAI Agents SDK ``Model``."""
 
-    def __init__(self, plan: Sequence[Call], final: str = FINAL) -> None:
-        super().__init__([])
+    def __init__(self, plan: Sequence[Call], final: str = FINAL, *, stall: float = 0.0) -> None:
+        super().__init__([], stall=stall)
         self.plan, self.final = list(plan), final
 
     def _next(self, input: Any, system: str | None) -> list[Any]:

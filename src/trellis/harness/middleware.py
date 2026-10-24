@@ -106,7 +106,7 @@ from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
 from trellis.harness.repository import pinned
-from trellis.harness.runtime import DEFERRED, Runtime, current
+from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
@@ -673,7 +673,11 @@ def model_error(exc: Exception, timeout: float | None = None) -> Exception:
     no answer, a timeout, 408, 409, 429, 5xx); anything else as it is."""
     if isinstance(exc, TimeoutError):
         within = "" if timeout is None else f" within {timeout:g}s"
-        return ModelError(f"the model did not answer{within}", source="langgraph", retryable=True)
+        return ModelTimeout(
+            f"the model did not answer{within}: the step stalled",
+            source="langgraph",
+            details={} if timeout is None else {"seconds": timeout},
+        )
     try:
         import openai  # noqa: PLC0415 - the model client of the react extra
     except ImportError:  # pragma: no cover - the react extra installs it

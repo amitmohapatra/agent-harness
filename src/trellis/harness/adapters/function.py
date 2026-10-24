@@ -8,6 +8,7 @@ message list); tools are called with ``await agent.tools.call(name, **args)``; a
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
@@ -31,6 +32,12 @@ class FunctionAdapter:
     narrows: Narrowing = "none"
     #: the function reads its input as it is: memory's window is in ``agent.context``
     replays_history = False
+
+    def __init__(self) -> None:
+        # the function's own LangChain chat models, where LangChain is installed: accounted to
+        # the run's budget and watched for a stall (``accounting``), as a graph's are
+        with contextlib.suppress(ImportError):
+            from trellis.harness import accounting  # noqa: F401
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None

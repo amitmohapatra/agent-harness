@@ -49,7 +49,7 @@ person's feedback days later, lands on it without anything stored.
 |---|---|---|
 | `trellis.runs` | `agent`, `outcome` (`success`, `error`, `timeout`, `interrupt`, `cancelled`) | an attempt ends |
 | `trellis.tool_calls` | `tool`, `status` (`ok`, `error`, `timeout`) | the bridge executed a call (a replayed or rejected call is not counted) |
-| `trellis.writes.failed` | `write` (the background write's label, e.g. `memory.transcript`) | a background write failed or the write queue was full |
+| `trellis.writes.failed` | `write` (the background write's label, e.g. `memory.transcript`) | a background write was given up (its attempts spent, the queue full): spooled or lost |
 | `trellis.writes.undelivered` | `write`, `outcome` (`spooled`, `lost`) | a background write this process gave up on |
 | `trellis.runs.queue_wait` (histogram, seconds) | `agent` | a worker claimed a queued run: how long it waited (since it was queued, or since the answer that queued it again) |
 | `trellis.runs.rate_limited` | `operation` (`start`, `resume`, `schedule`) | agent-runs still answered `429` after its SDK's retries ([runs.md](runs.md#admission-agent-runs-rate-limit)) |
@@ -163,8 +163,11 @@ memory search and recall see the real data. Masking of your own is a hook:
 `invoke_agent` span (`trellis.decision.*` attributes and a `decision` span event). With
 `RUNS_URL` the events are also in agent-runs' event log, readable from any process
 (`agent.events`, [runs.md](runs.md#a-runs-events-from-anywhere)). A failed background write is a `warning`
-event on the run's listeners, a log line and a `trellis.writes.failed` count — never silent,
-never raised into the run.
+event on the run's listeners, a `write_failed <label>` span with an error status in the run's
+trace, a log line (an error the first time each kind fails) and a `trellis.writes.failed`
+count — never silent, never raised into the run. A model call that stalled is a
+`model_timeout` warning event and a `model_timeout` span in the run's trace
+([reliability.md](reliability.md#stalled-model-calls)).
 
 Every tool call that starts on the stream (`TOOL_CALL_START`, `TOOL_CALL_ARGS`) ends there,
 before the attempt's `RUN_FINISHED`: `TOOL_CALL_END`, then `TOOL_CALL_RESULT` with the call's

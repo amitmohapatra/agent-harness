@@ -7,14 +7,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
 from typing import Any
 
 import httpx
 import pytest
 import respx
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.models import ScriptedChat
@@ -29,15 +27,6 @@ LANGFUSE: dict[str, Any] = {
     "langfuse_host": LF,
 }
 PREFIX = "langfuse.experiment."
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
 
 
 @tool(side_effects="read")

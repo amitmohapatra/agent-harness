@@ -15,15 +15,13 @@ import respx
 from bifrost_sdk import NO_GATEWAY_TOOLS
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import BaseModel, Field
 
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Budget, Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunStatus
-from trellis.harness import budget, react, telemetry
+from trellis.harness import budget, react
 
 GATEWAY = "http://gw.test/v1"
 
@@ -35,15 +33,6 @@ def _gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for cached in (react._unknown, budget._no_cost):
         cached.cache_clear()
     yield
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
 
 
 runs: list[Runtime] = []
