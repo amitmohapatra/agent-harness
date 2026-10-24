@@ -4,8 +4,8 @@ identity → (the run record, written by the caller) → tools → memory push (
 hints that narrow what the model is offered) → the adapter → the outcome recorded (paused
 with its journal as the run's checkpoint, finished with its answer or error; the run's sandbox
 paused or deleted with it) → background writes (transcript, the run's ``system`` outcome, the
-sampled grounding check, the sampled online judges). The adapter is the only part that knows
-the framework. Each attempt is one ``invoke_agent`` span in the run's trace.
+grounding check of a run given a context, the sampled online judges). The adapter is the only
+part that knows the framework. Each attempt is one ``invoke_agent`` span in the run's trace.
 
 :func:`attempt` is the one way an attempt starts — ``agent.run``/``stream``, a resume, a
 worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``serve_a2a`` and
@@ -57,6 +57,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.clients.memory import DOCUMENTS
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
 from trellis.harness.history import Said, Speaker
@@ -211,6 +212,7 @@ async def _attempt(
         framework_options={**agent.framework_options, **record.metadata.get(FRAMEWORK_OPTIONS, {})},
         used=set(journal.used),
         task=query_of(input),
+        document_ids=record.metadata.get(DOCUMENTS),
         started_at=datetime.now(UTC),
         ends_at=None if budget is None else time.monotonic() + budget.seconds,
         deadline=None if budget is None else budget.deadline,
@@ -531,7 +533,9 @@ async def _invoked(
     """The framework's part: its input (resumed where it paused), the run's tools in its
     format, and what it produced."""
     adapter, target = agent.adapter, agent.target
-    native_input = adapter.prepare_input(target, input, runtime.context, runtime.history or ())
+    history = runtime.history or ()
+    prepared = adapter.prepare_input(target, input, runtime.pushed_context, history)
+    native_input = prepared
     if pending is not None and resolution is not None:
         native_input = adapter.resume_input(target, native_input, pending, resolution)
     run_tools = [] if adapter.fixed_tools else tools
@@ -539,6 +543,8 @@ async def _invoked(
         run_tools = [t for t in run_tools if runtime.offers(t.name)]
     invocation = Invocation(runtime, run_tools, convert(adapter.tool_format, run_tools))
     produced = await _execute(agent, native_input, invocation, streaming=streaming)
+    if runtime.pushed_context and prepared is input:  # the input had no place for it
+        agent.unreached(runtime)
     return adapter.extract(target, produced)
 
 

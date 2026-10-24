@@ -32,6 +32,7 @@ from trellis.harness import budget
 from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.identity import AGENT_GROUP
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job, RunSummary
 
@@ -135,6 +136,13 @@ async def test_a_deep_agents_sub_agent_is_a_child_run_its_turns_in_memory(
         ("USER", "refund o1"),
         ("ASSISTANT", "refunded o1"),
     ]
+    # the helper's scope is a sub-agent's: its parent the run, the run's tree its group
+    [scope] = [
+        c.scope for c in memory_service.named("messages") if c.scope["thread_id"] == child.run_id
+    ]
+    assert scope["agent_run_id"] == child.run_id
+    assert scope["parent_agent_run_id"] == scope["agent_group_id"] == result.run_id
+    assert record.metadata[AGENT_GROUP] == result.run_id
 
 
 async def test_a_deep_agents_sub_agents_tokens_count_toward_the_runs_budget(

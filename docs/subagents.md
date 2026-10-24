@@ -86,8 +86,14 @@ one release, with a warning.
 **The child run.** Its id is derived from the parent's call — the parent run, the call and its
 occurrence (the call's `idempotency_key`) — so the parent's next attempt finds it again. Its
 record names its parent (`RunStart.parent_run_id`; `runs.iterate(parent_run_id=...)` lists a
-run's children). It inherits the parent's tenant, user and thread, the parent's `deadline`,
-and what is left of the parent's time as its `timeout`: a child never works past its parent.
+run's children). It inherits the parent's tenant, user and thread, the documents its context
+draws on (`document_ids=`), the parent's `deadline`, and what is left of the parent's time as
+its `timeout`: a child never works past its parent. Its memory scope is derived from the
+parent's (the memory SDK's `MemoryContext.agent`): it names the parent's run
+(`parent_agent_run_id`), so it reads the notes the parent kept for its run
+(`memory_remember(scope="run")`) and its own reach the parent, and every run of one delegation
+tree shares an agent group named by the run at its top (`agent_group_id`), which
+`memory_remember(scope="group")` writes to.
 Its agent version is its own. Its spans are in the parent's trace, under the call
 (`invoke_agent <child>` with `trellis.parent_run_id`), and so are its grounding and judge
 scores.

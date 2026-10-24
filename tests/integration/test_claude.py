@@ -294,11 +294,14 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
     target = options(tmp_path, [{"text": "told: {context}"}], system_prompt="You help.")
-    result = await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
-    assert result.answer == f"told: {memory_service.context_text}"
+    await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
     started = started_with(tmp_path)
     assert started["system_prompt"] == "You help."  # the team's, as it wrote it
-    assert started["context"] == memory_service.context_text
+    # Claude's built-in tools are the agent's tools too: the context carries their hints
+    rendered = memory_service.context_text + "\n\n## Tools\n- Read (confidence 0.90)"
+    assert started["context"] == rendered
+    [asked] = memory_service.named("context")
+    assert asked.body["tools"]["available"][:2] == ["Read", "Glob"]
 
 
 async def test_without_memory_no_context_hook_is_registered(

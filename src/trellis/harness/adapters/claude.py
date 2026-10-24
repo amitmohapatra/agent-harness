@@ -233,6 +233,24 @@ class ClaudeAdapter:
                 "(its tools) has that name"
             )
 
+    def native_tools(self, target: Any) -> list[str]:
+        """Claude Code's built-in tools the options leave it (``tools``, else the default set
+        :data:`BUILTIN_SIDE_EFFECTS` knows, less ``disallowed_tools``) and the MCP tools of
+        its own servers the options name (``allowed_tools``' ``mcp__<server>__<tool>``
+        entries; a server's other tools are listed only by the CLI)."""
+        from trellis.harness.tools.convert.claude import SERVER
+
+        given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
+        denied = set(target.disallowed_tools or ())
+        builtins = [name for name in given if name not in denied]
+        own = f"mcp__{SERVER}__"
+        servers = [
+            name
+            for name in target.allowed_tools or ()
+            if name.startswith("mcp__") and not name.startswith(own) and name not in denied
+        ]
+        return [*builtins, *servers]
+
     # ------------------------------------------------------------------ internals
     async def _helped(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         """The query's messages (:meth:`_messages`), each subagent Claude runs a helper of the

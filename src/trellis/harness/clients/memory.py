@@ -14,16 +14,25 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Final
 
+from trellis.contracts import (
+    ConfigurationError,
+    FeedbackSource,
+    FeedbackTargetKind,
+    ToolCall,
+    ToolOutcome,
+    ToolSpec,
+)
 from trellis.contracts import Feedback as Decision
-from trellis.contracts import ToolCall, ToolOutcome, ToolSpec
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.history import Said, Speaker, recorded, said_of
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
+from trellis.memory.errors import NotFoundError
 from trellis.memory.models import (
     AgentTool,
     DocumentInfo,
+    EvidenceRef,
     Feedback,
     KeyInfo,
     PromptContext,
@@ -42,6 +51,11 @@ READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 TOOL_SEARCH: Final = "tool_search"
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
+#: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
+DOCUMENTS: Final = "document_ids"
+#: The most memories a person's verdict on a run cites (the memory service's bound on a
+#: verdict's evidence references).
+CITED_MAX: Final = 50
 #: How long the agent-tool listing is kept before it is listed again; while the service
 #: cannot be reached, the last listing is kept and asked for again after the retry interval.
 AGENT_TOOLS_TTL_SECONDS: Final = 600.0
@@ -92,7 +106,17 @@ class Memory:
         return await self.client.tenant.keys.whoami()
 
     def bind(self, identity: Identity) -> RunMemory:
-        return RunMemory(self, self.client.bind(**identity.scope()))
+        """A run's calls, in its scope. A sub-agent's run is derived from its parent's the
+        SDK's way (``MemoryContext.agent``): it names its parent run, so it reads the
+        parent's hand-off notes (``RUN`` visibility) and its own go up to the parent, and its
+        agent group, which ``memory_remember(scope="group")`` binds to."""
+        if identity.parent_run is None:
+            return RunMemory(self, self.client.bind(**identity.scope()))
+        parent = self.client.bind(**identity.parent_scope())
+        child = parent.agent(
+            identity.agent_id, agent_run_id=identity.run_id, agent_group_id=identity.group
+        )
+        return RunMemory(self, child)
 
     def for_user(self, tenant: str, user: str, thread: str | None = None) -> RunMemory:
         """Calls made for a person outside a run (adding a document they can retrieve)."""
@@ -152,12 +176,15 @@ class RunMemory:
         window: Window,
         hints: bool,
         budget: int = CONTEXT_TOKEN_BUDGET,
+        document_ids: Sequence[str] | None = None,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
         skills it learned for the task and - unless ``hints`` is off - the tools that fit.
         ``window``: the thread's recent messages left out (``Window.NONE``: the framework
         keeps them itself), in the rendered text (``RENDERED``), or verbatim as
-        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own."""
+        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own.
+        ``document_ids`` narrows the documents its passages come from to those (``None``:
+        every one the scope may read)."""
         return await self.ctx.context(
             query,
             token_budget=budget,
@@ -165,6 +192,7 @@ class RunMemory:
             hints=hints,
             window=window is not Window.NONE,
             window_format="messages" if window is Window.MESSAGES else "rendered",
+            document_ids=document_ids,
         )
 
     # ------------------------------------------------------------------ pull
@@ -217,23 +245,44 @@ class RunMemory:
         correction: Any = None,
         comment: str | None = None,
         reviewer: str | None = None,
+        evidence_refs: Sequence[EvidenceRef] = (),
     ) -> Feedback:
         """A verdict on this scope's run (``source`` ``system`` for how it ended, ``human``
-        for a person's); ``key`` makes a retry store it once. The stored record comes back:
-        a person's verdict waits for the tenant administrator (``review.state`` pending,
-        ADR 0028 of the memory service) where the run's own status is applied at once."""
+        for a person's); ``key`` makes a retry store it once; ``evidence_refs`` are the
+        memories its answer cited, whose confidence the verdict moves. The stored record comes
+        back: a person's verdict waits for the tenant administrator (``review.state``
+        pending, ADR 0028 of the memory service) where the run's own status is applied at
+        once."""
         run_id = self.ctx.scope.agent_run_id
         assert run_id is not None
         return await self.ctx.feedback(
-            "run",
+            FeedbackTargetKind.RUN.value,
             run_id,
             verdict,
             correction=correction,
             comment=comment,
             reviewer=reviewer,
             source=source,
+            evidence_refs=evidence_refs,
             idempotency_key=key,
         )
+
+    async def cited(self) -> list[EvidenceRef]:
+        """The memories this scope's run's answer rests on: what the grounding judge's verdict
+        on it cites (``/v1/verify`` resolves the answer's claims against the run's context
+        bundle and records the supporting memories with its verdict), each once, at most
+        :data:`CITED_MAX`. Empty when the run was not verified (most runs: the check takes a
+        sample), the service holds no feedback on it (``NotFoundError``), or nothing it
+        claimed rested on a memory."""
+        run_id = self.ctx.scope.agent_run_id
+        assert run_id is not None
+        try:
+            page = await self.ctx.feedback.page_for(FeedbackTargetKind.RUN.value, run_id)
+        except NotFoundError:
+            return []
+        judged = [f for f in page.items if f.source == FeedbackSource.JUDGE.value]
+        refs = {ref.source_id: ref for verdict in judged for ref in verdict.evidence_refs}
+        return list(refs.values())[:CITED_MAX]
 
     async def feedback(self, record: Any) -> None:
         """A contracts ``Feedback`` record as it is (an interrupt's decision). Its id is the
@@ -269,6 +318,20 @@ class RunMemory:
         agent = self.ctx.scope.agent_id
         digest = hashlib.blake2b(key.encode(), digest_size=8).hexdigest()
         await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent}:{digest}")
+
+
+def documents(document_ids: Sequence[str]) -> list[str]:
+    """``document_ids=`` checked: a list of document ids (``h.add_document``'s), each once,
+    at least one — an empty list would narrow the context to no document at all."""
+    if isinstance(document_ids, str):
+        raise ConfigurationError("document_ids= is a list of ids: [document_id], not one id")
+    ids = list(dict.fromkeys(document_ids))
+    if not ids or not all(isinstance(i, str) and i for i in ids):
+        raise ConfigurationError(
+            "document_ids= names the documents a run's context draws on: one id or more "
+            "(h.add_document(...).document_id); leave it out for all of them"
+        )
+    return ids
 
 
 def context_budget(window: int | None) -> int:

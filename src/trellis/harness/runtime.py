@@ -102,8 +102,11 @@ class Runtime:
     replay: Replay
     attempt: int = 1
     run_memory: RunMemory | None = None
-    #: the pushed memory context, as the framework's system message carries it
-    context: str | None = None
+    #: the pushed memory context, as the framework's system message carries it (the run's
+    #: own code reads it as :attr:`context`, the harness as :attr:`pushed_context`)
+    _context: str | None = field(default=None, repr=False)
+    #: whether the run's own code read :attr:`context` (a function target, a graph's node)
+    context_read: bool = field(default=False, repr=False)
     #: where memory keeps the conversation and the framework replays it as messages: the
     #: thread's recent messages (``[]``: none yet); ``None`` where it does not
     history: list[Said] | None = None
@@ -112,6 +115,9 @@ class Runtime:
     evidence: str | None = None
     #: the question the run is working on (memory queries, tool-call tasks)
     task: str = ""
+    #: the documents the run's memory context draws its passages from (``document_ids=``;
+    #: ``None``: every one its scope may read)
+    document_ids: list[str] | None = None
     #: this run's tools by name (the agent's own, the MCP tools, the memory pull tools)
     toolbox: dict[str, Tool] = field(default_factory=dict)
     #: the tools offered to the model (``None``: all of them) — the tool hints' candidates,
@@ -168,6 +174,24 @@ class Runtime:
     _saved_at: float | None = None
     #: one progress save at a time, so a later save never lands before an earlier one
     _saving: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    # ------------------------------------------------------------------ the memory context
+    @property
+    def context(self) -> str | None:
+        """The memory context pushed for this run, as the framework's system message carries
+        it: a function target whose input is text (and a graph's node, whose input has no
+        ``messages``) reads it here, where the harness could not put it into the input."""
+        self.context_read = True
+        return self._context
+
+    @context.setter
+    def context(self, value: str | None) -> None:
+        self._context = value
+
+    @property
+    def pushed_context(self) -> str | None:
+        """:attr:`context` as the harness reads it (not the run's own code reading it)."""
+        return self._context
 
     # ------------------------------------------------------------------ identity
     @property

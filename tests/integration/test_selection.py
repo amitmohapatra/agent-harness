@@ -313,7 +313,8 @@ async def test_a_queued_run_and_its_sub_agents_keep_its_without(
         child_run = await h.runs.get(summary.run_id)
         assert child_run is not None
         assert child_run.metadata == {
-            "without": ["hints", "memory_pull", "memory_push", "records", "tool_search"]
+            "without": ["hints", "memory_pull", "memory_push", "records", "tool_search"],
+            "agent_group": handle.run_id,  # the delegation tree, named by its top run
         }
     assert reached(memory_service) == set()
 

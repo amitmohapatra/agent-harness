@@ -51,7 +51,13 @@ from trellis.harness.adapters.base import (
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
-from trellis.harness.clients.memory import RunMemory, Window, context_budget
+from trellis.harness.clients.memory import (
+    DOCUMENTS,
+    RunMemory,
+    Window,
+    context_budget,
+    documents,
+)
 from trellis.harness.evals import (
     EvalCase,
     EvalServices,
@@ -65,7 +71,7 @@ from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_wit
 from trellis.harness.gateways import Capability, missing
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
-from trellis.harness.identity import Identity
+from trellis.harness.identity import AGENT_GROUP, Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
@@ -93,6 +99,16 @@ MEMORY: Final = frozenset(COVERS["memory"])
 SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.model_fields)
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
+#: How a run's memory context reaches an agent whose input has no place for it, by framework
+#: (``Agent.unreached``): what the warning names as the fix.
+UNREACHED_FIX: Final = {
+    "function": "read agent.context (the runtime your function is given; "
+    "trellis.current().context in the code it calls), or pass the input as a list of "
+    "messages, which gets the context as its leading system message",
+    "langgraph": "give the graph's input its messages (a 'messages' state key: "
+    "{'messages': [...]}), which get the context as a system message, or read "
+    "trellis.current().context in a node",
+}
 #: How long a turn's transcript may take to write before the run returns, where memory keeps
 #: the conversation; past it the write is queued (``writes``) and the run returns.
 TURN_WRITE_SECONDS: Final = 5.0
@@ -200,6 +216,8 @@ class Agent:
         self.turns = Turns()
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
+        #: whether a run's memory context reaching nothing was said (``unreached``: once)
+        self._unreached_said = False
 
     @property
     def evals(self) -> EvalServices:
@@ -219,6 +237,7 @@ class Agent:
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
         framework_options: Mapping[str, Any] | None = None,
+        document_ids: Sequence[str] | None = None,
     ) -> Result:
         """Run to its end (or its first pause) and return how it ended. ``timeout``: the most
         working time the run may take, in seconds (not counting a pause; else the agent's,
@@ -228,7 +247,10 @@ class Agent:
         framework's own options for this run's call, over the agent's
         (``h.wrap(framework_options=)``; each framework's page says where they go). The run
         keeps the JSON ones with its record, for its later attempts (a resume); a value that
-        is not JSON (an object) is this call's only."""
+        is not JSON (an object) is this call's only. ``document_ids``: the documents
+        (``h.add_document``'s ``document_id``) the run's memory context draws its passages
+        from, none else (unset: all the person's); kept with the run, its sub-agents' runs
+        included."""
         record = await self._opened(
             input,
             user=user,
@@ -238,6 +260,7 @@ class Agent:
             deadline=deadline,
             without=without,
             framework_options=framework_options,
+            document_ids=document_ids,
         )
         return self.hooks.answer(await pipeline.attempt(self, record, input))
 
@@ -252,10 +275,11 @@ class Agent:
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
         framework_options: Mapping[str, Any] | None = None,
+        document_ids: Sequence[str] | None = None,
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
-        early cancels the run. ``timeout``, ``deadline``, ``without`` and
-        ``framework_options`` as for :meth:`run`."""
+        early cancels the run. ``timeout``, ``deadline``, ``without``, ``framework_options``
+        and ``document_ids`` as for :meth:`run`."""
         record = await self._opened(
             input,
             user=user,
@@ -265,6 +289,7 @@ class Agent:
             deadline=deadline,
             without=without,
             framework_options=framework_options,
+            document_ids=document_ids,
         )
         async for event in self._events(
             lambda listen: pipeline.attempt(self, record, input, listener=listen)
@@ -284,9 +309,11 @@ class Agent:
         framework_options: Mapping[str, Any] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
+        document_ids: Sequence[str] | None = None,
     ) -> RunHandle:
         """Queue the run for a worker (``h.worker([...]).run()``); it outlives this process.
-        ``timeout``, ``deadline``, ``without`` and ``framework_options`` as for :meth:`run`: the
+        ``timeout``, ``deadline``, ``without``, ``framework_options`` and ``document_ids`` as
+        for :meth:`run`: the
         working time counts across every worker that runs it, a crash included; the framework
         options are kept with the run, so they are JSON (an object goes on
         ``h.wrap(framework_options=)``). ``priority`` (-1000 to 1000):
@@ -310,6 +337,7 @@ class Agent:
             framework_options=framework_options,
             priority=priority,
             concurrency_key=concurrency_key or (f"thread:{thread}" if thread else None),
+            document_ids=document_ids,
         )
         await admitted(self.harness.runs.start(start, queue=True), "start")
         return RunHandle(self, start.run_id, tenant=start.tenant_id)
@@ -389,15 +417,16 @@ class Agent:
         framework_options: Mapping[str, Any] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
+        document_ids: Sequence[str] | None = None,
     ) -> Schedule:
         """Queue a run of this agent on ``cron`` (evaluated in ``tz``), acting for
         ``on_behalf_of``. Workers run them. Idempotent: the same agent, person, cadence and
         input are one schedule (agent-runs answers the existing one), so a redeploy adds none.
         Each fired run records the agent's ``version`` and takes what :meth:`start` takes for
         one run: ``timeout`` (else the agent's), ``without``, ``framework_options`` (JSON),
-        ``priority`` and ``concurrency_key`` — kept with the schedule (its ``metadata``, under
-        the keys a started run keeps them under) and copied into every run it fires. Pause or
-        resume it with ``trellis.runs.RunsClient``: ``schedules.update(id,
+        ``document_ids``, ``priority`` and ``concurrency_key`` — kept with the schedule (its
+        ``metadata``, under the keys a started run keeps them under) and copied into every run
+        it fires. Pause or resume it with ``trellis.runs.RunsClient``: ``schedules.update(id,
         ScheduleUpdate(enabled=…))``."""
         _kept_as_json(framework_options)
         queued = {"priority": priority or None, "concurrency_key": concurrency_key}
@@ -417,7 +446,7 @@ class Agent:
             input=input,
             timeout_seconds=self.timeout if timeout is None else timeout,
             agent_version=self.version,
-            metadata=self._metadata(without, framework_options),
+            metadata=self._metadata(without, framework_options, document_ids),
             **ordered,
         )
         return await admitted(self.harness.runs.schedules.create(spec), "schedule")
@@ -731,14 +760,17 @@ class Agent:
         return pushed
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
-        """The memory context for this run, in the runtime. Asked with the run's own tools,
-        it carries the skills the agent learned for the task, and - from five tools, the
-        service's threshold - the tools that fit, whose candidates narrow the tools the model
-        is offered (the ``hints`` feature). A failure is a warning."""
+        """The memory context for this run, in the runtime. Asked with the run's own tools —
+        the harness's and the ones its framework gives the model itself (the adapter's
+        ``native_tools``: an OpenAI Agents agent's ``tools``, Claude's built-ins and MCP tools,
+        a graph's tool nodes) — it carries the skills the agent learned for the task, and -
+        from five tools, the service's threshold - the tools that fit, whose candidates among
+        the harness's narrow the tools the model is offered (the ``hints`` feature). A failure
+        is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
-        own = runtime.tool_names()
+        own = list(dict.fromkeys([*runtime.tool_names(), *self.adapter.native_tools(self.target)]))
         hints = runtime.uses("hints")
         window = self.window(runtime)
         with retrieval_span(runtime.task) as span:
@@ -749,6 +781,7 @@ class Agent:
                     window=window,
                     hints=hints,
                     budget=self.context_budget,
+                    document_ids=runtime.document_ids,
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
@@ -772,6 +805,21 @@ class Agent:
             data={"chars": len(rendered), "evidence_status": status},
         )
         return pushed
+
+    def unreached(self, runtime: Runtime) -> None:
+        """The memory context pushed for ``runtime`` reached nothing: the adapter found no
+        place for it in the input (a function's text, a graph's input with no messages) and
+        the run's own code never read it (``agent.context``). Said once per agent, naming the
+        fix (:data:`UNREACHED_FIX`); the context is left as it is, never put elsewhere."""
+        if self._unreached_said or runtime.context_read:
+            return
+        self._unreached_said = True
+        message = (
+            f"{self.id}: the memory context pushed for its runs reaches neither its input nor "
+            f"its code, so the agent answers without it: {UNREACHED_FIX[self.adapter.name]}"
+        )
+        log.warning("%s", message)
+        runtime.events.warning("memory_context", message)
 
     def window(self, runtime: Runtime) -> Window:
         """How this run's context carries the thread's recent messages: not at all where the
@@ -839,7 +887,9 @@ class Agent:
 
     async def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
-        its outcome (the judge's and a person's override it in the memory service)."""
+        its outcome (the judge's and a person's override it in the memory service). Its
+        ``confirm`` is unverified, so the service keeps it as the outcome only: it moves no
+        memory's confidence, learned skill or tool statistic."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
         if memory is None or not runtime.uses("records") or verdict is None:
@@ -860,7 +910,9 @@ class Agent:
     async def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
         """On a sampled run, the answer (:func:`graded`) checked against the context it was
         given (the memory service's ``/v1/verify``, which records it as the run's ``judge``
-        feedback), and the score put on the run's trace."""
+        feedback), and the score put on the run's trace. Only such a verified run, and a
+        person's reviewed verdict (``h.feedback``), teach the memory service: a run's own
+        ``confirm`` (:meth:`recorded_outcome`) is its outcome only."""
         memory = runtime.run_memory
         text = graded(answer)
         if (
@@ -900,7 +952,7 @@ class Agent:
             run_id=runtime.run_id,
             trace_id=trace_hex(runtime.trace_run),
             bundle_id=pushed.bundle_id if pushed is not None else None,
-            context=runtime.context,
+            context=runtime.pushed_context,
             memory=memory.ctx if memory is not None else None,
             trajectory=list(runtime.replay.journal.trajectory),
         )
@@ -954,6 +1006,7 @@ class Agent:
         deadline: datetime | None = None,
         without: Collection[Feature] = (),
         framework_options: Mapping[str, Any] | None = None,
+        document_ids: Sequence[str] | None = None,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
@@ -970,6 +1023,7 @@ class Agent:
             deadline=deadline,
             without=without,
             framework_options=framework_options,
+            document_ids=document_ids,
         )
         await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
@@ -990,20 +1044,25 @@ class Agent:
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
         parent: str | None = None,
+        group: str | None = None,
         without: Collection[Feature] = (),
         framework_options: Mapping[str, Any] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
+        document_ids: Sequence[str] | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
-        the agent's version, the run it is a sub-agent's run of (``parent``), what it is
-        ``without``, its framework options that are JSON, and how a queued run waits its turn
-        (``priority``, ``concurrency_key``) go with it when there are any."""
+        the agent's version, the run it is a sub-agent's run of (``parent``) and the agent
+        group it works in (``group``), what it is ``without``, its framework options that are
+        JSON, the documents its context draws on (``document_ids``), and how a queued run waits
+        its turn (``priority``, ``concurrency_key``) go with it when there are any."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
-        metadata = self._metadata(without, framework_options)
+        metadata = self._metadata(without, framework_options, document_ids)
+        if group is not None:
+            metadata[AGENT_GROUP] = group
         given = {
             "timeout_seconds": self.timeout if timeout is None else timeout,
             "deadline": deadline,
@@ -1024,11 +1083,15 @@ class Agent:
         )
 
     def _metadata(
-        self, without: Collection[Feature], framework_options: Mapping[str, Any] | None
+        self,
+        without: Collection[Feature],
+        framework_options: Mapping[str, Any] | None,
+        document_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """What a run keeps of its own choices (``RunStart.metadata``; a schedule's, copied
-        into each run it fires): what it is ``without``, and its framework options — checked
-        against the adapter, over the agent's — that are JSON."""
+        into each run it fires): what it is ``without``, its framework options — checked
+        against the adapter, over the agent's — that are JSON, and the documents its context
+        draws on."""
         own = dict(framework_options or {})
         if own:
             self.adapter.check_options({**self.framework_options, **own})
@@ -1037,6 +1100,8 @@ class Agent:
         kept = {key: value for key, value in own.items() if _json(value)}
         if kept:
             metadata[FRAMEWORK_OPTIONS] = kept
+        if document_ids is not None:
+            metadata[DOCUMENTS] = documents(document_ids)
         return metadata
 
 

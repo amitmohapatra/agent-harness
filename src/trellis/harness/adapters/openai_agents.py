@@ -232,6 +232,10 @@ class OpenAIAgentsAdapter:
             return _Continue(state, call_id, approve=False, message=message)
         return _Continue(state, call_id, approve=False, message=reason_of(resolution))
 
+    def native_tools(self, target: Any) -> list[str]:
+        """The agent's own ``tools`` (function and hosted tools alike), by name."""
+        return [t.name for t in target.tools if isinstance(getattr(t, "name", None), str)]
+
     def check_options(self, options: Mapping[str, Any]) -> None:
         from agents import Runner
 

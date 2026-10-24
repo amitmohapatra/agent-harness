@@ -42,8 +42,11 @@ Each setting lives in one layer, decided by who owns it and how often it changes
 Explicit code beats the environment, and the environment beats what is detected. At start the
 harness logs one line naming what it is connected to; `trellis doctor` (`python -m
 trellis.harness.doctor`) prints every setting, where it came from (secrets redacted), whether
-each service answers and takes its key, whether the spool can be written and the Docker daemon
-answers, and what to set — it changes nothing.
+each service answers and takes its key — for the memory service also the key's role (a service
+key; an admin key fails the check: the verdicts it sends for people would skip their review),
+the agents' model key, its readiness (`/health/ready`) and version (`/version`) — whether the
+spool can be written and the Docker daemon answers, the approval rules the memory service
+accepted on its own (in effect or revoked), and what to set — it changes nothing.
 
 ### Where a model name goes
 
@@ -67,7 +70,7 @@ one gateway, chosen from what is set — never a chain of fallbacks
 | `TRELLIS_API_KEY` | `api_key` | only allowed without `MEMORY_URL` and `RUNS_URL` (`ConfigurationError` otherwise) | `trk_...` | the tenant: the memory service says who the key is (`GET /v1/keys/self`) |
 | `MEMORY_URL` | `memory_url` | memory off: no context, no memory tools, no records, no catalog (the tools' own risks decide) | `http://localhost:8080` | memory push, pull and records; the tool catalog; grounding; documents; feedback in memory |
 | `RUNS_URL` | `runs_url` | runs, the queue and schedules kept in process (`LocalRuns`: the last 1,000 finished runs, an hour each), lost on restart | `http://localhost:8090` | durable runs, workers across processes, the ticker's schedules and deadlines, artifacts, the event log (needs `MEMORY_URL`) |
-| `TRELLIS_EVAL_SAMPLE` | `eval_sample` | `0.1` | `0.25` | that share of successful runs, by run id, checked against their memory context (`/v1/verify`) and scored by the online judges (`Harness(judges=[...])`); `0` off, `1` every run |
+| `TRELLIS_EVAL_SAMPLE` | `eval_sample` | `0.1` | `0.25` | that share of successful runs, by run id, scored on their trace: the grounding check's score (every run given a memory context is checked, `/v1/verify`, for its outcome) and the online judges (`Harness(judges=[...])`); `0` off, `1` every run |
 | `TRELLIS_SPOOL_DIR` | `spool_dir` | the XDG state folder (`$XDG_STATE_HOME/trellis`, else `~/.local/state/trellis`) when it can be written and the process is not in a container or a serverless runtime (`K_SERVICE`, `KUBERNETES_SERVICE_HOST`, `AWS_LAMBDA_FUNCTION_NAME`, `/.dockerenv`); there, none: a write the service could not take is lost at a restart (said once) | `/var/spool/trellis` | undelivered writes kept in `<dir>/trellis-writes.jsonl`, replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | `SANDBOX` | `sandbox` | `sandbox()` given no provider has none: its tools tell the model so | `docker` | each run's sandbox is a container of the Docker daemon `DOCKER_HOST` names, else the current docker context's, else the local socket ([sandbox.md](sandbox.md)); any other value is refused |
 | `LANGFUSE_BASE_URL` | `langfuse_host` | Langfuse Cloud (`https://cloud.langfuse.com`), when the keys are set | `https://langfuse.example.com` | where Langfuse is: its prompts, scores and datasets, and its traces when no `OTEL_EXPORTER_OTLP_*` variable is set |
@@ -141,7 +144,7 @@ With the services configured, every wrapped agent gets all of this with no code.
 | **Tool set check** | When an agent's tools change, what makes them hard for a model to choose among — a missing or short description, an undescribed parameter, a name the OpenAI API refuses, look-alike names or descriptions, 20 or more tools at once — is logged as a warning (`trellis.tools`); nothing is refused ([tools.md](tools.md#tool-choice-what-helps-the-model-pick-the-right-tool)) |
 | **Code Mode** | The read-only Code Mode servers, from 3 servers or 20 tools, become Code Mode meta-tools under the harness's names; their nested calls are recorded from the gateway's log |
 | **Prompts and skills** | A prompt or skill named once is looked up in code, the folder, Langfuse, the gateway; pinned and journaled per run — a stored prompt a framework's model client selects (`h.model_headers(prompt=)`) too ([prompts.md](prompts.md), [skills.md](skills.md)) |
-| **Outcome and grounding** | The run's ending is its `system` feedback; a sampled share is checked against its context, a score on its trace |
+| **Outcome and grounding** | The run's ending is its `system` feedback; every run given a context is checked against it, the judge's verdict outranking the ending; a sampled share gets the score on its trace |
 | **People** | A pause is delivered to agent-runs' webhooks (`run.paused`), with the question and whose it is ([interrupts.md](interrupts.md#telling-people)) |
 | **Run events and queues** | With `RUNS_URL` every run's events go to agent-runs' event log, so any replica streams any run; a second message to a busy conversation waits for the first ([runs.md](runs.md)) |
 | **Sub-agents** | A wrapped agent in another's tools is a child run: tenant, user, thread, time and trace inherited, its pauses answered through the parent ([subagents.md](subagents.md)) |
@@ -172,7 +175,7 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 | `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
 | `skills` | `skills=` / `skills(...)` | the skills' section in the context and `load_skill`, `read_skill_file` | neither |
 | `judges` | `Harness(judges=[...])`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the online judges | not judged |
-| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the answer checked against the context it was given | not checked |
+| `grounding` | `MEMORY_URL`, a sampled share (`TRELLIS_EVAL_SAMPLE`) | the grounding check's score on the run's trace (the check itself runs on every run given a context, part of `memory`) | no score |
 | `planning` | `ReAct`, a long task, a known window of 32,000 tokens or more | LangChain's `TodoListMiddleware`: `write_todos` and its instructions ([react.md](frameworks/react.md#the-middleware)) | not offered; a call answers that it is not available |
 | `files` | the same | Deep Agents' scratch file tools: `ls`, `write_file`, `edit_file` on the run's journal | not offered (paged results are still read with `read_file`); a call answers that it is not available |
 | `react_auto` | the same | `planning` and `files` together | both off |

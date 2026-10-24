@@ -4,13 +4,15 @@ sub-agents, an OpenAI agent called as a tool (``Agent.as_tool``), Claude's
 (the spawning stays the framework's):
 
 * **lineage** — a run record of its own in the run store, its parent the run
-  (``parent_run_id``), its metadata naming it (:data:`HELPER`): started when the framework
+  (``parent_run_id``), its metadata naming it (:data:`HELPER`) and the run's agent group
+  (:data:`~trellis.harness.identity.AGENT_GROUP`): started when the framework
   starts it, ended with its answer or its error. Its id is derived from the run, the helper and
   its task (and how many times the attempt started that one), so the attempt after a pause or a
   crash finds the same record again and ends it;
 * **its turns in memory** — the task it was given and what it answered, recorded in the memory
   service under its own run (and its own thread: the conversation of the run is not the
-  helper's), as a run's transcript is;
+  helper's), as a run's transcript is, its scope derived from the run's as a sub-agent's is
+  (it reads the run's hand-off notes; ``scope="group"`` binds to the run's group);
 * **governance and budget** — its tool calls and its model replies are the run's: they go
   through the same governance (the catalog's rules) and count toward the run's budget, by the
   adapter's hooks that reach the helper (:mod:`trellis.harness.adapters`).
@@ -31,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Final
 from trellis.contracts import AgentError, RunStart, RunStatus, stable_id
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.history import Said, Speaker, recorded
+from trellis.harness.identity import AGENT_GROUP
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -89,7 +92,10 @@ class Helpers:
                 user_id=parent.user,
                 workspace_id=parent.identity.workspace,
                 input=task,
-                metadata={HELPER: {"framework": self.framework, "kind": kind, "name": name}},
+                metadata={
+                    HELPER: {"framework": self.framework, "kind": kind, "name": name},
+                    AGENT_GROUP: parent.identity.own_group,
+                },
             )
         )
         self._open[key] = Helper(run_id, [Said(Speaker.USER, task)])
@@ -175,7 +181,12 @@ class Helpers:
         if memory is None or parent.run_memory is None or not parent.uses("records"):
             return
         identity = parent.identity.model_copy(
-            update={"run_id": helper.run_id, "thread": helper.run_id}
+            update={
+                "run_id": helper.run_id,
+                "thread": helper.run_id,
+                "parent_run": parent.run_id,
+                "group": parent.identity.own_group,
+            }
         )
         scoped, messages = memory.bind(identity), list(helper.said)
         await parent.agent.harness.writes.submit(

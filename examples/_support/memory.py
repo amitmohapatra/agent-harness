@@ -42,6 +42,7 @@ ROUTES: Final = [
     ("POST", r"/v1/tools/hints", "hints"),
     ("POST", r"/v1/tools/invocations", "record_tool"),
     ("POST", r"/v1/feedback", "feedback"),
+    ("GET", r"/v1/feedback", "feedback_list"),
     ("POST", r"/v1/verify", "verify"),
     ("POST", r"/v1/messages", "messages"),
     ("GET", r"/v1/tools", "read_catalog"),
@@ -75,6 +76,8 @@ class ScriptedMemory:
     #: every call, by route: ``context_`` (a pushed context), ``recall``, ``read_catalog``...
     asked: Counter[str] = field(default_factory=Counter)
     documents: dict[str, str] = field(default_factory=dict)
+    #: every verdict stored, oldest first (``GET /v1/feedback`` lists one target's, newest first)
+    verdicts: list[dict[str, Any]] = field(default_factory=list)
     _ids: itertools.count[int] = field(default_factory=itertools.count)
 
     def client(self) -> MemoryClient:
@@ -173,7 +176,17 @@ class ScriptedMemory:
         }
         if record["source"] == "human" and record["target_kind"] == "run":
             record["review"] = {"state": "pending"}  # a person's verdict waits for the admin
+        self.verdicts.append(record)
         return record
+
+    def _feedback_list(self, body: Any, request: httpx.Request) -> dict[str, Any]:
+        params = request.url.params
+        on = [
+            f
+            for f in reversed(self.verdicts)
+            if (f["target_kind"], f["target_id"]) == (params["target_kind"], params["target_id"])
+        ]
+        return {"feedback": on, "next_cursor": None}
 
     def _verify(self, body: Any, request: httpx.Request) -> dict[str, Any]:
         claims = [{"claim": "the answer", "verdict": "supported"}]

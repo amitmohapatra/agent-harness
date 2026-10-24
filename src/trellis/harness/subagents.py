@@ -11,10 +11,14 @@ sub-agent, inside the call:
 
 * its id is derived from the parent's call (the parent run, the call, its occurrence: the
   call's ``idempotency_key``), so the parent's re-run finds it again; its record names its
-  parent (``parent_run_id``); it inherits the parent's tenant, user and thread, its deadline
-  and what is left of its time (a child never works past its parent), and its spans are in the
-  parent's trace; its agent version is its own, and so is its agent's ``without=`` (what the
-  parent's run is without, it is without too);
+  parent (``parent_run_id``), and its memory scope is derived from the parent's
+  (``MemoryContext.agent``): it reads the parent's hand-off notes (``RUN`` visibility), its
+  own go up to the parent, and the runs of one delegation tree share an agent group, named
+  by the run at its top (``memory_remember(scope="group")``); it inherits the parent's
+  tenant, user and thread, the documents its context draws on (``document_ids=``), its
+  deadline and what is left of its time (a child never works past its parent), and its spans
+  are in the parent's trace; its agent version is its own, and so is its agent's
+  ``without=`` (what the parent's run is without, it is without too);
 * while it works its journal is kept in the parent's, so the parent's progress saves it: after
   a crash the parent's next attempt continues the child where it was (the tool is
   ``resumable``), repeating none of its side effects;
@@ -135,7 +139,9 @@ class SubAgent:
             timeout=parent.remaining(),
             deadline=parent.deadline,
             parent=parent.run_id,
+            group=parent.identity.own_group,
             without=parent.without,
+            document_ids=parent.document_ids,
         )
         result = await self._continued(parent, await child.harness.runs.start(start))
         while result.status is RunStatus.PAUSED:
