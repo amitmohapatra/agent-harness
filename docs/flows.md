@@ -65,8 +65,8 @@ sequenceDiagram
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
   W-)Mem: POST /v1/feedback (system: confirm)
-  W-)Mem: POST /v1/verify (every run with a context: the judge's verdict on its outcome)
-  W-)LF: score grounding on the run's trace (sampled: TRELLIS_EVAL_SAMPLE)
+  W-)Mem: POST /v1/verify (sampled: TRELLIS_EVAL_SAMPLE) → grounding score
+  W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
   Agent->>Runs: get(run_id, tenant=)
   Agent->>Mem: POST /v1/feedback (human, review pending)
@@ -115,7 +115,7 @@ sequenceDiagram
   P-)W: the run ended
   W-)Mem: POST /v1/messages (the transcript, source_message_id each: stored once)
   W-)Mem: POST /v1/feedback (system: SUCCESS confirm / ERROR reject)
-  W-)Mem: POST /v1/verify {bundle_id, answer} (every run with a context; its score on a sampled share)
+  W-)Mem: POST /v1/verify {bundle_id, answer} (a sampled share: grounding)
 ```
 
 A failed context read is a `warning` event and the run goes on without it; a write given up is
