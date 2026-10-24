@@ -322,6 +322,31 @@ async def test_a_verdict_on_a_run_never_checked_cites_nothing(
     assert sent.body["evidence_refs"] == []
 
 
+@pytest.mark.parametrize("listed", [200, 404])
+async def test_a_verdict_on_an_unverified_run_succeeds_citing_nothing(
+    memory_service: FakeMemoryService, listed: int
+) -> None:
+    """Outside the sample the run has no judge's verdict: the person's verdict is sent, with
+    no citations, whether the service lists nothing on the run or knows nothing of it."""
+    if listed == 404:
+        memory_service.failures["feedback_list"] = 404
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "an answer"
+
+    async with harness_with(memory_service, eval_sample=0.0) as h:
+        result = await h.wrap(fn, id="f").run("q", user="u")
+        await h.writes.drain()
+        stored = await h.feedback(result.run_id, "confirm")
+    assert memory_service.named("verify") == []
+    if listed == 200:  # asked as the service's GET /v1/feedback takes it
+        [asked] = memory_service.named("feedback_list")
+        assert asked.query["target_kind"] == "run"
+        assert asked.query["target_id"] == asked.query["agent_run_id"] == result.run_id
+    [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
+    assert sent.body["evidence_refs"] == [] and stored is not None
+
+
 async def test_the_cited_memories_are_each_once_and_bounded(
     memory_service: FakeMemoryService,
 ) -> None:

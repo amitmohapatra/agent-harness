@@ -28,6 +28,7 @@ from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.history import Said, Speaker, recorded, said_of
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
+from trellis.memory.errors import NotFoundError
 from trellis.memory.models import (
     AgentTool,
     DocumentInfo,
@@ -270,11 +271,15 @@ class RunMemory:
         """The memories this scope's run's answer rests on: what the grounding judge's verdict
         on it cites (``/v1/verify`` resolves the answer's claims against the run's context
         bundle and records the supporting memories with its verdict), each once, at most
-        :data:`CITED_MAX`. Empty when the run was not verified or nothing it claimed rested
-        on a memory."""
+        :data:`CITED_MAX`. Empty when the run was not verified (most runs: the check takes a
+        sample), the service holds no feedback on it (``NotFoundError``), or nothing it
+        claimed rested on a memory."""
         run_id = self.ctx.scope.agent_run_id
         assert run_id is not None
-        page = await self.ctx.feedback.page_for(FeedbackTargetKind.RUN.value, run_id)
+        try:
+            page = await self.ctx.feedback.page_for(FeedbackTargetKind.RUN.value, run_id)
+        except NotFoundError:
+            return []
         judged = [f for f in page.items if f.source == FeedbackSource.JUDGE.value]
         refs = {ref.source_id: ref for verdict in judged for ref in verdict.evidence_refs}
         return list(refs.values())[:CITED_MAX]
