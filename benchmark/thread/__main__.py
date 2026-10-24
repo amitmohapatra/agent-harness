@@ -147,7 +147,7 @@ def framework_target(model: str) -> Any:
 
     from trellis.harness.react import _gateway_model
 
-    chat = _gateway_model(model, timeout=None, effort=None, settings=None)
+    chat = _gateway_model(model, effort=None, settings=None)
     return create_agent(chat, tools=[], system_prompt=SYSTEM, checkpointer=own_thread())
 
 
@@ -156,7 +156,7 @@ def memory_target(model: str) -> Any:
 
     from trellis.harness.react import _gateway_model
 
-    chat = _gateway_model(model, timeout=None, effort=None, settings=None)
+    chat = _gateway_model(model, effort=None, settings=None)
     return create_agent(chat, tools=[], system_prompt=SYSTEM)
 
 

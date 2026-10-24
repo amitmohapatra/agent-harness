@@ -17,8 +17,7 @@ same instructions and model. A new cost feature lands as one more entry of :data
   itself (:data:`AUTOMATIC`); ``main@8k`` — ``main`` on an 8,192-token window;
 * ``main-<piece>`` — ``main`` with one of its pieces off (:data:`PIECES`: ``paging``,
   ``context_editing``, ``summarization``), so each piece is measured on its own: the default
-  middleware of that name replaced by one that does nothing (``ReAct(middleware=)`` replaces a
-  default by name).
+  middleware of that name left out (``react.defaults_off``).
 
 :data:`DEFAULT` are the variants a run compares unless ``--variants`` says.
 """
@@ -30,9 +29,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-from langchain.agents.middleware import AgentMiddleware
-
 from trellis import ReAct
+from trellis.harness.react import defaults_off
 
 
 @dataclass(frozen=True)
@@ -60,7 +58,7 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
     from trellis.harness.react import _gateway_model
 
     graph = create_agent(
-        _gateway_model(setup.model, timeout=None, effort=None, settings=None),
+        _gateway_model(setup.model, effort=None, settings=None),
         tools=[],
         system_prompt=setup.system,
         middleware=[
@@ -83,26 +81,14 @@ def main(
     without: tuple[str, ...] = (),
     window: int | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    target = ReAct(
-        setup.system,
-        setup.model,
-        max_steps=setup.max_steps,
-        context_window=window or setup.window,
-        middleware=[Off(PIECES[piece]) for piece in off],
-    )
+    with defaults_off(*(PIECES[piece] for piece in off)):
+        target = ReAct(
+            setup.system,
+            setup.model,
+            max_steps=setup.max_steps,
+            context_window=window or setup.window,
+        )
     return target, {"without": set(without)} if without else {}
-
-
-class Off(AgentMiddleware):
-    """A default middleware turned off: one of its name that does nothing."""
-
-    def __init__(self, name: str) -> None:
-        super().__init__()
-        self._name = name
-
-    @property
-    def name(self) -> str:  # type: ignore[override]
-        return self._name
 
 
 #: ``main``'s pieces a ``main-<piece>`` variant turns off, by the name of their middleware.

@@ -27,9 +27,8 @@ the loop is the harness's. What it is built with:
   tools once they have something to read), the run's budget when it has one and
   :class:`~.RunCheckpointer` (the graph's checkpoint in the run: a resume continues in place);
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware (planning, the full
-  filesystem, sub-agents, approvals, call limits, PII, tool selection...), placed before
-  ``ModelHooks``; one named as a default one (``SummarizationMiddleware``,
-  ``FilesystemMiddleware``...) replaces it.
+  filesystem, sub-agents, approvals, call limits, PII, tool selection...), added before
+  ``ModelHooks``; one named as a default one is refused, naming the parameter that sets it.
 
 A model name is a model of the deployment's one gateway (``trellis.harness.gateways``), asked
 through ``ChatOpenAI`` on its chat completions: Bifrost (``BIFROST_URL``, the virtual key
@@ -43,9 +42,11 @@ the window-scaled features are off, said once.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from typing import Any, Final
 
 from pydantic import BaseModel
@@ -76,8 +77,8 @@ def ReAct(
     model: str | Any,
     *,
     output: type[BaseModel] | dict[str, Any] | None = None,
-    max_steps: int | None = None,
-    max_repeats: int | None = None,
+    max_steps: int = 12,
+    max_repeats: int = 3,
     model_timeout: float | None = None,
     context_window: int | None = None,
     prompt: str | Prompt | None = None,
@@ -90,23 +91,23 @@ def ReAct(
     effort: str | None = None,
     settings: Settings | None = None,
 ) -> Any:
-    """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name,
-    or a LangChain chat model), its answer an ``output`` (a pydantic model or a JSON schema)
-    when given. ``max_steps`` model calls with tools, then one without (:class:`~.StepLimit`);
-    ``max_repeats`` steps repeating one call stop it (:class:`~.StallGuard`); a model call
-    takes at most ``model_timeout`` seconds; ``prompt`` is a prompt of the harness's prompt
-    sources (``"name"``, ``"name@version"``, a ``Prompt``) pinned for the run — a stored prompt
-    of the gateway selected by every call, any other rendered into the instructions
-    (``prompt_vars`` fill its ``{{variables}}``); ``middleware`` adds or replaces middleware by
-    name; ``checkpointer`` replaces the run's (:class:`~.RunCheckpointer`). ``tool_guidance``
-    adds how to choose among tools to every call's instructions (:class:`~.ToolGuidance`);
-    ``answer_check`` has the model check its answer against the request once before it is
-    final, calling the tools still needed, and the first change against the rules before it is
-    made (:class:`~.AnswerCheck`: one more model call each); ``capabilities`` tells the model
-    what it can and cannot do beyond its tools (``{"accept an image upload": False}``), so it
-    answers such a question plainly. ``effort`` is the reasoning effort sent with every call
-    of a model name (``reasoning_effort``; the gateway passes it on); ``settings`` are the
-    gateway's address and key (``Harness(config=)``'s; else the environment's)."""
+    """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name, or a
+    LangChain chat model), its answer an ``output`` (a pydantic model or a JSON schema) when given.
+    ``max_steps`` model calls with tools, then one without (:class:`~.StepLimit`); ``max_repeats``
+    steps repeating one call stop it (:class:`~.StallGuard`); a model call takes at most
+    ``model_timeout`` seconds; ``prompt`` is a prompt of the harness's prompt sources (``"name"``,
+    ``"name@version"``, a ``Prompt``) pinned for the run — a stored prompt of the gateway selected
+    by every call, any other rendered into the instructions (``prompt_vars`` fill its
+    ``{{variables}}``); ``middleware`` adds middleware (one named as a default is refused);
+    ``checkpointer`` replaces the run's (:class:`~.RunCheckpointer`). ``tool_guidance`` adds how to
+    choose among tools to every call's instructions (:class:`~.ToolGuidance`); ``answer_check`` has
+    the model check its answer against the request once before it is final, calling the tools still
+    needed, and the first change against the rules before it is made (:class:`~.AnswerCheck`: one
+    more model call each); ``capabilities`` tells the model what it can and cannot do beyond its
+    tools (``{"accept an image upload": False}``), so it answers such a question plainly. ``effort``
+    is the reasoning effort sent with every call of a model name (``reasoning_effort``; the gateway
+    passes it on); ``settings`` are the gateway's address and key (``Harness(config=)``'s; else the
+    environment's)."""
     try:
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
@@ -121,12 +122,17 @@ def ReAct(
         ) from exc
     if model_timeout is not None and model_timeout <= 0:
         raise ConfigurationError("model_timeout is a number of seconds over 0")
+    for name, value in (("max_steps", max_steps), ("max_repeats", max_repeats)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigurationError(f"{name} is a number of steps, 1 or more: not {value!r}")
     if context_window is not None and context_window <= 0:
         raise ConfigurationError("context_window is a number of tokens over 0")
     if effort is not None and not isinstance(model, str):
         raise ConfigurationError("effort is for a model name: set it on your own chat model")
     named = model if isinstance(model, str) else None
-    gateway, chat = _served(model, timeout=model_timeout, effort=effort, settings=settings)
+    # the model call's bound is ``ModelHooks``' (with the run's time left): applied once, not
+    # again by the model's own client
+    gateway, chat = _served(model, effort=effort, settings=settings)
     window, source = window_of(chat, context_window)
     if window is None:
         _unknown(named or type(chat).__name__)
@@ -141,8 +147,8 @@ def ReAct(
         *([ours.AnswerCheck()] if answer_check else []),
         ours.HarnessTools(),
         ours.GovernTools(),
-        ours.StallGuard(max_repeats or ours.MAX_REPEATS),
-        ours.StepLimit(max_steps or ours.MAX_STEPS),
+        ours.StallGuard(max_repeats),
+        ours.StepLimit(max_steps),
         automatic.Budgeted(),
         PatchToolCallsMiddleware(),
         *(
@@ -194,19 +200,48 @@ def ReAct(
     return graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
 
 
+#: What a default middleware of ``ReAct`` is set by, where a parameter sets it: a given one of
+#: the same name is refused, naming it (it would have replaced the default silently).
+SET_BY: Final = {
+    "StepLimit": "max_steps=",
+    "StallGuard": "max_repeats=",
+    "ModelHooks": "model_timeout= and prompt= (and h.wrap(hooks=) for the hooks)",
+    "RunCheckpointer": "checkpointer=",
+    "ToolGuidance": "tool_guidance= and capabilities=",
+    "AnswerCheck": "answer_check=",
+}
+
+
+#: The default middleware a measurement turns off (:func:`defaults_off`), by name.
+_OFF: ContextVar[frozenset[str]] = ContextVar("trellis_react_off", default=frozenset())
+
+
+@contextlib.contextmanager
+def defaults_off(*names: str) -> Iterator[None]:
+    """``ReAct`` graphs built inside leave out the default middleware ``names`` (a measurement
+    of what each is worth: ``benchmark.cost``'s ``main-<piece>`` variants). Not an option of
+    ``ReAct``: a graph built for an agent has every default."""
+    token = _OFF.set(frozenset(names))
+    try:
+        yield
+    finally:
+        _OFF.reset(token)
+
+
 def stacked(defaults: Sequence[Any], given: Sequence[Any]) -> list[Any]:
-    """The middleware the graph is built with: the defaults, each replaced by a given one of
-    the same name, then the other given ones before the last default (``ModelHooks``, so its
-    span shows what the model is sent)."""
-    stack = list(defaults)
-    names = [m.name for m in stack]
-    added = []
-    for m in given:
-        if m.name in names:
-            stack[names.index(m.name)] = m
-        else:
-            added.append(m)
-    return [*stack[:-1], *added, stack[-1]]
+    """The middleware the graph is built with: the defaults, then the given ones, added before
+    the last default (``ModelHooks``, so its span shows what the model is sent). A given one
+    named as a default is refused, naming what sets that default: it never replaces it."""
+    names = {m.name for m in defaults}
+    taken = [m.name for m in given if m.name in names]
+    if taken:
+        said = "; ".join(
+            f"{name} is ReAct's own ({SET_BY.get(name, 'always on')})" for name in taken
+        )
+        raise ConfigurationError(f"ReAct(middleware=) adds middleware, it replaces none: {said}")
+    off = _OFF.get()
+    kept = [m for m in defaults[:-1] if m.name not in off]
+    return [*kept, *given, defaults[-1]]
 
 
 def window_of(model: Any, given: int | None = None) -> tuple[int | None, str]:
@@ -228,7 +263,7 @@ def _unknown(name: str) -> None:
 
 
 def _served(
-    model: Any, *, timeout: float | None, effort: str | None, settings: Settings | None
+    model: Any, *, effort: str | None, settings: Settings | None
 ) -> tuple[ModelGateway | None, Any]:
     """The gateway that serves a model name, and the chat model it makes of it
     (``trellis.harness.gateways``); any other model as it is, served by none."""
@@ -237,14 +272,12 @@ def _served(
     gateway = model_gateway(settings or Settings.from_env())
     if gateway is None:
         raise unserved("ReAct")
-    return gateway, gateway.chat_model(model, timeout=timeout, effort=effort)
+    return gateway, gateway.chat_model(model, effort=effort)
 
 
-def _gateway_model(
-    model: Any, *, timeout: float | None, effort: str | None, settings: Settings | None
-) -> Any:
+def _gateway_model(model: Any, *, effort: str | None, settings: Settings | None) -> Any:
     """The chat model for ``model`` (:func:`_served`'s), for a graph built by hand."""
-    return _served(model, timeout=timeout, effort=effort, settings=settings)[1]
+    return _served(model, effort=effort, settings=settings)[1]
 
 
 def _profiled(model: Any, window: int | None) -> Any:

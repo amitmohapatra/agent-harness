@@ -79,8 +79,10 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
   selected by every model call, which the gateway prepends (a model name only,
   [gateway.md](../gateway.md#prompts)); any other is rendered (`prompt_vars` fill its
   `{{variables}}`) into the system message before `system`, which may then be `""`.
-* `middleware` — more middleware, LangChain's, Deep Agents' or yours (below); one with the name
-  of a default one replaces it.
+* `middleware` — more middleware, LangChain's, Deep Agents' or yours (below), added to the
+  defaults; one with the name of a default one is refused, naming the parameter that sets it
+  (`StepLimit`: `max_steps`, `StallGuard`: `max_repeats`, `ModelHooks`: `model_timeout` and
+  `prompt`...). `max_steps` and `max_repeats` are 1 or more (12 and 3 by default).
 * `checkpointer` — the graph's checkpointer; by default `RunCheckpointer()`, which keeps the
   graph's checkpoint in the run itself.
 * `tool_guidance`, `answer_check`, `capabilities` — how to choose among tools, a check of the
@@ -139,12 +141,12 @@ shows what the model is sent). Each works the same in any `create_agent` or Deep
 | Add | For |
 |---|---|
 | `TodoListMiddleware()` (LangChain) | a `write_todos` plan the model keeps from the first call (by default only a long task gets one) |
-| `FilesystemMiddleware()` (Deep Agents) | the whole virtual filesystem (`ls`, `write_file`, `edit_file`, `glob`, `grep`): replaces the default `read_file`-only one |
+| `FilesystemMiddleware()` (Deep Agents) | the whole virtual filesystem (`ls`, `write_file`, `edit_file`, `glob`, `grep`): in a `create_agent` or Deep Agents graph of your own (`ReAct` has the `read_file`-only one and refuses a second of that name) |
 | `SubAgentMiddleware(...)` (Deep Agents) | the `task` tool with sub-agents of the graph's own, run by Deep Agents (a wrapped agent's `as_tool()` is the harness's way, [subagents.md](../subagents.md)) |
 | `HumanInTheLoopMiddleware(...)` (LangChain) | the framework's own approvals (the harness's are a tool's `ask`, [interrupts.md](../interrupts.md)) |
 | `ToolCallLimitMiddleware(...)` (LangChain) | a cap on the calls of a tool, or of all |
 | `PIIMiddleware(...)` (LangChain) | PII redacted, masked or refused in what the model reads |
-| `SummarizationMiddleware(...)` (LangChain) | LangChain's summarization in place of Deep Agents' (same name: it replaces it) |
+| `SummarizationMiddleware(...)` (LangChain) | LangChain's summarization, in a graph of your own (`ReAct` has Deep Agents' under that name, and refuses a second) |
 | `LLMToolSelectorMiddleware(...)` (LangChain) | many tools: a model call of its own picks those that fit the request, per model call, among the run's tools (`max_tools=`, `on_parsing_failure="all"` so a reply it cannot read offers every tool) |
 
 The harness middleware in a graph of your own: `HarnessTools()` makes the run's tools the

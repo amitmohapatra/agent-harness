@@ -196,7 +196,8 @@ whether a part is on. Runnable: [examples/02_way1_react/agent.py](../examples/02
 [`h.wrap`](api.md#hwrap) for every run of the agent (`serve_chat`, `serve_a2a` and `h.evaluate`
 have these), on [`agent.run`, `stream`, `start`](api.md#agentrun-agentstream-agentstart) and
 [`schedule`](api.md#agentschedule) for that run (each run a schedule fires) — merged over the
-agent's, key by key (a key the run gives replaces the agent's, a `configurable` dict included).
+agent's, key by key: a mapping both give (a graph's `configurable`, `metadata`) is merged the
+same way, and any other value the run gives replaces the agent's.
 
 ```python
 agent = h.wrap(graph, id="support", framework_options={"recursion_limit": 50})
@@ -205,7 +206,7 @@ await agent.run(question, user="ada", framework_options={"tags": ["vip"]})
 
 | Target | Where they go | The harness keeps for itself |
 |---|---|---|
-| LangGraph, Deep Agents, `ReAct` | the `config` of `ainvoke`/`astream` (`RunnableConfig` keys: `recursion_limit`, `configurable`, `tags`, `metadata`, `callbacks`, `max_concurrency`, `run_name`) | `configurable.thread_id`: the run's thread wins over one given |
+| LangGraph, Deep Agents, `ReAct` | the `config` of `ainvoke`/`astream` (`RunnableConfig` keys: `recursion_limit`, `configurable`, `tags`, `metadata`, `callbacks`, `max_concurrency`, `run_name`) | `configurable.thread_id`: refused (the thread is `run(thread=)`) |
 | OpenAI Agents | keyword arguments of `Runner.run`/`run_streamed` (`max_turns`, `run_config`, `context`, `session`...) | `starting_agent`, `input`, `hooks`: refused |
 | Claude Agent SDK | `ClaudeAgentOptions` fields set on the run's copy of the options (`max_turns`, `model`, `allowed_tools`...) | `resume`, `continue_conversation`, `permission_prompt_tool_name`: refused; `system_prompt`, `can_use_tool` and `mcp_servers` merged (the context appended, the callback asked after governance, the `trellis` server added beside — a server of that name refused); `env`'s `ANTHROPIC_CUSTOM_HEADERS` that select a stored prompt the run pinned (`h.model_headers(prompt=)`) select its pinned version |
 | a function | — (no framework run call) | any: refused |

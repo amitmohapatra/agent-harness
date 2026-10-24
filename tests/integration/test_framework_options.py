@@ -122,20 +122,38 @@ async def test_an_object_reaches_the_first_attempt_and_the_record_keeps_the_json
     assert record is not None and record.metadata == {"framework_options": {"tags": ["nightly"]}}
 
 
-async def test_a_graphs_configurable_keys_pass_and_the_harnesss_thread_wins(
+async def test_a_graphs_configurable_keys_merge_key_by_key_and_the_thread_is_the_runs(
     harness: Harness,
 ) -> None:
+    """A run's ``configurable`` goes over its agent's key by key (not the whole mapping), and
+    the thread is ``run(thread=)``: a ``thread_id`` in the options is refused, on the agent and
+    on the run alike (one owner of the thread)."""
+
     def answer(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
         given = config.get("configurable") or {}
-        return {"messages": [AIMessage(content=f"{given['shop']} on {given['thread_id']}")]}
+        said = f"{given['shop']}/{given['region']}/{given['tier']} on {given['thread_id']}"
+        return {"messages": [AIMessage(content=said)]}
 
     graph = StateGraph(MessagesState).add_node("answer", answer)
-    agent = harness.wrap(graph.add_edge(START, "answer").compile(), id="shop")
-    configurable = {"shop": "north", "thread_id": "theirs"}
-    result = await agent.run(
-        "hi", user="u", thread="t1", framework_options={"configurable": configurable}
+    built = graph.add_edge(START, "answer").compile()
+    agent = harness.wrap(
+        built,
+        id="shop",
+        framework_options={"configurable": {"shop": "north", "region": "eu"}},
     )
-    assert result.answer == "north on t1"
+    result = await agent.run(
+        "hi",
+        user="u",
+        thread="t1",
+        framework_options={"configurable": {"region": "uk", "tier": "gold"}},
+    )
+    assert result.answer == "north/uk/gold on t1"
+    with pytest.raises(ConfigurationError, match=r"pass agent\.run\(thread=\.\.\.\) instead"):
+        await agent.run("hi", user="u", framework_options={"configurable": {"thread_id": "theirs"}})
+    with pytest.raises(ConfigurationError, match=r"configurable\.thread_id"):
+        harness.wrap(
+            built, id="theirs", framework_options={"configurable": {"thread_id": "theirs"}}
+        )
 
 
 async def test_claudes_options_merge_with_what_the_harness_sets(

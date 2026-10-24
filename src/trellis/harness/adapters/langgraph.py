@@ -41,8 +41,9 @@
   the run's (``h.tools``), and its model calls count toward the run's budget (``accounting``),
   as are those of the graph's subgraphs and ``Send`` branches, which run inside the run;
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
-  ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; the harness's
-  ``configurable.thread_id`` wins over one given. The graph's own run arguments
+  ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; a
+  ``configurable.thread_id`` among them is refused (the thread is ``run(thread=)``, one owner).
+  The graph's own run arguments
   (:data:`RUN_ARGUMENTS`: ``context`` for a ``context_schema``, ``durability``) go to the call
   beside it.
 """
@@ -241,8 +242,15 @@ class LangGraphAdapter:
                 f"framework_options for a graph are RunnableConfig keys and its run arguments: "
                 f"{', '.join(map(repr, unknown))} is none of {', '.join(known)}"
             )
-        if not isinstance(options.get("configurable", {}), Mapping):
+        configurable = options.get("configurable", {})
+        if not isinstance(configurable, Mapping):
             raise ConfigurationError("framework_options' configurable is a dict")
+        if "thread_id" in configurable:
+            raise ConfigurationError(
+                "framework_options' configurable.thread_id: the harness runs the graph on the "
+                "run's thread (or the run's own, for a graph that checkpoints into its run): "
+                "pass agent.run(thread=...) instead"
+            )
 
     def native_tools(self, target: Any) -> list[str]:
         """A graph that binds its tools when it is built: what its tool nodes run
@@ -264,8 +272,8 @@ class LangGraphAdapter:
     @staticmethod
     def _config(target: Any, run: Invocation, helpers: Helpers) -> dict[str, Any]:
         """The run's config: its framework options (less its run arguments), the harness's
-        thread id over theirs, and the run's helper callbacks (``hooks.langgraph``) beside
-        theirs."""
+        thread id (theirs names none: ``check_options``), and the run's helper callbacks
+        (``hooks.langgraph``) beside theirs."""
         from trellis.harness.hooks.langgraph import HelperCallbacks
 
         runtime = run.runtime

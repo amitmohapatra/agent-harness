@@ -137,8 +137,9 @@ those may be resumed in another process, give every process a shared, durable ch
 
 `framework_options=` (on `h.wrap`, or a run's own on `run`/`stream`/`start`) goes into the config
 the harness calls `ainvoke`/`astream` with: `recursion_limit`, `configurable` keys your nodes
-read, `tags`, `metadata`, `callbacks`. The run's thread is the harness's: its
-`configurable.thread_id` wins over one given. The graph's own run arguments `context` (for a
+read, `tags`, `metadata`, `callbacks`; a run's `configurable` goes over the agent's key by key.
+The run's thread is the harness's: a `configurable.thread_id` given is refused (pass
+`run(thread=)`). The graph's own run arguments `context` (for a
 `context_schema`) and `durability` go to the call beside the config. Another key is refused when you wrap or run
 ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
 

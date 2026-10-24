@@ -47,6 +47,21 @@ from trellis.harness.tools.base import Tool
 #: values: what a later attempt — a resume, a worker's — runs with).
 FRAMEWORK_OPTIONS: Final = "framework_options"
 
+
+def merged(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
+    """Framework options ``over`` (a run's) on ``base`` (its agent's): a key both give as a
+    mapping (a LangGraph config's ``configurable``, ``metadata``) is merged the same way, key by
+    key; any other value of ``over``'s replaces ``base``'s."""
+    found = dict(base)
+    for key, value in over.items():
+        given = found.get(key)
+        if isinstance(value, Mapping) and isinstance(given, Mapping):
+            found[key] = merged(given, value)
+        else:
+            found[key] = value
+    return found
+
+
 ToolFormat = Literal["langchain", "openai_agents", "claude", "none"]
 Narrowing = Literal["turn", "run", "none"]
 

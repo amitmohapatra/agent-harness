@@ -275,7 +275,7 @@ a function target.
 ## ReAct
 
 ```text
-ReAct(system, model, *, output=None, max_steps=None, max_repeats=None, model_timeout=None,
+ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
       tool_guidance=False, answer_check=False, capabilities=None, effort=None, settings=None)
 ```
@@ -288,12 +288,12 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 | `system` | required | the instructions (may be `""` with a `prompt`) |
 | `model` | required | a Bifrost model name (a `ChatOpenAI` on `BIFROST_URL`, no retries of its own: the gateway's) or any LangChain chat model |
 | `output` | none | a pydantic model or a JSON schema the answer is parsed into (LangChain's `response_format`) |
-| `max_steps` | 12 | model calls with tools, then one more without |
-| `max_repeats` | 3 | identical calls in a row that stop the run |
+| `max_steps` | 12 | model calls with tools, then one more without (1 or more) |
+| `max_repeats` | 3 | identical calls in a row that stop the run (1 or more) |
 | `model_timeout` | none | the most one model call may take, in seconds |
 | `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `prompt`, `prompt_vars` | none | a prompt of the prompt sources, pinned for the run, and its variables ([prompts.md](prompts.md)) |
-| `middleware` | `()` | more LangChain or Deep Agents middleware; one named like a default replaces it |
+| `middleware` | `()` | more LangChain or Deep Agents middleware, added; one named like a default is refused |
 | `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |
 | `tool_guidance` | `False` | how to choose among tools, added to every call's instructions (`ToolGuidance`; [tool choice](frameworks/react.md#tool-choice)) |
 | `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |

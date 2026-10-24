@@ -99,11 +99,10 @@ def test_the_client_retries_where_no_gateway_does(monkeypatch: pytest.MonkeyPatc
     from trellis.harness.react import _gateway_model
 
     monkeypatch.setenv("OPENAI_BASE_URL", "http://litellm.test/v1")
-    compat = _gateway_model("m", timeout=None, effort=None, settings=Settings())
+    compat = _gateway_model("m", effort=None, settings=Settings())
     assert compat.max_retries is None  # the OpenAI client's own default: nothing else retries
-    bifrost = _gateway_model(
-        "m", timeout=None, effort=None, settings=Settings(bifrost_url="http://bf/v1")
-    )
+    assert compat.request_timeout is None  # a call's bound is the run's, applied once
+    bifrost = _gateway_model("m", effort=None, settings=Settings(bifrost_url="http://bf/v1"))
     assert bifrost.max_retries == BIFROST_CLIENT_RETRIES == 0  # the gateway retries
 
 

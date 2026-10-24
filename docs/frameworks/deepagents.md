@@ -93,7 +93,8 @@ needed) is the graph's own question: a dict `value` carries `options` (several p
 given ([the table](langgraph.md#approvals-and-pauses)).
 
 A Deep Agent is a graph: `framework_options=` goes into its run's config as for any graph
-(`recursion_limit`, `configurable` keys; the harness's `thread_id` wins —
+(`recursion_limit`, `configurable` keys, merged key by key; a `thread_id` among them is
+refused: the thread is `run(thread=)` —
 [langgraph.md](langgraph.md#the-graphs-own-run-options)).
 
 ## Limits

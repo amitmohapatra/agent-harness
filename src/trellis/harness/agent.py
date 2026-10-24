@@ -47,6 +47,7 @@ from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
     context_window,
+    merged,
 )
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.bounded import LRU
@@ -1094,7 +1095,7 @@ class Agent:
         draws on."""
         own = dict(framework_options or {})
         if own:
-            self.adapter.check_options({**self.framework_options, **own})
+            self.adapter.check_options(merged(self.framework_options, own))
         turned_off = sorted(features(without))
         metadata: dict[str, Any] = {WITHOUT: turned_off} if turned_off else {}
         kept = {key: value for key, value in own.items() if _json(value)}

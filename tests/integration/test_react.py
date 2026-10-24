@@ -27,7 +27,7 @@ from trellis.harness import middleware as ours
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import LangGraphAdapter
 from trellis.harness.middleware import RunCheckpointer
-from trellis.harness.react import stacked
+from trellis.harness.react import defaults_off, stacked
 
 
 @tool(side_effects="read")
@@ -184,19 +184,30 @@ class Named(AgentMiddleware):
         return self._name
 
 
-def test_given_middleware_replaces_a_default_of_its_name_and_goes_before_model_hooks() -> None:
-    defaults = [Named("A"), Named("B"), Named("ModelHooks")]
-    mine_b, extra = Named("B"), Named("C")
-    stack = stacked(defaults, [extra, mine_b])
-    assert [m.name for m in stack] == ["A", "B", "C", "ModelHooks"]
-    assert stack[1] is mine_b
+def test_given_middleware_is_added_before_model_hooks_and_replaces_nothing() -> None:
+    defaults = [Named("A"), Named("StepLimit"), Named("ModelHooks")]
+    extra, more = Named("C"), Named("D")
+    stack = stacked(defaults, [extra, more])
+    assert [m.name for m in stack] == ["A", "StepLimit", "C", "D", "ModelHooks"]
+    assert stacked(defaults, []) == defaults
+    with pytest.raises(ConfigurationError, match=r"StepLimit is ReAct's own \(max_steps=\)"):
+        stacked(defaults, [Named("StepLimit")])
+    with pytest.raises(ConfigurationError, match=r"A is ReAct's own \(always on\)"):
+        stacked(defaults, [Named("A")])
 
 
-async def test_a_summarization_middleware_given_replaces_the_default(harness: Harness) -> None:
+async def test_a_summarization_middleware_given_is_refused_naming_the_default() -> None:
     model = ScriptedChat(["hi"])
     mine = SummarizationMiddleware(model, trigger=("messages", 100))
-    graph = ReAct(system="s", model=model, middleware=[mine])
-    assert (await harness.wrap(graph, id="mine").run("x", user="u")).answer == "hi"
+    with pytest.raises(ConfigurationError, match="SummarizationMiddleware is ReAct's own"):
+        ReAct(system="s", model=model, middleware=[mine])
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.5, "3", None])
+@pytest.mark.parametrize("name", ["max_steps", "max_repeats"])
+def test_steps_and_repeats_are_one_or_more(name: str, value: Any) -> None:
+    with pytest.raises(ConfigurationError, match=f"{name} is a number of steps, 1 or more"):
+        ReAct(system="s", model=ScriptedChat(["hi"]), **{name: value})
 
 
 class Mine(AgentMiddleware):
@@ -385,3 +396,10 @@ async def test_a_call_that_changes_resets_the_stall_count(harness: Harness) -> N
     target = ReAct(system="s", model=model, max_repeats=3)
     result = await harness.wrap(target, id="no-stall", tools=[stock]).run("x", user="u")
     assert result.answer == "done"
+
+
+def test_a_measurement_leaves_default_middleware_out_only_inside_defaults_off() -> None:
+    defaults = [Named("A"), Named("SummarizationMiddleware"), Named("ModelHooks")]
+    with defaults_off("SummarizationMiddleware", "ModelHooks"):  # the last is always kept
+        assert [m.name for m in stacked(defaults, [])] == ["A", "ModelHooks"]
+    assert [m.name for m in stacked(defaults, [])] == ["A", "SummarizationMiddleware", "ModelHooks"]

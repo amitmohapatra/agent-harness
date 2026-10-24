@@ -53,6 +53,7 @@ from trellis.harness.adapters.base import (
     Invocation,
     NativePause,
     Output,
+    merged,
     query_of,
 )
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
@@ -209,7 +210,9 @@ async def _attempt(
         lease_seconds=None if job is None else job.lease_seconds,
         run_memory=await agent.run_memory(identity, without),
         without=without,
-        framework_options={**agent.framework_options, **record.metadata.get(FRAMEWORK_OPTIONS, {})},
+        framework_options=merged(
+            agent.framework_options, record.metadata.get(FRAMEWORK_OPTIONS, {})
+        ),
         used=set(journal.used),
         task=query_of(input),
         document_ids=record.metadata.get(DOCUMENTS),

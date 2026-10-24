@@ -92,17 +92,17 @@ class ModelGateway(ABC):
         """This gateway, when the deployment's configuration names it."""
 
     @abstractmethod
-    def chat_model(self, model: str, *, timeout: float | None, effort: str | None) -> Any:
-        """A LangChain chat model of ``model`` on this gateway."""
+    def chat_model(self, model: str, *, effort: str | None) -> Any:
+        """A LangChain chat model of ``model`` on this gateway. It has no timeout of its own:
+        a model call's bound is the run's (``ModelHooks``, the stall watchdog), applied once."""
 
 
-def _chat(model: str, timeout: float | None, effort: str | None, **more: Any) -> Any:
+def _chat(model: str, effort: str | None, **more: Any) -> Any:
     import openai  # noqa: PLC0415 - the react extra
     from langchain_openai import ChatOpenAI  # noqa: PLC0415
 
     return ChatOpenAI(
         model=model,
-        timeout=timeout,
         stream_usage=True,
         reasoning_effort=effort,
         # a client of its own: langchain-openai shares one per gateway URL across the process,
@@ -134,12 +134,11 @@ class Bifrost(ModelGateway):
             return None
         return cls(settings.bifrost_url, settings.bifrost_virtual_key)
 
-    def chat_model(self, model: str, *, timeout: float | None, effort: str | None) -> Any:
+    def chat_model(self, model: str, *, effort: str | None) -> Any:
         from bifrost_sdk import NO_GATEWAY_TOOLS  # noqa: PLC0415
 
         return _chat(
             model,
-            timeout,
             effort,
             base_url=self.url,
             api_key=self.key or NO_KEY,
@@ -174,8 +173,8 @@ class OpenAICompatible(ModelGateway):
         key = environ.get("OPENAI_API_KEY", "").strip() or None
         return cls(url, " and ".join(named), key=key)
 
-    def chat_model(self, model: str, *, timeout: float | None, effort: str | None) -> Any:
-        return _chat(model, timeout, effort, **({} if self.key else {"api_key": NO_KEY}))
+    def chat_model(self, model: str, *, effort: str | None) -> Any:
+        return _chat(model, effort, **({} if self.key else {"api_key": NO_KEY}))
 
     def judge(self, model: str) -> Any:
         """``model`` as a judge asks it (Bifrost's judges go through the harness's own client,

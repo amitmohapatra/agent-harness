@@ -437,3 +437,19 @@ def test_a_built_ins_structured_response_reads_as_its_text() -> None:
     assert _result_text({"content": [{"type": "text", "text": "a"}]}) == "a"
     assert _result_text({"file": {"path": "x"}}) == '{"file": {"path": "x"}}'
     assert _result_text(None) == ""
+
+
+def test_framework_options_merge_mapping_by_mapping() -> None:
+    from trellis.harness.adapters.base import merged
+
+    base = {"configurable": {"shop": "north", "nested": {"a": 1}}, "tags": ["a"], "ü": 1}
+    over = {"configurable": {"nested": {"b": 2}, "région": "eu"}, "tags": ["b"]}
+    assert merged(base, over) == {
+        "configurable": {"shop": "north", "nested": {"a": 1, "b": 2}, "région": "eu"},
+        "tags": ["b"],  # a list is replaced, not merged
+        "ü": 1,
+    }
+    assert merged({}, {}) == {} and merged(base, {}) == base and merged({}, over) == over
+    assert merged({"k": {"a": 1}}, {"k": None}) == {"k": None}  # a value over a mapping wins
+    assert merged({"k": 1}, {"k": {"a": 1}}) == {"k": {"a": 1}}
+    assert base["configurable"] == {"shop": "north", "nested": {"a": 1}}  # unchanged
