@@ -5,7 +5,67 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## Unreleased
 
+### Changed
+
+- Memory's window as the conversation itself: where memory owns a thread and the framework
+  keeps no store (`ReAct`, a LangGraph graph without a checkpointer), the thread's recent turns
+  arrive as LangChain's own messages — `HumanMessage`/`AIMessage` with `tool_calls`/
+  `ToolMessage` — after the one memory system message, not as text inside it; an OpenAI agent's
+  memory session gives the SDK the same turns as input items, its tool calls and results
+  included. Each run's question, tool calls, results
+  and answer are written back before the run returns (queued past 5 s or when memory is down),
+  so the next turn reads them wherever it runs. `trellis.harness.history` holds the policy and
+  the messages (`Said`, `from_window`). Needs the memory service's `window_format="messages"`.
+- Redaction masks credentials in traces only. Span attributes still lose secret-named fields,
+  bearer tokens, JWTs, `sk-` keys and key-like blobs; e-mail addresses are no longer masked
+  (personal data is the domain's to define). The run's event stream (`agent.stream`, AG-UI,
+  A2A task updates and pushes), its answer, the memory service's transcript, tool records and
+  spool, and the journal now carry values as they are, so memory search and recall see the
+  real data.
+
+### Fixed
+
+- OpenAI Agents: the tools of every agent reachable through `handoffs` (recursively, on copies)
+  are governed — hooks, the catalog's rules, the journal; a `Handoff` object whose agent is
+  hidden is said once. The harness's `RunHooks` are always passed, so a token budget is enforced
+  without any hooks.
+- Claude Agent SDK: built-in tools are governed by the SDK's own `PreToolUse` hook, so
+  `allowed_tools`, `acceptEdits` and `bypassPermissions` no longer bypass governance; your
+  `can_use_tool` is asked by that hook.
+- History owner: one policy (`trellis.harness.history`) with a registry of RAM-only stores. A
+  LangGraph `InMemorySaver`/`MemorySaver` or an OpenAI `SQLiteSession(":memory:")` no longer
+  turns memory's window off (warned once); OpenAI `conversation_id`/`previous_response_id`/
+  `auto_previous_response_id` count as the framework keeping the thread.
+- An `approve_when` rule that cannot be evaluated asks a person (never allows), is logged once
+  per rule, and is recorded on the run as an `APPROVAL_RULE_INVALID` warning
+  (`ApprovalRuleError`).
+
 ### Added
+
+- `Hooks.on_output(item) -> item`: mask what a user is shown. It runs, in order (the harness's
+  hooks, then the agent's), on the answer `agent.run`/`agent.resume`/`RunHandle.result` return
+  (`OutputKind.ANSWER`) and every event of `agent.stream`, `agent.events` and `serve_chat`'s
+  AG-UI stream (`OutputKind.EVENT`); what it returns is sent. It never touches memory, the
+  journal, A2A, traces or what the model and tools see. A hook that raises is logged and the
+  item is withheld (`WITHHELD`), never sent as it was; with no hook overriding it nothing is
+  wrapped.
+- Native slots backed by our services (`trellis.harness.bridges`), with no new settings and
+  each framework's defaults kept without `MEMORY_URL`: the memory service as a LangGraph/Deep
+  Agents `BaseStore` (only when the graph has none; its own is kept, said once), as an OpenAI
+  Agents `Session` (only when the run has none), and as a Claude `UserPromptSubmit` context
+  hook. Every turn is still recorded to memory by the harness. `without={"memory"}` turns them
+  off.
+- Durable runs: Claude's session kept in the run's journal as the SDK's `SessionStore`
+  (progress saved before each step), so a resume on another worker continues it; the OpenAI
+  `RunState` of a pause resumes on any worker.
+- Native helpers as child runs (lineage, turns in memory, budget, governance): a Deep Agents
+  `task`, an OpenAI `Agent.as_tool` call, a Claude `agents=` subagent.
+- P4: LangGraph `context=` (a `context_schema`) and `durability` pass through
+  `framework_options`. P7: Claude's usage and cost are read from its `ResultMessage`.
+
+- Learned approval suggestions are accepted automatically when the tool catalog refreshes
+  (the memory service's accept endpoint), except for a tool at the highest risk, which waits for
+  a person; each acceptance is logged and `trellis doctor` lists the accepted ones.
 
 - `python -m benchmark.thread`: who keeps a conversation's history across runs, the framework's
   own thread or the memory service's window, measured on recall and input tokens per turn.

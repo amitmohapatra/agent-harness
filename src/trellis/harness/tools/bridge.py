@@ -14,11 +14,11 @@ record.
    is announced on the run's stream, ``ask`` pauses the run for approval (an approver may edit
    the arguments, or reject);
 4. **execution** — inside a span, with ``TOOL_CALL_*`` events around it (the stream gets the
-   arguments and the output redacted; the tool and the model get them as they are); the
+   arguments and a preview of the output; the span masks credentials); the
    ``after_tool`` hooks may change the outcome the model reads;
 5. **record** — journaled for a later resume (and on the run's trajectory, which evaluators
    read; in a worker, saved as the run's progress checkpoint: at once after a call with side
-   effects), counted, and (memory on) sent, redacted, to the memory service's tool records in
+   effects), counted, and (memory on) sent to the memory service's tool records in
    the background.
 
 Execution is bounded: a call takes at most its tool's ``timeout`` and what is left of the
@@ -307,6 +307,8 @@ async def _decided(
     be, or the outcome of a call the approver rejected."""
     governance = runtime.agent.harness.governance(runtime.tenant)
     decision = await governance.check(spec.name, call.args, side_effects=spec.side_effects)
+    if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
+        runtime.events.warning(decision.error.code, decision.error.message)
     if asked is not None:
         decision = decision.asking(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props

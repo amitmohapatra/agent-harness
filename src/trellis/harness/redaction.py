@@ -1,8 +1,10 @@
-"""What may leave the process: span attributes, the run's events (AG-UI, A2A task updates and
-push notifications: ``events.py``), and the tool records sent to the memory service.
+"""What a trace keeps: span attributes (``telemetry.py``) pass this redactor, and nothing else
+does. It masks credentials only; personal data is the domain's to define, so the run's events,
+its answer, memory, A2A and the journal carry values as they are, and a team masks what its
+users see with an ``on_output`` hook (``trellis.harness.hooks``).
 
 The rules are deliberately boring: drop anything whose *name* looks like a secret, drop
-anything whose value looks like a credential, mask e-mail addresses, and cut long values. Text
+anything whose value looks like a credential, and cut long values. Text
 that is a JSON object or array (a model's tool-call arguments, a tool result as the model
 reads it) is redacted as what it holds, and stays JSON text. A redactor never raises — a
 redaction bug must not break a run — and unknown types are stringified before truncation.
@@ -79,14 +81,9 @@ _VALUE_PATTERNS = (
     ),
 )
 
-#: An address starts where a run of its characters starts (the lookbehind): tried from every
-#: position inside a long run instead, masking would be quadratic in the value's length.
-_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.]+")
-
 
 class Redactor:
-    """The contracts ``TelemetryRedactor`` every span, outbound event and memory tool record
-    goes through."""
+    """The contracts ``TelemetryRedactor`` every span attribute goes through."""
 
     __slots__ = ()
 
@@ -130,7 +127,7 @@ class Redactor:
             text = _stringify(self._payload(held, depth + 1))
         elif any(p.match(text) for p in _VALUE_PATTERNS):
             return REDACTED
-        return _truncate(_EMAIL.sub("[email]", text), MAX_VALUE_CHARS)
+        return _truncate(text, MAX_VALUE_CHARS)
 
     def _payload(self, value: Any, depth: int = 0) -> Any:
         if value is None:

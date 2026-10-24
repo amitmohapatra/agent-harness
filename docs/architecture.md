@@ -182,7 +182,7 @@ src/trellis/
                        evaluators (grounding, exact_match, contains, called, tool_sequence, llm_judge)
     settings.py        the environment
     telemetry.py       OTel GenAI spans, trace ids per run, counters; OTLP export; Langfuse client
-    redaction.py       what may leave the process
+    redaction.py       credentials masked in traces
     logs.py            JSON log lines (the worker CLI's, or the application's own)
     testing.py         Reviewer and Decide (trellis.testing)
     runs.py            RunStore (the part of trellis.runs.RunsClient the harness calls) and
@@ -267,7 +267,6 @@ flowchart TB
   harness --> clients
   runs --> sdk
   telemetry --> redaction["redaction.Redactor"]
-  events --> redaction
   pipeline --> telemetry
   bridge --> telemetry
 ```
@@ -420,7 +419,7 @@ flowchart LR
 ```
 
 * `prepare_input(target, input, context)` — the framework's input, the memory context as a
-  system message (or appended to the system prompt);
+  system message (or a `UserPromptSubmit` hook for Claude);
 * `invoke(target, native_input, run)` / `stream(...)` — run it; the stream yields text deltas
   and finally `Output(value)`;
 * `extract(target, output)` — the answer, the assistant transcript, and a pause the framework
@@ -436,7 +435,7 @@ flowchart LR
 | LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
 | `ReAct` (a `create_agent` graph) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
-| Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through `can_use_tool` | per run | appended to `system_prompt` |
+| Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through a `PreToolUse` hook | per run | a `UserPromptSubmit` hook |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |
 
 A framework installed outside the range this release was tested with is said once when its
@@ -544,8 +543,8 @@ The OTel API only: an `invoke_agent` span per attempt in a trace whose id derive
 id (every attempt, score and piece of feedback of a run in one trace), `execute_tool`, `chat`
 (the model calls of a graph built with `ModelHooks`, a `ReAct`'s included) and `retrieve
 memory` spans with GenAI attributes and Langfuse's trace attributes, `score` spans; counters
-`trellis.runs`, `trellis.tool_calls`, `trellis.writes.failed`. Attributes pass the redactor and
-are built only for a recording span; so do a tool call's arguments and output on the event
-stream (`events.py`: AG-UI, A2A, push) and in the memory service's tool records, once each.
+`trellis.runs`, `trellis.tool_calls`, `trellis.writes.failed`. Attributes pass the redactor
+(credentials masked) and are built only for a recording span; the event stream and the memory
+service's records carry values as they are, and what a user is shown passes `on_output`.
 `OTEL_EXPORTER_OTLP_ENDPOINT` installs an SDK provider with one OTLP exporter unless the
 application installed one ([observability.md](observability.md)).

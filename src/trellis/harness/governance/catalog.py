@@ -12,6 +12,11 @@ A catalog that cannot be read fails closed: rules read in the last
 :data:`GOVERNANCE_STALE_SECONDS` still stand, and past that (or with none read) every tool that
 does more than read asks (:data:`CATALOG_UNREAD`) until the catalog answers again; a warning is
 logged once.
+
+Each refresh also checks the approval suggestions the service learned from people's decisions
+(``approval_suggestions``) and accepts each one not accepted yet (``accept_suggestion``: its
+rule becomes the tool's ``approve_when``) — logged, and listed by ``trellis doctor`` — except
+for a tool at the highest risk (:data:`TOP_RISK`): relaxing one of those waits for a person.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from typing import Any, Final, Protocol
 from trellis.contracts import Feedback, ToolSpec
 from trellis.harness.bounded import LRUSet
 from trellis.memory import MemoryContext
-from trellis.memory.models import SideEffects
+from trellis.memory.models import ApprovalSuggestion, SideEffects
 
 log = logging.getLogger("trellis.governance")
 
@@ -45,6 +50,11 @@ GOVERNANCE_STALE_SECONDS: Final = 300.0
 #: entries remembered as stored (the most recent): bounds, not limits on the toolbox.
 NAMES_KEPT: Final = 4096
 PUBLISHED_KEPT: Final = 4096
+#: The risks a tool may declare, lowest first.
+RISKS: Final[tuple[SideEffects, ...]] = ("read", "write", "irreversible")
+#: The highest risk: a learned approval suggestion for such a tool is never accepted
+#: automatically — a person accepts it.
+TOP_RISK: Final[SideEffects] = RISKS[-1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +79,15 @@ class Catalog(Protocol):
     async def publish(self, entries: Sequence[Mapping[str, object]]) -> None: ...
 
     async def feedback(self, record: Feedback) -> None: ...
+
+    async def suggestions(self) -> Sequence[ApprovalSuggestion]:
+        """The approval suggestions learned from people's decisions, accepted or not."""
+        ...
+
+    async def accept(self, suggestion_id: str) -> Rule:
+        """Accept a suggestion: its rule becomes its tool's ``approve_when``; the tool's rule
+        as it is now."""
+        ...
 
 
 class MemoryCatalog:
@@ -99,6 +118,13 @@ class MemoryCatalog:
         """A person's decision on a call, as the ``TOOL_CALL`` feedback approval suggestions
         are learned from. Its id is the idempotency key: a retried send is stored once."""
         await self.ctx.feedback(record, idempotency_key=record.feedback_id)
+
+    async def suggestions(self) -> Sequence[ApprovalSuggestion]:
+        return await self.ctx.advanced.tools.approval_suggestions()
+
+    async def accept(self, suggestion_id: str) -> Rule:
+        accepted = await self.ctx.advanced.tools.accept_suggestion(suggestion_id)
+        return Rule(risk=accepted.risk, approve_when=accepted.approve_when or None)
 
 
 def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, object]:
@@ -133,6 +159,7 @@ class Rules:
         self._read_at = 0.0
         self._asked_at = 0.0
         self._unread = False
+        self._suggestions_unread = False
 
     async def get(self, names: Sequence[str]) -> dict[str, Rule] | None:
         """The rules of ``names`` (and every other tool asked about) as the catalog says now;
@@ -172,6 +199,50 @@ class Rules:
         self._read_at, self._etag = now, etag
         if rules is not None:  # changed (a 304 keeps what was read under that ETag)
             self._rules = rules
+        await self._accept_learned()
+
+    async def _accept_learned(self) -> None:
+        """Accept each learned approval suggestion for a tool asked about, not accepted yet,
+        unless the tool is at :data:`TOP_RISK` (a person accepts those). A suggestion that
+        cannot be read or accepted now is checked again at the next refresh."""
+        try:
+            found = await self._catalog.suggestions()
+        except Exception as exc:
+            if not self._suggestions_unread:
+                log.warning(
+                    "the approval suggestions could not be read: none is accepted until they "
+                    "can be",
+                    extra={"reason": type(exc).__name__},
+                )
+                self._suggestions_unread = True
+            return
+        self._suggestions_unread = False
+        for suggestion in found:
+            rule = (self._rules or {}).get(suggestion.tool)
+            if suggestion.accepted or rule is None or rule.risk == TOP_RISK:
+                continue
+            try:
+                accepted = await self._catalog.accept(suggestion.id)
+            except Exception as exc:
+                log.warning(
+                    "an approval suggestion could not be accepted",
+                    extra={
+                        "tool": suggestion.tool,
+                        "suggestion_id": suggestion.id,
+                        "reason": type(exc).__name__,
+                    },
+                )
+                continue
+            self._rules = {**(self._rules or {}), suggestion.tool: accepted}
+            log.info(
+                "an approval suggestion was accepted automatically",
+                extra={
+                    "tool": suggestion.tool,
+                    "suggestion_id": suggestion.id,
+                    "suggestion": suggestion.suggestion,
+                    "approve_when": accepted.approve_when,
+                },
+            )
 
 
 @dataclass(slots=True)

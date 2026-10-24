@@ -43,8 +43,12 @@ if result.interrupt:  # create_po asks a person
 tools the virtual key allows and, memory on, the memory tools). Your own `function_tool`s keep
 working and are left untouched; they are not governed, journaled or recorded by the harness.
 
-**Handoffs.** `wrap(tools=...)` reaches the agent you wrap. A specialist reached by a handoff
-gets harness tools when it is built:
+**Handoffs.** `wrap(tools=...)` reaches the agent you wrap. Every agent reachable through its
+`handoffs` (recursively, cycles included) runs as a copy whose own tools are governed like the
+wrapped agent's — hooks, the catalog's rules, the journal; your agents are not changed. A
+`Handoff` object (`handoff(agent, ...)`) hides its agent until it is invoked, so that agent's
+tools are not governed (said once at the first run): hand off to the `Agent` itself. A
+specialist that needs harness tools gets them when it is built:
 
 ```python
 refunds = Agent(
@@ -105,8 +109,11 @@ agent = h.wrap(
 
 | | |
 |---|---|
-| Memory push | the context as a leading `system` message of the input (a string input becomes a user message after it) |
+| Memory push | the context as a leading `system` message of the input (a string input becomes a user message after it); without a `session`, memory keeps the conversation: the run's session is the memory service's thread (`bridges.session.MemorySession`), which gives the SDK the earlier turns as its own input items — messages, `function_call`, `function_call_output`, a call never parted from its result — and each run's items are written back before it returns |
 | Memory pull | the memory tools are added to the copy per run |
+| Session | a run given no `session` (nor a conversation OpenAI's servers keep) reads its earlier turns from the memory service's thread through the SDK's own `Session` (`MemorySession`), so memory's window is not sent beside it; every turn is recorded there by the harness, and removing items through the session is refused (`ThreadReadOnly`). A `session` of yours is kept |
+| Pauses | the SDK's saved `RunState` (a `needs_approval` tool) is kept with the run in agent-runs, so any worker resumes it |
+| Agent tools | an `Agent.as_tool` call is governed by the catalog by its tool name and is a child run (its record names the run, its turns go to memory); what its run spends counts toward the run's budget. Its agent's own tools are governed when built with `h.tools`; others are said once (the SDK runs that agent itself) |
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used; your own tools are never narrowed |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with `read_file`, enabled once there is something to read ([tools.md](../tools.md#large-results)) |
@@ -160,7 +167,8 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 
 * A resume after a harness approval re-runs the conversation: the model is asked again for the
   steps before the pause (their tool calls replay from the journal).
-* The SDK's sessions (`session=`) are yours to pass (`framework_options={"session": ...}`): with one, the SDK keeps the thread, so the memory context is pushed without the recent conversation (memory's window), as for a checkpointed LangGraph graph. Long-term memory stays the memory service's.
+* The SDK's sessions (`session=`) are yours to pass (`framework_options={"session": ...}`), as are `conversation_id`, `previous_response_id` and `auto_previous_response_id` (OpenAI's servers keep the thread): with a durable one, the SDK keeps the thread, so the memory context is pushed without the recent conversation (memory's window), as for a checkpointed LangGraph graph. A `SQLiteSession(":memory:")` is kept in RAM only and lost on a restart: memory's window stays on, and a warning says so once (`trellis.harness.history`). Long-term memory stays the memory service's.
+* Token budgets (`Budget(max_tokens=...)`) are enforced on every run: the harness always passes its `RunHooks`, which count each reply's usage, whether or not the agent has hooks.
 * A `RunConfig` object given to one in-process run (`run`/`stream`) is not kept with its record:
   a resume runs with the agent's (put it on `h.wrap`, or give it as a dict).
 

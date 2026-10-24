@@ -21,7 +21,9 @@ from agents import FunctionTool
 from agents.tool_context import ToolContext
 
 from trellis.contracts import ToolSpec
-from trellis.harness.runtime import current
+from trellis.harness import budget
+from trellis.harness.bridges.helpers import Helpers, Kind, text_of
+from trellis.harness.runtime import Paused, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
 
@@ -31,6 +33,10 @@ __all__ = ["FIX_ARGUMENTS", "arguments_of", "convert", "governed"]
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
 #: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
 MADE: Final = "_trellis_made"
+#: The attribute the SDK marks an agent called as a tool with (``Agent.as_tool``), and the one
+#: holding that agent.
+AGENT_TOOL: Final = "_is_agent_tool"
+AGENT_OF_TOOL: Final = "_agent_instance"
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
@@ -40,14 +46,18 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
     return made
 
 
-def governed(tool: Any) -> Any:
+def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
     harness's are — governance (the catalog's risk, else ``write``: announced), a person when
     it asks, the journal (a resume does not run a call again), its time and its trace — as a
-    copy: the agent's own tool is not changed. Anything else is returned as it is."""
+    copy: the agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
+    is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
+    else is returned as it is."""
     if not isinstance(tool, FunctionTool) or getattr(tool.on_invoke_tool, MADE, False):
         return tool
     original = tool.on_invoke_tool
+    if helpers is not None and getattr(tool, AGENT_TOOL, False):
+        original = _helped(tool, original, helpers)
 
     async def invoke(context: ToolContext[Any], arguments: str) -> Any:
         args = arguments_of(arguments)
@@ -68,6 +78,52 @@ def governed(tool: Any) -> Any:
 
     setattr(invoke, MADE, True)
     return dataclasses.replace(tool, on_invoke_tool=invoke)
+
+
+def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
+    """An agent tool's ``invoke`` as a helper of the run (``bridges.helpers``): started with the
+    call's input, ended with the agent's answer or its error, and what its own run spent — the
+    SDK adds it to the calling run's usage — counted toward the run's budget. A pause inside
+    leaves it to the next attempt, and stops the calling agent too (the SDK hands the agent
+    tool's pause back as an error text)."""
+    inner = getattr(tool, AGENT_OF_TOOL, None)
+    model = getattr(inner, "model", None)
+
+    async def helped(context: ToolContext[Any], arguments: str) -> Any:
+        args = arguments_of(arguments)
+        task = args.get("input") if isinstance(args, dict) else None
+        key = context.tool_call_id
+        await helpers.start(key, kind=Kind.AGENT_TOOL, name=tool.name, task=str(task or arguments))
+        before = _spent(context.usage)
+        try:
+            answer = await invoke(context, arguments)
+        except Exception as exc:  # a pause leaves it open (``Helpers.end``: the run is pausing)
+            await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            given, said, cached = (
+                a - b for a, b in zip(_spent(context.usage), before, strict=True)
+            )
+            budget.account(
+                helpers.runtime,
+                model=model if isinstance(model, str) else None,
+                input_tokens=given,
+                output_tokens=said,
+                cached=cached,
+            )
+        if helpers.runtime.pending is not None:  # paused inside: the SDK told it as an error text
+            raise Paused(helpers.runtime.pending.interrupt)
+        await helpers.end(key, output=text_of(answer))
+        return answer
+
+    return helped
+
+
+def _spent(usage: Any) -> tuple[int, int, int]:
+    """A run's usage so far: input, output and cached input tokens."""
+    details = getattr(usage, "input_tokens_details", None)
+    cached = int(getattr(details, "cached_tokens", 0) or 0)
+    return usage.input_tokens, usage.output_tokens, cached
 
 
 def _one(tool: Tool) -> FunctionTool:

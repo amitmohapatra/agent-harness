@@ -34,6 +34,7 @@ from trellis.contracts import (
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
+from trellis.harness.history import Said
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
 from trellis.runs import LeaseLostError
@@ -106,6 +107,9 @@ class Runtime:
     _context: str | None = field(default=None, repr=False)
     #: whether the run's own code read :attr:`context` (a function target, a graph's node)
     context_read: bool = field(default=False, repr=False)
+    #: where memory keeps the conversation and the framework replays it as messages: the
+    #: thread's recent messages (``[]``: none yet); ``None`` where it does not
+    history: list[Said] | None = None
     #: how far memory covered the question (its ``evidence_status``: ``COMPLETE``,
     #: ``INCOMPLETE``, ``INSUFFICIENT``), when a context was pushed
     evidence: str | None = None
@@ -236,7 +240,7 @@ class Runtime:
         return Tools(self)
 
     def log(self, message: str, **fields: Any) -> None:
-        """A line in the run's log and on its event stream (its fields redacted there)."""
+        """A line in the run's log and on its event stream."""
         log.info("%s", message, extra={"run_id": self.run_id, **fields})
         self.events.custom(LOG, message=message, **fields)
 

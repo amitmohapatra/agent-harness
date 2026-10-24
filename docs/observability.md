@@ -1,8 +1,8 @@
 # Observability
 
 The harness emits OpenTelemetry with the GenAI semantic conventions: one trace per run, a span
-per attempt, tool call and model call, with Langfuse's trace attributes, every attribute
-redacted; the memory service's grounding score and people's feedback go on the run's trace.
+per attempt, tool call and model call, with Langfuse's trace attributes, credentials in
+every attribute masked; the memory service's grounding score and people's feedback go on the run's trace.
 Langfuse reads the traces and is where scores, datasets and dashboards live; Datadog gets every
 span end to end through a collector. Evaluation — offline over a dataset, online on sampled
 runs — is [evaluation.md](evaluation.md).
@@ -127,31 +127,31 @@ Whether the *harness* got slower is `make bench` (`tests/performance`, against t
 
 ## Redaction
 
-Everything a run sends out of the process passes `trellis.harness.redaction`, once, where it
-leaves: every span attribute; on the run's event stream (`agent.stream`, and so `serve_chat`'s
-AG-UI events, `serve_a2a`'s task updates and its push notifications), each tool call's
-arguments and output and the data of `CUSTOM` events (`tool_notice`, `log`, `warning`); and the
-tool calls recorded in the memory service (the arguments, the output, and the spooled copy of a
-write that waits for the service). The tool and the model get the values as they are, and so
-does what the run needs to continue: the journal and the interrupt kept in agent-runs. Two
-things on the stream are not redacted: the answer (text deltas, the result) — what the user
-asked for — and the pause (`INTERRUPT`, the interrupt in `RUN_FINISHED`) — the question, its
-payload and the tool call to approve, which the person answering needs to see, as the inbox
-shows them. The rules are the same everywhere and need no setting: names that look like secrets
-(`api_key`, `password`, `token`...) and values that look like credentials (bearer tokens,
-JWTs, `sk-...`, long key-like blobs) become `[redacted]`, e-mail addresses are masked, long
-values are cut at 2000 characters. Names are matched by their words, not substrings
-(`gen_ai.usage.input_tokens` and `tokenizer` stay; `refresh-token` and `X-Api-Key` go), and a
-number is never treated as a credential. Mappings and lists are redacted recursively, and so
-is text that is a JSON object or array (a model's tool-call arguments, a tool result as the
-model read it, in a `chat` span's input and output): it stays JSON text, redacted. Bytes
-become `<n bytes>`, anything else its JSON or its text. The redactor is the contracts
-`TelemetryRedactor`; it never raises into a run.
+Traces mask credentials, and only traces: every span attribute passes
+`trellis.harness.redaction` once, where it is set. Names that look like secrets (`api_key`,
+`password`, `token`...) and values that look like credentials (bearer tokens, JWTs, `sk-...`,
+long key-like blobs) become `[redacted]`, long values are cut at 2000 characters. Names are
+matched by their words, not substrings (`gen_ai.usage.input_tokens` and `tokenizer` stay;
+`refresh-token` and `X-Api-Key` go), and a number is never treated as a credential. Mappings
+and lists are redacted recursively, and so is text that is a JSON object or array (a model's
+tool-call arguments, a tool result as the model read it, in a `chat` span's input and
+output): it stays JSON text, redacted. Bytes become `<n bytes>`, anything else its JSON or its
+text. The redactor is the contracts `TelemetryRedactor`; it never raises into a run. It needs
+no setting.
 
-Redaction of your own — a domain's identifiers, what the model itself must not read — is a
-hook: `after_tool` returns the outcome masked (what the model reads, the journal and memory
-keep), `before_model` the messages masked ([hooks.md](hooks.md),
-[`examples/02_way1_react/hooks_guardrails.py`](../examples/02_way1_react/hooks_guardrails.py)).
+Personal data is not masked by the harness: what is personal is your domain's to say (an
+e-mail address, a card number, an account id). Everything else carries values as they are —
+the run's event stream (`agent.stream`, `serve_chat`'s AG-UI events, `serve_a2a`'s task updates
+and push notifications), its answer, the memory service's transcript and tool records (and the
+spooled copy of a write that waits for it), the journal, the interrupt kept in agent-runs — so
+memory search and recall see the real data. Masking of your own is a hook:
+
+* what your users see — the answer and every event of `agent.stream`, `agent.events` and
+  AG-UI — `on_output` ([hooks.md](hooks.md#mask-what-the-ui-sees)); A2A, memory and the
+  journal are not touched by it;
+* what the model reads, and so what the journal and memory keep — `after_tool` returns the
+  outcome masked, `before_model` the messages ([hooks.md](hooks.md),
+  [`examples/02_way1_react/hooks_guardrails.py`](../examples/02_way1_react/hooks_guardrails.py)).
 
 ## Events
 

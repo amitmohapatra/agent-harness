@@ -150,7 +150,7 @@ With the services configured, every wrapped agent gets all of this with no code.
 | **Sub-agents** | A wrapped agent in another's tools is a child run: tenant, user, thread, time and trace inherited, its pauses answered through the parent ([subagents.md](subagents.md)) |
 | **Sandboxes** | Made at a run's first call, recorded, attached again after a pause or a crash, paused while a person answers, deleted at its end; leftovers reaped ([sandbox.md](sandbox.md)) |
 | **Reliability** | Every tool call bounded by its `timeout` and the run's; reads retried; writes run once with an idempotency key; a write of unknown outcome never run blind again; a stopping worker hands its runs back ([reliability.md](reliability.md)) |
-| **Traces** | OTel GenAI spans with Langfuse's trace attributes, every attempt of a run in one trace, every attribute redacted ([observability.md](observability.md)) |
+| **Traces** | OTel GenAI spans with Langfuse's trace attributes, every attempt of a run in one trace, credentials masked ([observability.md](observability.md#redaction)) |
 | **Version check** | A framework outside the range this release was tested with is said once in the log when its first target is wrapped ([versioning.md](versioning.md)) |
 
 ## What is on, and how to turn it off

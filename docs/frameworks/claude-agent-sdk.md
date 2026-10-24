@@ -52,10 +52,12 @@ that server's config (add it to `mcp_servers` as `"trellis"`).
 ## Claude Code's built-in tools
 
 `Read`, `Write`, `Edit`, `Bash`, `WebFetch` and the rest are the CLI's own: it runs them. The
-harness decides whether it may, through the SDK's own permission callback — the options it runs
-carry a `can_use_tool` of the harness's:
+harness decides whether it may, through the SDK's own `PreToolUse` hook, which the CLI runs
+before every tool call in every permission mode — the options it runs carry the harness's hook
+after any of yours:
 
-* **What.** A built-in call the CLI asks permission for is decided as a harness tool call is:
+* **What.** Every built-in call is decided as a harness tool call is, under `allowed_tools`,
+  `acceptEdits` and `bypassPermissions` too:
   the run's `before_tool` hooks ([hooks.md](../hooks.md)), then governance by the tool's risk —
   and a person when it asks. Approved (or edited), it runs once; rejected or denied, Claude reads
   why.
@@ -64,12 +66,9 @@ carry a `can_use_tool` of the harness's:
   irreversible (it asks). Any other tool the CLI asks about (your own MCP server's) is a write.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)).
-* **Your own `can_use_tool`** is asked after the harness's decision, with the arguments as they
-  were decided (a hook's rewrite, a reviewer's edit): what it answers stands.
-* **Where not.** The CLI asks only about calls it does not already allow: a built-in your
-  `allowed_tools` names whole (`"Read"`), or every call under `permission_mode=
-  "bypassPermissions"`, never reaches the callback (the SDK warns of it). A
-  `permission_prompt_tool_name` of your own is refused: give your check as `can_use_tool`.
+* **Your own `can_use_tool`** is asked by the harness's hook after its decision, with the
+  arguments as they were decided (a hook's rewrite, a reviewer's edit): what it answers stands.
+  A `permission_prompt_tool_name` of your own is refused: give your check as `can_use_tool`.
 * **Not recorded.** A built-in call is not journaled or recorded in memory (the CLI keeps its
   result in its session, below).
 
@@ -91,7 +90,10 @@ carry a `can_use_tool` of the harness's:
 
 | | |
 |---|---|
-| Memory push | the context is appended to the options' `system_prompt` (a string, a `preset`'s `append`, a `custom` prompt); with no system prompt it is the system prompt |
+| Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks; the options' `system_prompt` is left as you wrote it |
+| Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
+| Spending | each query's usage and `total_cost_usd`, read from its `ResultMessage` (subagents included), count toward the run's budget |
+| Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 5 tools, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
@@ -124,7 +126,7 @@ harness calls already made are not made again; the built-ins run again.
 `framework_options=` sets `ClaudeAgentOptions` fields on the run's copy of the options (on
 `h.wrap` for every run, on `run`/`stream`/`start` for one, over the agent's): `max_turns`,
 `model`, `permission_mode`, `cwd`... before the harness's own changes, which merge with them —
-a `system_prompt` gets the memory context appended, a `can_use_tool` is asked after governance
+`hooks` get the governance and context hooks after theirs, a `can_use_tool` is asked after governance
 as the target's would be, and `mcp_servers` get the harness's `trellis` server beside them (one
 of that name is refused). The session is the harness's (`resume`, `continue_conversation`) and so
 is the permission prompt (`permission_prompt_tool_name`): both refused, as is a name that is not
@@ -149,13 +151,10 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
 
 ## Limits
 
-* A built-in tool the CLI does not ask about (`allowed_tools`, `bypassPermissions`) is not the
-  harness's; a built-in that ran is not journaled or recorded (above).
+* A built-in that ran is not journaled or recorded (above).
 * No model hooks: the CLI makes the model calls ([hooks.md](../hooks.md)).
 * A session resumes on the machine whose CLI holds it (or a shared `session_store`);
   elsewhere the query runs again from its prompt (above).
-* A `system_prompt` given as a prompt file is read by the CLI; the context has no place in it
-  and is not added (use a string or a preset with `append`).
 * Large results: a tool's result comes back from the CLI in one message (as the model reads it),
   which the SDK reads into a buffer of `max_buffer_size` bytes (1 MiB by default: a message
   over it fails the run with `CLIJSONDecodeError`). A harness tool's large result is cut before

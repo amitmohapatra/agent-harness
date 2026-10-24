@@ -4,7 +4,11 @@
   string input becomes one user message; any other state dict passes through untouched).
   The context message has a fixed id, so a checkpointed thread holds at most one — each turn
   replaces it in place (``add_messages``) — and it leaves out the recent conversation, which
-  the checkpointer already holds;
+  the checkpointer already holds. Where memory keeps the conversation instead, its recent
+  messages follow the context as LangChain's own — ``HumanMessage``, ``AIMessage`` with its
+  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay;
+* transcript: the messages the run added after the question — tool calls and their results
+  with the answer — so the conversation memory keeps replays as the framework's would;
 * run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the
   run's thread (or the run id);
 * pause: with a checkpointer, ``trellis.current().ask`` *is* LangGraph's ``interrupt``, and a
@@ -29,15 +33,27 @@
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
   stopped, and it holds no conversation of its own (the memory service gives the recent turns);
+* store: a graph compiled without a store of its own is run, while memory is on, with the
+  memory service as its long-term store (``bridges.store.MemoryStore``: ``runtime.store``,
+  ``get_store()``, Deep Agents' ``StoreBackend``); a graph's own store is kept (said once);
+* helpers: a Deep Agent's ``task`` sub-agent is a child run of the run (``bridges.helpers``,
+  through the run's LangChain callbacks: ``hooks.langgraph``). Its tool calls are governed as
+  the run's (``h.tools``), and its model calls count toward the run's budget (``accounting``),
+  as are those of the graph's subgraphs and ``Send`` branches, which run inside the run;
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
   ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; the harness's
-  ``configurable.thread_id`` wins over one given.
+  ``configurable.thread_id`` wins over one given. The graph's own run arguments
+  (:data:`RUN_ARGUMENTS`: ``context`` for a ``context_schema``, ``durability``) go to the call
+  beside it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
-from collections.abc import AsyncIterator, Mapping
+import logging
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar, Final
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution
@@ -50,8 +66,13 @@ from trellis.harness.adapters.base import (
     ToolFormat,
 )
 from trellis.harness.asking import answer_of
+from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.bridges.helpers import Helpers
+from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
-from trellis.harness.runtime import DEFERRED, MARKER, reason_of
+from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
+
+log = logging.getLogger("trellis.harness")
 
 #: The journal key a graph's own ``interrupt(...)`` (not ``ask``) is filed under.
 FOREIGN: Final = "langgraph"
@@ -64,12 +85,19 @@ HARNESS_TOOLS: Final = "trellis_harness_tools"
 CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
 #: The qualified name of a ``create_agent`` graph's async model node (Deep Agents' too).
 MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
+#: The graph's own run arguments a run's framework options may carry, beside its config.
+RUN_ARGUMENTS: Final = ("context", "durability")
 
 
 class LangGraphAdapter:
     name: ClassVar[str] = "langgraph"
 
+    replays_history = True
+
     def __init__(self, target: Any = None) -> None:
+        # every model call of the graph accounted to the run's budget, ModelHooks or not
+        from trellis.harness import accounting  # noqa: F401
+
         #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
         #: converts them itself, so nothing is converted for it here
         per_call = HARNESS_TOOLS in (getattr(target, "channels", None) or {})
@@ -81,13 +109,19 @@ class LangGraphAdapter:
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
 
-    def keeps_conversation(self, target: Any) -> bool:
-        return _checkpointed(target) and not run_scoped(target)
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        """The graph's checkpointer, unless it checkpoints into its run."""
+        if not _checkpointed(target) or run_scoped(target):
+            return None
+        return target.checkpointer
 
-    def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
+    def prepare_input(
+        self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
+    ) -> Any:
         from langchain_core.messages import SystemMessage
 
         system = [SystemMessage(content=context, id=CONTEXT_MESSAGE_ID)] if context else []
+        system += [langchain_message(said) for said in history]
         if isinstance(input, str):
             return {"messages": [*system, {"role": "user", "content": input}]}
         if isinstance(input, list):
@@ -97,9 +131,20 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
-        return await self._graph(target).ainvoke(
-            _continued(target, native_input, run), self._config(target, run), version="v2"
-        )
+        helpers = Helpers(run.runtime, self.name)
+        error: BaseException | None = None
+        try:
+            return await self._graph(target, run.runtime).ainvoke(
+                _continued(target, native_input, run),
+                self._config(target, run, helpers),
+                version="v2",
+                **_run_arguments(run.runtime),
+            )
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            await helpers.closed(error)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from langchain_core.messages import AIMessage
@@ -107,33 +152,46 @@ class LangGraphAdapter:
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
-        async for part in self._graph(target).astream(
-            _continued(target, native_input, run),
-            self._config(target, run),
-            stream_mode=["messages", "values"],
-            version="v2",
-        ):
-            if part["type"] == "messages":
-                chunk = part["data"][0]
-                if (
-                    isinstance(chunk, AIMessage)
-                    and isinstance(chunk.content, str)
-                    and chunk.content
-                ):
-                    yield chunk.content
-            elif part["type"] == "values":
-                values = part["data"]
-                interrupts = part["interrupts"] or interrupts
+        helpers = Helpers(run.runtime, self.name)
+        error: BaseException | None = None
+        try:
+            async for part in self._graph(target, run.runtime).astream(
+                _continued(target, native_input, run),
+                self._config(target, run, helpers),
+                stream_mode=["messages", "values"],
+                version="v2",
+                **_run_arguments(run.runtime),
+            ):
+                if part["type"] == "messages":
+                    chunk = part["data"][0]
+                    if (
+                        isinstance(chunk, AIMessage)
+                        and isinstance(chunk.content, str)
+                        and chunk.content
+                    ):
+                        yield chunk.content
+                elif part["type"] == "values":
+                    values = part["data"]
+                    interrupts = part["interrupts"] or interrupts
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            await helpers.closed(error)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
     def extract(self, target: Any, output: Any) -> Extracted:
         state = output.value
         answer: Any = None
+        messages: list[Any] = []
         if isinstance(state, dict):
+            messages = state.get("messages") or []
             answer = state.get("structured_response")
             if answer is None:
-                answer = _last_ai_text(state.get("messages") or [])
-        transcript = [("assistant", answer)] if isinstance(answer, str) and answer else []
+                answer = _last_ai_text(messages)
+        transcript = added(messages) or (
+            [Said(Speaker.ASSISTANT, answer)] if isinstance(answer, str) and answer else []
+        )
         pause = None
         # a call waiting for its turn behind a pause asks nothing (``DEFERRED``)
         raised = [
@@ -176,11 +234,11 @@ class LangGraphAdapter:
     def check_options(self, options: Mapping[str, Any]) -> None:
         from langchain_core.runnables import RunnableConfig
 
-        known = list(RunnableConfig.__annotations__)
+        known = [*RunnableConfig.__annotations__, *RUN_ARGUMENTS]
         unknown = [key for key in options if key not in known]
         if unknown:
             raise ConfigurationError(
-                f"framework_options for a graph are RunnableConfig keys: "
+                f"framework_options for a graph are RunnableConfig keys and its run arguments: "
                 f"{', '.join(map(repr, unknown))} is none of {', '.join(known)}"
             )
         if not isinstance(options.get("configurable", {}), Mapping):
@@ -196,21 +254,74 @@ class LangGraphAdapter:
             return []
         return [t.name for t in bound_tools(target) if isinstance(getattr(t, "name", None), str)]
 
-    def _graph(self, target: Any) -> Any:
-        """The graph run for ``target``: its narrowing copy, when it has one."""
-        return target if self.narrowed is None else self.narrowed
+    def _graph(self, target: Any, runtime: Runtime) -> Any:
+        """The graph run for ``target``: its narrowing copy, when it has one — given the
+        memory service as its store (:func:`memory_store`) when it has none of its own."""
+        graph = target if self.narrowed is None else self.narrowed
+        store = memory_store(target, runtime)
+        return graph if store is None else graph.copy({"store": store})
 
     @staticmethod
-    def _config(target: Any, run: Invocation) -> dict[str, Any]:
-        """The run's config: its framework options, the harness's thread id over theirs."""
+    def _config(target: Any, run: Invocation, helpers: Helpers) -> dict[str, Any]:
+        """The run's config: its framework options (less its run arguments), the harness's
+        thread id over theirs, and the run's helper callbacks (``hooks.langgraph``) beside
+        theirs."""
+        from trellis.harness.hooks.langgraph import HelperCallbacks
+
         runtime = run.runtime
         if _checkpointed(target):
             from langgraph.types import interrupt
 
             runtime.suspend = interrupt
-        options = runtime.framework_options
+        options = {k: v for k, v in runtime.framework_options.items() if k not in RUN_ARGUMENTS}
         thread = thread_of(target, runtime)
-        return {**options, "configurable": {**options.get("configurable", {}), "thread_id": thread}}
+        return {
+            **options,
+            "callbacks": _with_handler(options.get("callbacks"), HelperCallbacks(helpers)),
+            "configurable": {**options.get("configurable", {}), "thread_id": thread},
+        }
+
+
+def _with_handler(given: Any, handler: Any) -> Any:
+    """The run's callbacks: ``handler`` beside the ones the run was given (a list of handlers,
+    or a callback manager — copied, the given one is not changed)."""
+    if given is None:
+        return [handler]
+    if isinstance(given, list):
+        return [*given, handler]
+    manager = given.copy()
+    manager.add_handler(handler, inherit=True)
+    return manager
+
+
+def _run_arguments(runtime: Runtime) -> dict[str, Any]:
+    """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`)."""
+    options = runtime.framework_options
+    return {key: options[key] for key in RUN_ARGUMENTS if key in options}
+
+
+def memory_store(target: Any, runtime: Runtime) -> Any | None:
+    """The store a run of ``target`` is given (``bridges.store.MemoryStore``): the memory
+    service while memory is on for the run, its memory tools too (``memory_pull``: the store is
+    the graph reading memory), and the graph was compiled with no store of its own (one it has
+    is kept, said once); else ``None`` — the graph runs as it was built."""
+    if runtime.run_memory is None or not runtime.uses("memory_pull"):
+        return None
+    if getattr(target, "store", None) is not None:
+        _own_store(runtime.agent_id, type(target.store).__name__)
+        return None
+    from trellis.harness.bridges.store import MemoryStore
+
+    return MemoryStore(runtime.run_memory.ctx, asyncio.get_running_loop())
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent and store type, of the most recent
+def _own_store(agent_id: str, store: str) -> None:
+    log.warning(
+        "the graph was compiled with a store of its own: it keeps it, and its long-term memory "
+        "is not the memory service's (compile it without one to use the memory service)",
+        extra={"agent_id": agent_id, "store": store},
+    )
 
 
 def _narrowed(target: Any) -> Any | None:
@@ -337,12 +448,60 @@ def _checkpointed(target: Any) -> bool:
     return isinstance(getattr(target, "checkpointer", None), BaseCheckpointSaver)
 
 
+def langchain_message(said: Said) -> Any:
+    """``said`` as LangChain's own message: an assistant's with its tool calls, a tool's with
+    the call it answers."""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+    if said.role is Speaker.USER:
+        return HumanMessage(content=said.content)
+    if said.role is Speaker.ASSISTANT:
+        calls = [
+            {"id": c.id, "name": c.name, "args": dict(c.arguments), "type": "tool_call"}
+            for c in said.tool_calls
+        ]
+        return AIMessage(content=said.content, tool_calls=calls)
+    if said.role is Speaker.TOOL:
+        return ToolMessage(content=said.content, tool_call_id=said.tool_call_id or "")
+    return SystemMessage(content=said.content)
+
+
+def added(messages: Sequence[Any]) -> list[Said]:
+    """What the run said after its question (the last user message): each answer with the
+    tool calls it made, and their results; ``[]`` without a question."""
+    asked = next(
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if getattr(messages[i], "type", None) == "human"
+        ),
+        None,
+    )
+    if asked is None:
+        return []
+    out: list[Said] = []
+    for m in messages[asked + 1 :]:
+        kind = getattr(m, "type", None)
+        if kind == "ai":
+            calls = tuple(
+                Called(c["id"] or "", c["name"], c.get("args") or {})
+                for c in getattr(m, "tool_calls", None) or ()
+            )
+            if calls or _text(m):
+                out.append(Said(Speaker.ASSISTANT, _text(m), tool_calls=calls))
+        elif kind == "tool":
+            out.append(Said(Speaker.TOOL, _text(m), tool_call_id=m.tool_call_id))
+    return out
+
+
+def _text(message: Any) -> str:
+    """A message's text (its text parts, when its content is a list of them)."""
+    text = message.text if isinstance(getattr(message, "text", None), str) else message.content
+    return text if isinstance(text, str) else ""
+
+
 def _last_ai_text(messages: list[Any]) -> str | None:
     for message in reversed(messages):
-        if getattr(message, "type", None) == "ai":
-            text = (
-                message.text if isinstance(getattr(message, "text", None), str) else message.content
-            )
-            if isinstance(text, str) and text:
-                return text
+        if getattr(message, "type", None) == "ai" and (text := _text(message)):
+            return text
     return None

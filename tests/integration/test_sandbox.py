@@ -314,7 +314,7 @@ async def test_the_catalog_governs_the_sandbox_tools_like_any_other() -> None:
     assert done.answer == "approved"
 
 
-async def test_what_a_command_prints_is_redacted_on_its_way_out(
+async def test_what_a_command_prints_reaches_the_stream_and_memory_as_it_is(
     memory_harness: Harness, memory_service: Any
 ) -> None:
     secret = "sk-live0123456789abcdef"
@@ -328,11 +328,10 @@ async def test_what_a_command_prints_is_redacted_on_its_way_out(
     events = [e async for e in agent.stream("go", user="u")]
     assert events[-1].data["result"] == secret  # the model and the tool had it as it is
     [(_, shown)] = results(events)
-    assert shown["stdout"] == "[redacted]"
+    assert shown["stdout"] == secret  # an on_output hook masks what a user sees
     await memory_harness.writes.drain()
     [recorded] = memory_service.named("record_tool")
-    assert recorded.body["output"]["stdout"] == "[redacted]"
-    assert secret not in str(recorded.body)
+    assert recorded.body["output"]["stdout"] == secret
 
 
 async def test_a_run_that_fails_times_out_or_is_cancelled_deletes_its_sandbox(

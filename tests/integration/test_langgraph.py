@@ -199,8 +199,11 @@ async def test_the_memory_context_leads_the_messages(
 
 
 async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conversation(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from trellis.harness import history
+
+    monkeypatch.setattr(history, "IN_RAM", {})  # the checkpointer taken as durable
     model = ScriptedChatModel(turns=["first", "second"])
     graph = create_agent(model, tools=[], system_prompt="You help.", checkpointer=InMemorySaver())
     agent = memory_harness.wrap(graph, id="helper")
@@ -419,3 +422,53 @@ async def test_a_graphs_interrupt_that_cannot_be_asked_fails_the_run_saying_why(
     result = await harness.wrap(asking_graph(value), id="bad").run({"topic": "x"}, user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert re.search(why, result.error.message), result.error.message
+
+
+@pytest.mark.parametrize("durable", [False, True], ids=["in_ram", "durable"])
+async def test_a_checkpointer_kept_in_ram_leaves_memorys_window_on(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    monkeypatch: pytest.MonkeyPatch,
+    durable: bool,
+) -> None:
+    """An ``InMemorySaver`` loses the thread on a restart: memory's window keeps it. A durable
+    checkpointer (here: the RAM-only registry emptied) keeps the thread itself: no window."""
+    from trellis.harness import history
+
+    if durable:
+        monkeypatch.setattr(history, "IN_RAM", {})
+    model = ScriptedChatModel(turns=["hello"])
+    graph = await agent_graph(memory_harness, model, checkpointer=InMemorySaver())
+    agent = memory_harness.wrap(graph, id=f"saver_{durable}")
+    await agent.run("hi", user="u1")
+    assert memory_service.named("context")[-1].body.get("window") is not durable
+
+
+async def test_the_graphs_context_and_durability_pass_through(harness: Harness) -> None:
+    from dataclasses import dataclass
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.runtime import Runtime as GraphRuntime
+
+    @dataclass
+    class Ctx:
+        tier: str
+
+    class State(TypedDict):
+        seen: NotRequired[str]
+
+    async def look(state: State, runtime: GraphRuntime[Ctx]) -> dict[str, Any]:
+        return {"seen": runtime.context.tier}
+
+    graph = StateGraph(State, context_schema=Ctx)
+    graph.add_node("look", look)
+    graph.add_edge(START, "look")
+    graph.add_edge("look", END)
+    saver = InMemorySaver()
+    agent = harness.wrap(graph.compile(checkpointer=saver), id="ctx")
+    options = {"context": Ctx(tier="gold"), "durability": "exit", "recursion_limit": 5}
+    result = await agent.run({}, user="u1", thread="t1", framework_options=options)
+    assert result.status is RunStatus.SUCCESS, result.error
+    state = await agent.target.aget_state({"configurable": {"thread_id": "t1"}})
+    assert state.values == {"seen": "gold"}

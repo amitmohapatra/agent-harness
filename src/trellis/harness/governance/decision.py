@@ -7,19 +7,34 @@ exactly when the rule holds on its arguments. The rule language is the memory se
 (:mod:`trellis.memory.approval`, which writes and validates these rules): there is one
 implementation of it, and governance evaluates rather than re-invents it. A rule that cannot be
 evaluated on a call asks, and so does :data:`~trellis.harness.governance.catalog.CATALOG_UNREAD`
-— the decision fails closed.
+— the decision fails closed. A rule that cannot be evaluated is an :class:`ApprovalRuleError`
+too: logged once per rule, and carried on the decision (``error``) for the run to record.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import functools
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
 
+from trellis.contracts import ErrorCategory, HarnessError
+from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.governance.catalog import CATALOG_UNREAD
 from trellis.memory.approval import evaluate
+
+log = logging.getLogger("trellis.harness")
+
+
+class ApprovalRuleError(HarnessError):
+    """A tool's approval rule (``approve_when``) could not be evaluated on a call: the call
+    asks a person — the rule never lets a call through it could not check."""
+
+    code = "APPROVAL_RULE_INVALID"
+    category = ErrorCategory.POLICY
 
 
 class Action(StrEnum):
@@ -53,6 +68,8 @@ class Decision:
     assignee: str | None = None
     component: str | None = None
     props: Mapping[str, Any] | None = None
+    #: why the rule could not be evaluated, when it could not (the call then asks)
+    error: ApprovalRuleError | None = None
 
     @property
     def asks(self) -> bool:
@@ -115,7 +132,22 @@ def decide(tool: str, risk: str, rule: str | None, args: Mapping[str, Any]) -> D
     try:
         if evaluate(rule, args):
             return decided(Action.ASK, f"{rule}.")
-    except Exception:
-        return decided(Action.ASK, f"the rule {rule!r} could not be checked on this call.")
+    except Exception as exc:  # fails closed: the call asks, whatever went wrong
+        _said_unevaluable(tool, rule, type(exc).__name__)
+        error = ApprovalRuleError(
+            f"{tool}'s approval rule could not be evaluated: the call asks a person",
+            details={"tool": tool, "rule": rule, "reason": type(exc).__name__},
+        )
+        reason = f"the rule {rule!r} could not be checked on this call."
+        return dataclasses.replace(decided(Action.ASK, reason), error=error)
     # the rule decided no approval: the call runs, announced unless it only reads
     return decided(Action.RUN if risk == "read" else Action.ANNOUNCE, "")
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per rule, of the most recent
+def _said_unevaluable(tool: str, rule: str, reason: str) -> None:
+    log.error(
+        "an approval rule could not be evaluated: every call it governs asks a person until "
+        "it is fixed",
+        extra={"tool": tool, "rule": rule, "reason": reason},
+    )

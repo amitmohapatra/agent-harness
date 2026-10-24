@@ -60,6 +60,7 @@ from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.clients.memory import DOCUMENTS
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
+from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
@@ -268,7 +269,13 @@ async def _attempt(
         _call.reset(tokens[1])
         _current.reset(tokens[0])
         agent.running.pop(identity.run_id, None)
-    timed_out = budget.error if budget is not None and (clock.expired() or stopped) else None
+    # out of time: the attempt's clock ended it, its worker did, or what failed it failed past
+    # the run's time — a call bounded by what was left of it (a model call's ``TimeoutError``)
+    # fires with the clock, and its error may reach the attempt first
+    late = error is not None and runtime.ends_at is not None and time.monotonic() >= runtime.ends_at
+    timed_out = (
+        budget.error if budget is not None and (clock.expired() or stopped or late) else None
+    )
     bridge.unended(runtime, timed_out=timed_out is not None)
     result = await _concluded(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
@@ -526,7 +533,8 @@ async def _invoked(
     """The framework's part: its input (resumed where it paused), the run's tools in its
     format, and what it produced."""
     adapter, target = agent.adapter, agent.target
-    prepared = adapter.prepare_input(target, input, runtime.pushed_context)
+    history = runtime.history or ()
+    prepared = adapter.prepare_input(target, input, runtime.pushed_context, history)
     native_input = prepared
     if pending is not None and resolution is not None:
         native_input = adapter.resume_input(target, native_input, pending, resolution)
@@ -780,13 +788,14 @@ async def _recorded(
         log.info("run %s was already recorded as %s", run_id, record.status.value)
 
 
-def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[tuple[str, str]]:
-    """The attempt's messages: the question, then what the agent said (its answer, when the
-    framework reports no transcript of its own)."""
-    said: list[tuple[str, str]] = list(extracted.transcript) if extracted is not None else []
+def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[Said]:
+    """The attempt's messages: the question, then what the agent said - its tool calls and
+    their results too, where the framework reports them (its answer, when the framework
+    reports no transcript of its own)."""
+    said: list[Said] = list(extracted.transcript) if extracted is not None else []
     if not said and extracted is not None and isinstance(extracted.answer, str):
-        said = [("assistant", extracted.answer)] if extracted.answer else []
-    return [("user", runtime.task), *said] if runtime.task else said
+        said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
+    return [Said(Speaker.USER, runtime.task), *said] if runtime.task else said
 
 
 async def _settle_cancelled(

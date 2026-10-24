@@ -8,7 +8,7 @@ message list); tools are called with ``await agent.tools.call(name, **args)``; a
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
 from trellis.contracts import InterruptResolution
@@ -20,6 +20,7 @@ from trellis.harness.adapters.base import (
     ToolFormat,
     no_options,
 )
+from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 
 
@@ -28,11 +29,15 @@ class FunctionAdapter:
     tool_format: ToolFormat = "none"
     fixed_tools: bool = False
     narrows: Narrowing = "none"
+    #: the function reads its input as it is: memory's window is in ``agent.context``
+    replays_history = False
 
-    def keeps_conversation(self, target: Any) -> bool:
-        return False
+    def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
+        return None
 
-    def prepare_input(self, target: Any, input: Any, context: str | None) -> Any:
+    def prepare_input(
+        self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
+    ) -> Any:
         if context and isinstance(input, list):
             return [{"role": "system", "content": context}, *input]
         return input
@@ -46,7 +51,9 @@ class FunctionAdapter:
     def extract(self, target: Any, output: Any) -> Extracted:
         return Extracted(
             answer=output,
-            transcript=[("assistant", output)] if isinstance(output, str) and output else [],
+            transcript=[Said(Speaker.ASSISTANT, output)]
+            if isinstance(output, str) and output
+            else [],
         )
 
     def resume_input(
