@@ -1,7 +1,7 @@
 """What the memory service offers, used on every run, the same through every framework:
 
-* every run given a context is verified for its outcome, apart from the eval sample, after the
-  answer (the judge's verdict labels the run);
+* a run's own success is its outcome only; the sampled share is verified, and the judge's
+  verdict is what teaches;
 * a sub-agent's run is derived from its parent's memory scope (it names the parent's run and
   its delegation tree's agent group);
 * the framework's own tools count among the agent's tools for its skills and hints;
@@ -12,13 +12,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, TypedDict
 
-import httpx
 import pytest
-import respx
 from agents import Agent as OpenAIAgent
 from agents import function_tool
 from langchain.agents import create_agent
@@ -31,7 +28,6 @@ from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import agent as agent_module
 from trellis.harness.agent import UNREACHED_FIX
 from trellis.harness.clients.memory import CITED_MAX
 from trellis.memory.errors import DependencyUnavailableError
@@ -65,9 +61,9 @@ def warned(events: list[Any], code: str) -> list[dict[str, Any]]:
     ]
 
 
-# --------------------------------------------------------------------------- 1. verify
+# --------------------------------------------------------------------------- 1. learning signal
 @pytest.mark.parametrize("framework", ["function", "react", "openai_agents"])
-async def test_every_run_given_a_context_is_verified_whatever_the_framework(
+async def test_a_sampled_run_is_verified_whatever_the_framework(
     memory_service: FakeMemoryService, framework: str
 ) -> None:
     async def fn(input: str, agent: Runtime) -> str:
@@ -78,7 +74,7 @@ async def test_every_run_given_a_context_is_verified_whatever_the_framework(
         "react": ReAct(system="s", model=ScriptedChat(["you prefer email"])),
         "openai_agents": OpenAIAgent(name="o", model=ScriptedModel(["you prefer email"])),
     }
-    async with harness_with(memory_service, eval_sample=0.0) as h:
+    async with harness_with(memory_service, eval_sample=1.0) as h:
         result = await h.wrap(targets[framework], id="v").run("contact?", user="u")
         await h.writes.drain()
     [verified] = memory_service.named("verify")
@@ -87,78 +83,24 @@ async def test_every_run_given_a_context_is_verified_whatever_the_framework(
     assert [f["target_id"] for f in judged(memory_service)] == [result.run_id]
 
 
-@respx.mock
-@pytest.mark.parametrize(
-    ("without", "sample", "verified", "scored"),
-    [
-        ((), 0.0, True, False),  # outside the sample: checked, no score
-        ((), 1.0, True, True),  # in the sample: checked and scored
-        (("grounding",), 1.0, True, False),  # the score off: the check is the records'
-        (("memory",), 1.0, False, False),  # no memory: no context, nothing to check
-        (("grounding", "records"), 1.0, False, False),
-    ],
-)
-async def test_the_check_is_the_runs_records_and_the_score_the_eval_samples(
-    memory_service: FakeMemoryService,
-    without: tuple[str, ...],
-    sample: float,
-    verified: bool,
-    scored: bool,
+@pytest.mark.parametrize(("sample", "verified"), [(0.0, False), (1.0, True)])
+async def test_a_runs_own_success_is_its_outcome_and_only_a_sampled_run_is_verified(
+    memory_service: FakeMemoryService, sample: float, verified: bool
 ) -> None:
-    scores = respx.post("https://lf.test/api/public/scores").mock(
-        return_value=httpx.Response(200, json={"id": "x"})
-    )
+    """The run's ``system`` confirm cites nothing (the service keeps it as the outcome only);
+    the judge's verdict, on the sampled share, is what teaches."""
 
     async def fn(input: str, agent: Runtime) -> str:
         return "an answer"
 
-    async with harness_with(memory_service, **LANGFUSE, eval_sample=sample) as h:
-        await h.wrap(fn, id="g").run("q", user="u", without=without)  # type: ignore[arg-type]
+    async with harness_with(memory_service, eval_sample=sample) as h:
+        result = await h.wrap(fn, id="g").run("q", user="u")
         await h.writes.drain()
+    own = [f for f in memory_service.stored_feedback.values() if f["source"] == "system"]
+    assert [(f["target_id"], f["verdict"]) for f in own] == [(result.run_id, "confirm")]
+    assert not own[0].get("evidence_refs")
     assert bool(memory_service.named("verify")) is verified
-    assert bool([c for c in scores.calls if b"grounding" in c.request.content]) is scored
-
-
-@pytest.mark.parametrize("case", ["no question", "no answer", "failed", "memory down"])
-async def test_a_run_with_nothing_to_check_is_not_verified(
-    memory_service: FakeMemoryService, case: str
-) -> None:
-    async def fn(input: str, agent: Runtime) -> str:
-        if case == "failed":
-            raise RuntimeError("the agent failed")
-        return "" if case == "no answer" else "an answer"
-
-    if case == "memory down":
-        memory_service.fail = {"context"}
-    async with harness_with(memory_service) as h:
-        await h.wrap(fn, id="n").run("" if case == "no question" else "q", user="u")
-        await h.writes.drain()
-    assert memory_service.named("verify") == []
-
-
-async def test_the_check_runs_after_the_answer_is_out(
-    memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Off the critical path: the run has its answer while its check still waits."""
-    held = asyncio.Event()
-    checked: list[str] = []
-
-    async def slow(memory: Any, answer: str, bundle_id: str) -> float:
-        await held.wait()
-        checked.append(answer)
-        return 1.0
-
-    monkeypatch.setattr(agent_module, "grounding_score", slow)
-
-    async def fn(input: str, agent: Runtime) -> str:
-        return "an answer"
-
-    async with harness_with(memory_service) as h:
-        result = await asyncio.wait_for(h.wrap(fn, id="fast").run("q", user="u"), 2)
-        assert result.status is RunStatus.SUCCESS and checked == []
-        held.set()
-        await h.writes.drain()
-    assert checked == ["an answer"]
+    assert bool(judged(memory_service)) is verified
 
 
 # --------------------------------------------------------------------------- 2. sub-agents
@@ -350,7 +292,7 @@ async def test_a_persons_verdict_cites_the_memories_the_answer_rested_on(
     async def fn(input: str, agent: Runtime) -> str:
         return "you prefer email"
 
-    async with harness_with(memory_service) as h:
+    async with harness_with(memory_service, eval_sample=1.0) as h:  # a verified run
         result = await h.wrap(fn, id="f").run("contact?", user="u")
         await h.writes.drain()  # the check, and with it the judge's verdict
         # another voice on the run citing something else is not what the answer rested on
@@ -388,7 +330,7 @@ async def test_the_cited_memories_are_each_once_and_bounded(
     async def fn(input: str, agent: Runtime) -> str:
         return "an answer"
 
-    async with harness_with(memory_service) as h:
+    async with harness_with(memory_service, eval_sample=1.0) as h:  # a verified run
         result = await h.wrap(fn, id="f").run("q", user="u")
         await h.writes.drain()
         await h.feedback(result.run_id, "confirm")

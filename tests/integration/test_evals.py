@@ -440,11 +440,7 @@ async def test_a_react_agent_with_memory_is_graded_for_grounding_and_by_a_judge(
     assert report.summary["grounding"].mean == 0.8 and report.summary["grounding"].count == 2
     assert report.summary["llm_judge"].mean == 0.9
     verified = memory_service.named("verify")
-    # each run is checked for its outcome, and the grounding() evaluator checks it again (the
-    # service records the one verdict once: the same run, bundle and answer)
-    assert len(verified) == 4 and all(v.body["answer"] == "Paris" for v in verified)
-    verdicts = [f for f in memory_service.stored_feedback.values() if f["source"] == "judge"]
-    assert len(verdicts) == 2
+    assert len(verified) == 2 and all(v.body["answer"] == "Paris" for v in verified)
     asked = model.judged[0][1]["content"]
     assert "## Criteria\nNames the right capital city." in asked
     assert "## Expected answer\n" in asked and memory_service.context_text in asked
@@ -489,7 +485,7 @@ async def test_grounding_gives_no_score_for_an_answer_with_no_claim(
     memory_service.unsupported = 0
     async with langfuse_harness(memory_service, langfuse_public_key=None, eval_sample=0.0) as h:
         report = await h.evaluate(h.wrap(capital, id="c"), [{"input": "France"}], [grounding()])
-    assert report.items[0].scores == [] and len(memory_service.named("verify")) == 2
+    assert report.items[0].scores == [] and len(memory_service.named("verify")) == 1
 
 
 async def test_a_score_of_a_case_with_no_run_is_kept_off_any_trace(

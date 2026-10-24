@@ -887,7 +887,9 @@ class Agent:
 
     async def recorded_outcome(self, runtime: Runtime, status: RunStatus, note: str | None) -> None:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
-        its outcome (the judge's and a person's override it in the memory service)."""
+        its outcome (the judge's and a person's override it in the memory service). Its
+        ``confirm`` is unverified, so the service keeps it as the outcome only: it moves no
+        memory's confidence, learned skill or tool statistic."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
         if memory is None or not runtime.uses("records") or verdict is None:
@@ -906,27 +908,26 @@ class Agent:
         )
 
     async def grounded(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
-        """Every successful run that was given a memory context has its answer
-        (:func:`graded`) checked against that context — the memory service's ``/v1/verify``,
-        in the background once the answer is out. The service records the verdict as the run's
-        ``judge`` feedback, which outranks the run's own ``confirm``: a run's outcome is then
-        what its claims held up as, not only that it finished, and it is what tool success
-        rates, learned skills and the memory pulls its verified claims rest on learn from.
-        The check is part of the run's records (``memory``) and apart from the eval sample: on
-        a run the sample takes (``TRELLIS_EVAL_SAMPLE``, ``grounding`` on) its score also goes
-        on the run's trace."""
+        """On a sampled run, the answer (:func:`graded`) checked against the context it was
+        given (the memory service's ``/v1/verify``, which records it as the run's ``judge``
+        feedback), and the score put on the run's trace. Only such a verified run, and a
+        person's reviewed verdict (``h.feedback``), teach the memory service: a run's own
+        ``confirm`` (:meth:`recorded_outcome`) is its outcome only."""
         memory = runtime.run_memory
         text = graded(answer)
-        scored = runtime.uses("grounding") and sampled(
-            runtime.run_id, self.harness.settings.eval_sample
-        )
-        if memory is None or pushed is None or not text or not (runtime.uses("records") or scored):
+        if (
+            memory is None
+            or pushed is None
+            or not text
+            or not runtime.uses("grounding")
+            or not sampled(runtime.run_id, self.harness.settings.eval_sample)
+        ):
             return
         bundle_id, run_id, traced = pushed.bundle_id, runtime.run_id, runtime.trace_run
 
         async def work() -> None:
             score = await grounding_score(memory.ctx, text, bundle_id)
-            if scored and score is not None:
+            if score is not None:
                 key = f"{run_id}:grounding"
                 await self.harness.score(run_id, "grounding", score, key=key, trace=traced)
 

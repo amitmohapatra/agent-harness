@@ -57,6 +57,12 @@ class Identity(BaseModel):
             group=group if isinstance(group, str) else None,
         )
 
+    @property
+    def own_group(self) -> str:
+        """The agent group the runs this one starts (its sub-agents', its framework's
+        helpers') work in: its own, else the one it names by being at the top of the tree."""
+        return self.group or self.run_id
+
     def scope(self) -> dict[str, Any]:
         """The memory service scope of a run with no parent (a sub-agent's run is derived from
         its parent's: :meth:`parent_scope`)."""

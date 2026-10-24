@@ -139,7 +139,7 @@ class SubAgent:
             timeout=parent.remaining(),
             deadline=parent.deadline,
             parent=parent.run_id,
-            group=parent.identity.group or parent.run_id,
+            group=parent.identity.own_group,
             without=parent.without,
             document_ids=parent.document_ids,
         )

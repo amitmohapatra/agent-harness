@@ -1,7 +1,7 @@
 """What the memory service offers, used on every run, against a running memory service
 (``MEMORY_URL``, ``TRELLIS_API_KEY``): a sub-agent reads its parent's hand-off notes and writes
-to its delegation tree's group; every run given a context is verified, and the judge's verdict
-labels it; a person's verdict cites what the answer rested on; a run's context draws on the
+to its delegation tree's group; a sampled run is verified, and the judge's verdict labels it; a
+person's verdict cites what the answer rested on; a run's context draws on the
 documents it names. No model: function agents, so each assertion is about the service."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from tests.live.conftest import needs_memory
+from tests.live.conftest import live_harness, needs_memory
 from trellis import Harness, Runtime
 from trellis.contracts import RunStatus
 
@@ -54,9 +54,12 @@ async def test_a_sub_agent_reads_its_parents_notes_and_writes_to_its_group(
     assert note not in str(other.answer)
 
 
-async def test_every_run_given_a_context_is_labelled_by_its_check_and_cited_by_a_person(
-    harness: Harness,
-) -> None:
+async def test_a_sampled_run_is_labelled_by_its_check_and_cited_by_a_person() -> None:
+    async with live_harness(eval_sample=1.0) as harness:
+        await _labelled_and_cited(harness)
+
+
+async def _labelled_and_cited(harness: Harness) -> None:
     marker = uuid.uuid4().hex[:8]
     user = f"live-{marker}"
 
@@ -80,7 +83,7 @@ async def test_every_run_given_a_context_is_labelled_by_its_check_and_cited_by_a
     )
     page = await scope.feedback.page_for("run", result.run_id)
     verdicts = {f.source: f for f in page.items}
-    assert "judge" in verdicts, "every run given a context is checked, not a sampled share"
+    assert "judge" in verdicts, "a sampled run is checked"
     judge = verdicts["judge"]
     assert judge.projection is not None and judge.projection.action == "run_labelled"
     stored = await harness.feedback(result.run_id, "confirm")

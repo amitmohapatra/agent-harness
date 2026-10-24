@@ -116,7 +116,7 @@ Every write above is queued and the run moves on (`writes.py`); four writers dra
   the next time a harness with the same directory starts writing (a worker at its start, any
   other process at its first write). The service stores a replayed write that had in fact
   landed once (every write carries its idempotency key or message id). Without the directory,
-  or for a write that is not data (the grounding check, the model key, Code Mode
+  or for a write that is not data (the sampled grounding check, the model key, Code Mode
   calls read back from the gateway), it is lost: counted (`trellis.writes.failed`) and, during a
   run, a `warning` event.
 
@@ -140,20 +140,19 @@ precedence **human > judge > system**:
 
 * **system** — the harness, when the run ends: `SUCCESS` → `confirm`, `ERROR` → `reject` (a
   cancelled run says nothing about the agent). Never "no exception = success" on its own: the
-  judge and people outrank it.
-* **judge** — on every successful run with an answer (a structured one as its JSON) that was
-  given a memory context, `/v1/verify {bundle_id, answer, run_id}` checks the answer against
-  that context, in the background once the answer is out; the service records the verdict
-  itself (`source=judge`), which outranks the run's own `confirm`, so a confirmed outcome is a
-  verified one, and marks the memory pulls the supported claims rest on as used. It is part of
-  the run's records (off with `without={"memory"}`), apart from the eval sample: on a run the
-  sample takes (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id) the harness also puts
-  the score — the share of the answer's claims the evidence supports — on the run's trace
-  (`grounding`; `without={"grounding"}` keeps the check and drops the score). An answer with no
-  checkable claim, or a context that held no evidence (every claim would be "unsupported"
-  against nothing), is no verdict and no score.
+  judge and people outrank it, and the service keeps an unverified `confirm` as the run's
+  outcome only — it moves no memory's confidence, learned skill or tool statistic. What the
+  service learns from comes from the judge's verdict on a sampled run and from people's
+  reviewed verdicts.
+* **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
+  (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
+  context the run was given; the service records the verdict itself (`source=judge`), and the
+  harness puts the same score — the share of the answer's claims the evidence supports — on
+  the run's trace (`grounding`). An answer with no checkable claim, or a context that held no
+  evidence (every claim would be "unsupported" against nothing), is no verdict and no score.
 * **human** — `h.feedback(run_id, verdict, correction=None)`, citing the memories the judge's
-  verdict found the answer rests on (`evidence_refs`), whose confidence it moves. The memory service stores a
+  verdict found the answer rests on (`evidence_refs`: a run the sample verified; none otherwise),
+  whose confidence it moves. The memory service stores a
   person's verdict as a vote that waits for the tenant administrator (`review.state ==
   "pending"`, its ADR 0028): it changes the run's outcome, and the confidence of what the run
   cited, only once approved (`GET /v1/feedback/pending`, `POST /v1/feedback/{id}/approve`
