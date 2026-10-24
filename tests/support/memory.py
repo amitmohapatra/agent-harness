@@ -204,6 +204,8 @@ class FakeMemoryService:
                     return refused
                 self.calls.append(call)
                 answer = getattr(self, f"_{name}")(call)
+                if isinstance(answer, httpx.Response):  # the call refused, as the service does
+                    return answer
                 status, answer = (
                     answer if isinstance(answer, tuple) else (CREATED.get(name, 200), answer)
                 )
@@ -646,10 +648,17 @@ class FakeMemoryService:
         return {"tools": [_catalog_tool(n, self.catalog[n]) for n in names if n in self.catalog]}
 
     def _suggestions(self, call: Call) -> dict[str, Any]:
-        return {"suggestions": self.suggestions}
+        """The suggestions learned from the asking agent's decisions only, as the service
+        answers them (its ``ctx.agent_id``: a scope with no agent reads none)."""
+        agent = call.scope.get("agent_id") or ""
+        return {"suggestions": [s for s in self.suggestions if (s.get("agent_id") or "") == agent]}
 
-    def _accept(self, call: Call) -> dict[str, Any]:
+    def _accept(self, call: Call) -> Any:
+        """Accepted by the agent it was learned from only (another's: 404, as the service)."""
         found = next(s for s in self.suggestions if s["id"] == call.path["suggestion_id"])
+        if (found.get("agent_id") or "") != (call.scope.get("agent_id") or ""):
+            path = f"/v1/tools/approval-suggestions/{found['id']}/accept"
+            return problem(404, path, detail="no such approval suggestion")
         found["accepted"] = True
         tool = self.catalog.setdefault(found["tool"], {})
         tool["approve_when"] = found["rule"]

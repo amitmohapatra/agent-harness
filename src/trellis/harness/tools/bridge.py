@@ -306,7 +306,9 @@ async def _decided(
     what came of it: the call (with an approver's edited arguments), announced when it is to
     be, or the outcome of a call the approver rejected."""
     governance = runtime.agent.harness.governance(runtime.tenant)
-    decision = await governance.check(spec.name, call.args, side_effects=spec.side_effects)
+    decision = await governance.check(
+        spec.name, call.args, side_effects=spec.side_effects, agent_id=runtime.agent_id
+    )
     if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
         runtime.events.warning(decision.error.code, decision.error.message)
     if asked is not None:

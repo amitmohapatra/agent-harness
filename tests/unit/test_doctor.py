@@ -46,10 +46,13 @@ VERSION = {"service": "trellis-memory", "version": "0.4.1", "api_version": "v1"}
 
 
 def memory_answers(
-    key: dict[str, Any] | None = None, *, ready: tuple[int, dict[str, Any]] = (200, READY)
+    key: dict[str, Any] | None = None,
+    *,
+    ready: tuple[int, dict[str, Any]] = (200, READY),
+    suggestions: bool = True,
 ) -> None:
-    """The memory service as ``doctor`` asks it: who the key is, readiness, version, the
-    approval suggestions."""
+    """The memory service as ``doctor`` asks it: who the key is, readiness, version, and no
+    approval suggestions for any agent."""
     respx.get(f"{MEM}{doctor.KEY_PATH}").mock(
         return_value=httpx.Response(200, json=key or SERVICE_KEY)
     )
@@ -57,29 +60,35 @@ def memory_answers(
         return_value=httpx.Response(ready[0], json=ready[1])
     )
     respx.get(f"{MEM}{doctor.VERSION_PATH}").mock(return_value=httpx.Response(200, json=VERSION))
-    respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}").mock(
-        return_value=httpx.Response(200, json={"suggestions": []})
-    )
+    if suggestions:  # none for any agent (else the test answers them itself)
+        respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}").mock(
+            return_value=httpx.Response(200, json={"suggestions": []})
+        )
 
 
 @respx.mock
 async def test_each_service_is_reached_with_its_key(tmp_path: Path) -> None:
     respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(200, json={}))
-    memory_answers()
+    memory_answers(suggestions=False)
     respx.get("http://mem.test/v1/keys/self").mock(return_value=httpx.Response(401))
     respx.get("http://runs.test/v1/runs/doctor-check").mock(return_value=httpx.Response(404))
     learned = [
         {"tool": "po", "suggestion": "auto_approve", "accepted": True},
         {"tool": "wire", "suggestion": "auto_approve", "accepted": False},
     ]
-    respx.get("http://mem.test/v1/tools/approval-suggestions").mock(
+    # learned per agent: the service lists an agent's in its scope only
+    respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}", params={"agent_id": "buyer"}).mock(
         return_value=httpx.Response(200, json={"suggestions": learned})
     )
+    respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}", params={"agent_id": "clerk"}).mock(
+        return_value=httpx.Response(200, json={"suggestions": []})
+    )
     settings = Settings.from_env({**ENV, "TRELLIS_SPOOL_DIR": str(tmp_path)})
-    found = {c.name: c for c in await doctor.checks(settings)}
+    found = {c.name: c for c in await doctor.checks(settings, agents=["buyer", "clerk", "buyer"])}
     assert found["gateway"].ok and found["runs"].ok and found["spool"].ok
     assert not found["memory"].ok and "refused the key (401)" in found["memory"].said
-    assert found["approval_rules"].said == "accepted: po (auto_approve)"  # wire waits
+    # wire waits for a person; each agent asked once
+    assert found["approval_rules"].said == "accepted: buyer: po (auto_approve); clerk: none"
     # what needs the key is not asked; readiness and the version need none
     assert "memory key" not in found and "model key" not in found
     assert found["memory ready"].ok and found["memory version"].ok
@@ -99,7 +108,7 @@ async def test_a_service_down_or_failing_is_a_failed_check(tmp_path: Path) -> No
     settings = Settings.from_env(
         {**ENV, "RUNS_URL": "", "TRELLIS_SPOOL_DIR": str(blocked / "spool")}
     )
-    found = {c.name: c for c in await doctor.checks(settings)}
+    found = {c.name: c for c in await doctor.checks(settings, agents=["buyer"])}
     assert "cannot be reached (ConnectError)" in found["gateway"].said
     assert found["memory"].said.endswith("answered 500") and "runs" not in found
     assert not found["approval_rules"].ok and found["approval_rules"].said.endswith("403")
@@ -268,10 +277,36 @@ def test_a_context_without_a_host_is_the_local_socket(tmp_path: Path) -> None:
 
 @respx.mock
 async def test_approval_rules_that_cannot_be_listed_fail_the_check() -> None:
-    memory_answers()
     respx.get("http://mem.test/v1/tools/approval-suggestions").mock(
         side_effect=httpx.ConnectError("down")
     )
+    memory_answers({**SERVICE_KEY, "may_act_as": ["agent:support"]}, suggestions=False)
     settings = Settings.from_env({"MEMORY_URL": "http://mem.test", "TRELLIS_API_KEY": "k"})
     found = {c.name: c for c in await doctor.checks(settings)}
     assert "cannot be reached (ConnectError)" in found["approval_rules"].said
+    assert "agent_id=support" in found["approval_rules"].said  # the agent the key acts as
+
+
+@respx.mock
+async def test_approval_rules_are_listed_per_agent_and_a_tenant_wide_read_lists_none() -> None:
+    memory_answers()
+    found = {c.name: c for c in await doctor.checks(Settings(memory_url=MEM, api_key="k"))}
+    rules = found["approval_rules"]
+    assert rules.ok and "trellis doctor --agent <id>" in rules.said
+    # a tenant-wide read would list nothing: suggestions are an agent's
+    assert not [c for c in respx.calls if c.request.url.path == doctor.SUGGESTIONS_PATH]
+
+
+def test_the_cli_names_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[list[str]] = []
+
+    async def checks(settings: Settings, env: Any, *, agents: list[str]) -> list[doctor.Check]:
+        asked.append(agents)
+        return []
+
+    monkeypatch.setattr(doctor, "checks", checks)
+    assert doctor.main(["--agent", "a", "--agent=b"], {}) == 0
+    assert asked == [["a", "b"]]
+    for wrong in (["--agent"], ["--verbose"]):
+        with pytest.raises(SystemExit, match="usage: trellis doctor"):
+            doctor.main(wrong, {})

@@ -14,9 +14,12 @@ does more than read asks (:data:`CATALOG_UNREAD`) until the catalog answers agai
 logged once.
 
 Each refresh also checks the approval suggestions the service learned from people's decisions
-(``approval_suggestions``) and accepts each one not accepted yet (``accept_suggestion``: its
-rule becomes the tool's ``approve_when``) — logged, and listed by ``trellis doctor`` — except
-for a tool at the highest risk (:data:`TOP_RISK`): relaxing one of those waits for a person.
+and accepts each one not accepted yet (its rule becomes the tool's ``approve_when``) — logged,
+and listed by ``trellis doctor`` — except for a tool at the highest risk (:data:`TOP_RISK`):
+relaxing one of those waits for a person. The service learns them per agent (from that agent's
+decisions) and lists and accepts them in the agent's scope only, so they are read and accepted
+for each agent governance was asked about (:meth:`Rules.get`'s ``agent_id``), at most
+:data:`AGENTS_KEPT` of them, the most recently asked.
 """
 
 from __future__ import annotations
@@ -50,6 +53,9 @@ GOVERNANCE_STALE_SECONDS: Final = 300.0
 #: entries remembered as stored (the most recent): bounds, not limits on the toolbox.
 NAMES_KEPT: Final = 4096
 PUBLISHED_KEPT: Final = 4096
+#: The agents whose learned approval suggestions are checked at each refresh (the most
+#: recently asked about): a bound, not a limit on the agents of a tenant.
+AGENTS_KEPT: Final = 256
 #: The risks a tool may declare, lowest first.
 RISKS: Final[tuple[SideEffects, ...]] = ("read", "write", "irreversible")
 #: The highest risk: a learned approval suggestion for such a tool is never accepted
@@ -80,13 +86,14 @@ class Catalog(Protocol):
 
     async def feedback(self, record: Feedback) -> None: ...
 
-    async def suggestions(self) -> Sequence[ApprovalSuggestion]:
-        """The approval suggestions learned from people's decisions, accepted or not."""
+    async def suggestions(self, agent_id: str) -> Sequence[ApprovalSuggestion]:
+        """The approval suggestions learned from people's decisions on ``agent_id``'s calls,
+        accepted or not."""
         ...
 
-    async def accept(self, suggestion_id: str) -> Rule:
-        """Accept a suggestion: its rule becomes its tool's ``approve_when``; the tool's rule
-        as it is now."""
+    async def accept(self, suggestion_id: str, *, agent_id: str) -> Rule:
+        """Accept a suggestion learned for ``agent_id``: its rule becomes its tool's
+        ``approve_when``; the tool's rule as it is now."""
         ...
 
 
@@ -119,12 +126,25 @@ class MemoryCatalog:
         are learned from. Its id is the idempotency key: a retried send is stored once."""
         await self.ctx.feedback(record, idempotency_key=record.feedback_id)
 
-    async def suggestions(self) -> Sequence[ApprovalSuggestion]:
-        return await self.ctx.advanced.tools.approval_suggestions()
+    async def suggestions(self, agent_id: str) -> Sequence[ApprovalSuggestion]:
+        """The suggestions learned for ``agent_id``: the service lists those of the agent its
+        scope names (none for a tenant-wide scope)."""
+        return await self._agent(agent_id).advanced.tools.approval_suggestions()
 
-    async def accept(self, suggestion_id: str) -> Rule:
-        accepted = await self.ctx.advanced.tools.accept_suggestion(suggestion_id)
+    async def accept(self, suggestion_id: str, *, agent_id: str) -> Rule:
+        """Accepted in ``agent_id``'s scope: the service accepts a suggestion only for the
+        agent it was learned for."""
+        tools = self._agent(agent_id).advanced.tools
+        accepted = await tools.accept_suggestion(suggestion_id)
         return Rule(risk=accepted.risk, approve_when=accepted.approve_when or None)
+
+    def _agent(self, agent_id: str) -> MemoryContext:
+        """This catalog's scope, for one agent."""
+        if self.ctx.scope.agent_id == agent_id:
+            return self.ctx
+        return MemoryContext(
+            self.ctx.client, self.ctx.scope.model_copy(update={"agent_id": agent_id})
+        )
 
 
 def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, object]:
@@ -153,17 +173,23 @@ class Rules:
         self._lock = asyncio.Lock()
         #: the tools asked about, the least recently asked forgotten past the bound
         self._names: LRUSet[str] = LRUSet(maxsize=NAMES_KEPT)
+        #: the agents asked for, whose learned suggestions each refresh checks
+        self._agents: LRUSet[str] = LRUSet(maxsize=AGENTS_KEPT)
         #: the catalog's word on them (``None``: unread), and when and under which ETag
         self._rules: dict[str, Rule] | None = None
         self._etag: str | None = None
         self._read_at = 0.0
         self._asked_at = 0.0
         self._unread = False
-        self._suggestions_unread = False
+        #: the agents whose suggestions could not be read at the last try (said once each)
+        self._suggestions_unread: set[str] = set()
 
-    async def get(self, names: Sequence[str]) -> dict[str, Rule] | None:
+    async def get(
+        self, names: Sequence[str], *, agent_id: str | None = None
+    ) -> dict[str, Rule] | None:
         """The rules of ``names`` (and every other tool asked about) as the catalog says now;
-        ``None`` while it cannot be read."""
+        ``None`` while it cannot be read. ``agent_id`` is the agent asking: the suggestions
+        learned from its decisions are checked from now on (at once for a new one)."""
         async with self._lock:
             now = _now()
             new = [n for n in names if n not in self._names]
@@ -172,6 +198,11 @@ class Rules:
             if new:
                 self._etag = None  # other names: the next read is a full one
                 self._asked_at = 0.0
+            if agent_id and agent_id not in self._agents:
+                self._agents.add(agent_id)
+                self._asked_at = 0.0  # its suggestions are checked now
+            elif agent_id:
+                self._agents.add(agent_id)  # the most recently asked
             if self._names and now - self._asked_at > GOVERNANCE_TTL_SECONDS:
                 await self._read(now)
             return self._rules
@@ -202,31 +233,39 @@ class Rules:
         await self._accept_learned()
 
     async def _accept_learned(self) -> None:
-        """Accept each learned approval suggestion for a tool asked about, not accepted yet,
-        unless the tool is at :data:`TOP_RISK` (a person accepts those). A suggestion that
-        cannot be read or accepted now is checked again at the next refresh."""
+        """For each agent asked for: accept each approval suggestion learned from its
+        decisions for a tool asked about, not accepted yet, unless the tool is at
+        :data:`TOP_RISK` (a person accepts those). A suggestion that cannot be read or accepted
+        now is checked again at the next refresh. The agents are asked at once: a refresh takes
+        one round trip however many agents the tenant runs here."""
+        agents = list(self._agents)
+        self._suggestions_unread &= set(agents)  # an agent forgotten past the bound
+        await asyncio.gather(*(self._accepted_for(agent_id) for agent_id in agents))
+
+    async def _accepted_for(self, agent_id: str) -> None:
         try:
-            found = await self._catalog.suggestions()
+            found = await self._catalog.suggestions(agent_id)
         except Exception as exc:
-            if not self._suggestions_unread:
+            if agent_id not in self._suggestions_unread:
                 log.warning(
                     "the approval suggestions could not be read: none is accepted until they "
                     "can be",
-                    extra={"reason": type(exc).__name__},
+                    extra={"reason": type(exc).__name__, "agent_id": agent_id},
                 )
-                self._suggestions_unread = True
+                self._suggestions_unread.add(agent_id)
             return
-        self._suggestions_unread = False
+        self._suggestions_unread.discard(agent_id)
         for suggestion in found:
             rule = (self._rules or {}).get(suggestion.tool)
             if suggestion.accepted or rule is None or rule.risk == TOP_RISK:
                 continue
             try:
-                accepted = await self._catalog.accept(suggestion.id)
+                accepted = await self._catalog.accept(suggestion.id, agent_id=agent_id)
             except Exception as exc:
                 log.warning(
                     "an approval suggestion could not be accepted",
                     extra={
+                        "agent_id": agent_id,
                         "tool": suggestion.tool,
                         "suggestion_id": suggestion.id,
                         "reason": type(exc).__name__,
@@ -237,6 +276,7 @@ class Rules:
             log.info(
                 "an approval suggestion was accepted automatically",
                 extra={
+                    "agent_id": agent_id,
                     "tool": suggestion.tool,
                     "suggestion_id": suggestion.id,
                     "suggestion": suggestion.suggestion,

@@ -99,9 +99,14 @@ class Watched(Governance):
         self.seen: list[Decision] = []
 
     async def check(
-        self, tool: str, args: Mapping[str, Any], *, side_effects: str = "write"
+        self,
+        tool: str,
+        args: Mapping[str, Any],
+        *,
+        side_effects: str = "write",
+        agent_id: str | None = None,
     ) -> Decision:
-        decision = await super().check(tool, args, side_effects=side_effects)
+        decision = await super().check(tool, args, side_effects=side_effects, agent_id=agent_id)
         self.seen.append(decision)
         return decision
 

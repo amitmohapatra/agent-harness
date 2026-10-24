@@ -157,7 +157,7 @@ async def _not_auto_executed(gateway: Gateway, defs: list[ToolDef]) -> list[Tool
 
 
 class Toolbox:
-    """One agent's toolbox in one tenant, kept fresh: the definitions every
+    """One agent's toolbox (``agent_id``'s) in one tenant, kept fresh: the definitions every
     :data:`TOOLS_TTL_SECONDS` (published through ``governance`` when they change; the last
     ones kept while listing fails), the Code Mode choice as governance's rules stand. One
     refresh at a time: concurrent runs that find it stale share one listing."""
@@ -169,8 +169,11 @@ class Toolbox:
         gateway: Gateway | None,
         governance: Governance,
         mcp: Sequence[str] | None = None,
+        agent_id: str | None = None,
     ) -> None:
         self._sources = list(sources)
+        #: whose toolbox it is: governance reads the rules learned for that agent
+        self._agent_id = agent_id
         self._gateway = gateway
         self._governance = governance
         self._lock = asyncio.Lock()
@@ -197,7 +200,7 @@ class Toolbox:
                     _linted(listing)
                 self._listing, self._tools = listing, {}
                 await _publish(self._governance, listing)
-            rules = await self._governance.rules(listing.names)
+            rules = await self._governance.rules(listing.names, agent_id=self._agent_id)
             if rules != self._rules:
                 self._tools, self._rules = {}, rules
             if code_mode not in self._tools:

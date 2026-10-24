@@ -338,3 +338,67 @@ async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness
     assert again.interrupt is not None
     scanned = await Reviewer({"The scan of page 1?": {"pages": 1}}).settle(agent, again)
     assert scanned.answer == {"pages": 1}
+
+
+# --------------------------------------------------------------------------- learned rules
+
+
+@tool(side_effects="write")
+def order(amount: int) -> str:
+    """Order an amount."""
+    paid.append(amount)
+    return f"ordered {amount}"
+
+
+async def test_a_learned_approval_rule_is_accepted_for_its_agent_and_stops_the_pause(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """People approved the buyer's orders often enough that the memory service suggests no
+    longer asking: the next refresh of governance accepts it for the buyer — it reads and
+    accepts the buyer's suggestions in the buyer's scope, the only place the service lists them
+    — and the buyer's next order runs without a pause. Accepted, the rule is the tool's
+    ``approve_when`` in the tenant's catalog (the service writes it there), so it governs every
+    agent's calls of the tool; each agent's own suggestions are read for that agent."""
+    from trellis.harness.governance import catalog as catalog_module
+
+    now = [1000.0]
+    monkeypatch.setattr(catalog_module, "_now", lambda: now[0])
+    memory_service.catalog = {"order": {"side_effects": "write", "approve_when": "true"}}
+
+    async def buy(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("order", amount=5)
+
+    buyer = memory_harness.wrap(buy, id="buyer", tools=[order])
+    clerk = memory_harness.wrap(buy, id="clerk", tools=[order])
+    first = await buyer.run("order five", user="u1")
+    assert first.status is RunStatus.PAUSED  # approve_when "true": every order asks
+    memory_service.suggestions.append(
+        {
+            "id": "sug_buyer_order",
+            "agent_id": "buyer",
+            "tool": "order",
+            "arg_shape": '{"amount":"int"}',
+            "suggestion": "auto_approve",
+            "approvals": 5,
+            "rejections": 0,
+            "edits": 0,
+            "support": 5,
+            "approve_rate": 1.0,
+            "accepted": False,
+            "rule": "false",
+        }
+    )
+    now[0] += catalog_module.GOVERNANCE_TTL_SECONDS + 1
+    again = await buyer.run("order five", user="u1")
+    assert again.status is RunStatus.SUCCESS and again.answer == "ordered 5"  # no pause
+    accepted = [c for c in memory_service.calls if c.name == "accept"]
+    assert [c.scope.get("agent_id") for c in accepted] == ["buyer"]
+    assert memory_service.suggestions[0]["accepted"]
+    listed = {c.scope.get("agent_id") for c in memory_service.calls if c.name == "suggestions"}
+    assert listed == {"buyer"}  # never tenant-wide: the service would list nothing there
+    # the catalog's rule is the tool's now, for every agent: the clerk's order runs too, but
+    # the clerk's own suggestions are read for the clerk
+    later = await clerk.run("order five", user="u2")
+    assert later.status is RunStatus.SUCCESS
+    listed = {c.scope.get("agent_id") for c in memory_service.calls if c.name == "suggestions"}
+    assert listed == {"buyer", "clerk"}

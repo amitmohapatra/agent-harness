@@ -124,13 +124,20 @@ class Governance:
         return governance
 
     async def check(
-        self, tool: str, args: Mapping[str, Any], *, side_effects: str = "write"
+        self,
+        tool: str,
+        args: Mapping[str, Any],
+        *,
+        side_effects: str = "write",
+        agent_id: str | None = None,
     ) -> Decision:
         """The decision for a call of ``tool`` with ``args``. ``side_effects`` is what the tool
         says it does (``read``, ``write``, ``irreversible``); the catalog's word overrides it,
-        and while the catalog cannot be read every tool that does more than read asks."""
+        and while the catalog cannot be read every tool that does more than read asks.
+        ``agent_id`` is the agent making the call (else this governance's own): the approval
+        rules learned from people's decisions on its calls are accepted for it."""
         if self._rules is not None:
-            rules = await self._rules.get([tool])
+            rules = await self._rules.get([tool], agent_id=agent_id or self.agent_id)
             if rules is None:
                 if side_effects != "read":
                     return decide(tool, side_effects, CATALOG_UNREAD, args)
@@ -138,11 +145,15 @@ class Governance:
                 return decide(tool, rule.risk, rule.approve_when, args)
         return decide(tool, side_effects, None, args)
 
-    async def rules(self, names: Sequence[str]) -> dict[str, Rule | None]:
-        """The catalog's rule for each of ``names``: ``None`` for a tool it says nothing about
-        — and for every tool while it cannot be read (:meth:`check` then asks for each one
-        that does more than read)."""
-        found = await self._rules.get(names) if self._rules is not None else None
+    async def rules(
+        self, names: Sequence[str], *, agent_id: str | None = None
+    ) -> dict[str, Rule | None]:
+        """The catalog's rule for each of ``names`` (``agent_id``: whose tools they are, as for
+        :meth:`check`): ``None`` for a tool it says nothing about — and for every tool while it
+        cannot be read (:meth:`check` then asks for each one that does more than read)."""
+        rules = self._rules
+        agent = agent_id or self.agent_id
+        found = await rules.get(names, agent_id=agent) if rules is not None else None
         return {name: (found or {}).get(name) for name in names}
 
     async def publish(

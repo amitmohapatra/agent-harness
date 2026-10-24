@@ -631,14 +631,17 @@ class Harness:
         tenant: str,
         mcp: Sequence[str] | None = None,
         without: Collection[Feature] = (),
+        agent_id: str | None = None,
     ) -> Toolbox:
         """A toolbox of ``sources`` and the MCP tools in ``tenant`` (the key's, or those of
         the Virtual MCPs ``mcp`` names; none ``without`` ``mcp``: no MCP server is asked),
-        published to its catalog and kept fresh (``tools/toolbox.py``)."""
+        published to its catalog and kept fresh (``tools/toolbox.py``) — ``agent_id``'s, whose
+        learned approval rules governance reads."""
         gateway = None if "mcp" in without else self.gateway
         if "mcp" in without:  # its own MCP servers not reached either
             sources = [s for s in sources if not isinstance(s, MCPSource)]
-        return Toolbox(sources, gateway=gateway, governance=self.governance(tenant), mcp=mcp)
+        governance = self.governance(tenant)
+        return Toolbox(sources, gateway=gateway, governance=governance, mcp=mcp, agent_id=agent_id)
 
     async def resolve(
         self,

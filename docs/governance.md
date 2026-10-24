@@ -172,7 +172,13 @@ An approver answers with `agent.resume(interrupt_id, decision, ...)`
 | cancel | the run ends `CANCELLED` |
 
 Each decision is also `TOOL_CALL` feedback, from which the memory service learns approval
-suggestions.
+suggestions. It learns them per agent, from that agent's decisions, and lists and accepts them
+in the agent's scope only. Governance reads them for each agent it governs calls of, at every
+refresh of the catalog (at once for an agent it had not seen), and accepts each one
+automatically, except for an `irreversible` tool, where a person accepts it. An accepted
+suggestion is the tool's `approve_when` in the tenant's catalog. `trellis doctor --agent <id>`
+lists the rules accepted for an agent; without `--agent` it lists those of the agents the key
+may act as.
 
 **Gate a tool in one place.** A framework's own approval gate pauses the run as the same
 approval and takes the same decisions
