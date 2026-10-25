@@ -227,6 +227,9 @@ TOOLS_ATTRIBUTE: Final = "trellis_tools"
 #: Set on a graph built with a checkpointer of its own (``ReAct(checkpointer=)``): for a run
 #: outside the harness only, so ``h.wrap`` refuses it.
 OWN_CHECKPOINTER: Final = "trellis_own_checkpointer"
+#: Set on a graph built with a store of its own (``ReAct(store=)``): for a run outside the
+#: harness only (a wrapped agent's store is the memory service), so ``h.wrap`` refuses it.
+OWN_STORE: Final = "trellis_own_store"
 
 
 def declared_tools(target: Any) -> list[Any]:

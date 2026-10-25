@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 from deepagents import create_deep_agent
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from tests.support.adapters import BUILDERS
@@ -24,7 +24,14 @@ from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import ConfigurationError, RunStatus, ToolSpec
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.evals import tool_coverage
-from trellis.harness.middleware import ANSWER_CHECK, TOOL_GUIDANCE, AnswerCheck, ToolGuidance
+from trellis.harness.middleware import (
+    ANSWER_CHECK,
+    TOOL_GUIDANCE,
+    AnswerCheck,
+    ToolGuidance,
+    ruled,
+)
+from trellis.harness.react import GUIDE_FROM
 from trellis.harness.tools.convert import langchain as lc
 from trellis.harness.tools.lint import MOST_TOOLS, lint
 
@@ -423,3 +430,58 @@ def test_only_the_requests_own_results_count_as_nothing_found() -> None:
     assert _no_record([*now[:1], ToolMessage("ST-1: 4", tool_call_id="3")], None) == ""
     # no request in the conversation at all: every result counts
     assert "no record" in _no_record([ToolMessage("[]", tool_call_id="4")], None)
+
+
+# --------------------------------------------------------------------------- automatic (None)
+def lookers(count: int) -> list[Any]:
+    def look_up(item: str) -> str:
+        """Look an item up in one of the shelves."""
+        return item
+
+    return [tool(look_up, name=f"look_{n}", side_effects="read") for n in range(count)]
+
+
+async def test_automatic_guidance_goes_with_many_tools_only(harness: Harness) -> None:
+    few = lookers(GUIDE_FROM - 1)
+    model = ScriptedChatModel(turns=["hi"])
+    await arm(harness.wrap(ReAct("s", model), id="few"), few).run("hi", user="u")
+    assert guided(model) == [False]
+    many = lookers(GUIDE_FROM)
+    model = ScriptedChatModel(turns=["hi"])
+    await arm(harness.wrap(ReAct("s", model), id="many"), many).run("hi", user="u")
+    assert guided(model) == [True]
+    with pytest.raises(ConfigurationError, match="from_tools is a number of tools"):
+        ToolGuidance(from_tools=0)
+    with pytest.raises(ConfigurationError, match="from_tools is a number of tools"):
+        ToolGuidance(from_tools=True)
+
+
+async def test_the_automatic_check_comes_with_a_rule_in_the_context(harness: Harness) -> None:
+    model = ScriptedChatModel(turns=["no rule here", "checked"])
+    agent = arm(harness.wrap(ReAct("s", model), id="norule"), [look, rule])
+    plain = await agent.run("make a rule for a-1", user="u")
+    assert plain.answer == "no rule here" and checks(model) == 0
+    ruled_model = ScriptedChatModel(turns=["made it", "it is forbidden"])
+    agent = arm(harness.wrap(ReAct("s", ruled_model), id="rule"), [look, rule])
+    said = [
+        {"role": "system", "content": "Remembered: never make a rule for a-1."},
+        {"role": "user", "content": "make a rule for a-1"},
+    ]
+    assert (await agent.run(said, user="u")).answer == "it is forbidden"
+    assert checks(ruled_model) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        ("Never refund twice.", True),
+        ("Policy: approvals over 100.", True),
+        ("You must ask first.", True),
+        ("Refunds are forbidden on Sundays.", True),
+        ("The user likes email.", False),
+        ("", False),
+    ],
+)
+def test_a_rule_is_read_in_the_conversations_own_system_messages(text: str, found: bool) -> None:
+    assert ruled([SystemMessage(content=text), HumanMessage(content="never mind")]) is found
+    assert ruled([HumanMessage(content=text)]) is False  # the user's words are no rule

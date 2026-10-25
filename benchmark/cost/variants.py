@@ -7,12 +7,18 @@ same instructions and model. A new cost feature lands as one more entry of :data
   ``StallGuard``, ``StepLimit``, ``PatchToolCallsMiddleware``, ``ModelHooks``), no result
   paging, no context editing, no summarization, no automatic feature;
   ``without={"code_mode", "tool_search"}``.
-* ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: the features it turns
-  on by itself (planning, scratch files, the ``task`` helper, tool search...), result paging
-  (``FilesystemMiddleware``: a result over 80,000 characters saved, a preview sent), older
-  results cleared past half the window, summarization near its end, ``ToolGuidance`` and
-  ``AnswerCheck`` off, Code Mode where it applies (read-only Code Mode MCP servers of the
-  gateway; this benchmark's catalogues are the harness's own tools, so it does not).
+* ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: Deep Agents'
+  ``create_deep_agent`` with the harness's middleware — the features it turns on by itself
+  (planning, scratch files, the ``task`` helper, tool search...), result paging
+  (``FilesystemMiddleware``: a large result saved, a preview sent), older results cleared past
+  half the window, summarization near its end, ``ToolGuidance`` and ``AnswerCheck`` automatic
+  (``None``), Code Mode where it applies (read-only Code Mode MCP servers of the gateway; this
+  benchmark's catalogues are the harness's own tools, so it does not).
+* ``agent`` — LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep Agents'
+  ``PatchToolCallsMiddleware``): the harness's part without Deep Agents' (no result paging, no
+  summarization, no file tools or helper) — the other base ``ReAct`` could have.
+* ``main+guidance``, ``main+check`` — ``main`` with ``tool_guidance=True`` or
+  ``answer_check=True``: what each is worth when forced on.
 * ``main-<feature>`` — ``main`` without each feature it turns on by itself
   (:data:`AUTOMATIC`: its middleware left out); ``main@8k`` — ``main`` on an 8,192-token
   window;
@@ -31,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from trellis import ReAct
-from trellis.harness.react import defaults_off
+from trellis.harness.react import PLACED, defaults_off
 
 
 @dataclass(frozen=True)
@@ -80,7 +86,11 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
 
 
 def main(
-    setup: Setup, *, off: tuple[str, ...] = (), window: int | None = None
+    setup: Setup,
+    *,
+    off: tuple[str, ...] = (),
+    window: int | None = None,
+    switches: dict[str, bool] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     with defaults_off(*({**PIECES, **AUTOMATIC}[name] for name in off)):
         target = ReAct(
@@ -89,21 +99,48 @@ def main(
             max_steps=setup.max_steps,
             context_window=window or setup.window,
             tools=setup.tools,
+            tool_guidance=(switches or {}).get("tool_guidance"),
+            answer_check=(switches or {}).get("answer_check"),
         )
     return target, {}
+
+
+def agent(setup: Setup) -> tuple[Any, dict[str, Any]]:
+    """``create_agent`` with the harness's middleware: ``ReAct``'s settings, no Deep Agents."""
+    from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
+    from langchain.agents import create_agent
+
+    from trellis import middleware
+    from trellis.harness import middleware as ours
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+    from trellis.harness.gateways import routed_chat_model
+
+    graph = create_agent(
+        routed_chat_model(setup.model) if isinstance(setup.model, str) else setup.model,
+        tools=[],
+        system_prompt=setup.system,
+        middleware=[
+            PatchToolCallsMiddleware(),
+            *middleware(max_steps=setup.max_steps, context_window=setup.window),
+        ],
+        checkpointer=ours.RunCheckpointer(),
+        name="agent",
+    )
+    setattr(graph, TOOLS_ATTRIBUTE, list(setup.tools))  # run by HarnessTools, as ReAct's are
+    return graph, {}
 
 
 #: ``main``'s pieces a ``main-<piece>`` variant turns off, by the name of their middleware.
 PIECES: Final = {
     "paging": "FilesystemMiddleware",
     "context_editing": "ContextEditingMiddleware",
-    "summarization": "SummarizationMiddleware",
+    "summarization": PLACED,
 }
 
 
 #: The features ``ReAct`` turns on by itself (``trellis.harness.automatic``), by the name of
 #: their middleware: a ``main-<feature>`` variant is ``main`` with it left out.
-AUTOMATIC: Final = {"planning": "TodoListMiddleware", "files": "ScratchFiles"}
+AUTOMATIC: Final = {"planning": "TodoListMiddleware", "files": "LongTaskTools"}
 #: The window ``main@8k`` assumes whatever the model's: a small local model's.
 SMALL_WINDOW: Final = 8_192
 
@@ -131,6 +168,21 @@ VARIANTS: Final[dict[str, Variant]] = {
         )
         for feature in AUTOMATIC
     },
+    "agent": Variant(
+        "agent",
+        "create_agent with trellis.middleware(): the harness's part without Deep Agents",
+        agent,
+    ),
+    "main+guidance": Variant(
+        "main+guidance",
+        "main with tool_guidance=True",
+        functools.partial(main, switches={"tool_guidance": True}),
+    ),
+    "main+check": Variant(
+        "main+check",
+        "main with answer_check=True",
+        functools.partial(main, switches={"answer_check": True}),
+    ),
     "main@8k": Variant(
         "main@8k",
         "main on an 8,192-token window, whatever the model's",

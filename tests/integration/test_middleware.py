@@ -565,6 +565,51 @@ async def test_the_checkpoint_is_the_latest_only_and_lives_in_memory_outside_a_r
     assert await saver.aget_tuple(config) is None
 
 
+async def test_a_deep_agents_delta_channels_come_back_whole_from_the_latest_checkpoint() -> None:
+    """Deep Agents keeps ``messages`` and ``files`` as deltas (a snapshot every 50 updates): from
+    the latest checkpoint only, a fresh graph — another worker — rebuilds both whole, pauses
+    and continues."""
+    from deepagents import create_deep_agent
+    from langchain_core.tools import tool as lc_tool
+    from langgraph.types import Command, interrupt
+
+    @lc_tool
+    def ask(question: str) -> str:
+        """Ask a person."""
+        return str(interrupt({"question": question}))
+
+    turns: list[Any] = [
+        ("write_file", {"file_path": f"/n{n}.txt", "content": f"note {n}"}) for n in range(60)
+    ]
+    saver = RunCheckpointer()
+    first = ScriptedChatModel(turns=[*turns, ("ask", {"question": "ok?"})])
+    config: Any = {"configurable": {"thread_id": "t"}, "recursion_limit": 1000}
+    paused = await create_deep_agent(first, tools=[ask], checkpointer=saver).ainvoke(
+        {"messages": [HumanMessage("go")]}, config
+    )
+    assert paused["__interrupt__"] and len(paused["files"]) == 60
+    deltas = saver._threads["t"][""]["deltas"]
+    assert set(deltas) == {"files", "messages"}
+    assert all(d["seed"] is not None for d in deltas.values())  # a snapshot was taken
+    assert all(len(d["writes"]) < 60 for d in deltas.values())  # and the writes since only
+    other = create_deep_agent(ScriptedChatModel(turns=["done"]), tools=[ask], checkpointer=saver)
+    state = await other.aget_state(config)
+    assert len(state.values["messages"]) == len(paused["messages"]) == 122
+    assert len(state.values["files"]) == 60
+    done = await other.ainvoke(Command(resume="yes"), config)
+    assert done["messages"][-1].content == "done" and len(done["files"]) == 60
+    assert [m.content for m in done["messages"]][-2] == "yes"
+
+
+def test_the_delta_history_of_a_checkpoint_not_kept_is_empty() -> None:
+    saver = RunCheckpointer()
+    config: Any = {"configurable": {"thread_id": "t", "checkpoint_ns": "", "checkpoint_id": "x"}}
+    assert saver.get_delta_channel_history(config=config, channels=["messages"]) == {
+        "messages": {"writes": []}
+    }
+    assert saver.get_delta_channel_history(config=config, channels=[]) == {}
+
+
 def test_writes_are_kept_once_per_task_and_index_and_the_special_ones_replaced() -> None:
     saver = RunCheckpointer()
     config: Any = {"configurable": {"thread_id": "t", "checkpoint_ns": "", "checkpoint_id": "1"}}

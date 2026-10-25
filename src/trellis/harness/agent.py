@@ -48,6 +48,7 @@ from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
     OWN_CHECKPOINTER,
+    OWN_STORE,
     context_window,
     declared_tools,
     merged,
@@ -158,6 +159,11 @@ class Agent:
             raise ConfigurationError(
                 f"{id}: ReAct(checkpointer=) is for the graph run on its own: a wrapped agent's "
                 "runs checkpoint into the run (leave checkpointer= out)"
+            )
+        if getattr(target, OWN_STORE, False):
+            raise ConfigurationError(
+                f"{id}: ReAct(store=) is for the graph run on its own: a wrapped agent's store "
+                "is the memory service (leave store= out)"
             )
         self.harness = harness
         self.target = target

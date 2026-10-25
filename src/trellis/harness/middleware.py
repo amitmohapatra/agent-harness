@@ -90,9 +90,11 @@ from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
+    DeltaChannelHistory,
     get_checkpoint_id,
     get_checkpoint_metadata,
 )
+from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
@@ -105,7 +107,7 @@ from trellis.harness import (
 from trellis.harness.adapters.langgraph import TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
-from trellis.harness.gateways import Capability, route_now
+from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
@@ -179,8 +181,25 @@ TOOLSETS: Final = 64
 #: on its default ``StateBackend``; on a backend that writes to a real disk, its file tools are
 #: governed as any other (give them their risk in the catalog).
 STATE_TOOLS: Final = frozenset(
-    {"write_todos", "read_result", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+    {
+        "write_todos",
+        "read_result",
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delete",
+        "glob",
+        "grep",
+    }
 )
+#: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
+#: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
+OUTSIDE_STATE: Final = "trellis_outside_state"
+#: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
+#: (``ReAct``'s: Deep Agents' ``execute`` on a backend that runs nothing, its general-purpose
+#: ``task`` helper, offered on a long task only): it is left out of the run's tool set.
+MACHINERY: Final = "trellis_machinery"
 
 
 class GovernTools(AgentMiddleware):
@@ -199,7 +218,9 @@ class GovernTools(AgentMiddleware):
 
 #: The call a governed run of a framework's own tool is executing (:func:`governed_call`): the
 #: layers under it (a tool node inside a ``GovernTools``) let it through, governed once.
-_GOVERNING: ContextVar[str | None] = ContextVar("trellis_governing", default=None)
+#: By the tool's name and the call's id: a call id is unique in one conversation only, and a
+#: sub-agent's calls are another's.
+_GOVERNING: ContextVar[tuple[str, str] | None] = ContextVar("trellis_governing", default=None)
 
 
 async def governed_call(
@@ -214,7 +235,8 @@ async def governed_call(
     ``Command`` (a Deep Agent's ``task`` updating the graph's state) included — and, replayed
     from the journal, as the message the model read. The harness's tools, the graph's state
     tools (:data:`STATE_TOOLS`), a call already governed and any call outside a run are let
-    through as they are."""
+    through as they are — a file tool of a backend outside the graph's state
+    (:data:`OUTSIDE_STATE`) is governed."""
     runtime = current()
     call = request.tool_call
     own = request.tool
@@ -223,14 +245,14 @@ async def governed_call(
         or own is None
         or converted.made(own)  # the harness's own: its call goes through the bridge itself
         or call["name"] in runtime.toolbox
-        or call["name"] in STATE_TOOLS
-        or _GOVERNING.get() == call["id"]
+        or (call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE))
+        or _GOVERNING.get() == (call["name"], str(call["id"]))
     ):
         return await handler(request)
     produced: list[ToolMessage | Command[Any]] = []
 
     async def run(args: dict[str, Any]) -> Any:
-        token = _GOVERNING.set(call["id"])
+        token = _GOVERNING.set((call["name"], str(call["id"])))
         try:
             done = await _helped(runtime, call["name"], str(call["id"]), args, ran)
         finally:
@@ -610,13 +632,8 @@ class ModelHooks(AgentMiddleware):
         *hooks: Hooks,
         timeout: float | None = None,
         prompt: Stored | None = None,
-        routed: bool = False,
     ) -> None:
         super().__init__()
-        #: the model is a routed name (``gateways.routed_chat_model``): on a route that
-        #: attributes (Bifrost), every call carries the run's dimensions and its ``traceparent``
-        #: (``telemetry.gateway_headers``)
-        self.routed = routed
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
         self.given = list(hooks)
@@ -663,8 +680,10 @@ class ModelHooks(AgentMiddleware):
             request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
-            # in the model's span: the gateway's span of the call joins it
-            if self.routed and route_now().has(Capability.ATTRIBUTION):
+            # in the model's span: the gateway's span of the call joins it. A model name the
+            # harness routes (``gateways.routed_chat_model``), on a route that attributes
+            # (Bifrost): every call carries the run's dimensions and its ``traceparent``
+            if routed(request.model) and route_now().has(Capability.ATTRIBUTION):
                 sent = request.model_settings.get("extra_headers") or {}
                 headers = {**sent, **gateway_headers()}
                 request = request.override(
@@ -701,7 +720,7 @@ class ModelHooks(AgentMiddleware):
         if (
             pin is not None
             and not prompt.variables
-            and self.routed
+            and routed(request.model)
             and route_now().has(Capability.PROMPTS)
         ):
             sent = request.model_settings.get("extra_headers", {})
@@ -1017,14 +1036,20 @@ def read_result(most: int = READ_LIMIT) -> BaseTool:
 
 
 class ReadTools(AgentMiddleware):
-    """``read_file`` offered once the graph's state has a file to read (a large result saved, a
-    summarized history: Deep Agents' ``StateBackend``), ``read_result`` once a result reads as
-    ``placeholder`` (cleared): a small model offered them from the start reads nothing, again
-    and again. Both stay callable."""
+    """The tools that read back what was put aside, offered once there is something to read:
+    ``read_result`` (:func:`read_result`, which it adds to the graph) once a result reads as
+    ``placeholder`` (cleared by a ``ContextEditingMiddleware``), and Deep Agents' ``read_file``
+    once the graph's state holds a file (a large result saved, a summarized history) — a small
+    model offered them from the start reads nothing, again and again. Both stay callable.
+    ``placeholder=None``: no ``read_result`` (nothing is cleared); ``files=True``: ``read_file``
+    always offered (its files are outside the graph's state: a disk, a store, a sandbox, the
+    skills)."""
 
-    def __init__(self, placeholder: str) -> None:
+    def __init__(self, placeholder: str | None, *, files: bool = False) -> None:
         super().__init__()
         self.placeholder = placeholder
+        self.files = files
+        self.tools = [read_result()] if placeholder is not None else []
 
     async def awrap_model_call(
         self,
@@ -1032,14 +1057,16 @@ class ReadTools(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         unused = set()
-        if not request.state.get("files"):
-            unused.add("read_file")
-        if not any(
+        if not self.files and not request.state.get("files"):
+            unused.add(READ_FILE)
+        if self.placeholder is None or not any(
             isinstance(m, ToolMessage) and m.content == self.placeholder for m in request.messages
         ):
             unused.add(READ_RESULT)
         kept = [t for t in request.tools if _named(t) not in unused]
-        return await handler(request.override(tools=kept))
+        return await handler(
+            request if len(kept) == len(request.tools) else request.override(tools=kept)
+        )
 
 
 # --------------------------------------------------------------------------- tool choice
@@ -1137,12 +1164,20 @@ class ToolGuidance(AgentMiddleware):
         text: str | None = TOOL_GUIDANCE,
         *,
         capabilities: Mapping[str, bool] | None = None,
+        from_tools: int = 1,
     ) -> None:
         super().__init__()
         if text is not None and not text.strip():
             raise ConfigurationError("ToolGuidance needs a text (None: the capabilities only)")
+        if isinstance(from_tools, bool) or not isinstance(from_tools, int) or from_tools < 1:
+            raise ConfigurationError(
+                f"from_tools is a number of tools, 1 or more: not {from_tools!r}"
+            )
         self.text = text
         self.capabilities = dict(capabilities or {})
+        #: the guidance goes with a call offering at least this many tools (besides the
+        #: graph's state tools): ``ReAct(tool_guidance=None)`` sets :data:`GUIDE_FROM`
+        self.from_tools = from_tools
 
     async def awrap_model_call(
         self,
@@ -1150,7 +1185,7 @@ class ToolGuidance(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         parts = []
-        if request.tools and self.text is not None:
+        if self.text is not None and _counted(request.tools) >= self.from_tools:
             writes = _writes_offered(request)
             parts.append(self.text)
             if writes:
@@ -1163,6 +1198,26 @@ class ToolGuidance(AgentMiddleware):
         if not parts:
             return await handler(request)
         return await handler(request.override(system_message=_appended(request, "\n".join(parts))))
+
+
+def _counted(tools: Sequence[BaseTool | dict[str, Any]]) -> int:
+    """The tools of a call that are not the graph's own state tools (:data:`STATE_TOOLS`)."""
+    return sum(_named(t) not in STATE_TOOLS for t in tools)
+
+
+#: What says a context holds a rule (:func:`ruled`): a rule, a policy, a "never", an "always",
+#: a "must", something forbidden or not allowed.
+_RULE: Final = re.compile(
+    r"\b(?:rules?|polic(?:y|ies)|never|always|must|forbid\w*|prohibit\w*|not allowed)\b",
+    re.IGNORECASE,
+)
+
+
+def ruled(messages: Sequence[BaseMessage]) -> bool:
+    """Whether the conversation's own system messages — the memory context pushed for the run,
+    the rules an input gives — hold a rule (:data:`_RULE`). The agent's instructions (the
+    request's ``system_message``) are not among them: they always say what to do."""
+    return any(isinstance(m, SystemMessage) and _RULE.search(m.text) for m in messages)
 
 
 class _CheckedState(AgentState[Any]):
@@ -1199,7 +1254,14 @@ class AnswerCheck(AgentMiddleware):
 
     state_schema = _CheckedState
 
-    def __init__(self, checks: int = 1, *, writes: bool = True, text: str = ANSWER_CHECK) -> None:
+    def __init__(
+        self,
+        checks: int = 1,
+        *,
+        writes: bool = True,
+        text: str = ANSWER_CHECK,
+        with_rules_only: bool = False,
+    ) -> None:
         super().__init__()
         if checks < 1:
             raise ConfigurationError("AnswerCheck makes at least 1 check (or leave it out)")
@@ -1208,6 +1270,10 @@ class AnswerCheck(AgentMiddleware):
         self.checks = checks
         self.writes = writes
         self.text = text
+        #: check only an invocation whose context holds a rule (:func:`ruled`: the memory
+        #: context pushed for the run, an input's own system messages):
+        #: ``ReAct(answer_check=None)``
+        self.with_rules_only = with_rules_only
 
     async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         return {CHECKED: 0, WRITE_CHECKED: False}
@@ -1224,6 +1290,7 @@ class AnswerCheck(AgentMiddleware):
             (done >= self.checks and write_checked)
             or not _tools(request, runtime)
             or request.tool_choice == "none"
+            or (self.with_rules_only and not ruled(request.messages))
         ):
             return await handler(request)
         with _quiet():
@@ -1298,10 +1365,9 @@ def _empty(message: ToolMessage) -> bool:
 
 
 def _tools(request: ModelRequest[Any], runtime: Runtime | None) -> bool:
-    """Whether the model has tools to call beyond the readers of earlier results: the run's
-    own, or the graph's."""
-    own = [t for t in request.tools if _named(t) not in (READ_RESULT, READ_FILE)]
-    return bool(own) or bool(runtime is not None and runtime.tool_names())
+    """Whether the model has tools to call beyond the graph's state tools (the readers of
+    earlier results among them): the run's own, or the graph's."""
+    return _counted(request.tools) > 0 or bool(runtime is not None and runtime.tool_names())
 
 
 def _changing(runtime: Runtime | None) -> list[str]:
@@ -1381,8 +1447,15 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     (``Journal.graph``), saved with the run's progress and with its pause. A resume in any
     worker continues where the graph stopped: the model is not asked again, a summary is not
     written again, a tool that finished beside a pause is not run again. Outside a run it is
-    an in-memory checkpointer. A graph whose state uses LangGraph's ``DeltaChannel`` needs the
-    whole history and is not for it."""
+    an in-memory checkpointer.
+
+    A channel kept as deltas (LangGraph's ``DeltaChannel``: Deep Agents' ``messages`` and
+    ``files``) is stored in a checkpoint only every so many updates (its snapshot); in between
+    the graph rebuilds it from the writes since (``get_delta_channel_history``). With the
+    latest checkpoint only, those writes would be gone: each such channel keeps its last
+    snapshot and the writes applied since, beside the checkpoint (``deltas``), and they are
+    what the history returns — a new snapshot starts them again, so they never hold more than
+    the channel's own updates since its last one."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1457,15 +1530,74 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     ) -> RunnableConfig:
         thread_id, ns = _where(config)
         slot = self._slot(thread_id)
-        writes = [w for w in (slot.get(ns) or {}).get("writes", []) if w[0] >= checkpoint["id"]]
+        before = slot.get(ns) or {}
+        parent = _configurable(config).get("checkpoint_id")
+        kept = before.get("writes", [])
+        # the writes the new checkpoint applied — those of the one it follows — in the order
+        # they were applied (the tasks' paths, LangGraph's ``apply_writes``), not finished in
+        applied = sorted(
+            (w for w in kept if w[0] == parent and before.get("id") == parent),
+            key=lambda w: (w[5], w[2]),
+        )
         slot[ns] = {
             "id": checkpoint["id"],
             "checkpoint": self._dumped(checkpoint),
             "metadata": self._dumped(get_checkpoint_metadata(config, metadata)),
-            "parent": _configurable(config).get("checkpoint_id"),
-            "writes": writes,
+            "parent": parent,
+            "writes": [w for w in kept if w[0] >= checkpoint["id"]],
+            "deltas": self._deltas(before.get("deltas") or {}, checkpoint, metadata, applied),
         }
         return _config(thread_id, ns, checkpoint["id"])
+
+    def _deltas(
+        self,
+        kept: Mapping[str, Any],
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        applied: Sequence[Sequence[Any]],
+    ) -> dict[str, Any]:
+        """Each delta channel's last stored value and the writes applied since (``kept``, then
+        what this checkpoint holds or ``applied``): the channels the checkpoint's metadata
+        counts updates of (``counters_since_delta_snapshot``), those it stores a snapshot of,
+        and those kept before."""
+        values = checkpoint["channel_values"]
+        counted = cast(Mapping[str, Any], metadata.get("counters_since_delta_snapshot") or {})
+        names = {*kept, *counted, *(k for k, v in values.items() if isinstance(v, _DeltaSnapshot))}
+        deltas: dict[str, Any] = {}
+        for name in sorted(names):
+            if name in values:  # stored whole: the history starts again from it
+                deltas[name] = {"seed": self._dumped(values[name]), "writes": []}
+                continue
+            entry = kept.get(name) or {"seed": None, "writes": []}
+            added = [[w[1], w[4]] for w in applied if w[3] == name]
+            deltas[name] = {**entry, "writes": [*entry["writes"], *added]} if added else entry
+        return deltas
+
+    def get_delta_channel_history(
+        self, *, config: RunnableConfig, channels: Sequence[str]
+    ) -> Mapping[str, DeltaChannelHistory]:
+        """The delta channels' last stored values and the writes since, for the latest
+        checkpoint (an earlier one is not kept: nothing)."""
+        thread_id, ns = _where(config)
+        record = self._slot(thread_id).get(ns) or {}
+        wanted = get_checkpoint_id(config)
+        latest = not wanted or wanted == record.get("id")
+        deltas = (record.get("deltas") or {}) if latest else {}
+        found: dict[str, DeltaChannelHistory] = {}
+        for name in channels:
+            entry = deltas.get(name) or {"seed": None, "writes": []}
+            history: DeltaChannelHistory = {
+                "writes": [(task, name, self._loaded(value)) for task, value in entry["writes"]]
+            }
+            if entry["seed"] is not None:
+                history["seed"] = self._loaded(entry["seed"])
+            found[name] = history
+        return found
+
+    async def aget_delta_channel_history(
+        self, *, config: RunnableConfig, channels: Sequence[str]
+    ) -> Mapping[str, DeltaChannelHistory]:
+        return self.get_delta_channel_history(config=config, channels=channels)
 
     def put_writes(
         self,

@@ -27,10 +27,11 @@ if TYPE_CHECKING:
     from trellis.harness.harness import Harness
     from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Output, OutputKind, Rewrite
     from trellis.harness.prompts import stored
-    from trellis.harness.react import ReAct
+    from trellis.harness.react import ReAct, middleware
     from trellis.harness.result import Result
     from trellis.harness.runtime import Runtime, current
     from trellis.harness.sandbox import sandbox
+    from trellis.harness.sandbox.backend import docker_sandbox
     from trellis.harness.settings import Settings
     from trellis.harness.tools.mcp import mcp, stdio
     from trellis.harness.tools.sources import a2a, openapi, tool
@@ -53,6 +54,8 @@ _EXPORTS = {
     "llm_judge": "trellis.harness.evals",
     "sandbox": "trellis.harness.sandbox",
     "ReAct": "trellis.harness.react",
+    "middleware": "trellis.harness.react",
+    "docker_sandbox": "trellis.harness.sandbox.backend",
     "current": "trellis.harness.runtime",
     "Agent": "trellis.harness.agent",
     "RunHandle": "trellis.harness.agent",
@@ -80,8 +83,10 @@ __all__ = [
     "Settings",
     "a2a",
     "current",
+    "docker_sandbox",
     "llm_judge",
     "mcp",
+    "middleware",
     "openapi",
     "sandbox",
     "stdio",

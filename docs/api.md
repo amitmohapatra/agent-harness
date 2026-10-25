@@ -267,31 +267,80 @@ a function target.
 ## ReAct
 
 ```text
-ReAct(system_prompt, model, *, tools=(), subagents=(), response_format=None, max_steps=12,
-      max_repeats=3, call_timeout=None, context_window=None, effort=None, tool_guidance=False,
-      answer_check=False, capabilities=None, middleware=(), checkpointer=None)
+ReAct(system_prompt, model, *, tools=(), subagents=(), skills=None, memory_files=None,
+      permissions=None, backend=None, store=None, response_format=None, state_schema=None,
+      context_schema=None, cache=None, max_steps=12, max_repeats=3, call_timeout=None,
+      context_window=None, effort=None, tool_guidance=None, answer_check=None,
+      capabilities=None, middleware=(), checkpointer=None)
 ```
 
-A tool-calling agent for teams with no framework: a LangChain v1 `create_agent` graph with the
-native context middleware and the harness's ([frameworks/react.md](frameworks/react.md)).
+A tool-calling agent for teams with no framework: Deep Agents' `create_deep_agent`, every feature
+of it native, with the harness's [`middleware()`](#middleware) on top
+([frameworks/react.md](frameworks/react.md)). The parameter names are Deep Agents' where both have
+one.
+
+**Must**
 
 | Argument | Default | What it is |
 |---|---|---|
 | `system_prompt` | required | the instructions: a string, or `stored("name", **values)` — the gateway's stored prompt, pinned per run ([prompts.md](prompts.md)) |
 | `model` | required | a model name — through Bifrost with `BIFROST_URL`, else the provider's own SDK with its own key (`openai/...`, `anthropic/...`) — or any LangChain chat model ([configuration.md](configuration.md#models)) |
-| `tools` | `()` | what the agent can call: functions, [`tool`](#tool), LangChain tools, [`mcp`](#mcp-stdio) servers, [`openapi`](#openapi), [`sandbox`](#sandbox) ([tools.md](tools.md)); every run also has the MCP tools the virtual key allows and the memory tools |
-| `subagents` | `()` | agents it hands tasks to, each a tool whose call is a child run: wrapped agents (`h.wrap(...)`) and [`a2a(url)`](#a2a) ([subagents.md](subagents.md)) |
+
+**Usual**
+
+| Argument | Default | What it is |
+|---|---|---|
+| `tools` | `()` | what the agent can call: functions, [`tool`](#tool), LangChain tools, [`mcp`](#mcp-stdio) servers, [`openapi`](#openapi) ([tools.md](tools.md)); every run also has the MCP tools the virtual key allows and the memory tools. A sandbox is a `backend`, an agent a sub-agent: either given here is refused |
 | `response_format` | none | a pydantic model or a JSON schema the answer is parsed into |
+
+**Optional**
+
+| Argument | Default | What it is |
+|---|---|---|
+| `subagents` | `()` | what it hands tasks to, each a child run: Deep Agents' own — a `SubAgent` dict (`name`, `description`, `system_prompt`, `mode` isolated or fork, `tools`, `model`, `middleware`, `skills`, `permissions`, `response_format`; its `interrupt_on` is the catalog's: a tool of its own named there asks a person) or a `CompiledSubAgent` `{"name", "description", "runnable"}` (another `ReAct` among them), called through Deep Agents' `task` tool — and wrapped agents (`h.wrap(...)`) and [`a2a(url)`](#a2a), each a tool ([subagents.md](subagents.md)) |
+| `skills` | none | Deep Agents' skill sources (`["/skills/"]`), read through `backend` |
+| `memory_files` | none | Deep Agents' `memory`: `AGENTS.md`-style files loaded into the instructions (named so it is not taken for the memory service) |
+| `backend` | the graph's state, kept in the run's journal | where Deep Agents' file tools work: a `StateBackend`, `StoreBackend` (the memory service when wrapped), `FilesystemBackend`, `CompositeBackend`, or the run's sandbox: [`docker_sandbox()`](#docker_sandbox) (`execute` runs code there). Files outside the graph's state are the agent's from the start and governed as any tool |
+| `permissions` | none | Deep Agents' `FilesystemPermission` rules for its file tools |
 | `max_steps` | 12 | model calls with tools, then one more without (1 or more) |
-| `max_repeats` | 3 | identical calls in a row that stop the run (1 or more) |
 | `call_timeout` | none | the most one model call may take, in seconds |
-| `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
-| `tool_guidance` | `False` | how to choose among tools, added to every call's instructions (`ToolGuidance`; [tool choice](frameworks/react.md#tool-choice)) |
-| `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |
 | `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
-| `middleware` | `()` | more LangChain or Deep Agents middleware, added; one named like a default is refused |
-| `checkpointer` | the run's (`RunCheckpointer()`) | for the graph run on its own, outside the harness: `h.wrap` refuses a `ReAct` given one |
+
+**Advanced**
+
+| Argument | Default | What it is |
+|---|---|---|
+| `middleware` | `()` | more LangChain or Deep Agents middleware, added before `ModelHooks`; one named as the harness's is refused, one named as Deep Agents' replaces it |
+| `state_schema`, `context_schema` | none | Deep Agents' graph state (a `DeepAgentState` subclass) and run context schemas |
+| `cache` | none | LangGraph's node cache |
+| `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
+| `max_repeats` | 3 | identical calls in a row that stop the run (2 or more) |
+| `tool_guidance` | `None`: automatic | how to choose among tools, added to the instructions (`ToolGuidance`); `None` with 20 tools or more (measured: [tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
+| `answer_check` | `None`: automatic | the draft answer checked against the request once, and the first change against the rules (`AnswerCheck`: one more model call each); `None` when the run's context holds a rule (the memory context, an input's system message), `True` always, `False` never |
+| `store`, `checkpointer` | the memory service; the run's (`RunCheckpointer()`) | for the graph run on its own, outside the harness: `h.wrap` refuses a `ReAct` given either |
+
+Not exposed: Deep Agents' `interrupt_on` (approvals are the [catalog](governance.md)'s), `name`
+(the wrap's `id`), `debug`.
+
+## middleware
+
+```text
+middleware(*, max_steps=12, max_repeats=3, call_timeout=None, context_window=None,
+           tool_guidance=None, answer_check=None, capabilities=None, system_prompt=None)
+```
+
+The harness's part of `ReAct` for a LangChain `create_agent` or a Deep Agents
+`create_deep_agent` graph of your own — `create_deep_agent(model, tools,
+middleware=middleware(), checkpointer=RunCheckpointer())` — the settings meaning what
+[`ReAct`](#react)'s do: the run's tools per model call (narrowed per turn; the memory and gateway
+MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` then a final answer, the
+run's budget, planning on a long task, older results cleared and read back (with a
+`context_window`), the tool guidance and the answer check, and `ModelHooks` (the hooks, the span,
+`call_timeout`, a `stored(...)` `system_prompt` pinned per run). Give the graph
+`checkpointer=RunCheckpointer()` (`trellis.harness.middleware`) for its checkpoint to live in the
+run. A `create_agent` or Deep Agents graph wrapped without it still runs governed and narrowed,
+said once ([frameworks/react.md](frameworks/react.md#the-middleware)).
 
 ## Budget
 
@@ -358,7 +407,20 @@ document's operations as tools, one per `operationId` ([tools.md](tools.md)).
 `sandbox(provider=None, *, image=None, spec=None, call_timeout=120)` — `sandbox_exec`,
 `sandbox_read`, `sandbox_write` in a sandbox of the run's own: Docker (the daemon
 `DOCKER_HOST` names; `image`, else `python:3.12-slim`), or a provider of yours
-([sandbox.md](sandbox.md)).
+([sandbox.md](sandbox.md)) — for a function, OpenAI Agents or Claude target (`agent.tools.use`,
+the framework's own tools); `ReAct` works in [`docker_sandbox()`](#docker_sandbox), its backend.
+
+### docker_sandbox
+
+```text
+docker_sandbox(provider=None, *, image=None, spec=None, call_timeout=120)
+```
+
+The run's sandbox as a Deep Agents backend — `ReAct(backend=docker_sandbox())` or
+`create_deep_agent(backend=...)` — where the file tools and `execute` work: made at the run's
+first call and named in its journal, attached again by a resume, snapshotted and paused while it
+waits for a person, deleted at its end (the same lifecycle as [`sandbox`](#sandbox), Docker unless a
+`provider` is given) ([sandbox.md](sandbox.md)).
 
 ### stored
 

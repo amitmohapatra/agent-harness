@@ -1,8 +1,8 @@
-"""What ``ReAct`` turns on for a long task (``trellis.harness.automatic``): LangChain's
-``TodoListMiddleware`` (``planning``), Deep Agents' scratch files on the journal
-(``files``) — offered from the model's :data:`LONG_AFTER`-th call or when the request asks for
-steps, on a known window with room for them, each off with ``without=``; a short task is
-offered none of them, nor a model whose window is not known."""
+"""What ``ReAct`` offers a long task (``trellis.harness.automatic``): LangChain's
+``TodoListMiddleware`` (``planning``), Deep Agents' scratch files on the journal and its
+general-purpose helper (``files``) — offered from the model's :data:`LONG_AFTER`-th call or when
+the request asks for steps, on a known window with room for them; a short task is offered none
+of them, nor a model whose window is not known."""
 
 from __future__ import annotations
 
@@ -10,25 +10,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from langchain.agents import create_agent
+from deepagents import create_deep_agent
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
-from trellis.harness.automatic import (
-    LONG_AFTER,
-    MIN_WINDOW,
-    SCRATCH,
-    JournalBackend,
-    JournalFiles,
-    ScratchFiles,
-)
+from trellis.harness.automatic import LONG_AFTER, MIN_WINDOW, SCRATCH, TASK, JournalBackend
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
 
-LONG_TOOLS = {"write_todos", *SCRATCH}
+LONG_TOOLS = {"write_todos", TASK, *SCRATCH}
 #: A window with room for the long-task tools.
 ROOM = 128_000
 STEPS = "Do this step by step: "
@@ -191,8 +184,7 @@ async def test_a_file_or_a_runs_files_too_large_are_refused() -> None:
             "ok",
         ]
     )
-    middleware: list[Any] = [JournalFiles(backend, tools=["read_file", *sorted(SCRATCH)])]
-    graph = create_agent(model, middleware=[*middleware, ScratchFiles()])
+    graph = create_deep_agent(model, backend=backend)
     out = await graph.ainvoke({"messages": [HumanMessage(STEPS + "write")]})
     said = [str(m.content) for m in out["messages"] if isinstance(m, ToolMessage)]
     assert "holds at most 10" in said[0]
@@ -266,7 +258,6 @@ async def test_an_edit_replacing_nothing_is_the_backends_own_answer() -> None:
             "ok",
         ]
     )
-    middleware: list[Any] = [JournalFiles(JournalBackend(), tools=["read_file", *sorted(SCRATCH)])]
-    graph = create_agent(model, middleware=[*middleware, ScratchFiles()])
+    graph = create_deep_agent(model, backend=JournalBackend())
     out = await graph.ainvoke({"messages": [HumanMessage(STEPS + "write")]})
     assert out["files"]["/a.md"]["content"] in ("abc", ["abc"])

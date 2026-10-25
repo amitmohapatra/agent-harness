@@ -10,11 +10,13 @@ model calls are what they were before any of these existed (the tools, the instr
 
   * ``planning`` — LangChain's ``TodoListMiddleware`` (:class:`Planning`): the ``write_todos``
     tool and its instructions;
-  * ``files`` — Deep Agents' ``FilesystemMiddleware`` with ``ls``, ``write_file`` and
-    ``edit_file`` besides ``read_file`` (:class:`ScratchFiles` offers them), on a
-    :class:`JournalBackend`: the files are the graph's state, so the run's journal keeps them
-    (a pause, a crash, another worker), each at most :data:`MAX_FILE_CHARS` and all of a run's
-    at most :data:`MAX_RUN_CHARS`.
+  * ``files`` — Deep Agents' scratch file tools (:data:`SCRATCH`: ``ls``, ``write_file``,
+    ``edit_file``, ``delete``, ``glob``, ``grep``) beside ``read_file``, and its
+    general-purpose ``task`` helper when the agent has no sub-agents of its own
+    (:class:`LongTaskTools` offers them; Deep Agents' ``FilesystemMiddleware`` and
+    ``SubAgentMiddleware`` have them all along), on a :class:`JournalBackend`: the files are
+    the graph's state, so the run's journal keeps them (a pause, a crash, another worker), each
+    at most :data:`MAX_FILE_CHARS` and all of a run's at most :data:`MAX_RUN_CHARS`.
 
 * **A budget** given (``h.wrap(budget=)``) — :class:`Budgeted`: once it is spent, one more call
   without tools for the best answer with what the run has.
@@ -25,16 +27,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
-from typing import Annotated, Any, Final, NotRequired
+from typing import Any, Final
 
 from deepagents.backends import StateBackend
 from deepagents.backends.protocol import EditResult, WriteResult
 from deepagents.backends.utils import file_data_to_string
-from deepagents.middleware import FilesystemMiddleware
-from deepagents.middleware.filesystem import _file_data_reducer
 from langchain.agents.middleware import (
     AgentMiddleware,
-    AgentState,
     ModelRequest,
     ModelResponse,
 )
@@ -57,8 +56,11 @@ _ITEM: Final = re.compile(r"(?m)^\s*(?:\d{1,2}[.)]|[-*•])\s+\S")
 _CUE: Final = re.compile(r"\bstep[- ]by[- ]step\b|\bmulti-?step\b|\b(?:a|the|your) plan\b", re.I)
 #: ``write_todos``: the planning tool.
 TODOS: Final = "write_todos"
-#: The scratch file tools a long task is offered (``read_file`` reads paged results anyway).
-SCRATCH: Final = frozenset({"ls", "write_file", "edit_file"})
+#: Deep Agents' scratch file tools a long task is offered (``read_file`` reads saved results
+#: anyway: ``ReadTools``).
+SCRATCH: Final = frozenset({"ls", "write_file", "edit_file", "delete", "glob", "grep"})
+#: Deep Agents' sub-agent tool: its general-purpose helper is a long task's.
+TASK: Final = "task"
 #: A file the model writes holds at most this many characters; all of a run's at most
 #: :data:`MAX_RUN_CHARS`. What the harness saves itself (a large result, a summarized
 #: history) is not counted.
@@ -214,39 +216,16 @@ class JournalBackend(StateBackend):
         return super().edit(file_path, old_string, new_string, replace_all)
 
 
-class FilesState(AgentState[Any]):
-    """The graph's files, merged by Deep Agents' own reducer as a plain channel: Deep Agents
-    keeps them in a ``DeltaChannel``, which needs every earlier checkpoint — the run's
-    checkpointer keeps the latest only (``RunCheckpointer``), so a resume would find no
-    files."""
+class LongTaskTools(_LongTasks, AgentMiddleware):
+    """Deep Agents' tools that only a long task is offered (``tools``: the scratch file tools,
+    and ``task`` when its only sub-agent is its general-purpose one): until then the model is
+    sent neither them nor what they cost. Deep Agents' ``FilesystemMiddleware`` and
+    ``SubAgentMiddleware`` have them all along."""
 
-    files: Annotated[NotRequired[dict[str, Any]], _file_data_reducer]
-
-
-class JournalFiles(FilesystemMiddleware):
-    """Deep Agents' ``FilesystemMiddleware`` on a :class:`JournalBackend`, its files in a
-    channel the run's journal keeps whole (:class:`FilesState`): a large result saved there, a
-    summarized history and the scratch files are all there after a pause, a crash or a move to
-    another worker. ``tools``: the file tools it has (``ReAct``: ``read_file`` and the scratch
-    tools :class:`ScratchFiles` offers). Named as Deep Agents', so a ``FilesystemMiddleware``
-    given to ``ReAct(middleware=)`` replaces it."""
-
-    def __init__(self, backend: JournalBackend, *, tools: list[Any]) -> None:
-        super().__init__(backend=backend, tools=tools)
-        self.state_schema = FilesState  # type: ignore[assignment]
-
-    @property
-    def name(self) -> str:
-        return FilesystemMiddleware.__name__
-
-
-class ScratchFiles(_LongTasks, AgentMiddleware):
-    """``ls``, ``write_file`` and ``edit_file`` (Deep Agents' ``FilesystemMiddleware``, which
-    ``ReAct`` builds with them) offered on a long task."""
-
-    def __init__(self, *, window: int | None = None) -> None:
+    def __init__(self, *, window: int | None = None, tools: Collection[str] = SCRATCH) -> None:
         super().__init__()
         self.window = window
+        self.held = frozenset(tools)
 
     async def awrap_model_call(
         self,
@@ -255,4 +234,4 @@ class ScratchFiles(_LongTasks, AgentMiddleware):
     ) -> ModelResponse[Any]:
         if self.wanted(request):
             return await handler(request)
-        return await handler(without_tools(request, SCRATCH))
+        return await handler(without_tools(request, self.held))
