@@ -109,7 +109,7 @@ async def test_hundreds_of_tools_narrowed_by_hints_widen_to_the_writes_only(
         assert (await agent.run("note a", user="u")).answer == "noted"
     memory = sorted(MEMORY_TOOLS)
     assert model.requests[0]["tools"] == sorted(["r000", *memory])
-    assert model.requests[1]["tools"] == sorted(["note", "r000", *memory])
+    assert model.requests[1]["tools"] == [*sorted(["r000", *memory]), "note"]  # appended
     assert [f.code for f in lint([t.spec for t in [*reads, note]])][-1] == "too_many_tools"
 
 

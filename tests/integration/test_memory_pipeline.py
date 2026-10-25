@@ -173,8 +173,9 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     # the candidates and the memory tools, never all six, sorted by name
     assert offered[0] == sorted(["t1", "t3", *memory_tools])
     assert offered[1] == sorted(["t1", "t3", *memory_tools])
-    # tool_search found t5 among the run's own tools: offered from the next call on
-    assert offered[2] == sorted(["t1", "t3", "t5", *memory_tools])
+    # tool_search found t5 among the run's own tools: offered from the next call on, after
+    # the others (the order they were first offered: a prompt cache keeps the prefix)
+    assert offered[2] == [*sorted(["t1", "t3", *memory_tools]), "t5"]
 
 
 async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(

@@ -221,6 +221,12 @@ async def test_memory_is_trimmed_last_its_lowest_ranked_items_first_never_rules_
     ):
         assert kept in left  # standing instructions, the plan, a rule, the best-ranked: kept
     assert not any(f"[m{n}]" in left for n in (1, 4, 5))
+    least = int(_size(request([HumanMessage("refund o-7")], [])) / 0.95) + 5
+    bare = (await sent(FitWindow(least), given)).messages[0].text  # every item that may go: gone
+    assert not any(f"[m{n}]" in bare for n in (1, 2, 4, 5)) and "never ship" in bare
+    pinned = SystemMessage("## Profile\n- Answer in French." * 40, id=ours.CONTEXT_MESSAGE_ID)
+    only = request([pinned, HumanMessage("refund o-7")], [])
+    assert (await sent(FitWindow(least), only)).messages[0] is pinned  # nothing it may drop
 
 
 async def test_memory_stays_whole_when_a_summarization_after_it_makes_it_fit() -> None:
@@ -231,3 +237,22 @@ async def test_memory_stays_whole_when_a_summarization_after_it_makes_it_fit() -
     out = await sent(FitWindow(window, turns=False), given)
     assert out.messages[0].text == MEMORY  # the older turns are the summarization's to shrink
     assert len(out.messages) == len(given.messages)
+
+
+def test_the_tools_keep_the_order_they_were_first_offered_in() -> None:
+    class Run:  # a run, as the order is kept per run
+        pass
+
+    hooks, run = ours.ModelHooks(), Run()
+    a, b, c, d = (lc(n, "x.") for n in "abcd")
+
+    def order(*tools: Any) -> list[str]:
+        out = hooks._in_order(request([HumanMessage("hi")], list(tools)), run)  # type: ignore[arg-type]
+        return [ours._named(t) for t in out.tools]
+
+    assert order(c, a) == ["a", "c"]  # the first call's by name
+    assert order(d, a, c, b) == ["a", "c", "b", "d"]  # those offered later after them
+    assert order(b, a) == ["a", "b"]  # narrowed (a request over the window), its order kept
+    assert order(c, b, a, d) == ["a", "c", "b", "d"]  # back in their places
+    given = request([HumanMessage("hi")], [a])
+    assert hooks._in_order(given, run) is given and hooks._in_order(given, None) is given  # type: ignore[arg-type]

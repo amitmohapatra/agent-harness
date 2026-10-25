@@ -641,6 +641,10 @@ class ModelHooks(AgentMiddleware):
         self.given = list(hooks)
         self.timeout = timeout
         self.prompt = prompt
+        #: each run's tools in the order they were first offered (:meth:`_in_order`)
+        self._order: weakref.WeakKeyDictionary[Runtime, dict[str, int]] = (
+            weakref.WeakKeyDictionary()
+        )
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
@@ -669,7 +673,7 @@ class ModelHooks(AgentMiddleware):
     ) -> ModelResponse[Any]:
         runtime = current()
         hooks = running(*self.given)
-        request = _with_task(_unbroken(_offered(request, runtime)))
+        request = self._in_order(_with_task(_unbroken(_offered(request, runtime))), runtime)
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
@@ -703,6 +707,20 @@ class ModelHooks(AgentMiddleware):
             await hooks.answered(call, reply)
             _replied(span, reply)
         return reply
+
+    def _in_order(self, request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
+        """The tools in the order the run first offered them — the first call's by name, each
+        tool offered later (a ``tool_search`` find, a long task's tools) after them — so a
+        provider's prompt cache, whose prefix the tools open, keeps it while the set only
+        grows: a tool offered again returns to its place, never moving the others."""
+        if runtime is None or len(request.tools) < 2:
+            return request
+        order = self._order.setdefault(runtime, {})
+        for name in sorted({_named(t) for t in request.tools} - order.keys()):
+            order[name] = len(order)
+        tools = sorted(request.tools, key=lambda t: order[_named(t)])
+        same = all(a is b for a, b in zip(tools, request.tools, strict=True))
+        return request if same else request.override(tools=tools)
 
     async def _pinned(self, runtime: Runtime | None) -> ResolvedPrompt | None:
         """The stored prompt's version this run uses: the journal's (a resumed run uses the
@@ -1649,8 +1667,7 @@ def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
     first = re.split(r"(?<=[.!?])\s", str(function.get("description") or ""), maxsplit=1)[0]
     function["description"] = first[:FIT_DESCRIPTION]
     for spec in (function.get("parameters") or {}).get("properties", {}).values():
-        if isinstance(spec, dict):
-            spec.pop("description", None)
+        spec.pop("description", None)
     return found
 
 

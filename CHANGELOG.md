@@ -77,6 +77,10 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
 
 ### Changed
 
+- A run's tools are offered in the order first offered (the first call's by name, those offered
+  later after them, a tool offered again in its old place), not re-sorted by name each call: the
+  set only grows at its end, so a provider's prompt cache (whose prefix the tools open) is broken
+  once per growth, not reordered.
 - Deep Agents' summarization stands after the harness's middleware that narrow the tools, so
   its budget counts what the model is sent.
 - The base and the automatic rules were chosen by one Granite batch (the cost benchmark's ten

@@ -220,7 +220,9 @@ async def test_a_run_narrowed_by_the_hints_is_offered_every_tool_from_the_check(
         assert (await agent.run("note a", user="u")).answer == "noted"
     memory = sorted(MEMORY_TOOLS)
     assert model.requests[0]["tools"] == sorted(["look", *memory])
-    assert model.requests[1]["tools"] == sorted([t.spec.name for t in tools] + memory)
+    first = sorted(["look", *memory])  # the tools offered later follow, by name
+    widened = sorted({t.spec.name for t in tools} - set(first))
+    assert model.requests[1]["tools"] == [*first, *widened]
 
 
 # --------------------------------------------------------------------------- native selector

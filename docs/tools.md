@@ -130,7 +130,7 @@ more tools, the model is then offered:
 
 | Framework | Narrowing |
 |---|---|
-| `ReAct`, a graph with `HarnessTools` | per model call (each request carries the tools offered at that moment, sorted by name; the set only grows within a run) |
+| `ReAct`, a graph with `HarnessTools` | per model call (each request carries the tools offered at that moment, in the order first offered — the first call's by name, those offered later after them — so the set only grows at its end within a run and a provider's prompt cache keeps its prefix) |
 | OpenAI Agents | per turn (`FunctionTool.is_enabled`): the harness's tools and the agent's own function tools (theirs is kept, and asked first); its hosted tools are the provider's |
 | Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query): the harness's tools, and Claude's own built-ins and MCP tools left out of the query's `disallowed_tools` (yours are kept) |
 | `create_agent` / Deep Agents graph | per model call: the harness runs a copy of the graph whose model calls go through one more `awrap_model_call` handler, offering the tools offered at that moment — its own tools of the set too (your graph object is unchanged) |
