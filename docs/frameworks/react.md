@@ -292,7 +292,10 @@ Each step taken is said on the run (a `warning` event, code `context_fit`, namin
 in the log. The count is an estimate (Deep Agents'): when the model's server still refuses the
 request as over its window — its tokenizer makes more tokens of it — the request is fitted again
 by the server's own count and sent once more, and — when the server stated its count — that
-model's later calls are fitted by the learned ratio from the start. Only when the instructions and the user's own message alone do not fit does the call
+model's later calls are fitted by the learned ratio from the start. The ratio is also learned
+from what each reply says its request was, so a request that fits by the model's own count is
+sent as it is; and the tools a run's narrowing kept are kept first on its later calls (the
+same set while it fits: a prompt cache keeps its prefix). Only when the instructions and the user's own message alone do not fit does the call
 fail: a `ContextTooLarge` (`CONTEXT_TOO_LARGE`) naming the window and the size. The memory
 context's own budget is unchanged (5% of the window, 2,000 to 8,000 tokens): it is the last
 thing shrunk, and only for a request that would overflow.

@@ -55,7 +55,15 @@ import logging
 import re
 import types
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
@@ -1476,9 +1484,11 @@ FIT_STEPS: Final = ("guidance", "tools", "descriptions", "results", "turns", "me
 #: ``refit``: a request the model's server refused as over its window, fitted again with the
 #: server's own count (:data:`_RATIOS`) and sent once more.
 FITTED: Final[collections.Counter[str]] = collections.Counter()
-#: A model's tokens per counted token, learned from a request its server refused as too large
-#: (the count is an estimate: a tokenizer may make more of the same text), by model name.
+#: A model's tokens per counted token, by model name: learned from what its replies say their
+#: requests were, and from a request its server refused as too large (the count is an
+#: estimate: a tokenizer makes more or fewer tokens of the same text); within ``FIT_RATIOS``.
 _RATIOS: Final[LRU[str, float]] = LRU(64)
+FIT_RATIOS: Final = (0.8, 2.0)
 #: A model server's refusal of a request over its window (OpenAI's, Anthropic's, llama.cpp's,
 #: vLLM's words), and the size it says the request was.
 _OVERFLOW: Final = re.compile(
@@ -1523,7 +1533,9 @@ class FitWindow(AgentMiddleware):
     The count is an estimate (Deep Agents'): when the model's server still refuses the request
     as over its window (its tokenizer makes more tokens of it), it is fitted again by the
     server's own count and sent once more (``refit``), that model's later calls fitted by the
-    learned ratio from the start (a refusal that states no count tightens that call only).
+    learned ratio from the start (a refusal that states no count tightens that call only); the
+    ratio is also learned from what each reply says its request was, so a request that fits by
+    the model's own count is sent as it is.
 
     When the instructions and the user's own message alone do not fit, the call fails with a
     :class:`ContextTooLarge` naming the window and the size. A request that fits is sent as it
@@ -1543,6 +1555,8 @@ class FitWindow(AgentMiddleware):
         self.window = window
         self.optional = tuple(optional)
         self.turns = turns
+        #: each run's tools its last narrowed call kept (:func:`_narrowed`'s ``before``)
+        self._kept: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = weakref.WeakKeyDictionary()
 
     async def awrap_model_call(
         self,
@@ -1554,9 +1568,11 @@ class FitWindow(AgentMiddleware):
             return await handler(request)
         name = _model_name(request.model) or ""
         ratio = _RATIOS.get(name) or 1.0
-        sent = self._within(request, int(budget / ratio))
+        sent, counted = self._within(request, int(budget / ratio))
         try:
-            return await handler(sent)
+            reply = await handler(sent)
+            _calibrated(name, counted, reply)
+            return reply
         except Exception as exc:
             real = _refused_size(exc)
             if real is None:
@@ -1564,17 +1580,21 @@ class FitWindow(AgentMiddleware):
             # the server counts more than the estimate: fitted again by its count, once — a
             # count it stated is the model's from then on; a refusal that states none (Deep
             # Agents' own budget check after its summary) tightens this call only
-            counted = _size(sent)
             if real and counted:
                 learned = _RATIOS[name] = max(ratio * 1.1, real / counted)
             else:
                 learned = ratio * 1.25
             FITTED["refit"] += 1
             log.info("the model's server refused %s tokens: fitted again", real or "too many")
-            return await handler(self._within(request, int(budget / learned)))
+            return await handler(self._within(request, int(budget / learned))[0])
 
-    def _within(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
-        return request if _size(request) <= budget else self._fitted(request, budget)
+    def _within(self, request: ModelRequest[Any], budget: int) -> tuple[ModelRequest[Any], int]:
+        """The request fitted to ``budget`` (counted tokens), and its count."""
+        size = _size(request)
+        if size <= budget:
+            return request, size
+        fitted = self._fitted(request, budget)
+        return fitted, _size(fitted)
 
     def _budget(self, request: ModelRequest[Any]) -> int | None:
         profile = getattr(request.model, "profile", None)
@@ -1592,12 +1612,13 @@ class FitWindow(AgentMiddleware):
 
     def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         runtime = current()
+        before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
         taken: list[str] = []
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
             self._without_guidance,
-            lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP),
+            lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
-            lambda r, b: _cut(_narrowed(_cleared(r), b, runtime, least=0), b),
+            lambda r, b: _cut(_narrowed(_cleared(r), b, runtime, least=0, before=before), b),
             lambda r, b: _latest(r) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
@@ -1620,6 +1641,8 @@ class FitWindow(AgentMiddleware):
                 source="langgraph",
                 details={"budget": budget, "size": size},
             )
+        if runtime is not None and ("tools" in taken or "results" in taken):
+            self._kept[runtime] = frozenset(_named(t) for t in request.tools)
         said = (
             f"the request was made to fit the model's window ({budget} tokens): {', '.join(taken)}"
         )
@@ -1641,6 +1664,22 @@ class FitWindow(AgentMiddleware):
         if kept == text:
             return request
         return request.override(system_message=SystemMessage(content=kept))
+
+
+def _calibrated(name: str, counted: int, reply: Any) -> None:
+    """The model's tokens per counted token, from what its reply says the request was
+    (``usage_metadata``): the count is an estimate, over a tokenizer's count or under it; a
+    request that fits the window by the model's own count is then not narrowed. Averaged with
+    what was learned, within :data:`FIT_RATIOS`."""
+    said = reply.result[-1] if isinstance(reply, ModelResponse) and reply.result else reply
+    usage = getattr(said, "usage_metadata", None) or {}
+    real = usage.get("input_tokens")
+    if not isinstance(real, int) or real <= 0 or counted <= 0:
+        return
+    low, high = FIT_RATIOS
+    observed = min(high, max(low, real / counted))
+    known = _RATIOS.get(name)
+    _RATIOS[name] = observed if known is None else (known + observed) / 2
 
 
 def _refused_size(exc: BaseException) -> int | None:
@@ -1671,12 +1710,18 @@ def _bare(request: ModelRequest[Any]) -> ModelRequest[Any]:
 
 
 def _narrowed(
-    request: ModelRequest[Any], budget: int, runtime: Runtime | None, *, least: int
+    request: ModelRequest[Any],
+    budget: int,
+    runtime: Runtime | None,
+    *,
+    least: int,
+    before: Collection[str] = (),
 ) -> ModelRequest[Any]:
     """The request's tools ranked — those the run used (and the graph's own state tools),
-    those the tool hints chose, then by the words they share with the user's latest message —
-    and kept in that order while they fit what the messages leave, at least ``least`` (the
-    used ones always)."""
+    those an earlier call of the run kept (``before``: the same set call after call, so a
+    prompt cache keeps its prefix), those the tool hints chose, then by the words they share
+    with the user's latest message — and kept in that order while they fit what the messages
+    leave, at least ``least`` (the used ones always)."""
     tools = list(request.tools)
     if not tools:
         return request
@@ -1690,7 +1735,8 @@ def _narrowed(
         name = _named(tool)
         must = name in used or name in STATE_TOOLS
         shared = len(words & set(_WORD.findall(f"{name} {_described(tool)}".lower())))
-        return (0 if must else 1 if name in hinted else 2, -shared, n)
+        tier = 0 if must else 1 if name in before else 2 if name in hinted else 3
+        return (tier, -shared, n)
 
     room = budget - _size(request.override(tools=[]))
     kept: list[BaseTool | dict[str, Any]] = []

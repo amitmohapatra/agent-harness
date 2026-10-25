@@ -153,6 +153,8 @@ async def test_react_on_a_small_window_with_many_tools_runs_and_says_what_it_dro
     assert any(d.get("code") == "context_fit" for d in said), said
     assert len(model.requests[0]["tools"]) < 60
     assert "look_3" in model.requests[1]["tools"]  # a tool the run used stays offered
+    # the same tools call after call (a prompt cache keeps its prefix)
+    assert model.requests[1]["tools"] == model.requests[0]["tools"]
 
 
 async def test_middleware_on_create_agent_fits_with_its_window(harness: Harness) -> None:
@@ -304,3 +306,40 @@ async def test_a_request_the_server_refuses_as_too_large_is_fitted_by_its_count(
 
     with pytest.raises(ModelError, match="boom"):  # anything else is not a refusal
         await fit.awrap_model_call(given, broken)
+
+
+async def test_the_ratio_is_learned_from_what_replies_say_their_requests_were() -> None:
+    from langchain_core.messages.ai import UsageMetadata
+
+    ours._RATIOS._data.clear()
+    tools = [lc(f"tool_{n}") for n in range(30)]
+    given = request([HumanMessage("please refund order o-7")], tools)
+    counted = _size(given)
+    window = int((counted - 40) / 0.95)  # over the window by the estimate
+    seen: list[ModelRequest[Any]] = []
+    said: list[int] = [int(counted * 0.5), int(counted * 0.9)]
+
+    async def handler(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        seen.append(r)
+        usage = UsageMetadata(input_tokens=said.pop(0), output_tokens=1, total_tokens=1)
+        return ModelResponse(result=[AIMessage(content="ok", usage_metadata=usage)])
+
+    fit = FitWindow(window)
+    await fit.awrap_model_call(given, handler)
+    assert len(seen[0].tools) < len(tools)  # nothing learned yet: fitted by the estimate
+    name = ours._model_name(given.model) or ""
+    first = ours._RATIOS.get(name)
+    assert first is not None and first >= ours.FIT_RATIOS[0]  # within the bounds
+    await fit.awrap_model_call(given, handler)
+    assert seen[1] is given  # fits by the model's own count: sent as it is
+    assert ours._RATIOS.get(name) == pytest.approx(
+        (first + 0.9 * counted / _size(seen[1])) / 2, 0.05
+    )
+
+    async def silent(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        return ModelResponse(result=[])
+
+    before = ours._RATIOS.get(name)
+    await fit.awrap_model_call(given, silent)  # a reply that says nothing teaches nothing
+    assert ours._RATIOS.get(name) == before
+    ours._RATIOS._data.clear()
