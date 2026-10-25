@@ -343,3 +343,22 @@ async def test_the_ratio_is_learned_from_what_replies_say_their_requests_were() 
     await fit.awrap_model_call(given, silent)  # a reply that says nothing teaches nothing
     assert ours._RATIOS.get(name) == before
     ours._RATIOS._data.clear()
+
+
+def test_the_longest_results_are_cut_first_and_only_as_far_as_needed() -> None:
+    calls = [
+        AIMessage(content="", tool_calls=[{"id": f"c{n}", "name": "a", "args": {}}]) for n in (1, 2)
+    ]
+    messages = [
+        HumanMessage("go"),
+        calls[0],
+        ToolMessage("y" * 4_000, tool_call_id="c1"),
+        calls[1],
+        ToolMessage("x" * 40_000, tool_call_id="c2"),
+    ]
+    given = request(messages, [])
+    out = ours._cut(given, _size(given) - 2_000)
+    assert out.messages[2].text == "y" * 4_000  # the shorter one is left whole
+    assert "characters cut to fit the window" in out.messages[4].text
+    small = request([HumanMessage("go"), calls[0], ToolMessage("z" * 50, tool_call_id="c1")], [])
+    assert ours._cut(small, 1) is small  # too short to cut

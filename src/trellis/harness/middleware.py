@@ -1853,7 +1853,8 @@ def _cut(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         if over <= 0:
             break
         text = messages[n].text
-        keep = max(200, len(text) - over * 4)  # tokens to characters, as the count does
+        # tokens to characters, as the count does, and room for the marker said in its place
+        keep = max(200, len(text) - over * 4 - 64)
         if keep >= len(text):
             continue
         half = keep // 2
