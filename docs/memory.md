@@ -19,7 +19,7 @@ Before the agent runs, `/v1/context` for the run's question — its token budget
 model's context window when the target says it (a `context_window` or `max_input_tokens`
 attribute on the target or its `model`, or a LangChain model's `profile`), between 2000 and
 8000, else 2000 — answered in
-the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, tools?}`, items cited
+the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, memory_ids?, tools?}`, items cited
 by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
 message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what
 the grounding check verifies the answer against. Where the input has no place for it — a
@@ -27,6 +27,21 @@ function target given text, a graph whose input has no `messages` — and the ru
 reads `trellis.current().context`, the agent answers without it: a warning says so once per
 agent (`memory_context`), naming the fix (read `agent.context`, or give the input its
 messages); the harness puts the context nowhere else.
+
+```python
+import trellis
+
+
+# a function target given text: the runtime it is given, or trellis.current() in code it calls
+async def answer(question: str, agent: trellis.Runtime) -> str:
+    return await my_llm(system=agent.context or "", user=question)
+
+
+# a graph whose state has no messages: a node reads the run's context
+def triage(state: Ticket) -> dict[str, str]:
+    context = trellis.current().context  # None when nothing was pushed
+    return {"answer": classify(state["question"], context)}
+```
 
 * `document_ids` when the run names documents (`agent.run(..., document_ids=[...])`, the ids
   `h.add_document` returned): the context draws its passages from those alone. Kept with the
@@ -148,16 +163,19 @@ precedence **human > judge > system**:
   judge and people outrank it, and the service keeps an unverified `confirm` as the run's
   outcome only — it moves no memory's confidence, learned skill or tool statistic. What the
   service learns from comes from the judge's verdict on a sampled run and from people's
-  reviewed verdicts.
+  reviewed verdicts. The record keeps what the run's context showed, in its metadata under
+  `pushed`: the context's `bundle_id` and the ids of the memories in it (`memory_ids`, at
+  most 50).
 * **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
   (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim, or a context that held no
   evidence (every claim would be "unsupported" against nothing), is no verdict and no score.
-* **human** — `h.feedback(run_id, verdict, correction=None)`, citing the memories the judge's
-  verdict found the answer rests on (`evidence_refs`: a run the sample verified; none otherwise),
-  whose confidence it moves. The memory service stores a
+* **human** — `h.feedback(run_id, verdict, correction=None)`, citing the memories the answer
+  rests on (`evidence_refs`), whose confidence it moves: the ones the judge's verdict found on a
+  run the sample verified, and on any other run the memories its context showed (the `system`
+  record's `pushed`); none when no context was pushed. The memory service stores a
   person's verdict as a vote that waits for the tenant administrator (`review.state ==
   "pending"`, its ADR 0028): it changes the run's outcome, and the confidence of what the run
   cited, only once approved (`GET /v1/feedback/pending`, `POST /v1/feedback/{id}/approve`

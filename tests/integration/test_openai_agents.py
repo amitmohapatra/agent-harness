@@ -417,6 +417,32 @@ async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog(
     assert finished.answer == "ok" and done == ["refund o1"]  # once: the journal kept it
 
 
+async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The specialist a run hands off to gets the run's memory tools (not the harness tools of
+    the agent it started with), and its own tools are offered as the hints narrow them."""
+
+    def make(i: int) -> Any:
+        def lookup(key: str) -> str:
+            return f"t{i}"
+
+        return tool(lookup, name=f"t{i}", side_effects="read")
+
+    memory_service.candidates = ["t2"]  # refund is no candidate
+    model = ScriptedModel(
+        [("transfer_to_billing", {}), ("memory_search", {"query": "orders"}), "checked"]
+    )
+    triage, billing, _ = _desk(model)
+    agent = memory_harness.wrap(triage, id="desk", tools=[make(i) for i in range(6)])
+    assert (await agent.run("find t2", user="u1")).answer == "checked"
+    assert model.tools[0] == ["t2", *MEMORY_TOOLS]
+    # billing: its own refund narrowed away, the memory tools added (not triage's t0..t5)
+    assert model.tools[1] == MEMORY_TOOLS
+    assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
+    assert [t.name for t in billing.tools] == ["refund"]  # yours, unchanged
+
+
 async def test_a_handoff_object_is_said_once_and_kept(
     harness: Harness, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
+    from trellis.harness.bridges.helpers import Helpers
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
@@ -138,6 +140,10 @@ class Runtime:
     #: how far memory covered the question (its ``evidence_status``: ``COMPLETE``,
     #: ``INCOMPLETE``, ``INSUFFICIENT``), when a context was pushed
     evidence: str | None = None
+    #: what the pushed memory context showed — its ``bundle_id`` and the ids of the memories
+    #: in it (``memory_ids``) — kept with the run's outcome record so a person's verdict on
+    #: the run cites them (``RunMemory.cited``); empty when nothing was pushed
+    pushed: dict[str, Any] = field(default_factory=dict)
     #: the question the run is working on (memory queries, tool-call tasks)
     task: str = ""
     #: the documents the run's memory context draws its passages from (``document_ids=``;
@@ -196,11 +202,16 @@ class Runtime:
     #: the run whose tool call this run works in (a sub-agent's run, ``Agent.as_tool``): its
     #: journal is kept in the parent's, and saved with the parent's progress
     parent: Runtime | None = None
+    #: the helpers the framework spawns in this attempt (``bridges.helpers``), once its
+    #: adapter made them
+    helpers: Helpers | None = None
     #: the task the attempt runs in (``agent.cancel`` cancels it), and why it was cancelled
     running_in: asyncio.Task[Any] | None = None
     cancelled: str | None = None
     _asked: int = 0
     _steps: int = 0
+    #: the child runs this attempt started, by where it started them and their agent
+    _children: Counter[tuple[str, str]] = field(default_factory=Counter, repr=False)
     _saved_at: float | None = None
     #: one progress save at a time, so a later save never lands before an earlier one
     _saving: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -304,6 +315,14 @@ class Runtime:
         """Offer more tools of the run's tool set (a ``tool_search`` found them)."""
         if self.offered is not None:
             self.offered.update(n for n in names if n in self.toolbox or n in self.native)
+
+    def child_number(self, place: str, agent_id: str) -> int:
+        """How many runs of ``agent_id`` this attempt started at ``place`` (a tool call's key,
+        or the run's id) before this one: the same in every attempt that makes the same
+        calls, so a re-run finds each child again (``subagents.child_run``)."""
+        n = self._children[(place, agent_id)]
+        self._children[(place, agent_id)] = n + 1
+        return n
 
     def next_step(self, count: int = 1) -> int:
         """The number of the run's next call — the first of ``count`` calls made at once,

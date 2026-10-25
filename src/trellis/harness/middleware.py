@@ -99,10 +99,13 @@ from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
+from trellis.harness.adapters.langgraph import TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
+from trellis.harness.bridges.helpers import Kind
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
@@ -230,13 +233,16 @@ async def governed_call(
     async def run(args: dict[str, Any]) -> Any:
         token = _GOVERNING.set(call["id"])
         try:
-            done = await handler(request.override(tool_call={**call, "args": args}))
+            done = await _helped(runtime, call["name"], str(call["id"]), args, ran)
         finally:
             _GOVERNING.reset(token)
         if isinstance(done, ToolMessage) and done.status == "error":
             raise ToolError(text_of(done.content), source="tools")
         produced.append(done)
         return text_of(_told(done))
+
+    async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
+        return await handler(request.override(tool_call={**call, "args": args}))
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
     outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
@@ -248,6 +254,41 @@ async def governed_call(
         name=call["name"],
         status="error" if outcome.status in FAILED else "success",
     )
+
+
+async def _helped(
+    runtime: Runtime,
+    name: str,
+    key: str,
+    args: dict[str, Any],
+    ran: Callable[[dict[str, Any]], Awaitable[ToolMessage | Command[Any]]],
+) -> ToolMessage | Command[Any]:
+    """A Deep Agents ``task`` call (:data:`TASK_TOOL`, with its arguments) as a helper of the
+    run (``bridges.helpers``): its child run started, the sub-agent given the memory context
+    for its task before the task, its tool calls recorded under its run while it works, and
+    ended with its answer or its error (a pause leaves it to the next attempt). Any other call
+    runs as it is."""
+    helpers = runtime.helpers
+    if helpers is None or name != TASK_TOOL or not set(args) >= TASK_ARGUMENTS:
+        return await ran(args)
+    task = str(args["description"])
+    helper = await helpers.start(key, kind=Kind.TASK, name=str(args["subagent_type"]), task=task)
+    try:
+        with helpers.working(helper):
+            done = await ran({**args, "description": helpers.briefed(helper, task)})
+    except BaseException as exc:
+        if not is_pause_signal(exc):  # a pause: the next attempt ends it
+            await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
+        raise
+    if isinstance(done, ToolMessage) and done.status == "error":
+        await helpers.end(key, error=text_of(done.content))
+    else:
+        await helpers.end(key, output=text_of(_told(done)))
+    return done
+
+
+#: The arguments Deep Agents' sub-agent tool (:data:`TASK_TOOL`) takes (``SubAgentMiddleware``).
+TASK_ARGUMENTS: Final = frozenset({"description", "subagent_type"})
 
 
 def _told(done: Any) -> Any:

@@ -29,7 +29,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness.agent import UNREACHED_FIX
-from trellis.harness.clients.memory import CITED_MAX
+from trellis.harness.clients.memory import CITED_MAX, PUSHED
 from trellis.memory.errors import DependencyUnavailableError
 
 LANGFUSE = {
@@ -343,11 +343,13 @@ async def test_a_verdict_on_a_run_never_checked_cites_nothing(
 
 
 @pytest.mark.parametrize("listed", [200, 404])
-async def test_a_verdict_on_an_unverified_run_succeeds_citing_nothing(
+async def test_a_verdict_on_an_unverified_run_cites_what_its_context_showed(
     memory_service: FakeMemoryService, listed: int
 ) -> None:
-    """Outside the sample the run has no judge's verdict: the person's verdict is sent, with
-    no citations, whether the service lists nothing on the run or knows nothing of it."""
+    """Outside the sample the run has no judge's verdict: the person's verdict cites the
+    memories the run's pushed context showed, which the run's own outcome record keeps with
+    its ``bundle_id`` — and is sent citing nothing when the service knows nothing of the
+    run."""
     if listed == 404:
         memory_service.failures["feedback_list"] = 404
 
@@ -359,12 +361,37 @@ async def test_a_verdict_on_an_unverified_run_succeeds_citing_nothing(
         await h.writes.drain()
         stored = await h.feedback(result.run_id, "confirm")
     assert memory_service.named("verify") == []
-    if listed == 200:  # asked as the service's GET /v1/feedback takes it
-        [asked] = memory_service.named("feedback_list")
-        assert asked.query["target_kind"] == "run"
-        assert asked.query["target_id"] == asked.query["agent_run_id"] == result.run_id
+    [outcome] = [f for f in memory_service.named("feedback") if f.body["source"] == "system"]
+    kept = outcome.body["metadata"][PUSHED]
+    assert kept["bundle_id"].startswith("bnd_") and kept["memory_ids"] == ["mem_1", "mem_2"]
     [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
-    assert sent.body["evidence_refs"] == [] and stored is not None
+    assert stored is not None
+    if listed == 404:
+        assert sent.body["evidence_refs"] == []
+        return
+    [asked] = memory_service.named("feedback_list")  # as the service's GET /v1/feedback takes it
+    assert asked.query["target_kind"] == "run"
+    assert asked.query["target_id"] == asked.query["agent_run_id"] == result.run_id
+    cited = [(r["source_type"], r["source_id"]) for r in sent.body["evidence_refs"]]
+    assert cited == [("memory", "mem_1"), ("memory", "mem_2")]
+
+
+async def test_a_run_whose_context_showed_no_memory_cites_nothing(
+    memory_service: FakeMemoryService,
+) -> None:
+    memory_service.shown = []
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "an answer"
+
+    async with harness_with(memory_service, eval_sample=0.0) as h:
+        result = await h.wrap(fn, id="f").run("q", user="u")
+        await h.writes.drain()
+        await h.feedback(result.run_id, "confirm")
+    [outcome] = [f for f in memory_service.named("feedback") if f.body["source"] == "system"]
+    assert outcome.body["metadata"][PUSHED]["memory_ids"] == []
+    [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
+    assert sent.body["evidence_refs"] == []
 
 
 async def test_the_cited_memories_are_each_once_and_bounded(
@@ -486,11 +513,18 @@ async def test_a_function_that_never_reads_its_context_is_told_once(
     assert caplog.text.count("reaches neither its input nor its code") == 1
 
 
-@pytest.mark.parametrize("given", ["reads", "messages", "no context"])
+@pytest.mark.parametrize("given", ["reads", "reads current()", "messages", "no context"])
 async def test_a_function_given_the_context_is_not_told(
     memory_service: FakeMemoryService, given: str
 ) -> None:
+    def helper() -> str:  # code the function calls: the run's context through current()
+        runtime = current()
+        assert runtime is not None
+        return f"{runtime.context}"
+
     async def reads(input: Any, agent: Runtime) -> str:
+        if given == "reads current()":
+            assert helper() == memory_service.context_text
         return f"{agent.context}" if given == "reads" else "fine"
 
     if given == "no context":

@@ -235,6 +235,47 @@ async def test_memory_tools_are_built_in_with_h_tools(
     assert [c.body["tool"] for c in memory_service.named("record_tool")] == ["stock"]
 
 
+async def test_a_graph_built_by_hand_pulls_from_memory_with_memory_tools(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """``h.memory_tools()`` is the memory block of a graph you build yourself: its tools in
+    the graph's ``ToolNode`` call the service in the run's scope, next to the graph's own
+    tools, which the harness governs and records as it finds them."""
+    from langchain_core.tools import tool as langchain_tool
+    from langgraph.graph import MessagesState
+    from langgraph.prebuilt import ToolNode, tools_condition
+
+    @langchain_tool
+    def shelf(sku: str) -> str:
+        """Where a SKU is shelved."""
+        return f"{sku}: aisle 4"
+
+    tools = [shelf, *await memory_harness.memory_tools()]
+    assert [t.name for t in tools] == ["shelf", *MEMORY_TOOLS]
+    model = ScriptedChatModel(
+        turns=[("memory_search", {"query": "x"}), ("shelf", {"sku": "a"}), "aisle 4"]
+    )
+    bound = model.bind_tools(tools)
+
+    async def think(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await bound.ainvoke(state["messages"])]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("model", think)
+    graph.add_node("tools", ToolNode(tools))
+    graph.add_edge(START, "model")
+    graph.add_conditional_edges("model", tools_condition)
+    graph.add_edge("tools", "model")
+    agent = memory_harness.wrap(graph.compile(), id="by-hand")
+    result = await agent.run("where is a?", user="u1", thread="t1")
+    assert result.answer == "aisle 4"
+    [pulled] = memory_service.named("call_agent_tool")
+    assert pulled.path["name"] == "memory_search"
+    assert pulled.scope["user_id"] == "u1" and pulled.scope["agent_run_id"] == result.run_id
+    await memory_harness.writes.drain()
+    assert [c.body["tool"] for c in memory_service.named("record_tool")] == ["shelf"]
+
+
 async def test_a_compiled_graph_refuses_tools_at_wrap(harness: Harness) -> None:
     with pytest.raises(ConfigurationError, match=r"h\.tools"):
         harness.wrap(review_graph(), id="x", tools=[stock])

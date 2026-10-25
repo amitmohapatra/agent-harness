@@ -103,10 +103,11 @@ def _narrowed(name: str, own: Any) -> Any:
 
 def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
     """An agent tool's ``invoke`` as a helper of the run (``bridges.helpers``): started with the
-    call's input, ended with the agent's answer or its error, and what its own run spent — the
-    SDK adds it to the calling run's usage — counted toward the run's budget. A pause inside
-    leaves it to the next attempt, and stops the calling agent too (the SDK hands the agent
-    tool's pause back as an error text)."""
+    call's input, given the memory context for it before it, its tool calls recorded under its
+    run while it works, ended with the agent's answer or its error, and what its own run spent
+    — the SDK adds it to the calling run's usage — counted toward the run's budget. A pause
+    inside leaves it to the next attempt, and stops the calling agent too (the SDK hands the
+    agent tool's pause back as an error text)."""
     inner = getattr(tool, AGENT_OF_TOOL, None)
     model = getattr(inner, "model", None)
 
@@ -114,10 +115,15 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
         args = arguments_of(arguments)
         task = args.get("input") if isinstance(args, dict) else None
         key = context.tool_call_id
-        await helpers.start(key, kind=Kind.AGENT_TOOL, name=tool.name, task=str(task or arguments))
+        helper = await helpers.start(
+            key, kind=Kind.AGENT_TOOL, name=tool.name, task=str(task or arguments)
+        )
+        if isinstance(args, dict) and isinstance(task, str):
+            arguments = json.dumps({**args, "input": helpers.briefed(helper, task)})
         before = _spent(context.usage)
         try:
-            answer = await invoke(context, arguments)
+            with helpers.working(helper):
+                answer = await invoke(context, arguments)
         except Exception as exc:  # a pause leaves it open (``Helpers.end``: the run is pausing)
             await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
             raise

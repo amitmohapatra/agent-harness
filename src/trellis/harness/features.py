@@ -49,6 +49,9 @@ COVERS: Final[dict[str, tuple[Feature, ...]]] = {
     # a deprecated name: the memory tools, ``tool_search`` among them
     "memory_pull": ("memory_pull", "tool_search"),
 }
+#: The features of the memory service's agent tools (``Harness.pull_tools``): its pull
+#: tools and ``tool_search``.
+MEMORY_TOOLS: Final[frozenset[Feature]] = frozenset({"memory_pull", "tool_search"})
 #: The names a release retired, still accepted (with a warning naming what replaced them).
 DEPRECATED: Final[dict[str, str]] = {
     "memory_push": "memory (or tool_search for the narrowing alone)",

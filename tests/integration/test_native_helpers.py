@@ -29,7 +29,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Harness, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness import budget
-from trellis.harness.bridges.helpers import HELPER
+from trellis.harness.bridges.helpers import HELPER, TASK_HEADING
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.identity import AGENT_GROUP
@@ -73,6 +73,21 @@ async def children(h: Harness, run_id: str) -> list[RunSummary]:
 def told(service: FakeMemoryService, run_id: str) -> list[tuple[str, str]]:
     """What the memory service was told in ``run_id``'s own thread."""
     return [(m["role"], str(m["content"])) for m in service.threads.get(run_id, [])]
+
+
+def a_full_child(service: FakeMemoryService, run_id: str, child_id: str, tools: list[str]) -> None:
+    """``child_id`` is a full child run of ``run_id`` in memory: its context asked for in its
+    own scope, its tool calls (``tools``) recorded under its run, its outcome recorded."""
+    [asked] = [c for c in service.named("context") if c.scope.get("agent_run_id") == child_id]
+    assert asked.scope["parent_agent_run_id"] == run_id
+    recorded = [c for c in service.named("record_tool") if c.body["tool"] in tools]
+    assert [c.scope["agent_run_id"] for c in recorded] == [child_id] * len(tools)
+    [outcome] = [
+        c.body
+        for c in service.named("feedback")
+        if c.body.get("source") == "system" and c.body["target_id"] == child_id
+    ]
+    assert outcome["verdict"] == "confirm"
 
 
 @pytest.fixture
@@ -127,6 +142,7 @@ async def test_a_deep_agents_sub_agent_is_a_child_run_its_turns_in_memory(
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         result = await h.wrap(await deep(h, main, sub), id="desk").run("refund o1", user="u")
         assert result.status is RunStatus.SUCCESS and done == ["refund o1"]
+        await h.writes.drain()
         [child] = await children(h, result.run_id)
         record = await h.runs.get(child.run_id)
     assert record is not None and record.parent_run_id == result.run_id
@@ -143,6 +159,11 @@ async def test_a_deep_agents_sub_agent_is_a_child_run_its_turns_in_memory(
     assert scope["agent_run_id"] == child.run_id
     assert scope["parent_agent_run_id"] == scope["agent_group_id"] == result.run_id
     assert record.metadata[AGENT_GROUP] == result.run_id
+    # a full child run: given its own memory context before its task, its call recorded under
+    # its run, its outcome recorded
+    given = [m.content for m in sub.seen[0] if m.type == "human"]
+    assert given == [f"{memory_service.context_text}\n\n{TASK_HEADING}refund o1"]
+    a_full_child(memory_service, result.run_id, child.run_id, ["refund"])
 
 
 async def test_a_deep_agents_sub_agents_tokens_count_toward_the_runs_budget(
@@ -206,10 +227,12 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
 ) -> None:
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
+        options.env["FAKE_CLAUDE_BRIEFS"] = str(tmp_path / "briefs.jsonl")
         result = await h.wrap(options, id="desk").run("check o1", user="u")
         assert result.status is RunStatus.SUCCESS and result.answer == "checked"
         [child] = await children(h, result.run_id)
         record = await h.runs.get(child.run_id)
+        await h.writes.drain()
     assert record is not None and record.status is RunStatus.SUCCESS
     assert record.metadata[HELPER] == {
         "framework": "claude_agent_sdk",
@@ -220,6 +243,11 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
         ("USER", "check o1"),
         ("ASSISTANT", "o1 is fine"),
     ]
+    # a full child run: the subagent's prompt carries its memory context (the PreToolUse
+    # hook's update), its Read is recorded under its run (the CLI names the subagent)
+    [brief] = [json.loads(line) for line in (tmp_path / "briefs.jsonl").read_text().splitlines()]
+    assert brief["prompt"] == f"{memory_service.context_text}\n\n{TASK_HEADING}check o1"
+    a_full_child(memory_service, result.run_id, child.run_id, ["Read"])
 
 
 async def test_a_claude_subagents_tokens_count_toward_the_runs_budget(
@@ -288,7 +316,8 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
 async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules(
     memory_service: FakeMemoryService,
 ) -> None:
-    checker = Agent(name="checker", model=ScriptedModel(["o1 is fine"], ids="checker_"))
+    inner = ScriptedModel(["o1 is fine"], ids="checker_")
+    checker = Agent(name="checker", model=inner)
     tool_ = checker.as_tool(tool_name="check", tool_description="Check an order.")
     model = ScriptedModel(
         [("check", {"input": "check o1"}), ("check", {"input": "check o1"}), "ok"]
@@ -305,6 +334,7 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
         assert result.status is RunStatus.SUCCESS and result.answer == "ok"
         [child] = await children(h, result.run_id)
         record = await h.runs.get(child.run_id)
+        await h.writes.drain()
     assert record is not None and record.status is RunStatus.SUCCESS
     assert record.metadata[HELPER] == {
         "framework": "openai_agents",
@@ -312,6 +342,11 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
         "name": "check",
     }
     assert told(memory_service, child.run_id) == [("USER", "check o1"), ("ASSISTANT", "o1 is fine")]
+    # a full child run: the agent is given its memory context before its task
+    assert inner.inputs[0][-1]["content"] == (
+        f"{memory_service.context_text}\n\n{TASK_HEADING}check o1"
+    )
+    a_full_child(memory_service, result.run_id, child.run_id, [])
 
 
 async def test_an_agent_tool_paused_inside_is_the_same_child_after_the_resume(

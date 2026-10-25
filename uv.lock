@@ -2261,7 +2261,7 @@ dev = [
 
 [[package]]
 name = "trellis-memory"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "../agent-memory-service/sdk/python" }
 dependencies = [
     { name = "httpx" },

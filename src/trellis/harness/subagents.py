@@ -28,6 +28,10 @@ sub-agent, inside the call:
   ``resume`` hands the answer to the child and continues both;
 * cancelling the parent cancels its children (:func:`cancel_children`).
 
+``agent.run(...)`` called inside a run — from a tool, a node, a function target's code — is the
+same child run (:func:`child_run`): its id derived from where the parent called it (the tool
+call, else the run) and how many runs of that agent it started there.
+
 The tool only reads — and so runs beside the parent's other reads — when every tool the child
 declares only reads and it has none the harness does not run (a framework's own tools, whose
 effects are not known); otherwise it writes, and runs one at a time. ``side_effects=`` says
@@ -38,6 +42,8 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+from collections.abc import Collection, Mapping, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import (
@@ -61,11 +67,14 @@ from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
+    from trellis.harness.features import Feature
     from trellis.harness.runs import RunStore
 
 #: The key of a parent's interrupt payload naming the child that asked:
 #: ``{"agent_id", "run_id", "interrupt_id"}``.
 SUBAGENT: Final = "subagent"
+#: What a nested run's id is derived from, besides where its parent is (``child_run``).
+CHILD: Final = "child"
 #: What a sub-agent's tool takes: the task, in words.
 INPUT: Final = {
     "type": "object",
@@ -124,40 +133,18 @@ class SubAgent:
         return [Tool(spec, self._run, resumable=True)]
 
     async def _run(self, args: dict[str, Any]) -> Any:
-        """The child run for this call: started, or found again by its id and continued; its
-        output, or its pause as the parent's."""
+        """The child run for this call (:func:`child_run`, its id the call's): its output, or
+        its failure as the tool's error the parent's model reads."""
         parent = current()
         assert parent is not None  # the bridge runs a tool inside a run
         child = self.agent
-        start = await child._start(
+        result = await child_run(
+            child,
+            parent,
             args["message"],
             user=parent.user,
-            thread=parent.thread,
-            tenant=parent.tenant,
             run_id=stable_id(parent.idempotency_key, prefix="run_"),
-            record_input=True,
-            timeout=parent.remaining(),
-            deadline=parent.deadline,
-            parent=parent.run_id,
-            group=parent.identity.own_group,
-            without=parent.without,
-            document_ids=parent.document_ids,
         )
-        result = await self._continued(parent, await child.harness.runs.start(start))
-        while result.status is RunStatus.PAUSED:
-            assert result.interrupt is not None
-            asked = result.interrupt
-            named = {
-                "agent_id": child.id,
-                "run_id": asked.run_id,
-                "interrupt_id": asked.interrupt_id,
-            }
-            answered = await parent.interrupt(
-                content_key("subagent", asked.run_id, asked.interrupt_id),
-                payload={**(asked.payload or {}), SUBAGENT: named},
-                **{name: getattr(asked, name) for name in ASKED},
-            )
-            result = await self._answered(parent, asked, answered)
         if result.status is not RunStatus.SUCCESS:
             why = f": {result.error.message}" if result.error is not None else ""
             raise ToolError(
@@ -167,53 +154,112 @@ class SubAgent:
             )
         return pipeline.jsonable(result.answer)
 
-    async def _continued(self, parent: Runtime, record: RunRecord) -> Result:
-        """The child as its record says: paused or ended as it is, else run — new, or cut by a
-        crash (its journal is the copy the parent's progress saved)."""
-        if record.status is RunStatus.PAUSED or record.final:
-            return Result.of(record)
-        journal = parent.replay.journal.children.get(record.run_id) or Journal()
-        return await self._attempt(parent, record, journal, None)
 
-    async def _answered(
-        self, parent: Runtime, asked: Interrupt, answer: InterruptResolution
-    ) -> Result:
-        """The parent's answer to the child's question, the child's own: resumed with it (in
-        this process: a child is never queued, and a cancel never reaches it this way — the
-        parent's ends the parent, and :func:`cancel_children` the child)."""
-        child = self.agent
-        record = await child.harness.runs.get(asked.run_id, tenant=parent.tenant)
-        assert record is not None
-        resolution = answer.model_copy(
-            update={"interrupt_id": asked.interrupt_id, "run_id": asked.run_id}
+async def child_run(
+    agent: Agent,
+    parent: Runtime,
+    input: Any,
+    *,
+    user: str,
+    run_id: str | None = None,
+    thread: str | None = None,
+    tenant: str | None = None,
+    timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+    deadline: datetime | None = None,
+    without: Collection[Feature] = (),
+    framework_options: Mapping[str, Any] | None = None,
+    document_ids: Sequence[str] | None = None,
+) -> Result:
+    """A run of ``agent`` inside ``parent``'s — a sub-agent's call, or ``agent.run`` called
+    from the parent's code — as the parent's child: started (its record names the parent and
+    takes what it inherits: ``Agent._start``), or found again by its id and continued; it works
+    at most what is left of the parent's time (and its own ``timeout``); a question it asks
+    pauses the parent, and the parent's answer resumes it. ``run_id``: the call's, else one
+    derived from where the parent is (its tool call, or its run) and how many children of this
+    agent it started there, so the parent's re-run finds each again. Its result, however it
+    ended."""
+    if run_id is None:
+        place = parent.idempotency_key or parent.run_id
+        run_id = stable_id(
+            place, CHILD, agent.id, parent.child_number(place, agent.id), prefix="run_"
         )
-        journal, resumed = await child._resumed(record, resolution)
-        return await self._attempt(parent, resumed, journal, resolution)
+    left = parent.remaining()
+    limits = [t for t in (timeout, left) if t is not None]
+    start = await agent._start(
+        input,
+        user=user,
+        thread=thread,
+        tenant=tenant,
+        run_id=run_id,
+        record_input=True,
+        timeout=min(limits) if limits else None,
+        deadline=deadline,
+        parent=parent,
+        without=without,
+        framework_options=framework_options,
+        document_ids=document_ids,
+    )
+    result = await _continued(agent, parent, await agent.harness.runs.start(start))
+    while result.status is RunStatus.PAUSED:
+        assert result.interrupt is not None
+        asked = result.interrupt
+        named = {"agent_id": agent.id, "run_id": asked.run_id, "interrupt_id": asked.interrupt_id}
+        answered = await parent.interrupt(
+            content_key("subagent", asked.run_id, asked.interrupt_id),
+            payload={**(asked.payload or {}), SUBAGENT: named},
+            **{name: getattr(asked, name) for name in ASKED},
+        )
+        result = await _answered(agent, parent, asked, answered)
+    return result
 
-    async def _attempt(
-        self,
-        parent: Runtime,
-        record: RunRecord,
-        journal: Journal,
-        resolution: InterruptResolution | None,
-    ) -> Result:
-        """One attempt of the child inside the parent's call, its journal kept in the
-        parent's meanwhile, its time what is left of the parent's."""
-        child = self.agent
-        children = parent.replay.journal.children
-        children[record.run_id] = journal
-        try:
-            return await pipeline.attempt(
-                child,
-                record,
-                record.input,
-                journal=journal,
-                resolution=resolution,
-                remaining=parent.remaining(),
-                parent=parent,
-            )
-        finally:
-            del children[record.run_id]
+
+async def _continued(agent: Agent, parent: Runtime, record: RunRecord) -> Result:
+    """The child as its record says: paused or ended as it is, else run — new, or cut by a
+    crash (its journal is the copy the parent's progress saved)."""
+    if record.status is RunStatus.PAUSED or record.final:
+        return Result.of(record)
+    journal = parent.replay.journal.children.get(record.run_id) or Journal()
+    return await _attempt(agent, parent, record, journal, None)
+
+
+async def _answered(
+    agent: Agent, parent: Runtime, asked: Interrupt, answer: InterruptResolution
+) -> Result:
+    """The parent's answer to the child's question, the child's own: resumed with it (in this
+    process: a child is never queued, and a cancel never reaches it this way — the parent's
+    ends the parent, and :func:`cancel_children` the child)."""
+    record = await agent.harness.runs.get(asked.run_id, tenant=parent.tenant)
+    assert record is not None
+    resolution = answer.model_copy(
+        update={"interrupt_id": asked.interrupt_id, "run_id": asked.run_id}
+    )
+    journal, resumed = await agent._resumed(record, resolution)
+    return await _attempt(agent, parent, resumed, journal, resolution)
+
+
+async def _attempt(
+    agent: Agent,
+    parent: Runtime,
+    record: RunRecord,
+    journal: Journal,
+    resolution: InterruptResolution | None,
+) -> Result:
+    """One attempt of the child inside the parent's call, its journal kept in the parent's
+    meanwhile, its time what is left of the parent's."""
+    children = parent.replay.journal.children
+    children[record.run_id] = journal
+    try:
+        return await pipeline.attempt(
+            agent,
+            record,
+            record.input,
+            journal=journal,
+            resolution=resolution,
+            remaining=parent.remaining(),
+            parent=parent,
+        )
+    finally:
+        del children[record.run_id]
 
 
 def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:

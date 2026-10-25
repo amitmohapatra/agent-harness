@@ -21,6 +21,7 @@ from trellis.contracts import (
     RunEventType,
     RunRecord,
     RunStatus,
+    ToolError,
     ToolSpec,
 )
 from trellis.harness import telemetry
@@ -258,11 +259,23 @@ async def test_documents_need_memory(harness: Harness) -> None:
 
 
 async def test_a_memory_tool_outside_a_run_is_refused(memory_harness: Harness) -> None:
-    assert memory_harness.memory is not None
-    tools = await memory_harness.memory_tools(memory_harness.memory.scoped("acme"))
-    search = next(t for t in tools if t.name == "memory_search")
-    with pytest.raises(ConfigurationError, match="memory_search needs a run with memory on"):
-        await search.run({"query": "x"})
+    search = next(t for t in await memory_harness.memory_tools() if t.name == "memory_search")
+    with pytest.raises(ToolError, match="memory_search is a trellis tool: it runs inside"):
+        await search.ainvoke({"query": "x"})
+
+
+async def test_a_memory_tool_in_a_run_without_memory_says_so(memory_harness: Harness) -> None:
+    search = next(t for t in await memory_harness.memory_tools() if t.name == "memory_search")
+
+    async def fn(input: str, agent: Runtime) -> Any:
+        return await search.ainvoke({"query": "x"})
+
+    result = await memory_harness.wrap(fn, id="f").run("q", user="u", without={"memory"})
+    assert result.answer == "memory_search is off in this run (without memory_pull)"
+
+
+async def test_with_memory_off_there_are_no_memory_tools(harness: Harness) -> None:
+    assert await harness.memory_tools() == []
 
 
 async def test_feedback_with_memory_off_is_only_a_score(

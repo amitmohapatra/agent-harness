@@ -23,6 +23,9 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, tool
 from trellis.contracts import ConfigurationError, RunRecord, RunStatus
 from trellis.harness import telemetry
+from trellis.harness.clients.memory import DOCUMENTS
+from trellis.harness.features import WITHOUT
+from trellis.harness.identity import AGENT_GROUP
 from trellis.harness.runs import LocalRuns
 from trellis.harness.subagents import SUBAGENT
 from trellis.runs import Job
@@ -384,3 +387,123 @@ async def test_any_framework_calls_a_child_and_answers_its_question(
     assert result.answer in ("done", "painted the door blue")
     [kid] = await children(harness, paused.run_id)
     assert kid.status is RunStatus.SUCCESS and kid.output == "painted the door blue"
+
+
+# ------------------------------------------------------------- agent.run inside a run: a child
+async def test_a_run_called_inside_a_run_is_its_child(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """``agent.run`` from a run's own code is that run's child, as a sub-agent's call is: its
+    record names the parent and the tree's group, it takes the parent's tenant, thread,
+    documents, deadline and what the parent is without (adding its own), it never works past the
+    parent's time, and its memory scope is derived from the parent's."""
+    seen: dict[str, Any] = {}
+
+    async def note(input: str, agent: Runtime) -> str:
+        seen["without"] = sorted(agent.without)
+        return f"noted {input}"
+
+    child = memory_harness.wrap(note, id="note")
+
+    async def boss(input: str, agent: Runtime) -> str:
+        first = await child.run(input, user=agent.user, without={"judges"})
+        second = await child.run("again", user=agent.user)
+        return f"{first.answer}; {second.answer}"
+
+    parent = memory_harness.wrap(boss, id="boss")
+    deadline = datetime.now(UTC) + timedelta(hours=1)
+    result = await parent.run(
+        "x",
+        user="ada",
+        thread="t-1",
+        timeout=60,
+        deadline=deadline,
+        without={"grounding"},
+        document_ids=["doc_1"],
+    )
+    assert result.answer == "noted x; noted again", result.error
+    kids = await children(memory_harness, result.run_id)
+    assert len(kids) == 2 and len({k.run_id for k in kids}) == 2  # each its own run
+    for kid in kids:
+        assert kid.parent_run_id == result.run_id and kid.thread_id == "t-1"
+        assert kid.user_id == "ada" and kid.deadline == deadline
+        assert kid.timeout_seconds is not None and kid.timeout_seconds <= 60
+        assert kid.metadata[AGENT_GROUP] == result.run_id
+        assert kid.metadata[DOCUMENTS] == ["doc_1"]
+    assert "grounding" in kids[0].metadata[WITHOUT]
+    assert "grounding" in seen["without"]
+    asked = [c for c in memory_service.named("context") if c.scope.get("agent_id") == "note"]
+    assert asked and all(c.scope["parent_agent_run_id"] == result.run_id for c in asked)
+
+
+async def test_a_nested_run_that_asks_pauses_its_parent_and_is_found_again(
+    harness: Harness,
+) -> None:
+    started: list[str] = []
+
+    async def asks(input: str, agent: Runtime) -> str:
+        started.append(agent.run_id)
+        return f"tone {await agent.ask('Which tone?', options=['warm', 'dry'])}"
+
+    child = harness.wrap(asks, id="asks")
+
+    async def desk(input: str, agent: Runtime) -> str:
+        answered = await child.run(input, user=agent.user)
+        return str(answered.answer)
+
+    parent = harness.wrap(desk, id="desk")
+    paused = await parent.run("news", user="ada")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    [kid] = await children(harness, paused.run_id)
+    assert paused.interrupt.question == "Which tone?" and kid.status is RunStatus.PAUSED
+    assert paused.interrupt.payload is not None
+    assert paused.interrupt.payload[SUBAGENT]["run_id"] == kid.run_id
+    finished = await parent.resume(
+        paused.interrupt.interrupt_id, "answer", answer="dry", reviewer="ada"
+    )
+    assert finished.status is RunStatus.SUCCESS and finished.answer == "tone dry"
+    assert set(started) == {kid.run_id}  # the parent's re-run found the same child
+    [kid] = await children(harness, paused.run_id)
+    assert kid.status is RunStatus.SUCCESS
+
+
+async def test_cancelling_a_parent_cancels_its_nested_run(harness: Harness) -> None:
+    started = asyncio.Event()
+
+    async def slow(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    child = harness.wrap(slow, id="slow-nested")
+
+    async def boss(input: str, agent: Runtime) -> str:
+        return str((await child.run(input, user=agent.user)).answer)
+
+    parent = harness.wrap(boss, id="boss-nested")
+    task = asyncio.create_task(parent.run("x", user="u"))
+    await asyncio.wait_for(started.wait(), 5)
+    [record] = [s async for s in harness.runs.iterate(agent_id="boss-nested")]
+    await parent.cancel(record.run_id, reason="stop")
+    assert (await task).status is RunStatus.CANCELLED
+    [kid] = await children(harness, record.run_id)
+    assert kid.status is RunStatus.CANCELLED
+
+
+async def test_a_stream_or_a_queued_run_inside_a_run_names_its_parent(harness: Harness) -> None:
+    async def echo(input: str, agent: Runtime) -> str:
+        return f"ok {input}"
+
+    child = harness.wrap(echo, id="streamed")
+    handles: list[Any] = []
+
+    async def boss(input: str, agent: Runtime) -> str:
+        events = [e async for e in child.stream("s", user=agent.user)]
+        handles.append(await child.start("q", user=agent.user))
+        return str(events[-1].data.get("result"))
+
+    result = await harness.wrap(boss, id="boss-stream").run("x", user="u", thread="t-9")
+    assert result.answer == "ok s", result.error
+    kids = await children(harness, result.run_id)
+    assert len(kids) == 2 and handles[0].run_id in {k.run_id for k in kids}
+    assert all(k.parent_run_id == result.run_id and k.thread_id == "t-9" for k in kids)

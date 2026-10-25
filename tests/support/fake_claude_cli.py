@@ -81,6 +81,9 @@ class Cli:
         self.mcp_ready = False
         #: the hooks the SDK registered, by event (its ``initialize`` request)
         self.hooks: dict[str, Any] = {}
+        #: the subagent working now (its ``agent_id`` and ``agent_type``), as the real CLI
+        #: names it in the hooks of the tool calls it makes
+        self.working: dict[str, str] = {}
 
     def prompt_context(self, session: str, prompt: Any) -> str:
         """What the ``UserPromptSubmit`` hooks add to ``prompt`` (their ``additionalContext``)."""
@@ -125,6 +128,7 @@ class Cli:
                             "tool_name": name,
                             "tool_input": args,
                             "tool_use_id": tool_id,
+                            **self.working,
                         },
                         "tool_use_id": tool_id,
                     }
@@ -155,6 +159,7 @@ class Cli:
             "tool_name": name,
             "tool_input": args,
             "tool_use_id": tool_id,
+            **self.working,
         }
         if error is None:
             given["tool_response"] = content
@@ -349,9 +354,25 @@ class Cli:
                 session, [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": args}]
             )
         )
-        if self.allowed(session, "Agent", args, tool_id).get("behavior", "allow") != "allow":
+        permission = self.allowed(session, "Agent", args, tool_id)
+        if permission.get("behavior", "allow") != "allow":
             self.result(session, tool_id, [{"type": "text", "text": "denied"}])
             return "denied", False, False, 0
+        briefs = os.environ.get("FAKE_CLAUDE_BRIEFS")
+        if briefs:  # what the subagent was given, the hooks' updates included
+            given = permission.get("updatedInput", args)
+            with open(briefs, "a") as log:
+                log.write(json.dumps({"agent": item["agent"], "prompt": given["prompt"]}) + "\n")
+        self.working = {"agent_id": f"agent_{tool_id}", "agent_type": item["agent"]}
+        try:
+            return self._worked(session, step, item, tool_id)
+        finally:
+            self.working = {}
+
+    def _worked(
+        self, session: str, step: int, item: dict[str, Any], tool_id: str
+    ) -> tuple[str, bool, bool, int]:
+        """The subagent's own steps, then its ``Agent`` call's result."""
         last, taken = "", 0
         for n, inner in enumerate(item["steps"]):
             taken += 1

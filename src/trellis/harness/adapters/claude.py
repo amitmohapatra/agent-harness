@@ -366,9 +366,25 @@ class ClaudeAdapter:
             runtime.model_ended(STEP)
 
 
+async def _briefed(
+    runtime: Runtime, call_id: str, name: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    """A call as it runs: a subagent's (:data:`SUBAGENT_TOOLS`) started as a helper of the run
+    (``bridges.helpers``) and its ``prompt`` given the memory context for its task before it;
+    any other as it was decided."""
+    helpers = runtime.helpers
+    if helpers is None or name not in SUBAGENT_TOOLS:
+        return args
+    task = str(args.get("prompt") or args.get("description") or "")
+    kind, called = Kind.SUBAGENT, str(args.get("subagent_type") or GENERAL_PURPOSE)
+    helper = await helpers.start(call_id, kind=kind, name=called, task=task)
+    return {**args, "prompt": helpers.briefed(helper, task)} if "prompt" in args else args
+
+
 async def _subagents(helpers: Helpers, message: Any) -> None:
     """A subagent's start (the main agent's ``Agent`` call: its ``subagent_type`` and
-    ``prompt``) or end (that call's result) in ``message``."""
+    ``prompt``; started already when its ``PreToolUse`` came first: :func:`_briefed`) or end
+    (that call's result) in ``message``."""
     from claude_agent_sdk import AssistantMessage, ToolResultBlock, ToolUseBlock, UserMessage
 
     if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
@@ -548,11 +564,12 @@ def _governance(own: Any, steps: Steps) -> Any:
         if isinstance(decided, ToolOutcome):
             return _decided("deny", str(decided.output))
         if own is None:
-            steps.started(call_id, name, decided.args)
-            return _decided("allow", updated=decided.args)
+            ran = await _briefed(runtime, call_id, name, decided.args)
+            steps.started(call_id, name, ran)
+            return _decided("allow", updated=ran)
         verdict = await own(name, decided.args, ToolPermissionContext(tool_use_id=tool_use_id))
         if isinstance(verdict, PermissionResultAllow):
-            ran = verdict.updated_input or decided.args
+            ran = await _briefed(runtime, call_id, name, verdict.updated_input or decided.args)
             steps.started(call_id, name, ran)
             return _decided("allow", updated=ran)
         refused = _decided("deny", verdict.message)
@@ -586,7 +603,14 @@ def _recorded(steps: Steps) -> Any:
             error_class="ClaudeToolError" if failed else None,
         )
         spec = native_spec(name)
-        await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
+        helpers = steps.runtime.helpers
+        if helpers is None:
+            await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
+            return {}
+        # a call a subagent made (the CLI names it: ``agent_type``) is recorded under its run
+        working = helpers.named(str(given["agent_type"])) if "agent_type" in given else None
+        with helpers.working(working):
+            await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
         return {}
 
     return HookMatcher(hooks=[post_tool_use])

@@ -170,14 +170,40 @@ async def test_a_claude_subagents_call_starts_it_and_its_result_ends_it() -> Non
     ]
 
 
-def test_the_runs_callbacks_go_beside_the_ones_it_was_given() -> None:
-    from langchain_core.callbacks import AsyncCallbackManager, StdOutCallbackHandler
+async def test_a_helper_is_briefed_with_its_context_and_its_work_is_its_own() -> None:
+    from trellis.harness.bridges.helpers import TASK_HEADING, inside
 
-    from trellis.harness.adapters.langgraph import _with_handler
+    runs = LocalRuns()
+    parent = runtime(runs)
+    helpers = Helpers(parent, "langgraph")
+    assert parent.helpers is helpers  # the adapter's hooks find them on the runtime
+    helper = await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
+    assert await helpers.start("k", kind=Kind.TASK, name="x", task="y") is helper  # once
+    assert helpers.briefed(helper, "check o1") == "check o1"  # memory off: the task alone
+    helper.context = "## Memories\n- o1 was late"
+    assert helpers.briefed(helper, "check o1") == f"{helper.context}\n\n{TASK_HEADING}check o1"
+    assert helpers.named("checker") is helper and helpers.named("nobody") is None
+    assert inside(parent) is None
+    with helpers.working(helper):
+        assert inside(parent) is helper
+        other = SimpleNamespace(run_id="run_other")  # a nested run's code is its own
+        assert inside(other) is None  # type: ignore[arg-type]
+    assert inside(parent) is None
 
-    ours, theirs = object(), StdOutCallbackHandler()
-    assert _with_handler(None, ours) == [ours]
-    assert _with_handler([theirs], ours) == [theirs, ours]
-    given = AsyncCallbackManager(handlers=[theirs])
-    manager = _with_handler(given, StdOutCallbackHandler())
-    assert len(manager.handlers) == 2 and given.handlers == [theirs]  # theirs: unchanged
+
+async def test_a_helpers_context_that_cannot_be_had_is_a_warning() -> None:
+    warned: list[tuple[str, str]] = []
+
+    class Down:
+        async def context(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("down")
+
+    parent = runtime(LocalRuns())
+    parent.uses = lambda feature: True
+    parent.document_ids = None
+    parent.events = SimpleNamespace(warning=lambda code, message: warned.append((code, message)))
+    helpers = Helpers(parent, "langgraph")
+    helper = SimpleNamespace(memory=Down(), name="checker")
+    assert await helpers._pushed(helper, "check o1") is None  # type: ignore[arg-type]
+    assert warned == [("memory_unavailable", "no memory context for checker: down")]
+    assert await helpers._pushed(helper, "") is None  # type: ignore[arg-type] # no task

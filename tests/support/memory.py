@@ -95,6 +95,8 @@ class Call:
 @dataclass
 class FakeMemoryService:
     context_text: str = "The user prefers email."
+    #: the ids of the memories the context shows (the prompt form's ``memory_ids``)
+    shown: list[str] = field(default_factory=lambda: ["mem_1", "mem_2"])
     #: what the context says about its evidence (COMPLETE, INCOMPLETE, INSUFFICIENT)
     evidence_status: str = "COMPLETE"
     #: what ``GET /v1/keys/self`` says about the key
@@ -257,6 +259,8 @@ class FakeMemoryService:
             "token_estimate": 0,
             "evidence_status": self.evidence_status,
         }
+        if self.shown:
+            answer["memory_ids"] = list(self.shown)
         if available is not None and self.learned_skills:
             # the service offers what the agent learned to any agent with tools
             rendered += "\n\n## Learned skills for this task\n" + self.learned_skills

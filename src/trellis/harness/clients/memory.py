@@ -53,6 +53,10 @@ TOOL_SEARCH: Final = "tool_search"
 SOURCE_SYSTEM: Final = "trellis-harness"
 #: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
 DOCUMENTS: Final = "document_ids"
+#: The key of a run's own outcome record's metadata that keeps what its pushed context showed:
+#: ``{"bundle_id": ..., "memory_ids": [...]}`` (at most :data:`CITED_MAX` ids), so a person's
+#: verdict on an unverified run cites the memories the model was shown.
+PUSHED: Final = "pushed"
 #: The most memories a person's verdict on a run cites (the memory service's bound on a
 #: verdict's evidence references).
 CITED_MAX: Final = 50
@@ -246,10 +250,12 @@ class RunMemory:
         comment: str | None = None,
         reviewer: str | None = None,
         evidence_refs: Sequence[EvidenceRef] = (),
+        metadata: dict[str, Any] | None = None,
     ) -> Feedback:
         """A verdict on this scope's run (``source`` ``system`` for how it ended, ``human``
         for a person's); ``key`` makes a retry store it once; ``evidence_refs`` are the
-        memories its answer cited, whose confidence the verdict moves. The stored record comes
+        memories its answer cited, whose confidence the verdict moves; ``metadata`` is kept
+        with it (the run's own: :data:`PUSHED`, what its context showed). The stored record comes
         back: a person's verdict waits for the tenant administrator (``review.state``
         pending, ADR 0028 of the memory service) where the run's own status is applied at
         once."""
@@ -264,16 +270,18 @@ class RunMemory:
             reviewer=reviewer,
             source=source,
             evidence_refs=evidence_refs,
+            metadata=metadata,
             idempotency_key=key,
         )
 
     async def cited(self) -> list[EvidenceRef]:
-        """The memories this scope's run's answer rests on: what the grounding judge's verdict
-        on it cites (``/v1/verify`` resolves the answer's claims against the run's context
-        bundle and records the supporting memories with its verdict), each once, at most
-        :data:`CITED_MAX`. Empty when the run was not verified (most runs: the check takes a
-        sample), the service holds no feedback on it (``NotFoundError``), or nothing it
-        claimed rested on a memory."""
+        """The memories this scope's run's answer rests on, each once, at most
+        :data:`CITED_MAX`: what the grounding judge's verdict on it cites (``/v1/verify``
+        resolves the answer's claims against the run's context bundle and records the
+        supporting memories with its verdict); a run that was not verified (most runs: the
+        check takes a sample) cites the memories its pushed context showed, which its own
+        outcome record keeps (:data:`PUSHED`). Empty when the service holds no feedback on the
+        run (``NotFoundError``), or neither cites a memory."""
         run_id = self.ctx.scope.agent_run_id
         assert run_id is not None
         try:
@@ -282,6 +290,13 @@ class RunMemory:
             return []
         judged = [f for f in page.items if f.source == FeedbackSource.JUDGE.value]
         refs = {ref.source_id: ref for verdict in judged for ref in verdict.evidence_refs}
+        if not refs:
+            own = [f for f in page.items if f.source == "system"]  # the run's own outcome
+            shown = own[0].metadata.get(PUSHED, {}) if own else {}
+            refs = {
+                mid: EvidenceRef(source_type="memory", source_id=mid)
+                for mid in shown.get("memory_ids", ())
+            }
         return list(refs.values())[:CITED_MAX]
 
     async def feedback(self, record: Any) -> None:

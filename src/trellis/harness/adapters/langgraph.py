@@ -36,10 +36,11 @@
 * store: a graph compiled without a store of its own is run, while memory is on, with the
   memory service as its long-term store (``bridges.store.MemoryStore``: ``runtime.store``,
   ``get_store()``, Deep Agents' ``StoreBackend``); a graph's own store is kept (said once);
-* helpers: a Deep Agent's ``task`` sub-agent is a child run of the run (``bridges.helpers``,
-  through the run's LangChain callbacks: ``hooks.langgraph``). Its tool calls are governed as
-  the run's (``h.tools``), and its model calls count toward the run's budget (``accounting``),
-  as are those of the graph's subgraphs and ``Send`` branches, which run inside the run;
+* helpers: a Deep Agent's ``task`` sub-agent is a full child run of the run
+  (``bridges.helpers``, from the governed ``task`` call: ``middleware.governed_call``): given
+  the memory context for its task, its tool calls governed as the run's and recorded under its
+  run, its outcome recorded; its model calls count toward the run's budget (``accounting``),
+  as do those of the graph's subgraphs and ``Send`` branches, which run inside the run;
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
   ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; a
   ``configurable.thread_id`` among them is refused (the thread is ``run(thread=)``, one owner).
@@ -148,7 +149,7 @@ class LangGraphAdapter:
         try:
             return await self._graph(target, run.runtime).ainvoke(
                 _continued(target, native_input, run),
-                self._config(target, run, helpers),
+                self._config(target, run),
                 version="v2",
                 **_run_arguments(run.runtime),
             )
@@ -169,7 +170,7 @@ class LangGraphAdapter:
         try:
             async for part in self._graph(target, run.runtime).astream(
                 _continued(target, native_input, run),
-                self._config(target, run, helpers),
+                self._config(target, run),
                 stream_mode=["messages", "values"],
                 version="v2",
                 **_run_arguments(run.runtime),
@@ -293,12 +294,9 @@ class LangGraphAdapter:
         return graph if store is None else graph.copy({"store": store})
 
     @staticmethod
-    def _config(target: Any, run: Invocation, helpers: Helpers) -> dict[str, Any]:
-        """The run's config: its framework options (less its run arguments), the harness's
-        thread id (theirs names none: ``check_options``), and the run's helper callbacks
-        (``hooks.langgraph``) beside theirs."""
-        from trellis.harness.hooks.langgraph import HelperCallbacks
-
+    def _config(target: Any, run: Invocation) -> dict[str, Any]:
+        """The run's config: its framework options (less its run arguments) and the harness's
+        thread id (theirs names none: ``check_options``)."""
         runtime = run.runtime
         if _checkpointed(target):
             from langgraph.types import interrupt
@@ -308,21 +306,8 @@ class LangGraphAdapter:
         thread = thread_of(target, runtime)
         return {
             **options,
-            "callbacks": _with_handler(options.get("callbacks"), HelperCallbacks(helpers)),
             "configurable": {**options.get("configurable", {}), "thread_id": thread},
         }
-
-
-def _with_handler(given: Any, handler: Any) -> Any:
-    """The run's callbacks: ``handler`` beside the ones the run was given (a list of handlers,
-    or a callback manager — copied, the given one is not changed)."""
-    if given is None:
-        return [handler]
-    if isinstance(given, list):
-        return [*given, handler]
-    manager = given.copy()
-    manager.add_handler(handler, inherit=True)
-    return manager
 
 
 def _run_arguments(runtime: Runtime) -> dict[str, Any]:

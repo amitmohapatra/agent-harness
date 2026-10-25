@@ -316,7 +316,7 @@ class Harness:
         tools = await self.resolve(mine, tenant=tenant, mcp=bundles, without=off)
         if self.memory is not None and "memory_pull" not in off:
             scope = self.memory.scoped(tenant)
-            tools.extend(t for t in await self.memory_tools(scope) if t.feature not in off)
+            tools.extend(t for t in await self.pull_tools(scope) if t.feature not in off)
         native = convert(tool_format, tools)
         if tool_format == "langchain" and native:
             for tool in native:
@@ -660,7 +660,19 @@ class Harness:
         """A memory write an earlier process spooled, as a write again (memory on)."""
         return self.memory.replay(record) if self.memory is not None else None
 
-    async def memory_tools(self, run_memory: RunMemory) -> list[Tool]:
+    async def memory_tools(self, *, tenant: str | None = None) -> list[Any]:
+        """The memory service's agent tools — its pull tools (``memory_search``...) and
+        ``tool_search`` — as LangChain tools, for a graph you build yourself: put them in its
+        ``ToolNode`` and bind them to its model. Each call goes to the memory service in the
+        scope of the run making it (its user, thread and run; a call outside a run is refused)
+        and is governed and recorded like any tool of the run. Memory off: none. ``tenant``
+        is the runs', named by a platform key only."""
+        if self.memory is None:
+            return []
+        scope = self.memory.scoped(await self.tenant(tenant))
+        return convert("langchain", await self.pull_tools(scope))
+
+    async def pull_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
         return [
             Tool(
@@ -719,11 +731,10 @@ class Harness:
 
 def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:
     async def run(args: dict[str, Any]) -> Any:
+        # the bridge runs it only inside a run whose memory is on (``memory_pull`` among its
+        # features): outside one, or without memory, it says so before this is reached
         runtime = current()
-        if runtime is None or runtime.run_memory is None:
-            raise ConfigurationError(
-                f"{spec.name} needs a run with memory on (MEMORY_URL, not without=memory)"
-            )
+        assert runtime is not None and runtime.run_memory is not None
         if spec.name == TOOL_SEARCH:  # among the tools this run can actually call
             hints = await runtime.tools.hints(str(args.get("task", "")))
             # what the model reads: each tool's confidence, arguments and gaps, and the plan

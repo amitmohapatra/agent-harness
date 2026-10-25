@@ -139,6 +139,35 @@ instead of reporting it of unknown effect.
 stops with its parent, a paused one (waiting for a person) is cancelled at once, and theirs
 too. So does answering a child's question with `cancel` on the parent.
 
+**A run started inside a run.** `agent.run(...)` called from a run's own code — a tool, a
+graph's node, a function target — is the same child run: its record names the run it was
+called in, its memory scope is derived from it, it takes its tenant, thread, documents, deadline
+(the earlier of both) and what it is without (`without=` adds to it), it never works past the
+parent's time, its journal is kept in the parent's (a crash continues it), its question pauses
+the parent and the parent's resume answers it, and cancelling the parent cancels it. Its id is
+derived from where it was called (the tool call, else the run) and how many runs of that agent
+were started there, so the parent's re-run finds each again. `agent.stream(...)` and
+`agent.start(...)` inside a run name the run as their parent and take the same scope; a
+streamed child's question ends its stream paused (the caller answers it), and a queued child
+works on a worker in its own time.
+
+```python
+research = h.wrap(ReAct(system_prompt="You research.", model=model), id="research")
+
+
+async def report(question: str, agent: trellis.Runtime) -> str:
+    facts = await research.run(question, user=agent.user)  # a child of this run
+    return f"Report: {facts.answer}"
+```
+
+**The framework's own helpers.** A Deep Agent's `task` sub-agent, an OpenAI agent called as a
+tool (`Agent.as_tool`) and Claude's `agents=` subagents are child runs too
+(`bridges.helpers`): a run record naming the run, the memory context for their task in what
+they are given (the context, then `## Your task`), their tool calls governed as the run's and
+recorded under their own run (Claude's built-ins and its MCP servers' tools by the subagent the
+CLI names; the harness's own tools that a Claude subagent calls are recorded under the run),
+their turns and their outcome in memory, their tokens on the run's budget.
+
 ## On failure
 
 * A child that fails (an error, its time out) is an error the parent's model reads

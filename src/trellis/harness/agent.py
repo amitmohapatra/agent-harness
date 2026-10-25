@@ -52,9 +52,12 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
 from trellis.harness.bounded import LRU
+from trellis.harness.bridges import helpers
 from trellis.harness.budget import Budget
 from trellis.harness.clients.memory import (
+    CITED_MAX,
     DOCUMENTS,
+    PUSHED,
     RunMemory,
     Window,
     context_budget,
@@ -77,9 +80,9 @@ from trellis.harness.identity import AGENT_GROUP, Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
-from trellis.harness.runtime import Runtime, reason_of, run_of
+from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.skills import Skill, Skills
-from trellis.harness.subagents import SubAgent, asked_by, cancel_children
+from trellis.harness.subagents import SubAgent, asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
 from trellis.harness.tools.mcp import retired_as_tool, retired_mcp, split
@@ -254,7 +257,31 @@ class Agent:
         is not JSON (an object) is this call's only. ``document_ids``: the documents
         (``h.add_document``'s ``document_id``) the run's memory context draws its passages
         from, none else (unset: all the person's); kept with the run, its sub-agents' runs
-        included."""
+        included.
+
+        Called inside another run (a tool of it, a node, a function target's code), the run is
+        that run's child, as a sub-agent's is (``trellis.harness.subagents.child_run``): its
+        record names its parent, its memory scope is derived from the parent's, it takes the
+        parent's tenant, thread, documents and what the parent is without, and never works
+        past the parent's time; its journal is kept in the parent's (a crash continues it, a
+        re-run finds it again), a question it asks pauses the parent, whose resume answers it,
+        and cancelling the parent cancels it."""
+        parent = current()
+        if parent is not None:
+            result = await child_run(
+                self,
+                parent,
+                input,
+                user=user,
+                thread=thread,
+                tenant=tenant,
+                timeout=timeout,
+                deadline=deadline,
+                without=without,
+                framework_options=framework_options,
+                document_ids=document_ids,
+            )
+            return self.hooks.answer(result)
         record = await self._opened(
             input,
             user=user,
@@ -283,7 +310,10 @@ class Agent:
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
         early cancels the run. ``timeout``, ``deadline``, ``without``, ``framework_options``
-        and ``document_ids`` as for :meth:`run`."""
+        and ``document_ids`` as for :meth:`run`. Streamed inside another run, it is that run's
+        child (its record names the parent; tenant, thread, documents and what the parent is
+        without carried over), whose events are the stream's: a question it asks ends the
+        stream paused, for the caller to answer (``run`` pauses the parent instead)."""
         record = await self._opened(
             input,
             user=user,
@@ -294,6 +324,7 @@ class Agent:
             without=without,
             framework_options=framework_options,
             document_ids=document_ids,
+            parent=current(),
         )
         async for event in self._events(
             lambda listen: pipeline.attempt(self, record, input, listener=listen)
@@ -342,6 +373,7 @@ class Agent:
             priority=priority,
             concurrency_key=concurrency_key or (f"thread:{thread}" if thread else None),
             document_ids=document_ids,
+            parent=current(),
         )
         await admitted(self.harness.runs.start(start, queue=True), "start")
         return RunHandle(self, start.run_id, tenant=start.tenant_id)
@@ -738,7 +770,7 @@ class Agent:
             and runtime.uses("memory_pull")
         ):
             try:
-                tools.extend(await self.harness.memory_tools(runtime.run_memory))
+                tools.extend(await self.harness.pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
@@ -821,6 +853,10 @@ class Agent:
             runtime.offered = set(candidates)
         status = pushed.evidence_status
         runtime.evidence = status
+        runtime.pushed = {
+            "bundle_id": pushed.bundle_id,
+            "memory_ids": pushed.memory_ids[:CITED_MAX],
+        }
         note = ABSTAIN_NOTES.get(status)
         rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
         runtime.context = rendered or None
@@ -865,7 +901,10 @@ class Agent:
         return history.owner(store, agent_id=self.id)
 
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
-        memory = runtime.run_memory
+        """A tool call, recorded in the memory service under the run — or, made while a helper
+        the framework spawned works (``bridges.helpers.inside``), under the helper's run."""
+        helper = helpers.inside(runtime)
+        memory = helper.memory if helper is not None else runtime.run_memory
         if memory is not None and runtime.uses("records") and call.tool not in _pull(self):
             await self.harness.writes.submit(
                 "memory.record_tool",
@@ -913,7 +952,9 @@ class Agent:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
         its outcome (the judge's and a person's override it in the memory service). Its
         ``confirm`` is unverified, so the service keeps it as the outcome only: it moves no
-        memory's confidence, learned skill or tool statistic."""
+        memory's confidence, learned skill or tool statistic. It keeps what the run's context
+        showed (``Runtime.pushed``, under :data:`PUSHED`): the memories a person's verdict on
+        the run cites when no grounding verdict did (``h.feedback``)."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
         if memory is None or not runtime.uses("records") or verdict is None:
@@ -923,6 +964,8 @@ class Agent:
             "source": "system",
             "comment": note,
             "key": f"{runtime.run_id}:outcome",
+            # what its context showed, which a person's verdict on the run cites
+            "metadata": {PUSHED: runtime.pushed} if runtime.pushed else None,
         }
         await self.harness.writes.submit(
             "memory.outcome",
@@ -1031,6 +1074,7 @@ class Agent:
         without: Collection[Feature] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
+        parent: Runtime | None = None,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
@@ -1048,6 +1092,7 @@ class Agent:
             without=without,
             framework_options=framework_options,
             document_ids=document_ids,
+            parent=parent,
         )
         await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
@@ -1067,8 +1112,7 @@ class Agent:
         record_input: bool = False,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
-        parent: str | None = None,
-        group: str | None = None,
+        parent: Runtime | None = None,
         without: Collection[Feature] = (),
         framework_options: Mapping[str, Any] | None = None,
         priority: int = 0,
@@ -1077,21 +1121,32 @@ class Agent:
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
-        the agent's version, the run it is a sub-agent's run of (``parent``) and the agent
-        group it works in (``group``), what it is ``without``, its framework options that are
-        JSON, the documents its context draws on (``document_ids``), and how a queued run waits
-        its turn (``priority``, ``concurrency_key``) go with it when there are any."""
+        the agent's version, what it is ``without``, its framework options that are JSON, the
+        documents its context draws on (``document_ids``), and how a queued run waits its turn
+        (``priority``, ``concurrency_key``) go with it when there are any. A run started
+        inside another (``parent``: a sub-agent's, a nested ``run``/``stream``/``start``) is
+        its child: its record names the parent and the agent group of the
+        tree, and it takes the parent's tenant, thread, documents, deadline (the earlier of
+        both) and what the parent is without, unless it names its own (``without`` adds to the
+        parent's)."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
+        if parent is not None:
+            tenant = tenant or parent.tenant
+            thread = thread or parent.thread
+            without = {*parent.without, *features(without)}
+            document_ids = parent.document_ids if document_ids is None else document_ids
+            ends = [d for d in (deadline, parent.deadline) if d is not None]
+            deadline = min(ends) if ends else None
         metadata = self._metadata(without, framework_options, document_ids)
-        if group is not None:
-            metadata[AGENT_GROUP] = group
+        if parent is not None:
+            metadata[AGENT_GROUP] = parent.identity.own_group
         given = {
             "timeout_seconds": self.timeout if timeout is None else timeout,
             "deadline": deadline,
             "agent_version": self.version,
-            "parent_run_id": parent,
+            "parent_run_id": None if parent is None else parent.run_id,
             "priority": priority or None,
             "concurrency_key": concurrency_key,
         }

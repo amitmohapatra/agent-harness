@@ -68,6 +68,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.session import MemorySession
+from trellis.harness.features import MEMORY_TOOLS
 from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
@@ -286,10 +287,17 @@ class OpenAIAgentsAdapter:
     # ------------------------------------------------------------------ internals
     @staticmethod
     def _agent(target: Any, run: Invocation, helpers: Helpers) -> Any:
-        # a tool the agent carries already (built with h.tools: read_file, say) is not added twice
-        carried = {getattr(t, "name", None) for t in target.tools}
-        added = [t for t in run.native_tools or () if t.name not in carried]
-        return governed_agents(target, added=added, agent_id=run.runtime.agent_id, helpers=helpers)
+        # the memory tools (pull, tool_search) go to every agent the run can reach: an agent
+        # it hands off to answers from memory as the one it started with
+        memory = {t.spec.name for t in run.tools if t.feature in MEMORY_TOOLS}
+        shared = [t for t in run.native_tools or () if t.name in memory]
+        return governed_agents(
+            target,
+            added=list(run.native_tools or ()),
+            shared=shared,
+            agent_id=run.runtime.agent_id,
+            helpers=helpers,
+        )
 
     @staticmethod
     async def _input(agent: Any, native_input: Any) -> Any:
@@ -309,24 +317,31 @@ class OpenAIAgentsAdapter:
 
 
 def governed_agents(
-    target: Any, *, added: list[Any], agent_id: str, helpers: Helpers | None = None
+    target: Any,
+    *,
+    added: list[Any],
+    agent_id: str,
+    shared: Sequence[Any] = (),
+    helpers: Helpers | None = None,
 ) -> Any:
     """``target`` and every agent reachable through its handoffs and its agent tools
     (``Agent.as_tool``), each a copy whose own tools are governed
-    (``tools.convert.openai_agents.governed``: hooks, the catalog's rules, the journal), whose
-    MCP servers' calls are governed the same way (:class:`GovernedServer`) and whose agent
-    tools run the governed copy of their agent — recursively, each agent copied once, so
-    handoffs that lead back are kept — ``added`` (the run's harness tools) on ``target``'s. A
-    ``Handoff`` object hides its agent until it is invoked: its tools cannot be reached, which is
-    said once. With ``helpers``, each agent tool's call is a helper of the run. The agents you
-    wrapped are not changed."""
+    (``tools.convert.openai_agents.governed``: hooks, the catalog's rules, the journal, and
+    offered per turn only while the run offers them: the tool hints' narrowing), whose MCP
+    servers' calls are governed the same way (:class:`GovernedServer`) and whose agent tools
+    run the governed copy of their agent — recursively, each agent copied once, so handoffs that
+    lead back are kept — ``added`` (the run's harness tools) on ``target``'s and ``shared``
+    (the run's memory tools) on every other's. A tool an agent carries already (built with
+    ``h.tools``) is not added twice. A ``Handoff`` object hides its agent until it is invoked:
+    its tools cannot be reached, which is said once. With ``helpers``, each agent tool's call is
+    a helper of the run. The agents you wrapped are not changed."""
     from agents import Agent
 
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, governed
 
     copies: dict[int, Any] = {}
 
-    def copied(agent: Any, extra: list[Any]) -> Any:
+    def copied(agent: Any, extra: Sequence[Any]) -> Any:
         found = copies.get(id(agent))
         if found is not None:
             return found
@@ -334,16 +349,17 @@ def governed_agents(
         own = []
         for tool in agent.tools:
             inner = getattr(tool, AGENT_OF_TOOL, None)
-            ran = _running(tool, copied(inner, [])) if isinstance(inner, Agent) else None
+            ran = _running(tool, copied(inner, shared)) if isinstance(inner, Agent) else None
             if inner is not None and ran is None:
                 _ungoverned_inside(agent_id, tool)
             own.append(governed(ran or tool, helpers))
-        copy.tools = [*own, *extra]
+        carried = {getattr(t, "name", None) for t in agent.tools}
+        copy.tools = [*own, *(t for t in extra if t.name not in carried)]
         copy.mcp_servers = [GovernedServer.of(s) for s in agent.mcp_servers]
         handoffs = []
         for handoff in agent.handoffs:
             if isinstance(handoff, Agent):
-                handoffs.append(copied(handoff, []))
+                handoffs.append(copied(handoff, shared))
             else:
                 _hidden_handoff(agent_id, str(getattr(handoff, "agent_name", "")))
                 handoffs.append(handoff)
