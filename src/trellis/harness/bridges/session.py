@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ErrorCategory, HarnessError
 from trellis.harness.history import Said, Speaker, answered, said_of
+from trellis.memory.errors import NotFoundError
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -55,10 +56,14 @@ class MemorySession:
     async def get_items(self, limit: int | None = None) -> list[Any]:
         """The thread's earlier turns, oldest first (``limit``: the newest that many), as the
         SDK's input items: the messages with the tool calls made in them and their results, a
-        call and its result never parted (``history.answered``)."""
+        call and its result never parted (``history.answered``). A thread the service does not
+        have yet (``404``: nothing was said in it) has none."""
         assert self.runtime.run_memory is not None
         ctx = self.runtime.run_memory.ctx
-        messages = await ctx.history(limit=HISTORY_LIMIT, include_internal=True)
+        try:
+            messages = await ctx.history(limit=HISTORY_LIMIT, include_internal=True)
+        except NotFoundError:
+            return []
         run_id = self.runtime.run_id
         said = [
             said_of({"role": m.role, "content": m.content, **(m.model_extra or {})})

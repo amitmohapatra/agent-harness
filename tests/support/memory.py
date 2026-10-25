@@ -542,10 +542,12 @@ class FakeMemoryService:
                 )
         return {"messages": acks}
 
-    def _thread_messages(self, call: Call) -> dict[str, Any]:
+    def _thread_messages(self, call: Call) -> dict[str, Any] | httpx.Response:
         """The thread's newest ``limit`` messages, oldest first (the INTERNAL ones only with
-        ``include_internal``)."""
+        ``include_internal``); ``404`` for a thread nothing was said in yet, as the service."""
         thread = call.path["thread_id"]
+        if thread not in self.threads:
+            return problem(404, f"/v1/threads/{thread}/messages", detail="Thread not found")
         internal = call.query.get("include_internal") == "true"
         limit = int(call.query.get("limit") or 50)
         found = [m for m in self.threads.get(thread, []) if internal or m["kind"] == "VISIBLE"]

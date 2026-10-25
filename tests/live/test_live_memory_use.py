@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 from tests.live.conftest import live_harness, needs_memory
-from tests.support.arm import arm
 from trellis import Harness, Runtime
 from trellis.contracts import RunStatus
 
@@ -37,21 +36,22 @@ async def test_a_sub_agent_reads_its_parents_notes_and_writes_to_its_group(
 
     async def parent(input: str, agent: Runtime) -> Any:
         await agent.tools.call("memory_remember", content=note, scope="run")
-        return await agent.tools.call("helper", message="use the hand-off code")
+        # the wrapped child, called as a tool (it joins the run): a child run of this one
+        return await agent.tools.call(helper, message="use the hand-off code")
 
     user = f"live-{marker}"
     helper = harness.wrap(child, id=f"helper-{marker}")
-    lead = arm(harness.wrap(parent, id=f"lead-{marker}"), [helper])
+    lead = harness.wrap(parent, id=f"lead-{marker}")
     result = await lead.run("start the task", user=user)
     assert result.status is RunStatus.SUCCESS, result.error
     assert marker in str(found["child"]), "the child reads the note its parent kept for its run"
     assert "id" in str(found["group"]), "a group note binds to the tree's group"
 
-    # another run of the same agent for the same user is not the parent: it cannot read it
+    # a run of another agent for the same user, outside the tree: it cannot read it
     async def outsider(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("memory_search", query=f"hand-off code {marker}")
 
-    other = await harness.wrap(outsider, id=f"helper-{marker}").run("look", user=user)
+    other = await harness.wrap(outsider, id=f"outsider-{marker}").run("look", user=user)
     assert note not in str(other.answer)
 
 

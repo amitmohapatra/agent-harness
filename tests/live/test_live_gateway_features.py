@@ -294,25 +294,30 @@ async def test_no_model_call_gets_the_keys_mcp_tools(wikis: list[str], wikis_key
 
 # --------------------------------------------------------------------------- prompts
 async def test_a_stored_prompt_reaches_every_model_call_of_a_react(admin: Admin) -> None:
+    """A model name the harness routes selects the pinned version by its headers (the gateway
+    prepends it); a model object of the team's own is not the harness's to route, so the
+    version pinned for the run is rendered into its instructions instead."""
     name = f"trellis-live-{suffix()}"
     prompt = await admin.prompts.create(name)
     try:
         system = [{"role": "system", "content": "Answer every question with the single word ARRR."}]
         await admin.prompts.commit(prompt.id, system, model=MODEL)
         async with live_harness() as h:
-            sent = Sent()  # the model a model name builds, its requests seen on the wire
-            agent = h.wrap(
+            # a model name: routed through Bifrost, the version selected per call
+            named = h.wrap(ReAct(system_prompt=stored(name), model=MODEL), id=f"live-p-{suffix()}")
+            result = await named.run("What is 2 + 2?", user="live")
+            assert result.status is RunStatus.SUCCESS, result.error
+            assert "ARRR" in str(result.answer).upper()  # the gateway prepended it
+            # a model object of your own: the pinned version is its instructions, no header
+            sent = Sent()  # its requests seen on the wire
+            own = h.wrap(
                 ReAct(system_prompt=stored(name), model=gateway_model(h, sent)),
                 id=f"live-p-{suffix()}",
             )
-            result = await agent.run("What is 2 + 2?", user="live")
+            result = await own.run("What is 2 + 2?", user="live")
             assert result.status is RunStatus.SUCCESS, result.error
-            assert "ARRR" in str(result.answer).upper()  # the gateway prepended it
-            # every model call selected the pinned version, through its request's headers
-            assert sent.headers and all(
-                (s["x-bf-prompt-id"], s["x-bf-prompt-version"]) == (prompt.id, "1")
-                for s in sent.headers
-            )
+            assert "ARRR" in str(result.answer).upper()
+            assert sent.headers and not any("x-bf-prompt-id" in s for s in sent.headers)
             assert h.gateway is not None
             assert (await h.gateway.prompt(name)).version == 1
             rendered = await h.prompt(f"{name}@1")
