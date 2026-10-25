@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 from deepagents import create_deep_agent
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from tests.support.adapters import BUILDERS
@@ -22,7 +22,6 @@ from tests.unit.test_toolbox import READ, Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import ConfigurationError, RunStatus, ToolSpec
-from trellis.harness.automatic import MIN_WINDOW
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.evals import tool_coverage
 from trellis.harness.middleware import (
@@ -30,9 +29,7 @@ from trellis.harness.middleware import (
     TOOL_GUIDANCE,
     AnswerCheck,
     ToolGuidance,
-    ruled,
 )
-from trellis.harness.react import GUIDE_FROM
 from trellis.harness.tools.convert import langchain as lc
 from trellis.harness.tools.lint import MOST_TOOLS, lint
 
@@ -421,7 +418,7 @@ async def test_capabilities_are_said_with_or_without_the_guidance(harness: Harne
 
 
 def test_only_the_requests_own_results_count_as_nothing_found() -> None:
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage
 
     from trellis.harness.middleware import _no_record
 
@@ -442,54 +439,17 @@ def lookers(count: int) -> list[Any]:
     return [tool(look_up, name=f"look_{n}", side_effects="read") for n in range(count)]
 
 
-async def test_automatic_guidance_goes_with_many_tools_only(harness: Harness) -> None:
-    few = lookers(GUIDE_FROM - 1)
-    roomy: dict[str, Any] = {"context_window": MIN_WINDOW}
-    model = ScriptedChatModel(turns=["hi"])
-    await arm(harness.wrap(ReAct("s", model, **roomy), id="few"), few).run("hi", user="u")
-    assert guided(model) == [False]
-    many = lookers(GUIDE_FROM)
-    model = ScriptedChatModel(turns=["hi"])
-    await arm(harness.wrap(ReAct("s", model, **roomy), id="many"), many).run("hi", user="u")
-    assert guided(model) == [True]
-    model = ScriptedChatModel(turns=["hi"])  # a small window has no room for it
-    small = ReAct("s", model, context_window=MIN_WINDOW - 1)
-    await arm(harness.wrap(small, id="small"), many).run("hi", user="u")
-    assert guided(model) == [False]
-    with pytest.raises(ConfigurationError, match="from_tools is a number of tools"):
-        ToolGuidance(from_tools=0)
-    with pytest.raises(ConfigurationError, match="from_tools is a number of tools"):
-        ToolGuidance(from_tools=True)
-
-
-async def test_the_automatic_check_comes_with_a_rule_in_the_context(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=["no rule here", "checked"])
-    agent = arm(harness.wrap(ReAct("s", model), id="norule"), [look, rule])
-    plain = await agent.run("make a rule for a-1", user="u")
-    assert plain.answer == "no rule here" and checks(model) == 0
-    ruled_model = ScriptedChatModel(turns=["made it", "it is forbidden"])
-    agent = arm(harness.wrap(ReAct("s", ruled_model), id="rule"), [look, rule])
+async def test_automatic_is_off_as_measured_many_tools_and_a_rule_alike(
+    harness: Harness,
+) -> None:
+    """``None`` (the default) adds neither the guidance nor the check — measured on a small
+    model, the guidance made it call changes nobody asked for and the check broke a rule."""
+    many = lookers(30)
+    model = ScriptedChatModel(turns=["made it"])
+    agent = arm(harness.wrap(ReAct("s", model, context_window=64_000), id="auto"), [*many, rule])
     said = [
         {"role": "system", "content": "Remembered: never make a rule for a-1."},
         {"role": "user", "content": "make a rule for a-1"},
     ]
-    assert (await agent.run(said, user="u")).answer == "it is forbidden"
-    assert checks(ruled_model) == 1
-
-
-@pytest.mark.parametrize(
-    ("text", "found"),
-    [
-        ("Never refund twice.", True),
-        ("Policy: approvals over 100.", True),
-        ("You must ask first.", True),
-        ("Refunds are forbidden on Sundays.", True),
-        ("The user likes email.", False),
-        ("", False),
-    ],
-)
-def test_a_rule_is_read_in_the_conversations_own_system_messages(text: str, found: bool) -> None:
-    assert ruled([SystemMessage(content=text), HumanMessage(content="never mind")]) is found
-    assert ruled([HumanMessage(content=text)]) is False  # the user's words are no rule
-    later = [HumanMessage(content="hi"), SystemMessage(content=text)]
-    assert ruled(later) is False  # only the conversation's leading ones are read
+    assert (await agent.run(said, user="u")).answer == "made it"
+    assert guided(model) == [False] and checks(model) == 0

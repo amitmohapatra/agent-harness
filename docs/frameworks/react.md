@@ -111,8 +111,8 @@ The names are Deep Agents' where both have one. In four tiers:
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
 * `tool_guidance`, `answer_check`, `capabilities` — how to choose among tools, a check of the
   answer before it is final and of a change before it is made, and what the assistant can do
-  beyond its tools; `None` (the default) switches the first two on by a measured rule
-  ([below](#tool-choice)).
+  beyond its tools; `None` (the default) is automatic: by the measurement
+  ([below](#tool-choice)) both stay off; `True` turns either on.
 * `middleware` — more middleware, LangChain's, Deep Agents' or yours, added before `ModelHooks`
   (so its span shows what the model is sent): one named as the harness's is refused, naming the
   parameter that sets it (`StepLimit`: `max_steps`, `StallGuard`: `max_repeats`, `ModelHooks`:
@@ -239,16 +239,31 @@ broad tool (a dashboard) when a specific one answers; it answers one part of a s
 request and drops another; it answers a request to change something in text, never calling the
 tool — so the change is not made and its approval never asked; it draws a conclusion the
 results do not support. Two switches guard against them — both LangChain middleware, in
-[`middleware()`](#middleware-on-your-own-graph) too. Each is `None` by default: on by a rule
-measured on a small model (below), `True` always, `False` never.
+[`middleware()`](#middleware-on-your-own-graph) too. Each is `None` by default — automatic,
+which by the measurement below is off — `True` always, `False` never.
 
 | | What it does | Costs | `None` (automatic) |
 |---|---|---|---|
-| `tool_guidance` — `ToolGuidance()` | adds to the instructions of a call that offers tools (`TOOL_GUIDANCE`): address every part of the request, each with the tool made for it; the most specific tool over a general one; current figures from a tool, not the remembered context, which gives background and rules; a change made by calling its tool — the system asks for approval itself — never claimed without its success; conclusions from the results, and a plain "cannot" for a part no tool answers. Inside a run it names the offered tools that change data | a few hundred tokens of instructions, the same on every call (a prompt cache holds) | on a call offering 20 tools or more (`GUIDE_FROM`), on a known window of 32,000 tokens or more (room for its ~450 tokens) |
+| `tool_guidance` — `ToolGuidance()` | adds to the instructions of a call that offers tools (`TOOL_GUIDANCE`): address every part of the request, each with the tool made for it; the most specific tool over a general one; current figures from a tool, not the remembered context, which gives background and rules; a change made by calling its tool — the system asks for approval itself — never claimed without its success; conclusions from the results, and a plain "cannot" for a part no tool answers. Inside a run it names the offered tools that change data | a few hundred tokens of instructions, the same on every call (a prompt cache holds) | off (measured: more tools called, and changes nobody asked for) |
 | `capabilities={...}` — `ToolGuidance(capabilities=)` | what the assistant can and cannot do beyond its tools (`{"accept an image upload": False}`), one line each in every call's instructions, so "can you ...?" gets a plain yes or no | a line per capability | always, when given |
-| `answer_check` — `AnswerCheck()` | when the model answers without calling a tool, its draft is not final (nor streamed): the model is shown it and asked once to check it against the request (`ANSWER_CHECK`), and either calls the tools still needed or gives the final answer in its place; when nothing found is about what was asked it asks for a plain "no record". **A change, before it is made**: the first step calling a tool that changes data is checked against the rules in the instructions and context (`WRITE_CHECK`) before governance asks anyone to approve it | one more model call per invocation for the answer, one for the first change | when the run's context holds a rule — the memory context pushed for it, or a system message of the input ("never", "always", "must", a rule, a policy, something forbidden) |
+| `answer_check` — `AnswerCheck()` | when the model answers without calling a tool, its draft is not final (nor streamed): the model is shown it and asked once to check it against the request (`ANSWER_CHECK`), and either calls the tools still needed or gives the final answer in its place; when nothing found is about what was asked it asks for a plain "no record". **A change, before it is made**: the first step calling a tool that changes data is checked against the rules in the instructions and context (`WRITE_CHECK`) before governance asks anyone to approve it | one more model call per invocation for the answer, one for the first change | off (measured: no better, a model call more per answer, a rule broken) |
 
-<!-- measured: the rules above, from the Phase 2 Granite batch -->
+Measured on Granite 3.3 2B (CPU, llama.cpp behind Bifrost), the store set of the live
+tool-choice test — 16 items: several-part requests, a change behind approval, a rule in the
+context, a capability question, a record that does not exist (`tests/live/test_live_tool_choice.py`):
+
+| Tools, window | Variant | Tool coverage | Items fully covered | Model calls / item | Changes called unasked (paused for approval) | Rule kept |
+|---|---|---|---|---|---|---|
+| 51 tools, 16,384 | off | 0.89 | 12/16 | 1.69 | 0 | yes |
+| 51 tools, 16,384 | `tool_guidance=True` | 1.00 | 14/16 | 1.63 | 4 | no |
+| 11 tools, 16,384 | off | 0.93 | 13/16 | 1.75 | 1 | yes |
+| 11 tools, 16,384 | `answer_check=True` | 0.93 | 13/16 | 2.75 | 2 | no |
+
+The guidance raised coverage, but the small model then called a change on four items that asked
+for none (a "where in the app" question, a comparison, a capability question) — each paused for
+an approval nobody wanted — and broke the context's rule; the check cost a model call per answer
+for no gain and broke the rule too. So `None` keeps both off; turn one on (`True`) for a model
+that measures better with it. One run per item: a measurement to repeat on the model you ship.
 
 Both are generic: they name no tool, and read only what the run already knows (the request,
 the results, which tools change data). What they cannot do is tell two tools apart that are
@@ -260,8 +275,8 @@ where the toolbox's check of the tool set, and the native tool selector for many
 target = ReAct(
     system,
     "provider/model",
-    tool_guidance=True,  # always (None: from 20 tools, on a window with room)
-    answer_check=False,  # never (None: when the context holds a rule)
+    tool_guidance=True,  # always (None, the default: off, as measured)
+    answer_check=False,  # never (None, the default: off, as measured)
     capabilities={"accept an image upload": False},
 )
 ```

@@ -23,9 +23,8 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
 - `ReAct(tools=)` refuses `sandbox()` (code runs in `backend=docker_sandbox()`) and agents
   (`a2a(url)` and wrapped agents go in `subagents=`); `max_repeats` is 2 or more, as
   `StallGuard` always required.
-- `tool_guidance` and `answer_check` default to `None`, automatic: the guidance with 20 tools
-  or more on a call and a known window of 32,000 tokens or more, the check when the run's
-  context holds a rule (measured: see Changed). `False` turns either off.
+- `tool_guidance` and `answer_check` default to `None`, automatic — which, measured on a small
+  model, keeps both off (see Changed); `True` turns either on, `False` keeps it off.
 - `ReAct(store=)`, like `checkpointer=`, is for the graph run on its own: `h.wrap` refuses it.
 - `ReAct(middleware=)` with a Deep Agents middleware's name replaces Deep Agents' own (as
   `create_deep_agent` does); one named as the harness's is still refused.
@@ -89,8 +88,11 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
 - Deep Agents' summarization stands after the harness's middleware that narrow the tools, so
   its budget counts what the model is sent.
 - The base and the automatic rules were chosen by one Granite batch (the cost benchmark's ten
-  tasks at 10 and 50 tools; the tool-choice store sets at 11 and 51 tools):
-  [docs/frameworks/react.md](docs/frameworks/react.md#tool-choice).
+  tasks at 10, 50 and 100 tools; the tool-choice store set at 11 and 51 tools): `ReAct` on
+  `create_deep_agent` with `middleware()`; the guidance and the check off by default — the
+  guidance raised coverage (0.89 to 1.00) but made the model call changes on 4 of 16 items that
+  asked for none, the check added a model call per answer for no gain, and both broke the
+  context's rule: [docs/frameworks/react.md](docs/frameworks/react.md#tool-choice).
 
 ### Fixed
 

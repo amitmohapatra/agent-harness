@@ -476,7 +476,7 @@ flowchart TB
 One model step through it, and the tool calls it makes, is in
 [flows.md](flows.md#react-one-model-step-through-the-middleware); what each piece does and how
 to add or replace one is [frameworks/react.md](frameworks/react.md#the-middleware). The two
-switches are present unless turned off (`None` applies them by a measured rule); `AnswerCheck`
+switches are off unless turned on (`None`, automatic, is off by the measurement); `AnswerCheck`
 sits outside `HarnessTools` so
 that, in a run its tool hints narrowed, the check can be offered every tool
 ([frameworks/react.md](frameworks/react.md#tool-choice), [ADR 0002](adr/0002-tool-choice.md)).

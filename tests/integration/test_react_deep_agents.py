@@ -28,7 +28,7 @@ from trellis.harness import middleware as ours
 from trellis.harness.adapters.langgraph import bound_tools, graph_tools
 from trellis.harness.gateways import routed
 from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE, RunCheckpointer
-from trellis.harness.react import GUIDE_FROM, PLACED, _native, defaults_off
+from trellis.harness.react import PLACED, _native, defaults_off
 
 
 @tool(side_effects="read")
@@ -61,7 +61,9 @@ def marked(graph: Any, key: str) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- middleware()
 def test_middleware_is_the_harness_part_in_its_order() -> None:
-    found = [m.name for m in middleware(context_window=64_000)]
+    found = [
+        m.name for m in middleware(context_window=64_000, tool_guidance=True, answer_check=True)
+    ]
     assert found == [
         "TodoListMiddleware",
         "AnswerCheck",
@@ -76,10 +78,8 @@ def test_middleware_is_the_harness_part_in_its_order() -> None:
         "FitWindow",
         "ModelHooks",
     ]
-    # no window, or one too small: no room for the automatic guidance (forced, it is there)
-    assert "ToolGuidance" not in [m.name for m in middleware()]
-    assert "ToolGuidance" not in [m.name for m in middleware(context_window=8_192)]
-    assert "ToolGuidance" in [m.name for m in middleware(tool_guidance=True)]
+    # automatic (None): neither, as measured; forced, they are there
+    assert {"ToolGuidance", "AnswerCheck"}.isdisjoint(m.name for m in middleware())
     off = [m.name for m in middleware(tool_guidance=False, answer_check=False)]
     assert "ToolGuidance" not in off and "AnswerCheck" not in off
     told = [m.name for m in middleware(tool_guidance=False, capabilities={"upload": False})]
@@ -93,10 +93,9 @@ def test_middleware_settings_mean_what_reacts_do() -> None:
     }
     assert stack["StepLimit"].max_steps == 4 and stack["StallGuard"].max_repeats == 5
     assert stack["ModelHooks"].timeout == 2.0
-    assert stack["ToolGuidance"].from_tools == GUIDE_FROM
-    assert stack["AnswerCheck"].with_rules_only
+    assert "ToolGuidance" not in stack and "AnswerCheck" not in stack  # None: off, measured
     forced = {m.name: m for m in middleware(tool_guidance=True, answer_check=True)}
-    assert forced["ToolGuidance"].from_tools == 1 and not forced["AnswerCheck"].with_rules_only
+    assert forced["ToolGuidance"].text is not None and forced["AnswerCheck"].checks == 1
     pinned = {m.name: m for m in middleware(system_prompt=stored("triage"))}
     assert pinned["ModelHooks"].prompt == stored("triage")
 

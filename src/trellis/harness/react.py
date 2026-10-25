@@ -73,9 +73,6 @@ MIN_FREED: Final = 0.1
 CLEARED: Final = (
     "[result cleared to keep the context small: read_result(id=<this call's id>) reads it again]"
 )
-#: ``tool_guidance=None``: the guidance goes with a call offering at least this many tools
-#: (measured: docs/frameworks/react.md#tool-choice).
-GUIDE_FROM: Final = 20
 #: Deep Agents' file tools that read, and those that change files: on a backend outside the
 #: graph's state they are governed as any tool, with these risks.
 FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
@@ -124,17 +121,17 @@ def middleware(
         agent = h.wrap(graph, id="stock")
 
     In order: planning on a long task (:class:`~.automatic.Planning`); the answer check
-    (``answer_check``: ``None`` checks an invocation whose context
-    holds a rule, ``True`` every one, ``False`` none — :class:`~.middleware.AnswerCheck`); the
-    run's tools per model call, narrowed per turn, the memory and gateway MCP tools among them
+    (``answer_check``: ``True`` every invocation; ``None``, automatic, and ``False`` none —
+    :class:`~.middleware.AnswerCheck`); the run's tools per model call, narrowed per turn,
+    the memory and gateway MCP tools among them
     (:class:`~.middleware.HarnessTools`); the graph's own tools governed with full parity
     (:class:`~.middleware.GovernTools`); ``max_repeats`` (:class:`~.middleware.StallGuard`);
     ``max_steps`` then one answer without tools (:class:`~.middleware.StepLimit`); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
     cleared past half of it and ``read_result`` to read them back; the tool guidance
-    (``tool_guidance``: ``None`` with :data:`GUIDE_FROM` tools or more on a known window with
-    room for it, ``True`` always, ``False`` never — and ``capabilities``, what the agent can and
-    cannot do, on every call); the request made to fit the window, never failing for its size
+    (``tool_guidance``: ``True`` on every call that offers tools; ``None``, automatic, and
+    ``False`` never — and ``capabilities``, what the agent can and cannot do, on every
+    call); the request made to fit the window, never failing for its size
     (:class:`~.middleware.FitWindow`: the guidance dropped, the tools narrowed and compacted,
     older results cleared, older turns left out — only as far as needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
@@ -207,28 +204,19 @@ def _middleware(
         if window is not None or not files
         else []
     )
-    # automatic, the guidance needs room: about 450 tokens a call, which a window under
-    # automatic.MIN_WINDOW (or one not known) cannot spare beside many tools (measured: at 50
-    # tools on an 8,192-token window it pushes the request past the window)
-    guided = tool_guidance or (
-        tool_guidance is None and window is not None and window >= automatic.MIN_WINDOW
-    )
+    # ``None`` (automatic) is off for both, as measured on a small model (docs/frameworks/
+    # react.md#tool-choice): the guidance made it call changes nobody asked for, the check
+    # cost a model call per answer and broke a rule it was meant to keep
     guidance = (
         [
             ours.ToolGuidance(
-                ours.TOOL_GUIDANCE if guided else None,
-                capabilities=capabilities,
-                from_tools=GUIDE_FROM if tool_guidance is None else 1,
+                ours.TOOL_GUIDANCE if tool_guidance else None, capabilities=capabilities
             )
         ]
-        if guided or capabilities
+        if tool_guidance or capabilities
         else []
     )
-    check = (
-        [ours.AnswerCheck(with_rules_only=answer_check is None)]
-        if answer_check is not False
-        else []
-    )
+    check = [ours.AnswerCheck()] if answer_check else []
     return [
         # what a long task is offered, decided before anything reads the request's tools
         automatic.Planning(window=window),

@@ -1192,20 +1192,12 @@ class ToolGuidance(AgentMiddleware):
         text: str | None = TOOL_GUIDANCE,
         *,
         capabilities: Mapping[str, bool] | None = None,
-        from_tools: int = 1,
     ) -> None:
         super().__init__()
         if text is not None and not text.strip():
             raise ConfigurationError("ToolGuidance needs a text (None: the capabilities only)")
-        if isinstance(from_tools, bool) or not isinstance(from_tools, int) or from_tools < 1:
-            raise ConfigurationError(
-                f"from_tools is a number of tools, 1 or more: not {from_tools!r}"
-            )
         self.text = text
         self.capabilities = dict(capabilities or {})
-        #: the guidance goes with a call offering at least this many tools (besides the
-        #: graph's state tools): ``ReAct(tool_guidance=None)`` sets :data:`GUIDE_FROM`
-        self.from_tools = from_tools
 
     async def awrap_model_call(
         self,
@@ -1213,7 +1205,7 @@ class ToolGuidance(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         parts = []
-        if self.text is not None and _counted(request.tools) >= self.from_tools:
+        if self.text is not None and _counted(request.tools):
             writes = _writes_offered(request)
             parts.append(self.text)
             if writes:
@@ -1233,21 +1225,12 @@ def _counted(tools: Sequence[BaseTool | dict[str, Any]]) -> int:
     return sum(_named(t) not in STATE_TOOLS for t in tools)
 
 
-#: What says a context holds a rule (:func:`ruled`): a rule, a policy, a "never", an "always",
-#: a "must", something forbidden or not allowed.
+#: What says a line of the memory context states a rule (``FitWindow`` never trims it): a rule,
+#: a policy, a "never", an "always", a "must", something forbidden or not allowed.
 _RULE: Final = re.compile(
     r"\b(?:rules?|polic(?:y|ies)|never|always|must|forbid\w*|prohibit\w*|not allowed)\b",
     re.IGNORECASE,
 )
-
-
-def ruled(messages: Sequence[BaseMessage]) -> bool:
-    """Whether the conversation's own leading system messages — the memory context pushed for
-    the run, the rules an input gives — hold a rule (:data:`_RULE`); read up to the first other
-    message, so a long run costs no more than a short one. The agent's instructions (the
-    request's ``system_message``) are not among them: they always say what to do."""
-    leading = itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages)
-    return any(_RULE.search(m.text) for m in leading)
 
 
 class _CheckedState(AgentState[Any]):
@@ -1290,7 +1273,6 @@ class AnswerCheck(AgentMiddleware):
         *,
         writes: bool = True,
         text: str = ANSWER_CHECK,
-        with_rules_only: bool = False,
     ) -> None:
         super().__init__()
         if checks < 1:
@@ -1300,10 +1282,6 @@ class AnswerCheck(AgentMiddleware):
         self.checks = checks
         self.writes = writes
         self.text = text
-        #: check only an invocation whose context holds a rule (:func:`ruled`: the memory
-        #: context pushed for the run, an input's own system messages):
-        #: ``ReAct(answer_check=None)``
-        self.with_rules_only = with_rules_only
 
     async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         return {CHECKED: 0, WRITE_CHECKED: False}
@@ -1320,7 +1298,6 @@ class AnswerCheck(AgentMiddleware):
             (done >= self.checks and write_checked)
             or not _tools(request, runtime)
             or request.tool_choice == "none"
-            or (self.with_rules_only and not ruled(request.messages))
         ):
             return await handler(request)
         with _quiet():

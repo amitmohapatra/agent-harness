@@ -316,8 +316,8 @@ one.
 | `cache` | none | LangGraph's node cache |
 | `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `max_repeats` | 3 | identical calls in a row that stop the run (2 or more) |
-| `tool_guidance` | `None`: automatic | how to choose among tools, added to the instructions (`ToolGuidance`); `None` with 20 tools or more on a known window of 32,000 tokens or more (measured: [tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
-| `answer_check` | `None`: automatic | the draft answer checked against the request once, and the first change against the rules (`AnswerCheck`: one more model call each); `None` when the run's context holds a rule (the memory context, an input's system message), `True` always, `False` never |
+| `tool_guidance` | `None`: automatic | how to choose among tools, added to the instructions (`ToolGuidance`); `None`: off, as measured ([tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
+| `answer_check` | `None`: automatic | the draft answer checked against the request once, and the first change against the rules (`AnswerCheck`: one more model call each); `None`: off, as measured ([tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
 | `store`, `checkpointer` | the memory service; the run's (`RunCheckpointer()`) | for the graph run on its own, outside the harness: `h.wrap` refuses a `ReAct` given either |
 
 Not exposed: Deep Agents' `interrupt_on` (approvals are the [catalog](governance.md)'s), `name`
