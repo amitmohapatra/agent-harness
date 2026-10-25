@@ -614,3 +614,30 @@ async def test_a_resume_entry_carries_a_comment_and_the_interrupt_what_to_render
     assert record is not None and record.last_resolution is not None
     assert record.last_resolution.remember == "run"
     await harness.aclose()
+
+
+async def test_a_resume_right_after_the_pause_is_not_ended_by_the_paused_attempts_tail() -> None:
+    """The paused attempt still finishing (its end hooks) when its resume starts: the
+    resumed attempt's stream ends with its own result, not an abort the paused one's end said
+    on the reopened buffer."""
+    from trellis import Hooks
+
+    class SlowEnd(Hooks):
+        async def on_run_end(self, run: Runtime, result: Any) -> None:
+            await asyncio.sleep(0.2)
+
+    harness = Harness(config=Settings())
+    app = FastAPI()
+    harness.wrap(agent_fn, id="slow", hooks=[SlowEnd()]).serve_chat(app, identity=user_of)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://agui", headers={"x-user": "u1"}
+    ) as http:
+        paused = finished(await post(http, body("ask")))
+        entry = paused["outcome"]["interrupts"][0]
+        answer = body(resume=[{"interruptId": entry["id"], "payload": "yes"}])
+        resumed = await post(http, answer)
+        assert "RUN_ERROR" not in [e["type"] for _, e in resumed], resumed
+        assert finished(resumed)["outcome"] == {"type": "success"}, resumed
+        assert finished(resumed)["result"] == "you said yes"
+    await harness.aclose()

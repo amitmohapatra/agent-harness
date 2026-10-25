@@ -310,10 +310,17 @@ class _Surface:
         run_id: str,
         execute: Callable[[Callable[[RunEvent], None]], Awaitable[Result]],
     ) -> None:
+        # this attempt's own end: the buffer is the run's, reopened by its resume, possibly
+        # while this attempt still finishes (its end hooks, its records) after announcing it
+        ended = False
+
         def listen(event: RunEvent) -> None:
+            nonlocal ended
             translated = translate(self.agent.hooks.event(event))
             if translated is not None:
-                buffer.publish(translated, final=event.type is RunEventType.RUN_FINISHED)
+                final = event.type is RunEventType.RUN_FINISHED
+                ended = ended or final
+                buffer.publish(translated, final=final)
 
         async def guarded() -> None:
             try:
@@ -324,7 +331,7 @@ class _Surface:
                 message = str(exc)
             else:
                 message = "the run ended without a result"
-            if not buffer.finished:
+            if not ended:
                 buffer.publish(_ending(result, thread_id, run_id, message), final=True)
 
         task = asyncio.create_task(guarded(), name=f"agui:{run_id}")
