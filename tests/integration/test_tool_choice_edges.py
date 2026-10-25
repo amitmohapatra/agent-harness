@@ -22,6 +22,7 @@ from tests.unit.test_toolbox import READ, Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import ConfigurationError, RunStatus, ToolSpec
+from trellis.harness.automatic import MIN_WINDOW
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.evals import tool_coverage
 from trellis.harness.middleware import (
@@ -443,13 +444,18 @@ def lookers(count: int) -> list[Any]:
 
 async def test_automatic_guidance_goes_with_many_tools_only(harness: Harness) -> None:
     few = lookers(GUIDE_FROM - 1)
+    roomy = {"context_window": MIN_WINDOW}
     model = ScriptedChatModel(turns=["hi"])
-    await arm(harness.wrap(ReAct("s", model), id="few"), few).run("hi", user="u")
+    await arm(harness.wrap(ReAct("s", model, **roomy), id="few"), few).run("hi", user="u")
     assert guided(model) == [False]
     many = lookers(GUIDE_FROM)
     model = ScriptedChatModel(turns=["hi"])
-    await arm(harness.wrap(ReAct("s", model), id="many"), many).run("hi", user="u")
+    await arm(harness.wrap(ReAct("s", model, **roomy), id="many"), many).run("hi", user="u")
     assert guided(model) == [True]
+    model = ScriptedChatModel(turns=["hi"])  # a small window has no room for it
+    small = ReAct("s", model, context_window=MIN_WINDOW - 1)
+    await arm(harness.wrap(small, id="small"), many).run("hi", user="u")
+    assert guided(model) == [False]
     with pytest.raises(ConfigurationError, match="from_tools is a number of tools"):
         ToolGuidance(from_tools=0)
     with pytest.raises(ConfigurationError, match="from_tools is a number of tools"):

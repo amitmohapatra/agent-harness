@@ -24,8 +24,8 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
   (`a2a(url)` and wrapped agents go in `subagents=`); `max_repeats` is 2 or more, as
   `StallGuard` always required.
 - `tool_guidance` and `answer_check` default to `None`, automatic: the guidance with 20 tools
-  or more on a call, the check when the run's context holds a rule (measured: see Changed).
-  `False` turns either off.
+  or more on a call and a known window of 32,000 tokens or more, the check when the run's
+  context holds a rule (measured: see Changed). `False` turns either off.
 - `ReAct(store=)`, like `checkpointer=`, is for the graph run on its own: `h.wrap` refuses it.
 - `ReAct(middleware=)` with a Deep Agents middleware's name replaces Deep Agents' own (as
   `create_deep_agent` does); one named as the harness's is still refused.

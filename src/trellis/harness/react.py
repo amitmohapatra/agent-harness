@@ -132,8 +132,9 @@ def middleware(
     ``max_steps`` then one answer without tools (:class:`~.middleware.StepLimit`); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
     cleared past half of it and ``read_result`` to read them back; the tool guidance
-    (``tool_guidance``: ``None`` with :data:`GUIDE_FROM` tools or more, ``True`` always,
-    ``False`` never — and ``capabilities``, what the agent can and cannot do, on every call);
+    (``tool_guidance``: ``None`` with :data:`GUIDE_FROM` tools or more on a known window with
+    room for it, ``True`` always, ``False`` never — and ``capabilities``, what the agent can and
+    cannot do, on every call);
     and :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
     headers on a routed model). Outside a harness run each steps aside."""
@@ -204,15 +205,21 @@ def _middleware(
         if window is not None or not files
         else []
     )
+    # automatic, the guidance needs room: about 450 tokens a call, which a window under
+    # automatic.MIN_WINDOW (or one not known) cannot spare beside many tools (measured: at 50
+    # tools on an 8,192-token window it pushes the request past the window)
+    guided = tool_guidance or (
+        tool_guidance is None and window is not None and window >= automatic.MIN_WINDOW
+    )
     guidance = (
         [
             ours.ToolGuidance(
-                ours.TOOL_GUIDANCE if tool_guidance is not False else None,
+                ours.TOOL_GUIDANCE if guided else None,
                 capabilities=capabilities,
                 from_tools=GUIDE_FROM if tool_guidance is None else 1,
             )
         ]
-        if tool_guidance is not False or capabilities
+        if guided or capabilities
         else []
     )
     check = (

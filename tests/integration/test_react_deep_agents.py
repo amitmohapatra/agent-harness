@@ -61,7 +61,7 @@ def marked(graph: Any, key: str) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- middleware()
 def test_middleware_is_the_harness_part_in_its_order() -> None:
-    found = [m.name for m in middleware()]
+    found = [m.name for m in middleware(context_window=64_000)]
     assert found == [
         "TodoListMiddleware",
         "AnswerCheck",
@@ -70,11 +70,15 @@ def test_middleware_is_the_harness_part_in_its_order() -> None:
         "StallGuard",
         "StepLimit",
         "Budgeted",
+        "ContextEditingMiddleware",
+        "ReadTools",
         "ToolGuidance",
         "ModelHooks",
     ]
-    windowed = [m.name for m in middleware(context_window=64_000)]
-    assert "ContextEditingMiddleware" in windowed and "ReadTools" in windowed
+    # no window, or one too small: no room for the automatic guidance (forced, it is there)
+    assert "ToolGuidance" not in [m.name for m in middleware()]
+    assert "ToolGuidance" not in [m.name for m in middleware(context_window=8_192)]
+    assert "ToolGuidance" in [m.name for m in middleware(tool_guidance=True)]
     off = [m.name for m in middleware(tool_guidance=False, answer_check=False)]
     assert "ToolGuidance" not in off and "AnswerCheck" not in off
     told = [m.name for m in middleware(tool_guidance=False, capabilities={"upload": False})]
@@ -82,7 +86,10 @@ def test_middleware_is_the_harness_part_in_its_order() -> None:
 
 
 def test_middleware_settings_mean_what_reacts_do() -> None:
-    stack = {m.name: m for m in middleware(max_steps=4, max_repeats=5, call_timeout=2.0)}
+    stack = {
+        m.name: m
+        for m in middleware(max_steps=4, max_repeats=5, call_timeout=2.0, context_window=64_000)
+    }
     assert stack["StepLimit"].max_steps == 4 and stack["StallGuard"].max_repeats == 5
     assert stack["ModelHooks"].timeout == 2.0
     assert stack["ToolGuidance"].from_tools == GUIDE_FROM

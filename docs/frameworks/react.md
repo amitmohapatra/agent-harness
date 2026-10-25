@@ -127,6 +127,27 @@ Not exposed: Deep Agents' `interrupt_on` — approvals are the [catalog](../gove
 sub-agent's `interrupt_on` becomes its tools' declared risk: a tool named there asks a person) —
 `name` (the wrap's `id`) and `debug`.
 
+## Lean by default: Deep Agents' capabilities on demand
+
+A simple task costs what it cost before Deep Agents: the same instructions (Deep Agents' main
+agent adds no base prompt), the run's tools and nothing else. Each capability is offered on the
+turn that needs it — by the harness's per-call tool set, never always on:
+
+| Capability | Offered when |
+|---|---|
+| planning (`write_todos`) | a long task: the model's third call, or a request asking for steps, on a window of 32,000 tokens or more |
+| scratch files (`ls`, `write_file`, `edit_file`, `delete`, `glob`, `grep`) and the general-purpose helper (`task`) | the same long task (on the default backend) |
+| `read_file` | once a result was saved as a file (Deep Agents' eviction of a large result) or a summary saved the history; from the start on a backend of yours, with skills or memory files |
+| `read_result` | once an older result was cleared past half the window |
+| summarization | near the window's end (Deep Agents' thresholds) |
+| `task` with your sub-agents | when you give `subagents=` |
+| `execute` | when the backend is a sandbox (`docker_sandbox()`) |
+| skills, memory files | when you give `skills=`, `memory_files=` |
+
+The guidance for a capability travels in its tool's description, offered that turn — never in
+the instructions — so the system prompt is the same from the first call to the last and a
+provider's prompt cache keeps its prefix.
+
 ## The middleware
 
 **Deep Agents', native** — `create_deep_agent`'s own stack, as it builds it:
@@ -222,7 +243,7 @@ measured on a small model (below), `True` always, `False` never.
 
 | | What it does | Costs | `None` (automatic) |
 |---|---|---|---|
-| `tool_guidance` — `ToolGuidance()` | adds to the instructions of a call that offers tools (`TOOL_GUIDANCE`): address every part of the request, each with the tool made for it; the most specific tool over a general one; current figures from a tool, not the remembered context, which gives background and rules; a change made by calling its tool — the system asks for approval itself — never claimed without its success; conclusions from the results, and a plain "cannot" for a part no tool answers. Inside a run it names the offered tools that change data | a few hundred tokens of instructions, the same on every call (a prompt cache holds) | on a call offering 20 tools or more (`GUIDE_FROM`) |
+| `tool_guidance` — `ToolGuidance()` | adds to the instructions of a call that offers tools (`TOOL_GUIDANCE`): address every part of the request, each with the tool made for it; the most specific tool over a general one; current figures from a tool, not the remembered context, which gives background and rules; a change made by calling its tool — the system asks for approval itself — never claimed without its success; conclusions from the results, and a plain "cannot" for a part no tool answers. Inside a run it names the offered tools that change data | a few hundred tokens of instructions, the same on every call (a prompt cache holds) | on a call offering 20 tools or more (`GUIDE_FROM`), on a known window of 32,000 tokens or more (room for its ~450 tokens) |
 | `capabilities={...}` — `ToolGuidance(capabilities=)` | what the assistant can and cannot do beyond its tools (`{"accept an image upload": False}`), one line each in every call's instructions, so "can you ...?" gets a plain yes or no | a line per capability | always, when given |
 | `answer_check` — `AnswerCheck()` | when the model answers without calling a tool, its draft is not final (nor streamed): the model is shown it and asked once to check it against the request (`ANSWER_CHECK`), and either calls the tools still needed or gives the final answer in its place; when nothing found is about what was asked it asks for a plain "no record". **A change, before it is made**: the first step calling a tool that changes data is checked against the rules in the instructions and context (`WRITE_CHECK`) before governance asks anyone to approve it | one more model call per invocation for the answer, one for the first change | when the run's context holds a rule — the memory context pushed for it, or a system message of the input ("never", "always", "must", a rule, a policy, something forbidden) |
 
@@ -238,7 +259,7 @@ where the toolbox's check of the tool set, and the native tool selector for many
 target = ReAct(
     system,
     "provider/model",
-    tool_guidance=True,  # always (None: from 20 tools)
+    tool_guidance=True,  # always (None: from 20 tools, on a window with room)
     answer_check=False,  # never (None: when the context holds a rule)
     capabilities={"accept an image upload": False},
 )
