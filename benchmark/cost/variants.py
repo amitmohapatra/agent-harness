@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import Any, Final, cast
 
 from trellis import ReAct
-from trellis.harness.react import PLACED, defaults_off
+from trellis.harness.react import PLACED, defaults_off, defaults_on
 
 
 @dataclass(frozen=True)
@@ -93,10 +93,12 @@ def main(
     setup: Setup,
     *,
     off: tuple[str, ...] = (),
+    on: tuple[str, ...] = (),
     window: int | None = None,
     switches: dict[str, bool] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    with defaults_off(*({**PIECES, **AUTOMATIC}[name] for name in off)):
+    named = PIECES | AUTOMATIC
+    with defaults_off(*(named[name] for name in off)), defaults_on(*on):
         target = ReAct(
             setup.system,
             setup.model,
@@ -223,6 +225,16 @@ VARIANTS: Final[dict[str, Variant]] = {
         "pieces",
         "create_agent with middleware() and Deep Agents' pieces attached, gated per call",
         pieces,
+    ),
+    "main+selector": Variant(
+        "main+selector",
+        "main with LangChain's tool selector when no hints and over 20 tools",
+        functools.partial(main, on=("ToolSelection",)),
+    ),
+    "main@16k": Variant(
+        "main@16k",
+        "main on a 16,384-token window (the model server's own: -c 16384)",
+        functools.partial(main, window=16_384),
     ),
     "main+guidance": Variant(
         "main+guidance",

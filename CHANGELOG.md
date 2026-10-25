@@ -54,14 +54,26 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
 - `RunCheckpointer` keeps a LangGraph `DeltaChannel`'s history (its last snapshot and the writes
   since, replayed in the order they were applied) beside the latest checkpoint, so a Deep
   Agents graph's `messages` and `files` come back whole on a resume anywhere.
+- `FitWindow` (in `middleware()`, so `ReAct`'s too): a run never fails because a request does
+  not fit the window. Over it, the request is made to fit step by step, only as far as needed —
+  the optional guidance, the tools narrowed (the used, the hinted, the relevant kept), their
+  descriptions compacted, older results cleared, older turns, and last the memory context's
+  lowest-ranked items (never a rule, the standing instructions or the learned plan) — each step
+  said on the run (`context_fit`); a request that fits is sent unchanged. Only a user message
+  that alone cannot fit fails: `ContextTooLarge` (`CONTEXT_TOO_LARGE`) naming the window and the
+  size.
+- With tool hints, each call is also offered the tools the memory context names (a learned
+  skill's steps), beside the hinted, the used, the memory tools and what `tool_search` found.
+- `automatic.ToolSelection`: LangChain's `LLMToolSelectorMiddleware` used only with no tool hints
+  and over 20 tools — measured (`benchmark.cost` variant `main+selector`), not a default.
 - `LIVE_SHARD=i/n` (`make live-shard`): the live suite in shards packed by the measured
   durations (`tests/live/durations.json`, `make live-durations`), each under a job's limit on a
   CPU model.
 - Python 3.13 beside 3.12: CI's gates (lint, types, tests, examples, docs, the matrix, the
   overhead benchmark) and the weekly canary run on both (`python-version: ["3.12", "3.13"]`);
   the 3.13 classifier.
-- `benchmark.cost` variants `agent` (`create_agent` + `middleware()`), `main+guidance`,
-  `main+check`; `TRELLIS_LIVE_VARIANTS` picks the live tool-choice test's variants.
+- `benchmark.cost` variants `agent` (`create_agent` + `middleware()`), `pieces`,
+  `main+guidance`, `main+check`, `main+selector`, `main@16k`; `TRELLIS_LIVE_VARIANTS` picks the live tool-choice test's variants.
 
 ### Changed
 

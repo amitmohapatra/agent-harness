@@ -177,6 +177,21 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     assert offered[2] == sorted(["t1", "t3", "t5", *memory_tools])
 
 
+async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The offered set is the hints, the tools the learned plan names, the used ones and the
+    memory tools — never all of the run's tools while hints exist."""
+    memory_service.candidates = ["t3"]
+    memory_service.learned_skills = "- archive: t3 then t4 (worked 90% of 10 runs)"
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
+    assert offered == sorted(["t3", "t4", *MEMORY_TOOLS])  # t4: the learned plan's step
+
+
 async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:

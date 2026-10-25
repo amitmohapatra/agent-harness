@@ -73,6 +73,7 @@ def test_middleware_is_the_harness_part_in_its_order() -> None:
         "ContextEditingMiddleware",
         "ReadTools",
         "ToolGuidance",
+        "FitWindow",
         "ModelHooks",
     ]
     # no window, or one too small: no room for the automatic guidance (forced, it is there)

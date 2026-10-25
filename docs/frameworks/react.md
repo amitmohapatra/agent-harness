@@ -181,6 +181,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `ContextEditingMiddleware` (LangChain) + `read_result` | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a prompt cache breaks rarely |
 | `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
 | `ToolGuidance` (`tool_guidance`, `capabilities`) | how to choose among tools, added to the instructions ([below](#tool-choice)) |
+| `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `before_model`/`after_model`/`on_error` hooks around every model call, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
 
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
@@ -270,6 +271,30 @@ keeps on a long request, `LLMToolSelectorMiddleware` for many tools, `tool_choic
 limit's last call is `"none"`), Deep Agents' file tools and sub-agents. A first call forced to
 `"required"` is not offered: a request that needs no tool (a greeting, a rule the context
 holds) would be made to call one.
+
+## When a request does not fit
+
+A run never fails because its request does not fit the model's window. Before each model call,
+`FitWindow` counts the request (messages, instructions, tools, as Deep Agents counts them); a
+request that fits is sent unchanged — the same object, byte for byte. One that does not is made
+smaller, step by step, only as far as it must, in this order:
+
+| Step | What goes | Kept |
+|---|---|---|
+| `guidance` | the optional tool guidance in the instructions | your instructions |
+| `tools` | the offered tools narrowed to the most relevant | those the run used; then the hinted ones; then by the words they share with the request; at least 8 |
+| `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
+| `results` | older tool results cleared (`read_result` reads them back), the longest cut to head and tail | the latest |
+| `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`) | the latest turn whole |
+| `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
+
+Each step taken is said on the run (a `warning` event, code `context_fit`, naming the steps) and
+in the log. Only when the instructions and the user's own message alone do not fit does the call
+fail: a `ContextTooLarge` (`CONTEXT_TOO_LARGE`) naming the window and the size. The memory
+context's own budget is unchanged (5% of the window, 2,000 to 8,000 tokens): it is the last
+thing shrunk, and only for a request that would overflow.
+
+<!-- measured: shrink at 8,192 vs a larger window, from the Phase 2 Granite batch -->
 
 ## What else is automatic
 

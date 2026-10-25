@@ -134,8 +134,10 @@ def middleware(
     cleared past half of it and ``read_result`` to read them back; the tool guidance
     (``tool_guidance``: ``None`` with :data:`GUIDE_FROM` tools or more on a known window with
     room for it, ``True`` always, ``False`` never — and ``capabilities``, what the agent can and
-    cannot do, on every call);
-    and :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
+    cannot do, on every call); the request made to fit the window, never failing for its size
+    (:class:`~.middleware.FitWindow`: the guidance dropped, the tools narrowed and compacted,
+    older results cleared, older turns left out — only as far as needed); and
+    :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
     headers on a routed model). Outside a harness run each steps aside."""
     return _middleware(
@@ -233,14 +235,18 @@ def _middleware(
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
         *check,
         ours.HarnessTools(),
+        *([automatic.ToolSelection()] if "ToolSelection" in _ON.get() else []),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
         ours.StepLimit(max_steps),
         automatic.Budgeted(),
         *clearing,
-        *([summarization] if summarization is not None else []),
         *reads,
         *guidance,
+        # the request made to fit the window, after everything that adds to it; a
+        # summarization after it summarizes the older turns, else it leaves them out
+        ours.FitWindow(window, turns=summarization is None),
+        *([summarization] if summarization is not None else []),
         ours.ModelHooks(timeout=call_timeout, prompt=system_prompt),
     ]
 
@@ -534,8 +540,21 @@ SET_BY: Final = {
 }
 
 
-#: The default middleware a measurement turns off (:func:`defaults_off`), by name.
+#: The default middleware a measurement turns off (:func:`defaults_off`), by name, and the
+#: middleware it turns on that a default leaves out (:func:`defaults_on`).
 _OFF: ContextVar[frozenset[str]] = ContextVar("trellis_react_off", default=frozenset())
+_ON: ContextVar[frozenset[str]] = ContextVar("trellis_react_on", default=frozenset())
+
+
+@contextlib.contextmanager
+def defaults_on(*names: str) -> Iterator[None]:
+    """``ReAct`` graphs built inside add the middleware ``names`` the defaults leave out
+    (``ToolSelection``): a measurement of what it is worth, as :func:`defaults_off`."""
+    token = _ON.set(frozenset(names))
+    try:
+        yield
+    finally:
+        _ON.reset(token)
 
 
 @contextlib.contextmanager

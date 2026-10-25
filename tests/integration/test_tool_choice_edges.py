@@ -444,7 +444,7 @@ def lookers(count: int) -> list[Any]:
 
 async def test_automatic_guidance_goes_with_many_tools_only(harness: Harness) -> None:
     few = lookers(GUIDE_FROM - 1)
-    roomy = {"context_window": MIN_WINDOW}
+    roomy: dict[str, Any] = {"context_window": MIN_WINDOW}
     model = ScriptedChatModel(turns=["hi"])
     await arm(harness.wrap(ReAct("s", model, **roomy), id="few"), few).run("hi", user="u")
     assert guided(model) == [False]

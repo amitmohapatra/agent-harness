@@ -54,6 +54,7 @@ from trellis.contracts import (
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
 from trellis.harness.clients import bifrost
+from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
 from trellis.harness.middleware import RunCheckpointer
@@ -384,6 +385,35 @@ async def context_management(w: World) -> None:
     o = (await w.go([d.report(2000)], plan, target=target)).succeeded()
     assert "result cleared to keep the context small" in w.said(), "nothing was cleared"
     assert len(d.ran("report")) == 6 and o.answer.startswith("Done. ")
+
+
+#: a long description: fifty of these do not fit a 4,096-token window
+CROWDED: Final = "Archives one record of the many systems this company keeps, by its key. " * 40
+
+
+async def fits_the_window(w: World) -> None:
+    """A request over the window is made to fit — the tools narrowed and compacted first, the
+    tool the plan needs kept — and the run says so; it never fails for its size."""
+    d = Desk()
+
+    def archive(n: int) -> Any:
+        said = f"System {n}: {CROWDED}"
+        return tool(lambda key: key, name=f"archive_{n}", description=said, side_effects="read")
+
+    async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
+        if w.adapter == "middleware":
+            fits = middleware(context_window=4096)
+            graph = create_agent(
+                PlannedChatModel(plan=plan), middleware=fits, checkpointer=RunCheckpointer()
+            )
+            return graph, tools
+        return ReAct(system_prompt="You read.", model=PlannedChat(plan), context_window=4096), tools
+
+    crowd = [d.lookup(), *(archive(n) for n in range(50))]
+    o = (await w.go(crowd, [("lookup", {"topic": "tides"})], target=target)).succeeded()
+    fitted = [c for c in o.custom(WARNING) if c.get("code") == "context_fit"]
+    assert fitted and "tools" in fitted[0]["message"], fitted
+    assert d.ran("lookup") and o.answer == "Done. facts about tides", o.answer
 
 
 # --------------------------------------------------------------------------- memory
@@ -990,6 +1020,18 @@ FEATURES: Final[list[Feature]] = [
             "deepagents": NATIVE_CONTEXT,
             "openai_agents": OWN_CONTEXT,
             "claude": OWN_CONTEXT,
+        },
+        way2=NA("native middleware: a graph is built with it"),
+    ),
+    Feature(
+        "F65f",
+        "a request over the window made to fit: never a failure for its size",
+        "F65",
+        "automatic in ReAct and middleware() (FitWindow, from context_window= or the profile)",
+        fits_the_window,
+        adapters={
+            a: NA("ReAct's and middleware()'s: add middleware() to a graph to have it")
+            for a in ("function", "langgraph", "deepagents", "openai_agents", "claude")
         },
         way2=NA("native middleware: a graph is built with it"),
     ),
