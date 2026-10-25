@@ -11,13 +11,19 @@ on:
 
 jobs:
   latest-frameworks:
+    name: latest frameworks (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     defaults:
       run:
         shell: bash  # -eo pipefail: a failing make before a tee fails the step
         working-directory: agent-harness
     env:
+      UV_PYTHON: ${{ matrix.python-version }}
       TRELLIS_MEMORY_OPENAPI: ${{ github.workspace }}/agent-memory-service/docs/openapi.json
       TRELLIS_RUNS_OPENAPI: ${{ github.workspace }}/agent-runs/docs/openapi.json
     steps:
@@ -42,7 +48,7 @@ jobs:
           path: agent-runs
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install, then the latest frameworks over the lock
         run: |
           uv sync --all-extras
@@ -82,7 +88,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: canary
+          name: canary-py${{ matrix.python-version }}
           path: |
             agent-harness/build/canary.md
             agent-harness/build/canary-tests.log

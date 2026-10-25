@@ -7,7 +7,15 @@ on:
 
 jobs:
   gates:
+    # every gate on each Python the harness supports (requires-python >=3.12)
+    name: gates (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     defaults:
       run:
         working-directory: agent-harness
@@ -40,7 +48,7 @@ jobs:
           path: agent-runs
       - uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
           cache-dependency-glob: agent-harness/uv.lock
       - name: Install
@@ -80,7 +88,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: matrix
+          name: matrix-py${{ matrix.python-version }}
           path: |
             agent-harness/build/matrix.md
             agent-harness/build/matrix-*.xml
@@ -91,6 +99,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: benchmark
+          name: benchmark-py${{ matrix.python-version }}
           path: agent-harness/build/benchmark-results.json
           if-no-files-found: ignore

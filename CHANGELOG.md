@@ -57,6 +57,9 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
 - `LIVE_SHARD=i/n` (`make live-shard`): the live suite in shards packed by the measured
   durations (`tests/live/durations.json`, `make live-durations`), each under a job's limit on a
   CPU model.
+- Python 3.13 beside 3.12: CI's gates (lint, types, tests, examples, docs, the matrix, the
+  overhead benchmark) and the weekly canary run on both (`python-version: ["3.12", "3.13"]`);
+  the 3.13 classifier.
 - `benchmark.cost` variants `agent` (`create_agent` + `middleware()`), `main+guidance`,
   `main+check`; `TRELLIS_LIVE_VARIANTS` picks the live tool-choice test's variants.
 

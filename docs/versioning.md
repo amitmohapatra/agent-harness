@@ -9,7 +9,9 @@ matrix and the live tests have run against it. The decision and its reasons are
 ## Compatibility
 
 What each release was tested with. The ranges are the extras' pins; the tested versions are
-the lock's (`uv.lock`), against which `make test`, `make matrix` and `make examples` ran.
+the lock's (`uv.lock`), against which `make test`, `make matrix` and `make examples` ran — on
+Python 3.12 and 3.13 (`requires-python >=3.12`; CI runs every gate on both, the weekly canary
+too).
 
 ### trellis-harness 0.6.0
 

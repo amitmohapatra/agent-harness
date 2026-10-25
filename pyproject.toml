@@ -9,6 +9,7 @@ authors = [{ name = "Agent Platform Team" }]
 keywords = ["agents", "harness", "langgraph", "openai-agents", "claude-agent-sdk", "memory"]
 classifiers = [
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: Apache Software License",
   "Typing :: Typed",
 ]
