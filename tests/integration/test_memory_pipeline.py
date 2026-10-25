@@ -165,8 +165,9 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     """A graph's tools are bound when it is built: the harness runs a copy of a
-    ``create_agent`` graph whose model calls offer only the tools the run offers — the
-    graph itself, run outside the harness, still offers every tool it was built with."""
+    ``create_agent`` graph whose model calls offer only the tools the run offers — its own
+    tools of the run's set too (``own`` is no candidate) — and the graph itself, run outside
+    the harness, still offers every tool it was built with."""
     from langchain_core.tools import tool as langchain_tool
 
     @langchain_tool
@@ -187,18 +188,21 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
     assert result.status is RunStatus.SUCCESS, result.error
 
     offered = [r["tools"] for r in model.requests]
-    kept = ["own", *MEMORY_TOOLS]  # the graph's own and the memory tools are not narrowed
+    kept = MEMORY_TOOLS  # the memory tools are not narrowed
     assert sorted(offered[0]) == sorted(["t1", "t3", *kept])
     assert sorted(offered[1]) == sorted(["t1", "t3", *kept])
     assert sorted(offered[2]) == sorted(["t1", "t3", "t5", *kept])  # tool_search found t5
+    [asked] = memory_service.named("context")[:1]
+    assert "own" in asked.body["tools"]["available"]  # the graph's own is of the run's set
     await graph.ainvoke({"messages": [{"role": "user", "content": "x"}]})
-    assert len(offered := model.requests[-1]["tools"]) == 6 + len(kept), offered  # as built
+    assert len(offered := model.requests[-1]["tools"]) == 7 + len(kept), offered  # as built
 
 
 async def test_the_hints_narrow_what_a_deep_agent_is_offered(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    """Deep Agents' own tools stay; the harness tools are those the run offers."""
+    """The harness tools are those the run offers; Deep Agents' state tools (its files) are no
+    tools of the run's set, and its ``task`` hands work on: they stay offered."""
     from deepagents import create_deep_agent
 
     memory_service.candidates = ["t2"]

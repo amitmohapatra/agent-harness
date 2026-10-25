@@ -188,6 +188,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         attempt=1,
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
+        offered=None,
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()

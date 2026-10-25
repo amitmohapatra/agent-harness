@@ -32,6 +32,7 @@ from trellis.contracts import (
     Option,
     ToolCall,
     ToolError,
+    ToolSpec,
 )
 from trellis.harness import telemetry
 from trellis.harness.asking import Question
@@ -59,6 +60,9 @@ log = logging.getLogger("trellis.run")
 #: artifact in agent-runs (``payload_ref``), not inside the question.
 INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 
+#: The tag of a framework's own tool that hands the work to another agent
+#: (``adapters.base.HELPER``, kept here: the runtime imports no adapter).
+HELPER: Final = "helper"
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
@@ -141,6 +145,11 @@ class Runtime:
     document_ids: list[str] | None = None
     #: this run's tools by name (the agent's own, the MCP tools, the memory pull tools)
     toolbox: dict[str, Tool] = field(default_factory=dict)
+    #: the tools the framework gives the model itself, beside the harness's (an OpenAI agent's
+    #: own and hosted tools, its MCP servers' and handoffs', Claude's built-ins and its MCP
+    #: servers', a graph's tool nodes', a Deep Agent's sub-agents'), by name: with the
+    #: toolbox they are the run's tool set (:meth:`tool_set`)
+    native: dict[str, ToolSpec] = field(default_factory=dict)
     #: the tools offered to the model (``None``: all of them) — the tool hints' candidates,
     #: the memory tools, and every tool this run has used (``used``)
     offered: set[str] | None = None
@@ -270,20 +279,31 @@ class Runtime:
         self.events.custom(LOG, message=message, **fields)
 
     def tool_names(self) -> list[str]:
-        """The run's own tools (the memory service's pull tools are not candidates)."""
+        """The run's own harness tools (the memory service's pull tools are not candidates)."""
         return [name for name, found in self.toolbox.items() if found.spec.source != "memory"]
 
+    def tool_set(self) -> list[str]:
+        """The run's tool set: its harness tools (:meth:`tool_names`) and the framework's own
+        (:attr:`native`), each once — what the tool hints, ``tool_search`` and the narrowing
+        choose among."""
+        return list(dict.fromkeys([*self.tool_names(), *self.native]))
+
     def offers(self, name: str) -> bool:
-        """Whether the model is offered ``name`` now (per turn where the framework allows)."""
+        """Whether the model is offered ``name`` now (per turn where the framework allows): a
+        tool of the run's tool set the narrowing left out is not; a memory tool always is, and
+        so is a tool outside the set (a graph's own state tools, ``read_file``)."""
         if self.offered is None or name in self.offered or name in self.used:
             return True
         found = self.toolbox.get(name)
-        return found is not None and found.spec.source == "memory"
+        if found is not None:
+            return found.spec.source == "memory"
+        own = self.native.get(name)
+        return own is None or HELPER in own.tags  # a helper: never narrowed away
 
     def offer(self, names: Sequence[str]) -> None:
-        """Offer more tools (a ``tool_search`` found them)."""
+        """Offer more tools of the run's tool set (a ``tool_search`` found them)."""
         if self.offered is not None:
-            self.offered.update(n for n in names if n in self.toolbox)
+            self.offered.update(n for n in names if n in self.toolbox or n in self.native)
 
     def next_step(self, count: int = 1) -> int:
         """The number of the run's next call — the first of ``count`` calls made at once,
@@ -578,10 +598,11 @@ class Tools:
         return (await call(found, args)).output
 
     async def hints(self, task: str) -> ToolHints:
-        """What the memory service suggests for ``task`` among this run's tools; the
-        candidates are offered to the model from then on."""
+        """What the memory service suggests for ``task`` among this run's tool set (its harness
+        tools and the framework's own); the candidates are offered to the model from then
+        on."""
         if self.runtime.run_memory is None:
             raise ConfigurationError("tool hints come from the memory service: set MEMORY_URL")
-        hints = await self.runtime.run_memory.tool_hints(task, self.runtime.tool_names())
+        hints = await self.runtime.run_memory.tool_hints(task, self.runtime.tool_set())
         self.runtime.offer([t.name for t in hints.tools])
         return hints  # type: ignore[no-any-return]

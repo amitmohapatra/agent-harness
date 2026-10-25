@@ -55,6 +55,7 @@ import re
 import types
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
@@ -94,7 +95,7 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.prebuilt import InjectedState
-from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
@@ -183,47 +184,109 @@ STATE_TOOLS: Final = frozenset(
 class GovernTools(AgentMiddleware):
     """The framework's own tools of a ``create_agent`` or Deep Agents graph — those not built
     with ``h.tools`` — run as the harness's are (``h.governance_middleware()``; ``ReAct`` has
-    it): governance decides each call (the catalog's risk, else the tool's declared one in its
-    ``metadata["side_effects"]``, else its MCP-style annotations, else ``write``: announced),
-    a person approves when it asks, and the call is journaled (a resume does not run it again),
-    timed and traced. The harness's tools and the graph's state tools (:data:`STATE_TOOLS`)
-    are let through as they are."""
+    it): :func:`governed_call`. Inside a harness run every tool node is governed so already
+    (:func:`govern_tool_nodes`); a call is governed once, whichever comes first."""
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        runtime = current()
-        call = request.tool_call
-        own = request.tool
-        if (
-            runtime is None
-            or own is None
-            or call["name"] in runtime.toolbox
-            or call["name"] in STATE_TOOLS
-        ):
-            return await handler(request)
+        return await governed_call(request, handler)
 
-        async def run(args: dict[str, Any]) -> Any:
+
+#: The call a governed run of a framework's own tool is executing (:func:`governed_call`): the
+#: layers under it (a tool node inside a ``GovernTools``) let it through, governed once.
+_GOVERNING: ContextVar[str | None] = ContextVar("trellis_governing", default=None)
+
+
+async def governed_call(
+    request: ToolCallRequest,
+    handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+) -> ToolMessage | Command[Any]:
+    """A framework's own tool call, inside a harness run, run as the harness's are: governance
+    decides it (the catalog's risk, else the tool's declared one in its
+    ``metadata["side_effects"]``, else its MCP-style annotations, else ``write``: announced), a
+    person approves when it asks, and it is journaled (a resume does not run it again), timed,
+    traced and recorded (``tools.bridge``). What the tool returned is returned as it is — a
+    ``Command`` (a Deep Agent's ``task`` updating the graph's state) included — and, replayed
+    from the journal, as the message the model read. The harness's tools, the graph's state
+    tools (:data:`STATE_TOOLS`), a call already governed and any call outside a run are let
+    through as they are."""
+    runtime = current()
+    call = request.tool_call
+    own = request.tool
+    if (
+        runtime is None
+        or own is None
+        or converted.made(own)  # the harness's own: its call goes through the bridge itself
+        or call["name"] in runtime.toolbox
+        or call["name"] in STATE_TOOLS
+        or _GOVERNING.get() == call["id"]
+    ):
+        return await handler(request)
+    produced: list[ToolMessage | Command[Any]] = []
+
+    async def run(args: dict[str, Any]) -> Any:
+        token = _GOVERNING.set(call["id"])
+        try:
             done = await handler(request.override(tool_call={**call, "args": args}))
-            if isinstance(done, ToolMessage) and done.status == "error":
-                raise ToolError(text_of(done.content), source="tools")
-            return text_of(getattr(done, "content", done))
+        finally:
+            _GOVERNING.reset(token)
+        if isinstance(done, ToolMessage) and done.status == "error":
+            raise ToolError(text_of(done.content), source="tools")
+        produced.append(done)
+        return text_of(_told(done))
 
-        spec = ToolSpec(
-            name=call["name"],
-            description=own.description or call["name"],
-            input_schema=_schema_of(own),
-            side_effects=side_effects_of(own.metadata),
-        )
-        outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
-        return ToolMessage(
-            content=text_of(outcome.output),
-            tool_call_id=str(call["id"]),
-            name=call["name"],
-            status="error" if outcome.status in FAILED else "success",
-        )
+    spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
+    outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
+    if produced and outcome.ok and isinstance(produced[-1], Command):
+        return produced[-1]  # the graph's state update, as the tool made it
+    return ToolMessage(
+        content=text_of(outcome.output),
+        tool_call_id=str(call["id"]),
+        name=call["name"],
+        status="error" if outcome.status in FAILED else "success",
+    )
+
+
+def _told(done: Any) -> Any:
+    """What a tool's result says to the model: a message's content, or a ``Command``'s last
+    message's (its state update's)."""
+    if isinstance(done, Command):
+        update = done.update if isinstance(done.update, Mapping) else {}
+        messages = update.get("messages") or []
+        return getattr(messages[-1], "content", messages[-1]) if messages else ""
+    return getattr(done, "content", done)
+
+
+def govern_tool_nodes() -> None:
+    """Every LangGraph tool node, inside a harness run, governed (:func:`governed_call`): a
+    ``create_agent`` or Deep Agents graph's (its ``task`` sub-agents' graphs too), a hand-built
+    graph's ``ToolNode`` — whoever built them, with no middleware of the harness's. Installed
+    once per process, on the tool node's one execution of a call (after its own wrappers);
+    outside a harness run it changes nothing."""
+    execute = ToolNode._execute_tool_async
+    if getattr(execute, _INSTALLED, False):
+        return
+
+    async def governed(
+        self: ToolNode, request: ToolCallRequest, input_type: Any, config: RunnableConfig
+    ) -> Any:
+        if current() is None:
+            return await execute(self, request, input_type, config)
+
+        async def handler(given: ToolCallRequest) -> Any:
+            return await execute(self, given, input_type, config)
+
+        return await governed_call(request, handler)
+
+    setattr(governed, _INSTALLED, True)
+    ToolNode._execute_tool_async = governed  # type: ignore[method-assign]
+
+
+#: The mark of the tool node's execution :func:`govern_tool_nodes` installed.
+_INSTALLED: Final = "_trellis_governed"
 
 
 def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
@@ -235,6 +298,17 @@ def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
     if declared in get_args(SideEffects):
         return str(declared)
     return annotated(found.get("annotations"))
+
+
+def spec_of(tool: BaseTool) -> ToolSpec:
+    """A framework's own LangChain tool as the harness governs, records and publishes it: its
+    name, description and schema, its risk as it declares it (:func:`side_effects_of`)."""
+    return ToolSpec(
+        name=tool.name,
+        description=tool.description or tool.name,
+        input_schema=_schema_of(tool),
+        side_effects=side_effects_of(tool.metadata),
+    )
 
 
 def _schema_of(tool: Any) -> dict[str, Any]:
@@ -407,10 +481,11 @@ def _unbroken(request: ModelRequest[Any]) -> ModelRequest[Any]:
 
 
 def _offered(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
-    """The request with only the harness tools the run offers now: a graph's are bound when it
-    is built (``h.tools``), so a part turned off afterwards (``h.wrap(without=)``, a run's
+    """The request with only the tools the run offers now: a graph's are bound when it is
+    built (``h.tools``), so a part turned off afterwards (``h.wrap(without=)``, a run's
     ``without=``) would still be offered (a call of it is refused: it is off), and so would the
-    tools the tool hints leave out (``Runtime.offers``). The graph's own tools stay."""
+    tools the tool hints leave out (``Runtime.offers``) — the harness's and the graph's own
+    tools of the run's set alike; a tool outside the set (the graph's state tools) stays."""
     if runtime is None:
         return request
     kept = [t for t in request.tools if _offers(runtime, t)]
@@ -421,8 +496,7 @@ def _offers(runtime: Runtime, tool: BaseTool | dict[str, Any]) -> bool:
     feature = (getattr(tool, "metadata", None) or {}).get(converted.FEATURE)
     if feature is not None and not runtime.uses(feature):
         return False
-    name = _named(tool)
-    return name not in runtime.toolbox or runtime.offers(name)
+    return runtime.offers(_named(tool))  # the graph's own tools of the run's set narrowed too
 
 
 async def _narrow(

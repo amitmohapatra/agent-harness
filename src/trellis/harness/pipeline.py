@@ -288,10 +288,12 @@ async def _worked(
     observe: Callable[[PromptContext | None], None] | None,
     streaming: bool,
 ) -> tuple[Extracted, PromptContext | None]:
-    """The attempt's work: its tools and what is pushed into its input, then — its hooks told
-    it starts — the framework; what it produced, and the memory context it was given."""
+    """The attempt's work: its tool set (the harness's tools, the framework's own) and what is
+    pushed into its input, then — its hooks told it starts — the framework; what it produced,
+    and the memory context it was given."""
     tools = await agent.tools_for(runtime)
     runtime.toolbox = {t.name: t for t in tools}
+    runtime.native = await agent.native_tools(runtime)
     pushed = await agent.push(runtime)
     if observe is not None:
         observe(pushed)

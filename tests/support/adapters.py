@@ -1,6 +1,7 @@
 """Every adapter, built to follow one plan of tool calls: the table the behaviour tests run over
-(``BUILDERS``) — the function target, ``ReAct``, LangChain's ``create_agent``, Deep Agents, the
-OpenAI Agents SDK and the Claude Agent SDK (the real SDK driving the scripted CLI). Each model
+(``BUILDERS``) — the function target, ``ReAct``, LangChain's ``create_agent``, a graph built by
+hand (``StateGraph`` with a ``ToolNode``), Deep Agents, the OpenAI Agents SDK and the Claude
+Agent SDK (the real SDK driving the scripted CLI). Each model
 makes the plan's calls in order and answers ``FINAL`` with the last result it read
 (``tests.support.planned``), so a test sees what reached the model. ``system`` is the
 instructions the framework's agent is built with (a function has none), and ``seen`` gets the
@@ -98,6 +99,39 @@ async def _langgraph(
     return create_agent(model, tools=built, system_prompt=system), []
 
 
+async def _graph(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    plan: list[Call],
+    *,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+    stall: float = 0.0,
+) -> Built:
+    """A graph built by hand: a model node binding its tools, a ``ToolNode``, the loop
+    between them (``tools_condition``) — no ``create_agent``, no middleware."""
+    from langchain_core.messages import SystemMessage
+    from langgraph.graph import START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode, tools_condition
+
+    model = PlannedChatModel(plan=plan, stall=stall)
+    _saw(seen, model)
+    built = await h.tools(*tools, framework="langgraph")
+    bound = model.bind_tools(built)
+
+    async def think(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await bound.ainvoke([SystemMessage(system), *state["messages"]])]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("model", think)
+    graph.add_node("tools", ToolNode(built))
+    graph.add_edge(START, "model")
+    graph.add_conditional_edges("model", tools_condition)
+    graph.add_edge("tools", "model")
+    return graph.compile(), []
+
+
 async def _deepagents(
     h: Harness,
     tools: list[Any],
@@ -161,6 +195,7 @@ BUILDERS: Final[dict[str, Builder]] = {
     "function": _function,
     "react": _react,
     "langgraph": _langgraph,
+    "graph": _graph,
     "deepagents": _deepagents,
     "openai_agents": _openai_agents,
     "claude_agent_sdk": _claude,

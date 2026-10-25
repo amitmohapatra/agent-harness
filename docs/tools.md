@@ -101,9 +101,23 @@ on Claude it is on the `trellis` server from the start (the CLI lists a server's
 A page holds at most 20,000 characters and says where the next one starts; a line longer than
 5,000 characters reads as several, so a one-line JSON result pages too.
 
+## The run's tool set
+
+A run's tools are one set: the harness's (the toolbox above) and the framework's own — a graph's
+tool nodes' tools (a hand-built `StateGraph`'s `ToolNode` included), a Deep Agent's `task`
+sub-agents' tools, an OpenAI agent's function and hosted tools, its MCP servers' tools (as the
+servers list them), its handoffs (`transfer_to_...`) and the tools of the agents it hands off to
+or runs as tools, Claude Code's built-ins and its MCP servers' tools (an in-process server's as
+it lists them, the ones `allowed_tools` names, the ones it was seen calling). The set is sorted
+by name, each name once, so the memory context's cache key holds. It is what the tool hints and
+`tool_search` choose among, what the tenant's catalog is told about (once per set of names) and
+what the narrowing narrows. A tool that hands the work to another agent (Deep Agents' `task`, a
+handoff, an agent tool, Claude's `Agent`) is of the set but never narrowed away, and its call is
+a `read`: each of the other agent's own calls is governed on its own.
+
 ## Tool hints: what the model is offered
 
-The memory context is asked for with the run's own tools (not the memory tools): it comes back
+The memory context is asked for with the run's tool set (not the memory tools): it comes back
 with the skills the agent learned for the task ("Learned skills for this task", any number of
 tools) and, from five tools (the memory service's threshold), the tools section (the next step,
 argument values found in memory, what is missing) and the `tools` that fit the task
@@ -118,9 +132,9 @@ more tools, the model is then offered:
 | Framework | Narrowing |
 |---|---|
 | `ReAct`, a graph with `HarnessTools` | per model call (each request carries the tools offered at that moment, sorted by name; the set only grows within a run) |
-| OpenAI Agents | per turn (`FunctionTool.is_enabled`); the team's own tools are untouched |
-| Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query) |
-| `create_agent` / Deep Agents graph built with `h.tools` | per model call: the harness runs a copy of the graph whose model calls go through one more `awrap_model_call` handler, offering the tools offered at that moment (your graph object is unchanged) |
+| OpenAI Agents | per turn (`FunctionTool.is_enabled`): the harness's tools and the agent's own function tools (theirs is kept, and asked first); its hosted tools are the provider's |
+| Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query): the harness's tools, and Claude's own built-ins and MCP tools left out of the query's `disallowed_tools` (yours are kept) |
+| `create_agent` / Deep Agents graph | per model call: the harness runs a copy of the graph whose model calls go through one more `awrap_model_call` handler, offering the tools offered at that moment — its own tools of the set too (your graph object is unchanged) |
 | hand-written LangGraph `StateGraph` | none: its own code binds the model's tools (`model.bind_tools(...)`) when it is built, out of the harness's reach |
 | function | n/a: it calls tools by name |
 

@@ -13,6 +13,7 @@ preview naming where; ``read_file`` (with them, enabled once the run keeps one) 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 from collections.abc import Sequence
 from typing import Any, Final
@@ -49,8 +50,9 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
 def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
     harness's are — governance (the catalog's risk, else ``write``: announced), a person when
-    it asks, the journal (a resume does not run a call again), its time and its trace — as a
-    copy: the agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
+    it asks, the journal (a resume does not run a call again), its time and its trace — and
+    offered per turn only while the run offers it (the tool hints' narrowing), as a copy: the
+    agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
     is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
     else is returned as it is."""
     if not isinstance(tool, FunctionTool) or getattr(tool.on_invoke_tool, MADE, False):
@@ -61,13 +63,15 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
 
     async def invoke(context: ToolContext[Any], arguments: str) -> Any:
         args = arguments_of(arguments)
-        if isinstance(args, str) or current() is None:
+        runtime = current()
+        if isinstance(args, str) or runtime is None:
             return await original(context, arguments)
 
         async def run(given: dict[str, Any]) -> Any:
             return await original(context, json.dumps(given))
 
-        spec = ToolSpec(
+        # as the run's tool set has it (an agent tool: a helper, read), else undeclared: write
+        spec = runtime.native.get(tool.name) or ToolSpec(
             name=tool.name,
             description=tool.description or tool.name,
             input_schema=tool.params_json_schema,
@@ -77,7 +81,24 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         return results.readable(outcome.output)
 
     setattr(invoke, MADE, True)
-    return dataclasses.replace(tool, on_invoke_tool=invoke)
+    enabled = _narrowed(tool.name, tool.is_enabled)
+    return dataclasses.replace(tool, on_invoke_tool=invoke, is_enabled=enabled)
+
+
+def _narrowed(name: str, own: Any) -> Any:
+    """An agent's own tool enabled per turn as it was (``own``: a bool, or a sync or async
+    callable) and only while the run offers it (``Runtime.offers``: the tool hints' narrowing
+    reaches the framework's own tools too)."""
+
+    async def enabled(context: Any, agent: Any) -> bool:
+        if not _offered(name):
+            return False
+        if callable(own):
+            given = own(context, agent)
+            return bool(await given if inspect.isawaitable(given) else given)
+        return bool(own)
+
+    return enabled
 
 
 def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:

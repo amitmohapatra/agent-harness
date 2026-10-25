@@ -12,10 +12,10 @@ from uuid import UUID
 from langchain_core.callbacks import AsyncCallbackHandler
 
 from trellis.contracts.errors import is_pause_signal
+from trellis.harness.adapters.langgraph import TASK_TOOL
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 
-#: Deep Agents' sub-agent tool, and the arguments it takes (``SubAgentMiddleware``).
-TASK: Final = "task"
+#: The arguments Deep Agents' sub-agent tool (``TASK_TOOL``) takes (``SubAgentMiddleware``).
 TASK_ARGUMENTS: Final = frozenset({"description", "subagent_type"})
 
 
@@ -39,7 +39,7 @@ class HelperCallbacks(AsyncCallbackHandler):
         inputs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        if (serialized or {}).get("name") == TASK and set(inputs or {}) >= TASK_ARGUMENTS:
+        if (serialized or {}).get("name") == TASK_TOOL and set(inputs or {}) >= TASK_ARGUMENTS:
             assert inputs is not None
             await self.helpers.start(
                 str(run_id),

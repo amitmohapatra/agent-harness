@@ -240,22 +240,42 @@ async def test_react_counts_its_toolbox_not_its_automatic_tools(
     assert asked.body["tools"]["available"] == ["stock"]
 
 
-def test_claudes_tools_are_its_built_ins_and_the_mcp_tools_it_names() -> None:
-    from claude_agent_sdk import ClaudeAgentOptions
+async def test_claudes_tools_are_its_built_ins_and_the_mcp_tools_it_names_lists_and_calls() -> None:
+    from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server
+    from claude_agent_sdk import tool as sdk_tool
 
     from trellis.harness.adapters.claude import BUILTIN_SIDE_EFFECTS, ClaudeAdapter
 
-    adapter = ClaudeAdapter()
-    assert adapter.native_tools(ClaudeAgentOptions()) == list(BUILTIN_SIDE_EFFECTS)
+    async def names(options: ClaudeAgentOptions, adapter: ClaudeAdapter | None = None) -> list[str]:
+        return [s.name for s in await (adapter or ClaudeAdapter()).native(options)]
+
+    assert await names(ClaudeAgentOptions()) == sorted(BUILTIN_SIDE_EFFECTS)
     narrowed = ClaudeAgentOptions(
         tools=["Read", "Bash"],
         disallowed_tools=["Bash", "mcp__crm__delete"],
         allowed_tools=["Read", "mcp__crm__find", "mcp__crm__delete", "mcp__trellis__stock"],
     )
-    assert adapter.native_tools(narrowed) == ["Read", "mcp__crm__find"]
-    assert adapter.native_tools(ClaudeAgentOptions(tools=[])) == []
+    assert await names(narrowed) == ["Read", "mcp__crm__find"]
+    assert await names(ClaudeAgentOptions(tools=[])) == []
     preset = ClaudeAgentOptions(tools={"type": "preset", "preset": "claude_code"})
-    assert adapter.native_tools(preset) == list(BUILTIN_SIDE_EFFECTS)
+    assert await names(preset) == sorted(BUILTIN_SIDE_EFFECTS)
+
+    @sdk_tool("lookup", "Look an order up.", {"order": str})
+    async def lookup(args: dict[str, Any]) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": "found"}]}
+
+    # an in-process server's tools are listed; a tool the agent was seen calling joins the set
+    server = create_sdk_mcp_server("orders", tools=[lookup])
+    adapter = ClaudeAdapter()
+    listing = ClaudeAgentOptions(tools=[], mcp_servers={"orders": server})
+    [found] = await adapter.native(listing)
+    assert (found.name, found.source, found.server) == ("mcp__orders__lookup", "mcp", "orders")
+    adapter.observed("mcp__wiki__search")
+    adapter.observed("Read")  # a built-in is declared, not learned
+    assert await names(listing, adapter) == ["mcp__orders__lookup", "mcp__wiki__search"]
+    odd: Any = {"type": "sdk", "name": "odd", "instance": object()}
+    broken = ClaudeAgentOptions(tools=[], mcp_servers={"odd": odd})
+    assert await names(broken) == []  # cannot be listed: said once, and left out
 
 
 async def test_a_function_has_no_tools_of_its_own(memory_service: FakeMemoryService) -> None:

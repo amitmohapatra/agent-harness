@@ -135,7 +135,7 @@ async def test_the_context_is_a_system_message_and_memory_tools_are_added(
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
 
 
-async def test_the_hints_narrow_the_tools_each_turn_and_the_teams_own_stay(
+async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     @function_tool
@@ -149,14 +149,15 @@ async def test_the_hints_narrow_the_tools_each_turn_and_the_teams_own_stay(
         return tool(lookup, name=f"t{i}", side_effects="read")
 
     memory_service.candidates = ["t2"]
-    memory_service.candidates_for = {"find t4": ["t4"]}
+    memory_service.candidates_for = {"find t4": ["t4", "eta"]}
     model = ScriptedModel([("tool_search", {"task": "find t4"}), ("t4", {"key": "k"}), "done"])
     target = Agent(name="n", model=model, tools=[eta])
     agent = memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "done"
     memory_tools = MEMORY_TOOLS
-    assert model.tools[0] == ["eta", "t2", *memory_tools]
-    assert model.tools[1] == ["eta", "t2", "t4", *memory_tools]  # tool_search offered t4
+    assert model.tools[0] == ["t2", *memory_tools]  # the agent's own eta is no candidate
+    # tool_search found t4 and the agent's own eta: both offered from then on
+    assert model.tools[1] == ["eta", "t2", "t4", *memory_tools]
 
 
 async def test_two_sdk_approvals_in_one_turn_are_answered_one_at_a_time(

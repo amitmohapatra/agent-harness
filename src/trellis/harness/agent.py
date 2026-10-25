@@ -38,6 +38,7 @@ from trellis.contracts import (
     ScheduleSpec,
     ToolCall,
     ToolOutcome,
+    ToolSpec,
     ToolStatus,
     new_id,
     safe_id,
@@ -211,6 +212,8 @@ class Agent:
             self.sources, self.mcp = harness.built_for(bound_tools(target))
         #: the toolbox per tenant, kept fresh
         self._toolboxes: LRU[str, Toolbox] = LRU()
+        #: the framework's own tools last published to each tenant's catalog, by name
+        self._published_native: LRU[str, tuple[str, ...]] = LRU()
         #: the runs an attempt of which runs in this process now, by id
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
@@ -740,6 +743,25 @@ class Agent:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
 
+    async def native_tools(self, runtime: Runtime) -> dict[str, ToolSpec]:
+        """The tools the framework gives the model itself (the adapter's ``native``), less the
+        run's harness tools — with them the run's tool set — published to the tenant's catalog
+        (an administrator's risk and rules govern them as any tool's), once per set of names
+        per tenant. One that cannot be read is a warning: the run goes on with its harness
+        tools."""
+        try:
+            specs = await self.adapter.native(self.target)
+        except Exception as exc:
+            runtime.events.warning("native_tools", f"the framework's own tools: {exc}")
+            return {}
+        found = {s.name: s for s in specs if s.name not in runtime.toolbox}
+        names = tuple(found)
+        if found and self._published_native.get(runtime.tenant) != names:
+            governance = self.harness.governance(runtime.tenant)
+            await governance.publish(list(found.values()))
+            self._published_native[runtime.tenant] = names
+        return found
+
     def _toolbox(self, tenant: str) -> Toolbox:
         box = self._toolboxes.get(tenant)
         if box is None:
@@ -761,17 +783,18 @@ class Agent:
         return pushed
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
-        """The memory context for this run, in the runtime. Asked with the run's own tools —
-        the harness's and the ones its framework gives the model itself (the adapter's
-        ``native_tools``: an OpenAI Agents agent's ``tools``, Claude's built-ins and MCP tools,
-        a graph's tool nodes) — it carries the skills the agent learned for the task, and -
-        from five tools, the service's threshold - the tools that fit, whose candidates among
-        the harness's narrow the tools the model is offered (the ``hints`` feature). A failure
-        is a warning."""
+        """The memory context for this run, in the runtime. Asked with the run's tool set —
+        the harness's tools and the ones its framework gives the model itself
+        (``Runtime.native``: an OpenAI Agents agent's own, hosted, MCP and handoff tools,
+        Claude's built-ins and MCP tools, a graph's tool nodes', a Deep Agent's sub-agents') —
+        it carries the skills the agent learned for the task, and - from five tools, the
+        service's threshold - the tools that fit, whose candidates narrow the tools the model is
+        offered (the ``hints`` feature), the framework's own among them where the framework
+        lets them be narrowed. A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
-        own = list(dict.fromkeys([*runtime.tool_names(), *self.adapter.native_tools(self.target)]))
+        own = runtime.tool_set()
         hints = runtime.uses("hints")
         window = self.window(runtime)
         with retrieval_span(runtime.task) as span:
@@ -793,7 +816,7 @@ class Agent:
                 pushed.conversation.messages if pushed.conversation else []
             )
         # candidates the model is offered; no candidates at all narrows nothing
-        candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
+        candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
         if hints and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
         status = pushed.evidence_status

@@ -12,7 +12,7 @@ import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
-from trellis.contracts import InterruptResolution
+from trellis.contracts import InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
     Extracted,
     Invocation,
@@ -38,6 +38,10 @@ class FunctionAdapter:
         # the run's budget and watched for a stall (``accounting``), as a graph's are
         with contextlib.suppress(ImportError):
             from trellis.harness import accounting  # noqa: F401
+            from trellis.harness.middleware import govern_tool_nodes
+
+            # and a graph it runs itself governed, tool node by tool node
+            govern_tool_nodes()
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
@@ -75,5 +79,5 @@ class FunctionAdapter:
     def check_options(self, options: Mapping[str, Any]) -> None:
         no_options(options, "a function target", "it reads what it needs from its input")
 
-    def native_tools(self, target: Any) -> list[str]:
+    async def native(self, target: Any) -> list[ToolSpec]:
         return []  # a function calls the run's tools, nothing of its own the harness can read

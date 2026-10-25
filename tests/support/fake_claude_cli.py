@@ -266,6 +266,7 @@ class Cli:
                         "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
                         "context": context,
                         "materialised": mirrored(session) is not None,
+                        "disallowed_tools": argument("--disallowedTools"),
                     },
                     handle,
                 )

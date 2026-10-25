@@ -47,7 +47,9 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
+import logging
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
@@ -63,7 +65,16 @@ from trellis.contracts import (
     ToolStatus,
 )
 from trellis.harness import budget
-from trellis.harness.adapters.base import Extracted, Invocation, Narrowing, Output, ToolFormat
+from trellis.harness.adapters.base import (
+    Extracted,
+    Invocation,
+    Narrowing,
+    Output,
+    ToolFormat,
+    helper,
+    unique,
+)
+from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.history import Said, Speaker
@@ -72,14 +83,18 @@ from trellis.harness.prompts import selected_env
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
+from trellis.harness.tools.mcp import side_effects_of
+
+log = logging.getLogger("trellis.harness")
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
-#: What Claude Code's built-in tools do, as governance sees them (the tool catalog's word
-#: overrides it): reads run, writes run and are announced, ``Bash`` asks; a subagent's call
-#: (``Agent``, ``Task``) only hands work on — its own calls are governed one by one. Any other
-#: tool the CLI asks about is a write.
+#: Claude Code's built-in tools, and what each does as governance sees it (the tool catalog's
+#: word overrides it): reads run, writes run and are announced, ``Bash`` asks; a subagent's
+#: call (``Agent``, ``Task``) only hands work on — its own calls are governed one by one; a
+#: skill (``Skill``) or a plan (``ExitPlanMode``) is read, a slash command (``SlashCommand``)
+#: may do anything its command does: a write. Any other tool the CLI asks about is a write.
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "Read": "read",
     "Glob": "read",
@@ -90,12 +105,21 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "TodoWrite": "read",
     "Agent": "read",
     "Task": "read",
+    "Skill": "read",
+    "ExitPlanMode": "read",
+    "BashOutput": "read",
+    "ListMcpResourcesTool": "read",
+    "ReadMcpResourceTool": "read",
     "Write": "write",
     "Edit": "write",
     "MultiEdit": "write",
     "NotebookEdit": "write",
+    "KillShell": "write",
+    "SlashCommand": "write",
     "Bash": "irreversible",
 }
+#: The most MCP tools a Claude agent was seen calling that join its tool set (the most recent).
+SEEN_KEPT: Final = 1024
 #: The most one message from the CLI may be (the SDK's ``max_buffer_size``: 1 MiB unless the
 #: options say): a tool's result comes back from the CLI in one, and a run keeps results as large
 #: as an agent-runs artifact (50 MiB: a journal over a checkpoint's size travels as one) —
@@ -167,6 +191,12 @@ class ClaudeAdapter:
     narrows: Narrowing = "run"
     #: a query takes one prompt, not a conversation: memory's window is in the context's text
     replays_history = False
+
+    def __init__(self) -> None:
+        #: the tools the options declare (:meth:`native`), once read
+        self._static: list[ToolSpec] | None = None
+        #: the MCP tools the agent was seen calling, the most recent kept
+        self.seen: LRUSet[str] = LRUSet(maxsize=SEEN_KEPT)
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
@@ -246,23 +276,20 @@ class ClaudeAdapter:
                 "(its tools) has that name"
             )
 
-    def native_tools(self, target: Any) -> list[str]:
-        """Claude Code's built-in tools the options leave it (``tools``, else the default set
-        :data:`BUILTIN_SIDE_EFFECTS` knows, less ``disallowed_tools``) and the MCP tools of
-        its own servers the options name (``allowed_tools``' ``mcp__<server>__<tool>``
-        entries; a server's other tools are listed only by the CLI)."""
-        from trellis.harness.tools.convert.claude import SERVER
+    async def native(self, target: Any) -> list[ToolSpec]:
+        """Claude Code's built-in tools the options leave it (``tools``, else the ones
+        :data:`BUILTIN_SIDE_EFFECTS` knows, less ``disallowed_tools``) and the MCP tools of its
+        own servers: those an in-process server (``create_sdk_mcp_server``) lists, those
+        ``allowed_tools`` names (``mcp__<server>__<tool>``), and those the agent was seen
+        calling (its ``PostToolUse``: another server's tools are listed only by the CLI)."""
+        if self._static is None:
+            self._static = await _declared(target)
+        return unique([*self._static, *(native_spec(name) for name in self.seen)])
 
-        given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
-        denied = set(target.disallowed_tools or ())
-        builtins = [name for name in given if name not in denied]
-        own = f"mcp__{SERVER}__"
-        servers = [
-            name
-            for name in target.allowed_tools or ()
-            if name.startswith("mcp__") and not name.startswith(own) and name not in denied
-        ]
-        return [*builtins, *servers]
+    def observed(self, name: str) -> None:
+        """A tool Claude ran itself (``PostToolUse``): an MCP server's joins the tool set."""
+        if name.startswith("mcp__"):
+            self.seen.add(name)
 
     # ------------------------------------------------------------------ internals
     async def _helped(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
@@ -309,9 +336,8 @@ class ClaudeAdapter:
             answered = answered or isinstance(message, AssistantMessage)
             yield message
 
-    @staticmethod
     async def _query(
-        target: Any, native_input: Any, run: Invocation, session: str | None
+        self, target: Any, native_input: Any, run: Invocation, session: str | None
     ) -> AsyncIterator[Any]:
         """One query (``session``: the one it resumes); the session it runs in kept in the
         journal as it goes."""
@@ -320,7 +346,7 @@ class ClaudeAdapter:
         runtime = run.runtime
         given = runtime.framework_options
         target = dataclasses.replace(target, **given) if given else target
-        steps = Steps(runtime)
+        steps = Steps(runtime, self)
         options = _options(target, native_input.context, run, session, steps)
         prompt = native_input.prompt if session is None else _resumed(native_input, run)
         steps.waiting()
@@ -410,10 +436,12 @@ class Steps:
     ``PreToolUse`` to its ``PostToolUse``: a tool's own time is not a stalled model); and the
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records)."""
 
-    __slots__ = ("calls", "runtime")
+    __slots__ = ("adapter", "calls", "runtime")
 
-    def __init__(self, runtime: Runtime) -> None:
+    def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
+        #: whose query it is: the MCP tools it is seen calling join its tool set
+        self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
         self.calls: dict[str, tuple[str, dict[str, Any], float]] = {}
 
@@ -459,12 +487,26 @@ def _options(
     if run.native_tools is not None:
         servers = configured_servers(options.mcp_servers)
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
+    narrowed = _narrowed(runtime, options.disallowed_tools)
+    if narrowed is not None:
+        changes["disallowed_tools"] = narrowed
     if session is not None:
         changes["resume"] = session
     env = selected_env(options.env, runtime)
     if env is not None:
         changes["env"] = env
     return dataclasses.replace(options, **changes)
+
+
+def _narrowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str] | None:
+    """The options' ``disallowed_tools`` with the framework's own tools the run does not offer
+    (the tool hints' narrowing: Claude's built-ins and MCP tools too, for the whole query);
+    ``None`` when nothing is narrowed."""
+    if runtime.offered is None:
+        return None
+    given = list(denied or ())
+    hidden = [n for n in runtime.native if not runtime.offers(n) and n not in given]
+    return [*given, *hidden] if hidden else None
 
 
 def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) -> dict[str, Any]:
@@ -534,6 +576,7 @@ def _recorded(steps: Steps) -> Any:
         name = str(given.get("tool_name") or "")
         if name.startswith(f"mcp__{SERVER}__"):
             return {}
+        steps.adapter.observed(name)
         _, args, started = found or (name, dict(given.get("tool_input") or {}), time.time())
         failed = given.get("hook_event_name") == FAILED_EVENT
         outcome = ToolOutcome(
@@ -549,6 +592,59 @@ def _recorded(steps: Steps) -> Any:
     return HookMatcher(hooks=[post_tool_use])
 
 
+async def _declared(target: Any) -> list[ToolSpec]:
+    """The tools ``ClaudeAgentOptions`` declare (:meth:`ClaudeAdapter.native`, less what the
+    agent was seen calling)."""
+    from trellis.harness.tools.convert.claude import SERVER
+
+    given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
+    denied = set(target.disallowed_tools or ())
+    found = [native_spec(name) for name in given if name not in denied]
+    own = f"mcp__{SERVER}__"
+    found.extend(
+        native_spec(name)
+        for name in target.allowed_tools or ()
+        if name.startswith("mcp__") and not name.startswith(own) and name not in denied
+    )
+    for server, config in configured_servers(target.mcp_servers).items():
+        instance = config.get("instance") if isinstance(config, Mapping) else None
+        if server != SERVER and config.get("type") == "sdk" and instance is not None:
+            listed = await _sdk_tools(server, instance)
+            found.extend(s for s in listed if s.name not in denied)
+    return found
+
+
+async def _sdk_tools(server: str, instance: Any) -> list[ToolSpec]:
+    """The tools an in-process MCP server lists (``create_sdk_mcp_server``), as Claude names
+    them (``mcp__<server>__<tool>``); ``[]`` when it cannot be asked here (said once)."""
+    try:
+        entry = instance.get_request_handler("tools/list")
+        listed = (await entry.handler(None, None)).tools
+    except Exception as exc:
+        _unlisted(server, type(exc).__name__)
+        return []
+    return [
+        ToolSpec(
+            name=f"mcp__{server}__{tool.name}",
+            description=tool.description or tool.name,
+            input_schema=dict(tool.input_schema or {"type": "object"}),
+            source="mcp",
+            server=server,
+            side_effects=side_effects_of(tool.annotations),
+        )
+        for tool in listed
+    ]
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per server, of the most recent
+def _unlisted(server: str, reason: str) -> None:
+    log.info(
+        "an in-process MCP server's tools could not be listed for the run's tool set: they "
+        "join it as the agent calls them",
+        extra={"server": server, "reason": reason},
+    )
+
+
 def native_spec(name: str) -> ToolSpec:
     """A tool Claude runs itself, as the harness records and publishes it: a built-in by its
     risk (:data:`BUILTIN_SIDE_EFFECTS`), an MCP server's tool (``mcp__<server>__<tool>``) by its
@@ -556,7 +652,8 @@ def native_spec(name: str) -> ToolSpec:
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
-    return ToolSpec(name=name, side_effects=BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS))
+    spec = ToolSpec(name=name, side_effects=BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS))
+    return helper(spec) if name in SUBAGENT_TOOLS else spec
 
 
 def _decided(
