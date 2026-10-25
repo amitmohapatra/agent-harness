@@ -162,7 +162,22 @@ queues one on a cadence ([runs.md](../runs.md)). A worker saves the journal as p
 every side-effecting harness call, so a worker that dies repeats none of them. The worker that
 continues a paused run is any worker: see *Which checkpointer* above. The graph object
 must be built the same way in every worker process (build it at import, in the module the
-worker loads).
+worker loads). Every framework's runs are queued, scheduled and cancelled the same way:
+[examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py).
+
+## Sub-agents and child runs
+
+A wrapped agent called from the graph's own code — a tool, a node — is a child run of the
+graph's run: `await research.run(question, user=trellis.current().user)` makes a run record
+that names the graph's run, takes its tenant, thread and deadline and what is left of its time,
+pauses the graph's run when it asks a person (the graph's resume answers it), keeps its journal
+in the run's (a crash continues it) and is cancelled with it
+([subagents.md](../subagents.md#automatic)). Deep Agents' `SubAgentMiddleware` gives a
+`create_agent` graph the `task` tool, each call a child run as in a Deep Agent
+([deepagents.md](deepagents.md#sub-agents-and-child-runs)). The other way round, the wrapped
+graph is a `ReAct`'s sub-agent like any agent (`subagents=[agent]`): its own tools make that
+tool a write. Runnable:
+[examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
 
 ## AG-UI and A2A
 

@@ -150,12 +150,29 @@ also ask for it.
 `agent.stream(...)` runs `Runner.run_streamed`: text deltas (`response.output_text.delta`) as
 `TEXT_MESSAGE_*` events, the harness tool calls as `TOOL_CALL_*`, then `RUN_FINISHED`.
 
+## Sub-agents and child runs
+
+* **Agent tools** (`Agent.as_tool`): each call is a child run of the run — its record names the
+  run (`h.runs.iterate(parent_run_id=...)`), the agent is given the memory context for its task
+  before the task, its tools are governed and recorded under its own run, its turns go to memory,
+  what it spends counts toward the run's budget; a pause inside it pauses the run, and the
+  resume continues the same child ([subagents.md](../subagents.md#automatic)).
+* **Handoffs** are not child runs: the agent handed off to goes on with the same run and the
+  same conversation, its own tools and MCP servers governed as the run's and given the memory
+  tools ([above](#using-an-existing-openai-agents-project)).
+* **A wrapped agent** called from a tool's code (`await other.run(...)`) is a child run too, and
+  the wrapped OpenAI agent is a `ReAct`'s sub-agent like any agent (`subagents=[agent]`).
+
+Runnable: [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
 ## Durable runs, workers, schedules, AG-UI, A2A, evaluation
 
 The same as every target: `start` + `h.worker`/`python -m trellis.harness.worker` (progress saved after
 each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` as a tool,
 `h.evaluate` and online judges (`llm_judge` asks the gateway's judge alias (or its own `model=`)). See
-[runs.md](../runs.md), [surfaces.md](../surfaces.md), [evaluation.md](../evaluation.md).
+[runs.md](../runs.md), [surfaces.md](../surfaces.md), [evaluation.md](../evaluation.md), and
+[examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py)
+(an agent of every framework queued, one worker for all).
 
 ## Limits
 

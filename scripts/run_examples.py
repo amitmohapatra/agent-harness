@@ -1,11 +1,12 @@
-"""Run every example, several at once, and fail if any fails.
+"""Run every example and the README's walkthrough, several at once, and fail if any fails.
 
     python scripts/run_examples.py          # offline: the services' variables unset (make examples)
     python scripts/run_examples.py --live   # the environment as it is (make examples-live)
     python scripts/run_examples.py 02_way1  # only the examples whose path contains this
 
 Each example is ``examples/<NN_group>/<name>.py``, run as ``python -m examples.<NN_group>.<name>``
-from the repository root (``examples/_support`` is what they share). Offline, the variables
+from the repository root (``examples/_support`` is what they share); the README's walkthrough is
+``scripts/run_readme.py`` (``README`` selects it alone). Offline, the variables
 that name a service are removed from each example's environment, so every one runs on its
 scripted model, memory service and gateway. Standard library only.
 """
@@ -35,20 +36,26 @@ SERVICES = (
 )
 #: the most one example may take, in seconds
 TIMEOUT = 180
+#: the README's walkthrough, run as it is written
+WALKTHROUGH = ROOT / "scripts" / "run_readme.py"
 
 
 def examples(only: list[str]) -> list[Path]:
-    found = sorted((ROOT / "examples").glob("[0-9][0-9]_*/*.py"))
-    return [p for p in found if not only or any(o in str(p) for o in only)]
+    found = [*sorted((ROOT / "examples").glob("[0-9][0-9]_*/*.py")), WALKTHROUGH]
+    named = {WALKTHROUGH: "README"}
+    return [p for p in found if not only or any(o in named.get(p, str(p)) for o in only)]
 
 
 def module(path: Path) -> str:
     return ".".join(path.relative_to(ROOT).with_suffix("").parts)
 
 
-def run(path: Path, environ: dict[str, str]) -> tuple[Path, bool, float, str]:
+def run(path: Path, environ: dict[str, str], live: bool) -> tuple[Path, bool, float, str]:
     started = time.monotonic()
-    command = [sys.executable, "-m", module(path)]
+    if path == WALKTHROUGH:
+        command = [sys.executable, str(path), *(["--live"] if live else [])]
+    else:
+        command = [sys.executable, "-m", module(path)]
     try:
         done = subprocess.run(
             command,
@@ -80,7 +87,7 @@ def main(argv: list[str]) -> int:
     started = time.monotonic()
     failed = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for path, ok, seconds, output in pool.map(lambda p: run(p, environ), paths):
+        for path, ok, seconds, output in pool.map(lambda p: run(p, environ, live), paths):
             print(f"{'ok  ' if ok else 'FAIL'} {seconds:5.1f}s {path.relative_to(ROOT)}")  # noqa: T201
             if not ok:
                 failed.append((path, output))

@@ -28,7 +28,8 @@ for you.
 
 | Page | |
 |---|---|
-| **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic, approvals, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
+| **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic (memory included), approvals, sub-agents and child runs, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
+| **Feature x framework** — which feature works with which framework, written from the test matrix | [matrix.md](matrix.md) |
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, a framework's own tools, tool hints, Code Mode |
 | [gateway.md](gateway.md) | the Bifrost gateway: stored prompts, who an MCP call is for, what the gateway never does for a run, frameworks' own MCP clients |
 | [prompts.md](prompts.md) | stored prompts of the gateway: `stored(...)` as a `ReAct`'s instructions, `h.prompt` for any framework, pinned per run |

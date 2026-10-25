@@ -151,10 +151,25 @@ await agent.run(
 `agent.stream(...)` yields each assistant text block as a text delta, the harness tool calls as
 `TOOL_CALL_*` events, then `RUN_FINISHED`.
 
+## Sub-agents and child runs
+
+Each `agents=` subagent Claude runs (its `Agent` tool) is a child run of the run: its record
+names the run (`h.runs.iterate(parent_run_id=...)`), its prompt carries the memory context for
+its task (the `PreToolUse` hook's update), its built-in and MCP tool calls are governed and
+recorded under its own run (by the subagent the CLI names; the harness's own tools it calls are
+recorded under the run), its turns go to memory, its spending is in the query's
+`ResultMessage`, and a subagent cut by a crash is ended by the worker that continues the run
+([subagents.md](../subagents.md#automatic)). A wrapped agent called from a tool of yours
+(`await other.run(...)`) is a child run too, and the wrapped options are a `ReAct`'s sub-agent
+like any agent (`subagents=[agent]`). Runnable:
+[examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
 ## Durable runs, workers, schedules, AG-UI, A2A, evaluation
 
 The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
-[evaluation.md](../evaluation.md)): the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (or its own `model=`).
+[evaluation.md](../evaluation.md),
+[examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py)):
+the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (or its own `model=`).
 
 ## Limits
 

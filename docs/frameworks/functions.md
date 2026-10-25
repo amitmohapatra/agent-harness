@@ -56,6 +56,18 @@ already recorded — in order, by content. So: keep side effects in tool calls (
 the bridge runs once), and code outside them runs again on each attempt. A function's tools
 are its code's: as another agent's sub-agent its calls count as writes (they run one at a time).
 
+## Sub-agents and child runs
+
+A function delegates by calling a wrapped agent: `await research.run(question,
+user=agent.user)` inside the run is a child run of it — a record naming the run, its tenant,
+thread and deadline and what is left of its time, its journal kept in the run's (a crash
+continues it), its question pausing the run (the run's resume answers it), cancelled with it
+([subagents.md](../subagents.md#automatic)). `agent.start(...)` there queues
+a child for a worker instead. The other way round, the wrapped function is a `ReAct`'s
+sub-agent like any agent (`subagents=[agent]`): its docstring describes the tool, and its calls
+are its code's, so the tool counts as a write (one at a time). Runnable:
+[examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
 ## Native or ours
 
 A function has no framework of its own to bring prompts or a sandbox: use the harness's —
@@ -75,12 +87,24 @@ A2A servers, which serve wrapped agents only: wrap the function that calls your 
 `framework_options=` does not apply: a function has no framework run call to hand them to, so
 they are refused (`ConfigurationError`) — the function reads what it needs from its input.
 
+## Limits
+
+* A resume calls the function again from its input: code outside tool calls and `ask` runs
+  again on every attempt (the journal answers the calls and questions already made, in order),
+  so keep side effects in tool calls.
+* The memory context reaches the function only through what it reads: `agent.context`, or an
+  input that is a list of messages (the context as its leading system message); a run whose
+  code reads neither is said once in the log.
+* `stream` has no text deltas (a function has no model); `framework_options=` is refused.
+* A queued or scheduled run's input must be JSON.
+
 ## Run it
 
 * [`examples/01_start/hello.py`](../../examples/01_start/hello.py) — Level 0;
   [`examples/02_way1_function/agent.py`](../../examples/02_way1_function/agent.py) — memory, local and
   MCP tools, a question, a hook, `without=`.
 * [`examples/02_way1_function/queue_worker_inbox.py`](../../examples/02_way1_function/queue_worker_inbox.py), [`examples/02_way1_function/schedule.py`](../../examples/02_way1_function/schedule.py),
+  [`examples/06_scenarios/runs_every_framework.py`](../../examples/06_scenarios/runs_every_framework.py),
   [`examples/05_features/serve_agui_and_a2a.py`](../../examples/05_features/serve_agui_and_a2a.py),
   [`examples/03_way2_a2a/remote.py`](../../examples/03_way2_a2a/remote.py),
   [`examples/02_way1_function/memory_documents_feedback.py`](../../examples/02_way1_function/memory_documents_feedback.py).

@@ -46,6 +46,7 @@ ROUTES: Final = [
     ("POST", r"/v1/verify", "verify"),
     ("POST", r"/v1/messages", "messages"),
     ("GET", r"/v1/tools", "read_catalog"),
+    ("GET", r"/v1/tools/approval-suggestions", "suggestions"),
     ("PUT", r"/v1/tools/catalog", "publish"),
     ("PUT", r"/v1/agents/model-key", "model_key"),
     ("POST", r"/v1/documents", "add_document"),
@@ -135,6 +136,11 @@ class ScriptedMemory:
             {"id": f"mem_{n}", "kind": "memory", "text": fact, "observed_on": "2026-10-01"}
             for n, fact in enumerate(self.facts)
         ]
+
+    def _suggestions(self, body: Any, request: httpx.Request) -> dict[str, Any]:
+        """The approval rules learned from people's decisions: none here (the service learns
+        them from the feedback it is sent)."""
+        return {"suggestions": []}
 
     def _agent_tools(self, body: Any, request: httpx.Request) -> dict[str, Any]:
         return {"tools": AGENT_TOOLS}

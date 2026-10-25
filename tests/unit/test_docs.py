@@ -91,3 +91,10 @@ def test_the_docs_index_links_every_page() -> None:
 def test_the_readme_explains_the_two_ways() -> None:
     # the sibling repositories link to README.md#two-ways-to-use-trellis
     assert "\n## Two ways to use Trellis\n" in README
+
+
+def test_the_matrix_page_is_the_matrix() -> None:
+    """docs/matrix.md is written from the test matrix's tables: it says what the tests run."""
+    from tests.matrix import page
+
+    assert page.PAGE.read_text() == page.render(), "stale: run make matrix-page"

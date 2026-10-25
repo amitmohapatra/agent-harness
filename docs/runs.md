@@ -34,6 +34,38 @@ raises `TimeoutError` past `wait`). A queued run's input must be JSON (`start` r
 anything else); a run started in process records its input as JSON where it can and as text
 where it cannot, and so does its answer.
 
+Every framework's runs are the same records, queued, claimed, paused and resumed the same way
+([examples/06_scenarios/runs_every_framework.py](../examples/06_scenarios/runs_every_framework.py):
+an agent of each queued, one worker for all, a schedule fired, a queued run cancelled).
+
+## Resuming a paused run
+
+A run that waits for a person — an approval, an `ask`, a framework's own pause — is `PAUSED`
+with its question (an `Interrupt`, in the inbox). `agent.resume(interrupt_id, decision,
+answer=, reviewer=, comment=, remember=)` answers it from any process: a run that was started
+in process (`run`, `stream`) continues in the caller, now; one that came from the queue
+(`start`, a schedule) is `QUEUED` again and any worker continues it. Either way the next attempt
+reads the run's journal, so nothing asked or done before the pause happens again, and the
+approved call runs once ([interrupts.md](interrupts.md)). After a crash nothing needs to be
+called: the run's lease lapses and another worker continues it from its last progress
+checkpoint ([below](#workers), [reliability.md](reliability.md#crash-behaviour-end-to-end)).
+
+## Spending: a budget per run
+
+`h.wrap(budget=Budget(...))` caps every run of the agent, `agent.run(budget=)` (and `stream`,
+`start`, `schedule`) one run in its place: tokens, dollars as the gateway reports them, harness
+tool calls. The budget is kept with the run's record, so a resumed run and a worker that
+continues it go on from what it already spent; a sub-agent's run counts toward its parent's.
+At a limit the run ends `PARTIAL` with `BUDGET_EXCEEDED` ([api.md](api.md#budget)). A tenant's
+or a team's budget is Bifrost's.
+
+```python
+from trellis import Budget
+
+agent = h.wrap(graph, id="triage", budget=Budget(max_tokens=50_000))
+await agent.start(question, user="ada", budget=Budget(max_cost=0.50, max_tool_calls=20))
+```
+
 ## Workers
 
 ```python

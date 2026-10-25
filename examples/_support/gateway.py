@@ -17,11 +17,9 @@ here.
 from __future__ import annotations
 
 import ast
-import inspect
 import itertools
 import json
 import re
-import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -31,11 +29,11 @@ import httpx
 from bifrost_sdk import Bifrost
 from bifrost_sdk.admin import Admin
 
+from trellis import tool as local_tool
 from trellis.harness.clients.bifrost import Gateway
 
 URL: Final = "http://gateway.offline/v1"
 META_TOOLS: Final = ("listToolFiles", "readToolFile", "getToolDocs", "executeToolCode")
-JSON_TYPES: Final = {str: "string", int: "integer", float: "number", bool: "boolean"}
 CALL: Final = re.compile(r"(\w+)\.(\w+)\(([^()]*)\)")
 
 
@@ -49,13 +47,12 @@ class McpTool:
 
     @property
     def description(self) -> str:
-        return inspect.getdoc(self.fn) or ""
+        """The docstring without its ``Args:`` (as the harness reads a local tool's)."""
+        return local_tool(self.fn).spec.description
 
     def schema(self) -> dict[str, Any]:
-        hints = typing.get_type_hints(self.fn)
-        params = inspect.signature(self.fn).parameters
-        properties = {n: {"type": JSON_TYPES.get(hints.get(n), "string")} for n in params}
-        return {"type": "object", "properties": properties, "required": list(properties)}
+        """The arguments' JSON schema, each described by the docstring's ``Args:``."""
+        return dict(local_tool(self.fn).spec.input_schema or {})
 
 
 @dataclass

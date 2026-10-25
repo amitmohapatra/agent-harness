@@ -9,6 +9,31 @@ parts off with one switch, `without=`.
 Every variable is in [`.env.example`](../.env.example), which `tests/unit/test_settings.py`
 checks lists exactly what is read.
 
+## Where each thing goes
+
+One place for each thing, decided by who owns it and how often it changes — never two
+(the README's [short table](../README.md#where-things-go) is this one, cut down).
+
+| Place | Owner | What goes there | Example |
+|---|---|---|---|
+| the environment | the deployment | where each service is, its key, the spool: the seven [settings](#settings-and-the-environment) | `BIFROST_URL=http://localhost:8091/v1` |
+| the tools' own variables | their SDKs | `OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`, the providers' keys (without Bifrost) | `OPENAI_API_KEY=sk-...` |
+| Bifrost | the gateway's administrator | model routing, fallbacks, model retries, rate limits, key and team budgets, caching, the MCP allow-list of a key, stored prompts, the judge's model alias | a virtual key allowed the `erp` MCP server |
+| the memory service | its administrator, or a deploy script | the tool catalog: each tool's `risk` and `approve_when` rules; learned approvals | `refund`: `approve_when amount > 100` |
+| agent-runs | the people and code that schedule | schedules and their ticker, the inbox, webhooks | `await agent.schedule("0 9 * * 1-5", user="ada", input="Digest")` |
+| Langfuse | the team | datasets, scores and traces (when no `OTEL_EXPORTER_OTLP_*` is set) | `LANGFUSE_PUBLIC_KEY=pk-...` |
+| [`Harness(...)`](api.md#harness) | the application | settings in code instead of the environment, a block of your own, a service turned off | `Harness(config=Settings(...), memory=False)` |
+| the builder (`ReAct` or your framework's) | the agent's author | the model, the instructions, the tools and their `call_timeout`, the output schema, sub-agents | `ReAct(system_prompt="...", model="openai/gpt-4.1-mini", tools=[lookup])` |
+| [`h.wrap(...)`](api.md#hwrap) | the agent's author | every run of the agent: `hooks`, `judges`, `budget`, `run_timeout`, `without`, `framework_options`, `version`, `description` | `h.wrap(graph, id="triage", judges=[llm_judge("Polite.")], run_timeout=600)` |
+| [`agent.run(...)`](api.md#agentrun-agentstream-agentstart) (`stream`, `start`, `schedule`) | the caller | this run: `user`, `thread`, `tenant`, `run_timeout`, `deadline`, `budget`, `without`, `framework_options`, `document_ids`; queued: `priority`, `concurrency_key` | `agent.run(q, user="ada", without={"memory"})` |
+| [`h.worker(...)`](api.md#hworker) | the operator | how many runs a worker process takes at once | `h.worker(concurrency=8)` |
+| constants | the harness | thresholds, limits, cache lengths ([below](#what-is-not-a-setting)) | `MAX_STEPS` |
+
+When two places could say the same, the narrower wins: a run's over its agent's (`without=` is
+added to, `framework_options=` merged key by key, `run_timeout`/`budget` replaced), code over
+the environment, the environment over what is detected — and Bifrost over a provider key
+([below](#where-a-model-name-goes)).
+
 ## Settings and the environment
 
 `Harness()` reads `Settings.from_env()`; `Harness(config=Settings(...))` takes the same fields
@@ -74,7 +99,8 @@ framework:
 | a model object you built (a `ChatOpenAI`, an OpenAI `Model`) | as you built it: with Bifrost set, a call that does not go through it is said once per agent and model |
 
 `trellis doctor` names the route, the provider keys it leaves unused, and what is off without
-Bifrost.
+Bifrost. Runnable, one agent on each route:
+[examples/05_features/model_routing.py](../examples/05_features/model_routing.py).
 
 | Variable | `Settings` field | Unset (default) | Example | Automatic when set |
 |---|---|---|---|---|
@@ -155,7 +181,7 @@ With the services configured, every wrapped agent gets all of this with no code.
 | **Outcome and grounding** | The run's ending is its `system` feedback; a tenth of the runs given a context, chosen by the run id, is checked against it (`/v1/verify`), the judge's verdict outranking the ending and its score on the run's trace |
 | **People** | A pause is delivered to agent-runs' webhooks (`run.paused`), with the question and whose it is ([interrupts.md](interrupts.md#telling-people)) |
 | **Run events and queues** | With `RUNS_URL` every run's events go to agent-runs' event log, so any replica streams any run; a second message to a busy conversation waits for the first ([runs.md](runs.md)) |
-| **Sub-agents** | A wrapped agent another calls — a `ReAct`'s `subagents=`, a nested `agent.run` inside a run, a framework's own helper (a handoff, a Deep Agents `task`, a Claude subagent) — is a child run: tenant, user, thread, time and trace inherited, its pauses answered through the parent ([subagents.md](subagents.md)) |
+| **Sub-agents** | A wrapped agent another calls — a `ReAct`'s `subagents=`, a nested `agent.run` inside a run, a framework's own helper (an OpenAI Agents `Agent.as_tool`, a Deep Agents `task`, a Claude subagent) — is a child run: tenant, user, thread, time and trace inherited, its pauses answered through the parent ([subagents.md](subagents.md)) |
 | **Sandboxes** | Made at a run's first call, recorded, attached again after a pause or a crash, paused while a person answers, deleted at its end; leftovers reaped ([sandbox.md](sandbox.md)) |
 | **Reliability** | Every tool call bounded by its `call_timeout` and the run's; reads retried; writes run once with an idempotency key; a write of unknown outcome never run blind again; a stopping worker hands its runs back ([reliability.md](reliability.md)) |
 | **Traces** | OTel GenAI spans with Langfuse's trace attributes, every attempt of a run in one trace, credentials masked ([observability.md](observability.md#redaction)) |
@@ -190,7 +216,8 @@ long task with room in the window ([react.md](frameworks/react.md#the-middleware
 governance and approvals, the journal and replay, tool retries and time limits, tracing and
 redaction, the run record, a budget (opt-in: give one), structured output, model retries,
 fallbacks and caching (the gateway's). Inside a run, `trellis.current().uses(feature)` says
-whether a part is on. Runnable: [examples/02_way1_react/agent.py](../examples/02_way1_react/agent.py),
+whether a part is on. Runnable: [examples/05_features/without_combinations.py](../examples/05_features/without_combinations.py)
+(each combination, and what it leaves on), [examples/02_way1_react/agent.py](../examples/02_way1_react/agent.py),
 [examples/06_scenarios/scheduled_run_selection_limit.py](../examples/06_scenarios/scheduled_run_selection_limit.py).
 
 ## The framework's own run options

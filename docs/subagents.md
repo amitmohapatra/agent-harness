@@ -42,8 +42,9 @@ vendor); a sub-agent runs in the parent's process.
 Way 1, every target as the child: a `ReAct` parent with a function, LangGraph, OpenAI Agents,
 Claude or `ReAct` child. Any code inside a run makes a child run too: a wrapped agent's
 `run`, `stream` or `start` called inside another's run (a tool, a node, a function target), and
-a framework's own helpers — an OpenAI Agents handoff or agent-as-tool, a Deep Agents `task`, a
-Claude subagent — each a child run of the run. Every mode the parent runs in (`run`, `stream`,
+a framework's own helpers — an OpenAI Agents agent-as-tool, a Deep Agents `task`, a Claude
+subagent — each a child run of the run (an OpenAI Agents handoff is not: the agent handed off
+to goes on with the same run and conversation, its tools governed as the run's). Every mode the parent runs in (`run`, `stream`,
 `start` and workers, a resume in another process, `serve_chat`, `serve_a2a`). Way 2 has no
 sub-agent block: an agent you do not wrap calls another with `a2a(url)`
 ([blocks/a2a.md](blocks/a2a.md)).

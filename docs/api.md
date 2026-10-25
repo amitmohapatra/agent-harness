@@ -307,8 +307,9 @@ spending counts toward its parent's, and a resumed run goes on from what it spen
 no new tool call starts (the calls under way finish), a `ReAct` is asked once more, with no
 tools, for its best answer, and the run ends `PARTIAL`, its result's error `BUDGET_EXCEEDED`.
 What is counted: the model replies of a `ReAct` (and any graph with `ModelHooks`) and of an
-OpenAI Agents run (tokens; its dollars are not reported), and every harness tool call of any
-framework; a Claude Agent SDK run's model use is not counted. A tenant's or a team's budget is
+OpenAI Agents run (tokens; its dollars are not reported), a Claude Agent SDK run (each query's
+tokens and `total_cost_usd`, from its `ResultMessage`, subagents included), and every harness
+tool call of any framework. A tenant's or a team's budget is
 the gateway's (Bifrost's virtual-key budgets).
 
 ## Tools

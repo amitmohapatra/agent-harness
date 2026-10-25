@@ -10,29 +10,106 @@ re-implemented.
 
 ## Start here
 
-Level 0 — wrap the agent you have, run it:
+Three steps: build the agent, wrap it, run it. The walkthrough below is one program — CI runs
+it as it is written here (`make examples`, offline: a scripted model answers; `make
+examples-live` against your services), so it cannot go stale.
+
+<!-- walkthrough: scripts/run_readme.py runs the python blocks from here to its end -->
+
+**1. Build** the agent — with your framework, or with `ReAct` when you have none. A tool says
+what it does to the world: `read` runs, `irreversible` waits for a person.
 
 ```python
-h = Harness()  # the deployment is the environment
-agent = h.wrap(my_agent, id="support")  # a graph, an Agent, ClaudeAgentOptions, a function
-result = await agent.run("Where is my order?", user="ada")
+from trellis import Harness, ReAct, tool
+
+
+@tool(side_effects="read")
+def stock(sku: str) -> int:
+    """Units of a SKU in stock.
+
+    Args:
+        sku: the SKU, like "SKU-1"
+    """
+    return {"SKU-1": 3}.get(sku, 0)
+
+
+@tool(side_effects="irreversible")
+def reorder(sku: str, qty: int) -> str:
+    """Order more units of a SKU from the supplier.
+
+    Args:
+        sku: the SKU, like "SKU-1"
+        qty: how many units to order
+    """
+    return f"ordered {qty} x {sku}"
+
+
+target = ReAct(
+    system_prompt="You keep stock above 10 units.",
+    model="openai/gpt-4.1-mini",  # through Bifrost when BIFROST_URL is set, else OPENAI_API_KEY
+    tools=[stock, reorder],
+)
 ```
 
-One page per framework says what to add to an existing project:
+**2. Wrap** it. The `Harness` reads the deployment from the environment — each service is on
+when its variable is set, and with none set everything runs in this process. What applies to
+every run of this agent goes on `h.wrap`.
+
+```python
+h = Harness()
+agent = h.wrap(target, id="stock-keeper", run_timeout=300)
+```
+
+**3. Run** it where you called the framework. What applies to one run goes on the run.
+
+```python
+result = await agent.run("Is SKU-1 low? Top it up if so.", user="ada")
+while result.interrupt is not None:  # reorder is irreversible: the run waits for a person
+    print("waiting for a person:", result.interrupt.question)
+    result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="lee")
+print(result.status.value, result.answer)
+await h.aclose()
+```
+
+<!-- /walkthrough -->
+
+An agent you already built is wrapped the same way — `h.wrap(graph, id=...)`, an OpenAI
+`Agent`, your `ClaudeAgentOptions`, an async function — and keeps its own tools, each governed
+as the framework runs it. One page per framework says what to add to an existing project:
 [LangGraph and LangChain](docs/frameworks/langgraph.md), [Deep Agents](docs/frameworks/deepagents.md),
 [OpenAI Agents SDK](docs/frameworks/openai-agents.md),
 [Claude Agent SDK](docs/frameworks/claude-agent-sdk.md), [ReAct](docs/frameworks/react.md),
-[plain functions](docs/frameworks/functions.md).
-
-That is the whole integration. Each piece switches on when its service is configured
-(`MEMORY_URL`, `RUNS_URL`, `BIFROST_URL`, the Langfuse keys or `OTEL_EXPORTER_OTLP_ENDPOINT`);
-with nothing set everything runs in this process. Run it now, with no services:
+[plain functions](docs/frameworks/functions.md); which feature works with which:
+[docs/matrix.md](docs/matrix.md), written from the tests. Run it now, with no services:
 
 ```bash
 make install                         # uv sync (the sibling repositories are path sources)
 .venv/bin/python -m examples.01_start.hello
 .venv/bin/python -m examples.01_start.first_agent   # a model, two tools, an approval
 ```
+
+### Where things go
+
+Each thing has one place, decided by who owns it and how often it changes; the full table, with
+every setting and argument: [docs/configuration.md](docs/configuration.md#where-each-thing-goes).
+
+| Place | What goes there |
+|---|---|
+| the environment | where each service is and its key: `BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, `MEMORY_URL`, `RUNS_URL`, `TRELLIS_API_KEY` (and `OTEL_*`, `LANGFUSE_*`, the providers' keys, read by their own SDKs) |
+| the services | Bifrost: model routing, fallbacks, budgets, MCP tools, stored prompts; the memory catalog: tool risk and approval rules; agent-runs: schedules |
+| the builder (`ReAct` or your framework's) | the model, the instructions, the tools, the output schema, sub-agents |
+| `h.wrap(...)` | every run of the agent: `hooks`, `judges`, `budget`, `run_timeout`, `without`, `framework_options` |
+| `agent.run(...)` | this run: `user`, `thread`, `run_timeout`, `deadline`, `budget`, `without`, `framework_options` |
+
+### Bifrost or a provider key
+
+A model name is routed one way for every framework. With `BIFROST_URL` set, every model call
+goes through Bifrost on `BIFROST_VIRTUAL_KEY` — and Bifrost wins when a provider key is set
+too. Without it, a name goes to its provider's own SDK, which reads its own key
+(`OPENAI_API_KEY`, `OPENAI_BASE_URL` for any OpenAI-compatible endpoint, `ANTHROPIC_API_KEY`):
+models only — the MCP tools, Code Mode, stored prompts and dollar budgets are Bifrost's
+([configuration.md](docs/configuration.md#where-a-model-name-goes),
+[examples/05_features/model_routing.py](examples/05_features/model_routing.py)).
 
 ## What do I need?
 
@@ -47,7 +124,7 @@ make install                         # uv sync (the sibling repositories are pat
 | to ask a person something | `await trellis.current().ask("Which plan?", options=["basic", "pro"])` | [interrupts.md](docs/interrupts.md) |
 | a rule of my own around calls | `h.wrap(target, id="a", hooks=[MyRule()])` | [hooks.md](docs/hooks.md) |
 | runs that outlive the process | `await agent.start(...)` and `python -m trellis.harness.worker app:h` | [runs.md](docs/runs.md) |
-| a run on a cadence | `await agent.schedule("weekdays", "Digest", on_behalf_of="ada")` | [runs.md](docs/runs.md#schedules) |
+| a run on a cadence | `await agent.schedule("weekdays", user="ada", input="Digest")` | [runs.md](docs/runs.md#schedules) |
 | a part turned off | `await agent.run(q, user="ada", without={"memory"})` | [configuration.md](docs/configuration.md#what-is-on-and-how-to-turn-it-off) |
 | a time limit | `h.wrap(target, id="a", run_timeout=600)` | [reliability.md](docs/reliability.md) |
 | the framework's own options | `h.wrap(graph, id="a", framework_options={"recursion_limit": 50})` | [configuration.md](docs/configuration.md#the-frameworks-own-run-options) |

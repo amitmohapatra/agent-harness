@@ -233,7 +233,33 @@ events. `start` + workers, `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` too
 judge alias — never the agent's own model ([evaluation.md](../evaluation.md#the-judges-model)).
 
 `framework_options=` go into the graph's run config as for any graph (`recursion_limit`,
-`configurable`...: [langgraph.md](langgraph.md)); the thread is the run's.
+`configurable`...: [langgraph.md](langgraph.md)); the thread is the run's. Every framework's runs
+are queued, scheduled and cancelled the same way:
+[examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py).
+
+## Sub-agents and child runs
+
+`subagents=[...]` takes wrapped agents of any framework and `a2a(url)`: each is a tool named
+after the agent's id and described by `h.wrap(description=)` (else its docstring), and each
+call is a child run of the run — its own record, journal and memory scope, its pauses asked
+through the run, its crash continued, its cancel with the run. The reads among them run at
+once, the writes one at a time ([subagents.md](../subagents.md)). A `ReAct` is any other
+parent's sub-agent the same way. Runnable:
+[examples/05_features/subagents.py](../../examples/05_features/subagents.py),
+[examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
+## Limits
+
+* `middleware=` adds to the defaults: one of a default's name is refused (its parameter sets
+  it), and so are `TodoListMiddleware` and `FilesystemMiddleware`, which are `ReAct`'s own.
+* `checkpointer=` is for the graph run on its own: wrapped, the run keeps the checkpoint, and
+  `h.wrap` refuses a `ReAct` given one.
+* `subagents=` takes wrapped agents and `a2a(url)`; a Deep Agents sub-agent spec or a graph is
+  wrapped first (`h.wrap(graph, id=...)`).
+* Without a known window (`context_window=`, or the model's LangChain profile), clearing old
+  tool results and the long-task tools are off, said once.
+* A model name needs Bifrost or a provider prefix (`openai/...`) whose key the provider's SDK
+  reads ([configuration.md](../configuration.md#where-a-model-name-goes)).
 
 ## Run it
 
