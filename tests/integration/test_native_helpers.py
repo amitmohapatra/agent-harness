@@ -166,6 +166,24 @@ async def test_a_deep_agents_sub_agent_is_a_child_run_its_turns_in_memory(
     a_full_child(memory_service, result.run_id, child.run_id, ["refund"])
 
 
+async def test_a_deep_agents_sub_agent_that_fails_is_a_failed_child(
+    memory_service: FakeMemoryService,
+) -> None:
+    main = ScriptedChatModel(turns=[TASK, "the checker failed"])
+    sub = ScriptedChatModel(turns=[])  # it has no reply to give: its model call fails
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        result = await h.wrap(await deep(h, main, sub), id="desk").run("refund o1", user="u")
+        [child] = await children(h, result.run_id)
+        await h.writes.drain()
+    assert child.status is RunStatus.ERROR
+    [outcome] = [
+        c.body
+        for c in memory_service.named("feedback")
+        if c.body.get("source") == "system" and c.body["target_id"] == child.run_id
+    ]
+    assert outcome["verdict"] == "reject" and "IndexError" in outcome["comment"]
+
+
 async def test_a_deep_agents_sub_agents_tokens_count_toward_the_runs_budget(
     harness: Harness,
 ) -> None:

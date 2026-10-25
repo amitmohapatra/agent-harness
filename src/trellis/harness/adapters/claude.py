@@ -604,9 +604,7 @@ def _recorded(steps: Steps) -> Any:
         )
         spec = native_spec(name)
         helpers = steps.runtime.helpers
-        if helpers is None:
-            await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
-            return {}
+        assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
         # a call a subagent made (the CLI names it: ``agent_type``) is recorded under its run
         working = helpers.named(str(given["agent_type"])) if "agent_type" in given else None
         with helpers.working(working):
