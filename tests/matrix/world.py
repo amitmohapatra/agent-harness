@@ -44,6 +44,7 @@ from tests.matrix.dimensions import SWITCHES
 from tests.matrix.model import Feature, Selection
 from tests.matrix.models import ModelLog
 from tests.support.adapters import BUILDERS, SYSTEM
+from tests.support.arm import arm, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.gateway import URL as GATEWAY_URL
 from tests.support.gateway import FakeGateway
@@ -60,13 +61,13 @@ from trellis.contracts import (
     ToolCall,
     new_id,
 )
-from trellis.harness import pipeline, telemetry
+from trellis.harness import agent as agent_module
+from trellis.harness import evals, pipeline, telemetry
 from trellis.harness.a2a.identity import EXTENSION_URI
 from trellis.harness.agent import Agent
 from trellis.harness.agui.sse import decode
 from trellis.harness.evals import EvalCase, EvalScore
 from trellis.harness.events import RunEvents
-from trellis.harness.features import features
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Hooks
@@ -83,7 +84,7 @@ from trellis.runs import Worker as RunsWorker
 #: ``make matrix-models``: every ``ReAct`` cell names its model (``MATRIX_MODELS=named``)
 #: instead of passing a model object — the other two of the three model modes.
 NAMED: Final = os.environ.get("MATRIX_MODELS") == "named"
-NAMED_MODEL: Final = "local/small"
+NAMED_MODEL: Final = "openai/small"
 USER: Final = "ada"
 #: The agent's version and default time limit when those switches are on.
 VERSION: Final = "v-matrix"
@@ -137,10 +138,10 @@ class MatrixGateway(FakeGateway):
             )
         return await super().handle(request)
 
-    def _rpc(self, slug: str, message: dict[str, Any]) -> httpx.Response:
+    def _rpc(self, message: dict[str, Any]) -> httpx.Response:
         if message["method"] != "tools/list":
-            return super()._rpc(slug, message)
-        names = self.bundles.get(slug, [])
+            return super()._rpc(message)
+        names = self.tools
         tools = [{"name": n, "inputSchema": {"type": "object"}} for n in names]
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})
 
@@ -280,7 +281,7 @@ class World:
         )
         self.recorder = Recorder()
         self.memory_service = FakeMemoryService(candidates=[])  # no narrowing unless asked
-        self.fake_gateway = MatrixGateway(bundles={"": [KEY_TOOL]})
+        self.fake_gateway = MatrixGateway(tools=[KEY_TOOL])
         #: ``MATRIX_MODELS=named``: a ``ReAct`` names its model, served by the gateway in the
         #: deployment's mode — Bifrost with the gateway on, an OpenAI-compatible endpoint (a
         #: gateway of its own, ``OPENAI_BASE_URL``) without it
@@ -345,9 +346,11 @@ class World:
 
     def _made(self) -> Harness:
         on = self.switched
+        # every run checked and judged while those are on (a fixed share in a deployment)
+        sample = 1.0 if {"grounding", "judges"} & set(on) else 0.0
+        self.monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", sample)
+        self.monkeypatch.setattr(evals, "JUDGE_SAMPLE", sample)
         settings = Settings(
-            # one sample for both (``TRELLIS_EVAL_SAMPLE``); each is still its own feature
-            eval_sample=1.0 if {"grounding", "judges"} & set(on) else 0.0,
             bifrost_virtual_key="vk" if "gateway" in on else None,
             bifrost_url=GATEWAY_URL if "gateway" in on else None,
         )
@@ -356,15 +359,8 @@ class World:
         governance: Governance | None = None
         if self.way == "with_blocks":
             governance = Governance(self.team_catalog)
-        return Harness(
-            config=settings,
-            runs=self.store,
-            memory=memory,
-            gateway=gateway,
-            governance=governance,
-            judges=[self.judge] if "judges" in on else (),
-            hooks=[self.recorder] if "hooks" in on and self.way == "with_blocks" else (),
-        )
+        made = Harness(config=settings, runs=self.store, memory=memory, gateway=gateway)
+        return made if governance is None else with_governance(made, governance)
 
     def rules(self, rules: dict[str, Rule]) -> None:
         """Approval rules for the tools: the memory service's catalog (Way 1), the team's own
@@ -400,7 +396,6 @@ class World:
         process: int = 0,
         name: str | None = None,
         target: Target | None = None,
-        mcp: Sequence[str] | None = None,
         parent: str | None = None,
         **wrap: Any,
     ) -> Agent:
@@ -413,26 +408,26 @@ class World:
         if target is not None:
             built, own = await target(h, list(tools), list(plan))
         else:
-            built, own = await self._built(adapter, h, list(tools), list(plan), mcp)
-        if adapter not in FIXED and mcp is not None:
-            wrap["mcp"] = list(mcp)
-        for key in ("timeout", "version"):
+            built, own = await self._built(adapter, h, list(tools), list(plan))
+        for key in ("run_timeout", "version"):
             if key in wrap:
                 self.overrides[key] = wrap[key]
         if "version" in self.switched:
             wrap.setdefault("version", VERSION)
         if "agent_timeout" in self.switched:
-            wrap.setdefault("timeout", AGENT_TIMEOUT)
+            wrap.setdefault("run_timeout", AGENT_TIMEOUT)
         if self.without:
             wrap["without"] = {*self.without, *wrap.get("without", ())}
-        if "hooks" in self.switched and self.way != "with_blocks":
+        if "hooks" in self.switched:
             wrap["hooks"] = [*wrap.get("hooks", ()), self.recorder]
+        if "judges" in self.switched:
+            wrap["judges"] = [*wrap.get("judges", ()), self.judge]
         if name is None:
             self._agents += 1
             name = f"{self.feature.id.lower()}.{self.adapter}.{self._agents}"
         elif name in h.agents:
             return h.agents[name]  # this process wrapped it already
-        return h.wrap(built, id=name, tools=own, **wrap)
+        return arm(h.wrap(built, id=name, **wrap), own)
 
     async def _built(
         self,
@@ -440,7 +435,6 @@ class World:
         h: Harness,
         tools: list[Any],
         plan: list[Call],
-        mcp: Sequence[str] | None,
     ) -> tuple[Any, list[Any]]:
         adapter = "claude_agent_sdk" if adapter == "claude" else adapter
         if NAMED and adapter == "react":  # the model by name, served by the deployment's gateway
@@ -451,22 +445,21 @@ class World:
                     serving.serve_models(self.monkeypatch)
                 else:
                     serving = self.compat = FakeGateway()
-                    serving.serve_openai_compatible(self.monkeypatch)
+                    serving.serve_provider_key(self.monkeypatch)
                 self._serving = serving
             serving.chat = PlannedChat(plan)
-            return ReAct(system=SYSTEM, model=NAMED_MODEL), tools
-        if adapter in FIXED and (mcp is not None or self.without):
+            return ReAct(system_prompt=SYSTEM, model=NAMED_MODEL), tools
+        if adapter in FIXED and self.without:
             # a graph's tools are bound when it is built: built without what the agent goes
             # without, and with the harness's middleware (it hides what a run turns off)
-            bundles = None if mcp is None else list(mcp)
-            native = await h.tools(*tools, framework=adapter, mcp=bundles, without=self.without)  # type: ignore[arg-type]
+            native = await native_tools(h, *tools, framework=adapter, without=self.without)
             model = PlannedChatModel(plan=plan)
             middleware = [ModelHooks()]
             if adapter == "langgraph":
-                return create_agent(model, tools=native, middleware=middleware), []
+                return create_agent(model, tools=native, middleware=middleware), tools
             from deepagents import create_deep_agent
 
-            return create_deep_agent(model=model, tools=native, middleware=middleware), []
+            return create_deep_agent(model=model, tools=native, middleware=middleware), tools
         return await BUILDERS[adapter](h, tools, self.tmp, plan)
 
     # ------------------------------------------------------------------ driving a run
@@ -477,7 +470,6 @@ class World:
         *,
         input: str = "do the task",
         answer: Answering = approve_all,
-        mcp: Sequence[str] | None = None,
         target: Target | None = None,
         parent: str | None = None,
         during: Callable[[str], Coroutine[Any, Any, None]] | None = None,
@@ -487,16 +479,16 @@ class World:
         """Run the agent under test once, in the cell's mode, to its end: each pause answered
         with ``answer`` (by another process, in ``elsewhere``). ``during`` is called with the
         run's id while its first attempt is under way (to cancel it). ``run`` holds the run's
-        own options (``timeout=``, ``without=``, ``framework_options=``: ``run``, ``stream``,
+        own options (``run_timeout=``, ``without=``, ``framework_options=``: ``run``, ``stream``,
         ``start`` and ``schedule`` take them; ``priority=``, ``concurrency_key=``: ``start`` and
         ``schedule``)."""
         tools, plan = list(tools), list(plan)
         if self.mode == "elsewhere":
             tools, plan = [*tools, confirm], [CONFIRM, *plan]
-        agent = await self.agent(tools, plan, mcp=mcp, target=target, parent=parent, **wrap)
+        agent = await self.agent(tools, plan, target=target, parent=parent, **wrap)
         self._run_options = dict(run or {})
-        if "timeout" in self._run_options:
-            self.overrides["timeout"] = self._run_options["timeout"]
+        if "run_timeout" in self._run_options:
+            self.overrides["run_timeout"] = self._run_options["run_timeout"]
         handle = self._current = await self._start(agent, input)
         watching = None
         if during is not None:
@@ -518,7 +510,6 @@ class World:
                     plan,
                     process=process,
                     name=agent.id,
-                    mcp=mcp,
                     target=target,
                     parent=parent,
                     **wrap,
@@ -535,7 +526,7 @@ class World:
         if injected_pause(self.mode, pauses):
             pauses = pauses[1:]
         outcome = Outcome(run_id, record, events, pauses, handle.surface)
-        outcome.without = features(self._run_options.get("without", ()))
+        outcome.without = frozenset(self._run_options.get("without", ()))
         self.outcomes.append(outcome)
         return outcome
 
@@ -595,11 +586,11 @@ class World:
             handle.task = asyncio.create_task(_streamed(agent, input, self._run_options))
         elif mode in ("worker", "elsewhere"):
             started = await agent.start(input, user=USER, **self._run_options)
-            handle.run_id = started.run_id
+            handle.run_id = started.id
             handle.task = asyncio.create_task(self._work(agent))
         elif mode == "schedule":
             schedule = await agent.schedule(
-                "0 0 1 1 *", input, on_behalf_of=USER, **self._run_options
+                "0 0 1 1 *", user=USER, input=input, **self._run_options
             )
             self.store._schedules[schedule.schedule_id] = schedule.model_copy(
                 update={"next_fire_at": datetime.now(UTC) - timedelta(seconds=1)}
@@ -627,7 +618,7 @@ class World:
             )
             card = await A2ACardResolver(handle.http, A2A_URL).get_agent_card()
             handle.client = ClientFactory(ClientConfig(httpx_client=handle.http)).create(card)
-            tenant = await agent.harness.tenant()
+            tenant = await agent.harness._tenant()
             handle.task = asyncio.create_task(_sent(handle.client, tenant, new_text_part(input)))
         else:  # pragma: no cover - the modes are fixed
             raise AssertionError(mode)
@@ -675,7 +666,7 @@ class World:
             handle.task = asyncio.create_task(handle.http.post("/agui/run", json=body))
         elif mode == "a2a":
             assert handle.client is not None and handle.run_id is not None
-            tenant = await agent.harness.tenant()
+            tenant = await agent.harness._tenant()
             part = new_data_part({"decision": decision, "answer": value})
             handle.task = asyncio.create_task(
                 _sent(
@@ -694,7 +685,7 @@ class World:
         assert handle is not None
         if self.mode == "a2a":
             assert handle.client is not None
-            tenant = await handle.agent.harness.tenant()
+            tenant = await handle.agent.harness._tenant()
             headers = {HTTP_EXTENSION_HEADER: EXTENSION_URI, **identity_headers(tenant, USER)}
             context = ClientCallContext(service_parameters=headers)
             await handle.client.cancel_task(CancelTaskRequest(id=run_id), context=context)
@@ -736,13 +727,12 @@ class World:
         switched (the run's own ``without=`` turning more off)."""
         on, names = self.switched - outcome.without, set(outcome.called())
         loaded = [e for e in outcome.events if e.type is RunEventType.CONTEXT_LOADED]
-        if {"memory", "memory_push"} <= on:
-            assert loaded, f"memory push on: no context was pushed into {outcome.run_id}"
+        if "memory" in on:
+            assert loaded, f"memory on: no context was pushed into {outcome.run_id}"
         else:
-            assert not loaded, "memory push off: a context was pushed"
-        if not {"memory", "memory_pull"} <= on:
+            assert not loaded, "memory off: a context was pushed"
             pulled = names & set(MEMORY_TOOLS)
-            assert not pulled, f"memory pull off: memory tools were called: {pulled}"
+            assert not pulled, f"memory off: memory tools were called: {pulled}"
         if not {"gateway", "mcp"} <= on:
             assert KEY_TOOL not in names, "the key's MCP tools off: one was called"
         succeeded = outcome.status is RunStatus.SUCCESS
@@ -783,13 +773,10 @@ class World:
                 and o.answer
             ]
             assert verified >= len(grounded), f"grounding on: {verified} verified"
-        recording = [o for o in self.outcomes if "records" not in o.without]
+        recording = [o for o in self.outcomes if "memory" not in o.without]
         recorded = self.memory_service.named("messages")
-        if "records" in on and recording:
-            assert recorded, "memory records on: no transcript was recorded"
-        elif "records" not in on:
-            stored = recorded + self.memory_service.named("record_tool")
-            assert not stored, "memory records off: a transcript or a tool call was recorded"
+        if recording:
+            assert recorded, "memory on: no transcript was recorded"
 
     def _services(self) -> None:
         """The gateway, the judges, tracing and hooks: nothing when off."""
@@ -802,7 +789,7 @@ class World:
         elif "mcp" not in on:
             if listed:
                 raise OffButCalled("the key's MCP tools off: they were listed")
-        elif self.outcomes and self.feature.id not in NO_KEY_LISTING:
+        elif self.outcomes:
             assert listed, "gateway on: the key's MCP tools were never listed"
         if "judges" not in on:
             assert not self.judged, "judges off: a judge ran"
@@ -818,18 +805,15 @@ class World:
         if "version" not in self.overrides:
             expected = VERSION if "version" in on else None
             assert record.agent_version == expected, ("version", record.agent_version)
-        if "timeout" not in self.overrides and record.parent_run_id is None:
+        if "run_timeout" not in self.overrides and record.parent_run_id is None:
             limit = AGENT_TIMEOUT if "agent_timeout" in on else None
             assert record.timeout_seconds == limit, ("timeout", record.timeout_seconds)
 
 
-#: The adapters whose tools are bound when the target is built (``h.tools``).
+#: The adapters whose tools are bound when the target is built.
 FIXED: Final = frozenset({"langgraph", "deepagents"})
 #: Features on with the team's blocks whatever the selection (its own governance's rules).
 ON_WITH_BLOCKS: Final = frozenset({"F33"})
-#: Features whose runs never list the key's MCP tools: their ``mcp(...)`` entries name exactly
-#: the servers they have (Virtual MCPs, a server of their own).
-NO_KEY_LISTING: Final = frozenset({"F18", "F18s"})
 
 
 def injected_pause(mode: str, pauses: list[Interrupt]) -> bool:

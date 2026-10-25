@@ -65,7 +65,7 @@ async def test_a_langfuse_dataset_is_graded_for_grounding_by_the_memory_service(
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
     user = f"live-eval-{suffix}"
-    async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
+    async with live_harness(sampled=0.0, langfuse=langfuse.environ()) as h:
         agent = h.wrap(answer, id=f"live-eval-{suffix}")
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         # unique per run: the memory SDK's default idempotency key leaves the user out, so the
@@ -98,10 +98,10 @@ async def test_a_langfuse_dataset_is_graded_for_grounding_by_the_memory_service(
 @pytest.mark.timeout(TIMEOUT_SECONDS)
 async def test_a_real_judge_model_grades_the_answers(langfuse: StubLangfuse) -> None:
     suffix = uuid.uuid4().hex[:8]
-    judge = llm_judge("The answer names the steel supplier or its id, as the question asks.")
-    async with live_harness(
-        judge_model=_env("TRELLIS_JUDGE_MODEL") or MODEL, **langfuse.settings()
-    ) as h:
+    judge = llm_judge(
+        "The answer names the steel supplier or its id, as the question asks.", model=MODEL
+    )
+    async with live_harness(langfuse=langfuse.environ()) as h:
         agent = h.wrap(answer, id=f"live-judged-{suffix}")
         report = await h.evaluate(agent, "live-capitals", [judge], user=f"live-judge-{suffix}")
     stats = report.summary["llm_judge"]

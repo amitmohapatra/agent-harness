@@ -1,8 +1,9 @@
 """A run's budget: the most it may spend — tokens, dollars, tool calls — counted as it runs and
 kept in its journal, so a resume goes on from what was spent, and a sub-agent's spending counts
-toward its parent's too. ``h.wrap(..., budget=Budget(...))`` sets it; an agent given none has
-no cap (its runs are still counted). Only the run's own cap is the harness's: a tenant's or a
-team's budget is the gateway's (Bifrost's virtual-key budgets).
+toward its parent's too. ``h.wrap(..., budget=Budget(...))`` sets it for every run of the
+agent, ``agent.run(..., budget=...)`` for one run (kept with its record, for its later
+attempts); a run given none has no cap (it is still counted). Only the run's own cap is the
+harness's: a tenant's or a team's budget is the gateway's (Bifrost's virtual-key budgets).
 
 Counted: every model reply the harness sees (``ReAct`` and any graph with ``ModelHooks``, an
 OpenAI Agents run's hooks) — its input, output and cached tokens, and the dollars the gateway
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.run")
 
+#: The ``RunStart.metadata`` key a run's own budget is kept under.
+BUDGET: Final = "budget"
 #: The error code of a run that ended at its budget.
 BUDGET_EXCEEDED: Final = "BUDGET_EXCEEDED"
 #: What a run's model is told when its budget is spent.
@@ -52,6 +55,20 @@ class Budget:
             value = getattr(self, name)
             if value is not None and value < 0:
                 raise ConfigurationError(f"a budget's {name} is a number from 0")
+
+    def kept(self) -> dict[str, Any]:
+        """What a run's record keeps of it (its limits that are set)."""
+        found = {
+            "max_tokens": self.max_tokens,
+            "max_cost": self.max_cost,
+            "max_tool_calls": self.max_tool_calls,
+        }
+        return {name: value for name, value in found.items() if value is not None}
+
+    @classmethod
+    def of(cls, kept: Any) -> Budget | None:
+        """It again, from a run's record (``None``: the run kept none)."""
+        return cls(**kept) if isinstance(kept, dict) else None
 
     def over(self, spent: dict[str, float]) -> str | None:
         """The limit ``spent`` has reached, said (``None``: none)."""
@@ -84,7 +101,7 @@ def account(
     cost: float | None = None,
 ) -> None:
     """One model reply's spending, on the run and every run it works inside."""
-    capped = any(r.agent.budget is not None and r.agent.budget.max_cost for r in _runs(runtime))
+    capped = any(r.budget is not None and r.budget.max_cost for r in _runs(runtime))
     if cost is None and capped:
         _no_cost(model or "a model")
     for run in _runs(runtime):
@@ -150,7 +167,7 @@ def stopped(runtime: Runtime, spent: str) -> None:
 
 
 def _over(run: Runtime) -> str | None:
-    cap: Budget | None = run.agent.budget
+    cap: Budget | None = run.budget
     return cap.over(run.replay.journal.spent) if cap is not None else None
 
 
@@ -164,6 +181,7 @@ def _no_cost(model: str) -> None:
 
 
 __all__ = [
+    "BUDGET",
     "BUDGET_EXCEEDED",
     "SPENT",
     "Budget",

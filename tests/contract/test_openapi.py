@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 import respx
 
+from tests.support.arm import arm
 from tests.support.memory import CONTRACT, ROUTES, FakeMemoryService
 from tests.support.openapi import runs_contract
 from trellis import Harness, Runtime, Settings, tool
@@ -61,7 +62,7 @@ async def test_every_memory_call_the_harness_makes_speaks_the_contract(
     memory_service.claims = 3
     settings = Settings(memory_url="http://memory.test", api_key="test", bifrost_virtual_key="vk")
     async with Harness(config=settings, memory=memory_service.client()) as h:
-        agent = h.wrap(works, id="contract", tools=[refund])
+        agent = arm(h.wrap(works, id="contract"), [refund])
         paused = await agent.run("refund o1", user="ada", thread="thr_1")
         assert paused.interrupt is not None
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="cfo")

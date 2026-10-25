@@ -57,6 +57,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from tests.live.conftest import RUNS_URL, live_harness, needs_memory, needs_runs
 from tests.live.support import StubLangfuse, eventually, memory_scope, seed
+from tests.support.arm import arm, native_tools
 from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
 from trellis import Agent, Harness, ReAct, Runtime, a2a, tool
 from trellis.contracts import (
@@ -202,7 +203,7 @@ async def _function(case: Case, plan: list[Call], tools: list[Any], hitl: bool) 
 
 async def _react(case: Case, plan: list[Call], tools: list[Any], hitl: bool) -> Built:
     chat = PlannedChat(plan)
-    return Built(ReAct(system=SYSTEM, model=chat), tools, chat.said)
+    return Built(ReAct(system_prompt=SYSTEM, model=chat), tools, chat.said)
 
 
 async def _langgraph(case: Case, plan: list[Call], tools: list[Any], hitl: bool) -> Built:
@@ -213,7 +214,7 @@ async def _langgraph(case: Case, plan: list[Call], tools: list[Any], hitl: bool)
     middleware = [HumanInTheLoopMiddleware(interrupt_on={case.email: True})] if hitl else []
     graph = create_agent(
         model,
-        tools=await case.h.tools(*tools, framework="langgraph"),
+        tools=await native_tools(case.h, *tools, framework="langgraph"),
         system_prompt=SYSTEM,
         middleware=middleware,
         checkpointer=InMemorySaver() if hitl else None,
@@ -223,7 +224,7 @@ async def _langgraph(case: Case, plan: list[Call], tools: list[Any], hitl: bool)
 
 async def _state_graph(case: Case, plan: list[Call], tools: list[Any], hitl: bool) -> Built:
     model = PlannedChatModel(plan=plan)
-    native = await case.h.tools(*tools, framework="langgraph")
+    native = await native_tools(case.h, *tools, framework="langgraph")
     return Built(state_graph(model, native, confirm=False), [], model.said)
 
 
@@ -279,7 +280,7 @@ def state_graph(model: PlannedChatModel, tools: list[Any], *, confirm: bool) -> 
 async def _deep_agent(case: Case, plan: list[Call], tools: list[Any], hitl: bool) -> Built:
     """Deep Agents: it plans (``write_todos``), hands the stock check to a sub-agent (``task``)
     — which calls the harness's stock tool itself — then follows ``plan``."""
-    native = await case.h.tools(*tools, framework="deepagents")
+    native = await native_tools(case.h, *tools, framework="deepagents")
     checker = PlannedChatModel(plan=[(case.stock, {"sku": "A-1"})], final="A-1: {last} units.")
     model = PlannedChatModel(
         plan=[
@@ -390,7 +391,7 @@ async def test_memory_is_pushed_pulled_and_written_back(framework: str, tmp_path
         if framework != "deepagents":  # a Deep Agent's sub-agent checks the stock
             plan.append((case.stock, {"sku": "A-1"}))
         built = await build(case, plan)
-        agent = h.wrap(built.target, id=case.agent_id, tools=built.tools)
+        agent = arm(h.wrap(built.target, id=case.agent_id), built.tools)
         user_scope = await memory_scope(h, user=case.user, agent_id=agent.id)
         await seed(user_scope, case.fact, visibility="USER")
 
@@ -434,7 +435,7 @@ async def test_an_irreversible_call_waits_in_agent_runs_for_a_person(
     async with live_harness() as h:
         case = Case(h, framework, tmp_path)
         built = await build(case, [(case.reorder, {"sku": "A-1", "qty": 20})])
-        agent = h.wrap(built.target, id=case.agent_id, tools=built.tools)
+        agent = arm(h.wrap(built.target, id=case.agent_id), built.tools)
 
         paused = await agent.run(QUESTION, user=case.user, thread=case.thread)
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
@@ -468,7 +469,7 @@ async def test_the_frameworks_own_approval_is_a_harness_interrupt(
     async with live_harness() as h:
         case = Case(h, framework, tmp_path)
         built = await build(case, [(case.email, {"to": "ops", "body": "A-1 is low"})], hitl=True)
-        agent = h.wrap(built.target, id=case.agent_id, tools=built.tools)
+        agent = arm(h.wrap(built.target, id=case.agent_id), built.tools)
 
         paused = await agent.run(QUESTION, user=case.user, thread=case.thread)
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
@@ -500,7 +501,7 @@ async def test_a_hand_built_graphs_own_interrupt_pauses_in_agent_runs(tmp_path: 
     async with live_harness() as h:
         case = Case(h, "stategraph", tmp_path)
         model = PlannedChatModel(plan=[(case.stock, {"sku": "A-1"})])
-        native = await h.tools(*case.tools(), framework="langgraph")
+        native = await native_tools(h, *case.tools(), framework="langgraph")
         agent = h.wrap(state_graph(model, native, confirm=True), id=case.agent_id)
         scope = await memory_scope(h, user=case.user, agent_id=agent.id)
         await seed(scope, case.fact, visibility="USER")
@@ -552,7 +553,7 @@ async def test_a_deep_agents_sub_agent_call_waits_in_agent_runs(tmp_path: Path) 
     and the approval resumes the sub-agent in place."""
     async with live_harness() as h:
         case = Case(h, "deepagents", tmp_path)
-        native = await h.tools(*case.tools(), framework="deepagents")
+        native = await native_tools(h, *case.tools(), framework="deepagents")
         buyer = PlannedChatModel(plan=[(case.reorder, {"sku": "A-1", "qty": 20})], final="{last}")
         model = PlannedChatModel(
             plan=[("task", {"description": "Reorder 20 x A-1.", "subagent_type": "buyer"})]
@@ -607,13 +608,13 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) ->
         return f"{receipt}; size {size}"
 
     async with case.h as h:
-        agent = h.wrap(billing, id=case.agent_id, tools=[charge])
+        agent = arm(h.wrap(billing, id=case.agent_id), [charge])
         scope = await memory_scope(h, user=case.user, agent_id=agent.id)
         await seed(scope, case.fact, visibility="USER")
         # the question memory is asked about is the input's text field (a dict's "question")
         question = "Charge order o-7 for my SKU A-1 stock from the warehouse."
         handle = await agent.start({"order": "o-7", "question": question}, user=case.user)
-        assert (await stored(h, handle.run_id)).status is RunStatus.QUEUED
+        assert (await stored(h, handle.id)).status is RunStatus.QUEUED
 
         first = h.worker([agent], concurrency=1)
         # a short lease, so the run the crashed worker held is queued again within the test
@@ -621,22 +622,22 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) ->
         working = asyncio.create_task(first.run())
         await asyncio.wait_for(crashed.wait(), 60)
         # the charge was saved as the run's progress before the crash
-        progress = (await stored(h, handle.run_id)).checkpoint
+        progress = (await stored(h, handle.id)).checkpoint
         assert progress is not None and progress.get("calls"), progress
         first.stop()
         first.stop()  # at once: the run is released, nothing written, its lease lapses
         await working
 
         async def requeued() -> bool:
-            return (await stored(h, handle.run_id)).status is RunStatus.QUEUED
+            return (await stored(h, handle.id)).status is RunStatus.QUEUED
 
         assert await eventually(requeued, within=60)
         second = h.worker([agent], concurrency=1)
         assert await second.run_once()
-        paused = await handle.result(timeout=30)
+        paused = await handle.result(wait=30)
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         assert paused.interrupt.question == "Which size?" and charged == ["o-7"]
-        assert handle.run_id in [r.run_id for r in await h.inbox("role:fv-ops")]
+        assert handle.id in [r.run_id for r in await h.inbox("role:fv-ops")]
 
         queued = await agent.resume(
             paused.interrupt.interrupt_id, "answer", answer="L", reviewer="fv-ops"
@@ -644,17 +645,17 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) ->
         assert queued.status is RunStatus.QUEUED  # it came from the queue: a worker continues
         third = h.worker([agent], concurrency=1)
         assert await third.run_once()
-        done = await handle.result(timeout=30)
+        done = await handle.result(wait=30)
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == "charged o-7 40; size L"
-        record = await stored(h, handle.run_id)
+        record = await stored(h, handle.id)
         assert record.attempt == 3 and record.checkpoint is None
         assert charged == ["o-7"]  # three attempts, one charge
         assert all(case.fact in c for c in contexts)  # each attempt had the user's memory
 
         await h.writes.drain()
         assert await stats(scope, charge.spec.name, calls=1)
-        thread = await memory_scope(h, user=case.user, agent_id=agent.id, thread=handle.run_id)
+        thread = await memory_scope(h, user=case.user, agent_id=agent.id, thread=handle.id)
         assert [m.content for m in await thread.history()][-1] == done.answer
 
 
@@ -671,22 +672,22 @@ async def test_a_queued_graph_paused_in_one_worker_is_continued_by_another(
 
         async def worker_agent(h: Harness) -> Agent:
             model = PlannedChatModel(plan=plan)
-            tools = await h.tools(*case.tools(), framework="langgraph")
+            tools = await native_tools(h, *case.tools(), framework="langgraph")
             graph = create_agent(model, tools=tools, checkpointer=InMemorySaver())
             return h.wrap(graph, id=case.agent_id)
 
         here, there = await worker_agent(first), await worker_agent(second)
         handle = await here.start(QUESTION, user=case.user, thread=case.thread)
         assert await first.worker([here], concurrency=1).run_once()
-        paused = await handle.result(timeout=30)
+        paused = await handle.result(wait=30)
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         queued = await here.resume(paused.interrupt.interrupt_id, "approve", reviewer="fv-lead")
         assert queued.status is RunStatus.QUEUED
         assert await second.worker([there], concurrency=1).run_once()
-        done = await handle.result(timeout=30)
+        done = await handle.result(wait=30)
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == "Done. ordered 20 x A-1" and case.ledger == ["reorder:A-1:20"]
-        assert (await stored(first, handle.run_id)).attempt == 2
+        assert (await stored(first, handle.id)).attempt == 2
 
 
 # longer than the others: the ticker fires the schedule within the next two minutes
@@ -702,7 +703,7 @@ async def test_a_schedule_fires_through_the_ticker_to_a_worker(tmp_path: Path) -
         scope = await memory_scope(h, user=case.user, agent_id=agent.id)
         await seed(scope, case.fact, visibility="USER")
         minute = (datetime.now(UTC) + timedelta(minutes=2)).minute  # agent-runs: one an hour
-        schedule = await agent.schedule(f"{minute} * * * *", "briefing", on_behalf_of=case.user)
+        schedule = await agent.schedule(f"{minute} * * * *", user=case.user, input="briefing")
         worker = h.worker([agent], concurrency=1)
         working = asyncio.create_task(worker.run())
         try:
@@ -848,10 +849,12 @@ async def test_a2a_an_agent_served_and_consumed_as_a_tool(
     async with live_harness() as h:
         case = Case(h, "a2a", tmp_path)
         chat = PlannedChat([("planner", {"message": "the shop"})])
-        agent = h.wrap(
-            ReAct(system=SYSTEM, model=chat),
-            id=case.agent_id,
-            tools=[a2a(planner_served.url, name="planner")],
+        agent = arm(
+            h.wrap(
+                ReAct(system_prompt=SYSTEM, model=chat),
+                id=case.agent_id,
+            ),
+            [a2a(planner_served.url, name="planner")],
         )
         paused = await agent.run(QUESTION, user=case.user, thread=case.thread)
         # the remote agent's question became this run's own pause
@@ -902,7 +905,7 @@ async def test_a_document_added_is_cited_by_the_next_context(tmp_path: Path) -> 
 async def test_feedback_waits_for_review_in_memory_and_is_scored() -> None:
     with StubLangfuse() as langfuse:
         # no grounding check: a sampled run's /v1/verify would add a ``judge`` record
-        async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
+        async with live_harness(sampled=0.0, langfuse=langfuse.environ()) as h:
             case = Case(h, "feedback", Path("."))
 
             async def answer(input: str, agent: Runtime) -> str:
@@ -970,7 +973,7 @@ async def test_offline_evaluation_scores_a_langfuse_dataset(spans: InMemorySpanE
         for n, (q, a) in enumerate(ANSWERS.items())
     ]
     with StubLangfuse(f"fv-golden-{suffix}", items) as langfuse:
-        async with live_harness(grounding_sample=0.0, **langfuse.settings()) as h:
+        async with live_harness(sampled=0.0, langfuse=langfuse.environ()) as h:
             h.evals.judge_model = judge = Judge()
             agent = h.wrap(answer_from_table, id=f"fv-eval-{suffix}")
             user = f"fv-eval-{suffix}"
@@ -1026,9 +1029,8 @@ async def test_online_judges_score_every_sampled_run() -> None:
     suffix = uuid.uuid4().hex[:8]
     judge = Judge()
     with StubLangfuse() as langfuse:
-        async with live_harness(
-            judge_sample=1.0, judges=[llm_judge("Answers the question.")], **langfuse.settings()
-        ) as h:
+        judges = [llm_judge("Answers the question.", sample=1.0)]
+        async with live_harness(judges=judges, langfuse=langfuse.environ()) as h:
             h.evals.judge_model = judge
             agent = h.wrap(answer_from_table, id=f"fv-judged-{suffix}")
             user = f"fv-judged-{suffix}"

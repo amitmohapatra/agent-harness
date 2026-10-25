@@ -43,10 +43,11 @@ class Worker:
     ) -> None:
         self.harness = harness
         self.agents = {agent.id: agent for agent in agents}
-        chosen = harness.settings.worker_concurrency if concurrency is None else concurrency
         try:
             #: the claim loop: claims, leases, heartbeats, the graceful stop
-            self.loop = ClaimLoop(harness.runs, self._execute, [*self.agents], concurrency=chosen)
+            self.loop = ClaimLoop(
+                harness.runs, self._execute, [*self.agents], concurrency=concurrency
+            )
         except ValueError as exc:  # no agent, or a concurrency under one
             raise ConfigurationError(str(exc)) from exc
 

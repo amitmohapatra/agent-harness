@@ -33,7 +33,7 @@ class Identity(BaseModel):
     run_id: str
     thread: str | None = None
     workspace: str | None = None
-    #: the run this one is a sub-agent's run of (``agent.as_tool()``): what it reads of the
+    #: the run this one is a child run of (a sub-agent's, a nested run): what it reads of the
     #: parent's hand-off notes, and where its own reports go up to
     parent_run: str | None = None
     #: the agent group a sub-agent's run works in: its delegation tree, named by the run at

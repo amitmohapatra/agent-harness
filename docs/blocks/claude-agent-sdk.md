@@ -24,8 +24,7 @@ pip install -e ../agent-runs/sdk/python                # trellis.runs (the harne
 ```
 
 The SDK drives the Claude Code CLI, which must be on the machine. Set `MEMORY_URL`, `RUNS_URL`
-and `TRELLIS_API_KEY` for the services, and `BIFROST_URL` with `TRELLIS_JUDGE_MODEL` for the
-judge; through Bifrost, `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic", ...}` in the options.
+and `TRELLIS_API_KEY` for the services, and `BIFROST_URL` for the judge (its judge alias); through Bifrost, `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic", ...}` in the options.
 
 ## The tools, and the permission callback
 

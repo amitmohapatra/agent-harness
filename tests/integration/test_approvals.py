@@ -15,6 +15,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import Call
 from trellis import Ask, Harness, Hooks, Runtime, current, tool
@@ -95,7 +96,7 @@ async def test_a_hook_and_the_catalog_rule_by_arguments_on_every_adapter(
     rule = Threshold()
     plan: list[Call] = [("pay", {"amount": a}) for a in (5, 50, 500)]
     target, tools = await BUILDERS[framework](memory_harness, [pay], tmp_path, plan)
-    agent = memory_harness.wrap(target, id=f"payer-{framework}", tools=tools, hooks=[rule])
+    agent = arm(memory_harness.wrap(target, id=f"payer-{framework}", hooks=[rule]), tools)
     first = await agent.run("pay three", user="ada")
     assert first.interrupt is not None, first
     assert first.interrupt.question == "Approve pay? amount > 20."  # the catalog's rule
@@ -131,7 +132,7 @@ async def test_remembering_a_hooks_ask_covers_later_asks_of_the_same_assignee_on
 ) -> None:
     plan: list[Call] = [("pay", {"amount": a}) for a in (50, 60, 900, 950)]
     target, tools = await BUILDERS[framework](harness, [pay], tmp_path, plan)
-    agent = harness.wrap(target, id=f"remembering-{framework}", tools=tools, hooks=[Escalating()])
+    agent = arm(harness.wrap(target, id=f"remembering-{framework}", hooks=[Escalating()]), tools)
     first = await agent.run("pay four", user="ada")
     assert first.interrupt is not None and first.interrupt.assignee is None, first
     finance = await agent.resume(
@@ -182,7 +183,7 @@ async def test_an_approval_remembered_for_the_run_covers_the_tools_later_calls_o
 ) -> None:
     plan: list[Call] = [("wire", {"amount": 50}), ("wire", {"amount": 60})]
     target, tools = await BUILDERS[framework](harness, [wire], tmp_path, plan)
-    agent = harness.wrap(target, id=f"wires-{framework}", tools=tools)
+    agent = arm(harness.wrap(target, id=f"wires-{framework}"), tools)
     first = await agent.run("wire twice", user="ada")
     assert first.interrupt is not None, first
     resumed = await agent.resume(
@@ -203,7 +204,7 @@ async def test_a_remembered_approval_and_a_comment_are_events_of_the_next_attemp
     async def fn(input: str, agent: Runtime) -> Any:
         return [await agent.tools.call("wire", amount=a) for a in (1, 2)]
 
-    agent = harness.wrap(fn, id="wiring", tools=[wire])
+    agent = arm(harness.wrap(fn, id="wiring"), [wire])
     paused = await agent.run("go", user="ada")
     assert paused.interrupt is not None
     seen: list[Any] = []
@@ -239,7 +240,7 @@ async def test_a_rejection_with_a_comment_tells_the_model_why(harness: Harness) 
     async def fn(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("wire", amount=900)
 
-    agent = harness.wrap(fn, id="rejected", tools=[wire])
+    agent = arm(harness.wrap(fn, id="rejected"), [wire])
     paused = await agent.run("go", user="ada")
     assert paused.interrupt is not None
     done = await agent.resume(
@@ -272,7 +273,7 @@ async def test_reviewer_answers_approvals_and_questions_by_script(harness: Harne
         plan = await agent.ask("Which plan?", options=["a", "b"])
         return f"{wired}, {plan}"
 
-    agent = harness.wrap(fn, id="scripted", tools=[wire])
+    agent = arm(harness.wrap(fn, id="scripted"), [wire])
     reviewer = Reviewer({"wire": Decide("approve", comment="ok"), "Which plan?": "b"})
     done = await reviewer.run(agent, "go", user="ada")
     assert done.answer == "wired 50, b"
@@ -303,7 +304,7 @@ async def test_a_result_from_outside_is_an_ask_in_the_tool_on_every_adapter(
     what the tool returns and the model reads."""
     plan: list[Call] = [("sign", {"contract": "c-1"})]
     target, tools = await BUILDERS[framework](harness, [sign], tmp_path, plan)
-    agent = harness.wrap(target, id=f"signing-{framework}", tools=tools)
+    agent = arm(harness.wrap(target, id=f"signing-{framework}"), tools)
     paused = await agent.run("get c-1 signed", user="ada")
     asked = paused.interrupt
     assert asked is not None and asked.reason is InterruptReason.QUESTION, paused
@@ -329,7 +330,7 @@ async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness
     async def fn(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("scan", page=1)
 
-    agent = harness.wrap(fn, id="scanning", tools=[scan])
+    agent = arm(harness.wrap(fn, id="scanning"), [scan])
     paused = await agent.run("scan", user="ada")
     assert paused.interrupt is not None and paused.interrupt.expects is None
     done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="ops")
@@ -338,3 +339,67 @@ async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness
     assert again.interrupt is not None
     scanned = await Reviewer({"The scan of page 1?": {"pages": 1}}).settle(agent, again)
     assert scanned.answer == {"pages": 1}
+
+
+# --------------------------------------------------------------------------- learned rules
+
+
+@tool(side_effects="write")
+def order(amount: int) -> str:
+    """Order an amount."""
+    paid.append(amount)
+    return f"ordered {amount}"
+
+
+async def test_a_learned_approval_rule_is_accepted_for_its_agent_and_stops_the_pause(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """People approved the buyer's orders often enough that the memory service suggests no
+    longer asking: the next refresh of governance accepts it for the buyer — it reads and
+    accepts the buyer's suggestions in the buyer's scope, the only place the service lists them
+    — and the buyer's next order runs without a pause. Accepted, the rule is the tool's
+    ``approve_when`` in the tenant's catalog (the service writes it there), so it governs every
+    agent's calls of the tool; each agent's own suggestions are read for that agent."""
+    from trellis.harness.governance import catalog as catalog_module
+
+    now = [1000.0]
+    monkeypatch.setattr(catalog_module, "_now", lambda: now[0])
+    memory_service.catalog = {"order": {"side_effects": "write", "approve_when": "true"}}
+
+    async def buy(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("order", amount=5)
+
+    buyer = arm(memory_harness.wrap(buy, id="buyer"), [order])
+    clerk = arm(memory_harness.wrap(buy, id="clerk"), [order])
+    first = await buyer.run("order five", user="u1")
+    assert first.status is RunStatus.PAUSED  # approve_when "true": every order asks
+    memory_service.suggestions.append(
+        {
+            "id": "sug_buyer_order",
+            "agent_id": "buyer",
+            "tool": "order",
+            "arg_shape": '{"amount":"int"}',
+            "suggestion": "auto_approve",
+            "approvals": 5,
+            "rejections": 0,
+            "edits": 0,
+            "support": 5,
+            "approve_rate": 1.0,
+            "accepted": False,
+            "rule": "false",
+        }
+    )
+    now[0] += catalog_module.GOVERNANCE_TTL_SECONDS + 1
+    again = await buyer.run("order five", user="u1")
+    assert again.status is RunStatus.SUCCESS and again.answer == "ordered 5"  # no pause
+    accepted = [c for c in memory_service.calls if c.name == "accept"]
+    assert [c.scope.get("agent_id") for c in accepted] == ["buyer"]
+    assert memory_service.suggestions[0]["accepted"]
+    listed = {c.scope.get("agent_id") for c in memory_service.calls if c.name == "suggestions"}
+    assert listed == {"buyer"}  # never tenant-wide: the service would list nothing there
+    # the catalog's rule is the tool's now, for every agent: the clerk's order runs too, but
+    # the clerk's own suggestions are read for the clerk
+    later = await clerk.run("order five", user="u2")
+    assert later.status is RunStatus.SUCCESS
+    listed = {c.scope.get("agent_id") for c in memory_service.calls if c.name == "suggestions"}
+    assert listed == {"buyer", "clerk"}

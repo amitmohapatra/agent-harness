@@ -46,10 +46,12 @@ ROUTES: Final = [
     ("POST", r"/v1/verify", "verify"),
     ("POST", r"/v1/messages", "messages"),
     ("GET", r"/v1/tools", "read_catalog"),
+    ("GET", r"/v1/tools/approval-suggestions", "suggestions"),
     ("PUT", r"/v1/tools/catalog", "publish"),
     ("PUT", r"/v1/agents/model-key", "model_key"),
     ("POST", r"/v1/documents", "add_document"),
     ("GET", r"/v1/documents/(?P<document_id>[^/]+)", "document"),
+    ("GET", r"/v1/threads/(?P<thread_id>[^/]+)/messages", "thread_messages"),
 ]
 #: the uploaded file's bytes in a multipart body
 FILE_PART: Final = rb'filename="[^"]*"\r\n(?:[^\r]*\r\n)*\r\n(.*?)\r\n--'
@@ -134,6 +136,11 @@ class ScriptedMemory:
             {"id": f"mem_{n}", "kind": "memory", "text": fact, "observed_on": "2026-10-01"}
             for n, fact in enumerate(self.facts)
         ]
+
+    def _suggestions(self, body: Any, request: httpx.Request) -> dict[str, Any]:
+        """The approval rules learned from people's decisions: none here (the service learns
+        them from the feedback it is sent)."""
+        return {"suggestions": []}
 
     def _agent_tools(self, body: Any, request: httpx.Request) -> dict[str, Any]:
         return {"tools": AGENT_TOOLS}
@@ -236,6 +243,9 @@ class ScriptedMemory:
             "size_bytes": len(self.documents[document_id]),
             "job_ids": [self._id("job")],
         }
+
+    def _thread_messages(self, body: Any, request: httpx.Request, thread_id: str) -> dict[str, Any]:
+        return {"messages": []}  # a scripted conversation has no earlier turns
 
     def _document(self, body: Any, request: httpx.Request, document_id: str) -> dict[str, Any]:
         return {

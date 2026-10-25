@@ -41,14 +41,12 @@ async def test_a_worker_needs_an_agent_and_at_least_one_slot(harness: Harness) -
         harness.worker([harness.wrap(echo, id="echo")], concurrency=0)
 
 
-async def test_the_concurrency_is_the_argument_else_the_setting_else_the_sdks_default(
+async def test_the_concurrency_is_the_argument_else_the_sdks_default(
     harness: Harness,
 ) -> None:
     agent = harness.wrap(echo, id="echo")
     assert harness.worker([agent]).concurrency == claim_loop.default_concurrency()
     assert harness.worker([agent], concurrency=3).concurrency == 3
-    configured = Harness(config=Settings(worker_concurrency=5))
-    assert configured.worker([configured.wrap(echo, id="echo")]).concurrency == 5
     worker = harness.worker([agent])
     assert worker.worker_id == worker.loop.worker_id and worker.loop.store is harness.runs
 
@@ -70,11 +68,11 @@ async def test_a_claimed_run_is_its_agents_next_attempt_as_the_lease_holder(
     worker = harness.worker([agent, other])
     assert await worker.run_once() is True
     [job] = jobs
-    assert (job.record.run_id, job.worker_id) == (handle.run_id, worker.worker_id)
+    assert (job.record.run_id, job.worker_id) == (handle.id, worker.worker_id)
     assert job.lease_seconds == worker.loop.lease_seconds
-    assert (await handle.result(timeout=5)).answer == "x"
+    assert (await handle.result(wait=5)).answer == "x"
     assert await worker.run_once() is False  # nothing queued
-    with pytest.raises(ConfigurationError, match=f"run {handle.run_id} is echo's, not other's"):
+    with pytest.raises(ConfigurationError, match=f"run {handle.id} is echo's, not other's"):
         await other.execute(job)
 
 
@@ -98,7 +96,7 @@ async def test_run_starts_the_background_writes_and_drains_them_when_stopped(
     worker = harness.worker([agent])
     task = asyncio.create_task(worker.run())
     handle = await agent.start("late work", user="u")  # queued while the worker idles
-    assert (await handle.result(timeout=5)).answer == "late work"
+    assert (await handle.result(wait=5)).answer == "late work"
     assert calls == ["start"]
     worker.stop()
     await asyncio.wait_for(task, 5)
@@ -147,7 +145,7 @@ async def test_a_worker_run_someone_cancelled_ends_cancelled(
     handle = await agent.start("x", user="u")
     working = asyncio.create_task(harness.worker([agent]).run_once())
     await started.wait()
-    await handle.cancel(reason="not needed")
+    await agent.cancel(handle.id, reason="not needed")
     assert await working is True
     assert (await handle.status()).status is RunStatus.CANCELLED
 
@@ -219,7 +217,7 @@ async def test_a_lease_another_worker_took_stops_the_run_and_writes_nothing(
         assert await harness.worker([agent]).run_once() is True
     record = await handle.status()
     assert record.status is RunStatus.RUNNING  # the other worker's run, untouched
-    assert f"lease on {handle.run_id} lost" in caplog.text
+    assert f"lease on {handle.id} lost" in caplog.text
 
 
 # --------------------------------------------------------------------------- the CLI

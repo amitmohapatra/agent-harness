@@ -145,18 +145,18 @@ def own_thread() -> Any:
 def framework_target(model: str) -> Any:
     from langchain.agents import create_agent
 
-    from trellis.harness.react import _gateway_model
+    from trellis.harness.gateways import routed_chat_model
 
-    chat = _gateway_model(model, timeout=None, effort=None, settings=None)
+    chat = routed_chat_model(model) if isinstance(model, str) else model
     return create_agent(chat, tools=[], system_prompt=SYSTEM, checkpointer=own_thread())
 
 
 def memory_target(model: str) -> Any:
     from langchain.agents import create_agent
 
-    from trellis.harness.react import _gateway_model
+    from trellis.harness.gateways import routed_chat_model
 
-    chat = _gateway_model(model, timeout=None, effort=None, settings=None)
+    chat = routed_chat_model(model) if isinstance(model, str) else model
     return create_agent(chat, tools=[], system_prompt=SYSTEM)
 
 

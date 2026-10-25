@@ -3,22 +3,24 @@
 `sandbox()` gives an agent three tools — run a shell command, read a file, write a file — that
 work in a sandbox of its run's own: a container (or a hosted microVM) made at the run's first
 sandbox call and deleted when the run ends. Every call is a harness tool call, so it is
-governed, journaled, recorded, redacted and bounded like any other, in every framework. You
-choose only where sandboxes come from (`SANDBOX=docker`, or a provider object) and, if you
-like, what each is made of; the rest is automatic.
+governed, journaled, recorded, redacted and bounded like any other. You choose only where
+sandboxes come from (Docker, or a provider object) and, if you like, what each is made of; the
+rest is automatic.
 
 ```python
 from trellis import Harness, ReAct, sandbox
 
-h = Harness()  # SANDBOX=docker
-agent = h.wrap(ReAct(system="You analyse data.", model=model), id="analyst", tools=[sandbox()])
+h = Harness()  # sandbox(): Docker, the daemon DOCKER_HOST names
+agent = h.wrap(
+    ReAct(system_prompt="You analyse data.", model=model, tools=[sandbox()]), id="analyst"
+)
 result = await agent.run("How many units did we sell?", user="ada")
 ```
 
 | You write | Automatic |
 |---|---|
-| `tools=[sandbox()]` (or `h.tools(sandbox(), framework=...)`) and `SANDBOX=docker` | one sandbox per run: made at its first call, named and labelled after the run, recorded in its journal before any call uses it, attached again after a pause or a crash, snapshotted and paused while a person answers, deleted at the end; orphans reaped |
-| optionally `sandbox(provider, SandboxSpec(...), timeout=)` | the provider (else `SANDBOX`), the image, CPU, memory, network and starting files (else the provider's image, its limits, no network), the most one call may take (else 120 s) |
+| `ReAct(tools=[sandbox()])` (a function target: `agent.tools.call(sandbox(), ...)`) | one sandbox per run: made at its first call, named and labelled after the run, recorded in its journal before any call uses it, attached again after a pause or a crash, snapshotted and paused while a person answers, deleted at the end; orphans reaped |
+| optionally `sandbox(provider, image=, spec=SandboxSpec(...), call_timeout=)` | the provider (else Docker), the image, CPU, memory, network and starting files (else the provider's image, its limits, no network), the most one call may take (else 120 s) |
 
 ## What
 
@@ -50,10 +52,9 @@ can reach (no network) and, when needed, approve it ([governance](#automatic)).
 
 ## Where
 
-Way 1, every adapter: `tools=[sandbox()]` for a function, `ReAct`, an OpenAI Agents `Agent` or
-`ClaudeAgentOptions`; `await h.tools(sandbox(), framework="langgraph" | "deepagents" |
-"openai_agents" | "claude_agent_sdk")` for a graph built with its tools (and an OpenAI Agents
-handoff's specialist). Every mode: `run`, `stream`, `start` + workers, a resume in another
+Way 1: `ReAct(tools=[sandbox()])`, and a function target's `agent.tools.call(sandbox(), ...)`
+(or `agent.tools.use(sandbox())`). A framework's own agent uses its own sandbox (below). Every
+mode: `run`, `stream`, `start` + workers, a resume in another
 process, `serve_chat`, `serve_a2a`, `h.evaluate` — a resume elsewhere reaches the same sandbox
 when its provider is reachable from there (a hosted provider; for Docker, the same daemon).
 Way 2: the provider is a block of its own ([below](#way-2-without-a-harness)).
@@ -70,20 +71,19 @@ from trellis.harness.sandbox import DockerSandbox, SandboxSpec
 spec = SandboxSpec(
     image="python:3.12-slim", cpu=1, memory=512, network="none", files={"sales.csv": csv_text}
 )
-tools = [sandbox(DockerSandbox(), spec, timeout=300)]
+tools = [sandbox(DockerSandbox(), spec=spec, call_timeout=300)]
 ```
 
 | Name | |
 |---|---|
-| `sandbox(provider=None, spec=None, *, timeout=120)` | the tool source. `provider`: where sandboxes come from (else the deployment's: `SANDBOX`); `spec`: what each is made of; `timeout`: the most one call may take, in seconds (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool) |
+| `sandbox(provider=None, *, image=None, spec=None, call_timeout=120)` | the tool source. `provider`: where sandboxes come from (else `DockerSandbox(image)`); `image`: what each is made of (else the spec's, else the provider's); `spec`: the rest of what each is made of; `call_timeout`: the most one call may take, in seconds (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool) |
 | `SandboxSpec(image=None, cpu=None, memory=None, network="none", files={})` | frozen; `cpu` and `memory` over 0 |
 | `DockerSandbox(image=None, *, host=None, socket=None)` | the Docker provider: `image` for a spec that names none (else `python:3.12-slim`); the daemon at `host` (`unix:///path` or `tcp://host:port`) or `socket`, else where docker-py would find it: `DOCKER_HOST`, else the current docker context's endpoint, else `/var/run/docker.sock` |
-| `configured(settings)` | the deployment's provider: `SANDBOX=docker` is `DockerSandbox()` (the deprecated `SANDBOX_IMAGE`, while it is read, its image) |
 | `await reap(provider, runs, *, tenant)` | deletes the tenant's sandboxes whose runs have ended (and returns them): what runs it automatically does by hand, for a cron |
 | `SandboxRef(provider, id, labels, snapshot)` | which sandbox, as a run's journal keeps it: never a secret or a host path |
 
-The environment: `SANDBOX=docker` names the deployment's provider and `SANDBOX_IMAGE` its image
-([configuration.md](configuration.md)); nothing else is configured.
+Nothing is configured in the environment: `sandbox()` is Docker (the daemon `DOCKER_HOST`
+names, Docker's own variable), `sandbox(image=)` its image.
 
 ## Automatic
 
@@ -172,14 +172,12 @@ await provider.delete(box.ref)
 ```
 
 `env=` is per command (a short-lived credential goes there, never into the spec: a spec and a
-ref travel in checkpoints and snapshots). Within a wrapped agent, `h.tools(sandbox(...),
-framework=...)` gives a framework's own agent the same three tools, every call still the
-harness's.
+ref travel in checkpoints and snapshots).
 
 ## On failure
 
-* No provider (`sandbox()` without one, `SANDBOX` unset): each call is an error the model reads,
-  saying so. `SANDBOX` other than `docker`: `Settings` refuses it (`ValidationError`).
+* No Docker daemon reachable (`sandbox()` without a provider): each call is an error the model
+  reads, saying so.
 * A spec the provider cannot enforce — a list of hosts for Docker — is refused when the sandbox
   is made (`ConfigurationError`, the model reads it), never weakened.
 * An image that cannot be pulled, a daemon that refuses: the call's error (`"Docker answered
@@ -264,15 +262,13 @@ temporary directory, with no isolation) that shows the whole interface working.
   does not know — runs kept in a process that is gone, without `RUNS_URL` — is left alone.
   A paused sub-agent's run cancelled with its parent, or a paused run ended by agent-runs'
   ticker, has its sandbox reaped rather than deleted at once.
-* A sandbox only an OpenAI Agents handoff's specialist uses (its tools from `h.tools`, not the
-  wrapped agent's own) is neither paused nor deleted by the run: the reaper deletes it.
 * Files are text to the tools (`sandbox_read`, `sandbox_write`); binary data moves with a
   command (`base64`).
 
 ## Run it
 
 * [`examples/05_features/sandbox.py`](../examples/05_features/sandbox.py) — a `ReAct` analyst writing and running a
-  script in its sandbox (Docker with `SANDBOX=docker`, else a provider of the example's own),
+  script in its sandbox (Docker with `DOCKER_HOST`, else a provider of the example's own),
   then the provider governed without a harness (Way 2).
 * Tests: `tests/integration/test_sandbox.py` (every adapter, calls at once, a pause, a lost
   sandbox, crashes, a timeout, governance, redaction, every ending, the reaper),

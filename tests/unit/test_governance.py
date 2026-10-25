@@ -41,6 +41,7 @@ from trellis.harness.governance.catalog import (
 )
 from trellis.harness.governance.decision import decide
 from trellis.harness.writes import SPOOL_FILE, Writes
+from trellis.memory.errors import NotFoundError
 
 ENV = {"MEMORY_URL": "http://memory.test", "TRELLIS_API_KEY": "test"}
 
@@ -270,18 +271,70 @@ async def test_an_accepted_suggestion_stops_a_repeated_pause(
 ) -> None:
     catalog = FakeCatalog({"po": Rule(risk="write", approve_when="amount > 10")})
     governance = Governance(catalog)
-    assert (await governance.check("po", {"amount": 50})).asks  # a person approves, again...
-    catalog.suggest("po", "amount > 1000")  # ...and the service learns from it
+    # a person approves, again...
+    assert (await governance.check("po", {"amount": 50}, agent_id="buyer")).asks
+    catalog.suggest("po", "amount > 1000", agent="buyer")  # ...and the service learns from it
     clock.now += GOVERNANCE_TTL_SECONDS + 1
     with caplog.at_level("INFO", logger="trellis.governance"):
-        decision = await governance.check("po", {"amount": 50})
+        decision = await governance.check("po", {"amount": 50}, agent_id="buyer")
     assert decision.announces and decision.rule == "amount > 1000"  # no pause any more
     assert catalog.accepted == ["sug_1"]
     [said] = [r for r in caplog.records if "accepted automatically" in r.getMessage()]
     assert said.tool == "po" and said.suggestion_id == "sug_1"  # type: ignore[attr-defined]
+    assert said.agent_id == "buyer"  # type: ignore[attr-defined]
     clock.now += GOVERNANCE_TTL_SECONDS + 1
-    await governance.check("po", {"amount": 50})
+    await governance.check("po", {"amount": 50}, agent_id="buyer")
     assert catalog.accepted == ["sug_1"]  # accepted once
+
+
+async def test_suggestions_are_read_and_accepted_for_the_agent_they_were_learned_from(
+    clock: Clock,
+) -> None:
+    catalog = FakeCatalog(
+        {
+            "po": Rule(risk="write", approve_when="amount > 10"),
+            "ship": Rule(risk="write", approve_when="true"),
+        }
+    )
+    catalog.suggest("po", "amount > 1000", agent="buyer")
+    catalog.suggest("ship", "false", agent="clerk")
+    governance = Governance(catalog)
+    # with no agent named (a tenant-wide scope) there is nobody's to read: none is accepted
+    assert (await governance.check("po", {"amount": 50})).asks
+    assert catalog.suggestions_asked == [] and catalog.accepted == []
+    # a new agent's are read at once — its own only
+    assert (await governance.check("po", {"amount": 50}, agent_id="buyer")).announces
+    assert catalog.suggestions_asked == ["buyer"] and catalog.accepted == ["sug_1"]
+    # the clerk's rule is the clerk's: read and accepted when the clerk asks
+    assert (await governance.check("ship", {}, agent_id="clerk")).announces
+    assert catalog.accepted == ["sug_1", "sug_2"]
+    # every refresh checks each agent asked about
+    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    catalog.suggestions_asked.clear()
+    await governance.check("po", {"amount": 1}, agent_id="buyer")
+    assert sorted(catalog.suggestions_asked) == ["buyer", "clerk"]
+
+
+async def test_governance_for_one_agent_reads_that_agents_suggestions() -> None:
+    catalog = FakeCatalog({"po": Rule(risk="write", approve_when="amount > 10")})
+    catalog.suggest("po", "amount > 1000", agent="buyer")
+    governance = Governance(catalog, tenant="acme", agent_id="buyer")  # Way 2: one agent's
+    assert (await governance.check("po", {"amount": 50})).announces
+    assert (await governance.rules(["po"]))["po"] == Rule("write", "amount > 1000")
+
+
+async def test_the_agents_checked_are_bounded_the_least_recently_asked_forgotten(
+    clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("trellis.harness.governance.catalog.AGENTS_KEPT", 2)
+    catalog = FakeCatalog({"po": Rule(risk="write")})
+    governance = Governance(catalog)
+    for agent in ("a", "b", "c"):
+        await governance.check("po", {}, agent_id=agent)
+    clock.now += GOVERNANCE_TTL_SECONDS + 1
+    catalog.suggestions_asked.clear()
+    await governance.check("po", {}, agent_id="c")
+    assert sorted(catalog.suggestions_asked) == ["b", "c"]
 
 
 async def test_a_top_risk_tool_is_not_relaxed_automatically(clock: Clock) -> None:
@@ -289,7 +342,7 @@ async def test_a_top_risk_tool_is_not_relaxed_automatically(clock: Clock) -> Non
     catalog.suggest("wire", "amount > 1000")
     catalog.suggest("unasked", "x > 1")  # a tool governance was not asked about
     governance = Governance(catalog)
-    assert (await governance.check("wire", {"amount": 5})).asks
+    assert (await governance.check("wire", {"amount": 5}, agent_id="buyer")).asks
     assert catalog.accepted == []  # a person accepts it, or not
 
 
@@ -299,7 +352,7 @@ async def test_suggestions_that_cannot_be_read_or_accepted_wait_for_the_next_ref
     catalog = FakeCatalog({"po": Rule(risk="write", approve_when="amount > 10")})
     catalog.suggest("po", "amount > 1000")
     catalog.suggestions_fail = {"read"}
-    governance = Governance(catalog)
+    governance = Governance(catalog, agent_id="buyer")
     with caplog.at_level("WARNING", logger="trellis.governance"):
         for _ in range(2):
             assert (await governance.check("po", {"amount": 50})).asks
@@ -326,17 +379,27 @@ async def test_the_memory_catalog_lists_and_accepts_suggestions() -> None:
         "support": 5,
         "approve_rate": 1.0,
         "accepted": False,
-        "agent_id": None,
+        "agent_id": "buyer",
         "rule": "amount > 1000",
     }
     service = FakeMemoryService(
         catalog={"po": {"risk": "write", "approve_when": "amount > 10"}}, suggestions=[suggestion]
     )
+    # tenant-wide: the scope the harness's governance is built with
     catalog = MemoryCatalog(service.client().bind(tenant_id="acme"))
-    [found] = await catalog.suggestions()
+    assert await catalog.suggestions("clerk") == []  # another agent's decisions taught nothing
+    with pytest.raises(NotFoundError):  # and it cannot accept the buyer's
+        await catalog.accept("sug_1", agent_id="clerk")
+    [found] = await catalog.suggestions("buyer")
     assert found.id == "sug_1" and not found.accepted
-    assert await catalog.accept("sug_1") == Rule(risk="write", approve_when="amount > 1000")
-    assert [s.accepted for s in await catalog.suggestions()] == [True]
+    accepted = await catalog.accept("sug_1", agent_id="buyer")
+    assert accepted == Rule(risk="write", approve_when="amount > 1000")
+    assert [s.accepted for s in await catalog.suggestions("buyer")] == [True]
+    asked = [c for c in service.calls if c.name in ("suggestions", "accept")]
+    assert {c.scope.get("agent_id") for c in asked} == {"clerk", "buyer"}
+    # a catalog already in the agent's scope is used as it is
+    own = MemoryCatalog(service.client().bind(tenant_id="acme", agent_id="buyer"))
+    assert own._agent("buyer") is own.ctx
 
 
 # --------------------------------------------------------------------------- the memory service
@@ -608,8 +671,8 @@ def test_memory_without_a_key_is_a_configuration_error() -> None:
 
 
 async def test_the_harness_keeps_one_governance_per_tenant(harness: Harness) -> None:
-    acme = harness.governance("acme")
-    assert harness.governance("acme") is acme and harness.governance("globex") is not acme
+    acme = harness._governance("acme")
+    assert harness._governance("acme") is acme and harness._governance("globex") is not acme
     assert acme.catalog is None and acme.tenant == "acme"  # memory off: the tools' own risks
 
 
@@ -621,7 +684,7 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
     service.fail.add("put_catalog")  # unavailable: the write is kept in the spool
     settings = Settings(spool_dir=str(tmp_path))
     async with Harness(config=settings, memory=service.client()) as h:
-        governance = h.governance("acme")
+        governance = h._governance("acme")
         assert isinstance(governance.catalog, MemoryCatalog)
         assert governance.catalog.ctx.scope.tenant_id == "acme"
         await governance.publish(SPECS)

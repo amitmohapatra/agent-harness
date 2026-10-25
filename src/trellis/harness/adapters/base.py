@@ -13,10 +13,13 @@
 * ``resume_input(target, native_input, pending, resolution)`` — what continues a paused run;
 * ``check_options(options)`` — refuses framework options (``framework_options=``) its run call
   cannot take: they reach the framework's own run call unchanged (``runtime.framework_options``);
-* ``native_tools(target)`` — the names of the tools the framework gives the model itself, beside
-  the harness's (an OpenAI Agents agent's own tools, Claude's built-ins and its MCP tools, the
-  tools a compiled graph's tool nodes run), where they can be read: they count among the
-  agent's tools for the skills it learned and the tool hints (``Agent.remembered``).
+* ``native(target)`` — the tools the framework gives the model itself, beside the harness's
+  (an OpenAI Agents agent's own, hosted, MCP servers' and handoff tools — its handoff agents'
+  and agent tools' agents' too —, Claude's built-ins and its MCP servers' tools, the tools a
+  compiled graph's tool nodes run, a Deep Agent's sub-agents'), as specs, sorted by name, each
+  once (:func:`unique`): with the harness's they are the run's tool set
+  (``Runtime.tool_set``), which the tool hints, ``tool_search``, the catalog and the
+  narrowing read.
 
 ``run`` carries the per-run tools (already converted by ``tools.convert`` for the format the
 adapter names) and the runtime. Adapters never wrap models, never re-implement a loop, and
@@ -33,19 +36,35 @@ tools in its own code (a hand-written LangGraph graph) or has no model (a functi
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Literal, Protocol
 
-from trellis.contracts import ConfigurationError, InterruptResolution
+from trellis.contracts import ConfigurationError, InterruptResolution, ToolSpec
 from trellis.harness.history import Said
 from trellis.harness.journal import Pending
+from trellis.harness.runtime import HELPER as HELPER_TAG
 from trellis.harness.runtime import Runtime
 from trellis.harness.tools.base import Tool
 
 #: The ``RunStart.metadata`` key a run's own ``framework_options=`` is kept under (its JSON
 #: values: what a later attempt — a resume, a worker's — runs with).
 FRAMEWORK_OPTIONS: Final = "framework_options"
+
+
+def merged(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
+    """Framework options ``over`` (a run's) on ``base`` (its agent's): a key both give as a
+    mapping (a LangGraph config's ``configurable``, ``metadata``) is merged the same way, key by
+    key; any other value of ``over``'s replaces ``base``'s."""
+    found = dict(base)
+    for key, value in over.items():
+        given = found.get(key)
+        if isinstance(value, Mapping) and isinstance(given, Mapping):
+            found[key] = merged(given, value)
+        else:
+            found[key] = value
+    return found
+
 
 ToolFormat = Literal["langchain", "openai_agents", "claude", "none"]
 Narrowing = Literal["turn", "run", "none"]
@@ -98,7 +117,7 @@ class Adapter(Protocol):
     name: ClassVar[str]
     tool_format: ToolFormat
     #: the target's tools are fixed when it is built (a compiled graph): ``tools=`` is refused
-    #: at wrap time, and the harness tools come from ``h.tools(...)`` instead
+    #: at wrap time; the memory tools come from ``h.memory_tools()`` instead
     fixed_tools: bool
     narrows: Narrowing
     #: the framework takes a conversation's history as its own messages (``prepare_input``'s
@@ -131,7 +150,28 @@ class Adapter(Protocol):
 
     def check_options(self, options: Mapping[str, Any]) -> None: ...
 
-    def native_tools(self, target: Any) -> list[str]: ...
+    async def native(self, target: Any) -> list[ToolSpec]: ...
+
+
+#: The tag of a framework's own tool that hands the work to another agent — Deep Agents'
+#: ``task``, an OpenAI agent's handoff or agent tool, Claude's ``Agent`` —: it joins the run's
+#: tool set (hints, the catalog, records) but the narrowing never takes it away.
+HELPER: Final = HELPER_TAG
+
+
+def helper(spec: ToolSpec) -> ToolSpec:
+    """``spec`` tagged :data:`HELPER`, its risk ``read``: the call only hands the work on — each
+    of the other agent's own calls is governed on its own."""
+    return spec.model_copy(update={"tags": [*spec.tags, HELPER], "side_effects": "read"})
+
+
+def unique(specs: Iterable[ToolSpec]) -> list[ToolSpec]:
+    """Tool specs sorted by name, each name once (the first found wins): a stable tool set,
+    whatever order the framework lists them in (the memory context's cache key holds)."""
+    found: dict[str, ToolSpec] = {}
+    for spec in specs:
+        found.setdefault(spec.name, spec)
+    return [found[name] for name in sorted(found)]
 
 
 def no_options(options: Mapping[str, Any], target: str, why: str) -> None:
@@ -179,6 +219,20 @@ WINDOW_ATTRIBUTES: Final = ("context_window", "max_input_tokens")
 #: model's name (when it was given one) and its context window.
 MODEL_METADATA: Final = "trellis_model"
 WINDOW_METADATA: Final = "trellis_context_window"
+
+
+#: The attribute a graph ``ReAct(...)`` built carries its declared tools on (``tools=``, its
+#: ``subagents=`` among them): what ``h.wrap`` gives its runs.
+TOOLS_ATTRIBUTE: Final = "trellis_tools"
+#: Set on a graph built with a checkpointer of its own (``ReAct(checkpointer=)``): for a run
+#: outside the harness only, so ``h.wrap`` refuses it.
+OWN_CHECKPOINTER: Final = "trellis_own_checkpointer"
+
+
+def declared_tools(target: Any) -> list[Any]:
+    """The tools ``target``'s builder declared for the harness to run (``ReAct(tools=,
+    subagents=)``); none for any other target: its tools are the framework's own."""
+    return list(getattr(target, TOOLS_ATTRIBUTE, None) or ())
 
 
 def metadata_of(target: Any) -> dict[str, Any]:

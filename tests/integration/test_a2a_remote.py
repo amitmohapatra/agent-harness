@@ -1,4 +1,4 @@
-"""Calling a remote A2A agent: ``remote()`` from plain code, and the harness's ``a2a(url)`` tool
+"""Calling a remote A2A agent: ``RemoteAgent`` from plain code, and the harness's ``a2a(url)`` tool
 built on it, against a wrapped agent served by the harness's A2A server in process (over
 ``httpx.ASGITransport``)."""
 
@@ -22,9 +22,10 @@ from a2a.types import (
 from fastapi import FastAPI
 
 from tests.integration.test_a2a_server import TENANT, URL, asgi, serve
+from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings, a2a
-from trellis.contracts import RunStatus, ToolError
-from trellis.harness.a2a import InputRequired, RemoteAgent, remote
+from trellis.contracts import ConfigurationError, RunStatus, ToolError
+from trellis.harness.a2a import InputRequired, RemoteAgent
 from trellis.harness.a2a import client as a2a_client
 from trellis.harness.identity import IDENTITY_HEADER
 from trellis.harness.runs import LocalRuns
@@ -45,14 +46,14 @@ def statuses(harness: Harness) -> list[RunStatus]:
     return [r.status for r in harness.runs._runs.values()]
 
 
-# --------------------------------------------------------------------------- remote()
+# --------------------------------------------------------------------------- RemoteAgent()
 
 
 async def test_a_remote_agent_is_an_async_callable_with_its_card_and_spec(
     served: tuple[httpx.AsyncClient, Harness],
 ) -> None:
     http, harness = served
-    async with remote(URL, tenant=TENANT, user="u1", thread="t1", client=http) as agent:
+    async with RemoteAgent(URL, tenant=TENANT, user="u1", thread="t1", client=http) as agent:
         assert await agent("world") == "hello world"
         seen = await agent("whoami")
         assert agent.card.name == "greeter"
@@ -65,7 +66,7 @@ async def test_a_remote_agent_is_an_async_callable_with_its_card_and_spec(
     assert spec.side_effects == "write"
     assert spec.input_schema is not None and spec.input_schema["required"] == ["message"]
     assert not http.is_closed  # an injected client is the caller's
-    named = remote(URL, tenant=TENANT, user="u1", name="the greeter!", client=http)
+    named = RemoteAgent(URL, tenant=TENANT, user="u1", name="the greeter!", client=http)
     assert (await named.connect()).spec.name == "the_greeter_"
 
 
@@ -73,7 +74,7 @@ async def test_the_card_is_read_on_connect_or_by_the_first_call(
     served: tuple[httpx.AsyncClient, Harness],
 ) -> None:
     http, _ = served
-    agent = remote(URL, tenant=TENANT, user="u1", client=http)
+    agent = RemoteAgent(URL, tenant=TENANT, user="u1", client=http)
     with pytest.raises(RuntimeError, match="connect"):
         agent.card  # noqa: B018
     assert isinstance(agent, RemoteAgent)
@@ -92,7 +93,7 @@ async def test_the_identity_is_the_callers_whatever_the_headers_say(
 
     http.event_hooks["request"].append(spy)
     forged = {IDENTITY_HEADER: '{"tenant_id":"default","user_id":"mallory"}', "x-edge": "ok"}
-    async with remote(URL, tenant=TENANT, user="u1", headers=forged, client=http) as agent:
+    async with RemoteAgent(URL, tenant=TENANT, user="u1", headers=forged, client=http) as agent:
         seen = await agent("whoami")
     assert seen["user"] == "u1"
     assert all(r.headers["x-edge"] == "ok" for r in sent)  # the card read and the message
@@ -108,7 +109,7 @@ async def test_on_input_answers_a_remote_question_on_the_same_task(
         asked.append(question)
         return "eu"
 
-    async with remote(URL, tenant=TENANT, user="u1", on_input=answer, client=http) as agent:
+    async with RemoteAgent(URL, tenant=TENANT, user="u1", on_input=answer, client=http) as agent:
         assert await agent("ask me") == "deploying to eu"
     assert asked == ["Which region?"]
     assert statuses(harness) == [RunStatus.SUCCESS]  # one task: the question, then the answer
@@ -122,7 +123,7 @@ async def test_on_input_may_be_async_and_answer_with_data(
     async def answer(question: str) -> dict[str, str]:
         return {"answer": "us"}
 
-    async with remote(URL, tenant=TENANT, user="u1", on_input=answer, client=http) as agent:
+    async with RemoteAgent(URL, tenant=TENANT, user="u1", on_input=answer, client=http) as agent:
         assert await agent("ask me") == "deploying to us"
 
 
@@ -130,7 +131,7 @@ async def test_without_on_input_a_question_is_raised_and_reply_continues_the_tas
     served: tuple[httpx.AsyncClient, Harness],
 ) -> None:
     http, harness = served
-    async with remote(URL, tenant=TENANT, user="u1", client=http) as agent:
+    async with RemoteAgent(URL, tenant=TENANT, user="u1", client=http) as agent:
         with pytest.raises(InputRequired) as raised:
             await agent("ask me")
         assert raised.value.question == "Which region?" == str(raised.value)
@@ -148,7 +149,9 @@ async def test_when_on_input_raises_the_remote_task_is_cancelled(
     def interrupted(question: str) -> str:
         raise LookupError(question)
 
-    async with remote(URL, tenant=TENANT, user="u1", on_input=interrupted, client=http) as agent:
+    async with RemoteAgent(
+        URL, tenant=TENANT, user="u1", on_input=interrupted, client=http
+    ) as agent:
         with pytest.raises(LookupError, match="Which region"):
             await agent("ask me")
     assert statuses(harness) == [RunStatus.CANCELLED]
@@ -158,7 +161,7 @@ async def test_a_remote_failure_is_a_tool_error(
     served: tuple[httpx.AsyncClient, Harness],
 ) -> None:
     http, _ = served
-    async with remote(URL, tenant=TENANT, user="u1", client=http) as agent:
+    async with RemoteAgent(URL, tenant=TENANT, user="u1", client=http) as agent:
         with pytest.raises(ToolError, match=r"greeter ended TASK_STATE_FAILED: .*boom") as raised:
             await agent("boom")
     assert raised.value.source == "a2a"
@@ -175,7 +178,7 @@ async def test_an_unreachable_agent_is_a_tool_error() -> None:
         card_json = (await http.get("/agents/greeter/.well-known/agent-card.json")).json()
     await harness.aclose()
     down = httpx.AsyncClient(transport=httpx.MockTransport(refuse))
-    async with remote(URL, tenant=TENANT, user="u1", client=down) as agent:
+    async with RemoteAgent(URL, tenant=TENANT, user="u1", client=down) as agent:
         with pytest.raises(ToolError, match="A2AClientError: Network communication error: refused"):
             await agent("hi")
     await down.aclose()
@@ -193,7 +196,7 @@ async def test_a_remote_agent_opens_and_closes_its_own_client(
         return opened[-1]
 
     monkeypatch.setattr(a2a_client, "_http", http)
-    agent = remote(URL, tenant=TENANT, user="u1", timeout=5.0)
+    agent = RemoteAgent(URL, tenant=TENANT, user="u1", timeout=5.0)
     await agent.aclose()  # nothing opened yet: nothing to close
     assert await agent("world") == "hello world"
     await agent.aclose()
@@ -258,11 +261,11 @@ async def delegate(input: Any, agent: Runtime) -> Any:
 
 async def test_a_remote_agent_is_a_tool(remote_harness: Harness) -> None:
     harness = Harness(config=Settings())
-    agent = harness.wrap(delegate, id="caller", tools=[a2a(URL)])
+    agent = arm(harness.wrap(delegate, id="caller"), [a2a(URL)])
     result = await agent.run("world", user="u1", thread="t1")
     assert result.status is RunStatus.SUCCESS
     assert result.answer == "hello world"
-    tool = (await harness.resolve([a2a(URL)], tenant=TENANT))[0]
+    [tool] = await a2a(URL).resolve()
     assert tool.spec.name == "greeter" and tool.spec.side_effects == "write"
     assert tool.spec.input_schema is not None and "message" in tool.spec.input_schema["properties"]
     with pytest.raises(ToolError, match="inside a harness run"):
@@ -271,9 +274,30 @@ async def test_a_remote_agent_is_a_tool(remote_harness: Harness) -> None:
     await remote_harness.aclose()
 
 
+async def test_a2a_url_is_an_async_callable_anywhere(remote_harness: Harness) -> None:
+    greeter = a2a(URL)
+    with pytest.raises(ConfigurationError, match="called outside a run: pass tenant= and user="):
+        await greeter("world")
+    assert await greeter("world", user="u1", tenant=TENANT) == "hello world"
+
+    async def answer(question: str) -> str:
+        return "eu"
+
+    assert await greeter("ask me", user="u1", tenant=TENANT, on_input=answer) == "deploying to eu"
+
+    async def calls(input: Any, agent: Runtime) -> Any:  # inside a run: as the run
+        return await greeter(input)
+
+    harness = Harness(config=Settings())
+    result = await harness.wrap(calls, id="direct").run("world", user="u1", thread="t1")
+    assert result.answer == "hello world", result.error
+    await harness.aclose()
+    await remote_harness.aclose()
+
+
 async def test_a_remote_question_pauses_the_calling_run(remote_harness: Harness) -> None:
     harness = Harness(config=Settings())
-    agent = harness.wrap(delegate, id="caller", tools=[a2a(URL)])
+    agent = arm(harness.wrap(delegate, id="caller"), [a2a(URL)])
     paused = await agent.run("ask me", user="u1", thread="t1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.question == "Which region?"
@@ -299,7 +323,7 @@ async def test_a_remote_failure_is_the_tool_error_the_calling_model_reads(
     monkeypatch.setattr(a2a_client, "_http", lambda timeout: asgi(app))
 
     harness = Harness(config=Settings())
-    result = await harness.wrap(delegate, id="caller", tools=[a2a(URL)]).run("x", user="u1")
+    result = await arm(harness.wrap(delegate, id="caller"), [a2a(URL)]).run("x", user="u1")
     assert result.status is RunStatus.SUCCESS
     assert "greeter failed" in result.answer and "TASK_STATE_FAILED" in result.answer
     assert "out of stock" in result.answer
@@ -319,11 +343,11 @@ async def test_the_tool_takes_its_timeout_and_opens_its_task_with_the_calls_key(
 
     monkeypatch.setattr(a2a_client, "_send", recorded)
     harness = Harness(config=Settings())
-    agent = harness.wrap(delegate, id="caller", tools=[a2a(URL, timeout=7)])
+    agent = arm(harness.wrap(delegate, id="caller"), [a2a(URL, call_timeout=7)])
     result = await agent.run("world", user="u1")
     assert result.answer == "hello world"
     assert sent[0].startswith(f"{result.run_id}:")  # the same message again after a crash
-    [tool] = await harness.resolve([a2a(URL, timeout=7)], tenant=TENANT)
+    [tool] = await a2a(URL, call_timeout=7).resolve()
     assert tool.timeout == 7
     await harness.aclose()
     await remote_harness.aclose()

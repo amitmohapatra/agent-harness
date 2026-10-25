@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.arm import arm
 from trellis import Harness, Runtime, tool
 from trellis.contracts import (
     ConfigurationError,
@@ -85,7 +86,7 @@ async def test_the_risk_tiers(harness: Harness) -> None:
         await agent.tools.call("note", text="checked")
         return await agent.tools.call("refund", order="o1", amount=found["amount"])
 
-    agent = harness.wrap(worker, id="refunds", tools=[lookup, note, refund])
+    agent = arm(harness.wrap(worker, id="refunds"), [lookup, note, refund])
     events = [e async for e in agent.stream("refund o1", user="u1")]
     names = [e.data.get("name") for e in events if e.type is RunEventType.CUSTOM]
     assert names == ["tool_notice"]  # the write is announced; the read is not
@@ -108,7 +109,7 @@ async def test_an_approver_can_edit_or_reject(harness: Harness) -> None:
     async def worker(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("refund", order="o1", amount=500)
 
-    agent = harness.wrap(worker, id="refunds", tools=[refund])
+    agent = arm(harness.wrap(worker, id="refunds"), [refund])
     paused = await agent.run("x", user="u1")
     assert paused.interrupt is not None
     edited = await agent.resume(
@@ -211,7 +212,7 @@ async def test_a_failing_tool_is_shown_to_the_agent_not_raised(harness: Harness)
     async def worker(input: str, agent: Runtime) -> str:
         return await agent.tools.call("flaky")
 
-    result = await harness.wrap(worker, id="flaky", tools=[flaky]).run("x", user="u1")
+    result = await arm(harness.wrap(worker, id="flaky"), [flaky]).run("x", user="u1")
     assert result.answer == "flaky failed: timeout upstream"
 
 
@@ -224,7 +225,7 @@ async def test_arguments_that_do_not_fit_the_schema_are_told_not_run(harness: Ha
             await agent.tools.call("lookup", order=7),
         ]
 
-    agent = harness.wrap(worker, id="bad-args", tools=[refund, lookup])
+    agent = arm(harness.wrap(worker, id="bad-args"), [refund, lookup])
     result = await agent.run("x", user="u1")
     assert result.answer == [
         "refund was not run: missing required argument(s): amount. Call it again with "

@@ -1,6 +1,6 @@
 """The Bifrost gateway, as the harness uses it: MCP tools (normal, Code Mode, and through a
 Virtual MCP), their execution log, chat completions for the LLM judge,
-and the gateway's repositories of stored prompts and Agent Skills.
+and the gateway's repository of stored prompts.
 
 Agent Mode (the gateway running tools itself) is never used: every call comes back to the
 harness so governance and approval sit in front of it. A completion carries the gateway's
@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any, Final
 
 from bifrost_sdk import Bifrost, MCPLog, Options, ToolDef
-from bifrost_sdk.admin import Admin, Skill
+from bifrost_sdk.admin import Admin
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness import telemetry
@@ -40,7 +40,7 @@ LOG_PAGE: Final = 500
 #: every :data:`LOG_POLL_SECONDS` until two reads agree, for at most :data:`LOG_SETTLE_SECONDS`.
 LOG_POLL_SECONDS: Final = 2.0
 LOG_SETTLE_SECONDS: Final = 20.0
-#: How long a stored prompt's id and latest version, and a skill's served version, are kept
+#: How long a stored prompt's id and latest version are kept
 #: before they are read again; while the gateway cannot be reached the last ones read stand
 #: (read again after :data:`REPOSITORY_RETRY_SECONDS`): every remote source's
 #: (``repository``).
@@ -183,18 +183,14 @@ class Gateway:
     ) -> None:
         self.client = client or Bifrost(url, api_key=virtual_key)
         #: the gateway's management API, asked with the virtual key (the stored prompts, the
-        #: skills, the MCP clients' Agent Mode lists), as the MCP log is read
+        #: MCP clients' Agent Mode lists), as the MCP log is read
         self.admin = admin or Admin(url, token=virtual_key)
         self._prompts: LRU[str, Fresh[PromptPin]] = LRU()
-        self._served: LRU[str, Fresh[Skill]] = LRU()
-        #: skills as a given version reads (immutable once published), by name and version
-        self._versions: LRU[tuple[str, str], Skill] = LRU()
 
-    async def tools(self, slug: str | None = None) -> list[ToolDef]:
+    async def tools(self) -> list[ToolDef]:
         """Every MCP tool the virtual key allows: the gateway's own `/mcp` listing asked with
-        the key (never `/api`, which admin auth closes to it), Code Mode clients included —
-        or, with ``slug``, the tools of that one Virtual MCP (``/mcp/<slug>``)."""
-        return await self.client.tools(slug=slug)
+        the key (never `/api`, which admin auth closes to it), Code Mode clients included."""
+        return await self.client.tools()
 
     async def auto_executed(self) -> dict[str, frozenset[str]]:
         """Each MCP client's ``tools_to_auto_execute`` (Agent Mode: tools the gateway runs
@@ -210,10 +206,9 @@ class Gateway:
         args: dict[str, Any],
         *,
         clients: Sequence[str],
-        slug: str | None = None,
         parent_request_id: str | None = None,
     ) -> Any:
-        """Run one call (through the Virtual MCP ``slug``, else scoped to ``clients``); the
+        """Run one call (scoped to ``clients``); the
         tool's result, or :class:`ToolError` when the tool failed. Inside a run the request
         waits at most what is left of the call's time, carries the call's idempotency key as
         its id (the gateway's log shows it; the MCP protocol gives a server no field for it)
@@ -228,13 +223,13 @@ class Gateway:
             "function": {"name": name, "arguments": json.dumps(args)},
         }
         options = Options(
-            mcp_clients=None if slug is not None else list(clients),
+            mcp_clients=list(clients),
             parent_request_id=parent_request_id,
             mcp_session_id=f"{runtime.tenant}:{runtime.user}" if runtime else None,
             extra=identity_headers(runtime.tenant, runtime.user) if runtime else {},
         )
         timeout = runtime.remaining() if runtime else None
-        turn = await self.client.execute_tool(call, options=options, timeout=timeout, slug=slug)
+        turn = await self.client.execute_tool(call, options=options, timeout=timeout)
         content = turn.get("content")
         if turn.get("is_error") or turn.get("isError"):
             raise ToolError(str(content), source=f"mcp.{name}")
@@ -319,41 +314,6 @@ class Gateway:
                 raise NotFound(f"the gateway's prompt {name!r} has no version {version}")
             chosen = kept
         return PromptPin(name=name, id=found.id, version=chosen.number, messages=chosen.messages)
-
-    async def skill(self, name: str, version: str | None = None) -> Skill:
-        """The skill ``name`` as ``version`` reads — its ``SKILL.md`` body and file list —
-        else as its served version (read again every :data:`REPOSITORY_TTL_SECONDS`; the last
-        one read stands while the gateway is down). ``LookupError`` for no such skill."""
-        if version is None:
-            found = self._served.get(name)
-            if found is None:
-                found = self._served[name] = Fresh(
-                    functools.partial(self._skill, name, None),
-                    what=f"the skill {name!r}",
-                    ttl=REPOSITORY_TTL_SECONDS,
-                    retry=REPOSITORY_RETRY_SECONDS,
-                )
-            return await found.get()
-        known = self._versions.get((name, version))
-        if known is None:
-            known = self._versions[name, version] = await self._skill(name, version)
-        return known
-
-    async def _skill(self, name: str, version: str | None) -> Skill:
-        found = await self.admin.skills.find(name, version)
-        if found is None:
-            raise LookupError(f"the gateway has no skill named {name!r}")
-        return found
-
-    async def served(self, name: str) -> str | None:
-        """The version of the skill ``name`` the gateway serves now — read now, not kept: the
-        gateway serves a file only of that version (``None``: no such skill)."""
-        found = [s for s in await self.admin.skills.list(search=name) if s.name == name]
-        return found[0].version if found else None
-
-    async def skill_file(self, name: str, path: str) -> bytes:
-        """A file of the skill's served version (the only one the gateway serves files of)."""
-        return await self.admin.skills.read_file(name, path)
 
     async def aclose(self) -> None:
         await asyncio.gather(self.client.aclose(), self.admin.aclose())

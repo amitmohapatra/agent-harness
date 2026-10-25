@@ -4,6 +4,7 @@ on the gateway, and the user's middleware added or replacing by name."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -20,6 +21,7 @@ from langchain.agents.middleware import (
 from langgraph.pregel import Pregel
 from pydantic import BaseModel
 
+from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import ConfigurationError, RunStatus
@@ -27,7 +29,7 @@ from trellis.harness import middleware as ours
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import LangGraphAdapter
 from trellis.harness.middleware import RunCheckpointer
-from trellis.harness.react import stacked
+from trellis.harness.react import defaults_off, stacked
 
 
 @tool(side_effects="read")
@@ -47,9 +49,9 @@ def names(request: dict[str, Any]) -> list[str]:
 
 async def test_react_is_a_create_agent_graph_the_langgraph_adapter_runs(harness: Harness) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
-    graph = ReAct(system="You answer stock questions.", model=model)
+    graph = ReAct(system_prompt="You answer stock questions.", model=model)
     assert isinstance(graph, Pregel) and isinstance(graph.checkpointer, RunCheckpointer)
-    agent = harness.wrap(graph, id="stock", tools=[stock])
+    agent = arm(harness.wrap(graph, id="stock"), [stock])
     assert isinstance(agent.adapter, LangGraphAdapter)
     result = await agent.run("how many a?", user="u1")
     assert result.answer == "7 units"
@@ -63,7 +65,9 @@ async def test_react_is_a_create_agent_graph_the_langgraph_adapter_runs(harness:
 
 async def test_structured_output_is_the_native_response_format(harness: Harness) -> None:
     model = ScriptedChat([("Answer", {"sku": "a", "units": 7})])
-    agent = harness.wrap(ReAct(system="s", model=model, output=Answer), id="structured")
+    agent = harness.wrap(
+        ReAct(system_prompt="s", model=model, response_format=Answer), id="structured"
+    )
     result = await agent.run("a?", user="u1")
     assert result.answer == Answer(sku="a", units=7)
     assert "Answer" in names(model.requests[0])
@@ -73,15 +77,15 @@ async def test_structured_output_is_the_native_response_format(harness: Harness)
 
 async def test_at_the_step_limit_a_structured_answer_is_the_only_tool(harness: Harness) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), ("Answer", {"sku": "a", "units": 7})])
-    target = ReAct(system="s", model=model, output=Answer, max_steps=1)
-    result = await harness.wrap(target, id="last", tools=[stock]).run("a?", user="u1")
+    target = ReAct(system_prompt="s", model=model, response_format=Answer, max_steps=1)
+    result = await arm(harness.wrap(target, id="last"), [stock]).run("a?", user="u1")
     assert result.answer == Answer(sku="a", units=7)
     assert names(model.requests[-1]) == ["Answer"]  # its own tool, no other
 
 
 async def test_an_unknown_tool_is_told_to_the_model(harness: Harness) -> None:
     model = ScriptedChat([("nope", {}), "sorry"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="unknown")
+    agent = harness.wrap(ReAct(system_prompt="s", model=model), id="unknown")
     assert (await agent.run("x", user="u1")).answer == "sorry"
     assert "nope is not a valid tool" in model.requests[1]["messages"][-1]["content"]
 
@@ -89,7 +93,9 @@ async def test_an_unknown_tool_is_told_to_the_model(harness: Harness) -> None:
 async def test_a_loop_that_never_answers_is_stopped(harness: Harness) -> None:
     # asked once more without tools at the step limit, the model still calls a tool
     model = ScriptedChat([*[("stock", {"sku": sku}) for sku in "abc"], ("stock", {"sku": "d"})])
-    agent = harness.wrap(ReAct(system="s", model=model, max_steps=3), id="loop", tools=[stock])
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model, max_steps=3), id="loop"), [stock]
+    )
     result = await agent.run("x", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert result.error.message == "stopped after 3 model calls without an answer"
@@ -115,7 +121,7 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
     route = respx.post("http://gw.test/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=reply)
     )
-    graph = ReAct(system="s", model="provider/model", context_window=50_000)
+    graph = ReAct(system_prompt="s", model="provider/model", context_window=50_000)
     assert context_window(graph) == 50_000
     async with Harness(
         config=Settings(bifrost_url="http://gw.test/v1", bifrost_virtual_key="vk")
@@ -130,10 +136,13 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
     assert json.loads(request.content)["model"] == "provider/model"
 
 
-def test_each_gateway_model_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_event_loop_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     """langchain-openai's default client is one per gateway URL for the whole process: its
-    pooled connections would break a graph run in a later event loop."""
+    pooled connections would break a graph run in a later event loop. A routed name's chat
+    model is made once per route and event loop."""
     import openai
+
+    from trellis.harness.gateways import routed_chat_model
 
     monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")
     made: list[httpx.AsyncClient] = []
@@ -143,33 +152,56 @@ def test_each_gateway_model_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPa
         return made[-1]
 
     monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", client)
-    ReAct(system="s", model="provider/model")
-    ReAct(system="s", model="provider/model")
-    assert len(made) == 2 and made[0] is not made[1]
+    model = routed_chat_model("provider/model")
+
+    async def twice() -> tuple[Any, Any]:
+        return model.resolved(), model.resolved()
+
+    first, again = asyncio.run(twice())
+    other, _ = asyncio.run(twice())
+    assert first is again and first is not other and len(made) == 2
 
 
-def test_a_model_name_without_the_gateway_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_name_whose_provider_cannot_be_told_fails_the_run_saying_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("BIFROST_URL", raising=False)
-    with pytest.raises(ConfigurationError, match="BIFROST_URL"):
-        ReAct(system="s", model="some/model")
+    graph = ReAct(system_prompt="s", model="granite")  # built: the route is the run's to choose
+    async with Harness(config=Settings()) as h:
+        result = await h.wrap(graph, id="unnamed").run("x", user="u")
+    assert (
+        result.error is not None and "name its provider ('openai:granite'" in result.error.message
+    )
 
 
 def test_what_react_refuses() -> None:
     model = ScriptedChat([])
-    with pytest.raises(ConfigurationError, match="model_timeout"):
-        ReAct(system="s", model=model, model_timeout=0)
+    with pytest.raises(ConfigurationError, match="call_timeout"):
+        ReAct(system_prompt="s", model=model, call_timeout=0)
     with pytest.raises(ConfigurationError, match="context_window"):
-        ReAct(system="s", model=model, context_window=0)
-    with pytest.raises(ConfigurationError, match="prompt_vars"):
-        ReAct(system="s", model=model, prompt_vars={"a": 1})
-    with pytest.raises(ConfigurationError):
-        ReAct(system="s", model=model, prompt="bad@")
+        ReAct(system_prompt="s", model=model, context_window=0)
+
+
+def test_a_react_with_its_own_checkpointer_runs_on_its_own_and_is_not_wrapped(
+    harness: Harness,
+) -> None:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    own = ReAct(system_prompt="s", model=ScriptedChat([]), checkpointer=InMemorySaver())
+    with pytest.raises(ConfigurationError, match=r"ReAct\(checkpointer=\) is for the graph run"):
+        harness.wrap(own, id="own")
+    harness.wrap(ReAct(system_prompt="s", model=ScriptedChat([])), id="run")  # the run's
+
+
+def test_subagents_are_wrapped_agents_and_a2a(harness: Harness) -> None:
+    with pytest.raises(ConfigurationError, match="subagents= takes wrapped agents"):
+        ReAct(system_prompt="s", model=ScriptedChat([]), subagents=[ScriptedChat([])])
 
 
 def test_the_window_is_the_models_profile_else_the_default() -> None:
     profiled = ScriptedChat([], profile={"max_input_tokens": 32_000})
-    assert context_window(ReAct(system="s", model=profiled)) == 32_000
-    unknown = ReAct(system="s", model=ScriptedChat([]))
+    assert context_window(ReAct(system_prompt="s", model=profiled)) == 32_000
+    unknown = ReAct(system_prompt="s", model=ScriptedChat([]))
     assert context_window(unknown) is None  # assumed CONTEXT_WINDOW: not said to the harness
 
 
@@ -184,19 +216,30 @@ class Named(AgentMiddleware):
         return self._name
 
 
-def test_given_middleware_replaces_a_default_of_its_name_and_goes_before_model_hooks() -> None:
-    defaults = [Named("A"), Named("B"), Named("ModelHooks")]
-    mine_b, extra = Named("B"), Named("C")
-    stack = stacked(defaults, [extra, mine_b])
-    assert [m.name for m in stack] == ["A", "B", "C", "ModelHooks"]
-    assert stack[1] is mine_b
+def test_given_middleware_is_added_before_model_hooks_and_replaces_nothing() -> None:
+    defaults = [Named("A"), Named("StepLimit"), Named("ModelHooks")]
+    extra, more = Named("C"), Named("D")
+    stack = stacked(defaults, [extra, more])
+    assert [m.name for m in stack] == ["A", "StepLimit", "C", "D", "ModelHooks"]
+    assert stacked(defaults, []) == defaults
+    with pytest.raises(ConfigurationError, match=r"StepLimit is ReAct's own \(max_steps=\)"):
+        stacked(defaults, [Named("StepLimit")])
+    with pytest.raises(ConfigurationError, match=r"A is ReAct's own \(always on\)"):
+        stacked(defaults, [Named("A")])
 
 
-async def test_a_summarization_middleware_given_replaces_the_default(harness: Harness) -> None:
+async def test_a_summarization_middleware_given_is_refused_naming_the_default() -> None:
     model = ScriptedChat(["hi"])
     mine = SummarizationMiddleware(model, trigger=("messages", 100))
-    graph = ReAct(system="s", model=model, middleware=[mine])
-    assert (await harness.wrap(graph, id="mine").run("x", user="u")).answer == "hi"
+    with pytest.raises(ConfigurationError, match="SummarizationMiddleware is ReAct's own"):
+        ReAct(system_prompt="s", model=model, middleware=[mine])
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.5, "3", None])
+@pytest.mark.parametrize("name", ["max_steps", "max_repeats"])
+def test_steps_and_repeats_are_one_or_more(name: str, value: Any) -> None:
+    with pytest.raises(ConfigurationError, match=f"{name} is a number of steps, 1 or more"):
+        ReAct(system_prompt="s", model=ScriptedChat(["hi"]), **{name: value})
 
 
 class Mine(AgentMiddleware):
@@ -237,8 +280,8 @@ async def test_the_middleware_run_in_their_order(
     ]:
         recorded(cls, label)
     model = ScriptedChat([("stock", {"sku": "a"}), "7"])
-    graph = ReAct(system="s", model=model, middleware=[Mine()], context_window=128_000)
-    await harness.wrap(graph, id="order", tools=[stock]).run("x", user="u")
+    graph = ReAct(system_prompt="s", model=model, middleware=[Mine()], context_window=128_000)
+    await arm(harness.wrap(graph, id="order"), [stock]).run("x", user="u")
     model_order = ["files", "tools", "stall", "steps", "clear", "summary", "mine", "hooks"]
     first_call = [s.split()[1] for s in seen[: len(model_order)]]
     assert first_call == model_order  # outermost first: ModelHooks sees what is sent
@@ -253,7 +296,7 @@ async def test_a_resume_continues_in_place(harness: Harness) -> None:
         return f"refunded {order}"
 
     model = ScriptedChat([("stock", {"sku": "a"}), ("refund", {"order": "o1"}), "refunded"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="refunds", tools=[stock, refund])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="refunds"), [stock, refund])
     paused = await agent.run("refund o1", user="u")
     assert paused.interrupt is not None and len(model.requests) == 2
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
@@ -263,13 +306,13 @@ async def test_a_resume_continues_in_place(harness: Harness) -> None:
 
 async def test_framework_options_are_the_graphs_run_config(harness: Harness) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), ("stock", {"sku": "b"}), "done"])
-    graph = ReAct(system="s", model=model)
-    agent = harness.wrap(graph, id="opts", tools=[stock], framework_options={"recursion_limit": 3})
+    graph = ReAct(system_prompt="s", model=model)
+    agent = arm(harness.wrap(graph, id="opts", framework_options={"recursion_limit": 3}), [stock])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert "recursion" in result.error.message.lower()
     with pytest.raises(ConfigurationError, match="RunnableConfig"):
-        harness.wrap(ReAct(system="s", model=model), id="bad", framework_options={"temp": 1})
+        harness.wrap(ReAct(system_prompt="s", model=model), id="bad", framework_options={"temp": 1})
 
 
 # --------------------------------------------------------------------------- robustness
@@ -282,7 +325,7 @@ async def test_arguments_that_are_not_json_are_told_to_the_model(harness: Harnes
         ],
     }
     model = ScriptedChat([broken, ("stock", {"sku": "a"}), "7"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="bad-json", tools=[stock])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="bad-json"), [stock])
     result = await agent.run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "7"
     sent = model.requests[1]["messages"]
@@ -312,7 +355,7 @@ async def test_arguments_that_do_not_fit_the_schema_do_not_run_the_tool(
         return "ordered"
 
     model = ScriptedChat([("order", args), "fixed"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="schema", tools=[order])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="schema"), [order])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.SUCCESS and ran == []  # nobody was asked to approve it
     assert problem in model.requests[1]["messages"][-1]["content"]
@@ -350,9 +393,9 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
     model = ScriptedChat(
         [("dump", {}), ("read_file", {"file_path": "/large_tool_results/call_1"}), "done"]
     )
-    result = await harness.wrap(ReAct(system="s", model=model), id="dumper", tools=[dump]).run(
-        "x", user="u"
-    )
+    result = await arm(
+        harness.wrap(ReAct(system_prompt="s", model=model), id="dumper"), [dump]
+    ).run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     told = model.requests[1]["messages"][-1]["content"]
     assert "saved in the filesystem at this path: /large_tool_results/call_1" in told
@@ -372,7 +415,7 @@ async def test_the_same_call_over_and_over_is_a_stall(harness: Harness) -> None:
         return "pending"
 
     model = ScriptedChat([("poll", {"job": "j"})] * 5)
-    agent = harness.wrap(ReAct(system="s", model=model), id="stall", tools=[poll])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="stall"), [poll])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert "called 'poll' with the same arguments 3 times in a row" in result.error.message
@@ -382,6 +425,13 @@ async def test_the_same_call_over_and_over_is_a_stall(harness: Harness) -> None:
 async def test_a_call_that_changes_resets_the_stall_count(harness: Harness) -> None:
     turns: list[Any] = [("stock", {"sku": s}) for s in "aabaab"]
     model = ScriptedChat([*turns, "done"])
-    target = ReAct(system="s", model=model, max_repeats=3)
-    result = await harness.wrap(target, id="no-stall", tools=[stock]).run("x", user="u")
+    target = ReAct(system_prompt="s", model=model, max_repeats=3)
+    result = await arm(harness.wrap(target, id="no-stall"), [stock]).run("x", user="u")
     assert result.answer == "done"
+
+
+def test_a_measurement_leaves_default_middleware_out_only_inside_defaults_off() -> None:
+    defaults = [Named("A"), Named("SummarizationMiddleware"), Named("ModelHooks")]
+    with defaults_off("SummarizationMiddleware", "ModelHooks"):  # the last is always kept
+        assert [m.name for m in stacked(defaults, [])] == ["A", "ModelHooks"]
+    assert [m.name for m in stacked(defaults, [])] == ["A", "SummarizationMiddleware", "ModelHooks"]

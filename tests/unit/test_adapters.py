@@ -27,6 +27,7 @@ from trellis.contracts import (
     ToolCall,
 )
 from trellis.harness import budget
+from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
 from trellis.harness.adapters.claude import (
@@ -51,6 +52,7 @@ from trellis.harness.adapters.openai_agents import (
 )
 from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.evals import _unfenced
+from trellis.harness.gateways import ProviderKey
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Journal, Pending
 
@@ -152,8 +154,6 @@ def test_structured_output_outranks_the_result_text() -> None:
 
 
 async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    import claude_agent_sdk
-
     messages = [
         AssistantMessage(content=[ToolUseBlock("t1", "mcp__trellis__x", {})], model="m"),
         AssistantMessage(content=[TextBlock(text=""), TextBlock(text="done")], model="m"),
@@ -170,17 +170,26 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     ]
     seen: list[ClaudeAgentOptions] = []
 
-    async def query(*, prompt: str, options: ClaudeAgentOptions) -> Any:
+    async def query(prompt: str, options: ClaudeAgentOptions) -> Any:
         seen.append(options)
         for message in messages:
             yield message
 
-    monkeypatch.setattr(claude_agent_sdk, "query", query)
+    monkeypatch.setattr(claude_adapter, "_queried", query)
     spent: list[dict[str, Any]] = []
     monkeypatch.setattr(budget, "account", lambda runtime, **given: spent.append(given))
     replay = SimpleNamespace(journal=Journal())
+    watched: list[tuple[str, str]] = []
     runtime = SimpleNamespace(
-        pending=None, replay=replay, framework_options={}, agent_id="a", attempt=1
+        pending=None,
+        replay=replay,
+        framework_options={},
+        agent_id="a",
+        attempt=1,
+        model_started=lambda key: watched.append(("started", key)),
+        model_ended=lambda key: watched.append(("ended", key)),
+        offered=None,
+        agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderKey())),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
@@ -193,6 +202,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert spent == [
         {"model": None, "input_tokens": 17, "output_tokens": 5, "cached": 4, "cost": 0.25}
     ]
+    # the query watched for a stall from its start, anew at each message, until it ended
+    assert watched[0] == ("started", "claude_agent_sdk") and watched[-1][0] == "ended"
+    assert watched.count(("started", "claude_agent_sdk")) == 1 + len(messages)
     # no context and no harness tools: the options as they were, the permission check and
     # the room for a large tool result and the run's journal as the session store added
     [sent] = seen
@@ -418,3 +430,28 @@ def test_mcp_servers_given_as_text_or_a_file_are_read() -> None:
     assert configured_servers('{"mcpServers": {"b": {"type": "http"}}}') == {"b": {"type": "http"}}
     with pytest.raises(ConfigurationError, match="no mcpServers"):
         configured_servers('{"servers": {}}')
+
+
+def test_a_built_ins_structured_response_reads_as_its_text() -> None:
+    from trellis.harness.adapters.claude import _result_text
+
+    assert _result_text({"stdout": "ok", "stderr": ""}) == "ok"
+    assert _result_text({"content": [{"type": "text", "text": "a"}]}) == "a"
+    assert _result_text({"file": {"path": "x"}}) == '{"file": {"path": "x"}}'
+    assert _result_text(None) == ""
+
+
+def test_framework_options_merge_mapping_by_mapping() -> None:
+    from trellis.harness.adapters.base import merged
+
+    base = {"configurable": {"shop": "north", "nested": {"a": 1}}, "tags": ["a"], "ü": 1}
+    over = {"configurable": {"nested": {"b": 2}, "région": "eu"}, "tags": ["b"]}
+    assert merged(base, over) == {
+        "configurable": {"shop": "north", "nested": {"a": 1, "b": 2}, "région": "eu"},
+        "tags": ["b"],  # a list is replaced, not merged
+        "ü": 1,
+    }
+    assert merged({}, {}) == {} and merged(base, {}) == base and merged({}, over) == over
+    assert merged({"k": {"a": 1}}, {"k": None}) == {"k": None}  # a value over a mapping wins
+    assert merged({"k": 1}, {"k": {"a": 1}}) == {"k": {"a": 1}}
+    assert base["configurable"] == {"shop": "north", "nested": {"a": 1}}  # unchanged

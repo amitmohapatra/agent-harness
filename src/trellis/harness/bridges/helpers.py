@@ -1,7 +1,7 @@
 """Native helpers: the agents a framework spawns itself inside a run — a Deep Agent's ``task``
 sub-agents, an OpenAI agent called as a tool (``Agent.as_tool``), Claude's
-``agents=`` subagents — each a child of the run, reached through the framework's own hooks
-(the spawning stays the framework's):
+``agents=`` subagents — each a full child run of the run, reached through the framework's own
+hooks (the spawning stays the framework's):
 
 * **lineage** — a run record of its own in the run store, its parent the run
   (``parent_run_id``), its metadata naming it (:data:`HELPER`) and the run's agent group
@@ -9,10 +9,13 @@ sub-agents, an OpenAI agent called as a tool (``Agent.as_tool``), Claude's
   starts it, ended with its answer or its error. Its id is derived from the run, the helper and
   its task (and how many times the attempt started that one), so the attempt after a pause or a
   crash finds the same record again and ends it;
-* **its turns in memory** — the task it was given and what it answered, recorded in the memory
-  service under its own run (and its own thread: the conversation of the run is not the
-  helper's), as a run's transcript is, its scope derived from the run's as a sub-agent's is
-  (it reads the run's hand-off notes; ``scope="group"`` binds to the run's group);
+* **its own memory** — its scope derived from the run's as a sub-agent's is (it reads the
+  run's hand-off notes; ``scope="group"`` binds to the run's group), in it: the memory context
+  for its task, pushed into what it is given (:meth:`Helpers.briefed`: the task the framework
+  hands it, the context before it); the tool calls made while it works
+  (:meth:`Helpers.working`, :func:`inside`), recorded under its run; its turns — the task and
+  its answer — under its run and its own thread (the conversation of the run is not the
+  helper's); and how it ended, as its run's ``system`` outcome;
 * **governance and budget** — its tool calls and its model replies are the run's: they go
   through the same governance (the catalog's rules) and count toward the run's budget, by the
   adapter's hooks that reach the helper (:mod:`trellis.harness.adapters`).
@@ -24,8 +27,11 @@ the helper again, ends it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections import Counter
+from collections.abc import Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
@@ -36,6 +42,7 @@ from trellis.harness.history import Said, Speaker, recorded
 from trellis.harness.identity import AGENT_GROUP
 
 if TYPE_CHECKING:
+    from trellis.harness.clients.memory import RunMemory
     from trellis.harness.runtime import Runtime
 
 log = logging.getLogger("trellis.harness")
@@ -44,6 +51,8 @@ log = logging.getLogger("trellis.harness")
 HELPER: Final = "native_helper"
 #: The error code of a helper whose run failed before it ended.
 UNFINISHED: Final = "HelperUnfinished"
+#: What comes between a helper's memory context and its task, in what it is given.
+TASK_HEADING: Final = "## Your task\n"
 #: Why a helper an earlier attempt started, and the next did not take up again, ended.
 NOT_CONTINUED: Final = "cut short by a pause or a crash, and not taken up again: the run went on"
 
@@ -58,10 +67,27 @@ class Kind(StrEnum):
 
 @dataclass
 class Helper:
-    """One open helper: its run, and what it was told and said so far."""
+    """One open helper: its run, whose run it works in, its name, what it was told and said
+    so far, its memory (its scope's: ``None`` with memory off for the run) and the memory
+    context pushed for its task."""
 
     run_id: str
+    parent_run_id: str
+    name: str
     said: list[Said] = field(default_factory=list)
+    memory: RunMemory | None = None
+    context: str | None = None
+
+
+#: The helper whose work is running in this task (:meth:`Helpers.working`).
+_INSIDE: ContextVar[Helper | None] = ContextVar("trellis_helper", default=None)
+
+
+def inside(runtime: Runtime) -> Helper | None:
+    """The helper of ``runtime``'s run whose work the calling code is part of, if any: what it
+    does is recorded under its run (a nested run's code is its own run's, not the helper's)."""
+    helper = _INSIDE.get()
+    return helper if helper is not None and helper.parent_run_id == runtime.run_id else None
 
 
 class Helpers:
@@ -74,10 +100,15 @@ class Helpers:
         self._open: dict[str, Helper] = {}
         #: how many times this attempt started each helper on each task
         self._started: Counter[tuple[str, str]] = Counter()
+        runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
 
-    async def start(self, key: str, *, kind: Kind, name: str, task: str) -> None:
+    async def start(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:
         """The helper ``key`` started on ``task``: its run record started (found again on a
-        later attempt)."""
+        later attempt), its memory bound, and the memory context for its task fetched
+        (:meth:`briefed` hands it over). A key already open is that helper."""
+        found = self._open.get(key)
+        if found is not None:
+            return found
         parent = self.runtime
         occurrence = self._started[(name, task)]
         self._started[(name, task)] += 1
@@ -98,11 +129,37 @@ class Helpers:
                 },
             )
         )
-        self._open[key] = Helper(run_id, [Said(Speaker.USER, task)])
+        helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)])
+        helper.memory = self._memory(run_id)
+        helper.context = await self._pushed(helper, task)
+        self._open[key] = helper
         log.info(
             "helper started",
             extra={"run_id": parent.run_id, "helper_run_id": run_id, "helper": name},
         )
+        return helper
+
+    @staticmethod
+    def briefed(helper: Helper, task: str) -> str:
+        """What the helper is given for ``task``: the memory context pushed for it, then the
+        task (the task alone without one)."""
+        return f"{helper.context}\n\n{TASK_HEADING}{task}" if helper.context else task
+
+    @contextlib.contextmanager
+    def working(self, helper: Helper | None) -> Iterator[None]:
+        """The code inside is ``helper``'s work (``None``: the run's own): the tool calls it
+        makes are recorded under the helper's run (:func:`inside`)."""
+        token = _INSIDE.set(helper)
+        try:
+            yield
+        finally:
+            _INSIDE.reset(token)
+
+    def named(self, name: str) -> Helper | None:
+        """The open helper called ``name`` started last (a framework that names the helper
+        a call comes from, not the call that started it: Claude's ``agent_type``)."""
+        found = [h for h in self._open.values() if h.name == name]
+        return found[-1] if found else None
 
     async def end(self, key: str, *, output: str | None = None, error: str | None = None) -> None:
         """The helper ``key`` ended with ``output``, or failed (``error``): its run record
@@ -128,6 +185,7 @@ class Helpers:
                 tenant=self.runtime.tenant,
             )
         await self._recorded(helper)
+        await self._outcome(helper, error)
         log.info(
             "helper ended",
             extra={
@@ -164,31 +222,68 @@ class Helpers:
         for run_id in left:
             record = await runs.get(run_id, tenant=parent.tenant)
             if record is None or HELPER not in record.metadata:
-                continue  # a sub-agent of the harness's own (``Agent.as_tool``) ends itself
+                continue  # a sub-agent's child run (``subagents``) ends itself
             await runs.finish(
                 run_id,
                 RunStatus.ERROR,
                 error=AgentError(code=UNFINISHED, message=NOT_CONTINUED),
                 tenant=parent.tenant,
             )
-            await self._recorded(Helper(run_id, [Said(Speaker.USER, str(record.input))]))
+            name = str((record.metadata.get(HELPER) or {}).get("name", ""))
+            left = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, str(record.input))])
+            left.memory = self._memory(run_id)
+            await self._recorded(left)
+            await self._outcome(left, NOT_CONTINUED)
+
+    def _memory(self, run_id: str) -> RunMemory | None:
+        """The helper's memory: its scope derived from the run's (``None`` with memory off for
+        the run)."""
+        parent = self.runtime
+        memory = parent.agent.harness.memory
+        if memory is None or parent.run_memory is None:
+            return None
+        identity = parent.identity.model_copy(
+            update={
+                "run_id": run_id,
+                "thread": run_id,
+                "parent_run": parent.run_id,
+                "group": parent.identity.own_group,
+            }
+        )
+        return memory.bind(identity)
+
+    async def _pushed(self, helper: Helper, task: str) -> str | None:
+        """The memory context for the helper's task, in its scope, as the run's is pushed (the
+        documents the run draws on; no window: the helper's conversation is its task). A
+        failure is a warning: the helper works without it."""
+        parent = self.runtime
+        if helper.memory is None or not task or not parent.uses("memory_push"):
+            return None
+        from trellis.harness.clients.memory import Window
+
+        try:
+            pushed = await helper.memory.context(
+                task,
+                tools=None,
+                window=Window.NONE,
+                hints=False,
+                document_ids=parent.document_ids,
+            )
+        except Exception as exc:
+            parent.events.warning(
+                "memory_unavailable", f"no memory context for {helper.name}: {exc}"
+            )
+            return None
+        return pushed.rendered or None
 
     async def _recorded(self, helper: Helper) -> None:
         """The helper's turns, in the memory service under its own run (the run's records
         feature, as a run's transcript)."""
         parent = self.runtime
-        memory = parent.agent.harness.memory
-        if memory is None or parent.run_memory is None or not parent.uses("records"):
+        scoped = helper.memory
+        if scoped is None or not parent.uses("records"):
             return
-        identity = parent.identity.model_copy(
-            update={
-                "run_id": helper.run_id,
-                "thread": helper.run_id,
-                "parent_run": parent.run_id,
-                "group": parent.identity.own_group,
-            }
-        )
-        scoped, messages = memory.bind(identity), list(helper.said)
+        messages = list(helper.said)
         await parent.agent.harness.writes.submit(
             "memory.transcript",
             lambda: scoped.record_messages(messages, helper.run_id, 1),
@@ -199,6 +294,26 @@ class Helpers:
                 run_id=helper.run_id,
                 attempt=1,
             ),
+        )
+
+    async def _outcome(self, helper: Helper, error: str | None) -> None:
+        """How the helper ended, as its run's ``system`` outcome (``confirm``: it answered;
+        ``reject``: it failed), as a run's is."""
+        parent = self.runtime
+        scoped = helper.memory
+        if scoped is None or not parent.uses("records"):
+            return
+        feedback = {
+            "verdict": "confirm" if error is None else "reject",
+            "source": "system",
+            "comment": error,
+            "key": f"{helper.run_id}:outcome",
+        }
+        await parent.agent.harness.writes.submit(
+            "memory.outcome",
+            lambda: scoped.run_feedback(**feedback),
+            events=parent.events,
+            record=scoped.record("run_feedback", **feedback),
         )
 
 

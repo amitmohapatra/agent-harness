@@ -55,7 +55,7 @@ async def memory_scope(
 ) -> MemoryContext:
     """The memory service in a user's (and thread's) scope, read as the agent reads it."""
     assert h.memory is not None
-    scope = {"tenant_id": await h.tenant(), "user_id": user, "agent_id": agent_id}
+    scope = {"tenant_id": await h._tenant(), "user_id": user, "agent_id": agent_id}
     if thread is not None:
         scope["thread_id"] = thread
     return h.memory.client.bind(**scope)
@@ -66,7 +66,7 @@ class StubLangfuse:
     with the dataset run :data:`DATASET_RUN`, as Langfuse answers it).
 
         with StubLangfuse("golden", items) as langfuse:
-            h = live_harness(**langfuse.settings())
+            h = live_harness(langfuse=langfuse.environ())
     """
 
     DATASET_RUN: Final = "dsr-live"
@@ -119,15 +119,14 @@ class StubLangfuse:
     def posted(self, path: str) -> list[Any]:
         return [body for p, body in self.received if p == path]
 
-    def settings(self) -> dict[str, Any]:
-        """Langfuse reached through the OTLP headers (no exporter: spans stay in process)."""
-        headers = {"authorization": "Basic cGs6c2s=", "x-langfuse-host": self.url}
-        return {"otlp_endpoint": None, "otlp_headers": headers}
-
     def environ(self) -> dict[str, str]:
-        """The same, as the environment a deployment sets (``EvalServices.from_env``)."""
-        headers = f"authorization=Basic%20cGs6c2s%3D,x-langfuse-host={self.url}"
-        return {"OTEL_EXPORTER_OTLP_HEADERS": headers}
+        """Langfuse's own variables, naming this one (``live_harness(langfuse=)``,
+        ``EvalServices.from_env``)."""
+        return {
+            "LANGFUSE_PUBLIC_KEY": "pk",
+            "LANGFUSE_SECRET_KEY": "sk",
+            "LANGFUSE_BASE_URL": self.url,
+        }
 
 
 def free_port() -> int:

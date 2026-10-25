@@ -58,6 +58,10 @@ matrix:  ## The generated feature matrix (feature x adapter x way x mode x selec
 	$(PY) -m tests.matrix.report build/matrix-*.xml --out build/matrix.md; \
 	if [ $$status -ne 0 ]; then grep -h "^FAILED\|^ERROR" build/matrix-*.log; fi; exit $$status
 
+.PHONY: matrix-page
+matrix-page:  ## docs/matrix.md, the feature x framework page, written from the matrix's tables (a test fails when it is stale)
+	$(PY) -m tests.matrix.page
+
 .PHONY: matrix-models
 matrix-models:  ## The matrix's ReAct cells with a model name: served by Bifrost (gateway on) or an OpenAI-compatible endpoint (gateway off)
 	@mkdir -p build && rm -f build/matrix-models-*.xml build/matrix-models-*.log
@@ -84,11 +88,11 @@ check: lint typecheck test  ## Everything CI runs, except the benchmark
 	@echo "all gates passed"
 
 .PHONY: examples
-examples:  ## Run every example offline (scripted model, memory, gateway), several at once
+examples:  ## Run every example and the README walkthrough offline (scripted model, memory, gateway), several at once
 	$(PY) scripts/run_examples.py
 
 .PHONY: examples-live
-examples-live:  ## Run every example with the environment as it is (the real services that are set)
+examples-live:  ## Run every example and the README walkthrough with the environment as it is (the real services that are set)
 	$(PY) scripts/run_examples.py --live
 
 .PHONY: docs-check

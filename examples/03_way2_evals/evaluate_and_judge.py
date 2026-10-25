@@ -5,9 +5,10 @@
 * Online: ``judge`` scores one run your code just finished, on that run's trace, with a judge
   of your own and a judge model; ``sample=`` judges a stable share of runs.
 
-What evaluation reaches is ``EvalServices.from_env()``: Langfuse (the OTLP settings) and the
-judge (``BIFROST_URL``, ``TRELLIS_JUDGE_MODEL``). Offline the judge is a scripted model; the
-dataset is a local list (with Langfuse configured, pass a Langfuse dataset's name instead).
+What evaluation reaches is ``EvalServices.from_env()``: Langfuse (its own ``LANGFUSE_*``
+variables) and the judge (``BIFROST_URL``: the gateway's judge alias, or
+``llm_judge(model=)``). Offline the judge is a scripted model; the dataset is a local list
+(with Langfuse configured, pass a Langfuse dataset's name instead).
 
     python -m examples.03_way2_evals.evaluate_and_judge
 """

@@ -36,11 +36,12 @@ async def main() -> None:
             ]
         )
         target = ReAct(
-            system="You give weather advice. Use the tool, then answer.",
+            system_prompt="You give weather advice. Use the tool, then answer.",
             model=model,
-            output=Forecast,
+            response_format=Forecast,
+            tools=[temperature],
         )
-        agent = h.wrap(target, id="weather", tools=[temperature])
+        agent = h.wrap(target, id="weather")
         result = await agent.run("Do I need a coat in Oslo?", user="ada")
         print(result.status.value, result.answer)
 

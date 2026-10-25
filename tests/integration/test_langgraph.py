@@ -12,6 +12,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, current, tool
@@ -40,7 +41,7 @@ def _reset() -> None:
 
 
 async def agent_graph(harness: Harness, model: ScriptedChatModel, **kwargs: Any) -> Any:
-    tools = await harness.tools(stock, order, framework="langgraph")
+    tools = await native_tools(harness, stock, order, framework="langgraph")
     return create_agent(model, tools=tools, system_prompt="You manage stock.", **kwargs)
 
 
@@ -50,16 +51,6 @@ async def test_a_create_agent_graph_runs_with_harness_tools(harness: Harness) ->
     result = await agent.run("how many a?", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "7 units of a"
     assert executed == ["stock:a"]
-
-
-async def test_h_tools_names_a_framework_by_its_adapter(harness: Harness) -> None:
-    [deep] = await harness.tools(stock, framework="deepagents")  # a LangGraph graph too
-    assert deep.name == "stock"
-    valid = "langgraph, deepagents, openai_agents, claude_agent_sdk"
-    with pytest.raises(
-        ConfigurationError, match=f"no framework 'openai-agents': name one of {valid}"
-    ):
-        await harness.tools(stock, framework="openai-agents")  # type: ignore[arg-type]
 
 
 async def test_streaming_carries_text_and_tool_events(harness: Harness) -> None:
@@ -221,7 +212,7 @@ async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conve
 async def test_memory_tools_are_built_in_with_h_tools(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    tools = await memory_harness.tools(stock, framework="langgraph")
+    tools = await native_tools(memory_harness, stock, framework="langgraph")
     assert [t.name for t in tools] == ["stock", *MEMORY_TOOLS]
     model = ScriptedChatModel(
         turns=[("memory_search", {"query": "x"}), ("stock", {"sku": "a"}), "found"]
@@ -235,14 +226,50 @@ async def test_memory_tools_are_built_in_with_h_tools(
     assert [c.body["tool"] for c in memory_service.named("record_tool")] == ["stock"]
 
 
-async def test_a_compiled_graph_refuses_tools_at_wrap(harness: Harness) -> None:
-    with pytest.raises(ConfigurationError, match=r"h\.tools"):
-        harness.wrap(review_graph(), id="x", tools=[stock])
+async def test_a_graph_built_by_hand_pulls_from_memory_with_memory_tools(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """``h.memory_tools()`` is the memory block of a graph you build yourself: its tools in
+    the graph's ``ToolNode`` call the service in the run's scope, next to the graph's own
+    tools, which the harness governs and records as it finds them."""
+    from langchain_core.tools import tool as langchain_tool
+    from langgraph.graph import MessagesState
+    from langgraph.prebuilt import ToolNode, tools_condition
+
+    @langchain_tool
+    def shelf(sku: str) -> str:
+        """Where a SKU is shelved."""
+        return f"{sku}: aisle 4"
+
+    tools = [shelf, *await memory_harness.memory_tools()]
+    assert [t.name for t in tools] == ["shelf", *MEMORY_TOOLS]
+    model = ScriptedChatModel(
+        turns=[("memory_search", {"query": "x"}), ("shelf", {"sku": "a"}), "aisle 4"]
+    )
+    bound = model.bind_tools(tools)
+
+    async def think(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await bound.ainvoke(state["messages"])]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("model", think)
+    graph.add_node("tools", ToolNode(tools))
+    graph.add_edge(START, "model")
+    graph.add_conditional_edges("model", tools_condition)
+    graph.add_edge("tools", "model")
+    agent = memory_harness.wrap(graph.compile(), id="by-hand")
+    result = await agent.run("where is a?", user="u1", thread="t1")
+    assert result.answer == "aisle 4"
+    [pulled] = memory_service.named("call_agent_tool")
+    assert pulled.path["name"] == "memory_search"
+    assert pulled.scope["user_id"] == "u1" and pulled.scope["agent_run_id"] == result.run_id
+    await memory_harness.writes.drain()
+    assert [c.body["tool"] for c in memory_service.named("record_tool")] == ["shelf"]
 
 
 async def test_two_graphs_may_each_have_a_tool_of_the_same_name(harness: Harness) -> None:
-    """Each ``h.tools`` call is its own toolbox: a graph's agent knows only the tools its graph
-    was built with, so a second graph with another ``lookup`` is no clash."""
+    """A graph's agent knows only the tools its graph was built with, so a second graph with
+    another ``lookup`` is no clash."""
 
     @tool(side_effects="read", name="lookup")
     def lookup_stock(sku: str) -> str:
@@ -259,13 +286,14 @@ async def test_two_graphs_may_each_have_a_tool_of_the_same_name(harness: Harness
     graphs = []
     for fn, answer in ((lookup_stock, "7"), (lookup_price, "$3")):
         model = ScriptedChatModel(turns=[("lookup", {"sku": "a"}), answer])
-        graphs.append(create_agent(model, tools=await harness.tools(fn, framework="langgraph")))
+        graphs.append(
+            create_agent(model, tools=await native_tools(harness, fn, framework="langgraph"))
+        )
     stock_agent = harness.wrap(graphs[0], id="stock-lookup")
     price_agent = harness.wrap(graphs[1], id="price-lookup")
     assert (await stock_agent.run("a?", user="u1")).answer == "7"
     assert (await price_agent.run("a?", user="u1")).answer == "$3"
     assert executed == ["stock:a", "price:a"]
-    assert stock_agent.sources != price_agent.sources
 
 
 # --------------------------------------------------------------------------- another process

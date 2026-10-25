@@ -1,5 +1,5 @@
-"""Sub-agents: ``agent.as_tool()`` makes any wrapped agent a tool of any other; each call is a
-child run — named by its parent's call, inheriting its tenant, user, thread, time and trace —
+"""Sub-agents: any wrapped agent is a tool of any other (``ReAct(subagents=[...])``); each call
+is a child run — named by its parent's call, inheriting its tenant, user, thread, time and trace —
 that answers, fails, or pauses its parent with its question (the parent's resume answers it);
 after a crash the parent's next attempt continues it from the journal its progress saved;
 cancelling the parent cancels it."""
@@ -7,7 +7,6 @@ cancelling the parent cancels it."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -15,10 +14,9 @@ import pytest
 from agents import Agent as OpenAIAgent
 from agents import function_tool
 from langchain.agents import create_agent
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
@@ -26,8 +24,11 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, tool
 from trellis.contracts import ConfigurationError, RunRecord, RunStatus
 from trellis.harness import telemetry
+from trellis.harness.clients.memory import DOCUMENTS
+from trellis.harness.features import WITHOUT
+from trellis.harness.identity import AGENT_GROUP
 from trellis.harness.runs import LocalRuns
-from trellis.harness.subagents import SUBAGENT
+from trellis.harness.subagents import SUBAGENT, SubAgent
 from trellis.runs import Job
 
 done: list[str] = []
@@ -63,23 +64,23 @@ def researcher(h: Harness, name: str = "research") -> Any:
         """Research a topic and report what was found."""
         return str(await agent.tools.call("lookup", topic=input))
 
-    return h.wrap(research, id=name, tools=[lookup], version="r-2")
+    return arm(h.wrap(research, id=name, version="r-2"), [lookup])
 
 
 async def test_a_child_run_of_any_framework_answers_its_parents_call(harness: Harness) -> None:
     graph = create_agent(
         ScriptedChatModel(turns=[("lookup", {"topic": "graphs"}), "graphs are graphs"]),
-        tools=await harness.tools(lookup, framework="langgraph"),
+        tools=await native_tools(harness, lookup, framework="langgraph"),
     )
     openai = OpenAIAgent(
         name="o", model=ScriptedModel([("lookup", {"topic": "sdks"}), "sdks are sdks"])
     )
-    react = ReAct(system="r", model=ScriptedChat([("lookup", {"topic": "loops"}), "loops"]))
+    react = ReAct(system_prompt="r", model=ScriptedChat([("lookup", {"topic": "loops"}), "loops"]))
     kids = [
         researcher(harness),
         harness.wrap(graph, id="graph"),
-        harness.wrap(openai, id="openai", tools=[lookup]),
-        harness.wrap(react, id="react", tools=[lookup]),
+        arm(harness.wrap(openai, id="openai"), [lookup]),
+        arm(harness.wrap(react, id="react"), [lookup]),
     ]
     model = ScriptedChat(
         [
@@ -88,9 +89,7 @@ async def test_a_child_run_of_any_framework_answers_its_parents_call(harness: Ha
             "all four answered",
         ]
     )
-    parent = harness.wrap(
-        ReAct(system="p", model=model), id="lead", tools=[k.as_tool() for k in kids]
-    )
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="lead"), list(kids))
     result = await parent.run("research", user="ada", thread="t1")
     assert result.status is RunStatus.SUCCESS, result.error
     told = [m["content"] for m in model.requests[1]["messages"] if m["role"] == "tool"]
@@ -115,11 +114,11 @@ async def test_children_that_only_read_run_at_once(harness: Harness) -> None:
         await asyncio.wait_for(together.wait(), 1)  # only when both run at once
         return str(await agent.tools.call("lookup", topic=input))
 
-    first = harness.wrap(waits, id="first", tools=[lookup])
-    second = harness.wrap(waits, id="second", tools=[lookup])
+    first = arm(harness.wrap(waits, id="first"), [lookup])
+    second = arm(harness.wrap(waits, id="second"), [lookup])
     model = ScriptedChat([[("first", {"message": "a"}), ("second", {"message": "b"})], "both"])
-    tools = [first.as_tool(), second.as_tool()]
-    parent = harness.wrap(ReAct(system="p", model=model), id="pair", tools=tools)
+    tools = [first, second]
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="pair"), tools)
     assert (await parent.run("x", user="u")).answer == "both"
 
 
@@ -128,11 +127,16 @@ async def test_what_a_child_does_decides_whether_its_tool_reads(harness: Harness
         return input
 
     async def tool_of(agent: Any, **kwargs: Any) -> Any:
-        [made] = await agent.as_tool(**kwargs).resolve()
+        given = {"name": None, "description": None, "side_effects": None, **kwargs}
+        [made] = await SubAgent(agent, **given).resolve()
         return made.spec
 
-    reads = harness.wrap(nothing, id="reads", tools=[lookup])
-    writes = harness.wrap(nothing, id="writes", tools=[lookup, file])
+    # a function target's code calls what it calls: write, unless its tools are declared
+    assert (await tool_of(harness.wrap(nothing, id="unseen"))).side_effects == "write"
+    described = harness.wrap(nothing, id="described", description="Does nothing, well.")
+    assert (await tool_of(described)).description == "Does nothing, well."
+    reads = arm(harness.wrap(nothing, id="reads"), [lookup])
+    writes = arm(harness.wrap(nothing, id="writes"), [lookup, file])
     assert (await tool_of(reads)).side_effects == "read"
     assert (await tool_of(writes)).side_effects == "write"
     assert (await tool_of(writes, side_effects="read", name="w")).side_effects == "read"
@@ -177,9 +181,9 @@ async def test_a_child_that_asks_pauses_its_parent_and_the_answer_reaches_it(
         tone = await agent.ask("Which tone?", options=["warm", "dry"])
         return str(await agent.tools.call("publish", text=f"{input} ({tone})"))
 
-    child = memory_harness.wrap(editor, id="editor", tools=[publish])
+    child = arm(memory_harness.wrap(editor, id="editor"), [publish])
     model = ScriptedChat([("editor", {"message": "news"}), "published"])
-    parent = memory_harness.wrap(ReAct(system="p", model=model), id="desk", tools=[child.as_tool()])
+    parent = arm(memory_harness.wrap(ReAct(system_prompt="p", model=model), id="desk"), [child])
     paused = await parent.run("publish the news", user="ada")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     question = paused.interrupt
@@ -219,7 +223,7 @@ async def test_a_child_that_fails_is_an_error_its_parents_model_reads(harness: H
 
     child = harness.wrap(broken, id="broken")
     model = ScriptedChat([("broken", {"message": "x"}), ("broken", {"message": "x"}), "gave up"])
-    parent = harness.wrap(ReAct(system="p", model=model), id="boss", tools=[child.as_tool()])
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="boss"), [child])
     result = await parent.run("x", user="u")
     assert result.answer == "gave up"
     told = model.requests[1]["messages"][-1]["content"]
@@ -247,9 +251,9 @@ async def test_a_worker_killed_inside_a_child_repeats_none_of_its_side_effects(
         await agent.tools.call("boom")
         return str(filed)
 
-    child = harness.wrap(filer, id="filer", tools=[file, boom])
+    child = arm(harness.wrap(filer, id="filer"), [file, boom])
     model = ScriptedChat([("filer", {"message": "n1"}), "filed n1"])
-    parent = harness.wrap(ReAct(system="p", model=model), id="clerk", tools=[child.as_tool()])
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="clerk"), [child])
     store = harness.runs
     assert isinstance(store, LocalRuns)
     handle = await parent.start("file n1", user="u")
@@ -260,17 +264,17 @@ async def test_a_worker_killed_inside_a_child_repeats_none_of_its_side_effects(
         await parent.execute(
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
-    held, _ = store._leases[handle.run_id]
-    store._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
-    [kid] = await children(harness, handle.run_id)
+    held, _ = store._leases[handle.id]
+    store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+    [kid] = await children(harness, handle.id)
     assert kid.status is RunStatus.RUNNING  # cut by the crash
     saved = (await handle.status()).checkpoint
     assert saved is not None and kid.run_id in saved["children"]
     assert await harness.worker([parent]).run_once()
-    result = await handle.result(timeout=5)
+    result = await handle.result(wait=5)
     assert result.status is RunStatus.SUCCESS and result.answer == "filed n1", result.error
     assert done == ["file n1"]  # filed once, before the crash
-    [kid] = await children(harness, handle.run_id)
+    [kid] = await children(harness, handle.id)
     assert kid.status is RunStatus.SUCCESS and kid.output == "filed n1"
     assert len(model.requests) == 2  # the parent's first step was replayed
 
@@ -288,7 +292,7 @@ async def test_cancelling_a_parent_cancels_its_children(harness: Harness) -> Non
 
     running = harness.wrap(slow, id="slow")
     model = ScriptedChat([("slow", {"message": "x"})])
-    parent = harness.wrap(ReAct(system="p", model=model), id="p1", tools=[running.as_tool()])
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="p1"), [running])
     task = asyncio.create_task(parent.run("x", user="u"))
     await asyncio.wait_for(started.wait(), 5)
     [record] = [s async for s in harness.runs.iterate(agent_id="p1")]
@@ -300,8 +304,8 @@ async def test_cancelling_a_parent_cancels_its_children(harness: Harness) -> Non
     waiting = harness.wrap(asks, id="asks")
     for reason in ("cancel", "resume"):
         model = ScriptedChat([("asks", {"message": "x"})])
-        tools = [waiting.as_tool()]
-        parent = harness.wrap(ReAct(system="p", model=model), id=f"p-{reason}", tools=tools)
+        tools = [waiting]
+        parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id=f"p-{reason}"), tools)
         paused = await parent.run("x", user="u")
         assert paused.interrupt is not None
         if reason == "cancel":
@@ -322,9 +326,9 @@ async def test_a_child_has_what_is_left_of_its_parents_time_and_its_deadline(
 
     child = harness.wrap(slow, id="slow")
     model = ScriptedChat([("slow", {"message": "x"})])
-    parent = harness.wrap(ReAct(system="p", model=model), id="timed", tools=[child.as_tool()])
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="timed"), [child])
     deadline = datetime.now(UTC) + timedelta(hours=1)
-    result = await parent.run("x", user="u", timeout=0.3, deadline=deadline)
+    result = await parent.run("x", user="u", run_timeout=0.3, deadline=deadline)
     assert result.status is RunStatus.TIMEOUT
     [kid] = await children(harness, result.run_id)
     assert kid.timeout_seconds is not None and kid.timeout_seconds <= 0.3
@@ -332,21 +336,13 @@ async def test_a_child_has_what_is_left_of_its_parents_time_and_its_deadline(
     assert kid.final  # it stopped with its parent
 
 
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
-
-
 async def test_a_childs_spans_are_in_its_parents_trace_under_the_call(
     harness: Harness, spans: InMemorySpanExporter
 ) -> None:
     model = ScriptedChat([("research", {"message": "x"}), "done"])
-    parent = harness.wrap(
-        ReAct(system="p", model=model), id="lead", tools=[researcher(harness).as_tool()]
+    parent = arm(
+        harness.wrap(ReAct(system_prompt="p", model=model), id="lead"),
+        [researcher(harness)],
     )
     result = await parent.run("x", user="u")
     by_name = {s.name: s for s in spans.get_finished_spans()}
@@ -375,17 +371,17 @@ async def test_any_framework_calls_a_child_and_answers_its_question(
     call = ("painter", {"message": "the door"})
     if framework == "langgraph":
         model = ScriptedChatModel(turns=[call, call, "done"])
-        tools = await harness.tools(child.as_tool(), framework="langgraph")
+        tools = await native_tools(harness, child, framework="langgraph")
         parent = harness.wrap(create_agent(model, tools=tools), id="graph-parent")
     elif framework == "openai_agents":
         sdk = OpenAIAgent(name="p", model=ScriptedModel([call, call, "done"]))
-        parent = harness.wrap(sdk, id="sdk-parent", tools=[child.as_tool()])
+        parent = arm(harness.wrap(sdk, id="sdk-parent"), [child])
     else:
 
         async def delegates(input: str, agent: Runtime) -> Any:
             return await agent.tools.call("painter", message="the door")
 
-        parent = harness.wrap(delegates, id="fn-parent", tools=[child.as_tool()])
+        parent = arm(harness.wrap(delegates, id="fn-parent"), [child])
     paused = await parent.run("paint", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.question == "Which colour?"
@@ -396,3 +392,123 @@ async def test_any_framework_calls_a_child_and_answers_its_question(
     assert result.answer in ("done", "painted the door blue")
     [kid] = await children(harness, paused.run_id)
     assert kid.status is RunStatus.SUCCESS and kid.output == "painted the door blue"
+
+
+# ------------------------------------------------------------- agent.run inside a run: a child
+async def test_a_run_called_inside_a_run_is_its_child(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """``agent.run`` from a run's own code is that run's child, as a sub-agent's call is: its
+    record names the parent and the tree's group, it takes the parent's tenant, thread,
+    documents, deadline and what the parent is without (adding its own), it never works past the
+    parent's time, and its memory scope is derived from the parent's."""
+    seen: dict[str, Any] = {}
+
+    async def note(input: str, agent: Runtime) -> str:
+        seen["without"] = sorted(agent.without)
+        return f"noted {input}"
+
+    child = memory_harness.wrap(note, id="note")
+
+    async def boss(input: str, agent: Runtime) -> str:
+        first = await child.run(input, user=agent.user, without={"judges"})
+        second = await child.run("again", user=agent.user)
+        return f"{first.answer}; {second.answer}"
+
+    parent = memory_harness.wrap(boss, id="boss")
+    deadline = datetime.now(UTC) + timedelta(hours=1)
+    result = await parent.run(
+        "x",
+        user="ada",
+        thread="t-1",
+        run_timeout=60,
+        deadline=deadline,
+        without={"grounding"},
+        document_ids=["doc_1"],
+    )
+    assert result.answer == "noted x; noted again", result.error
+    kids = await children(memory_harness, result.run_id)
+    assert len(kids) == 2 and len({k.run_id for k in kids}) == 2  # each its own run
+    for kid in kids:
+        assert kid.parent_run_id == result.run_id and kid.thread_id == "t-1"
+        assert kid.user_id == "ada" and kid.deadline == deadline
+        assert kid.timeout_seconds is not None and kid.timeout_seconds <= 60
+        assert kid.metadata[AGENT_GROUP] == result.run_id
+        assert kid.metadata[DOCUMENTS] == ["doc_1"]
+    assert "grounding" in kids[0].metadata[WITHOUT]
+    assert "grounding" in seen["without"]
+    asked = [c for c in memory_service.named("context") if c.scope.get("agent_id") == "note"]
+    assert asked and all(c.scope["parent_agent_run_id"] == result.run_id for c in asked)
+
+
+async def test_a_nested_run_that_asks_pauses_its_parent_and_is_found_again(
+    harness: Harness,
+) -> None:
+    started: list[str] = []
+
+    async def asks(input: str, agent: Runtime) -> str:
+        started.append(agent.run_id)
+        return f"tone {await agent.ask('Which tone?', options=['warm', 'dry'])}"
+
+    child = harness.wrap(asks, id="asks")
+
+    async def desk(input: str, agent: Runtime) -> str:
+        answered = await child.run(input, user=agent.user)
+        return str(answered.answer)
+
+    parent = harness.wrap(desk, id="desk")
+    paused = await parent.run("news", user="ada")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    [kid] = await children(harness, paused.run_id)
+    assert paused.interrupt.question == "Which tone?" and kid.status is RunStatus.PAUSED
+    assert paused.interrupt.payload is not None
+    assert paused.interrupt.payload[SUBAGENT]["run_id"] == kid.run_id
+    finished = await parent.resume(
+        paused.interrupt.interrupt_id, "answer", answer="dry", reviewer="ada"
+    )
+    assert finished.status is RunStatus.SUCCESS and finished.answer == "tone dry"
+    assert set(started) == {kid.run_id}  # the parent's re-run found the same child
+    [kid] = await children(harness, paused.run_id)
+    assert kid.status is RunStatus.SUCCESS
+
+
+async def test_cancelling_a_parent_cancels_its_nested_run(harness: Harness) -> None:
+    started = asyncio.Event()
+
+    async def slow(input: str, agent: Runtime) -> str:
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    child = harness.wrap(slow, id="slow-nested")
+
+    async def boss(input: str, agent: Runtime) -> str:
+        return str((await child.run(input, user=agent.user)).answer)
+
+    parent = harness.wrap(boss, id="boss-nested")
+    task = asyncio.create_task(parent.run("x", user="u"))
+    await asyncio.wait_for(started.wait(), 5)
+    [record] = [s async for s in harness.runs.iterate(agent_id="boss-nested")]
+    await parent.cancel(record.run_id, reason="stop")
+    assert (await task).status is RunStatus.CANCELLED
+    [kid] = await children(harness, record.run_id)
+    assert kid.status is RunStatus.CANCELLED
+
+
+async def test_a_stream_or_a_queued_run_inside_a_run_names_its_parent(harness: Harness) -> None:
+    async def echo(input: str, agent: Runtime) -> str:
+        return f"ok {input}"
+
+    child = harness.wrap(echo, id="streamed")
+    handles: list[Any] = []
+
+    async def boss(input: str, agent: Runtime) -> str:
+        events = [e async for e in child.stream("s", user=agent.user)]
+        handles.append(await child.start("q", user=agent.user))
+        return str(events[-1].data.get("result"))
+
+    result = await harness.wrap(boss, id="boss-stream").run("x", user="u", thread="t-9")
+    assert result.answer == "ok s", result.error
+    kids = await children(harness, result.run_id)
+    assert len(kids) == 2 and handles[0].id in {k.run_id for k in kids}
+    assert all(k.parent_run_id == result.run_id and k.thread_id == "t-9" for k in kids)

@@ -1,8 +1,9 @@
 # Deep Agents
 
 `create_deep_agent(...)` returns a compiled LangGraph graph, so a Deep Agent is wrapped like any
-graph — everything on the [LangGraph page](langgraph.md) applies: tools built with `h.tools`,
-`agent.run`/`stream`/`resume` instead of `graph.ainvoke`, pauses in place with a checkpointer.
+graph — everything on the [LangGraph page](langgraph.md) applies: its own tools governed as it
+runs them, the harness's added with `HarnessTools`, `agent.run`/`stream`/`resume` instead of
+`graph.ainvoke`, pauses in place with a checkpointer.
 This page is what is particular to Deep Agents.
 
 **Install:** `pip install 'trellis-harness[deepagents]'` (brings `[langgraph]`).
@@ -16,19 +17,20 @@ LangGraph graph, and the Way 2 recipe applies as it is: [blocks/langgraph.md](..
 from deepagents import create_deep_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
+from trellis.harness.middleware import HarnessTools
 
-tools = await h.tools(refund, lookup_order, framework="deepagents")
+tools = [refund, lookup_order]  # LangChain tools: the graph's own, governed as it runs them
 graph = create_deep_agent(
     model=model,
     tools=tools,
     system_prompt="You process refund requests.",
-    middleware=[TodoListMiddleware()],  # planning: write_todos
+    middleware=[TodoListMiddleware(), HarnessTools()],  # planning; the MCP and memory tools
     subagents=[
         {
             "name": "order-checker",
             "description": "Looks up an order.",
             "system_prompt": "Look the order up.",
-            "tools": tools,  # the same harness tools
+            "tools": tools,  # the same tools
             "model": model,
         }
     ],
@@ -43,35 +45,41 @@ result = await agent.run("Refund order o-7.", user="ada", thread="ticket-7")
 
 | Part | |
 |---|---|
-| Your tools from `h.tools` | harness tools: governed by the catalog at each call, approvals, journal, records, spans — in the main agent and in a sub-agent alike (a sub-agent's calls happen inside the run, so they are the run's) |
-| Sub-agents (`subagents=[...]`, the `task` tool) | run inside the main agent's run: one run record, one trace, one transcript (the main agent's answer). Give a sub-agent the harness tools it needs (`"tools": tools`); the default `general-purpose` sub-agent gets the main agent's tools |
+| Your tools | the graph's own, governed at each call as the graph runs them: the catalog's risk and rules, approvals, journal, records, spans — in the main agent and in a sub-agent alike (a sub-agent's calls happen inside the run, so they are the run's) |
+| Sub-agents (`subagents=[...]`, the `task` tool) | each `task` call is a child run of the run ([below](#sub-agents-and-child-runs)): its own record, its turns in memory, its spans in the run's trace. Give a sub-agent the tools it needs (`"tools": tools`); the default `general-purpose` sub-agent gets the main agent's tools |
 | Planning (`TodoListMiddleware`, `write_todos`) | the plan lives in the graph's state (`state["todos"]`, read with `graph.aget_state(...)` on the thread); `write_todos` is Deep Agents' own tool, not a harness tool |
-| Built-in file tools (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `delete`, `execute`) and `task` | Deep Agents' own: they work on its backend (the graph state by default) and are not governed, journaled or recorded by the harness. Gate the ones that matter with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
+| Built-in tools | Deep Agents' own. Those that only change the graph's state — `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` on its default backend — run as they are (the run's checkpoint keeps them); any other, `execute` among them, is governed as the graph's own tools are (the catalog's risk, else a write); `task` is a child run. Gate more with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
 | `interrupt_on={tool: True \| InterruptOnConfig}` | LangChain's `HumanInTheLoopMiddleware`: an approval of the calls it holds, answered with `approve`, `edit`, `reject` (with a reason the model reads), `answer` ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)); needs a checkpointer |
 | Hooks | the tool and run hooks as for every target; the model hooks through the same LangChain middleware as `create_agent`: `create_deep_agent(..., middleware=[ModelHooks()])` ([hooks.md](../hooks.md)) |
-| A stored prompt of the gateway (`ChatOpenAI(default_headers=await h.model_headers(prompt="triage"))`) | pinned at each run's start, journaled and said (a `prompt` event, the agent span's `trellis.prompt.*`); the chat model copied its headers when it was built, so with `middleware=[ModelHooks()]` each call selects the version the run pinned ([gateway.md](../gateway.md#prompts)) |
-| Tool hints | as for a `create_agent` graph ([langgraph.md](langgraph.md#what-is-automatic)): from 5 tools, each model call of the main agent is offered only the harness tools the run offers (the hinted ones, the memory tools, those already used); Deep Agents' own tools (`ls`, `task`, ...) are always offered, and a sub-agent's model is offered the tools it was built with |
-| Memory | the context as a leading system message of the main agent (sub-agents get the `task` description, as Deep Agents gives them); the memory tools are in `h.tools(...)` for the main agent and any sub-agent you give them to |
+| A stored prompt of the gateway (`middleware=[ModelHooks(prompt=stored("triage"))]`) | pinned at each run's start, journaled and said (a `prompt` event, the span's `trellis.prompt.*`); each model call gets the version the run pinned ([prompts.md](../prompts.md)) |
+| Tool hints | as for a `create_agent` graph ([langgraph.md](langgraph.md#what-is-automatic)): from 5 tools, each model call of the main agent is offered only the harness tools the run offers (the hinted ones, the memory tools, those already used); Deep Agents' state tools (`ls`, `read_file`...) and `task` are always offered, its other own tools as the run offers them; a sub-agent's model is offered the tools it was built with, and their calls are governed and recorded as the run's |
+| Memory | the context as a leading system message of the main agent; a sub-agent, a child run, gets the context for its task before the task description (`## Your task`); the memory tools come with `HarnessTools` (or `await h.memory_tools()` for a sub-agent you give them to) |
 
 Deep Agents' own `memory=[...]` (AGENTS.md files) and `skills=[...]` are prompts it loads from
 its backend; they are independent of the memory service and can be used beside it.
 
-## Sub-agents and the store
+## Sub-agents and child runs
 
-A `task` call is a child run of the run: its record names the run, its task and answer go to
-memory under its own run, its tool calls are governed as the run's (`h.tools`), and its model
-calls count toward the run's budget. A Deep Agent compiled without a `store` gets the memory
-service as its store, so a `StoreBackend` writes the user's memories
+A `task` call is a child run of the run (`bridges.helpers`): its record names the run
+(`h.runs.iterate(parent_run_id=...)` lists it), the memory context for its task comes before
+the task description, its tool calls are governed under the catalog's rules and recorded under
+its own run, its task and answer go to memory under it, its model calls count toward the run's
+budget, and a sub-agent cut by a crash is ended by the worker that continues the run
+([subagents.md](../subagents.md#automatic)). The wrapped Deep Agent is, the other way round, a
+`ReAct`'s sub-agent like any agent (`subagents=[agent]`). Runnable:
+[examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
+## The store
+
+A Deep Agent compiled without a `store` gets the memory service as its store, so a `StoreBackend` writes the user's memories
 ([langgraph.md](langgraph.md#what-is-automatic)).
 
 ## Native or ours: skills, prompts, sandbox
 
 * **Skills:** for `SKILL.md` folders, use Deep Agents' own: `create_deep_agent(skills=[...])`
-  (its `SkillsMiddleware`, read through the backend). Use the harness's
-  (`h.tools(skills(...), framework="deepagents")`) for skills from Bifrost's registry, or when
-  each skill's version must be pinned per run and replayed ([skills.md](../skills.md#native-or-ours)).
-* **Prompts:** Deep Agents takes text: `system_prompt=await h.prompt(...)` for a prompt from a
-  folder, Langfuse or Bifrost, its version pinned ([prompts.md](../prompts.md#native-or-ours)).
+  (its `SkillsMiddleware`, read through the backend) ([skills.md](../skills.md#native-or-ours)).
+* **Prompts:** Deep Agents takes text: `system_prompt=(await h.prompt("triage")).text` for a
+  stored prompt of the gateway ([prompts.md](../prompts.md#native-or-ours)).
 * **Sandbox:** prefer its own backend for `execute` (`BaseSandbox`, `LangSmithSandbox`;
   `LocalShellBackend` is the host's shell, unisolated), gated with `interrupt_on`; `sandbox()`
   when every command must be governed by the catalog and journaled
@@ -84,7 +92,7 @@ tool node (in place with a checkpointer, by re-run without), `stream` yields the
 `start`/workers/`schedule` run it durably (an `interrupt_on` pause resumed by another worker
 needs a checkpointer every worker can reach; a harness approval resumed there is answered from
 the journal — [which checkpointer](langgraph.md#approvals-and-pauses)), `serve_chat`/`serve_a2a`
-serve it, and `h.evaluate`/judges score it (`llm_judge` needs `TRELLIS_JUDGE_MODEL`).
+serve it, and `h.evaluate`/judges score it (`llm_judge` asks the gateway's judge alias (or its own `model=`)).
 
 A tool of the agent's own that asks with LangGraph's `interrupt(value)` (a checkpointer
 needed) is the graph's own question: a dict `value` carries `options` (several picks with
@@ -93,24 +101,25 @@ needed) is the graph's own question: a dict `value` carries `options` (several p
 given ([the table](langgraph.md#approvals-and-pauses)).
 
 A Deep Agent is a graph: `framework_options=` goes into its run's config as for any graph
-(`recursion_limit`, `configurable` keys; the harness's `thread_id` wins —
+(`recursion_limit`, `configurable` keys, merged key by key; a `thread_id` among them is
+refused: the thread is `run(thread=)` —
 [langgraph.md](langgraph.md#the-graphs-own-run-options)).
 
 ## Limits
 
-* Harness tools are bound when the graph is built, as for `create_agent`: build it without
-  what its agent goes without (`h.tools(..., without={...})`), and give it the harness's
+* Tools are bound when the graph is built, as for `create_agent`: give it the harness's
   middleware (`create_deep_agent(..., middleware=[ModelHooks()])`) to hide from the model the
   tools of a part turned off later; without it they are offered, and a call is refused
   ([langgraph.md](langgraph.md#limits)).
 
-* Deep Agents' built-in tools (files, `execute`, `task`, `write_todos`) are not the harness's
-  (above): gate them with `interrupt_on`.
+* Deep Agents' state tools (`write_todos`, the files on its default backend) are not governed
+  or journaled (above): the graph's checkpoint keeps what they did; gate them with
+  `interrupt_on`.
 * A sub-agent's harness call that asks pauses the whole run (the interrupt names the call), and
   the approval resumes the sub-agent where it stopped with a checkpointer, or re-runs the run
   from its journal without one — either way the call runs once.
-* A sub-agent sees the `task` description, not the pushed context: give it the memory tools
-  (`memory_search`) when it should read memory itself.
+* A sub-agent is given the context for its task, not the main agent's tools: give it the
+  memory tools (`memory_search`) when it should read memory itself.
 
 ## Run it
 

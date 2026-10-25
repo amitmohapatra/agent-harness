@@ -38,13 +38,13 @@ def notify(email: str, api_key: str, text: str) -> str:
 
 async def mailer(input: str, agent: Runtime) -> str:
     return await agent.tools.call(
-        "notify", email="ada@example.com", api_key="example-not-a-real-key", text=input
+        notify, email="ada@example.com", api_key="example-not-a-real-key", text=input
     )
 
 
 async def main() -> None:
     async with Harness() as h:
-        agent = h.wrap(mailer, id="mailer", tools=[notify])
+        agent = h.wrap(mailer, id="mailer")
         result = await agent.run("Your order shipped.", user="ada", thread="orders")
         print(result.status.value, result.answer)
     for span in exporter.get_finished_spans():

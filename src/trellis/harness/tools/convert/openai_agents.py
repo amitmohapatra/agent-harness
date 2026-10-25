@@ -13,6 +13,7 @@ preview naming where; ``read_file`` (with them, enabled once the run keeps one) 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 from collections.abc import Sequence
 from typing import Any, Final
@@ -49,8 +50,9 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
 def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
     harness's are — governance (the catalog's risk, else ``write``: announced), a person when
-    it asks, the journal (a resume does not run a call again), its time and its trace — as a
-    copy: the agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
+    it asks, the journal (a resume does not run a call again), its time and its trace — and
+    offered per turn only while the run offers it (the tool hints' narrowing), as a copy: the
+    agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
     is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
     else is returned as it is."""
     if not isinstance(tool, FunctionTool) or getattr(tool.on_invoke_tool, MADE, False):
@@ -61,13 +63,15 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
 
     async def invoke(context: ToolContext[Any], arguments: str) -> Any:
         args = arguments_of(arguments)
-        if isinstance(args, str) or current() is None:
+        runtime = current()
+        if isinstance(args, str) or runtime is None:
             return await original(context, arguments)
 
         async def run(given: dict[str, Any]) -> Any:
             return await original(context, json.dumps(given))
 
-        spec = ToolSpec(
+        # as the run's tool set has it (an agent tool: a helper, read), else undeclared: write
+        spec = runtime.native.get(tool.name) or ToolSpec(
             name=tool.name,
             description=tool.description or tool.name,
             input_schema=tool.params_json_schema,
@@ -77,15 +81,33 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         return results.readable(outcome.output)
 
     setattr(invoke, MADE, True)
-    return dataclasses.replace(tool, on_invoke_tool=invoke)
+    enabled = _narrowed(tool.name, tool.is_enabled)
+    return dataclasses.replace(tool, on_invoke_tool=invoke, is_enabled=enabled)
+
+
+def _narrowed(name: str, own: Any) -> Any:
+    """An agent's own tool enabled per turn as it was (``own``: a bool, or a sync or async
+    callable) and only while the run offers it (``Runtime.offers``: the tool hints' narrowing
+    reaches the framework's own tools too)."""
+
+    async def enabled(context: Any, agent: Any) -> bool:
+        if not _offered(name):
+            return False
+        if callable(own):
+            given = own(context, agent)
+            return bool(await given if inspect.isawaitable(given) else given)
+        return bool(own)
+
+    return enabled
 
 
 def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
     """An agent tool's ``invoke`` as a helper of the run (``bridges.helpers``): started with the
-    call's input, ended with the agent's answer or its error, and what its own run spent — the
-    SDK adds it to the calling run's usage — counted toward the run's budget. A pause inside
-    leaves it to the next attempt, and stops the calling agent too (the SDK hands the agent
-    tool's pause back as an error text)."""
+    call's input, given the memory context for it before it, its tool calls recorded under its
+    run while it works, ended with the agent's answer or its error, and what its own run spent
+    — the SDK adds it to the calling run's usage — counted toward the run's budget. A pause
+    inside leaves it to the next attempt, and stops the calling agent too (the SDK hands the
+    agent tool's pause back as an error text)."""
     inner = getattr(tool, AGENT_OF_TOOL, None)
     model = getattr(inner, "model", None)
 
@@ -93,10 +115,15 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
         args = arguments_of(arguments)
         task = args.get("input") if isinstance(args, dict) else None
         key = context.tool_call_id
-        await helpers.start(key, kind=Kind.AGENT_TOOL, name=tool.name, task=str(task or arguments))
+        helper = await helpers.start(
+            key, kind=Kind.AGENT_TOOL, name=tool.name, task=str(task or arguments)
+        )
+        if isinstance(args, dict) and isinstance(task, str):
+            arguments = json.dumps({**args, "input": helpers.briefed(helper, task)})
         before = _spent(context.usage)
         try:
-            answer = await invoke(context, arguments)
+            with helpers.working(helper):
+                answer = await invoke(context, arguments)
         except Exception as exc:  # a pause leaves it open (``Helpers.end``: the run is pausing)
             await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
             raise

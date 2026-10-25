@@ -96,7 +96,7 @@ def docker_host(environ: Mapping[str, str] | None = None) -> str:
 
 
 class DockerSandbox:
-    """The Docker provider (``SANDBOX=docker``): ``image``, the image of a sandbox whose spec
+    """The Docker provider (``sandbox()``'s default): ``image``, the image of a sandbox whose spec
     names none (else :data:`DEFAULT_IMAGE`); ``host``, where the daemon is (else
     :func:`docker_host`: ``DOCKER_HOST``, the docker context, the local socket)."""
 

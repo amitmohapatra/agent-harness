@@ -7,37 +7,34 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
 from typing import Any
 
 import httpx
 import pytest
 import respx
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Settings, tool
 from trellis.harness import telemetry
 from trellis.harness.evals import EvalItem, EvalServices, evaluate, exact_match
 
 LF = "https://lf.test"
-LANGFUSE: dict[str, Any] = {
-    "langfuse_public_key": "pk",
-    "langfuse_secret_key": "sk",
-    "langfuse_host": LF,
+LANGFUSE: dict[str, str] = {
+    "LANGFUSE_PUBLIC_KEY": "pk",
+    "LANGFUSE_SECRET_KEY": "sk",
+    "LANGFUSE_BASE_URL": LF,
 }
 PREFIX = "langfuse.experiment."
 
 
 @pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
+def langfuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Langfuse's own variables, as its SDK reads them."""
+    for name, value in LANGFUSE.items():
+        monkeypatch.setenv(name, value)
 
 
 @tool(side_effects="read")
@@ -51,7 +48,7 @@ def geo_agent(h: Harness, turns: int) -> Any:
     for country, city in [("France", "Paris"), ("Italy", "Rome")][:turns]:
         script += [("capital_of", {"country": country}), city]
     model = ScriptedChat(script)
-    return h.wrap(ReAct(system="Capitals.", model=model), id="geo", tools=[capital_of])
+    return arm(h.wrap(ReAct(system_prompt="Capitals.", model=model), id="geo"), [capital_of])
 
 
 def experimental(span: ReadableSpan) -> dict[str, Any]:
@@ -103,6 +100,7 @@ def langfuse_dataset(routes: respx.MockRouter, *, link: httpx.Response) -> respx
     return routes.post(f"{LF}/api/public/dataset-run-items").mock(return_value=link)
 
 
+@pytest.mark.usefixtures("langfuse")
 @respx.mock
 async def test_a_langfuse_dataset_run_is_linked_and_on_every_span_of_its_runs(
     spans: InMemorySpanExporter,
@@ -111,7 +109,7 @@ async def test_a_langfuse_dataset_run_is_linked_and_on_every_span_of_its_runs(
         respx.mock,
         link=httpx.Response(200, json={"id": "dri-1", "datasetRunId": "dsr-1"}),
     )
-    async with Harness(config=Settings(**LANGFUSE)) as h:
+    async with Harness(config=Settings()) as h:
         report = await h.evaluate(
             geo_agent(h, 2),
             "capitals",
@@ -171,12 +169,13 @@ async def test_a_langfuse_dataset_run_is_linked_and_on_every_span_of_its_runs(
     )
 
 
+@pytest.mark.usefixtures("langfuse")
 @respx.mock
 async def test_a_refused_link_still_marks_the_spans_with_one_fallback_id(
     spans: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
 ) -> None:
     langfuse_dataset(respx.mock, link=httpx.Response(404, json={"message": "gone in v4"}))
-    async with Harness(config=Settings(**LANGFUSE)) as h:
+    async with Harness(config=Settings()) as h:
         report = await h.evaluate(geo_agent(h, 2), "capitals", [], run_name="v4", concurrency=1)
     assert "was not linked to dataset run v4" in caplog.text
     assert report.dataset_run_url is None
@@ -200,7 +199,7 @@ async def test_a_callables_items_are_linked_and_on_every_span_of_their_traces(
         with telemetry._tracer.start_as_current_span("my framework's step"):
             return {"France": "Paris"}.get(country, "Rome")
 
-    langfuse = telemetry.Langfuse.of(Settings(**LANGFUSE))
+    langfuse = telemetry.Langfuse.of(LANGFUSE)
     async with EvalServices(langfuse=langfuse) as services:
         report = await evaluate(
             capitals,

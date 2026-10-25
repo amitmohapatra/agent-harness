@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions, InMemorySessionStore
 
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunStatus
@@ -76,8 +77,8 @@ async def test_a_paused_session_continues_on_another_machine(tmp_path: Path) -> 
     first = Harness(config=Settings(), runs=runs)
     second = Harness(config=Settings(), runs=runs)
     try:
-        here = first.wrap(machine(tmp_path, "one", SCRIPT), id="refunder", tools=[refund])
-        there = second.wrap(machine(tmp_path, "two", SCRIPT), id="refunder", tools=[refund])
+        here = arm(first.wrap(machine(tmp_path, "one", SCRIPT), id="refunder"), [refund])
+        there = arm(second.wrap(machine(tmp_path, "two", SCRIPT), id="refunder"), [refund])
         paused = await here.run("refund o1", user="ada")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         record = await runs.get(paused.run_id)
@@ -118,8 +119,8 @@ async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Pat
     first = Harness(config=Settings(), runs=runs)
     second = Harness(config=Settings(), runs=runs)
     try:
-        dying = first.wrap(machine(tmp_path, "one", script), id="r", tools=[boom])
-        taking_over = second.wrap(machine(tmp_path, "two", script), id="r", tools=[boom])
+        dying = arm(first.wrap(machine(tmp_path, "one", script), id="r"), [boom])
+        taking_over = arm(second.wrap(machine(tmp_path, "two", script), id="r"), [boom])
         handle = await dying.start("work", user="ada")
         worker = first.worker([dying])
         claimed = await runs.claim(worker.worker_id, [dying.id])
@@ -128,10 +129,10 @@ async def test_a_worker_that_died_leaves_no_side_effect_done_twice(tmp_path: Pat
         # the worker dies inside the SDK's tool call: its task group carries the crash out
         with pytest.RaisesGroup(Crash, flatten_subgroups=True):
             await dying.execute(job)
-        held, _ = runs._leases[handle.run_id]
-        runs._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+        held, _ = runs._leases[handle.id]
+        runs._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
         assert await second.worker([taking_over]).run_once()
-        result = await handle.result(timeout=10)
+        result = await handle.result(wait=10)
     finally:
         await first.aclose()
         await second.aclose()

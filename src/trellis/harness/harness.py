@@ -1,12 +1,12 @@
-"""``Harness``: the one object an application constructs. It is the blocks it is given — the
-run store, the memory client, the Bifrost gateway, governance — each built from the environment
-when it is not given (or left off: ``memory=False``), with the background writes and the
-scores, and attaches all of it to agents with :meth:`Harness.wrap`.
+"""``Harness``: the one object an application constructs — its connections to the services
+(the run store, the memory service, the Bifrost gateway), each built from the environment when
+it is not given (or left off: ``memory=False``), with the background writes and the scores —
+and attaches all of it to agents with :meth:`Harness.wrap`.
 
 Nothing about an agent is configured beyond ``h.wrap(target, id=...)``: memory is on when the
 deployment has a memory service, the MCP tools are the ones the Bifrost virtual key allows,
-whether a call runs, is announced or asks is governance's (:meth:`Harness.governance`: the
-tools' risks and the catalog's rules), and who the deployment is (its tenant) comes from
+whether a call runs, is announced or asks is governance's (the tools' risks and the memory
+service's catalog rules), and who the deployment is (its tenant) comes from
 ``TRELLIS_API_KEY`` itself — asked of the memory service, remembered for the process (asked
 again every :data:`KEY_TTL_SECONDS`, the last answer kept while the service is down).
 """
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, Final, Literal, TypeVar
 
@@ -27,7 +28,6 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
-from trellis.harness.adapters.base import ToolFormat
 from trellis.harness.agent import Agent
 from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
@@ -35,28 +35,20 @@ from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
-from trellis.harness.features import Feature, features
+from trellis.harness.features import Feature
 from trellis.harness.fresh import Fresh
-from trellis.harness.gateways import model_gateway
+from trellis.harness.gateways import GatewayKind, bifrost_wins, model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
-from trellis.harness.prompts import (
-    GatewayHeaders,
-    ModelPrompts,
-    Prompt,
-    PromptSource,
-    PromptSources,
-)
+from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
-from trellis.harness.skills import Skill, SkillSource, SkillSources
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
-from trellis.harness.tools.mcp import MCPSource, retired_mcp, split
-from trellis.harness.tools.sources import as_source
+from trellis.harness.tools.mcp import MCPSource
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.harness.worker import Worker
 from trellis.harness.writes import Writes
@@ -71,19 +63,8 @@ from trellis.runs import RunsClient, RunSummary
 
 log = logging.getLogger("trellis.harness")
 
-_Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient, PromptSources, SkillSources)
+_Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient)
 
-Framework = Literal["langgraph", "deepagents", "openai_agents", "claude_agent_sdk"]
-#: The native tool format each framework's agents are built with, by the framework's adapter
-#: name (Deep Agents builds a LangGraph graph: LangChain tools too).
-FORMATS: Final[dict[str, ToolFormat]] = {
-    "langgraph": "langchain",
-    "deepagents": "langchain",
-    "openai_agents": "openai_agents",
-    "claude_agent_sdk": "claude",
-}
-#: The metadata key on a LangChain tool built by :meth:`Harness.tools`: which call built it.
-TOOLBOX: Final = "trellis_toolbox"
 #: The tenant of a deployment with no memory service (development: nothing to ask).
 LOCAL_TENANT: Final = "default"
 #: How long what the memory service said about ``TRELLIS_API_KEY`` is kept before it is asked
@@ -103,41 +84,25 @@ INBOX_MAX_PAGES: Final = 10
 
 
 class Harness:
-    """The blocks it is given, the rest from the environment: ``Harness()`` reads it
+    """The connections to the services, the rest from the environment: ``Harness()`` reads it
     (``.env.example`` lists every variable); ``Harness(config=Settings(...))`` is the same
     without it.
 
-    ``runs`` (a :class:`~trellis.harness.runs.RunStore`: ``trellis.runs.RunsClient``,
-    ``LocalRuns``), ``memory`` (a ``trellis.memory.MemoryClient``), ``gateway`` (a
-    ``trellis.harness.clients.bifrost.Gateway``) and ``governance`` (a
-    :class:`~trellis.harness.governance.Governance`, for every tenant) are the blocks Way 2 uses
-    on their own: given, each is used as it is (and closed by its owner, not here); not given,
-    each is built from the environment (``RUNS_URL``, ``MEMORY_URL``, ``BIFROST_URL``; governance
-    from the memory service's catalog per tenant); ``False`` leaves memory, the gateway or
-    agent-runs off (runs kept in this process) even where the environment names them.
-    ``prompts`` and ``skills`` are the prompt and skill sources (``trellis.harness.prompts``,
-    ``trellis.harness.skills``: ``Prompt``, ``prompts_dir``, ``langfuse_prompts``, ``Skill``,
-    ``skills_dir``..., or a ``PromptSources``/``SkillSources``): given, they are the ones asked,
-    in their order; not given, the environment's (``PROMPTS_DIR``, Langfuse's keys,
-    ``SKILLS_DIR``, the gateway).
-
-    ``judges`` are the online evaluators every sampled successful run is scored by
-    (``TRELLIS_EVAL_SAMPLE``: by default 0.1 of the runs), in the background. ``hooks``
-    (``trellis.harness.hooks.Hooks``) run around every run, model call and tool call of every
-    agent it wraps, before each agent's own."""
+    ``memory`` (a ``trellis.memory.MemoryClient``), ``runs`` (a
+    :class:`~trellis.harness.runs.RunStore`: ``trellis.runs.RunsClient``, ``LocalRuns``) and
+    ``gateway`` (a ``trellis.harness.clients.bifrost.Gateway``) replace that service (tests, in
+    process): given, each is used as it is (and closed by its owner, not here); not given, each
+    is built from the environment (``MEMORY_URL``, ``RUNS_URL``, ``BIFROST_URL``); ``False``
+    leaves memory, the gateway or agent-runs off (runs kept in this process) even where the
+    environment names them."""
 
     def __init__(
         self,
         config: Settings | None = None,
         *,
-        runs: RunStore | Literal[False] | None = None,
         memory: MemoryClient | Literal[False] | None = None,
+        runs: RunStore | Literal[False] | None = None,
         gateway: Gateway | Literal[False] | None = None,
-        governance: Governance | None = None,
-        prompts: PromptSources | Sequence[PromptSource] | None = None,
-        skills: SkillSources | Sequence[SkillSource] | None = None,
-        judges: Sequence[Evaluator] = (),
-        hooks: Sequence[Hooks] = (),
     ) -> None:
         self.settings = config or Settings.from_env()
         s = self.settings
@@ -162,11 +127,6 @@ class Harness:
         #: the gateway, with the judge's own virtual key when it has one (its budget apart from
         #: the agents'); each agent's are ``agent.evals``
         self.evals = EvalServices.of(s, gateway=self.gateway)
-        #: the online judges, and the share of runs they score
-        self.judges: list[Evaluator] = list(judges)
-        #: the hooks of every agent wrapped here
-        self.hooks: list[Hooks] = list(hooks)
-        self.judge_sample = s.eval_sample if judges else 0.0
         if builds_memory:
             memory = self._making(MemoryClient(s.memory_url, api_key=s.api_key))
         self.memory = Memory(memory) if memory else None
@@ -176,11 +136,6 @@ class Harness:
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: every agent wrapped here, by id (what ``python -m trellis.harness.worker`` serves)
         self.agents: dict[str, Agent] = {}
-        #: the sources and Virtual MCPs of each :meth:`tools` call, by the number its LangChain
-        #: tools carry in their metadata: a LangGraph agent's toolbox is those of the calls its
-        #: graph's tools came from
-        self._built: LRU[int, tuple[list[Source], list[str] | None]] = LRU()
-        self._next_built = 0
         self._key = Fresh(
             self._whoami,
             what="who TRELLIS_API_KEY is",
@@ -188,144 +143,89 @@ class Harness:
             retry=KEY_RETRY_SECONDS,
             fatal=(ConfigurationError,),
         )
-        self._registered: set[tuple[str, str]] = set()
+        self._keys_registered: set[tuple[str, str]] = set()
         #: the memory service said it takes no model keys: none is registered again
         self._model_keys_off = False
-        #: governance per tenant (:meth:`governance`), or the one given for every tenant
-        #: one governance per tenant, the least recently used forgotten past the bound
-        self._governance: LRU[str, Governance] = LRU()
-        self._given_governance = governance
-        #: where prompts and skills are looked up: the sources given, as they are; else the
-        #: ones the environment names (``PROMPTS_DIR``, Langfuse, ``SKILLS_DIR``, the gateway)
-        if prompts is None:
-            prompts = self._making(PromptSources.of(s, gateway=self.gateway))
-        if skills is None:
-            skills = self._making(SkillSources.of(s, gateway=self.gateway))
-        self.prompts = prompts if isinstance(prompts, PromptSources) else PromptSources(prompts)
-        #: the gateway's prompts handed to frameworks' model clients (``model_headers``)
-        self.model_prompts = ModelPrompts(self.gateway)
-        self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
-        self.evals.prompts = self.prompts
-        telemetry.configure(s)
-        #: where a model name goes (``trellis.harness.gateways``): Bifrost, else an
-        #: OpenAI-compatible endpoint, else none
+        #: governance per tenant (:meth:`governance`), the least recently used forgotten past
+        #: the bound; ``_governance_given`` replaces it for every tenant (tests)
+        self._governances: LRU[str, Governance] = LRU()
+        self._governance_given: Governance | None = None
+        #: the gateway's stored prompts (``stored``, :meth:`prompt`)
+        self.prompts = Prompts(self.gateway)
+        telemetry.configure()
+        #: where a model name goes (``trellis.harness.gateways``): Bifrost, else the
+        #: provider's own SDK with its own key; these settings', not the environment's
         self.model_gateway = model_gateway(s)
+        if self.model_gateway.kind is GatewayKind.BIFROST:
+            bifrost_wins(os.environ)
         log.info(
-            "trellis harness: gateway %s, memory %s, runs %s, spool %s, traces %s, sandbox %s "
+            "trellis harness: models %s, memory %s, runs %s, spool %s, traces %s "
             "(trellis doctor prints each setting and its source)",
-            "none"
-            if self.model_gateway is None
-            else f"{self.model_gateway.title} {self.model_gateway.url}",
+            f"{self.model_gateway.title} {self.model_gateway.url}",
             s.memory_url or "off",
             s.runs_url or "in process",
             s.spool_dir or "none",
             "on" if telemetry.exporting() else "off",
-            s.sandbox or "none",
         )
 
     # ------------------------------------------------------------------ attaching
     def wrap(
         self,
-        target: Any,
+        agent: Any,
         *,
         id: str,
-        tools: Sequence[Source | Callable[..., Any] | Agent] = (),
         version: str | None = None,
-        mcp: Sequence[str] | None = None,
-        skills: Sequence[str | Skill] = (),
-        timeout: float | None = None,
-        without: Collection[Feature] = (),
+        description: str | None = None,
         hooks: Sequence[Hooks] = (),
-        framework_options: Mapping[str, Any] | None = None,
+        judges: Sequence[Evaluator] = (),
         budget: Budget | None = None,
+        run_timeout: float | None = None,
+        without: Collection[str] = (),
+        framework_options: Mapping[str, Any] | None = None,
     ) -> Agent:
-        """Attach the harness to ``target`` (a compiled LangGraph graph, an OpenAI Agents
-        ``Agent``, ``ClaudeAgentOptions``, a ``ReAct``, or ``async (input, agent) -> answer``).
-        ``tools`` are the agent's own (functions, ``a2a``, ``openapi``, wrapped agents as
-        sub-agents) and its MCP servers, ``mcp(...)`` (``tools.mcp``): a server's URL, a local
-        ``stdio(...)`` server, or a Virtual MCP of the gateway by name; with none, its MCP tools
-        are the ones the Bifrost virtual key allows. ``mcp`` (deprecated: ``mcp("name")`` in
-        ``tools``) names Virtual MCPs as before. ``skills`` are skills by name
-        (``"name"``, ``"name@version"``, from the skill sources) or given (``Skill``):
-        ``trellis.harness.skills``.
-        ``version`` is the version of the agent's code (else ``TRELLIS_AGENT_VERSION``),
-        recorded with each run it starts: a run resumed on another version goes on, with a
-        warning naming both. ``timeout`` is the most working time one of its runs may take, in
-        seconds, when the run names none (``run``/``stream``/``start(timeout=)`` override it):
-        on every entry — ``serve_chat``, ``serve_a2a``, ``h.evaluate``, scheduled runs too.
-        ``without`` turns parts of what the harness does off for every run of the agent
-        (``trellis.harness.features``: ``memory``, ``judges``, ``mcp``...); everything
-        configured is on otherwise. ``hooks`` run around its runs, model calls and tool calls,
-        after the harness's (``trellis.harness.hooks``). ``framework_options`` are the
-        framework's own options for every run's call, passed through unchanged (a LangGraph
-        config's keys, ``Runner.run``'s arguments, ``ClaudeAgentOptions`` fields; each
-        framework's page says which the harness keeps for itself): a run's own
-        (``run``/``stream``/``start``/``schedule(framework_options=)``) go over them.
-        ``budget`` is the most one of its runs may spend — tokens, dollars, tool calls
-        (``trellis.harness.budget``; none given: no cap)."""
-        agent = Agent(
-            self,
-            target,
-            id=id,
-            tools=tools,
-            version=version,
-            mcp=mcp,
-            skills=skills,
-            timeout=timeout,
-            without=without,
-            hooks=hooks,
-            framework_options=framework_options,
-            budget=budget,
-        )
-        if agent.id in self.agents:
-            raise ConfigurationError(f"an agent {agent.id!r} is already wrapped by this harness")
-        self.agents[agent.id] = agent
-        return agent
+        """Attach the harness to ``agent`` — a compiled LangGraph graph (Deep Agents and
+        ``ReAct`` included), an OpenAI Agents ``Agent``, ``ClaudeAgentOptions``, or
+        ``async (input, agent) -> answer`` — and say who it is and how it is run. What the agent
+        *is* (its model, instructions and tools) is its builder's: ``ReAct(tools=,
+        subagents=)``, or the framework's own (its tools are governed as the harness's); every
+        run also has the MCP tools the virtual key allows and the memory tools.
 
-    async def tools(
-        self,
-        *sources: Source | Callable[..., Any] | Agent,
-        framework: Framework,
-        mcp: Sequence[str] | None = None,
-        without: Collection[Feature] = (),
-    ) -> Any:
-        """The toolbox as ``framework``'s own tools (by its adapter's name), for building an
-        agent with them before wrapping it: LangChain tools (``langgraph``, ``deepagents``),
-        ``FunctionTool``\\ s (``openai_agents``), or one in-process MCP server
-        (``claude_agent_sdk``); another name is refused, naming these. It holds ``sources``
-        (``skills(...)``, ``mcp(...)`` and wrapped agents among them), the MCP tools the virtual
-        key allows (or, once ``sources`` name any ``mcp(...)``, the ones they name; ``mcp``:
-        deprecated, Virtual MCPs by name) and — memory on — the memory service's agent tools,
-        less the parts ``without`` names (``mcp``: no MCP tool; ``memory_pull``...): a graph's
-        tools are bound when it is built, so build it without what its agent goes without
-        (the harness's LangChain middleware, ``ModelHooks``, hides a part turned off later).
-        Every call is still the harness's: governance, approval, record."""
-        tool_format = FORMATS.get(framework)
-        if tool_format is None:
-            raise ConfigurationError(
-                f"no framework {framework!r}: name one of {', '.join(FORMATS)}"
-            )
-        if mcp is not None:
-            retired_mcp("h.tools")
-        mine, bundles = split([as_source(s) for s in sources], None if mcp is None else list(mcp))
-        off = features(without)
-        tenant = await self.tenant()
-        number = self._next_built
-        self._next_built += 1
-        self._built[number] = (mine, bundles)
-        tools = await self.resolve(mine, tenant=tenant, mcp=bundles, without=off)
-        if self.memory is not None and "memory_pull" not in off:
-            scope = self.memory.scoped(tenant)
-            tools.extend(t for t in await self.memory_tools(scope) if t.feature not in off)
-        native = convert(tool_format, tools)
-        if tool_format == "langchain" and native:
-            for tool in native:
-                tool.metadata = {**(tool.metadata or {}), TOOLBOX: number}
-        return native
+        ``id`` names it (its runs, memory, catalog, traces); ``version`` is the version of its
+        code (else ``service.version`` in ``OTEL_RESOURCE_ATTRIBUTES``), recorded with each run
+        it starts: a run resumed on another version goes on, with a warning naming both;
+        ``description`` says what it does (its A2A card, an agent calling it; else its
+        function's docstring). ``hooks`` run around its runs, model calls and tool calls
+        (``trellis.harness.hooks``); ``judges`` score a share of its successful runs online
+        (``llm_judge(sample=)``). For every run unless the run says otherwise: ``budget`` is
+        the most one may spend — tokens, dollars, tool calls (``trellis.harness.budget``) —,
+        ``run_timeout`` the most working time it may take, in seconds — on every entry:
+        ``serve_chat``, ``serve_a2a``, ``h.evaluate``, scheduled runs too —, ``without`` what
+        the harness does not do (``memory``, ``tool_search``, ``mcp``, ``code_mode``,
+        ``grounding``, ``judges``: ``trellis.harness.features``), and ``framework_options``
+        the framework's own options for each run's call, passed through unchanged (a LangGraph
+        config's keys, ``Runner.run``'s arguments, ``ClaudeAgentOptions`` fields; each
+        framework's page says which the harness keeps for itself): a run's own go over them."""
+        wrapped = Agent(
+            self,
+            agent,
+            id=id,
+            version=version,
+            description=description,
+            hooks=hooks,
+            judges=judges,
+            budget=budget,
+            run_timeout=run_timeout,
+            without=without,
+            framework_options=framework_options,
+        )
+        if wrapped.id in self.agents:
+            raise ConfigurationError(f"an agent {wrapped.id!r} is already wrapped by this harness")
+        self.agents[wrapped.id] = wrapped
+        return wrapped
 
     def worker(self, agents: Sequence[Agent], *, concurrency: int | None = None) -> Worker:
         """A worker that claims these agents' queued runs and executes them, ``concurrency``
-        at a time (else ``TRELLIS_WORKER_CONCURRENCY``, else the CPU count from 1 to 8)."""
+        at a time (else the CPU count, from 1 to 8)."""
         return Worker(self, agents, concurrency=concurrency)
 
     async def inbox(
@@ -343,7 +243,7 @@ class Harness:
                 status=RunStatus.PAUSED,
                 assignee=assignee,
                 limit=INBOX_LIMIT,
-                tenant=await self.tenant(tenant),
+                tenant=await self._tenant(tenant),
                 max_pages=INBOX_MAX_PAGES,
             )
         ]
@@ -373,7 +273,7 @@ class Harness:
         outrank the judge's and the run's own; the stored record is returned (None with
         memory off). ``tenant`` is the run's, named by a platform key only."""
         chosen = FeedbackVerdict(verdict)
-        record = await self.runs.get(run_id, tenant=await self.tenant(tenant))
+        record = await self.runs.get(run_id, tenant=await self._tenant(tenant))
         if record is None:
             raise ConfigurationError(f"no run {run_id}")
         stored: Feedback | None = None
@@ -389,7 +289,7 @@ class Harness:
                 evidence_refs=await run_memory.cited(),
             )
         comment = None if correction is None else str(correction)
-        await self.score(
+        await self._score(
             run_id,
             "feedback",
             VERDICT_SCORES[chosen.value],
@@ -415,7 +315,7 @@ class Harness:
         retrieve it (``WORKSPACE``, ``TENANT``)."""
         if self.memory is None:
             raise ConfigurationError("memory is off in this deployment: set MEMORY_URL")
-        scope = self.memory.for_user(await self.tenant(tenant), user, thread)
+        scope = self.memory.for_user(await self._tenant(tenant), user, thread)
         return await scope.add_document(file, title=title, visibility=visibility, wait=wait)
 
     async def evaluate(
@@ -458,48 +358,23 @@ class Harness:
             user=user,
         )
 
-    async def prompt(self, ref: str | Prompt, /, **values: Any) -> str:
-        """The prompt ``ref`` names (``"name"``, ``"name@version"``, or a ``Prompt``), from the
-        first prompt source that has it, as text with ``values`` filled in — for a framework's
-        own instructions (LangGraph, OpenAI Agents, Claude, Deep Agents, a function). Inside a
-        run it is pinned: journaled, so a resumed run reads the same text."""
-        return await self.prompts.render(ref, **values)
-
-    async def prompt_messages(self, ref: str | Prompt, /, **values: Any) -> list[dict[str, Any]]:
-        """:meth:`prompt` as chat messages (a chat prompt's; a text prompt is one system
-        message)."""
-        return await self.prompts.messages(ref, **values)
+    async def prompt(self, ref: str | Stored, /, **values: Any) -> Rendered:
+        """The gateway's stored prompt ``ref`` (``"name"``, ``"name@version"``, or
+        ``stored(...)``) with ``values`` filling its ``{{variables}}``: its ``.text`` and its
+        ``.messages`` — for a framework's own instructions (LangGraph, OpenAI Agents, Claude,
+        Deep Agents, a function). Inside a run it is pinned: journaled, so a resumed run reads
+        the same version."""
+        return await self.prompts.rendered(ref, **values)
 
     def governance_middleware(self) -> Any:
-        """A LangChain middleware that runs the framework's own tools of a ``create_agent`` or
-        Deep Agents graph — those not built with :meth:`tools` — as the harness's tools are:
-        governed, approved when governance asks, journaled, timed and traced
-        (``middleware.GovernTools``). Add it when you build the graph:
-        ``create_agent(..., middleware=[h.governance_middleware()])``; ``ReAct`` has it. An
-        OpenAI Agents agent's own tools are governed by ``h.wrap`` itself, on a copy."""
+        """A LangChain middleware that runs a ``create_agent`` or Deep Agents graph's own tools
+        as the harness's are — governed, approved when governance asks, journaled, timed and
+        traced (``middleware.GovernTools``) — for code that does not wrap the graph (a wrapped
+        graph's tool nodes are governed already): ``create_agent(...,
+        middleware=[h.governance_middleware()])``."""
         from trellis.harness.middleware import GovernTools  # noqa: PLC0415 - the react extra
 
         return GovernTools()
-
-    async def model_headers(self, *, prompt: str | None = None) -> Mapping[str, str]:
-        """The headers to give a framework's own model client pointed at the gateway
-        (``AsyncOpenAI(default_headers=...)``, ``ChatOpenAI(default_headers=...)``): the
-        gateway's deny-all MCP scope, so it neither adds the virtual key's MCP tools to the
-        framework's requests nor runs any itself (the harness's tools are the framework's), and
-        — ``prompt``, a stored prompt's name or ``name@version`` — that prompt's selection: the
-        gateway prepends it to every request.
-
-        With ``prompt`` they are pinned per run (``prompts.ModelHeaders``): every run of this
-        harness pins the prompt at its start — journaled, its ``prompt`` event, the
-        ``trellis.prompt.*`` attributes of its agent span — and the headers, read at each
-        request, select the version the run executing pinned (outside a run: the one resolved
-        now). An OpenAI client keeps them and reads them per request; a LangChain chat model
-        copies them when built, and the harness's ``ModelHooks`` middleware selects the run's
-        version on each call; the Claude Code CLI's ``ANTHROPIC_CUSTOM_HEADERS`` get it as the
-        CLI starts."""
-        if prompt is None:
-            return GatewayHeaders()
-        return await self.model_prompts.headers(prompt)
 
     async def aclose(self) -> None:
         """Finish the queued writes, export the queued spans and close the clients built here
@@ -514,9 +389,8 @@ class Harness:
         await asyncio.gather(*closers)
 
     def _mcp_sources(self) -> list[MCPSource]:
-        """The MCP servers this harness's agents and toolboxes reach themselves."""
+        """The MCP servers this harness's agents reach themselves."""
         found = [s for a in self.agents.values() for s in a.sources]
-        found += [s for mine, _ in self._built.values() for s in mine]
         return list({id(s): s for s in found if isinstance(s, MCPSource)}.values())
 
     async def __aenter__(self) -> Harness:
@@ -526,7 +400,7 @@ class Harness:
         await self.aclose()
 
     # ------------------------------------------------------------------ who we are
-    async def key(self) -> KeyInfo:
+    async def _key_info(self) -> KeyInfo:
         """What the memory service says about ``TRELLIS_API_KEY``: asked at first use, then
         every :data:`KEY_TTL_SECONDS`; while the service cannot be reached the last answer
         stands. ``ConfigurationError`` when the service refuses the key, or could never be
@@ -552,10 +426,10 @@ class Harness:
                 f"TRELLIS_API_KEY is (its tenant): {type(exc).__name__}: {exc}"
             ) from exc
 
-    async def tenant(self, requested: str | None = None) -> str:
+    async def _tenant(self, requested: str | None = None) -> str:
         """The tenant a call runs in: the key's own. Only a platform key (no tenant of its
         own) names one per call."""
-        own = (await self.key()).tenant_id
+        own = (await self._key_info()).tenant_id
         if own is None:
             if requested is None:
                 raise ConfigurationError("a platform key names the tenant: pass tenant=")
@@ -564,35 +438,9 @@ class Harness:
             raise ConfigurationError(f"TRELLIS_API_KEY speaks for {own!r}, not {requested!r}")
         return own
 
-    def built_for(self, tools: Sequence[Any]) -> tuple[list[Source], list[str] | None]:
-        """The sources and Virtual MCPs of the :meth:`tools` calls that ``tools`` (a graph's
-        bound tools) came from — each graph has its own toolbox, so two graphs may each have a
-        ``search`` (the key's whole reach when any of the calls named no Virtual MCP)."""
-        numbers = sorted(
-            {
-                n
-                for t in tools
-                if (n := (getattr(t, "metadata", None) or {}).get(TOOLBOX)) is not None
-            }
-        )
-        missing = [n for n in numbers if n not in self._built]
-        if missing:
-            raise ConfigurationError(
-                f"the tools of this graph were built by one of the {self._next_built} "
-                f"h.tools(...) calls past the last {self._built.maxsize}: wrap a graph soon "
-                "after building it"
-            )
-        built = [self._built[n] for n in numbers]
-        sources = [s for found, _ in built for s in found]
-        named = [bundles for _, bundles in built]
-        if not named or None in named:
-            return sources, None
-        return sources, list(dict.fromkeys(slug for bundles in named for slug in bundles or ()))
-
     @property
-    def known_tenant(self) -> str | None:
-        """The key's tenant once :meth:`key` has been asked (``None`` before, or for a
-        platform key)."""
+    def _known_tenant(self) -> str | None:
+        """The key's tenant once it has been asked (``None`` before, or for a platform key)."""
         return self._key.value.tenant_id if self._key.value is not None else None
 
     def _making(self, client: _Made) -> _Made:
@@ -601,15 +449,15 @@ class Harness:
         return client
 
     # ------------------------------------------------------------------ used by agents
-    def governance(self, tenant: str) -> Governance:
-        """Governance in ``tenant``: the one given (``Harness(governance=)``), else one per
-        tenant — the memory service's tool catalog in its scope (memory on; publishes go
-        through the background writes), or the tools' own risks only."""
-        if self._given_governance is not None:
-            return self._given_governance
-        found = self._governance.get(tenant)
+    def _governance(self, tenant: str) -> Governance:
+        """Governance in ``tenant``: one per tenant — the memory service's tool catalog in its
+        scope (memory on; publishes go through the background writes), or the tools' own risks
+        only."""
+        if self._governance_given is not None:
+            return self._governance_given
+        found = self._governances.get(tenant)
         if found is None:
-            found = self._governance[tenant] = self._governed(tenant)
+            found = self._governances[tenant] = self._governed(tenant)
         return found
 
     def _governed(self, tenant: str) -> Governance:
@@ -624,40 +472,41 @@ class Harness:
 
         return Governance(MemoryCatalog(scope.ctx), submit=submit, tenant=tenant)
 
-    def toolbox(
+    def _toolbox(
         self,
         sources: Sequence[Source],
         *,
         tenant: str,
-        mcp: Sequence[str] | None = None,
         without: Collection[Feature] = (),
+        agent_id: str | None = None,
     ) -> Toolbox:
-        """A toolbox of ``sources`` and the MCP tools in ``tenant`` (the key's, or those of
-        the Virtual MCPs ``mcp`` names; none ``without`` ``mcp``: no MCP server is asked),
-        published to its catalog and kept fresh (``tools/toolbox.py``)."""
+        """A toolbox of ``sources`` and the MCP tools the virtual key allows in ``tenant``
+        (none ``without`` ``mcp``: no MCP server is asked), published to its catalog and kept
+        fresh (``tools/toolbox.py``) — ``agent_id``'s, whose learned approval rules governance
+        reads."""
         gateway = None if "mcp" in without else self.gateway
         if "mcp" in without:  # its own MCP servers not reached either
             sources = [s for s in sources if not isinstance(s, MCPSource)]
-        return Toolbox(sources, gateway=gateway, governance=self.governance(tenant), mcp=mcp)
-
-    async def resolve(
-        self,
-        sources: Sequence[Source],
-        *,
-        tenant: str,
-        mcp: Sequence[str] | None = None,
-        without: frozenset[Feature] = frozenset(),
-    ) -> list[Tool]:
-        """The toolbox once: ``sources`` and the MCP tools, less the parts ``without`` names."""
-        box = self.toolbox(sources, tenant=tenant, mcp=mcp, without=without)
-        tools = await box.tools(code_mode="code_mode" not in without)
-        return [t for t in tools if t.feature not in without]
+        governance = self._governance(tenant)
+        return Toolbox(sources, gateway=gateway, governance=governance, agent_id=agent_id)
 
     def _replay(self, record: dict[str, Any]) -> Callable[[], Awaitable[object]] | None:
         """A memory write an earlier process spooled, as a write again (memory on)."""
         return self.memory.replay(record) if self.memory is not None else None
 
-    async def memory_tools(self, run_memory: RunMemory) -> list[Tool]:
+    async def memory_tools(self, *, tenant: str | None = None) -> list[Any]:
+        """The memory service's agent tools — its pull tools (``memory_search``...) and
+        ``tool_search`` — as LangChain tools, for a graph you build yourself: put them in its
+        ``ToolNode`` and bind them to its model. Each call goes to the memory service in the
+        scope of the run making it (its user, thread and run; a call outside a run is refused)
+        and is governed and recorded like any tool of the run. Memory off: none. ``tenant``
+        is the runs', named by a platform key only."""
+        if self.memory is None:
+            return []
+        scope = self.memory.scoped(await self._tenant(tenant))
+        return convert("langchain", await self._pull_tools(scope))
+
+    async def _pull_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""
         return [
             Tool(
@@ -668,16 +517,16 @@ class Harness:
             for spec in await run_memory.agent_tools()
         ]
 
-    async def registered(self, memory: Memory, identity: Identity) -> None:
+    async def _registered(self, memory: Memory, identity: Identity) -> None:
         """Register ``BIFROST_VIRTUAL_KEY`` as the agent's memory model key, once per process
         and agent (idempotent in the service). A memory service that takes no model keys (its
         credential encryption is not configured) is told so once per process, in the log, and
         not asked again."""
         key = self.settings.bifrost_virtual_key
         scope = (identity.tenant, identity.agent_id)
-        if key is None or self._model_keys_off or scope in self._registered:
+        if key is None or self._model_keys_off or scope in self._keys_registered:
             return
-        self._registered.add(scope)
+        self._keys_registered.add(scope)
         agent_memory = memory.scoped(identity.tenant, identity.agent_id)
 
         async def register() -> None:
@@ -696,7 +545,7 @@ class Harness:
 
         await self.writes.submit("memory.model_key", register)
 
-    async def score(
+    async def _score(
         self,
         run_id: str,
         name: str,
@@ -716,11 +565,10 @@ class Harness:
 
 def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:
     async def run(args: dict[str, Any]) -> Any:
+        # the bridge runs it only inside a run whose memory is on (``memory_pull`` among its
+        # features): outside one, or without memory, it says so before this is reached
         runtime = current()
-        if runtime is None or runtime.run_memory is None:
-            raise ConfigurationError(
-                f"{spec.name} needs a run with memory on (MEMORY_URL, not without=memory)"
-            )
+        assert runtime is not None and runtime.run_memory is not None
         if spec.name == TOOL_SEARCH:  # among the tools this run can actually call
             hints = await runtime.tools.hints(str(args.get("task", "")))
             # what the model reads: each tool's confidence, arguments and gaps, and the plan

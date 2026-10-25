@@ -11,6 +11,26 @@ matrix and the live tests have run against it. The decision and its reasons are
 What each release was tested with. The ranges are the extras' pins; the tested versions are
 the lock's (`uv.lock`), against which `make test`, `make matrix` and `make examples` ran.
 
+### trellis-harness 0.5.0
+
+| Distribution | Extra | Pinned range | Tested |
+|---|---|---|---|
+| `langgraph` | `langgraph` | `>=1.2,<1.3` | 1.2.11 |
+| `langchain` | `langgraph` | `>=1.4,<1.5` | 1.4.2 |
+| `langchain-core` | `langgraph` | `>=1.6,<1.7` | 1.6.5 |
+| `langchain-openai` | `react` | `>=1.6,<1.7` | 1.6.6 |
+| `deepagents` | `deepagents`, `react` | `>=0.7.19,<0.8` | 0.7.19 |
+| `openai-agents` | `openai-agents` | `>=0.22.3,<0.23` | 0.22.3 |
+| `claude-agent-sdk` | `claude-agent-sdk` | `>=0.2.160,<0.3` | 0.2.160 |
+| `a2a-sdk` | `a2a` | `>=1.1,<1.2` | 1.1.5 |
+
+| Sibling | Pinned | Tested | Service |
+|---|---|---|---|
+| `trellis-contracts` | `>=0.6.1,<0.7` | 0.6.1 | — |
+| `trellis-memory` | `>=0.5` | 0.5.0 | agent-memory-service 0.3.0 with the prompt-form `memory_ids` (`docs/openapi.json`) |
+| `trellis-runs` | `>=0.4.0` | 0.4.1 | agent-runs 0.4.0 (`docs/openapi.json`) |
+| `bifrost-sdk` | `>=0.3` | 0.3.0 | the Bifrost gateway |
+
 ### trellis-harness 0.4.0
 
 | Distribution | Extra | Pinned range | Tested |

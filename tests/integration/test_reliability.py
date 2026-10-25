@@ -17,6 +17,7 @@ import pytest
 import respx
 
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.planned import Call
 from tests.unit.test_sources import DOCUMENT
 from trellis import Harness, ReAct, Runtime, current, openapi, tool
@@ -42,7 +43,7 @@ class Ledger:
         self.quotes = 0
 
     def tools(self) -> list[Any]:
-        @tool(side_effects="write", timeout=0.05)
+        @tool(side_effects="write", call_timeout=0.05)
         async def transfer(amount: int) -> str:
             """Transfer money."""
             runtime = current()
@@ -76,7 +77,7 @@ async def test_a_write_out_of_time_is_unknown_and_a_flaky_read_is_retried(
 ) -> None:
     ledger = Ledger()
     target, tools = await BUILDERS[framework](harness, ledger.tools(), tmp_path, PLAN)
-    agent = harness.wrap(target, id=f"payer-{framework}", tools=tools)
+    agent = arm(harness.wrap(target, id=f"payer-{framework}"), tools)
     events = [e async for e in agent.stream("pay A-1", user="u")]
     finished = events[-1]
     assert finished.type is RunEventType.RUN_FINISHED and finished.outcome is not None
@@ -111,7 +112,7 @@ async def test_a_timed_out_write_is_replayed_as_unknown_never_run_again(harness:
         answer = await agent.ask("Anything else?")
         return f"{said} / {answer}"
 
-    agent = harness.wrap(pay, id="pay", tools=[transfer])
+    agent = arm(harness.wrap(pay, id="pay"), [transfer])
     paused = await agent.run("pay", user="u")
     assert paused.interrupt is not None and ledger.transfers == [5]
     done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="no", reviewer="u")
@@ -122,7 +123,7 @@ async def test_a_timed_out_write_is_replayed_as_unknown_never_run_again(harness:
 async def test_a_read_out_of_time_says_so_and_a_timeout_of_its_own_counts(
     harness: Harness,
 ) -> None:
-    @tool(side_effects="read", timeout=0.05)
+    @tool(side_effects="read", call_timeout=0.05)
     def slow(sku: str) -> str:
         """A sync read that blocks: it runs in a worker thread, so its timeout still holds."""
         time.sleep(0.3)
@@ -136,7 +137,7 @@ async def test_a_read_out_of_time_says_so_and_a_timeout_of_its_own_counts(
     async def read(input: str, agent: Runtime) -> list[Any]:
         return [await agent.tools.call(name, sku="A") for name in ("slow", "stuck")]
 
-    agent = harness.wrap(read, id="read", tools=[slow, stuck])
+    agent = arm(harness.wrap(read, id="read"), [slow, stuck])
     began = time.monotonic()
     result = await agent.run("read", user="u")
     assert time.monotonic() - began < 0.25  # the loop was free while the thread slept
@@ -155,15 +156,15 @@ async def test_an_error_that_will_not_pass_is_not_retried(harness: Harness) -> N
     async def read(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("missing", sku="Z")
 
-    result = await harness.wrap(read, id="read", tools=[missing]).run("read", user="u")
+    result = await arm(harness.wrap(read, id="read"), [missing]).run("read", user="u")
     assert result.answer == "missing failed: no SKU Z" and tried == ["Z"]
 
 
 def test_a_timeout_is_a_number_of_seconds_over_zero() -> None:
     with pytest.raises(ConfigurationError, match="never: a timeout is a number of seconds over 0"):
-        tool(lambda: None, name="never", timeout=0)
-    with pytest.raises(ConfigurationError, match="model_timeout is a number of seconds over 0"):
-        ReAct(system="s", model="m", model_timeout=-1)
+        tool(lambda: None, name="never", call_timeout=0)
+    with pytest.raises(ConfigurationError, match="call_timeout is a number of seconds over 0"):
+        ReAct(system_prompt="s", model="m", call_timeout=-1)
 
 
 # --------------------------------------------------------------------------- Way 2
@@ -223,9 +224,9 @@ async def test_openapi_reads_are_retried_and_writes_carry_the_idempotency_key(
             await agent.tools.call("create_order", body={"sku": "a"}),
         ]
 
-    source = openapi(DOCUMENT, timeout=5)
+    source = openapi(DOCUMENT, call_timeout=5)
     assert {t.timeout for t in await source.resolve()} == {5}
-    agent = harness.wrap(ordering, id="ordering", tools=[source])
+    agent = arm(harness.wrap(ordering, id="ordering"), [source])
     result = await agent.run("x", user="u")
     found, gone, made = result.answer
     assert found == {"id": "o1"} and order.call_count == 3
@@ -246,7 +247,7 @@ async def test_a_write_of_unknown_effect_is_recorded_so(
     async def pay(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("transfer", amount=5)
 
-    agent = memory_harness.wrap(pay, id="pay", tools=[transfer])
+    agent = arm(memory_harness.wrap(pay, id="pay"), [transfer])
     assert (await agent.run("pay", user="u")).answer == UNKNOWN_TEXT
     await memory_harness.writes.drain()
     [recorded] = memory_service.named("record_tool")
@@ -269,7 +270,7 @@ async def test_the_key_a_tool_hands_on_is_the_runs_and_the_calls_own_names_the_c
     async def refunding(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("refund", order=input)
 
-    agent = harness.wrap(refunding, id="refunds", tools=[refund])
+    agent = arm(harness.wrap(refunding, id="refunds"), [refund])
     first, second = [await agent.run("o1", user="u") for _ in range(2)]
     for paused in (first, second):
         assert paused.interrupt is not None and paused.interrupt.tool_call is not None

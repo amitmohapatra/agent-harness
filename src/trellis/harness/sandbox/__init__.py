@@ -1,14 +1,14 @@
 """Sandboxes for any framework: ``sandbox()``, a place where the model runs commands and changes
 files away from the host.
 
-    agent = h.wrap(target, id="analyst", tools=[sandbox()])  # SANDBOX=docker
-    tools = await h.tools(sandbox(DockerSandbox(), SandboxSpec(cpu=1)), framework="langgraph")
+    agent = h.wrap(ReAct("You analyse data.", "gpt-4o", tools=[sandbox(image="python:3.12")]),
+                   id="analyst")
 
 The source gives the model three harness tools: :data:`EXEC` (a shell command: its exit code,
 stdout and stderr), :data:`READ` (a file, as text) and :data:`WRITE` (a file). Each call goes
 through the bridge like any tool's: governed (``sandbox_exec`` and ``sandbox_write`` write,
 ``sandbox_read`` reads; the catalog may say more), journaled (a resumed run reads the same
-output and runs nothing again), recorded and redacted, and bounded by its ``timeout`` — a
+output and runs nothing again), recorded and redacted, and bounded by its ``call_timeout`` — a
 command out of time is killed, and its effect is unknown to the model, as any write's.
 
 The sandbox lives as long as its run, with nothing to call:
@@ -29,8 +29,8 @@ The sandbox lives as long as its run, with nothing to call:
   :func:`reap`, which runs in the background when a process makes a sandbox for a tenant (at
   most every :data:`REAP_SECONDS`).
 
-The provider is the one given (``sandbox(provider)``), else the deployment's
-(:func:`configured`: ``SANDBOX=docker``, its image ``SANDBOX_IMAGE``).
+The provider is the one given (``sandbox(provider)``), else Docker (:class:`DockerSandbox`, of
+``sandbox(image=)``): the daemon ``DOCKER_HOST`` names.
 """
 
 from __future__ import annotations
@@ -38,9 +38,10 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import ConfigurationError, ToolError, ToolSpec, stable_id
+from trellis.contracts import ToolError, ToolSpec, stable_id
 from trellis.harness.bounded import LRU
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.sandbox.base import (
@@ -57,7 +58,6 @@ from trellis.harness.sandbox.base import (
     SupportsSnapshot,
 )
 from trellis.harness.sandbox.docker import DockerSandbox
-from trellis.harness.settings import Settings
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, Tool
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ REAP_SECONDS: Final = 600.0
 
 
 class SandboxSource:
-    """A sandbox's tools, as a tool source (``tools=[...]``, ``h.tools(...)``): what
+    """A sandbox's tools, as a tool source (``ReAct(tools=[...])``): what
     :func:`sandbox` returns."""
 
     def __init__(self, provider: SandboxProvider | None, spec: SandboxSpec, timeout: float) -> None:
@@ -125,9 +125,13 @@ class SandboxSource:
     async def resolve(self) -> list[Tool]:
         return list(self.tools)
 
-    def provider_for(self, settings: Settings) -> SandboxProvider:
-        """The provider given, else the deployment's (``settings``: the harness's)."""
-        return self.provider or configured(settings)
+    def provider_for(self) -> SandboxProvider:
+        """The provider given: a ``sandbox()`` without one makes Docker containers (the daemon
+        ``DOCKER_HOST`` names, else the docker context, else the local socket), of the spec's
+        image."""
+        if self.provider is None:
+            self.provider = DockerSandbox(self.spec.image)
+        return self.provider
 
     async def opened(self, runtime: Runtime, *, changes: bool = False) -> Sandbox:
         """The run's sandbox: the one this attempt attached, else the one the journal names,
@@ -142,7 +146,7 @@ class SandboxSource:
             return runtime.sandbox
 
     async def _opened(self, runtime: Runtime) -> Sandbox:
-        provider = self.provider_for(runtime.agent.harness.settings)
+        provider = self.provider_for()
         journal = runtime.replay.journal
         if journal.sandbox is None:
             await self._reaping(provider, runtime)
@@ -208,27 +212,21 @@ class SandboxSource:
 
 def sandbox(
     provider: SandboxProvider | None = None,
-    spec: SandboxSpec | None = None,
     *,
-    timeout: float = REMOTE_TIMEOUT_SECONDS,
+    image: str | None = None,
+    spec: SandboxSpec | None = None,
+    call_timeout: float = REMOTE_TIMEOUT_SECONDS,
 ) -> SandboxSource:
     """A sandbox's tools for an agent: ``sandbox_exec``, ``sandbox_read``, ``sandbox_write``,
-    in the sandbox of the run that calls them. ``provider`` makes the sandboxes (else
-    ``SANDBOX``: :func:`configured`); ``spec`` says what each is made of (else the provider's
-    image, its limits, and no network); ``timeout`` is the most one call may take, in seconds
-    (a command past it is killed)."""
-    return SandboxSource(provider, spec or SandboxSpec(), timeout)
-
-
-def configured(settings: Settings) -> SandboxProvider:
-    """The deployment's provider: ``SANDBOX=docker`` is :class:`DockerSandbox`, of
-    ``SANDBOX_IMAGE`` when it is set."""
-    if settings.sandbox is None:
-        raise ConfigurationError(
-            "sandbox() was given no provider and the deployment has none: set SANDBOX=docker, "
-            "or pass one (sandbox(DockerSandbox()))"
-        )
-    return DockerSandbox(settings.sandbox_image)
+    in the sandbox of the run that calls them — granting code execution is this explicit
+    entry. ``provider`` makes the sandboxes (else Docker: the daemon ``DOCKER_HOST`` names);
+    ``image`` is what each is made of (else the provider's), and ``spec`` the rest — limits,
+    network (none by default), files; ``call_timeout`` is the most one call may take, in
+    seconds (a command past it is killed)."""
+    given = spec or SandboxSpec()
+    if image is not None:
+        given = given.model_copy(update={"image": image})
+    return SandboxSource(provider, given, call_timeout)
 
 
 def ref_of(runtime: Runtime, provider: str) -> SandboxRef:
@@ -246,13 +244,13 @@ async def paused(runtime: Runtime) -> None:
     """The run pauses for a person: the sandbox this attempt worked in snapshotted (the
     snapshot named in its reference, which the pause saves) and paused, as far as its provider
     can. A failure is a warning: the run pauses all the same."""
-    source = _source(runtime.agent)
+    source = _source(runtime.agent, runtime.added)
     if runtime.sandbox is None or source is None:
         return
     journal = runtime.replay.journal
     ref = SandboxRef.model_validate(journal.sandbox)
     try:
-        provider = source.provider_for(runtime.agent.harness.settings)
+        provider = source.provider_for()
         if isinstance(provider, SupportsSnapshot):
             snapshot = await provider.snapshot(ref)
             journal.sandbox = _recorded(ref.model_copy(update={"snapshot": snapshot}))
@@ -264,19 +262,22 @@ async def paused(runtime: Runtime) -> None:
     runtime.events.custom(EVENT, action="paused", sandbox=ref.id)
 
 
-async def ended(agent: Agent, recorded: dict[str, Any] | None, run_id: str) -> None:
+async def ended(
+    agent: Agent, recorded: dict[str, Any] | None, run_id: str, added: Sequence[Any] = ()
+) -> None:
     """The run ``run_id`` of ``agent`` ended: the sandbox its journal names (``recorded``:
-    ``Journal.sandbox``) deleted. A failure is logged — the run's end stands, and :func:`reap`
-    deletes the sandbox later."""
+    ``Journal.sandbox``) deleted, by the agent's sandbox source or one its code added
+    (``added``). A failure is logged — the run's end stands, and :func:`reap` deletes the
+    sandbox later."""
     if recorded is None:
         return
     ref = SandboxRef.model_validate(recorded)
-    source = _source(agent)
+    source = _source(agent, added)
     if source is None:  # not among the agent's own sources (a handoff's specialist's)
         log.warning("the sandbox %s of run %s is left to the reaper", ref.id, run_id)
         return
     try:
-        await source.provider_for(agent.harness.settings).delete(ref)
+        await source.provider_for().delete(ref)
     except Exception as exc:
         log.warning("the sandbox %s of run %s was not deleted: %s", ref.id, run_id, exc)
         return
@@ -317,9 +318,10 @@ def _spec(
     )
 
 
-def _source(agent: Agent) -> SandboxSource | None:
-    """The agent's sandbox source (one at most: two would give it two tools of one name)."""
-    return next((s for s in agent.sources if isinstance(s, SandboxSource)), None)
+def _source(agent: Agent, added: Sequence[Any] = ()) -> SandboxSource | None:
+    """The agent's sandbox source, else one the run's code added (one at most: two would give
+    it two tools of one name)."""
+    return next((s for s in [*agent.sources, *added] if isinstance(s, SandboxSource)), None)
 
 
 def _running() -> Runtime:
@@ -343,7 +345,6 @@ __all__ = [
     "SandboxSpec",
     "SupportsPause",
     "SupportsSnapshot",
-    "configured",
     "reap",
     "sandbox",
 ]

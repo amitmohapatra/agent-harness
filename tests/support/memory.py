@@ -95,6 +95,8 @@ class Call:
 @dataclass
 class FakeMemoryService:
     context_text: str = "The user prefers email."
+    #: the ids of the memories the context shows (the prompt form's ``memory_ids``)
+    shown: list[str] = field(default_factory=lambda: ["mem_1", "mem_2"])
     #: what the context says about its evidence (COMPLETE, INCOMPLETE, INSUFFICIENT)
     evidence_status: str = "COMPLETE"
     #: what ``GET /v1/keys/self`` says about the key
@@ -199,11 +201,13 @@ class FakeMemoryService:
                     path=matched.groupdict(),
                     query=request.url.params,
                 )
-                refused = self._refusal(name, request)
+                refused = self._refusal(name, request) or _unbounded(body, request)
                 if refused is not None:
                     return refused
                 self.calls.append(call)
                 answer = getattr(self, f"_{name}")(call)
+                if isinstance(answer, httpx.Response):  # the call refused, as the service does
+                    return answer
                 status, answer = (
                     answer if isinstance(answer, tuple) else (CREATED.get(name, 200), answer)
                 )
@@ -255,6 +259,8 @@ class FakeMemoryService:
             "token_estimate": 0,
             "evidence_status": self.evidence_status,
         }
+        if self.shown:
+            answer["memory_ids"] = list(self.shown)
         if available is not None and self.learned_skills:
             # the service offers what the agent learned to any agent with tools
             rendered += "\n\n## Learned skills for this task\n" + self.learned_skills
@@ -536,10 +542,12 @@ class FakeMemoryService:
                 )
         return {"messages": acks}
 
-    def _thread_messages(self, call: Call) -> dict[str, Any]:
+    def _thread_messages(self, call: Call) -> dict[str, Any] | httpx.Response:
         """The thread's newest ``limit`` messages, oldest first (the INTERNAL ones only with
-        ``include_internal``)."""
+        ``include_internal``); ``404`` for a thread nothing was said in yet, as the service."""
         thread = call.path["thread_id"]
+        if thread not in self.threads:
+            return problem(404, f"/v1/threads/{thread}/messages", detail="Thread not found")
         internal = call.query.get("include_internal") == "true"
         limit = int(call.query.get("limit") or 50)
         found = [m for m in self.threads.get(thread, []) if internal or m["kind"] == "VISIBLE"]
@@ -646,10 +654,17 @@ class FakeMemoryService:
         return {"tools": [_catalog_tool(n, self.catalog[n]) for n in names if n in self.catalog]}
 
     def _suggestions(self, call: Call) -> dict[str, Any]:
-        return {"suggestions": self.suggestions}
+        """The suggestions learned from the asking agent's decisions only, as the service
+        answers them (its ``ctx.agent_id``: a scope with no agent reads none)."""
+        agent = call.scope.get("agent_id") or ""
+        return {"suggestions": [s for s in self.suggestions if (s.get("agent_id") or "") == agent]}
 
-    def _accept(self, call: Call) -> dict[str, Any]:
+    def _accept(self, call: Call) -> Any:
+        """Accepted by the agent it was learned from only (another's: 404, as the service)."""
         found = next(s for s in self.suggestions if s["id"] == call.path["suggestion_id"])
+        if (found.get("agent_id") or "") != (call.scope.get("agent_id") or ""):
+            path = f"/v1/tools/approval-suggestions/{found['id']}/accept"
+            return problem(404, path, detail="no such approval suggestion")
         found["accepted"] = True
         tool = self.catalog.setdefault(found["tool"], {})
         tool["approve_when"] = found["rule"]
@@ -746,6 +761,37 @@ def problem(
     if retryable and status in (429, 503):
         headers["retry-after"] = retry_after
     return httpx.Response(status, content=json.dumps(body).encode(), headers=headers)
+
+
+#: The service's bounds on a caller's metadata object (its ``api/validation.py``), which its
+#: OpenAPI document does not say: keys, nesting (a flat object is 1) and serialised bytes.
+METADATA_MAX_KEYS: Final = 32
+METADATA_MAX_DEPTH: Final = 2
+METADATA_MAX_BYTES: Final = 8 * 1024
+
+
+def _depth(value: Any) -> int:
+    if isinstance(value, dict):
+        return 1 + max((_depth(v) for v in value.values()), default=0)
+    if isinstance(value, list):
+        return 1 + max((_depth(v) for v in value), default=0)
+    return 0
+
+
+def _unbounded(body: Any, request: httpx.Request) -> httpx.Response | None:
+    """``422`` for a body whose ``metadata`` or ``custom_metadata`` the service would refuse."""
+    for key in ("metadata", "custom_metadata"):
+        value = body.get(key) if isinstance(body, dict) else None
+        if not isinstance(value, dict):
+            continue
+        size = len(json.dumps(value, separators=(",", ":"), default=str).encode())
+        if (
+            len(value) > METADATA_MAX_KEYS
+            or _depth(value) > METADATA_MAX_DEPTH
+            or size > METADATA_MAX_BYTES
+        ):
+            return problem(422, request.url.path, detail=f"{key} out of the service's bounds")
+    return None
 
 
 def _conditional(request: httpx.Request, answer: Any) -> httpx.Response:

@@ -38,49 +38,56 @@ from trellis.contracts import (
     ScheduleSpec,
     ToolCall,
     ToolOutcome,
+    ToolSpec,
     ToolStatus,
     new_id,
     safe_id,
 )
-from trellis.harness import compat, history, pipeline, sandbox, skills, telemetry
+from trellis.harness import compat, history, pipeline, sandbox, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
+    OWN_CHECKPOINTER,
     context_window,
+    declared_tools,
+    merged,
 )
-from trellis.harness.adapters.langgraph import bound_tools, hitl_response, is_hitl
+from trellis.harness.adapters.langgraph import hitl_response, is_hitl
 from trellis.harness.bounded import LRU
-from trellis.harness.budget import Budget
+from trellis.harness.bridges import helpers
+from trellis.harness.budget import BUDGET, Budget
 from trellis.harness.clients.memory import (
+    CITED_MAX,
     DOCUMENTS,
+    PUSHED_BUNDLE,
+    PUSHED_MEMORIES,
     RunMemory,
     Window,
     context_budget,
     documents,
 )
 from trellis.harness.evals import (
+    GROUNDING_SAMPLE,
     EvalCase,
     EvalServices,
     Evaluator,
     grounding_score,
     judge,
     name_of,
+    sample_of,
     sampled,
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
-from trellis.harness.gateways import Capability, missing
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
-from trellis.harness.runtime import Runtime, reason_of, run_of
-from trellis.harness.skills import Skill, Skills
-from trellis.harness.subagents import SubAgent, asked_by, cancel_children
+from trellis.harness.runtime import Runtime, current, reason_of, run_of
+from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools.base import SideEffects, Tool, arguments_problem
-from trellis.harness.tools.mcp import retired_as_tool, retired_mcp, split
+from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -136,32 +143,43 @@ class Agent:
         target: Any,
         *,
         id: str,
-        tools: Sequence[Any] = (),
         version: str | None = None,
-        mcp: Sequence[str] | None = None,
-        skills: Sequence[str | Skill] = (),
-        timeout: float | None = None,
-        without: Collection[Feature] = (),
+        description: str | None = None,
         hooks: Sequence[Hooks] = (),
-        framework_options: Mapping[str, Any] | None = None,
+        judges: Sequence[Evaluator] = (),
         budget: Budget | None = None,
+        run_timeout: float | None = None,
+        without: Collection[str] = (),
+        framework_options: Mapping[str, Any] | None = None,
     ):
-        if timeout is not None and timeout <= 0:
-            raise ConfigurationError(f"{id}: a timeout is a number of seconds over 0")
+        if run_timeout is not None and run_timeout <= 0:
+            raise ConfigurationError(f"{id}: run_timeout is a number of seconds over 0")
+        if getattr(target, OWN_CHECKPOINTER, False):
+            raise ConfigurationError(
+                f"{id}: ReAct(checkpointer=) is for the graph run on its own: a wrapped agent's "
+                "runs checkpoint into the run (leave checkpointer= out)"
+            )
         self.harness = harness
         self.target = target
         self.id = safe_id(id)
         #: the version of the agent's code: recorded with every run it starts, on its spans
-        self.version = version or harness.settings.agent_version
+        #: (else the OpenTelemetry resource's ``service.version``)
+        self.version = version or telemetry.agent_version()
+        #: what the agent does, as other agents and the A2A card read it (else its function's
+        #: docstring)
+        self.description = description
         #: the most working time one of its runs may take, in seconds, when the run names
         #: none (``None``: no limit)
-        self.timeout = timeout
+        self.timeout = run_timeout
         #: what the harness does not do for any of its runs (``h.wrap(without=)``)
         self.without = features(without)
         #: the most each of its runs may spend (``budget.py``; ``None``: no cap)
         self.budget = budget
-        #: the hooks around its runs, model calls and tool calls: the harness's, then its own
-        self.hooks = Chain([*harness.hooks, *hooks])
+        #: the hooks around its runs, model calls and tool calls
+        self.hooks = Chain(list(hooks))
+        #: the online judges every sampled successful run of it is scored by
+        #: (``llm_judge(sample=)``: the share of runs each scores)
+        self.judges: list[Evaluator] = list(judges)
         self.adapter = detect(target)
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
@@ -183,33 +201,14 @@ class Agent:
         self.adapter.check_options(self.framework_options)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))
-        given = [n for n, v in (("tools", tools), ("mcp", mcp), ("skills", skills)) if v]
-        if given and self.adapter.fixed_tools:
-            raise ConfigurationError(
-                f"a {self.adapter.name} target binds its tools when it is built: pass "
-                f"await h.tools(..., framework='{self.adapter.name}') to the graph instead of "
-                f"{'/'.join(f'{n}=' for n in given)} (skills as skills(...), mcp= to h.tools)"
-            )
-        if mcp is not None:
-            retired_mcp("h.wrap")
-        #: the Virtual MCPs whose tools the agent has (``None``: everything its key allows)
-        self.sources, self.mcp = split(
-            [as_source(t) for t in tools], None if mcp is None else list(mcp)
-        )
-        if skills:
-            self.sources.append(Skills(skills))
-        if self.mcp and harness.gateway is None and "mcp" not in self.without:
-            what = f"mcp({self.mcp[0]!r}), a Virtual MCP,"
-            why = missing(harness.model_gateway, Capability.MCP, what) or (
-                f"{what} needs the gateway, which this harness was given as off"
-            )
-            raise ConfigurationError(
-                f"{id}: {why}: give the server's URL, mcp('https://...'), instead"
-            )
-        if self.adapter.fixed_tools:
-            self.sources, self.mcp = harness.built_for(bound_tools(target))
+        #: the tools the harness runs for the agent: what its builder declares
+        #: (``ReAct(tools=, subagents=)``); besides them every run has the MCP tools the
+        #: virtual key allows and the memory tools (``tools_for``)
+        self.sources: list[Source] = [as_source(t) for t in declared_tools(target)]
         #: the toolbox per tenant, kept fresh
         self._toolboxes: LRU[str, Toolbox] = LRU()
+        #: the framework's own tools last published to each tenant's catalog, by name
+        self._published_native: LRU[str, tuple[str, ...]] = LRU()
         #: the runs an attempt of which runs in this process now, by id
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
@@ -233,31 +232,59 @@ class Agent:
         user: str,
         thread: str | None = None,
         tenant: str | None = None,
-        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        run_timeout: float | None = None,
         deadline: datetime | None = None,
-        without: Collection[Feature] = (),
+        budget: Budget | None = None,
+        without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
     ) -> Result:
-        """Run to its end (or its first pause) and return how it ended. ``timeout``: the most
-        working time the run may take, in seconds (not counting a pause; else the agent's,
-        ``h.wrap(timeout=)``), and ``deadline`` when it must have ended; past either it ends
-        ``TIMEOUT``. ``without``: what the harness does not do for this run, besides what the
-        agent's ``without`` says (``trellis.harness.features``). ``framework_options``: the
+        """Run to its end (or its first pause) and return how it ended. ``run_timeout``: the
+        most working time the run may take, in seconds (not counting a pause; else the
+        agent's, ``h.wrap(run_timeout=)``), and ``deadline`` when it must have ended; past
+        either it ends ``TIMEOUT``. ``budget``: the most the run may spend (else the agent's,
+        ``h.wrap(budget=)``). ``without``: what the harness does not do for this run, besides
+        what the agent's ``without`` says (``trellis.harness.features``). ``framework_options``: the
         framework's own options for this run's call, over the agent's
         (``h.wrap(framework_options=)``; each framework's page says where they go). The run
         keeps the JSON ones with its record, for its later attempts (a resume); a value that
         is not JSON (an object) is this call's only. ``document_ids``: the documents
         (``h.add_document``'s ``document_id``) the run's memory context draws its passages
         from, none else (unset: all the person's); kept with the run, its sub-agents' runs
-        included."""
+        included.
+
+        Called inside another run (a tool of it, a node, a function target's code), the run is
+        that run's child, as a sub-agent's is (``trellis.harness.subagents.child_run``): its
+        record names its parent, its memory scope is derived from the parent's, it takes the
+        parent's tenant, thread, documents and what the parent is without, and never works
+        past the parent's time; its journal is kept in the parent's (a crash continues it, a
+        re-run finds it again), a question it asks pauses the parent, whose resume answers it,
+        and cancelling the parent cancels it."""
+        parent = current()
+        if parent is not None:
+            result = await child_run(
+                self,
+                parent,
+                input,
+                user=user,
+                thread=thread,
+                tenant=tenant,
+                timeout=run_timeout,
+                deadline=deadline,
+                budget=budget,
+                without=without,
+                framework_options=framework_options,
+                document_ids=document_ids,
+            )
+            return self.hooks.answer(result)
         record = await self._opened(
             input,
             user=user,
             thread=thread,
             tenant=tenant,
-            timeout=timeout,
+            timeout=run_timeout,
             deadline=deadline,
+            budget=budget,
             without=without,
             framework_options=framework_options,
             document_ids=document_ids,
@@ -271,25 +298,32 @@ class Agent:
         user: str,
         thread: str | None = None,
         tenant: str | None = None,
-        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        run_timeout: float | None = None,
         deadline: datetime | None = None,
-        without: Collection[Feature] = (),
+        budget: Budget | None = None,
+        without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
-        early cancels the run. ``timeout``, ``deadline``, ``without``, ``framework_options``
-        and ``document_ids`` as for :meth:`run`."""
+        early cancels the run. ``run_timeout``, ``deadline``, ``budget``, ``without``,
+        ``framework_options`` and ``document_ids`` as for :meth:`run`. Streamed inside another
+        run, it is that run's child (its record names the parent; tenant, thread, documents
+        and what the parent is without carried over), whose events are the stream's: a
+        question it asks ends the stream paused, for the caller to answer (``run`` pauses the
+        parent instead)."""
         record = await self._opened(
             input,
             user=user,
             thread=thread,
             tenant=tenant,
-            timeout=timeout,
+            timeout=run_timeout,
             deadline=deadline,
+            budget=budget,
             without=without,
             framework_options=framework_options,
             document_ids=document_ids,
+            parent=current(),
         )
         async for event in self._events(
             lambda listen: pipeline.attempt(self, record, input, listener=listen)
@@ -303,17 +337,18 @@ class Agent:
         user: str,
         thread: str | None = None,
         tenant: str | None = None,
-        timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
+        run_timeout: float | None = None,
         deadline: datetime | None = None,
-        without: Collection[Feature] = (),
+        budget: Budget | None = None,
+        without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
+        document_ids: Sequence[str] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
-        document_ids: Sequence[str] | None = None,
     ) -> RunHandle:
         """Queue the run for a worker (``h.worker([...]).run()``); it outlives this process.
-        ``timeout``, ``deadline``, ``without``, ``framework_options`` and ``document_ids`` as
-        for :meth:`run`: the
+        ``run_timeout``, ``deadline``, ``budget``, ``without``, ``framework_options`` and
+        ``document_ids`` as for :meth:`run`: the
         working time counts across every worker that runs it, a crash included; the framework
         options are kept with the run, so they are JSON (an object goes on
         ``h.wrap(framework_options=)``). ``priority`` (-1000 to 1000):
@@ -331,13 +366,15 @@ class Agent:
             user=user,
             thread=thread,
             tenant=tenant,
-            timeout=timeout,
+            timeout=run_timeout,
             deadline=deadline,
+            budget=budget,
             without=without,
             framework_options=framework_options,
             priority=priority,
             concurrency_key=concurrency_key or (f"thread:{thread}" if thread else None),
             document_ids=document_ids,
+            parent=current(),
         )
         await admitted(self.harness.runs.start(start, queue=True), "start")
         return RunHandle(self, start.run_id, tenant=start.tenant_id)
@@ -351,7 +388,7 @@ class Agent:
         heartbeat (agent-runs). Its sub-agents' runs that have not ended are cancelled with
         it. A run that already ended raises ``ConflictError``. The run's record is returned.
         ``tenant`` is the run's, named by a platform key only."""
-        tenant = await self.harness.tenant(tenant)
+        tenant = await self.harness._tenant(tenant)
         runs = self.harness.runs
         runtime = self.running.get(run_id)
         # read first: its ending clears the checkpoint, which names the run's sandbox
@@ -398,7 +435,7 @@ class Agent:
             decision,
             answer,
             reviewer,
-            tenant=await self.harness.tenant(tenant),
+            tenant=await self.harness._tenant(tenant),
             comment=comment,
             remember=remember,
         )
@@ -407,23 +444,25 @@ class Agent:
     async def schedule(
         self,
         cron: str,
-        input: Any,
         *,
-        on_behalf_of: str,
+        user: str,
+        input: Any,
         tz: str = "UTC",
         tenant: str | None = None,
-        timeout: float | None = None,  # noqa: ASYNC109 - each fired run's limit
-        without: Collection[Feature] = (),
+        run_timeout: float | None = None,
+        budget: Budget | None = None,
+        without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
+        document_ids: Sequence[str] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
-        document_ids: Sequence[str] | None = None,
     ) -> Schedule:
-        """Queue a run of this agent on ``cron`` (evaluated in ``tz``), acting for
-        ``on_behalf_of``. Workers run them. Idempotent: the same agent, person, cadence and
-        input are one schedule (agent-runs answers the existing one), so a redeploy adds none.
-        Each fired run records the agent's ``version`` and takes what :meth:`start` takes for
-        one run: ``timeout`` (else the agent's), ``without``, ``framework_options`` (JSON),
+        """Queue a run of this agent on ``cron`` (evaluated in ``tz``), for ``user`` with
+        ``input``. Workers run them. Idempotent: the same agent, person, cadence and input are
+        one schedule (agent-runs answers the existing one), so a redeploy adds none. Each
+        fired run records the agent's ``version`` and takes what :meth:`start` takes for one
+        run: ``run_timeout`` (else the agent's), ``budget``, ``without``, ``framework_options``
+        (JSON),
         ``document_ids``, ``priority`` and ``concurrency_key`` — kept with the schedule (its
         ``metadata``, under the keys a started run keeps them under) and copied into every run
         it fires. Pause or resume it with ``trellis.runs.RunsClient``: ``schedules.update(id,
@@ -437,34 +476,19 @@ class Agent:
                 "0.6.1 or later: this one's ScheduleSpec has no priority or concurrency_key"
             )
         spec = ScheduleSpec(
-            tenant_id=await self.harness.tenant(tenant),
+            tenant_id=await self.harness._tenant(tenant),
             agent_id=self.id,
-            name=f"{self.id} for {on_behalf_of}",
+            name=f"{self.id} for {user}",
             cadence=cron,
             timezone=tz,
-            on_behalf_of=on_behalf_of,
+            on_behalf_of=user,
             input=input,
-            timeout_seconds=self.timeout if timeout is None else timeout,
+            timeout_seconds=self.timeout if run_timeout is None else run_timeout,
             agent_version=self.version,
-            metadata=self._metadata(without, framework_options, document_ids),
+            metadata=self._metadata(features(without), framework_options, document_ids, budget),
             **ordered,
         )
         return await admitted(self.harness.runs.schedules.create(spec), "schedule")
-
-    def as_tool(
-        self,
-        *,
-        name: str | None = None,
-        description: str | None = None,
-        side_effects: SideEffects | None = None,
-    ) -> SubAgent:
-        """This agent as a tool other agents call, any framework (``tools=[agent.as_tool()]``,
-        ``h.tools(agent.as_tool(), framework=...)``): each call is a child run of this agent
-        (``trellis.harness.subagents``). ``name`` (else the agent's id), ``description`` (else
-        the function's docstring, or a generic one) and ``side_effects`` (else ``read`` when
-        every tool it declares only reads, ``write`` otherwise) are the tool's."""
-        retired_as_tool()
-        return SubAgent(self, name=name, description=description, side_effects=side_effects)
 
     # ------------------------------------------------------------------ surfaces
     def serve_chat(self, app: Any, *, path: str = "/agui", identity: Any = None) -> None:
@@ -670,7 +694,7 @@ class Agent:
         replica). In process (no ``RUNS_URL``), the events of its attempts run in this process
         from now on (``after`` is not used: nothing is kept). ``tenant`` is the run's, named by
         a platform key only."""
-        tenant = await self.harness.tenant(tenant)
+        tenant = await self.harness._tenant(tenant)
         store = event_log(self.harness.runs)
         if store is not None:
             async for entry in store.stream_events(run_id, after=after, tenant=tenant):
@@ -719,13 +743,13 @@ class Agent:
         memory = self.harness.memory
         if memory is None or without | self.without >= MEMORY:
             return None
-        await self.harness.registered(memory, identity)
+        await self.harness._registered(memory, identity)
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them — less the
-        tools of what the run is without (``without=``: its MCP tools, its skills...)."""
+        tools of what the run is without (``without=``: its MCP tools...)."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -734,43 +758,56 @@ class Agent:
             and runtime.uses("memory_pull")
         ):
             try:
-                tools.extend(await self.harness.memory_tools(runtime.run_memory))
+                tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
 
+    async def native_tools(self, runtime: Runtime) -> dict[str, ToolSpec]:
+        """The tools the framework gives the model itself (the adapter's ``native``), less the
+        run's harness tools — with them the run's tool set — published to the tenant's catalog
+        (an administrator's risk and rules govern them as any tool's), once per set of names
+        per tenant. One that cannot be read is a warning: the run goes on with its harness
+        tools."""
+        try:
+            specs = await self.adapter.native(self.target)
+        except Exception as exc:
+            runtime.events.warning("native_tools", f"the framework's own tools: {exc}")
+            return {}
+        found = {s.name: s for s in specs if s.name not in runtime.toolbox}
+        names = tuple(found)
+        if found and self._published_native.get(runtime.tenant) != names:
+            governance = self.harness._governance(runtime.tenant)
+            await governance.publish(list(found.values()))
+            self._published_native[runtime.tenant] = names
+        return found
+
     def _toolbox(self, tenant: str) -> Toolbox:
         box = self._toolboxes.get(tenant)
         if box is None:
-            box = self._toolboxes[tenant] = self.harness.toolbox(
-                self.sources, tenant=tenant, mcp=self.mcp, without=self.without
+            box = self._toolboxes[tenant] = self.harness._toolbox(
+                self.sources, tenant=tenant, without=self.without, agent_id=self.id
             )
         return box
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """What is pushed into the framework's input, in the runtime's context: the memory
-        context (:meth:`remembered`), then the section of the skills the run pinned
-        (``skills.pin``); and the stored prompts the harness handed to model clients
-        (``h.model_headers(prompt=)``) pinned for the run (``prompts.ModelPrompts.pin``). The
-        memory context, when there is one, is returned."""
-        pushed = await self.remembered(runtime)
-        if runtime.uses("skills"):
-            await skills.pin(runtime, self.sources)
-        await self.harness.model_prompts.pin(runtime)
-        return pushed
+        context (:meth:`remembered`), returned when there is one."""
+        return await self.remembered(runtime)
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
-        """The memory context for this run, in the runtime. Asked with the run's own tools —
-        the harness's and the ones its framework gives the model itself (the adapter's
-        ``native_tools``: an OpenAI Agents agent's ``tools``, Claude's built-ins and MCP tools,
-        a graph's tool nodes) — it carries the skills the agent learned for the task, and -
-        from five tools, the service's threshold - the tools that fit, whose candidates among
-        the harness's narrow the tools the model is offered (the ``hints`` feature). A failure
-        is a warning."""
+        """The memory context for this run, in the runtime. Asked with the run's tool set —
+        the harness's tools and the ones its framework gives the model itself
+        (``Runtime.native``: an OpenAI Agents agent's own, hosted, MCP and handoff tools,
+        Claude's built-ins and MCP tools, a graph's tool nodes', a Deep Agent's sub-agents') —
+        it carries the skills the agent learned for the task, and - from five tools, the
+        service's threshold - the tools that fit, whose candidates narrow the tools the model is
+        offered (the ``hints`` feature), the framework's own among them where the framework
+        lets them be narrowed. A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
-        own = list(dict.fromkeys([*runtime.tool_names(), *self.adapter.native_tools(self.target)]))
+        own = runtime.tool_set()
         hints = runtime.uses("hints")
         window = self.window(runtime)
         with retrieval_span(runtime.task) as span:
@@ -792,11 +829,15 @@ class Agent:
                 pushed.conversation.messages if pushed.conversation else []
             )
         # candidates the model is offered; no candidates at all narrows nothing
-        candidates = [n for n in pushed.tool_names if n in runtime.toolbox]
+        candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
         if hints and candidates and self.adapter.narrows != "none":
             runtime.offered = set(candidates)
         status = pushed.evidence_status
         runtime.evidence = status
+        runtime.pushed = {
+            "bundle_id": pushed.bundle_id,
+            "memory_ids": pushed.memory_ids[:CITED_MAX],
+        }
         note = ABSTAIN_NOTES.get(status)
         rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
         runtime.context = rendered or None
@@ -841,7 +882,10 @@ class Agent:
         return history.owner(store, agent_id=self.id)
 
     async def record_tool(self, runtime: Runtime, call: ToolCall, outcome: ToolOutcome) -> None:
-        memory = runtime.run_memory
+        """A tool call, recorded in the memory service under the run — or, made while a helper
+        the framework spawned works (``bridges.helpers.inside``), under the helper's run."""
+        helper = helpers.inside(runtime)
+        memory = helper.memory if helper is not None else runtime.run_memory
         if memory is not None and runtime.uses("records") and call.tool not in _pull(self):
             await self.harness.writes.submit(
                 "memory.record_tool",
@@ -889,7 +933,10 @@ class Agent:
         """How the run ended, as the run's ``system`` feedback: the lowest-ranked voice on
         its outcome (the judge's and a person's override it in the memory service). Its
         ``confirm`` is unverified, so the service keeps it as the outcome only: it moves no
-        memory's confidence, learned skill or tool statistic."""
+        memory's confidence, learned skill or tool statistic. It keeps what the run's context
+        showed (``Runtime.pushed``, under :data:`PUSHED_BUNDLE` and :data:`PUSHED_MEMORIES`):
+        the memories a person's verdict on the run cites when no grounding verdict did
+        (``h.feedback``)."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
         if memory is None or not runtime.uses("records") or verdict is None:
@@ -899,6 +946,13 @@ class Agent:
             "source": "system",
             "comment": note,
             "key": f"{runtime.run_id}:outcome",
+            # what its context showed, which a person's verdict on the run cites
+            "metadata": {
+                PUSHED_BUNDLE: runtime.pushed["bundle_id"],
+                PUSHED_MEMORIES: runtime.pushed["memory_ids"],
+            }
+            if runtime.pushed
+            else None,
         }
         await self.harness.writes.submit(
             "memory.outcome",
@@ -920,7 +974,7 @@ class Agent:
             or pushed is None
             or not text
             or not runtime.uses("grounding")
-            or not sampled(runtime.run_id, self.harness.settings.eval_sample)
+            or not sampled(runtime.run_id, GROUNDING_SAMPLE)
         ):
             return
         bundle_id, run_id, traced = pushed.bundle_id, runtime.run_id, runtime.trace_run
@@ -929,21 +983,23 @@ class Agent:
             score = await grounding_score(memory.ctx, text, bundle_id)
             if score is not None:
                 key = f"{run_id}:grounding"
-                await self.harness.score(run_id, "grounding", score, key=key, trace=traced)
+                await self.harness._score(run_id, "grounding", score, key=key, trace=traced)
 
         await self.harness.writes.submit("memory.verify", work, events=runtime.events)
 
     async def judged(self, runtime: Runtime, answer: Any, pushed: PromptContext | None) -> None:
-        """On a sampled run (``TRELLIS_EVAL_SAMPLE``), each of the harness's online judges in
-        the background — never on the request path — as ``judge(case, [it], services=self.evals)``,
-        its score on the run's trace; the case's output is the answer as :func:`graded`. A judge
-        that fails is a warning."""
-        judges = self.harness.judges
-        rate = self.harness.judge_sample
+        """Each of the agent's online judges (``h.wrap(judges=)``) on the share of runs it
+        samples (``llm_judge(sample=)``, chosen by the run id), in the background — never on the
+        request path — as ``judge(case, [it], services=self.evals)``, its score on the run's
+        trace; the case's output is the answer as :func:`graded`. A judge that fails is a
+        warning."""
         text = graded(answer)
-        if not judges or not text or not runtime.uses("judges"):
+        if not text or not runtime.uses("judges"):
             return
-        if not sampled(f"{runtime.run_id}:judges", rate):
+        chosen = [
+            e for e in self.judges if sampled(f"{runtime.run_id}:judge:{name_of(e)}", sample_of(e))
+        ]
+        if not chosen:
             return
         memory = runtime.run_memory
         case = EvalCase(
@@ -958,7 +1014,7 @@ class Agent:
         )
         services, events = self.evals, runtime.events
         dims = {**telemetry.attribution(runtime), "purpose": "judge"}
-        for evaluator in judges:
+        for evaluator in chosen:
             name = name_of(evaluator)
 
             async def work(evaluator: Evaluator = evaluator, name: str = name) -> None:
@@ -1004,9 +1060,11 @@ class Agent:
         run_id: str | None = None,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
-        without: Collection[Feature] = (),
+        budget: Budget | None = None,
+        without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
+        parent: Runtime | None = None,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
@@ -1021,9 +1079,11 @@ class Agent:
             record_input=True,
             timeout=timeout,
             deadline=deadline,
+            budget=budget,
             without=without,
             framework_options=framework_options,
             document_ids=document_ids,
+            parent=parent,
         )
         await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
@@ -1043,9 +1103,9 @@ class Agent:
         record_input: bool = False,
         timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
         deadline: datetime | None = None,
-        parent: str | None = None,
-        group: str | None = None,
-        without: Collection[Feature] = (),
+        budget: Budget | None = None,
+        parent: Runtime | None = None,
+        without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         priority: int = 0,
         concurrency_key: str | None = None,
@@ -1053,27 +1113,40 @@ class Agent:
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
-        the agent's version, the run it is a sub-agent's run of (``parent``) and the agent
-        group it works in (``group``), what it is ``without``, its framework options that are
-        JSON, the documents its context draws on (``document_ids``), and how a queued run waits
-        its turn (``priority``, ``concurrency_key``) go with it when there are any."""
+        its budget, the agent's version, what it is ``without``, its framework options that are
+        JSON, the
+        documents its context draws on (``document_ids``), and how a queued run waits its turn
+        (``priority``, ``concurrency_key``) go with it when there are any. A run started
+        inside another (``parent``: a sub-agent's, a nested ``run``/``stream``/``start``) is
+        its child: its record names the parent and the agent group of the
+        tree, and it takes the parent's tenant, thread, documents, deadline (the earlier of
+        both) and what the parent is without, unless it names its own (``without`` adds to the
+        parent's)."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
-        metadata = self._metadata(without, framework_options, document_ids)
-        if group is not None:
-            metadata[AGENT_GROUP] = group
+        turned_off = features(without)
+        if parent is not None:
+            tenant = tenant or parent.tenant
+            thread = thread or parent.thread
+            turned_off |= parent.without
+            document_ids = parent.document_ids if document_ids is None else document_ids
+            ends = [d for d in (deadline, parent.deadline) if d is not None]
+            deadline = min(ends) if ends else None
+        metadata = self._metadata(turned_off, framework_options, document_ids, budget)
+        if parent is not None:
+            metadata[AGENT_GROUP] = parent.identity.own_group
         given = {
             "timeout_seconds": self.timeout if timeout is None else timeout,
             "deadline": deadline,
             "agent_version": self.version,
-            "parent_run_id": parent,
+            "parent_run_id": None if parent is None else parent.run_id,
             "priority": priority or None,
             "concurrency_key": concurrency_key,
         }
         return RunStart(
             run_id=run_id,
-            tenant_id=await self.harness.tenant(tenant),
+            tenant_id=await self.harness._tenant(tenant),
             agent_id=self.id,
             thread_id=thread or run_id,  # a run with no conversation is its own thread
             user_id=user,
@@ -1084,24 +1157,26 @@ class Agent:
 
     def _metadata(
         self,
-        without: Collection[Feature],
+        without: frozenset[Feature],
         framework_options: Mapping[str, Any] | None,
         document_ids: Sequence[str] | None = None,
+        budget: Budget | None = None,
     ) -> dict[str, Any]:
         """What a run keeps of its own choices (``RunStart.metadata``; a schedule's, copied
-        into each run it fires): what it is ``without``, its framework options — checked
-        against the adapter, over the agent's — that are JSON, and the documents its context
-        draws on."""
+        into each run it fires): the parts it is ``without``, its framework options — checked
+        against the adapter, over the agent's — that are JSON, the documents its context
+        draws on, and its own budget."""
         own = dict(framework_options or {})
         if own:
-            self.adapter.check_options({**self.framework_options, **own})
-        turned_off = sorted(features(without))
-        metadata: dict[str, Any] = {WITHOUT: turned_off} if turned_off else {}
+            self.adapter.check_options(merged(self.framework_options, own))
+        metadata: dict[str, Any] = {WITHOUT: sorted(without)} if without else {}
         kept = {key: value for key, value in own.items() if _json(value)}
         if kept:
             metadata[FRAMEWORK_OPTIONS] = kept
         if document_ids is not None:
             metadata[DOCUMENTS] = documents(document_ids)
+        if budget is not None:
+            metadata[BUDGET] = budget.kept()
         return metadata
 
 
@@ -1212,28 +1287,26 @@ def _pull(agent: Agent) -> frozenset[str]:
 
 
 class RunHandle:
-    """A queued run: its id, where it is, and a way to wait for it."""
+    """A queued run: its ``id``, where it is (:meth:`status`), and a way to wait for it
+    (:meth:`result`). Cancel it with ``agent.cancel(handle.id)``."""
 
     def __init__(self, agent: Agent, run_id: str, *, tenant: str) -> None:
-        self.agent = agent
-        self.run_id = run_id
-        self.tenant = tenant
+        self._agent = agent
+        self.id = run_id
+        self._tenant = tenant
 
     async def status(self) -> RunRecord:
-        record = await self.agent.harness.runs.get(self.run_id, tenant=self.tenant)
+        record = await self._agent.harness.runs.get(self.id, tenant=self._tenant)
         if record is None:
-            raise ConfigurationError(f"no run {self.run_id}")
+            raise ConfigurationError(f"no run {self.id}")
         return record
 
-    async def cancel(self, *, reason: str | None = None) -> RunRecord:
-        """Cancel the run, whatever it is doing (``Agent.cancel``)."""
-        return await self.agent.cancel(self.run_id, reason=reason, tenant=self.tenant)
-
-    async def result(self, *, timeout: float | None = None) -> Result:  # noqa: ASYNC109
-        """Wait until the run pauses or ends (a worker must be running it). A poll the run
+    async def result(self, *, wait: float | None = None) -> Result:
+        """Wait until the run pauses or ends (a worker must be running it), at most ``wait``
+        seconds (``None``: as long as it takes; past it, ``TimeoutError``). A poll the run
         store refuses for the tenant's request budget (429) waits what it says, then polls
         again."""
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(wait):
             while True:
                 try:
                     record = await self.status()
@@ -1241,7 +1314,7 @@ class RunHandle:
                     await asyncio.sleep(exc.retry_after or POLL_SECONDS * 4)
                     continue
                 if record.status is RunStatus.PAUSED or record.final:
-                    return self.agent.hooks.answer(Result.of(record))
+                    return self._agent.hooks.answer(Result.of(record))
                 await asyncio.sleep(POLL_SECONDS)
 
 

@@ -12,10 +12,9 @@ xfail until it lands.
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -39,11 +38,11 @@ from tests.matrix.world import (
     World,
     approve_all,
 )
-from tests.support.gateway import SkillVersions
+from tests.support.arm import arm, native_tools
 from tests.support.memory import MEMORY_TOOLS
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
 from tests.support.sandbox import PausingSandboxes
-from trellis import Harness, ReAct, Runtime, Settings, a2a, mcp, skills, stdio, tool
+from trellis import Harness, ReAct, Runtime, Settings, a2a, mcp, stdio, stored, tool
 from trellis.contracts import (
     InterruptReason,
     RunEventType,
@@ -52,12 +51,13 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
 )
+from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
 from trellis.harness.clients import bifrost
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
+from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.sandbox import sandbox
-from trellis.harness.skills import LOAD_SKILL
 from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
 
@@ -185,7 +185,7 @@ async def native_approval(w: World) -> None:
                 return f"sent {order}"
 
             return OpenAIAgent(name="sender", model=GroupedModel(plan), tools=[send]), tools
-        native = await h.tools(*tools, framework=w.adapter)  # type: ignore[arg-type]
+        native = await native_tools(h, *tools, framework=w.adapter)
         model = GroupedChatModel(plan=[], steps=list(plan))
         if w.adapter == "deepagents":
             from deepagents import create_deep_agent
@@ -193,14 +193,14 @@ async def native_approval(w: World) -> None:
             graph = create_deep_agent(
                 model=model, tools=native, interrupt_on={"note": True}, checkpointer=InMemorySaver()
             )
-            return graph, []
+            return graph, tools
         graph = create_agent(
             model,
             tools=native,
             middleware=[HumanInTheLoopMiddleware(interrupt_on={"note": True})],
             checkpointer=InMemorySaver(),
         )
-        return graph, []
+        return graph, tools
 
     name = "send" if w.adapter == "openai_agents" else "note"
     args = {"order": "o9"} if name == "send" else {"text": "o9"}
@@ -280,7 +280,7 @@ RUN_LIMIT: Final = 2.0
 
 async def run_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], timeout=RUN_LIMIT)
+    o = await w.go([d.hold()], [("hold", {})], run_timeout=RUN_LIMIT)
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
     assert o.record.error is not None and o.record.error.code == "run_timeout"
@@ -295,12 +295,14 @@ def _researcher(w: World, d: Desk, process: int = 0) -> Any:
         """Research a topic and report what was found."""
         return str(await agent.tools.call("lookup", topic=input))
 
-    return w.harness(process).wrap(research, id=f"research{process}", tools=[d.lookup()])
+    h = w.harness(process)
+    found = h.agents.get("research")  # another process's copy: wrapped once in each
+    return found or arm(h.wrap(research, id="research"), [d.lookup()])
 
 
 async def subagent_parent(w: World) -> None:
     d = Desk()
-    child = _researcher(w, d).as_tool(name="research")
+    child = _researcher(w, d)
     o = (await w.go([child], [("research", {"message": "tides"})])).succeeded()
     assert o.answer == "Done. facts about tides", o.answer
     kids = [r for r in w.store._runs.values() if r.parent_run_id == o.run_id]
@@ -310,10 +312,8 @@ async def subagent_parent(w: World) -> None:
 
 async def subagent_child(w: World) -> None:
     d = Desk()
-    child = await w.agent([d.lookup()], [("lookup", {"topic": "tides"})])
-    o = await w.go(
-        [child.as_tool(name="research")], [("research", {"message": "tides"})], parent="function"
-    )
+    child = await w.agent([d.lookup()], [("lookup", {"topic": "tides"})], name="research")
+    o = await w.go([child], [("research", {"message": "tides"})], parent="function")
     o.succeeded()
     assert o.answer == "Done. Done. facts about tides", o.answer
     kids = [r for r in w.store._runs.values() if r.parent_run_id == o.run_id]
@@ -324,16 +324,16 @@ async def subagent_child(w: World) -> None:
 def _parallel_target(w: World):
     async def target(h: Harness, tools: list[Any], plan: list[Step]) -> tuple[Any, list[Any]]:
         if w.adapter == "react":
-            return ReAct(system="You work.", model=GroupedChat(plan)), tools
+            return ReAct(system_prompt="You work.", model=GroupedChat(plan)), tools
         if w.adapter == "openai_agents":
             return OpenAIAgent(name="worker", model=GroupedModel(plan)), tools
-        native = await h.tools(*tools, framework=w.adapter)  # type: ignore[arg-type]
+        native = await native_tools(h, *tools, framework=w.adapter)
         model = GroupedChatModel(plan=[], steps=list(plan))
         if w.adapter == "deepagents":
             from deepagents import create_deep_agent
 
-            return create_deep_agent(model=model, tools=native), []
-        return create_agent(model, tools=native), []
+            return create_deep_agent(model=model, tools=native), tools
+        return create_agent(model, tools=native), tools
 
     return target
 
@@ -369,7 +369,7 @@ async def context_management(w: World) -> None:
 
     async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
         model = PlannedChat(plan)
-        return ReAct(system="You read.", model=model, context_window=6000), tools
+        return ReAct(system_prompt="You read.", model=model, context_window=6000), tools
 
     plan: list[Call] = [("report", {"name": f"r{n}"}) for n in range(6)]
     o = (await w.go([d.report(2000)], plan, target=target)).succeeded()
@@ -496,11 +496,6 @@ async def hints(w: World) -> None:
 
 
 # --------------------------------------------------------------------------- gateway
-SQL: Final = SkillVersions(
-    {"1.1.0": ("Reviews SQL.", "Read rules.md first.", {"rules.md": "No SELECT *."})}, "1.1.0"
-)
-
-
 async def key_tools(w: World) -> None:
     d = Desk()
     if not w.on:
@@ -509,19 +504,6 @@ async def key_tools(w: World) -> None:
     o = (await w.go([d.lookup()], [(KEY_TOOL, {"q": "tides"})])).succeeded()
     assert "tides" in o.text, o.answer
     assert [r["status"] for r in o.results(KEY_TOOL)] == ["ok"]
-
-
-async def virtual_mcps(w: World) -> None:
-    d = Desk()
-    w.fake_gateway.bundles["billing"] = ["billing-invoice"]
-    if not w.on:
-        (await w.go([d.lookup()], [("lookup", {"topic": "x"})])).succeeded()
-        return
-    plan: list[Call] = [("billing-invoice", {"invoice": "7"})]
-    o = (await w.go([d.lookup(), mcp("billing")], plan)).succeeded()
-    assert '"invoice": "7"' in o.text, o.answer
-    called = {r.url.path for r in w.fake_gateway.requests}
-    assert "/mcp/billing" in called and "/mcp" not in called, called  # its bundle only
 
 
 async def mcp_servers(w: World) -> None:
@@ -538,20 +520,6 @@ async def mcp_servers(w: World) -> None:
     assert [r["status"] for r in o.results("notes-read_note")] == ["ok"]
 
 
-async def skills_(w: World) -> None:
-    d = Desk()
-    w.fake_gateway.skills = {"sql": copy.deepcopy(SQL)}
-    if not w.on:
-        o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})])).succeeded()
-        assert not o.custom("skills")
-        return
-    o = (await w.go([d.lookup(), skills("sql")], [(LOAD_SKILL, {"name": "sql"})])).succeeded()
-    assert "Read rules.md first." in o.text, o.answer
-    pinned = o.custom("skills")  # each attempt says which versions it pinned
-    assert pinned and all(p == {"name": "skills", "versions": {"sql": "1.1.0"}} for p in pinned)
-    assert "## Skills" in w.said() or w.adapter == "function"
-
-
 async def prompts(w: World) -> None:
     d = Desk()
     system = [{"role": "system", "content": "You triage."}]
@@ -564,49 +532,49 @@ async def prompts(w: World) -> None:
         async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
             w.fake_gateway.chat = PlannedChat(plan)
             w.fake_gateway.serve_models(w.monkeypatch)
-            return ReAct(system="Tickets.", model="local/small", prompt="triage"), tools
+            return ReAct(system_prompt=stored("triage"), model="local/small"), tools
 
         o = (await w.go([d.lookup()], [("lookup", {"topic": "x"})], target=target)).succeeded()
         assert {r.headers["x-bf-prompt-id"] for r in w.fake_gateway.completions} == {"p-triage"}
         assert o.answer == "Done. facts about x"
         return
-    # every other framework: its model client is given h.model_headers(prompt=), read per
-    # request; each run pins the version it started with (a resumed attempt keeps it), its
-    # requests select that one, and it says so (its event, its agent span)
+    # every other framework reads it with h.prompt inside the run: pinned for the run (a
+    # resumed attempt keeps the version it started with), and said (its event, its span)
     w.monkeypatch.setattr(bifrost, "REPOSITORY_TTL_SECONDS", 0.0)  # every lookup reads again
-    made: list[Mapping[str, str]] = []
+    read: list[str] = []
     sent: list[dict[str, str]] = []
 
+    w.fake_gateway.prompts["triage"].append(system)  # a newer version since: 2
+
     async def built(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
-        headers = await h.model_headers(prompt="triage")  # one model client per process
-        made.append(headers)
-        w.fake_gateway.prompts["triage"].append(system)  # a newer version since: 2, then 3
-
         @tool(side_effects="read")
-        def model_request() -> str:
-            """What a model request made now sends."""
-            sent.append(dict(headers))
-            return "sent"
+        async def instructions() -> str:
+            """The team's instructions, and what a model request made now sends."""
+            read.append((await h.prompt("triage")).text)
+            sent.append(GatewayHeaders().now())
+            w.fake_gateway.prompts["triage"].append(system)  # 3: a later attempt keeps 2
+            return "read"
 
-        return await w._built(w.adapter, h, [*tools, model_request], plan, None)
+        return await w._built(w.adapter, h, [*tools, instructions], plan)
 
-    o = (await w.go([d.lookup()], [("model_request", {})], target=built)).succeeded()
-    assert made[0]["x-bf-prompt-version"] == "1"  # outside a run: as resolved when made
+    o = (await w.go([d.lookup()], [("instructions", {})], target=built)).succeeded()
     pins = {(p["prompt"], p["version"]) for p in o.custom("prompt")}
     assert pins == {("triage", "2")}, o.custom("prompt")  # every attempt: the run's start's
+    assert read == ["You triage."], read
     [request] = sent
-    prompt = {
-        k: v for k, v in request.items() if not k.startswith(DIMENSION) and k != "traceparent"
-    }
-    assert prompt == {**NO_GATEWAY_TOOLS, "x-bf-prompt-id": "p-triage", "x-bf-prompt-version": "2"}
+    scope = {k: v for k, v in request.items() if not k.startswith(DIMENSION) and k != "traceparent"}
+    assert scope == dict(NO_GATEWAY_TOOLS), scope
     # and the run's attribution (H6): its Bifrost dimensions, the user only as a hash
     assert request[f"{DIMENSION}run"] == o.run_id and request[f"{DIMENSION}agent"]
     assert request[f"{DIMENSION}user"] != USER and len(request[f"{DIMENSION}user"]) == 16
-    if "tracing" in w.switched:  # the run's agent span says it too
-        runs = [dict(s.attributes or {}) for s in w.spans()]
-        said = [a for a in runs if a.get("trellis.run_id") == o.run_id]
-        named = {(a.get("trellis.prompt.name"), a.get("trellis.prompt.version")) for a in said}
-        assert ("triage", 2) in named, named
+    if "tracing" in w.switched:  # the span current then (the tool's, in the run's trace) too
+        trace_id = telemetry.trace_id_of(o.run_id)
+        said = [
+            dict(s.attributes or {})
+            for s in w.spans()
+            if s.context is not None and s.context.trace_id == trace_id
+        ]
+        assert any(a.get("trellis.prompt") == "triage@2" for a in said), said
 
 
 class _Script:
@@ -877,7 +845,7 @@ FEATURES: Final[list[Feature]] = [
         "F20",
         "per-tool timeout: a read past its time limit says so",
         "F20",
-        "@tool(timeout=)",
+        "@tool(call_timeout=)",
         read_timeout,
         way2=way2.read_timeout,
     ),
@@ -920,16 +888,16 @@ FEATURES: Final[list[Feature]] = [
         "F09",
         "run time limit: past it the run ends TIMEOUT",
         "F09",
-        "h.wrap(timeout=) / run(timeout=)",
+        "h.wrap(run_timeout=) / run(run_timeout=)",
         run_timeout,
         way2=way2.run_timeout,
         way2_modes=("worker",),
     ),
     Feature(
         "F30p",
-        "sub-agent: the adapter under test calls a child agent (as_tool)",
+        "sub-agent: the adapter under test calls a child agent (a wrapped agent as a tool)",
         "F30",
-        "opt-in (agent.as_tool())",
+        "opt-in (ReAct(subagents=[agent]))",
         subagent_parent,
         way2=NA(
             "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
@@ -939,7 +907,7 @@ FEATURES: Final[list[Feature]] = [
         "F30c",
         "sub-agent: the adapter under test is the child of a function parent",
         "F30",
-        "opt-in (agent.as_tool())",
+        "opt-in (ReAct(subagents=[agent]))",
         subagent_child,
         way2=NA(
             "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
@@ -1018,7 +986,7 @@ FEATURES: Final[list[Feature]] = [
         "F41",
         "the memory service (MEMORY_URL / Harness(memory=))",
         push,
-        needs=frozenset({"memory", "memory_push"}),
+        needs=frozenset({"memory"}),
         adapters={"function": NA("checked by F41f: a function target reads agent.context")},
         way2=way2.push,
     ),
@@ -1028,7 +996,7 @@ FEATURES: Final[list[Feature]] = [
         "F41",
         "the memory service",
         push_function,
-        needs=frozenset({"memory", "memory_push"}),
+        needs=frozenset({"memory"}),
         adapters={
             a: NA("checked by F41 (what the model is sent)")
             for a in ("react", "langgraph", "deepagents", "openai_agents", "claude")
@@ -1041,7 +1009,7 @@ FEATURES: Final[list[Feature]] = [
         "F41",
         "the memory service (its learned skills)",
         learned,
-        needs=frozenset({"memory", "memory_push"}),
+        needs=frozenset({"memory"}),
         way2=way2.learned,
     ),
     Feature(
@@ -1050,7 +1018,7 @@ FEATURES: Final[list[Feature]] = [
         "F42",
         "the memory service",
         pull,
-        needs=frozenset({"memory", "memory_pull"}),
+        needs=frozenset({"memory"}),
         adapters={"function": NA("a function target calls the memory tools like any other (F43)")},
         way2=NA(
             "by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them"
@@ -1062,7 +1030,7 @@ FEATURES: Final[list[Feature]] = [
         "F43",
         "the memory service",
         records,
-        needs=frozenset({"memory", "records"}),
+        needs=frozenset({"memory"}),
         way2=way2.records,
     ),
     Feature(
@@ -1071,7 +1039,7 @@ FEATURES: Final[list[Feature]] = [
         "F40",
         "the memory service",
         decisions_fed_back,
-        needs=frozenset({"memory", "records"}),
+        needs=frozenset({"memory"}),
         way2=way2.decided,
     ),
     Feature(
@@ -1080,7 +1048,7 @@ FEATURES: Final[list[Feature]] = [
         "F28",
         "automatic from 5 tools, with memory",
         hints,
-        needs=frozenset({"memory", "memory_push", "hints"}),
+        needs=frozenset({"memory", "tool_search"}),
         adapters={"function": NO_MODEL},
         way2=NA(
             "by design: memory.tool_hints() ranks the tools; your code offers the ones it picks"
@@ -1096,19 +1064,10 @@ FEATURES: Final[list[Feature]] = [
         way2=way2.key_tools,
     ),
     Feature(
-        "F18",
-        "Virtual MCPs: only the named bundles' tools",
-        "F18",
-        "tools=[mcp('name')] (wrap, or h.tools for a graph)",
-        virtual_mcps,
-        needs=frozenset({"gateway", "mcp"}),
-        way2=way2.virtual_mcps,
-    ),
-    Feature(
         "F18s",
         "MCP servers of the agent's own: a server over stdio, its tools governed and journaled",
         "N2",
-        "tools=[mcp(stdio(...))] or mcp('https://...') (wrap, or h.tools for a graph)",
+        "ReAct(tools=[mcp(stdio(...))]) or mcp('https://...')",
         mcp_servers,
         way2=NA("Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools"),
     ),
@@ -1118,37 +1077,26 @@ FEATURES: Final[list[Feature]] = [
         "F19",
         "automatic with the gateway (and memory to record)",
         code_mode,
-        needs=frozenset({"gateway", "memory", "records", "mcp", "code_mode"}),
+        needs=frozenset({"gateway", "memory", "mcp", "code_mode"}),
         way2=NA("Code Mode is the gateway's: Way 2 calls its meta-tools through bifrost-sdk"),
-    ),
-    Feature(
-        "F50",
-        "skills: disclosed, pinned, loaded through the bridge",
-        "F50",
-        "skills=[...] / skills(...) with the gateway",
-        skills_,
-        needs=frozenset({"gateway", "skills"}),
-        way2=NA(
-            "by design: your code reads the skills from Bifrost's skills API and puts them in its own prompt"
-        ),
     ),
     Feature(
         "F49",
         "stored prompts: pinned per run and recorded",
         "F49",
-        "ReAct(prompt=) / model_headers(prompt=) with the gateway",
+        "ReAct(system_prompt=stored(...)) / h.prompt(...) with the gateway",
         prompts,
         needs=frozenset({"gateway"}),
         adapters={"function": NO_MODEL},
         way2=NA(
-            "by design: your code sends Bifrost's prompt headers itself (h.model_headers is the Way 1 form)"
+            "by design: your code reads the prompt from Bifrost's prompt repository itself (h.prompt is the Way 1 form)"
         ),
     ),
     Feature(
         "F55",
         "online judges score sampled runs",
         "F55",
-        "Harness(judges=[...]) (+ TRELLIS_JUDGE_SAMPLE)",
+        "h.wrap(judges=[...]) (llm_judge(sample=))",
         judges,
         needs=frozenset({"judges"}),
         way2=way2.judges,
@@ -1157,9 +1105,9 @@ FEATURES: Final[list[Feature]] = [
         "F54",
         "grounding: the answer checked against its context",
         "F54",
-        "TRELLIS_GROUNDING_SAMPLE with memory",
+        "a fixed share of runs, with memory",
         grounding,
-        needs=frozenset({"grounding", "memory", "memory_push"}),
+        needs=frozenset({"grounding", "memory"}),
         way2=way2.grounding,
     ),
     Feature(
@@ -1211,7 +1159,7 @@ FEATURES: Final[list[Feature]] = [
         "F06",
         "schedules: a schedule fires a run for its person",
         "F06",
-        "agent.schedule(cron, input, on_behalf_of=)",
+        "agent.schedule(cron, user=, input=)",
         scheduled,
         modes=only_modes("schedule", reason="schedules are their own mode"),
         way2=way2.scheduled,
@@ -1318,13 +1266,13 @@ async def hook_models(w: World) -> None:
     async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
         from trellis.harness.middleware import ModelHooks
 
-        native = await h.tools(*tools, framework=w.adapter)  # type: ignore[arg-type]
+        native = await native_tools(h, *tools, framework=w.adapter)
         model = PlannedChatModel(plan=plan)
         if w.adapter == "deepagents":
             from deepagents import create_deep_agent
 
-            return create_deep_agent(model=model, tools=native, middleware=[ModelHooks()]), []
-        return create_agent(model, tools=native, middleware=[ModelHooks()]), []
+            return create_deep_agent(model=model, tools=native, middleware=[ModelHooks()]), tools
+        return create_agent(model, tools=native, middleware=[ModelHooks()]), tools
 
     built = target if w.adapter in ("langgraph", "deepagents") else None
     plan: list[Call] = [("lookup", {"topic": "x"})]
@@ -1337,7 +1285,7 @@ async def hook_models(w: World) -> None:
 # --------------------------------------------------------------------------- a run's own options
 async def run_options_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run={"timeout": RUN_LIMIT})
+    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": RUN_LIMIT})
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
     assert o.record.timeout_seconds == RUN_LIMIT
@@ -1455,7 +1403,7 @@ FEATURES.append(
         "F10",
         "the agent's version (and time limit) recorded with every run it starts",
         "F10, F09",
-        "h.wrap(version=, timeout=) / TRELLIS_AGENT_VERSION",
+        "h.wrap(version=, run_timeout=) / OTEL_RESOURCE_ATTRIBUTES=service.version=",
         versioned,
         needs=frozenset({"version"}),
         way2=NA("RunStart.agent_version: your code sets it"),
@@ -1497,7 +1445,7 @@ FEATURES.extend(
                 fid,
                 title,
                 "F71 (W6)",
-                "h.wrap(hooks=[...]) / Harness(hooks=); Way 2 governed(hooks=)",
+                "h.wrap(hooks=[...]); Way 2 governed(hooks=)",
                 scenario,
                 way2=block,
             )
@@ -1507,7 +1455,7 @@ FEATURES.extend(
             "F71r",
             "hooks: on_run_start / on_run_end around every attempt",
             "F71 (W6)",
-            "h.wrap(hooks=[...]) / Harness(hooks=)",
+            "h.wrap(hooks=[...])",
             hook_runs,
             way2=NA("no run of the harness's in Way 2: your code has its own"),
         ),
@@ -1522,9 +1470,9 @@ FEATURES.extend(
         ),
         Feature(
             "F09r",
-            "a run's own time limit: run/stream/start/schedule(timeout=)",
+            "a run's own time limit: run/stream/start/schedule(run_timeout=)",
             "F09",
-            "agent.run(..., timeout=)",
+            "agent.run(..., run_timeout=)",
             run_options_timeout,
             modes=PER_RUN,
             way2=NA("RunStart.timeout_seconds: your code sets it (F09's Way 2 row)"),
@@ -1561,7 +1509,7 @@ FEATURES.extend(
             "F73",
             "sandbox: write, exec across a pause, one sandbox per run, deleted at its end",
             "F73 (W7)",
-            "tools=[sandbox(provider)] (h.tools for a graph); SANDBOX=docker",
+            "ReAct(tools=[sandbox(provider)]); sandbox() alone: Docker",
             sandboxed,
             way2=NA(
                 "sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)"

@@ -44,7 +44,7 @@ flowchart TB
 | [agent-contracts](https://github.com/amitmohapatra/agent-contracts) | the records (`RunStart`, `RunRecord`, `Interrupt`, `InterruptResolution`, `RunEvent`, `Feedback`, `ToolCall`, `AgentError`...) and the ports; no runtime | everything it returns and every record it writes |
 | [agent-memory-service](https://github.com/amitmohapatra/agent-memory-service) | memory: the context for a question, the memory tools, transcripts and tool records, documents, the tool catalog (risks, `approve_when`), feedback, grounding (`/v1/verify`), the keys (`/v1/keys/self`: who a key is) | memory push and pull, records, governance's catalog, the tenant, feedback, grounding |
 | [agent-runs](https://github.com/amitmohapatra/agent-runs) | durable runs: records, the queue, leases and heartbeats, pauses with their checkpoint, the inbox, schedules and their ticker, deadlines and escalation, artifacts, the event log, signed webhooks | the run store with `RUNS_URL` (else the in-process `LocalRuns`), workers, schedules |
-| [bifrost-sdk](https://github.com/amitmohapatra/bifrost-sdk) | the Bifrost gateway's client: completions, MCP listing and execution, the MCP log, prompts, skills, Virtual MCPs, the deny-all scope | MCP tools and Code Mode, `ReAct`'s and the judge's models, stored prompts and skills |
+| [bifrost-sdk](https://github.com/amitmohapatra/bifrost-sdk) | the Bifrost gateway's client: completions, MCP listing and execution, the MCP log, prompts, the deny-all scope | MCP tools and Code Mode, `ReAct`'s and the judge's models, stored prompts and skills |
 | agent-harness (this one) | Way 1 (the pipeline, the bridge, the journal, the adapters, the surfaces) and the governance, evaluation and A2A blocks | — |
 
 The run lifecycle is agent-runs': its
@@ -129,11 +129,11 @@ flowchart LR
 
 | Neighbour | What the harness uses it for | Endpoints (module) |
 |---|---|---|
-| Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows (or a Virtual MCP's), their execution, Code Mode, `ReAct`'s and the judge's model calls, the MCP log of Code Mode scripts, stored prompts, skills, the MCP clients' Agent Mode lists | `POST /mcp[/<slug>]` (`tools/list`, `tools/call`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs`, `GET /api/prompt-repo/prompts`, `GET /api/skills[/...]`, `GET /api/mcp/clients` (`clients/bifrost.py`, through `bifrost-sdk`) |
+| Bifrost gateway (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`) | the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s and the judge's model calls, the MCP log of Code Mode scripts, stored prompts, skills, the MCP clients' Agent Mode lists | `POST /mcp[/<slug>]` (`tools/list`, `tools/call`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs`, `GET /api/prompt-repo/prompts`, `GET /api/skills[/...]`, `GET /api/mcp/clients` (`clients/bifrost.py`, through `bifrost-sdk`) |
 | Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model key | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, the catalog in `governance/catalog.py`, `/v1/verify` in `evals.grounding_score`, through `trellis-memory`) |
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts, the event log | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/release`, `/artifacts`, `/events`, `/v1/artifacts/{id}`, `/v1/schedules` (`runs.py`, `runlog.py`, through `trellis.runs.RunsClient`) |
 | Chat UI | runs and their events, resumes, reconnects, cancels, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `POST {path}/runs/{id}/cancel`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`agui`) |
-| Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)` and `remote(url)`: `SendStreamingMessage`, `CancelTask` (`a2a`) |
+| Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)` (`RemoteAgent`): `SendStreamingMessage`, `CancelTask` (`a2a`) |
 | Langfuse (`LANGFUSE_*`) / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces; grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
 
 Unset variables remove a box: no `BIFROST_URL` means no MCP tools and no `ReAct` model names,
@@ -151,7 +151,7 @@ src/trellis/
     harness.py         Harness: the blocks given (runs, memory, gateway, governance), the rest built
                        from the settings; writes, evaluation services; the key (tenant, kept fresh);
                        governance per tenant; wrap / tools / worker / inbox / feedback /
-                       add_document / evaluate / score / prompt / model_headers
+                       add_document / evaluate / prompt
     agent.py           Agent: run, stream, start, execute (a claimed run), resume, cancel, events,
                        schedule, serve_*; RunHandle; memory push and records
     pipeline.py        one attempt of one run, from its record: the fixed pipeline below
@@ -351,9 +351,8 @@ tools all only read as governance says now, when there are enough of them
 (`CODE_MODE_MIN_SERVERS` 3 or `CODE_MODE_MIN_TOOLS` 20); its meta-tools are offered under the
 harness's names, so the gateway returns every call to the bridge. Each new set of names is
 checked for what makes tools hard to choose among (`tools/lint.py`: descriptions, parameters,
-names, look-alikes, how many), each finding a logged warning. With `mcp("name")` entries the definitions
-are the named Virtual MCPs' tools; a tool its client lists in `tools_to_auto_execute` is left
-out ([gateway.md](gateway.md)).
+names, look-alikes, how many), each finding a logged warning. A tool its client lists in
+`tools_to_auto_execute` is left out ([gateway.md](gateway.md)).
 
 Governance (`governance/`, one `Governance` per tenant) is the only place a call's action is
 decided. It reads the catalog's word on each tool (`risk`, `approve_when`) again after
@@ -411,7 +410,7 @@ adapter from the target's type, before anything is imported.
 ```mermaid
 flowchart LR
   target["target"] --> detect{"detect(target)<br/>by its type's module"}
-  detect -->|"langgraph.* Pregel<br/>(create_agent, Deep Agents, ReAct)"| lg["LangGraphAdapter<br/>tools: h.tools(...) at build<br/>narrows: per call (create_agent, Deep Agents)"]
+  detect -->|"langgraph.* Pregel<br/>(create_agent, Deep Agents, ReAct)"| lg["LangGraphAdapter<br/>tools: the graph's own, governed<br/>narrows: per call (create_agent, Deep Agents)"]
   detect -->|"agents.Agent"| oa["OpenAIAgentsAdapter<br/>tools: added to a copy per run<br/>narrows: per turn"]
   detect -->|"ClaudeAgentOptions"| cl["ClaudeAdapter<br/>tools: the trellis MCP server<br/>narrows: per run"]
   detect -->|"async (input, agent)"| fn["FunctionAdapter<br/>tools: agent.tools.call"]
@@ -432,7 +431,7 @@ flowchart LR
 
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
-| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | built in with `h.tools(..., framework="langgraph")` (a compiled graph refuses `tools=`) | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
+| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | the graph's own, governed as it runs them; the harness's with `HarnessTools()` | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
 | `ReAct` (a `create_agent` graph) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
 | Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through a `PreToolUse` hook | per run | a `UserPromptSubmit` hook |
@@ -463,7 +462,7 @@ flowchart TB
     rt["ReadTools · harness<br/>read_file / read_result offered once needed"]
     tg["ToolGuidance · harness, tool_guidance=True<br/>how to choose among tools, in the instructions"]
     yours["yours: middleware=[...]<br/>(TodoListMiddleware, HumanInTheLoopMiddleware, PII...)"]
-    mh["ModelHooks · harness<br/>before/after_model hooks, chat span, model_timeout,<br/>pinned prompt, unparsable calls answered"]
+    mh["ModelHooks · harness<br/>before/after_model hooks, chat span, call_timeout,<br/>pinned prompt, unparsable calls answered"]
   end
   fs --> ac --> ht --> sg --> sl --> pt --> ce --> su --> rt --> tg --> yours --> mh --> model(["the model"])
 ```

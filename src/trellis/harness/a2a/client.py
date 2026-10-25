@@ -1,5 +1,5 @@
-"""Calling a remote A2A agent from any code: ``remote(url, tenant=, user=)`` is a
-:class:`RemoteAgent`, an async callable — a message in, the remote agent's answer out.
+"""Calling a remote A2A agent from any code: ``a2a(url)`` (``tools.sources``) is an async
+callable — a message in, the remote agent's answer out — each call a :class:`RemoteAgent`.
 
 The call carries the caller's identity on the trusted-identity header, and ``thread`` as the A2A
 context, so a conversation between two agents is one thread on both sides. When the remote task
@@ -66,39 +66,6 @@ class InputRequired(Exception):
         super().__init__(question)
         self.question = question
         self.task_id = task_id
-
-
-def remote(
-    url: str,
-    *,
-    tenant: str,
-    user: str,
-    thread: str | None = None,
-    on_input: OnInput | None = None,
-    name: str | None = None,
-    headers: Mapping[str, str] | None = None,
-    timeout: float = REMOTE_TIMEOUT_SECONDS,
-    client: httpx.AsyncClient | None = None,
-) -> RemoteAgent:
-    """The agent whose card is at ``{url}/.well-known/agent-card.json``, called as ``tenant`` /
-    ``user`` on ``thread`` (the A2A context; each call its own when ``None``).
-
-    ``on_input(question)`` answers a remote question (else :class:`InputRequired`); ``name``
-    names its :attr:`~RemoteAgent.spec`; ``headers`` go on every request (an edge's
-    ``Authorization``); ``client`` is an ``httpx.AsyncClient`` to use (never closed here),
-    otherwise one with ``timeout`` is opened on connect and closed by ``aclose``.
-    """
-    return RemoteAgent(
-        url,
-        tenant=tenant,
-        user=user,
-        thread=thread,
-        on_input=on_input,
-        name=name,
-        headers=headers,
-        timeout=timeout,
-        client=client,
-    )
 
 
 class RemoteAgent:

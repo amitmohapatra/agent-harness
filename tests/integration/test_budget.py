@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.arm import arm
 from trellis import Budget, Harness, Runtime, tool
 from trellis.contracts import ConfigurationError, RunStatus, ToolError
 from trellis.harness import budget
@@ -59,7 +60,7 @@ async def test_the_calls_of_one_step_past_the_limit_are_not_started(harness: Har
         calls = [agent.tools.call("stock", sku=s) for s in ("a", "b", "c")]
         return list(await asyncio.gather(*calls))
 
-    agent = harness.wrap(counter, id="count", tools=shop.tools(), budget=Budget(max_tool_calls=2))
+    agent = arm(harness.wrap(counter, id="count", budget=Budget(max_tool_calls=2)), shop.tools())
     result = await agent.run("count", user="u")
     assert sorted(shop.reads) == ["a", "b"]  # the two under way finished; the third never ran
     assert result.answer[:2] == [7, 7]
@@ -68,18 +69,39 @@ async def test_the_calls_of_one_step_past_the_limit_are_not_started(harness: Har
     assert result.error.code == budget.BUDGET_EXCEEDED
 
 
+async def test_a_runs_own_budget_goes_over_its_agents_and_is_kept_with_its_record(
+    harness: Harness,
+) -> None:
+    """``run``/``start(budget=)``: this run's cap, over the agent's — kept with the queued run,
+    so the worker's attempt holds to it."""
+    shop = Shop()
+
+    async def counter(input: str, agent: Runtime) -> list[Any]:
+        return [await agent.tools.call("stock", sku=s) for s in ("a", "b", "c")]
+
+    agent = arm(harness.wrap(counter, id="count", budget=Budget(max_tool_calls=3)), shop.tools())
+    handle = await agent.start("count", user="u", budget=Budget(max_tool_calls=1))
+    record = await handle.status()
+    assert record.metadata["budget"] == {"max_tool_calls": 1}
+    assert Budget.of(record.metadata["budget"]) == Budget(max_tool_calls=1)
+    assert await harness.worker([agent]).run_once()
+    done = await handle.result(wait=5)
+    assert shop.reads == ["a"] and done.status is RunStatus.PARTIAL
+    assert Budget.of(None) is None
+
+
 async def test_a_sub_agents_calls_count_toward_its_parents_budget(harness: Harness) -> None:
     shop = Shop()
 
     async def counter(input: str, agent: Runtime) -> list[Any]:
         return [await agent.tools.call("stock", sku=s) for s in ("a", "b", "c")]
 
-    child = harness.wrap(counter, id="child", tools=shop.tools())
+    child = arm(harness.wrap(counter, id="child"), shop.tools())
 
     async def lead(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call(child.as_tool().name, message="count")
+        return await agent.tools.call(child.id, message="count")
 
-    parent = harness.wrap(lead, id="lead", tools=[child.as_tool()], budget=Budget(max_tool_calls=2))
+    parent = arm(harness.wrap(lead, id="lead", budget=Budget(max_tool_calls=2)), [child])
     result = await parent.run("count", user="u")
     # the parent's call to the child is one, the child's first read the second: the limit
     assert shop.reads == ["a"], result
@@ -94,7 +116,7 @@ async def test_a_resumed_run_goes_on_from_what_it_spent(harness: Harness) -> Non
         await agent.ask("Count b too?")
         return [first, await agent.tools.call("stock", sku="b")]
 
-    agent = harness.wrap(counter, id="count", tools=shop.tools(), budget=Budget(max_tool_calls=1))
+    agent = arm(harness.wrap(counter, id="count", budget=Budget(max_tool_calls=1)), shop.tools())
     paused = await agent.run("count", user="u")
     assert paused.interrupt is not None
     done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="r")
@@ -109,7 +131,7 @@ async def test_without_a_budget_nothing_is_refused(harness: Harness) -> None:
     async def counter(input: str, agent: Runtime) -> list[Any]:
         return [await agent.tools.call("stock", sku=s) for s in ("a", "b")]
 
-    agent = harness.wrap(counter, id="count", tools=shop.tools())
+    agent = arm(harness.wrap(counter, id="count"), shop.tools())
     result = await agent.run("count", user="u")
     assert result.answer == [7, 7] and result.status is RunStatus.SUCCESS
 
@@ -139,7 +161,7 @@ async def test_a_read_is_retried_after_an_error_that_may_pass(harness: Harness) 
     async def reader(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("stock", sku="a")
 
-    result = await harness.wrap(reader, id="r", tools=shop.tools()).run("read", user="u")
+    result = await arm(harness.wrap(reader, id="r"), shop.tools()).run("read", user="u")
     assert result.answer == 7 and shop.reads == ["a", "a", "a"]
 
 
@@ -150,7 +172,7 @@ async def test_a_read_waits_what_retry_after_says_when_there_is_time(harness: Ha
         return await agent.tools.call("stock", sku="a")
 
     began = asyncio.get_running_loop().time()
-    result = await harness.wrap(reader, id="r", tools=shop.tools()).run("read", user="u")
+    result = await arm(harness.wrap(reader, id="r"), shop.tools()).run("read", user="u")
     assert result.answer == 7 and asyncio.get_running_loop().time() - began >= 0.05
 
 
@@ -160,7 +182,7 @@ async def test_a_retry_after_past_the_time_left_is_not_waited(harness: Harness) 
     async def reader(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("stock", sku="a")
 
-    agent = harness.wrap(reader, id="r", tools=shop.tools(), timeout=2)
+    agent = arm(harness.wrap(reader, id="r", run_timeout=2), shop.tools())
     result = await agent.run("read", user="u")
     assert result.answer == "stock failed: the stock service is busy" and shop.reads == ["a"]
 
@@ -171,7 +193,7 @@ async def test_a_write_is_never_retried(harness: Harness) -> None:
     async def writer(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("order", sku="a")
 
-    result = await harness.wrap(writer, id="w", tools=shop.tools()).run("order", user="u")
+    result = await arm(harness.wrap(writer, id="w"), shop.tools()).run("order", user="u")
     assert result.answer == "order failed: the shop is busy" and shop.writes == ["a"]
 
 

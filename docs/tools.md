@@ -10,23 +10,22 @@ catalog.
 
 | Where from | Tools | Side effects |
 |---|---|---|
-| **MCP** — automatic, with a gateway | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)). Once `tools=[...]` names any `mcp(...)`, the agent has exactly the MCP servers it names instead; `without={"mcp"}` is no MCP tool at all | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
-| `mcp(target, *, name=None, timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`), `mcp("finance-tools")` a Bifrost Virtual MCP by name (the gateway lists and runs its tools). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. Code Mode is for the gateway's servers | the server's annotations, as above |
-| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
-| `a2a(url, *, name=None, timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `timeout` seconds per exchange | `"write"` |
-| an agent wrapped by this harness, in `tools=[...]` | one, named after the agent's id: `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)). `agent.as_tool(*, name=None, description=None, side_effects=None)` is deprecated (one release, with a warning) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"` |
-| `openapi(spec, *, only=None, base_url=None, headers=None, timeout=120)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
-| `sandbox(provider=None, spec=None, *, timeout=120)` | `sandbox_exec`, `sandbox_read` and `sandbox_write`, in a sandbox of the run's own (`SANDBOX=docker`, or the provider given), made at its first call and deleted at its end ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` (idempotent) `"write"`, `sandbox_read` `"read"` |
-| `h.wrap(..., skills=[...])`, `skills(...)` | `load_skill` and `read_skill_file`: skills from code, `SKILLS_DIR` and the gateway's Skills Repository, each pinned per run ([skills.md](skills.md)) | `"read"` |
+| **MCP** — automatic, with a gateway | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `without={"mcp"}` is no MCP tool at all | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
+| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. Code Mode is for the gateway's servers | the server's annotations, as above |
+| `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `call_timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
+| `a2a(url, *, name=None, call_timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `call_timeout` seconds per exchange | `"write"` |
+| a wrapped agent, in a `ReAct`'s `subagents=[...]` | one, named after the agent's id: `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"` |
+| `openapi(spec, *, only=None, base_url=None, headers=None, call_timeout=120)` | one per `operationId`; path and query parameters and a JSON `body` flattened into one argument object; at most `call_timeout` seconds per operation | by method: GET/HEAD/OPTIONS read, POST/PUT/PATCH write, DELETE irreversible |
+| `sandbox(provider=None, *, image=None, spec=None, call_timeout=120)` | `sandbox_exec`, `sandbox_read` and `sandbox_write`, in a sandbox of the run's own (Docker, or the provider given), made at its first call and deleted at its end ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` (idempotent) `"write"`, `sandbox_read` `"read"` |
+| your framework's own tools (a graph's, an OpenAI Agents agent's, Claude's built-ins and in-process servers) | the framework runs them; every call is governed as it makes it, published to the catalog, journaled and recorded | the catalog's risk (an MCP server's annotations where it has them), else `"write"` |
 | the memory service (memory on) | its agent tools (see [memory.md](memory.md)) | read or write |
 
-Everything an agent can call goes in one `tools=[...]` (or `h.tools(...)` for a framework that
-binds its tools when it is built): functions, sub-agents, `a2a`, `openapi`, `mcp(...)`,
-`sandbox()`, `skills(...)`. Without `mcp(...)` entries, which MCP tools an agent has is decided
+What an agent can call is said where it is built: a `ReAct`'s `tools=[...]` (functions,
+`tool(...)`, LangChain tools, `mcp(...)`, `openapi`, `sandbox()`) and `subagents=[...]`
+(wrapped agents, `a2a`); your framework's agent with its own tools; a function target's code
+with `agent.tools.call(tool, ...)`. Which of the gateway's MCP tools an agent has is decided
 where its virtual key is configured, in the gateway. Tool names must be unique across the
-toolbox. The retired `h.wrap(mcp=[...])` / `h.tools(mcp=[...])` still name Virtual MCPs for one
-release, with a warning (`mcp("name")` in `tools=[...]` replaces them; `mcp=[]` is
-`without={"mcp"}`).
+toolbox.
 
 With memory on, every tool is published to the memory service's tool catalog, through
 governance, in the background and once per content: MCP tools (the gateway's and your own
@@ -101,9 +100,23 @@ on Claude it is on the `trellis` server from the start (the CLI lists a server's
 A page holds at most 20,000 characters and says where the next one starts; a line longer than
 5,000 characters reads as several, so a one-line JSON result pages too.
 
+## The run's tool set
+
+A run's tools are one set: the harness's (the toolbox above) and the framework's own — a graph's
+tool nodes' tools (a hand-built `StateGraph`'s `ToolNode` included), a Deep Agent's `task`
+sub-agents' tools, an OpenAI agent's function and hosted tools, its MCP servers' tools (as the
+servers list them), its handoffs (`transfer_to_...`) and the tools of the agents it hands off to
+or runs as tools, Claude Code's built-ins and its MCP servers' tools (an in-process server's as
+it lists them, the ones `allowed_tools` names, the ones it was seen calling). The set is sorted
+by name, each name once, so the memory context's cache key holds. It is what the tool hints and
+`tool_search` choose among, what the tenant's catalog is told about (once per set of names) and
+what the narrowing narrows. A tool that hands the work to another agent (Deep Agents' `task`, a
+handoff, an agent tool, Claude's `Agent`) is of the set but never narrowed away, and its call is
+a `read`: each of the other agent's own calls is governed on its own.
+
 ## Tool hints: what the model is offered
 
-The memory context is asked for with the run's own tools (not the memory tools): it comes back
+The memory context is asked for with the run's tool set (not the memory tools): it comes back
 with the skills the agent learned for the task ("Learned skills for this task", any number of
 tools) and, from five tools (the memory service's threshold), the tools section (the next step,
 argument values found in memory, what is missing) and the `tools` that fit the task
@@ -118,9 +131,9 @@ more tools, the model is then offered:
 | Framework | Narrowing |
 |---|---|
 | `ReAct`, a graph with `HarnessTools` | per model call (each request carries the tools offered at that moment, sorted by name; the set only grows within a run) |
-| OpenAI Agents | per turn (`FunctionTool.is_enabled`); the team's own tools are untouched |
-| Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query) |
-| `create_agent` / Deep Agents graph built with `h.tools` | per model call: the harness runs a copy of the graph whose model calls go through one more `awrap_model_call` handler, offering the tools offered at that moment (your graph object is unchanged) |
+| OpenAI Agents | per turn (`FunctionTool.is_enabled`): the harness's tools and the agent's own function tools (theirs is kept, and asked first); its hosted tools are the provider's |
+| Claude Agent SDK | per run (the CLI lists an MCP server's tools once per query): the harness's tools, and Claude's own built-ins and MCP tools left out of the query's `disallowed_tools` (yours are kept) |
+| `create_agent` / Deep Agents graph | per model call: the harness runs a copy of the graph whose model calls go through one more `awrap_model_call` handler, offering the tools offered at that moment — its own tools of the set too (your graph object is unchanged) |
 | hand-written LangGraph `StateGraph` | none: its own code binds the model's tools (`model.bind_tools(...)`) when it is built, out of the harness's reach |
 | function | n/a: it calls tools by name |
 
@@ -142,29 +155,26 @@ read back from Bifrost's MCP log after the run — it is written a few seconds b
 read until two reads agree (at most 20 s) — and recorded as tool calls. Agent Mode (the
 gateway running tools itself) is never used: under its own names the gateway would run a
 declared meta-tool itself, inside the completion, so the harness's names keep every call in
-the bridge ([gateway.md](gateway.md#what-the-gateway-never-does-for-a-run)). Not through a
-Virtual MCP (`mcp=`): a script reaches every tool of a server, a bundle only some.
+the bridge ([gateway.md](gateway.md#what-the-gateway-never-does-for-a-run)).
 
-## Tools built into the agent: `h.tools`
+## A framework's own tools
 
-A compiled LangGraph graph (and Deep Agents) binds its tools when it is built, so `wrap(tools=)`
-is refused for it. Build it with the toolbox instead — every call still goes through the
-bridge, governed for the run that makes it:
+A framework's agent keeps its tools: a LangGraph graph's (bound when it is built), an OpenAI
+Agents agent's `function_tool`s and handoffs, Claude Code's built-ins and your in-process MCP
+servers. The harness finds them in the target, adds them to the run's tool set (the tool hints
+and the narrowing see them), publishes them to the catalog, and governs every call as the
+framework makes it — the catalog's risk and `approve_when`, approvals, the journal, the records:
 
 ```python
-graph = create_agent(model, tools=await h.tools(stock, framework="langgraph"))
+graph = create_agent(model, tools=[stock], middleware=[HarnessTools()])
 agent = h.wrap(graph, id="stock")
 ```
 
-The result holds `stock`, the MCP tools the virtual key allows and (memory on) the memory
-tools. `framework` is the adapter's name: `"langgraph"` (and `"deepagents"` for
-`create_deep_agent`) returns LangChain tools; `framework="openai_agents"` returns `FunctionTool`s (for an agent reached by a handoff,
-whose tools `wrap(tools=)` does not reach); `framework="claude_agent_sdk"` returns one
-in-process MCP server config (add it to `mcp_servers` as `"trellis"` and allow its tools,
-`mcp__trellis__<tool>`, in `allowed_tools`). Any other name is refused with the valid ones
-(`ConfigurationError`). A LangGraph agent's tool hints are asked for among
-these tools, and a `create_agent` or `create_deep_agent` graph's model calls are offered only
-those the run offers ([tool hints](#tool-hints-what-the-model-is-offered)).
+`HarnessTools()` (`trellis.harness.middleware`) adds the harness's tools — the MCP tools the
+virtual key allows and (memory on) the memory tools — to every model call of a `create_agent`
+or Deep Agents graph; an OpenAI Agents or Claude run gets them on its copy of the agent. A
+`create_agent` or `create_deep_agent` graph's model calls are offered only the tools the run
+offers ([tool hints](#tool-hints-what-the-model-is-offered)).
 
 The tools are built once, but governed at each call: governance looks the call up by its tool's
 name in the catalog as it is *then*, so an administrator's rule reaches a graph compiled before
@@ -172,7 +182,9 @@ it was set, within the 30 s the rules are kept ([governance.md](governance.md#wa
 
 ## Inside a run
 
-`trellis.current().tools.call(name, **args)` calls any of the run's tools through the bridge;
+`trellis.current().tools.call(tool, **args)` calls one of the run's tools through the bridge —
+by name, or a tool itself (`tool(fn)`, `mcp(...)`, `a2a(url)`...: it joins the run first);
+`tools.use(*sources)` adds a function target's own tools to the run;
 `tools.hints(task)` asks the memory service which of them fit (and offers the tools it names).
 Inside a tool call, `trellis.current().idempotency_key` is that call's key and
 `trellis.current().remaining()` the seconds it may still take (`None`: no limit).

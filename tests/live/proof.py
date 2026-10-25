@@ -135,7 +135,7 @@ class Proof(Hooks):
 def governed(h: Harness, tenant: str) -> list[tuple[str, Decision]]:
     """Every decision governance makes in ``tenant`` from now on — the harness's own (the
     memory service's catalog), only watched."""
-    governance = h.governance(tenant)
+    governance = h._governance(tenant)
     seen: list[tuple[str, Decision]] = []
     check = governance.check
 

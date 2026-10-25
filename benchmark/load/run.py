@@ -95,13 +95,15 @@ def agent(h: Any, plan: Plan, without: frozenset[str] = frozenset()) -> Any:
 
     model: Any = plan.model or Paced(pace=plan.pace)
     target = ReAct(
-        "You answer stock questions with the stock tool.", model, context_window=plan.window
+        "You answer stock questions with the stock tool.",
+        model,
+        context_window=plan.window,
+        tools=[tool(side_effects="read")(stock)],
     )
     return h.wrap(
         target,
         id="load",
-        tools=[tool(side_effects="read")(stock)],
-        timeout=plan.run_seconds,
+        run_timeout=plan.run_seconds,
         without=set(without),
     )
 

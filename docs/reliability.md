@@ -16,9 +16,10 @@ rules where it has the same pieces: `governed` for your own tools, `trellis.runs
 
 | Feature | You write | Automatic |
 |---|---|---|
-| [Tool timeouts](#tool-timeouts) | `@tool(timeout=)`, `openapi(timeout=)`, `a2a(timeout=)`, `governed(timeout=)` | MCP calls and every call bounded by what is left of the run |
-| [Model timeouts](#model-timeouts) | `ReAct(model_timeout=)` | the gateway's own retries stay inside it |
-| [Run time limit and deadline](#run-time-limit-and-deadline) | `run`/`stream`/`start(timeout=, deadline=)` | the clock survives a crash; workers stop in time |
+| [Tool timeouts](#tool-timeouts) | `@tool(call_timeout=)`, `openapi(call_timeout=)`, `a2a(call_timeout=)`, `governed(timeout=)` | MCP calls and every call bounded by what is left of the run |
+| [Model timeouts](#model-timeouts) | `ReAct(call_timeout=)` | the gateway's own retries stay inside it |
+| [Stalled model calls](#stalled-model-calls) | nothing: every target's model calls are watched | a stalled step ends the run with a `TIMEOUT` step error, recorded and traced |
+| [Run time limit and deadline](#run-time-limit-and-deadline) | `run`/`stream`/`start(run_timeout=, deadline=)` | the clock survives a crash; workers stop in time |
 | [Retries](#retries) | — | reads retried, writes run once |
 | [Idempotency keys](#idempotency-keys) | the tool hands `trellis.current().idempotency_key` to its service | OpenAPI, A2A and MCP calls carry it |
 | [Unknown outcomes](#unknown-outcomes) | — | a write that timed out or was cut by a crash is told to the model, never re-run blind |
@@ -26,8 +27,8 @@ rules where it has the same pieces: `governed` for your own tools, `trellis.runs
 | [Cancel](#cancel) | `agent.cancel(run_id, reason=)` | wherever the run is: queued, paused, here, on a worker; its sub-agents' runs with it |
 | [Releasing on shutdown](#releasing-on-shutdown) | — | a stopping worker hands its runs back at once |
 | [The last good tool list](#the-last-good-tool-list) | — | a gateway that is down does not empty the toolbox |
-| [Agent version](#agent-version) | `h.wrap(..., version=)` or `TRELLIS_AGENT_VERSION` | recorded with each run; a resume on another version says so |
-| [Sandboxes](sandbox.md#automatic) | `sandbox(timeout=)` | a command out of time killed with what it started; the run's sandbox recorded before use, attached after a crash, never replaced blindly, deleted at the end |
+| [Agent version](#agent-version) | `h.wrap(..., version=)` or `OTEL_RESOURCE_ATTRIBUTES=service.version=` | recorded with each run; a resume on another version says so |
+| [Sandboxes](sandbox.md#automatic) | `sandbox(call_timeout=)` | a command out of time killed with what it started; the run's sandbox recorded before use, attached after a crash, never replaced blindly, deleted at the end |
 
 ## Tool timeouts
 
@@ -41,19 +42,19 @@ rules where it has the same pieces: `governed` for your own tools, `trellis.runs
 **How.**
 
 ```python
-@tool(side_effects="write", timeout=20)
+@tool(side_effects="write", call_timeout=20)
 async def transfer(amount: int, to: str) -> str: ...
 
 
-tools = [transfer, openapi(spec_url, timeout=10), a2a(planner_url, timeout=300)]
+tools = [transfer, openapi(spec_url, call_timeout=10), a2a(planner_url, call_timeout=300)]
 ```
 
 | Source | Its own limit |
 |---|---|
-| `@tool(timeout=)` / `tool(fn, timeout=)` | none unless you give one |
-| `openapi(spec, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool); also the document's fetch |
-| `a2a(url, timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too; `remote()` the same), the whole exchange |
-| `sandbox(timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too): a command past it is killed, with what it started ([sandbox.md](sandbox.md)) |
+| `@tool(call_timeout=)` / `tool(fn, call_timeout=)` | none unless you give one |
+| `openapi(spec, call_timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool); also the document's fetch |
+| `a2a(url, call_timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too; `RemoteAgent` the same), the whole exchange |
+| `sandbox(call_timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS` too): a command past it is killed, with what it started ([sandbox.md](sandbox.md)) |
 | an MCP tool (Bifrost) | none of its own: the request waits what is left of the run's time (else the Bifrost SDK's 60 s) |
 | `governed(fn, gov, timeout=)` (Way 2) | none unless you give one |
 
@@ -89,24 +90,53 @@ built with the harness's `ModelHooks(timeout=)` middleware — may take.
 **When.** A model that sometimes hangs, or a run that must not spend its whole budget on one
 call.
 
-**Where.** `ReAct(..., model_timeout=seconds)`; in a graph of your own,
+**Where.** `ReAct(..., call_timeout=seconds)`; in a graph of your own,
 `create_agent(..., middleware=[ModelHooks(timeout=seconds)])`. A framework's own model clients (LangChain's
 `ChatOpenAI(timeout=)`, the OpenAI Agents SDK's) are configured on the client, as before; the
 run's own limit still bounds them.
 
-**How.** `ReAct(system=..., model="provider/model", model_timeout=30)`.
+**How.** `ReAct(system_prompt=..., model="provider/model", call_timeout=30)`.
 
 **Automatic.** The model client of a `ReAct` built with a model name makes one attempt: the
 gateway is the one place that retries a model call (a provider's `network_config.max_retries`
 in Bifrost, 0 by default: set it) and falls back (the virtual key's fallbacks), so
-attempts never multiply. All of it happens *inside* `model_timeout`, and what is left of the
+attempts never multiply. All of it happens *inside* `call_timeout`, and what is left of the
 run bounds it. A model error left is a `ModelError`, retryable for those causes (a queued run
 is queued again, its graph continuing from its checkpoint).
 
-**On failure.** The run fails `ERROR` with a `ModelError` that says
-`"the model did not answer within 30s"`, `retryable` true: a queued run goes back on the
+**On failure.** The run fails `ERROR` with a `ModelTimeout` (code `MODEL_TIMEOUT`, category
+`TIMEOUT`) that says `"the model did not answer within 30s: the step stalled"`, `retryable`
+true: a queued run goes back on the
 queue for a later attempt ([run retries](#retries)), and its model steps already journaled
 are not asked again.
+
+## Stalled model calls
+
+**What.** Every model call of every target — a step, the provider's hosted tools it runs
+included (an OpenAI agent's file search, web search, code interpreter) — is watched from its
+start to its answer. One that gets no answer within its bound has stalled: the run ends with a
+clear `TIMEOUT` step error instead of hanging or answering something generic.
+
+**Bound.** `min(call timeout, the run's time left)`: a `ReAct`'s `call_timeout`, else
+`STALL_SECONDS` (600 s, `trellis.harness.runtime`); the run's own `timeout` and `deadline` bound
+it too (then the run ends `TIMEOUT`, below).
+
+**Where it is watched.** Every LangChain chat model call made in a run (a `ReAct`, a
+`create_agent` or Deep Agents graph, a hand-built graph's model, a function's own LangChain
+model), through a callback on every LangChain run; an OpenAI Agents run through its `RunHooks`
+(`on_llm_start` to `on_llm_end`); a Claude query from one CLI message to the next, the time a
+tool call runs (its `PreToolUse` to its `PostToolUse`) not counted. A function's model of
+another kind is bounded by the run's time only.
+
+**On a stall.** The run ends `ERROR` with a `ModelTimeout`: code `MODEL_TIMEOUT`, category
+`TIMEOUT`, `retryable` true (a queued run is queued again), `details` naming the step and its
+bound. A `call_timeout` warning event and a `call_timeout` span with an error status are in
+the run's stream and trace.
+
+The provider's hosted tool calls are recorded as the run's tool calls once their step answered:
+what each was asked, what it found (never an image's bytes), whether it failed, and the step's
+duration (`tools.bridge.observed`). A Claude built-in's call is recorded the same way, with its
+own duration, by its `PostToolUse` hook.
 
 ## Run time limit and deadline
 
@@ -117,18 +147,18 @@ waiting included. Either, both, or neither.
 **When.** `timeout` for "do not work on this for more than ten minutes", even if a review in
 the middle takes a day; `deadline` for "the answer is useless after 9:00".
 
-**Where.** The agent's default limit: `h.wrap(..., timeout=)` — every run it starts, on every
+**Where.** The agent's default limit: `h.wrap(..., run_timeout=)` — every run it starts, on every
 entry: `run`, `stream`, `start`, `serve_chat`, `serve_a2a`, `h.evaluate` and its scheduled
-runs. A run's own: `agent.run`, `agent.stream` and `agent.start(timeout=, deadline=)`, which
+runs. A run's own: `agent.run`, `agent.stream` and `agent.start(run_timeout=, deadline=)`, which
 override the agent's (Way 1); `RunStart.timeout_seconds` and `RunStart.deadline` with
 `RunsClient.start` (Way 2). Every adapter.
 
 **How.**
 
 ```python
-agent = h.wrap(target, id="reconcile", timeout=900)  # every run of it, wherever it starts
-result = await agent.run("Reconcile March", user="ada", timeout=600)  # this one: 600
-handle = await agent.start(task, user="ada", timeout=600, deadline=tomorrow_9am)
+agent = h.wrap(target, id="reconcile", run_timeout=900)  # every run of it, wherever it starts
+result = await agent.run("Reconcile March", user="ada", run_timeout=600)  # this one: 600
+handle = await agent.start(task, user="ada", run_timeout=600, deadline=tomorrow_9am)
 ```
 
 **Automatic.**
@@ -190,8 +220,8 @@ them bounds them.
 | Layer | What it retries | How often, how long | Bounded by |
 |---|---|---|---|
 | Bifrost SDK (the judge's models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | the run's time |
-| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | nothing: the gateway retries | 1 attempt | `model_timeout`, the run's time |
-| Bifrost (the gateway) | a model call, per a provider's `network_config.max_retries` (default 0), then the virtual key's fallbacks | its configuration | `model_timeout`, the run's time |
+| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | nothing: the gateway retries | 1 attempt | `call_timeout`, the run's time |
+| Bifrost (the gateway) | a model call, per a provider's `network_config.max_retries` (default 0), then the virtual key's fallbacks | its configuration | `call_timeout`, the run's time |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
 | runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |
@@ -200,8 +230,8 @@ them bounds them.
 | agent-runs: run retries | a queued run its worker ended `ERROR` with a retryable error | 3 more attempts, after 10 s, 20 s, 40 s (jittered, ≤ 10 min) | the run's `timeout` and `deadline` |
 | agent-runs: lapsed leases | a queued run whose worker stopped heartbeating | up to 5 lapses, after 5 s doubling (≤ 1 min); then `ERROR` (`lease_expired`) | the run's `timeout` and `deadline` |
 
-**What multiplies.** A model call without `model_timeout` can take 3 × 60 s plus the waits;
-with it, at most `model_timeout`. A read tool is tried 3 times, but always within its own
+**What multiplies.** A model call without `call_timeout` can take 3 × 60 s plus the waits;
+with it, at most `call_timeout`. A read tool is tried 3 times, but always within its own
 timeout. A run that fails retryably is run up to 4 times by agent-runs — each attempt
 replaying its journal, so no write repeats — but its working time is one clock across all of
 them: `timeout=` bounds the sum, and `deadline=` the wall clock. A run kept in its caller's
@@ -223,7 +253,7 @@ the call.
 **How.**
 
 ```python
-@tool(side_effects="write", timeout=20)
+@tool(side_effects="write", call_timeout=20)
 async def pay(invoice: str, amount: int) -> str:
     key = trellis.current().idempotency_key
     return await bank.pay(invoice, amount, idempotency_key=key)
@@ -316,8 +346,8 @@ run cancels every call still running.
 
 **When.** A duplicate, a user who changed their mind, a run that is no longer needed.
 
-**Where.** Way 1: `await agent.cancel(run_id, reason=...)` (a platform key adds `tenant=`) and
-`await handle.cancel(reason=...)` on a `RunHandle`. Way 2: `await runs.cancel(run_id,
+**Where.** Way 1: `await agent.cancel(run_id, reason=...)` (a platform key adds `tenant=`; a
+`RunHandle`'s: `agent.cancel(handle.id)`). Way 2: `await runs.cancel(run_id,
 reason=...)` with `RunsClient`, and `trellis.runs.Worker` stops your handler. Every adapter.
 
 **How it works.**
@@ -366,8 +396,9 @@ with one name still do (`ConfigurationError`).
 **When.** Always worth setting in production: a run paused on Monday is resumed by Tuesday's
 deploy.
 
-**Where.** `h.wrap(target, id=..., version="2026.10.5")`, or `TRELLIS_AGENT_VERSION` for every
-agent of the deployment (`wrap` wins); Way 2: `RunStart.agent_version`.
+**Where.** `h.wrap(target, id=..., version="2026.10.5")`, or `service.version` in
+`OTEL_RESOURCE_ATTRIBUTES` for every agent of the deployment (`wrap` wins); Way 2:
+`RunStart.agent_version`.
 
 **Automatic.** Sent as `RunStart.agent_version` (only when set), on every attempt's
 `invoke_agent` span (`gen_ai.agent.version`, `langfuse.version`). A run resumed — or claimed
@@ -378,14 +409,14 @@ line naming both versions.
 
 | Timeout | Default | Set by |
 |---|---|---|
-| a tool call: `@tool(timeout=)`, `governed(timeout=)` | none | the tool's author |
-| an OpenAPI operation, its document: `openapi(timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`) | the author |
-| an A2A exchange: `a2a(timeout=)`; `remote(timeout=)` (per request) | 120 s (the same) | the author |
-| a sandbox call: `sandbox(timeout=)` (a command killed past it) | 120 s (the same) | the author |
+| a tool call: `@tool(call_timeout=)`, `governed(timeout=)` | none | the tool's author |
+| an OpenAPI operation, its document: `openapi(call_timeout=)` | 120 s (`REMOTE_TIMEOUT_SECONDS`) | the author |
+| an A2A exchange: `a2a(call_timeout=)`; `RemoteAgent(timeout=)` (per request) | 120 s (the same) | the author |
+| a sandbox call: `sandbox(call_timeout=)` (a command killed past it) | 120 s (the same) | the author |
 | an MCP call | the run's remaining time, else the Bifrost SDK's 60 s | — |
-| a model call: `ReAct(model_timeout=)` | the model client's own (none for `ChatOpenAI`): the run's time bounds it | the author |
+| a model call: `ReAct(call_timeout=)` | the model client's own (none for `ChatOpenAI`): the run's time bounds it | the author |
 | a sub-agent's run (an agent in `tools=[...]`) | what is left of its parent's time, and its parent's deadline | — |
-| an agent's runs' working time: `h.wrap(timeout=)` | none | the agent's author (every entry, scheduled runs too) |
+| an agent's runs' working time: `h.wrap(run_timeout=)` | none | the agent's author (every entry, scheduled runs too) |
 | a run's working time: `timeout=` | the agent's | the caller of `run`/`stream`/`start` |
 | a run's end: `deadline=` | none | the caller |
 | the platform's longest run | none | operations: `RUNS__RUNS__MAX_RUN_SECONDS` in agent-runs |
@@ -395,7 +426,7 @@ line naming both versions.
 | the background writes' drain | 10 s | constant (`DRAIN_SECONDS`) |
 | one memory / runs SDK request | 10 s | the SDKs |
 | an A2A push delivery | 10 s | constant |
-| waiting for a queued run: `RunHandle.result(timeout=)` | none | the caller (it only stops waiting) |
+| waiting for a queued run: `RunHandle.result(wait=)` | none | the caller (it only stops waiting) |
 
 ## Limitations
 

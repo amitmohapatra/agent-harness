@@ -170,14 +170,98 @@ async def test_a_claude_subagents_call_starts_it_and_its_result_ends_it() -> Non
     ]
 
 
-def test_the_runs_callbacks_go_beside_the_ones_it_was_given() -> None:
-    from langchain_core.callbacks import AsyncCallbackManager, StdOutCallbackHandler
+async def test_a_helper_is_briefed_with_its_context_and_its_work_is_its_own() -> None:
+    from trellis.harness.bridges.helpers import TASK_HEADING, inside
 
-    from trellis.harness.adapters.langgraph import _with_handler
+    runs = LocalRuns()
+    parent = runtime(runs)
+    helpers = Helpers(parent, "langgraph")
+    assert parent.helpers is helpers  # the adapter's hooks find them on the runtime
+    helper = await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
+    assert await helpers.start("k", kind=Kind.TASK, name="x", task="y") is helper  # once
+    assert helpers.briefed(helper, "check o1") == "check o1"  # memory off: the task alone
+    helper.context = "## Memories\n- o1 was late"
+    assert helpers.briefed(helper, "check o1") == f"{helper.context}\n\n{TASK_HEADING}check o1"
+    assert helpers.named("checker") is helper and helpers.named("nobody") is None
+    assert inside(parent) is None
+    with helpers.working(helper):
+        assert inside(parent) is helper
+        other = SimpleNamespace(run_id="run_other")  # a nested run's code is its own
+        assert inside(other) is None  # type: ignore[arg-type]
+    assert inside(parent) is None
 
-    ours, theirs = object(), StdOutCallbackHandler()
-    assert _with_handler(None, ours) == [ours]
-    assert _with_handler([theirs], ours) == [theirs, ours]
-    given = AsyncCallbackManager(handlers=[theirs])
-    manager = _with_handler(given, StdOutCallbackHandler())
-    assert len(manager.handlers) == 2 and given.handlers == [theirs]  # theirs: unchanged
+
+async def test_a_helpers_context_that_cannot_be_had_is_a_warning() -> None:
+    warned: list[tuple[str, str]] = []
+
+    class Down:
+        async def context(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("down")
+
+    parent = runtime(LocalRuns())
+    parent.uses = lambda feature: True
+    parent.document_ids = None
+    parent.events = SimpleNamespace(warning=lambda code, message: warned.append((code, message)))
+    helpers = Helpers(parent, "langgraph")
+    helper = SimpleNamespace(memory=Down(), name="checker")
+    assert await helpers._pushed(helper, "check o1") is None  # type: ignore[arg-type]
+    assert warned == [("memory_unavailable", "no memory context for checker: down")]
+    assert await helpers._pushed(helper, "") is None  # type: ignore[arg-type] # no task
+
+
+async def test_a_task_whose_tool_answers_an_error_is_a_failed_helper() -> None:
+    """``middleware._helped``: a Deep Agents ``task`` call is a helper of the run; one whose
+    tool answers with an error message ends it failed; any other call runs as it is."""
+    from trellis.harness.middleware import _helped
+
+    runs = LocalRuns()
+    parent = runtime(runs)
+    Helpers(parent, "langgraph")  # the attempt's helpers, on the runtime
+    given: list[dict[str, Any]] = []
+
+    async def ran(args: dict[str, Any]) -> Any:
+        given.append(args)
+        return ToolMessage("the checker broke", tool_call_id="c1", status="error")
+
+    args = {"description": "check o1", "subagent_type": "checker"}
+    done = await _helped(parent, "task", "c1", args, ran)
+    assert isinstance(done, ToolMessage) and done.status == "error"
+    assert given == [args]  # memory off: the task as it was
+    [child] = [c async for c in runs.iterate(parent_run_id="run_p")]
+    record = await runs.get(child.run_id)
+    assert record is not None and record.status is RunStatus.ERROR
+    assert record.error is not None and record.error.message == "the checker broke"
+    await _helped(parent, "lookup", "c2", {"sku": "a"}, ran)  # not a task: no helper
+    assert len([c async for c in runs.iterate(parent_run_id="run_p")]) == 1
+
+
+async def test_an_agent_tool_given_no_text_is_a_helper_on_its_arguments() -> None:
+    """``tools.convert.openai_agents._helped``: an agent tool called with arguments that are
+    not JSON is still the run's helper, its task the arguments as they came."""
+    from agents import Agent
+
+    from tests.support.openai_model import ScriptedModel
+    from trellis.harness.tools.convert.openai_agents import _helped
+
+    runs = LocalRuns()
+    parent = runtime(runs)
+    parent.budget = None
+    parent.parent = None
+    parent.replay = SimpleNamespace(journal=SimpleNamespace(spent={}))
+    helpers = Helpers(parent, "openai_agents")
+    tool = Agent(name="checker", model=ScriptedModel([])).as_tool("check", "Check.")
+    seen: list[str] = []
+
+    async def invoke(context: Any, arguments: str) -> str:
+        seen.append(arguments)
+        return "checked"
+
+    context = SimpleNamespace(
+        tool_call_id="c1",
+        usage=SimpleNamespace(input_tokens=0, output_tokens=0, input_tokens_details=None),
+    )
+    helped = _helped(tool, invoke, helpers)
+    assert await helped(context, "not json") == "checked" and seen == ["not json"]
+    [child] = [c async for c in runs.iterate(parent_run_id="run_p")]
+    record = await runs.get(child.run_id)
+    assert record is not None and record.input == "not json"

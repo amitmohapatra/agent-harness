@@ -14,6 +14,7 @@ import pytest
 
 from tests.live.conftest import LiveHarness, needs_memory, needs_runs, settings
 from tests.live.support import eventually, memory_scope
+from tests.support.arm import arm, with_governance
 from trellis import Agent, Harness, Runtime, tool
 from trellis.contracts import RunStatus
 from trellis.harness.governance import Decision, Governance
@@ -34,9 +35,14 @@ class Watched(Governance):
         self.seen: list[Decision] = []
 
     async def check(
-        self, tool: str, args: Mapping[str, Any], *, side_effects: str = "write"
+        self,
+        tool: str,
+        args: Mapping[str, Any],
+        *,
+        side_effects: str = "write",
+        agent_id: str | None = None,
     ) -> Decision:
-        decision = await super().check(tool, args, side_effects=side_effects)
+        decision = await super().check(tool, args, side_effects=side_effects, agent_id=agent_id)
         self.seen.append(decision)
         return decision
 
@@ -69,9 +75,9 @@ async def test_own_run_store_and_scheduler_loop_against_agent_runs() -> None:
     governance = Watched()
     memory = MemoryClient(s.memory_url, api_key=s.api_key)
     try:
-        async with Harness(config=s, runs=runs, memory=memory, governance=governance) as h:
+        async with with_governance(Harness(config=s, runs=runs, memory=memory), governance) as h:
             assert h.runs is runs
-            agent = h.wrap(refunds, id=f"live-blocks-{suffix}", tools=[refund], timeout=120)
+            agent = arm(h.wrap(refunds, id=f"live-blocks-{suffix}", run_timeout=120), [refund])
             handle = await agent.start("o1", user=f"live-user-{suffix}")
             worker = f"my-scheduler-{suffix}"
 
@@ -80,14 +86,14 @@ async def test_own_run_store_and_scheduler_loop_against_agent_runs() -> None:
                 return paused is not None
 
             assert await eventually(claimed, within=30)
-            paused = await handle.result(timeout=30)
+            paused = await handle.result(wait=30)
             assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
             assert [d.action.value for d in governance.seen] == ["ask"] and refunded == []
             queued = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="cfo")
             assert queued.status is RunStatus.QUEUED  # back to agent-runs' queue
             assert await eventually(claimed, within=30)
-            done = await handle.result(timeout=30)
-            record = await runs.get(handle.run_id, tenant=await h.tenant())
+            done = await handle.result(wait=30)
+            record = await runs.get(handle.id, tenant=await h._tenant())
     finally:
         await runs.aclose()
         await memory.aclose()
@@ -109,7 +115,7 @@ async def test_a_run_without_memory_leaves_no_record_in_memory(harness: LiveHarn
     async def answer(input: str, agent: Runtime) -> str:
         return f"{await agent.tools.call(stock.spec.name, sku='A-1')} units"
 
-    agent = harness.wrap(answer, id=f"live-select-{suffix}", tools=[stock])
+    agent = arm(harness.wrap(answer, id=f"live-select-{suffix}"), [stock])
     scope = await memory_scope(harness, user=user, agent_id=agent.id, thread=f"off-{suffix}")
     off = await agent.run("stock?", user=user, thread=f"off-{suffix}", without={"memory"})
     on = await agent.run("stock?", user=user, thread=f"on-{suffix}")

@@ -86,7 +86,9 @@ async def main() -> None:
         code_mode=frozenset({"crm", "wiki", "docs"}),
     )
     async with Harness(**blocks) as h:
-        agent = h.wrap(ReAct(system="You handle refunds for support.", model=model), id="refunds")
+        agent = h.wrap(
+            ReAct(system_prompt="You handle refunds for support.", model=model), id="refunds"
+        )
 
         result = await agent.run("acme wants order o-7 (250 EUR) refunded.", user="ada")
         while result.interrupt is not None:  # amount > 100: the administrator's rule asks

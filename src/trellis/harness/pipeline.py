@@ -11,7 +11,7 @@ part that knows the framework. Each attempt is one ``invoke_agent`` span in the 
 worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``serve_a2a`` and
 ``h.evaluate`` alike — from the run's record: its identity, its attempt, its version, and what
 is left of its time. The attempt works at most that (:class:`Budget`: its ``timeout`` — the
-agent's default, ``h.wrap(timeout=)``, when the run names none — less the time it already
+agent's default, ``h.wrap(run_timeout=)``, when the run names none — less the time it already
 worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.cancel``), it ends
 ``CANCELLED`` with the reason.
 """
@@ -53,10 +53,13 @@ from trellis.harness.adapters.base import (
     Invocation,
     NativePause,
     Output,
+    merged,
     query_of,
 )
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.budget import BUDGET as KEPT_BUDGET
+from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
@@ -65,7 +68,7 @@ from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
-from trellis.harness.runtime import Runtime, _call, _current, interrupt_id
+from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
 from trellis.harness.tools import bridge
 from trellis.memory.models import PromptContext
@@ -209,16 +212,20 @@ async def _attempt(
         lease_seconds=None if job is None else job.lease_seconds,
         run_memory=await agent.run_memory(identity, without),
         without=without,
-        framework_options={**agent.framework_options, **record.metadata.get(FRAMEWORK_OPTIONS, {})},
+        framework_options=merged(
+            agent.framework_options, record.metadata.get(FRAMEWORK_OPTIONS, {})
+        ),
         used=set(journal.used),
         task=query_of(input),
         document_ids=record.metadata.get(DOCUMENTS),
+        budget=Spending.of(record.metadata.get(KEPT_BUDGET)) or agent.budget,
         started_at=datetime.now(UTC),
         ends_at=None if budget is None else time.monotonic() + budget.seconds,
         deadline=None if budget is None else budget.deadline,
         parent=parent,
         running_in=asyncio.current_task(),
     )
+    events.trace_run = runtime.trace_run
     decision = _started(agent, runtime, record, resolution)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
@@ -247,28 +254,17 @@ async def _attempt(
     except RunCancelled as exc:
         runtime.cancelled = str(exc)
     except asyncio.CancelledError as exc:
-        task = asyncio.current_task()
-        assert task is not None
-        # ``agent.cancel`` ends the run CANCELLED with its reason, and its task goes on;
-        # otherwise the caller went away (a closed stream): the run ends here. A worker's run
-        # is the worker's to end — CANCELLED here only when someone asked (its heartbeat said
-        # so); stopped for its lease or a release, the worker ends it. Stopped by its worker
-        # at the end of its working time (the worker's clock and the attempt's end together,
-        # the worker's first), it ends TIMEOUT here, as when the attempt's own clock ends it
-        stopped = _out_of_time(job, exc)
-        if not stopped and (runtime.cancelled is None or task.uncancel()):
-            settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
-            if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
-                await sandbox.ended(agent, journal.sandbox, identity.run_id)
-            raise
+        stopped = await _cancelled(agent, runtime, journal, job, exc)
     except Exception as exc:
         # a framework may wrap or swallow the pause: the runtime is what says it paused
         if runtime.pending is None:
             error = exc
     finally:
+        runtime.unwatched()
         _call.reset(tokens[1])
         _current.reset(tokens[0])
         agent.running.pop(identity.run_id, None)
+    error = _stalled(runtime) or error
     # out of time: the attempt's clock ended it, its worker did, or what failed it failed past
     # the run's time — a call bounded by what was left of it (a model call's ``TimeoutError``)
     # fires with the clock, and its error may reach the attempt first
@@ -295,10 +291,12 @@ async def _worked(
     observe: Callable[[PromptContext | None], None] | None,
     streaming: bool,
 ) -> tuple[Extracted, PromptContext | None]:
-    """The attempt's work: its tools and what is pushed into its input, then — its hooks told
-    it starts — the framework; what it produced, and the memory context it was given."""
+    """The attempt's work: its tool set (the harness's tools, the framework's own) and what is
+    pushed into its input, then — its hooks told it starts — the framework; what it produced,
+    and the memory context it was given."""
     tools = await agent.tools_for(runtime)
     runtime.toolbox = {t.name: t for t in tools}
+    runtime.native = await agent.native_tools(runtime)
     pushed = await agent.push(runtime)
     if observe is not None:
         observe(pushed)
@@ -315,6 +313,45 @@ async def _worked(
         streaming=streaming,
     )
     return extracted, pushed
+
+
+async def _cancelled(
+    agent: Agent, runtime: Runtime, journal: Journal, job: Job | None, exc: asyncio.CancelledError
+) -> bool:
+    """The attempt's task was cancelled: whether its worker stopped it at the end of the run's
+    working time (it ends ``TIMEOUT``) — else the cancellation propagates, unless a model call
+    stalled (its watchdog cancelled it: that is the attempt's error, :func:`_stalled`).
+
+    ``agent.cancel`` ends the run CANCELLED with its reason, and its task goes on; otherwise
+    the caller went away (a closed stream): the run ends here. A worker's run is the worker's
+    to end — CANCELLED here only when someone asked (its heartbeat said so); stopped for its
+    lease or a release, the worker ends it. Stopped by its worker at the end of its working
+    time (the worker's clock and the attempt's end together, the worker's first), it ends
+    TIMEOUT here, as when the attempt's own clock ends it."""
+    task = asyncio.current_task()
+    assert task is not None
+    stalled = STALLED in exc.args and runtime.stalled is not None
+    stopped = not stalled and _out_of_time(job, exc)
+    if not (stalled or stopped) and (runtime.cancelled is None or task.uncancel()):
+        settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
+        identity, events = runtime.identity, runtime.events
+        if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
+            await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
+        raise exc
+    return stopped
+
+
+def _stalled(runtime: Runtime) -> Exception | None:
+    """The step that stalled (``Runtime.model_started``'s watchdog), as the attempt's error —
+    whether its cancellation reached the attempt, or the framework wrapped it in an error of
+    its own or swallowed it — its cancellation taken back. ``None`` when none stalled (or the
+    run was cancelled: that is its ending)."""
+    if runtime.stalled is None or runtime.cancelled is not None:
+        return None
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        task.uncancel()
+    return runtime.stalled
 
 
 #: What a worker's clock may leave of the working time as it stops an attempt: asyncio runs a
@@ -397,7 +434,7 @@ async def _concluded(
         assert extracted is not None
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
-        await sandbox.ended(agent, journal.sandbox, runtime.run_id)
+        await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
 
 

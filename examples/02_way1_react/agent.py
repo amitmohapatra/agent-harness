@@ -71,13 +71,16 @@ async def main() -> None:
         ]
     )
     async with Harness(**offline_blocks(memory=memory, mcp=ERP)) as h:
-        target = ReAct(system="You keep stock above 10 units. Check, then reorder.", model=model)
+        target = ReAct(
+            system_prompt="You keep stock above 10 units. Check, then reorder.",
+            model=model,
+            tools=[lead_time],
+        )
         agent = h.wrap(
             target,
             id="buyer",
-            tools=[lead_time],
             hooks=[CapOrders()],
-            timeout=300,  # the most working time of each run, however it starts
+            run_timeout=300,  # the most working time of each run, however it starts
             framework_options={"recursion_limit": 40},  # LangGraph's own run config
         )
 

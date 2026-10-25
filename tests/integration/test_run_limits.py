@@ -18,11 +18,13 @@ import pytest
 from fastapi import FastAPI
 
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import (
     ConfigurationError,
+    ErrorCategory,
     RunEvent,
     RunEventType,
     RunOutcome,
@@ -30,7 +32,7 @@ from trellis.contracts import (
     ToolError,
 )
 from trellis.harness import pipeline
-from trellis.harness.a2a import remote
+from trellis.harness.a2a import RemoteAgent
 from trellis.harness.events import RunEvents
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.bridge import CUT
@@ -56,14 +58,14 @@ async def slow(input: Any, agent: Runtime) -> str:
 
 async def test_a_run_past_its_time_limit_ends_timeout(harness: Harness) -> None:
     agent = harness.wrap(slow, id="slow")
-    result = await agent.run("5", user="u", timeout=0.05)
+    result = await agent.run("5", user="u", run_timeout=0.05)
     assert result.status is RunStatus.TIMEOUT and result.error is not None
     assert result.error.code == "run_timeout" and not result.error.retryable
     assert result.error.message == "the run worked past its time limit of 0.05s"
     record = await harness.runs.get(result.run_id)
     assert record is not None and record.status is RunStatus.TIMEOUT
     assert record.timeout_seconds == 0.05
-    assert (await agent.run("0", user="u", timeout=5)).answer == "done"
+    assert (await agent.run("0", user="u", run_timeout=5)).answer == "done"
 
 
 @pytest.mark.parametrize("framework", list(BUILDERS))
@@ -78,7 +80,7 @@ async def test_an_agents_time_limit_ends_its_runs_on_every_adapter(
 
     plan: list[Call] = [("wait", {"seconds": 5})]
     target, tools = await BUILDERS[framework](harness, [wait], tmp_path, plan)
-    agent = harness.wrap(target, id=f"slow-{framework}", tools=tools, timeout=0.3)
+    agent = arm(harness.wrap(target, id=f"slow-{framework}", run_timeout=0.3), tools)
     result = await agent.run("wait", user="u")
     assert result.status is RunStatus.TIMEOUT and result.error is not None
     assert result.error.message == "the run worked past its time limit of 0.3s"
@@ -89,9 +91,9 @@ async def test_an_agents_time_limit_ends_its_runs_on_every_adapter(
 async def test_the_agents_time_limit_holds_on_every_entry(harness: Harness) -> None:
     """``serve_chat``, ``serve_a2a``, ``h.evaluate`` and a scheduled run start an attempt the
     one way ``agent.run`` does: the agent's limit applies to each; a run's own overrides it."""
-    agent = harness.wrap(slow, id="slow", timeout=0.1)
+    agent = harness.wrap(slow, id="slow", run_timeout=0.1)
     limit = "the run worked past its time limit of 0.1s"
-    assert (await agent.run("0.2", user="u", timeout=5)).answer == "done"
+    assert (await agent.run("0.2", user="u", run_timeout=5)).answer == "done"
     app = FastAPI()
     agent.serve_chat(app)
     agent.serve_a2a(app, "http://limits.test/a2a")
@@ -101,12 +103,14 @@ async def test_the_agents_time_limit_holds_on_every_entry(harness: Harness) -> N
         chat = {"threadId": "t1", "messages": [{"id": "m1", "role": "user", "content": "5"}]}
         response = await http.post("/agui/run", json=chat)
         assert limit in response.text
-        async with remote("http://limits.test/a2a", tenant="default", user="u", client=http) as a2a:
+        async with RemoteAgent(
+            "http://limits.test/a2a", tenant="default", user="u", client=http
+        ) as a2a:
             with pytest.raises(ToolError, match="TASK_STATE_FAILED"):
                 await a2a("5")
     report = await harness.evaluate(agent, [{"input": "5"}], [])
     assert [(i.status, i.error) for i in report.items] == [("error", limit)]
-    schedule = await agent.schedule("0 7 * * *", "5", on_behalf_of="ada")
+    schedule = await agent.schedule("0 7 * * *", user="ada", input="5")
     runs = harness.runs
     assert isinstance(runs, LocalRuns)
     runs._schedules[schedule.schedule_id] = schedule.model_copy(
@@ -145,7 +149,7 @@ async def test_a_queued_run_past_its_time_limit_ends_timeout_with_its_events(
     async def waits(input: Any, agent: Runtime) -> Any:
         return await agent.tools.call("wait", seconds=5)
 
-    agent = harness.wrap(waits, id="queued", tools=[wait], timeout=0.3)
+    agent = arm(harness.wrap(waits, id="queued", run_timeout=0.3), [wait])
     handle = await agent.start("x", user="u")
     assert await harness.worker([agent]).run_once() is True
     record = await handle.status()
@@ -158,14 +162,14 @@ async def test_a_queued_run_past_its_time_limit_ends_timeout_with_its_events(
 
 
 def test_an_agents_time_limit_is_a_number_of_seconds_over_zero(harness: Harness) -> None:
-    with pytest.raises(ConfigurationError, match="slow: a timeout is a number of seconds over 0"):
-        harness.wrap(slow, id="slow", timeout=0)
+    with pytest.raises(ConfigurationError, match="slow: run_timeout is a number of seconds over 0"):
+        harness.wrap(slow, id="slow", run_timeout=0)
 
 
 async def test_a_run_past_its_deadline_ends_timeout_on_the_stream(harness: Harness) -> None:
     deadline = datetime.now(UTC) - timedelta(seconds=1)
     agent = harness.wrap(slow, id="slow")
-    events = [e async for e in agent.stream("5", user="u", timeout=60, deadline=deadline)]
+    events = [e async for e in agent.stream("5", user="u", run_timeout=60, deadline=deadline)]
     error, finished = events[-2:]
     assert error.type is RunEventType.RUN_ERROR and error.error is not None
     assert error.error.code == "run_deadline"
@@ -186,7 +190,7 @@ async def test_working_time_counts_across_a_crash(harness: Harness) -> None:
     store = harness.runs
     assert isinstance(store, LocalRuns)
     agent = harness.wrap(billing, id="billing")
-    handle = await agent.start("x", user="u", timeout=0.5)
+    handle = await agent.start("x", user="u", run_timeout=0.5)
     worker = harness.worker([agent])
     claimed = await store.claim(worker.worker_id, [agent.id])
     assert claimed is not None and claimed.run.timeout_seconds == 0.5
@@ -194,9 +198,9 @@ async def test_working_time_counts_across_a_crash(harness: Harness) -> None:
         await agent.execute(
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
-    lapse(store, handle.run_id)
+    lapse(store, handle.id)
     assert await worker.run_once()  # the next attempt: 0.2 s left of the run's 0.5
-    done = await handle.result(timeout=5)
+    done = await handle.result(wait=5)
     assert done.status is RunStatus.TIMEOUT and done.error is not None
     assert done.error.code == "run_timeout"
     record = await handle.status()
@@ -208,7 +212,7 @@ async def test_a_call_may_take_what_is_left_of_its_own_time_and_the_runs(
 ) -> None:
     seen: dict[str, float | None] = {}
 
-    @tool(side_effects="read", timeout=30)
+    @tool(side_effects="read", call_timeout=30)
     def look(sku: str) -> str:
         """Look a SKU up."""
         from trellis import current
@@ -222,8 +226,8 @@ async def test_a_call_may_take_what_is_left_of_its_own_time_and_the_runs(
         seen["run"] = agent.remaining()
         return await agent.tools.call("look", sku="A")
 
-    agent = harness.wrap(looking, id="looking", tools=[look])
-    await agent.run("x", user="u", timeout=10)
+    agent = arm(harness.wrap(looking, id="looking"), [look])
+    await agent.run("x", user="u", run_timeout=10)
     assert seen["call"] is not None and seen["call"] <= 10  # the run's time is the tighter
     await agent.run("x", user="u")
     assert seen["run"] is None and seen["call"] is not None and 29 < seen["call"] <= 30
@@ -244,14 +248,18 @@ class GivesUp(ScriptedChatModel):
 
 
 async def test_a_model_call_past_its_timeout_fails_the_run_retryably(harness: Harness) -> None:
-    agent = harness.wrap(ReAct(system="s", model=Slow(turns=[]), model_timeout=0.05), id="slow")
+    agent = harness.wrap(
+        ReAct(system_prompt="s", model=Slow(turns=[]), call_timeout=0.05), id="slow"
+    )
     result = await agent.run("q", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.code == "MODEL_ERROR" and result.error.retryable
-    assert result.error.message == "the model did not answer within 0.05s"
-    gives_up = harness.wrap(ReAct(system="s", model=GivesUp(turns=[])), id="gives-up")
+    assert result.error.code == "MODEL_TIMEOUT" and result.error.retryable
+    assert result.error.category is ErrorCategory.TIMEOUT
+    assert result.error.message == "the model did not answer within 0.05s: the step stalled"
+    gives_up = harness.wrap(ReAct(system_prompt="s", model=GivesUp(turns=[])), id="gives-up")
     failed = await gives_up.run("q", user="u")
-    assert failed.error is not None and failed.error.message == "the model did not answer"
+    assert failed.error is not None
+    assert failed.error.message == "the model did not answer: the step stalled"
 
 
 # --------------------------------------------------------------------------- version
@@ -263,8 +271,8 @@ async def test_runs_carry_the_agents_version_and_a_resume_on_another_says_so(
     async def asks(input: str, agent: Runtime) -> str:
         return await agent.ask("Go on?")
 
-    async with Harness(config=Settings(agent_version="2026.10")) as h:
-        old = h.wrap(asks, id="asks")
+    async with Harness(config=Settings()) as h:
+        old = h.wrap(asks, id="asks", version="2026.10")
         paused = await old.run("x", user="u")
         record = await h.runs.get(paused.run_id)
         assert record is not None and record.agent_version == "2026.10"
@@ -331,7 +339,7 @@ async def test_a_cancelled_queued_run_ends_cancelled_and_its_caller_too(
     handle = await agent.start("x", user="u")
     working = asyncio.create_task(harness.worker([agent]).run_once())
     await started.wait()
-    assert (await handle.cancel(reason="not needed")).status is RunStatus.CANCELLED
+    assert (await agent.cancel(handle.id, reason="not needed")).status is RunStatus.CANCELLED
     assert await working
 
     started.clear()
@@ -361,7 +369,7 @@ async def test_a_waiting_run_is_cancelled_at_once_and_an_ended_one_is_not(
     paused = await agent.run("x", user="u")
     assert (await agent.cancel(paused.run_id)).status is RunStatus.CANCELLED
     handle = await agent.start("x", user="u")
-    assert (await handle.cancel(reason="not needed")).status is RunStatus.CANCELLED
+    assert (await agent.cancel(handle.id, reason="not needed")).status is RunStatus.CANCELLED
     assert not await harness.worker([agent]).run_once()  # nothing left to claim
     with pytest.raises(ConflictError, match="already ended CANCELLED"):
         await agent.cancel(paused.run_id)
@@ -383,11 +391,11 @@ async def test_a_run_cancelled_elsewhere_is_stopped_by_its_worker(
         return "never"
 
     agent = harness.wrap(waits, id="waits")
-    handle = await agent.start("x", user="u", timeout=60)
+    handle = await agent.start("x", user="u", run_timeout=60)
     working = asyncio.create_task(harness.worker([agent]).run_once())
     await started.wait()
     # another process cancels it: only agent-runs (here, the store) is told
-    await harness.runs.cancel(handle.run_id, reason="dup", tenant=handle.tenant)
+    await harness.runs.cancel(handle.id, reason="dup", tenant=await harness._tenant())
     assert await asyncio.wait_for(working, 5)
     assert (await handle.status()).status is RunStatus.CANCELLED
 
@@ -441,7 +449,7 @@ async def test_a_call_cut_short_before_it_runs_still_ends_on_the_stream(
     async def notes(input: Any, agent: Runtime) -> Any:
         return await agent.tools.call("note", text="x")
 
-    agent = harness.wrap(notes, id="noting", tools=[note])
+    agent = arm(harness.wrap(notes, id="noting"), [note])
     events: list[Any] = []
 
     async def watch() -> None:
@@ -479,7 +487,7 @@ async def test_a_call_a_framework_leaves_running_ends_with_the_attempt(harness: 
         left.append(asyncio.create_task(agent.tools.call("wait", seconds=30)))
         await asyncio.sleep(30)
 
-    agent = harness.wrap(leaves, id="leaving", tools=[wait], timeout=0.3)
+    agent = arm(harness.wrap(leaves, id="leaving", run_timeout=0.3), [wait])
     events = [e async for e in agent.stream("x", user="u")]
     assert started.is_set()
     left[0].cancel()  # the framework stops it at last: nothing more on the stream
@@ -513,11 +521,13 @@ async def test_a_call_cut_short_still_ends_on_the_stream_on_every_adapter(
 
     plan: list[Call] = [("wait", {"seconds": 30})]
     target, tools = await BUILDERS[framework](harness, [wait], tmp_path, plan)
-    agent = harness.wrap(target, id=f"cut-{framework}", tools=tools)
+    agent = arm(harness.wrap(target, id=f"cut-{framework}"), tools)
     events: list[Any] = []
 
     async def watch() -> None:
-        async for event in agent.stream("wait", user="u", timeout=1 if cut == "timeout" else 30):
+        async for event in agent.stream(
+            "wait", user="u", run_timeout=1 if cut == "timeout" else 30
+        ):
             events.append(event)
 
     watching = asyncio.create_task(watch())
@@ -555,7 +565,7 @@ class SlowChatModel(ScriptedChatModel):
 def _slow_graph(kind: str) -> Any:
     model = SlowChatModel(turns=["too late"])
     if kind == "react":
-        return ReAct(system="You answer.", model=model)
+        return ReAct(system_prompt="You answer.", model=model)
     from langchain.agents import create_agent
 
     from trellis.harness.middleware import ModelHooks
@@ -579,6 +589,6 @@ async def test_a_deadline_during_a_model_call_ends_the_run_timeout(
 
     monkeypatch.setattr(pipeline, "_started", slow_setup)
     agent = harness.wrap(_slow_graph(kind), id=f"slow-model-{kind}")
-    result = await agent.run("hi", user="u", timeout=0.3)
+    result = await agent.run("hi", user="u", run_timeout=0.3)
     assert result.status is RunStatus.TIMEOUT, result.error
     assert result.error is not None and result.error.code == "run_timeout"

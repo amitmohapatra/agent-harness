@@ -55,7 +55,8 @@ jobs:
         # every test except the benchmark and the live ones (they need running services)
         run: make test
       - name: Examples
-        # every example, offline (scripted model, memory service and gateway), in parallel
+        # every example and the README walkthrough, offline (scripted model, memory service
+        # and gateway), in parallel
         run: make examples
       - name: Docs check
         # every relative link and anchor resolves; every snippet parses and names the real API

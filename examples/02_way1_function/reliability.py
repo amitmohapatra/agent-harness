@@ -26,7 +26,7 @@ async def quote(sku: str) -> str:
     return f"{sku} costs 7"
 
 
-@tool(side_effects="write", timeout=0.2)
+@tool(side_effects="write", call_timeout=0.2)
 async def order(sku: str) -> str:
     """Order a SKU (the supplier never answers in time)."""
     runtime = current()
@@ -37,7 +37,7 @@ async def order(sku: str) -> str:
 
 
 async def buy(sku: str, agent: Runtime) -> list[str]:
-    return [await agent.tools.call("quote", sku=sku), await agent.tools.call("order", sku=sku)]
+    return [await agent.tools.call(quote, sku=sku), await agent.tools.call(order, sku=sku)]
 
 
 pondering: list[str] = []
@@ -51,12 +51,12 @@ async def ponder(question: str, agent: Runtime) -> str:
 
 async def main() -> None:
     async with Harness() as h:
-        buyer = h.wrap(buy, id="buyer", tools=[quote, order], version="2026.10")
+        buyer = h.wrap(buy, id="buyer", version="2026.10")
         result = await buyer.run("A-1", user="ada")
         print(result.status.value, result.answer)  # the price, then: may or may not have ordered
 
         thinker = h.wrap(ponder, id="thinker")
-        timed = await thinker.run("What is the meaning of it all?", user="ada", timeout=0.2)
+        timed = await thinker.run("What is the meaning of it all?", user="ada", run_timeout=0.2)
         assert timed.error is not None
         print(timed.status.value, timed.error.code, timed.error.message)
 

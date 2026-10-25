@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, tool
 
@@ -51,8 +52,9 @@ def wire(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 async def test_a_short_task_sends_the_model_what_react_always_sent(harness: Harness) -> None:
     model = ScriptedChat([("stock", {"sku": "a-1"}), "7 units"])
-    agent = harness.wrap(
-        ReAct(system="You answer stock questions.", model=model), id="golden", tools=TOOLS
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="You answer stock questions.", model=model), id="golden"),
+        TOOLS,
     )
     result = await agent.run("How many a-1 are in stock?", user="u1")
     assert result.answer == "7 units"

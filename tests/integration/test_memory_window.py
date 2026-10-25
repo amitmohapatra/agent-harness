@@ -15,6 +15,7 @@ from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
 from benchmark.thread.__main__ import own_thread
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
@@ -73,7 +74,7 @@ async def test_a_tool_call_comes_back_with_its_result(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), "7 units.", "You asked about a."])
-    agent = memory_harness.wrap(ReAct(system="s", model=model), id="stock", tools=[stock])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="stock"), [stock])
     await agent.run("How many a?", user="u1", thread=THREAD)
     await agent.run("Which sku did I ask about?", user="u1", thread=THREAD)
     messages = [m for m in model.script.requests[-1]["messages"] if m["role"] != "system"]
@@ -146,7 +147,7 @@ async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_ite
         """Look it up."""
         return f"result {q}"
 
-    agent = memory_harness.wrap(OpenAIAgent(name="o", model=model), id="oa", tools=[lookup])
+    agent = arm(memory_harness.wrap(OpenAIAgent(name="o", model=model), id="oa"), [lookup])
     await agent.run("find a", user="u1", thread=THREAD)
     await agent.run("what did I ask?", user="u1", thread=THREAD)
     items = model.inputs[-1]

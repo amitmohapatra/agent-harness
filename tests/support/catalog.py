@@ -29,13 +29,17 @@ class FakeCatalog:
         self.accepted: list[str] = []
         #: whether reading (``"read"``) or accepting (``"accept"``) suggestions fails
         self.suggestions_fail: set[str] = set()
+        #: the agents whose suggestions were read, in order
+        self.suggestions_asked: list[str] = []
 
-    def suggest(self, tool: str, rule: str) -> None:
-        """A suggestion learned for ``tool``: accepted, ``rule`` is its ``approve_when``."""
+    def suggest(self, tool: str, rule: str, *, agent: str = "buyer") -> None:
+        """A suggestion learned for ``tool`` from ``agent``'s decisions: accepted, ``rule`` is
+        its ``approve_when``."""
         found = f"sug_{len(self.suggested) + 1}"
         self.suggested.append(
             ApprovalSuggestion(
                 id=found,
+                agent_id=agent,
                 tool=tool,
                 arg_shape="{}",
                 suggestion="auto_approve",
@@ -48,15 +52,24 @@ class FakeCatalog:
         )
         self.learned[found] = rule
 
-    async def suggestions(self) -> Sequence[ApprovalSuggestion]:
+    async def suggestions(self, agent_id: str) -> Sequence[ApprovalSuggestion]:
+        """The agent's own, as the service lists them (in its scope)."""
+        self.suggestions_asked.append(agent_id)
         if "read" in self.suggestions_fail:
             raise ConnectionError("suggestions are down")
-        return [s.model_copy(update={"accepted": s.id in self.accepted}) for s in self.suggested]
+        return [
+            s.model_copy(update={"accepted": s.id in self.accepted})
+            for s in self.suggested
+            if s.agent_id == agent_id
+        ]
 
-    async def accept(self, suggestion_id: str) -> Rule:
+    async def accept(self, suggestion_id: str, *, agent_id: str) -> Rule:
         if "accept" in self.suggestions_fail:
             raise ConnectionError("accepting is down")
-        tool = next(s.tool for s in self.suggested if s.id == suggestion_id)
+        found = next(s for s in self.suggested if s.id == suggestion_id)
+        if found.agent_id != agent_id:
+            raise LookupError("no such approval suggestion")  # the service's 404
+        tool = found.tool
         self.accepted.append(suggestion_id)
         self.rules[tool] = Rule(self.rules[tool].risk, approve_when=self.learned[suggestion_id])
         self.version += 1

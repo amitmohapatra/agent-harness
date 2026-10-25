@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request, Response
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import eventually, free_port, memory_scope, serving
+from tests.support.arm import arm
 from trellis import Harness, Runtime, openapi, tool
 from trellis.contracts import RunStatus
 from trellis.runs import Job
@@ -60,7 +61,7 @@ async def test_writes_of_unknown_effect_are_not_run_again_after_a_worker_dies(
     transfers: list[int] = []
     wires: list[int] = []
 
-    @tool(name=f"transfer_{suffix}", side_effects="write", timeout=0.3)
+    @tool(name=f"transfer_{suffix}", side_effects="write", call_timeout=0.3)
     async def transfer(amount: int) -> str:
         """Transfer money (the bank never answers in time)."""
         transfers.append(amount)
@@ -80,11 +81,11 @@ async def test_writes_of_unknown_effect_are_not_run_again_after_a_worker_dies(
         wired = await agent.tools.call(wire.spec.name, amount=7)
         return [sent, wired]
 
-    agent = harness.wrap(paying, id=f"live-pay-{suffix}", tools=[transfer, wire])
+    agent = arm(harness.wrap(paying, id=f"live-pay-{suffix}"), [transfer, wire])
     handle = await agent.start("pay", user="live-user")
     await died(harness, agent, handle)
     assert await claimed_again(harness, agent)
-    done = await handle.result(timeout=30)
+    done = await handle.result(wait=30)
     assert done.status is RunStatus.SUCCESS, done.error
     timed_out, interrupted = done.answer
     assert timed_out == (
@@ -123,7 +124,7 @@ async def test_a_running_queued_run_is_cancelled_from_another_process() -> None:
         handle = await agent.start("x", user="live-user")
         working = asyncio.create_task(worker.run_once())
         await asyncio.wait_for(started.wait(), 30)
-        asked = await handle.cancel(reason="nobody is waiting any more")
+        asked = await agent.cancel(handle.id, reason="nobody is waiting any more")
         assert asked.status is RunStatus.RUNNING  # its worker is asked to stop
         assert await asyncio.wait_for(working, 30)  # and does, at its next heartbeat
         record = await handle.status()
@@ -144,14 +145,14 @@ async def test_working_time_counts_across_a_crash_and_the_next_attempt_stops_on_
         return "never"
 
     agent = harness.wrap(slow, id=f"live-slow-{uuid.uuid4().hex[:8]}")
-    handle = await agent.start("x", user="live-user", timeout=30)
+    handle = await agent.start("x", user="live-user", run_timeout=30)
     await died(harness, agent, handle)
     worked = (await handle.status()).worked_seconds
     assert worked > 1  # running until agent-runs took the run back
     began = time.monotonic()
     assert await claimed_again(harness, agent)
     took = time.monotonic() - began
-    done = await handle.result(timeout=30)
+    done = await handle.result(wait=30)
     assert done.status is RunStatus.TIMEOUT and done.error is not None
     assert done.error.code == "run_timeout" and not done.error.retryable
     assert took < 30 - worked + 15  # what was left (and the backoff), not the limit again
@@ -199,7 +200,7 @@ async def test_a_read_that_meets_a_busy_service_is_retried_and_a_write_sends_its
         return [quoted, await agent.tools.call(f"order_{suffix}")]
 
     with serving(app, port):
-        agent = harness.wrap(buying, id=f"live-buy-{suffix}", tools=[openapi(document)])
+        agent = arm(harness.wrap(buying, id=f"live-buy-{suffix}"), [openapi(document)])
         result = await agent.run("buy A-1", user="live-user")
     assert result.status is RunStatus.SUCCESS, result.error
     assert result.answer == [{"sku": "A-1", "eur": 7}, {"id": "o-1"}]

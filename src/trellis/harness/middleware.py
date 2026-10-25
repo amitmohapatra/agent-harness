@@ -3,15 +3,15 @@ from the harness, added where LangChain and Deep Agents have no native piece. ``
 is a ``create_agent`` graph built with all of them, beside the native middleware it turns on;
 any ``create_agent`` or Deep Agents graph may take any of them:
 
-    graph = create_agent(model, middleware=[HarnessTools(), ModelHooks()],
+    graph = create_agent(model, tools=[refund], middleware=[ModelHooks()],
                          checkpointer=RunCheckpointer())
-    agent = h.wrap(graph, id="support", tools=[refund])
+    agent = h.wrap(graph, id="support")
 
 * :class:`HarnessTools` — the run's harness tools offered per model call (the tool hints'
   narrowing, the memory tools, what ``tool_search`` found), sorted by name so the cached prompt
   holds; every call goes through the bridge (``tools.bridge``: governance, journal, record),
   numbered in the model's order, and a call that does more than read waits for the earlier
-  ones of the same model step (the model's order); a graph with it takes ``h.wrap(tools=)``;
+  ones of the same model step (the model's order) — ``ReAct``'s ``tools=``;
 * :class:`ModelHooks` — around every model call: the run's ``before_model`` / ``after_model`` /
   ``on_error`` hooks, a ``chat`` span with the usage (redacted, as every span), the most the
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
@@ -55,10 +55,10 @@ import re
 import types
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
-from bifrost_sdk.headers import PROMPT_ID
 from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -94,19 +94,22 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.prebuilt import InjectedState
-from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
+from trellis.harness.adapters.langgraph import TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
+from trellis.harness.bridges.helpers import Kind
+from trellis.harness.gateways import Capability, route_now
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
-from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
-from trellis.harness.repository import pinned
-from trellis.harness.runtime import DEFERRED, Runtime, current
+from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
+from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
@@ -173,57 +176,157 @@ class _Step:
 TOOLSETS: Final = 64
 #: The tools that only change the graph's own state (no effect outside the run, kept by its
 #: checkpoint): a ``GovernTools`` lets them through. Deep Agents' file tools are among them
-#: on its default ``StateBackend``; on a backend that writes to a real disk, give the graph
-#: governed tools instead (``h.tools``).
+#: on its default ``StateBackend``; on a backend that writes to a real disk, its file tools are
+#: governed as any other (give them their risk in the catalog).
 STATE_TOOLS: Final = frozenset(
     {"write_todos", "read_result", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
 )
 
 
 class GovernTools(AgentMiddleware):
-    """The framework's own tools of a ``create_agent`` or Deep Agents graph — those not built
-    with ``h.tools`` — run as the harness's are (``h.governance_middleware()``; ``ReAct`` has
-    it): governance decides each call (the catalog's risk, else the tool's declared one in its
-    ``metadata["side_effects"]``, else its MCP-style annotations, else ``write``: announced),
-    a person approves when it asks, and the call is journaled (a resume does not run it again),
-    timed and traced. The harness's tools and the graph's state tools (:data:`STATE_TOOLS`)
-    are let through as they are."""
+    """The framework's own tools of a ``create_agent`` or Deep Agents graph run as the
+    harness's are (``h.governance_middleware()``; ``ReAct`` has it): :func:`governed_call`.
+    Inside a harness run every tool node is governed so already (:func:`govern_tool_nodes`);
+    a call is governed once, whichever comes first."""
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        runtime = current()
-        call = request.tool_call
-        own = request.tool
-        if (
-            runtime is None
-            or own is None
-            or call["name"] in runtime.toolbox
-            or call["name"] in STATE_TOOLS
-        ):
-            return await handler(request)
+        return await governed_call(request, handler)
 
-        async def run(args: dict[str, Any]) -> Any:
-            done = await handler(request.override(tool_call={**call, "args": args}))
-            if isinstance(done, ToolMessage) and done.status == "error":
-                raise ToolError(text_of(done.content), source="tools")
-            return text_of(getattr(done, "content", done))
 
-        spec = ToolSpec(
-            name=call["name"],
-            description=own.description or call["name"],
-            input_schema=_schema_of(own),
-            side_effects=side_effects_of(own.metadata),
-        )
-        outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
-        return ToolMessage(
-            content=text_of(outcome.output),
-            tool_call_id=str(call["id"]),
-            name=call["name"],
-            status="error" if outcome.status in FAILED else "success",
-        )
+#: The call a governed run of a framework's own tool is executing (:func:`governed_call`): the
+#: layers under it (a tool node inside a ``GovernTools``) let it through, governed once.
+_GOVERNING: ContextVar[str | None] = ContextVar("trellis_governing", default=None)
+
+
+async def governed_call(
+    request: ToolCallRequest,
+    handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+) -> ToolMessage | Command[Any]:
+    """A framework's own tool call, inside a harness run, run as the harness's are: governance
+    decides it (the catalog's risk, else the tool's declared one in its
+    ``metadata["side_effects"]``, else its MCP-style annotations, else ``write``: announced), a
+    person approves when it asks, and it is journaled (a resume does not run it again), timed,
+    traced and recorded (``tools.bridge``). What the tool returned is returned as it is — a
+    ``Command`` (a Deep Agent's ``task`` updating the graph's state) included — and, replayed
+    from the journal, as the message the model read. The harness's tools, the graph's state
+    tools (:data:`STATE_TOOLS`), a call already governed and any call outside a run are let
+    through as they are."""
+    runtime = current()
+    call = request.tool_call
+    own = request.tool
+    if (
+        runtime is None
+        or own is None
+        or converted.made(own)  # the harness's own: its call goes through the bridge itself
+        or call["name"] in runtime.toolbox
+        or call["name"] in STATE_TOOLS
+        or _GOVERNING.get() == call["id"]
+    ):
+        return await handler(request)
+    produced: list[ToolMessage | Command[Any]] = []
+
+    async def run(args: dict[str, Any]) -> Any:
+        token = _GOVERNING.set(call["id"])
+        try:
+            done = await _helped(runtime, call["name"], str(call["id"]), args, ran)
+        finally:
+            _GOVERNING.reset(token)
+        if isinstance(done, ToolMessage) and done.status == "error":
+            raise ToolError(text_of(done.content), source="tools")
+        produced.append(done)
+        return text_of(_told(done))
+
+    async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
+        return await handler(request.override(tool_call={**call, "args": args}))
+
+    spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
+    outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
+    if produced and outcome.ok and isinstance(produced[-1], Command):
+        return produced[-1]  # the graph's state update, as the tool made it
+    return ToolMessage(
+        content=text_of(outcome.output),
+        tool_call_id=str(call["id"]),
+        name=call["name"],
+        status="error" if outcome.status in FAILED else "success",
+    )
+
+
+async def _helped(
+    runtime: Runtime,
+    name: str,
+    key: str,
+    args: dict[str, Any],
+    ran: Callable[[dict[str, Any]], Awaitable[ToolMessage | Command[Any]]],
+) -> ToolMessage | Command[Any]:
+    """A Deep Agents ``task`` call (:data:`TASK_TOOL`, with its arguments) as a helper of the
+    run (``bridges.helpers``): its child run started, the sub-agent given the memory context
+    for its task before the task, its tool calls recorded under its run while it works, and
+    ended with its answer or its error (a pause leaves it to the next attempt). Any other call
+    runs as it is."""
+    helpers = runtime.helpers
+    if helpers is None or name != TASK_TOOL or not set(args) >= TASK_ARGUMENTS:
+        return await ran(args)
+    task = str(args["description"])
+    helper = await helpers.start(key, kind=Kind.TASK, name=str(args["subagent_type"]), task=task)
+    try:
+        with helpers.working(helper):
+            done = await ran({**args, "description": helpers.briefed(helper, task)})
+    except BaseException as exc:
+        if not is_pause_signal(exc):  # a pause: the next attempt ends it
+            await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
+        raise
+    if isinstance(done, ToolMessage) and done.status == "error":
+        await helpers.end(key, error=text_of(done.content))
+    else:
+        await helpers.end(key, output=text_of(_told(done)))
+    return done
+
+
+#: The arguments Deep Agents' sub-agent tool (:data:`TASK_TOOL`) takes (``SubAgentMiddleware``).
+TASK_ARGUMENTS: Final = frozenset({"description", "subagent_type"})
+
+
+def _told(done: Any) -> Any:
+    """What a tool's result says to the model: a message's content, or a ``Command``'s last
+    message's (its state update's)."""
+    if isinstance(done, Command):
+        update = done.update if isinstance(done.update, Mapping) else {}
+        messages = update.get("messages") or []
+        return getattr(messages[-1], "content", messages[-1]) if messages else ""
+    return getattr(done, "content", done)
+
+
+def govern_tool_nodes() -> None:
+    """Every LangGraph tool node, inside a harness run, governed (:func:`governed_call`): a
+    ``create_agent`` or Deep Agents graph's (its ``task`` sub-agents' graphs too), a hand-built
+    graph's ``ToolNode`` — whoever built them, with no middleware of the harness's. Installed
+    once per process, on the tool node's one execution of a call (after its own wrappers);
+    outside a harness run it changes nothing."""
+    execute = ToolNode._execute_tool_async
+    if getattr(execute, _INSTALLED, False):
+        return
+
+    async def governed(
+        self: ToolNode, request: ToolCallRequest, input_type: Any, config: RunnableConfig
+    ) -> Any:
+        if current() is None:
+            return await execute(self, request, input_type, config)
+
+        async def handler(given: ToolCallRequest) -> Any:
+            return await execute(self, given, input_type, config)
+
+        return await governed_call(request, handler)
+
+    setattr(governed, _INSTALLED, True)
+    ToolNode._execute_tool_async = governed  # type: ignore[method-assign]
+
+
+#: The mark of the tool node's execution :func:`govern_tool_nodes` installed.
+_INSTALLED: Final = "_trellis_governed"
 
 
 def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
@@ -235,6 +338,17 @@ def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
     if declared in get_args(SideEffects):
         return str(declared)
     return annotated(found.get("annotations"))
+
+
+def spec_of(tool: BaseTool) -> ToolSpec:
+    """A framework's own LangChain tool as the harness governs, records and publishes it: its
+    name, description and schema, its risk as it declares it (:func:`side_effects_of`)."""
+    return ToolSpec(
+        name=tool.name,
+        description=tool.description or tool.name,
+        input_schema=_schema_of(tool),
+        side_effects=side_effects_of(tool.metadata),
+    )
 
 
 def _schema_of(tool: Any) -> dict[str, Any]:
@@ -407,10 +521,11 @@ def _unbroken(request: ModelRequest[Any]) -> ModelRequest[Any]:
 
 
 def _offered(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
-    """The request with only the harness tools the run offers now: a graph's are bound when it
-    is built (``h.tools``), so a part turned off afterwards (``h.wrap(without=)``, a run's
+    """The request with only the tools the run offers now: a graph's are bound when it is
+    built, so a part turned off afterwards (``h.wrap(without=)``, a run's
     ``without=``) would still be offered (a call of it is refused: it is off), and so would the
-    tools the tool hints leave out (``Runtime.offers``). The graph's own tools stay."""
+    tools the tool hints leave out (``Runtime.offers``) — the harness's and the graph's own
+    tools of the run's set alike; a tool outside the set (the graph's state tools) stays."""
     if runtime is None:
         return request
     kept = [t for t in request.tools if _offers(runtime, t)]
@@ -421,8 +536,7 @@ def _offers(runtime: Runtime, tool: BaseTool | dict[str, Any]) -> bool:
     feature = (getattr(tool, "metadata", None) or {}).get(converted.FEATURE)
     if feature is not None and not runtime.uses(feature):
         return False
-    name = _named(tool)
-    return name not in runtime.toolbox or runtime.offers(name)
+    return runtime.offers(_named(tool))  # the graph's own tools of the run's set narrowed too
 
 
 async def _narrow(
@@ -486,37 +600,28 @@ class ModelHooks(AgentMiddleware):
     """Around every model call: the task kept ahead of a summary (the conversation's leading
     system messages, the pushed memory context among them, and its first user message), the
     run's model hooks (then ``hooks``), a ``chat`` span with the usage, at most ``timeout``
-    seconds (and what is left of the run's time), and the ``prompt`` of the harness's prompt
-    sources (``"name"``, ``"name@version"``, a ``Prompt``), pinned for the run: a stored prompt
-    of the gateway is selected by every call (headers the gateway reads: the model is a gateway
-    model, ``ChatOpenAI``); any other is rendered (``prompt_vars`` fill its ``{{variables}}``)
-    into the instructions, before the system prompt, its other messages before the
-    conversation. Without ``prompt``, a chat model whose own headers select a stored prompt
-    (``ChatOpenAI(default_headers=await h.model_headers(prompt=...))``) selects, on every call,
-    the version the run pinned."""
+    seconds (and what is left of the run's time), and the stored ``prompt`` of the gateway
+    (``stored("name", **vars)``), pinned for the run: with no variables to fill, on a routed
+    model through Bifrost, selected by every call (headers the gateway reads: it prepends it);
+    otherwise rendered into the instructions, its other messages before the conversation."""
 
     def __init__(
         self,
         *hooks: Hooks,
         timeout: float | None = None,
-        prompt: str | Prompt | None = None,
-        prompt_vars: dict[str, Any] | None = None,
-        gateway: bool = False,
+        prompt: Stored | None = None,
+        routed: bool = False,
     ) -> None:
         super().__init__()
-        #: the model is the gateway's: every call carries the run's Bifrost dimensions and
-        #: its ``traceparent`` (``telemetry.gateway_headers``)
-        self.gateway = gateway
+        #: the model is a routed name (``gateways.routed_chat_model``): on a route that
+        #: attributes (Bifrost), every call carries the run's dimensions and its ``traceparent``
+        #: (``telemetry.gateway_headers``)
+        self.routed = routed
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
-        if isinstance(prompt, str):
-            pinned(prompt)
-        if prompt_vars is not None and prompt is None:
-            raise ConfigurationError("prompt_vars= fills the variables of a prompt=")
         self.given = list(hooks)
         self.timeout = timeout
         self.prompt = prompt
-        self.prompt_vars = dict(prompt_vars or {})
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
@@ -546,7 +651,7 @@ class ModelHooks(AgentMiddleware):
         runtime = current()
         hooks = running(*self.given)
         request = _with_task(_unbroken(_offered(request, runtime)))
-        prompt = await self._pinned(runtime) or _selected(request, runtime)
+        prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
         name = _model_name(request.model)
@@ -558,7 +663,8 @@ class ModelHooks(AgentMiddleware):
             request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
-            if self.gateway:  # in the model's span: the gateway's span of the call joins it
+            # in the model's span: the gateway's span of the call joins it
+            if self.routed and route_now().has(Capability.ATTRIBUTION):
                 sent = request.model_settings.get("extra_headers") or {}
                 headers = {**sent, **gateway_headers()}
                 request = request.override(
@@ -578,33 +684,33 @@ class ModelHooks(AgentMiddleware):
         return reply
 
     async def _pinned(self, runtime: Runtime | None) -> ResolvedPrompt | None:
-        """The prompt's version this run uses: the journal's (a resumed run uses the same),
-        else the one its source gives now (journaled)."""
+        """The stored prompt's version this run uses: the journal's (a resumed run uses the
+        same), else the one the gateway serves now (journaled)."""
         if self.prompt is None:
             return None
         if runtime is None:
             raise ConfigurationError(
-                "ModelHooks(prompt=) pins the prompt for a harness run: outside one, render it "
-                "yourself (h.prompt_messages), or give the model client h.model_headers(prompt=)"
+                "a stored system_prompt is pinned for a harness run: outside one, render it "
+                "yourself (await h.prompt(...))"
             )
-        found = await runtime.agent.harness.prompts.pin(self.prompt, runtime)
-        if found.pin() is not None and self.prompt_vars:
-            raise ConfigurationError(
-                f"prompt= names {found.name}, a stored prompt of the gateway: the gateway "
-                "prepends it as it is stored (no prompt_vars=)"
-            )
-        return found
+        return await runtime.agent.harness.prompts.pin(self.prompt.ref, runtime)
 
     def _prompted(self, request: ModelRequest[Any], prompt: ResolvedPrompt) -> ModelRequest[Any]:
+        assert self.prompt is not None
         pin = prompt.pin()
-        if pin is not None:
+        if (
+            pin is not None
+            and not prompt.variables
+            and self.routed
+            and route_now().has(Capability.PROMPTS)
+        ):
             sent = request.model_settings.get("extra_headers", {})
             headers = {**sent, **pin.options().headers()}
             return request.override(
                 model_settings={**request.model_settings, "extra_headers": headers}
             )
-        rendered = prompt.messages(**self.prompt_vars)
-        own = [str(m["content"]) for m in rendered if m.get("role") == "system"]
+        rendered = prompt.messages(**self.prompt.values)
+        own = [message_text(m.get("content")) for m in rendered if m.get("role") == "system"]
         rest = [m for m in rendered if m.get("role") != "system"]
         system = request.system_message
         text = "\n\n".join(part for part in [*own, system.text if system else ""] if part)
@@ -612,16 +718,6 @@ class ModelHooks(AgentMiddleware):
             system_message=SystemMessage(content=text),
             messages=[*cast(list[AnyMessage], convert_to_messages(rest)), *request.messages],
         )
-
-
-def _selected(request: ModelRequest[Any], runtime: Runtime | None) -> ResolvedPrompt | None:
-    """The stored prompt the run pinned that the chat model's own headers select (a
-    ``ChatOpenAI(default_headers=await h.model_headers(prompt=...))``, which copied them when it
-    was built): each call then selects the version the run pinned."""
-    headers = getattr(request.model, "default_headers", None)
-    if runtime is None or not isinstance(headers, Mapping):
-        return None
-    return selected(runtime, headers.get(PROMPT_ID))
 
 
 def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
@@ -673,7 +769,11 @@ def model_error(exc: Exception, timeout: float | None = None) -> Exception:
     no answer, a timeout, 408, 409, 429, 5xx); anything else as it is."""
     if isinstance(exc, TimeoutError):
         within = "" if timeout is None else f" within {timeout:g}s"
-        return ModelError(f"the model did not answer{within}", source="langgraph", retryable=True)
+        return ModelTimeout(
+            f"the model did not answer{within}: the step stalled",
+            source="langgraph",
+            details={} if timeout is None else {"seconds": timeout},
+        )
     try:
         import openai  # noqa: PLC0415 - the model client of the react extra
     except ImportError:  # pragma: no cover - the react extra installs it

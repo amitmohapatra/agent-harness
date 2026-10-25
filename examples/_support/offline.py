@@ -12,7 +12,7 @@ Each piece is real when its variable is set and scripted when it is not:
   :class:`~examples._support.gateway.ScriptedGateway`, serving the example's own functions;
 * runs — with ``RUNS_URL``, agent-runs; else the harness's in-process store, which takes the
   same calls (:func:`runs_store`);
-* the judge — with ``BIFROST_URL``, ``TRELLIS_JUDGE_MODEL``; else :class:`Judging`.
+* the judge — with ``BIFROST_URL``, the gateway's judge alias; else :class:`Judging`.
 """
 
 from __future__ import annotations
@@ -199,7 +199,7 @@ class Judging:
 
 
 def judge_offline(h: Harness) -> None:
-    """Offline, the harness's judge is the scripted one (online: ``TRELLIS_JUDGE_MODEL``)."""
+    """Offline, the harness's judge is the scripted one (online: the gateway's judge alias)."""
     if not online():
         h.evals.judge_model = Judging()
 

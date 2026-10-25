@@ -14,7 +14,7 @@ nothing (attributes are built only for a recording span).
 
 | Span | Attributes |
 |---|---|
-| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the thread), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer); with an agent version (`h.wrap(..., version=)`, `TRELLIS_AGENT_VERSION`), `gen_ai.agent.version` and `langfuse.version` |
+| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the thread), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer); with an agent version (`h.wrap(..., version=)`, else `service.version`), `gen_ai.agent.version` and `langfuse.version` |
 | `retrieve memory` — the pushed context | `gen_ai.operation.name=retrieve`, `langfuse.observation.type=retriever`, input (the question), output (the rendered context) |
 | `execute_tool <tool>` — one per call | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` (`extension` for MCP, else `function`), `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `langfuse.observation.type=tool`, `trellis.tool.source`, `trellis.governance.action` (`run`, `announce` or `ask`: [governance.md](governance.md)) |
 | `chat <model>` — a model call of a graph with the harness's `ModelHooks` middleware (a `ReAct`'s) | `gen_ai.operation.name=chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens` (when the prompt cache was used), `gen_ai.response.finish_reasons`, `langfuse.observation.type=generation`, input/output |
@@ -49,7 +49,7 @@ person's feedback days later, lands on it without anything stored.
 |---|---|---|
 | `trellis.runs` | `agent`, `outcome` (`success`, `error`, `timeout`, `interrupt`, `cancelled`) | an attempt ends |
 | `trellis.tool_calls` | `tool`, `status` (`ok`, `error`, `timeout`) | the bridge executed a call (a replayed or rejected call is not counted) |
-| `trellis.writes.failed` | `write` (the background write's label, e.g. `memory.transcript`) | a background write failed or the write queue was full |
+| `trellis.writes.failed` | `write` (the background write's label, e.g. `memory.transcript`) | a background write was given up (its attempts spent, the queue full): spooled or lost |
 | `trellis.writes.undelivered` | `write`, `outcome` (`spooled`, `lost`) | a background write this process gave up on |
 | `trellis.runs.queue_wait` (histogram, seconds) | `agent` | a worker claimed a queued run: how long it waited (since it was queued, or since the answer that queued it again) |
 | `trellis.runs.rate_limited` | `operation` (`start`, `resume`, `schedule`) | agent-runs still answered `429` after its SDK's retries ([runs.md](runs.md#admission-agent-runs-rate-limit)) |
@@ -82,11 +82,11 @@ name none. Two deployments:
 
 * **Straight to Langfuse** — Langfuse's own names, nothing else:
   `LANGFUSE_PUBLIC_KEY=pk-lf-...`, `LANGFUSE_SECRET_KEY=sk-lf-...` and, unless the project is
-  on Langfuse Cloud, `LANGFUSE_BASE_URL=https://langfuse.example.com` (`LANGFUSE_HOST`, its
-  old name, still read for a release). With no OpenTelemetry exporter variable set the harness
+  on Langfuse Cloud, `LANGFUSE_BASE_URL=https://langfuse.example.com`. With no OpenTelemetry
+  exporter variable set the harness
   exports where Langfuse's SDK does: `<LANGFUSE_BASE_URL>/api/public/otel` with
-  `Authorization: Basic base64(pk:sk)` and `x-langfuse-ingestion-version: 4`. The same keys read
-  its prompts ([prompts.md](prompts.md)), post its scores and read its datasets.
+  `Authorization: Basic base64(pk:sk)` and `x-langfuse-ingestion-version: 4`. The same keys
+  post its scores and read its datasets.
 * **Through the collector** ([deploy/otel-collector.yaml](../deploy/otel-collector.yaml)) —
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`,
   `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>,x-langfuse-host=https://cloud.langfuse.com`.
@@ -117,8 +117,8 @@ when they are all that is set) — no extra variable:
 
 | Score | When | Value |
 |---|---|---|
-| `grounding` | a sampled share of successful runs with an answer — a structured one as its JSON (`TRELLIS_EVAL_SAMPLE`, default 0.1, chosen by the run id): the memory service's `/v1/verify {bundle_id, answer, run_id}` against the context the run was given — the one grounding judge, which owns the evidence and records the run's `judge` feedback itself | the share of the answer's claims the evidence supports, 0..1 (an answer with no checkable claim is no score) |
-| an evaluator's name (`exact_match`, `llm_judge`, ...) | `h.evaluate` or `evaluate` (every item of a dataset), an online judge (`Harness(judges=[...])`, a sampled share of runs), or `judge(...)` from code you do not wrap — [evaluation.md](evaluation.md), [blocks/evaluation.md](blocks/evaluation.md) | 0..1 (`NUMERIC`), a bool (`BOOLEAN`), or a category (`CATEGORICAL`); the evaluator's comment (a judge's reasoning) |
+| `grounding` | a sampled share of successful runs with an answer — a structured one as its JSON (a fixed 0.1, chosen by the run id): the memory service's `/v1/verify {bundle_id, answer, run_id}` against the context the run was given — the one grounding judge, which owns the evidence and records the run's `judge` feedback itself | the share of the answer's claims the evidence supports, 0..1 (an answer with no checkable claim is no score) |
+| an evaluator's name (`exact_match`, `llm_judge`, ...) | `h.evaluate` or `evaluate` (every item of a dataset), an online judge (`h.wrap(judges=[...])`, its sampled share of runs), or `judge(...)` from code you do not wrap — [evaluation.md](evaluation.md), [blocks/evaluation.md](blocks/evaluation.md) | 0..1 (`NUMERIC`), a bool (`BOOLEAN`), or a category (`CATEGORICAL`); the evaluator's comment (a judge's reasoning) |
 | `feedback` | `h.feedback(run_id, verdict, correction=None)` — also the run's `human` feedback in the memory service, which outranks the judge's and the run's own | confirm/approve 1.0, edit 0.5, correct/reject 0.0; the correction as the comment |
 
 How evaluators and judges produce the evaluator scores is [evaluation.md](evaluation.md).
@@ -163,8 +163,11 @@ memory search and recall see the real data. Masking of your own is a hook:
 `invoke_agent` span (`trellis.decision.*` attributes and a `decision` span event). With
 `RUNS_URL` the events are also in agent-runs' event log, readable from any process
 (`agent.events`, [runs.md](runs.md#a-runs-events-from-anywhere)). A failed background write is a `warning`
-event on the run's listeners, a log line and a `trellis.writes.failed` count — never silent,
-never raised into the run.
+event on the run's listeners, a `write_failed <label>` span with an error status in the run's
+trace, a log line (an error the first time each kind fails) and a `trellis.writes.failed`
+count — never silent, never raised into the run. A model call that stalled is a
+`call_timeout` warning event and a `call_timeout` span in the run's trace
+([reliability.md](reliability.md#stalled-model-calls)).
 
 Every tool call that starts on the stream (`TOOL_CALL_START`, `TOOL_CALL_ARGS`) ends there,
 before the attempt's `RUN_FINISHED`: `TOOL_CALL_END`, then `TOOL_CALL_RESULT` with the call's

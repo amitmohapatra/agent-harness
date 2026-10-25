@@ -67,7 +67,7 @@ class RunExecutor(AgentExecutor):
         self._settled: OrderedDict[str, None] = OrderedDict()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        tenant = await self.agent.harness.tenant()  # what an identity header is checked against
+        tenant = await self.agent.harness._tenant()  # what an identity header is checked against
         user = self._user(context)
         task = context.current_task
         task_id = str(context.task_id or "")
@@ -117,7 +117,7 @@ class RunExecutor(AgentExecutor):
         task_id = str(context.task_id or "")
         task = context.current_task
         context_id = (task.context_id if task is not None else "") or task_id
-        tenant = await self.agent.harness.tenant()
+        tenant = await self.agent.harness._tenant()
         with contextlib.suppress(NotFoundError, ConflictError):  # no run holds it, or it ended
             await self.agent.cancel(task_id, reason=f"cancelled by {user} (A2A)", tenant=tenant)
         await self._cancelled(event_queue, task_id, context_id)

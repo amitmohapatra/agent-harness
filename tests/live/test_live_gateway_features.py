@@ -1,5 +1,5 @@
 """The gateway's features through the harness, live: Code Mode calls that all go through the
-bridge, model calls the gateway adds no tools to, stored prompts, skills, Virtual MCPs, who an
+bridge, model calls the gateway adds no tools to, stored prompts, who an
 MCP call is for, Agent Mode tools left out, frameworks' own MCP clients and the key on /mcp.
 
 A small local model is slow and unreliable at choosing tools, so where a test needs a
@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 import pytest
-from bifrost_sdk import Bifrost
+from bifrost_sdk import NO_GATEWAY_TOOLS, Bifrost
 from bifrost_sdk.admin import Admin
 
 from tests.live.conftest import (
@@ -37,7 +37,8 @@ from tests.live.conftest import (
     needs_memory,
 )
 from tests.live.support import Forcing, Sent, eventually, gateway_model, memory_scope
-from trellis import ReAct, Runtime, mcp
+from tests.support.arm import resolved
+from trellis import ReAct, Runtime, stored
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.clients.bifrost import (
     CODE_MODE_TOOLS,
@@ -45,7 +46,6 @@ from trellis.harness.clients.bifrost import (
     Gateway,
     code_mode_tools,
 )
-from trellis.harness.skills import LOAD_SKILL, READ_SKILL_FILE, SECTION
 
 pytestmark = [pytest.mark.live, needs_gateway]
 
@@ -200,7 +200,7 @@ async def test_every_code_mode_call_of_a_react_run_goes_through_the_bridge(
         sent = Sent()
         model = gateway_model(h, sent)
         agent = h.wrap(
-            ReAct(system="You read wikis with code.", model=model, middleware=[forcing]),
+            ReAct(system_prompt="You read wikis with code.", model=model, middleware=[forcing]),
             id=f"live-cm-{suffix()}",
         )
         scope = await memory_scope(h, user=user, agent_id=agent.id)
@@ -285,9 +285,7 @@ async def test_no_model_call_gets_the_keys_mcp_tools(wikis: list[str], wikis_key
         headers = {"authorization": f"Bearer {wikis_key}"}
         body = {"model": MODEL, "messages": turn, "max_tokens": 4}
         async with httpx.AsyncClient(base_url=BIFROST_URL, headers=headers, timeout=120) as raw:
-            guarded = await raw.post(
-                "/chat/completions", json=body, headers=await h.model_headers()
-            )
+            guarded = await raw.post("/chat/completions", json=body, headers=dict(NO_GATEWAY_TOOLS))
             unguarded = await raw.post("/chat/completions", json=body)
         tokens = base["usage"]["prompt_tokens"]
         assert guarded.json()["usage"]["prompt_tokens"] == tokens
@@ -296,106 +294,36 @@ async def test_no_model_call_gets_the_keys_mcp_tools(wikis: list[str], wikis_key
 
 # --------------------------------------------------------------------------- prompts
 async def test_a_stored_prompt_reaches_every_model_call_of_a_react(admin: Admin) -> None:
+    """A model name the harness routes selects the pinned version by its headers (the gateway
+    prepends it); a model object of the team's own is not the harness's to route, so the
+    version pinned for the run is rendered into its instructions instead."""
     name = f"trellis-live-{suffix()}"
     prompt = await admin.prompts.create(name)
     try:
         system = [{"role": "system", "content": "Answer every question with the single word ARRR."}]
         await admin.prompts.commit(prompt.id, system, model=MODEL)
         async with live_harness() as h:
-            sent = Sent()  # the model a model name builds, its requests seen on the wire
-            agent = h.wrap(
-                ReAct(system="Be brief.", model=gateway_model(h, sent), prompt=name),
-                id=f"live-p-{suffix()}",
-            )
-            result = await agent.run("What is 2 + 2?", user="live")
+            # a model name: routed through Bifrost, the version selected per call
+            named = h.wrap(ReAct(system_prompt=stored(name), model=MODEL), id=f"live-p-{suffix()}")
+            result = await named.run("What is 2 + 2?", user="live")
             assert result.status is RunStatus.SUCCESS, result.error
             assert "ARRR" in str(result.answer).upper()  # the gateway prepended it
-            # every model call selected the pinned version, through its request's headers
-            assert sent.headers and all(
-                (s["x-bf-prompt-id"], s["x-bf-prompt-version"]) == (prompt.id, "1")
-                for s in sent.headers
+            # a model object of your own: the pinned version is its instructions, no header
+            sent = Sent()  # its requests seen on the wire
+            own = h.wrap(
+                ReAct(system_prompt=stored(name), model=gateway_model(h, sent)),
+                id=f"live-p-{suffix()}",
             )
+            result = await own.run("What is 2 + 2?", user="live")
+            assert result.status is RunStatus.SUCCESS, result.error
+            assert "ARRR" in str(result.answer).upper()
+            assert sent.headers and not any("x-bf-prompt-id" in s for s in sent.headers)
             assert h.gateway is not None
             assert (await h.gateway.prompt(name)).version == 1
-            headers = await h.model_headers(prompt=f"{name}@1")
-            assert headers["x-bf-prompt-id"] == prompt.id
+            rendered = await h.prompt(f"{name}@1")
+            assert rendered.text == system[0]["content"]
     finally:
         await admin.prompts.delete(prompt.id)
-
-
-# --------------------------------------------------------------------------- skills
-async def test_skills_are_disclosed_pinned_loaded_and_read(admin: Admin) -> None:
-    name = f"trellis-live-{suffix()}"
-    skill = await admin.skills.create(
-        name,
-        description="Reviews SQL queries.",
-        body="Read rules.md, then check each rule.",
-        version="1.0.0",
-        files={"rules.md": "No SELECT *."},
-    )
-    seen: dict[str, Any] = {}
-
-    async def reviewer(question: str, agent: Runtime) -> str:
-        seen["context"] = agent.context
-        seen["loaded"] = await agent.tools.call(LOAD_SKILL, name=name)
-        seen["file"] = await agent.tools.call(READ_SKILL_FILE, name=name, path="rules.md")
-        return "reviewed"
-
-    try:
-        async with live_harness() as h:
-            agent = h.wrap(reviewer, id=f"live-s-{suffix()}", skills=[name])
-            events = [e async for e in agent.stream("Review my query.", user="live")]
-            # after the memory context, when memory is on
-            assert seen["context"].endswith(f"{SECTION}\n- {name}: Reviews SQL queries.")
-            assert "Read rules.md, then check each rule." in seen["loaded"]
-            assert "- rules.md" in seen["loaded"] and seen["file"] == "No SELECT *."
-            [used] = [e.data for e in events if (e.data or {}).get("name") == "skills"]
-            assert used["versions"] == {name: "1.0.0"}
-            # a newer version served: a run pinned to 1.0.0 loads its body, not its files
-            await admin.skills.publish(
-                skill.id,
-                description="Reviews SQL.",
-                body="v2",
-                version="1.1.0",
-                files={"rules.md": "v2"},
-            )
-            old = h.wrap(reviewer, id=f"live-s-{suffix()}", skills=[f"{name}@1.0.0"])
-            await old.run("Review.", user="live")
-            assert "check each rule" in seen["loaded"]
-            assert "uses version 1.0.0" in seen["file"] and "(1.1.0)" in seen["file"]
-    finally:
-        await admin.skills.delete(skill.id)
-
-
-# --------------------------------------------------------------------------- Virtual MCPs
-async def test_an_agent_with_a_virtual_mcp_has_its_tools_only(
-    admin: Admin, ops: str, ops_key: str
-) -> None:
-    assert BIFROST_URL is not None
-    async with Bifrost(BIFROST_URL) as bf:
-        [client] = [c for c in await bf.mcp.clients() if c.config.name == ops]
-    bundle = await admin.virtual_mcps.create(f"trellislive{suffix()}", {client.id: ["write_note"]})
-    [key] = [k for k in await admin.vk.list() if k.get("value") == ops_key]
-    await admin.virtual_mcps.attach(bundle.id, key["id"])
-
-    async def noter(question: str, agent: Runtime) -> Any:
-        mcp = sorted(n for n, t in agent.toolbox.items() if t.spec.source == "mcp")
-        return [mcp, await agent.tools.call(f"{ops}-write_note", text="hi")]
-
-    try:
-        async with live_harness(ops_key) as h:
-            names, noted = (
-                await h.wrap(noter, id=f"live-v-{suffix()}", tools=[mcp(bundle.slug)]).run(
-                    "note", user="live"
-                )
-            ).answer
-            assert names == [f"{ops}-write_note"] and noted == "noted: hi"
-            everything = await h.wrap(noter, id=f"live-v-{suffix()}").run("note", user="live")
-            assert everything.answer[0] == sorted(
-                f"{ops}-{t}" for t in ("delete_records", "whoami", "write_note")
-            )
-    finally:
-        await admin.virtual_mcps.delete(bundle.id)
 
 
 # --------------------------------------------------------------------------- who a call is for
@@ -419,7 +347,7 @@ async def test_a_tool_the_gateway_would_run_itself_is_not_offered(ops: str, ops_
         )
         try:
             async with live_harness(ops_key) as h:
-                tools = await h.resolve([], tenant=await h.tenant())
+                tools = await resolved(h)
             assert sorted(t.name for t in tools) == [f"{ops}-delete_records", f"{ops}-whoami"]
         finally:
             await bf.mcp.update(client, client.config)

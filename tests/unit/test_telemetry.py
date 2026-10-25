@@ -5,29 +5,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Iterator
 
 import httpx
 import pytest
 import respx
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from trellis import Settings
 from trellis.harness import telemetry
 from trellis.harness.redaction import REDACTED
+from trellis.harness.settings import LANGFUSE_INGESTION_HEADER, LANGFUSE_INGESTION_VERSION
 from trellis.harness.telemetry import Langfuse, RunTrace
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
-
 
 RUN = RunTrace(
     run_id="run_1", agent_id="support", tenant="acme", user="u1", thread="th", framework="react"
@@ -118,7 +105,7 @@ def test_sensitive_attributes_are_redacted(spans) -> None:
 
 
 def test_nothing_configured_installs_nothing() -> None:
-    assert telemetry.configure(Settings()) is False
+    assert telemetry.configure({}) is False
     assert telemetry.traces_url("http://c:4318") == "http://c:4318/v1/traces"
     assert telemetry.traces_url("http://lf/api/public/otel/v1/traces/") == (
         "http://lf/api/public/otel/v1/traces"
@@ -128,24 +115,24 @@ def test_nothing_configured_installs_nothing() -> None:
 @pytest.mark.parametrize(
     ("given", "host"),
     [
-        ({"langfuse_public_key": "pk", "langfuse_secret_key": "sk"}, "https://cloud.langfuse.com"),
+        ({"LANGFUSE_PUBLIC_KEY": "pk", "LANGFUSE_SECRET_KEY": "sk"}, "https://cloud.langfuse.com"),
         (
             {
-                "langfuse_public_key": "pk",
-                "langfuse_secret_key": "sk",
-                "langfuse_host": "https://lf.example/",
+                "LANGFUSE_PUBLIC_KEY": "pk",
+                "LANGFUSE_SECRET_KEY": "sk",
+                "LANGFUSE_BASE_URL": "https://lf.example/",
             },
             "https://lf.example",
         ),
-        ({"langfuse_public_key": "pk"}, None),
-        ({"otlp_endpoint": "https://lf.example/api/public/otel"}, None),  # not its own names
+        ({"LANGFUSE_PUBLIC_KEY": "pk"}, None),
+        ({"OTEL_EXPORTER_OTLP_ENDPOINT": "https://lf.example/api/public/otel"}, None),
     ],
     ids=["cloud", "own-host", "no-secret", "otlp-only"],
 )
-def test_the_scores_api_is_reached_with_langfuses_own_settings(
+def test_the_scores_api_is_reached_with_langfuses_own_variables(
     given: dict[str, str], host: str | None
 ) -> None:
-    scores = Langfuse.of(Settings(**given))  # type: ignore[arg-type]
+    scores = Langfuse.of(given)
     assert (scores.host if scores is not None else None) == host
 
 
@@ -166,18 +153,19 @@ def test_the_sdks_exporter_reads_its_own_variables(monkeypatch: pytest.MonkeyPat
     from opentelemetry import trace
 
     installed: list[object] = []
+    monkeypatch.setattr(trace, "get_tracer_provider", trace.ProxyTracerProvider)
     monkeypatch.setattr(trace, "set_tracer_provider", installed.append)
     monkeypatch.setattr(telemetry, "_measured", lambda *a, **k: False)
     env = {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector:4318/v1/traces"}
     monkeypatch.setenv(
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]
     )
-    assert telemetry.configure(Settings(), env) is True
+    assert telemetry.configure(env) is True
     [provider] = installed
     [processor] = provider._active_span_processor._span_processors  # type: ignore[attr-defined]
     assert processor.span_exporter._endpoint == "http://collector:4318/v1/traces"
     monkeypatch.setattr(telemetry, "_measured", lambda *a, **k: False)
-    assert telemetry.configure(Settings(), {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4318"})
+    assert telemetry.configure({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4318"})
 
 
 @respx.mock
@@ -215,11 +203,16 @@ def installed(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     return providers
 
 
-def test_an_otlp_endpoint_installs_one_exporter_to_its_traces_url(installed: list[object]) -> None:
-    settings = Settings(
-        otlp_endpoint="http://collector:4318/", otlp_headers={"authorization": "Basic x"}
-    )
-    assert telemetry.configure(settings) is True
+def test_the_otlp_variables_install_one_exporter_for_traces_and_one_for_metrics(
+    installed: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
+        "OTEL_EXPORTER_OTLP_HEADERS": "authorization=Basic x",
+    }
+    for name, value in env.items():  # the SDK's exporters read the process's own
+        monkeypatch.setenv(name, value)
+    assert telemetry.configure(env) is True
     meters, provider = installed
     assert isinstance(provider, TracerProvider)
     [reader] = meters._metric_readers  # type: ignore[attr-defined]
@@ -244,16 +237,23 @@ def test_an_application_provider_is_kept(
     monkeypatch.setattr(trace, "get_tracer_provider", lambda: own)
     monkeypatch.setattr(metrics, "get_meter_provider", lambda: meters)
     with caplog.at_level("INFO", logger="trellis.telemetry"):
-        assert telemetry.configure(Settings(otlp_endpoint="http://c:4318")) is False
+        assert telemetry.configure({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4318"}) is False
     assert "meter provider is already installed; keeping it" in caplog.text
     assert "tracer provider is already installed; keeping it" in caplog.text
 
 
-def test_langfuse_takes_traces_only(installed: list[object]) -> None:
-    settings = Settings(otlp_endpoint="https://cloud.langfuse.com/api/public/otel")
-    assert telemetry.configure(settings) is True
+def test_langfuses_keys_take_traces_only(installed: list[object]) -> None:
+    keys = {"LANGFUSE_PUBLIC_KEY": "pk", "LANGFUSE_SECRET_KEY": "sk"}
+    assert telemetry.configure({**keys, "LANGFUSE_BASE_URL": "https://lf.example"}) is True
     [provider] = installed  # no meter provider: Langfuse has no metrics endpoint
     assert isinstance(provider, TracerProvider)
+    [processor] = provider._active_span_processor._span_processors  # type: ignore[attr-defined]
+    exporter = processor.span_exporter  # type: ignore[attr-defined]
+    assert exporter._endpoint == "https://lf.example/api/public/otel/v1/traces"
+    assert exporter._headers == {
+        "authorization": "Basic cGs6c2s=",
+        LANGFUSE_INGESTION_HEADER: LANGFUSE_INGESTION_VERSION,
+    }
     provider.shutdown()
     assert telemetry.metrics_url("http://c:4318/v1/traces") == "http://c:4318/v1/metrics"
     assert telemetry.metrics_url("http://c:4318/v1/metrics/") == "http://c:4318/v1/metrics"
@@ -267,7 +267,7 @@ def test_otlp_without_the_extra_installed_says_how_to_get_it(
     monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http.trace_exporter", None)
     monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http.metric_exporter", None)
     with caplog.at_level("WARNING", logger="trellis.telemetry"):
-        assert telemetry.configure(Settings(otlp_endpoint="http://c:4318")) is False
+        assert telemetry.configure({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4318"}) is False
     assert "pip install 'trellis-harness[otel]'" in caplog.text
     assert installed == []
 

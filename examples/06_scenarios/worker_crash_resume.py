@@ -38,7 +38,7 @@ def pay(amount: int) -> str:
 
 
 async def billing(invoice: str, agent: Runtime) -> str:
-    receipt = await agent.tools.call("pay", amount=120)
+    receipt = await agent.tools.call(pay, amount=120)
     if crashes:  # attempt 1 dies here, after the payment
         raise Died(crashes.pop())
     return f"{invoice}: {receipt}"
@@ -46,7 +46,7 @@ async def billing(invoice: str, agent: Runtime) -> str:
 
 async def main() -> None:
     async with Harness() as h:
-        agent = h.wrap(billing, id="billing", tools=[pay])
+        agent = h.wrap(billing, id="billing")
         handle = await agent.start("invoice 7", user="ada")
 
         claimed = await h.runs.claim("worker-a", [agent.id], lease_seconds=LEASE_SECONDS)
@@ -70,7 +70,7 @@ async def main() -> None:
         # the lease lapses, the run is queued again: a worker polls the store for it
         while not await worker_b.run_once():  # noqa: ASYNC110 - polling is what a worker does
             await asyncio.sleep(0.25)
-        done = await handle.result(timeout=10)
+        done = await handle.result(wait=10)
         print(done.status.value, done.answer, "| attempt", (await handle.status()).attempt)
         print("paid:", paid)  # once
 

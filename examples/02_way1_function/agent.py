@@ -53,7 +53,7 @@ async def support(number: str, agent: Runtime) -> str:
         options=["credit", "refund"],
         assignee="role:account-managers",
     )
-    done = await agent.tools.call("credit", order="o-7", amount=42.5) if remedy == "credit" else ""
+    done = await agent.tools.call(credit, order="o-7", amount=42.5) if remedy == "credit" else ""
     return f"{remedy}: {done} ({len(known)} memories, context: {agent.context or 'none'})"
 
 
@@ -61,7 +61,7 @@ async def main() -> None:
     memory = ScriptedMemory(context="The customer pays by card.", facts=["Prefers credits."])
     crm = {"crm-ticket": McpTool(ticket, read_only=True)}
     async with Harness(**offline_blocks(memory=memory, mcp=crm)) as h:
-        agent = h.wrap(support, id="support", tools=[credit], hooks=[NoBigCredits()], timeout=60)
+        agent = h.wrap(support, id="support", hooks=[NoBigCredits()], run_timeout=60)
 
         result = await agent.run("T-9", user="ada")
         assert result.interrupt is not None  # the account manager's choice

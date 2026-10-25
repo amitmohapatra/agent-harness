@@ -116,9 +116,12 @@ async def main() -> None:
             ]
         )
         agent = h.wrap(
-            ReAct(system="You handle accounts.", model=model),
+            ReAct(
+                system_prompt="You handle accounts.",
+                model=model,
+                tools=[refund, pick_plans, ship_to, sign],
+            ),
             id="accounts",
-            tools=[refund, pick_plans, ship_to, sign],
             hooks=[FinanceReviews()],
         )
         reviewer = Reviewer(

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Result, Runtime, tool
 from trellis.contracts import (
@@ -46,7 +47,7 @@ async def refunds(input: str, agent: Runtime) -> Any:
 
 
 async def test_a_runs_result_carries_contracts_types(memory_harness: Harness) -> None:
-    agent = memory_harness.wrap(refunds, id="refunds", tools=[refund])
+    agent = arm(memory_harness.wrap(refunds, id="refunds"), [refund])
     paused = await agent.run("o-1", user="ada")
     assert isinstance(paused, Result) and isinstance(paused.status, RunStatus)
     assert isinstance(paused.interrupt, Interrupt)
@@ -67,7 +68,7 @@ async def test_a_runs_result_carries_contracts_types(memory_harness: Harness) ->
 
 
 async def test_every_streamed_event_is_a_contracts_run_event(memory_harness: Harness) -> None:
-    agent = memory_harness.wrap(refunds, id="refunds", tools=[refund])
+    agent = arm(memory_harness.wrap(refunds, id="refunds"), [refund])
     events = [e async for e in agent.stream("o-1", user="ada")]
     assert events and all(isinstance(e, RunEvent) for e in events)
     for event in events:
@@ -80,11 +81,11 @@ async def test_every_streamed_event_is_a_contracts_run_event(memory_harness: Har
 async def test_a_queued_run_a_schedule_and_feedback_are_contracts_records(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    agent = memory_harness.wrap(refunds, id="refunds", tools=[refund])
+    agent = arm(memory_harness.wrap(refunds, id="refunds"), [refund])
     handle = await agent.start("o-3", user="ada")
     queued = await handle.status()
     assert isinstance(queued, RunRecord) and queued.status is RunStatus.QUEUED
-    schedule = await agent.schedule("daily", "o-4", on_behalf_of="ada")
+    schedule = await agent.schedule("daily", user="ada", input="o-4")
     assert isinstance(schedule, Schedule)
     round_trips(schedule)
 
@@ -113,7 +114,7 @@ async def test_a_queued_run_a_schedule_and_feedback_are_contracts_records(
 async def test_the_errors_it_raises_are_contracts_errors(harness: Harness) -> None:
     with pytest.raises(ConfigurationError):
         harness.wrap(object(), id="nothing")
-    agent = harness.wrap(refunds, id="refunds", tools=[refund])
+    agent = arm(harness.wrap(refunds, id="refunds"), [refund])
     with pytest.raises(ConfigurationError):
         await agent.resume("run_missing.1.1", "approve", reviewer="cfo")
     assert isinstance(refund, FunctionTool)

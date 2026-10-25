@@ -14,10 +14,18 @@ from trellis.harness.tools.convert import text_of
 #: The metadata key a tool's feature is kept under (``Tool.feature``: ``without=`` turns it
 #: off), so the harness's middleware leaves the tools of a part a run is without unoffered.
 FEATURE: Final = "trellis_feature"
+#: The metadata key marking a tool the harness made (its calls go through the bridge already):
+#: a framework's own tool has none, and is governed as one (``middleware.governed_call``).
+MADE: Final = "trellis_made"
 
 
 def convert(tools: Sequence[Tool]) -> list[BaseTool]:
     return [_one(t) for t in tools]
+
+
+def made(tool: Any) -> bool:
+    """Whether ``tool`` is one the harness made (:data:`MADE`)."""
+    return bool((getattr(tool, "metadata", None) or {}).get(MADE))
 
 
 def _one(tool: Tool) -> BaseTool:
@@ -29,5 +37,5 @@ def _one(tool: Tool) -> BaseTool:
         name=tool.name,
         description=tool.spec.description or tool.name,
         args_schema=tool.spec.input_schema or {"type": "object", "properties": {}},
-        metadata=None if tool.feature is None else {FEATURE: tool.feature},
+        metadata={MADE: True} | ({} if tool.feature is None else {FEATURE: tool.feature}),
     )

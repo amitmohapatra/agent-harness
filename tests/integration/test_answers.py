@@ -12,6 +12,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from tests.support.arm import arm
 from trellis import Harness, Runtime, tool
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.agent import Agent
@@ -82,7 +83,7 @@ async def test_an_answer_that_does_not_fit_is_refused_and_the_run_keeps_waiting(
 async def test_an_edit_that_does_not_fit_the_tool_is_refused_saying_which_argument(
     harness: Harness,
 ) -> None:
-    agent = harness.wrap(asking, id="asking", tools=[refund])
+    agent = arm(harness.wrap(asking, id="asking"), [refund])
     asked = await paused_on(agent, "refund")
     with pytest.raises(ConfigurationError, match="do not fit refund: amount must be of type"):
         await agent.resume(asked, "edit", answer={"order": "o1", "amount": "50"}, reviewer="u1")
@@ -97,15 +98,15 @@ async def test_an_edit_that_does_not_fit_the_tool_is_refused_saying_which_argume
 async def test_an_edit_of_a_tool_the_toolbox_cannot_list_now_is_left_to_the_tool(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent = harness.wrap(asking, id="asking", tools=[refund])
+    agent = arm(harness.wrap(asking, id="asking"), [refund])
     asked = await paused_on(agent, "refund")
 
     async def down() -> list[Any]:
         raise httpx.ConnectError("the MCP server is down")
 
-    monkeypatch.setattr(agent._toolbox(await harness.tenant()), "tools", down)
+    monkeypatch.setattr(agent._toolbox(await harness._tenant()), "tools", down)
     record, resolution = await agent._resolution(
-        asked, "edit", {"order": "o1", "amount": "lots"}, "u1", tenant=await harness.tenant()
+        asked, "edit", {"order": "o1", "amount": "lots"}, "u1", tenant=await harness._tenant()
     )
     assert resolution.payload == {"order": "o1", "amount": "lots"}  # not checked here
     monkeypatch.undo()

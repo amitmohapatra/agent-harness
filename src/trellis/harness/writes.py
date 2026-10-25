@@ -3,8 +3,15 @@
 A write is queued and the run moves on; a few workers drain the queue. A write that fails is
 tried again — :data:`WRITE_ATTEMPTS` attempts in all, with full-jitter backoff — when the
 failure may pass (the service unavailable, a timeout; not a refusal the same request would get
-again). A write that still fails is logged, counted (``trellis.writes.failed``) and reported to
-the run's event listeners as a ``warning`` event — never raised into the run.
+again). A write that still fails is never raised into the run, and never only a warning:
+
+* counted (``trellis.writes.failed``, and ``trellis.writes.undelivered`` by outcome: kept in the
+  spool or lost);
+* traced: a ``write_failed`` span in the run's trace, its status an error;
+* reported to the run's event listeners as a ``write_failed`` warning event;
+* logged: an error, the first time a kind of write fails in this process (each later one a
+  warning, so a long outage does not flood the log);
+* listed by ``trellis doctor`` while it waits in the spool (its "records failing" check).
 
 A full queue holds the run instead of dropping the write: ``await submit(...)`` waits up to
 :data:`SUBMIT_WAIT_SECONDS` for room, and only then gives the write up.
@@ -41,6 +48,7 @@ from typing import Any, Final
 
 from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
 
+from trellis.harness import telemetry
 from trellis.harness.events import RunEvents
 from trellis.harness.telemetry import metrics
 
@@ -221,19 +229,28 @@ class Writes:
 
     def _give_up(self, item: _Item, reason: str, *, keep: bool = True) -> None:
         """The write will not be delivered by this process: kept in the spool when it can be
-        (``keep``: its failure may pass, so the same write may land later), else lost and
-        reported."""
+        (``keep``: its failure may pass, so the same write may land later), else lost —
+        either way counted, traced, reported to the run and logged (see the module)."""
         if keep and self._kept(item):
             self.spooled += 1
-            metrics.write_undelivered(item.label, "spooled")
-            log.warning("trellis write kept for the next start: %s: %s", item.label, reason)
-            return
-        self.failed += 1
+            outcome, said = SPOOLED, f"{item.label} failed and is kept for the next start"
+        else:
+            self.failed += 1
+            outcome, said = LOST, f"{item.label} failed and is lost"
         metrics.write_failed(item.label)
-        metrics.write_undelivered(item.label, "lost")
-        log.warning("trellis write failed: %s: %s", item.label, reason)
-        if item.events is not None:
-            item.events.warning("write_failed", f"{item.label}: {reason}")
+        metrics.write_undelivered(item.label, outcome)
+        _logged(item.label, f"trellis write: {said}: {reason}")
+        events = item.events
+        if events is not None:
+            events.warning("write_failed", f"{said}: {reason}")
+            run = events.context.agent_run_id
+            telemetry.failure(
+                events.trace_run or run,
+                run,
+                f"write_failed {item.label}",
+                reason,
+                {"trellis.write": item.label, "trellis.write.outcome": outcome},
+            )
 
     def _kept(self, item: _Item) -> bool:
         if self._spool is None or item.record is None:
@@ -291,6 +308,23 @@ class Writes:
                 continue
             replayed += 1
         log.info("replaying %d spooled write(s) from %s", replayed, self._spool)
+
+
+#: What became of a write given up (``trellis.writes.undelivered``'s ``outcome``).
+SPOOLED: Final = "spooled"
+LOST: Final = "lost"
+#: The kinds of writes whose first failure in this process was logged as an error.
+_ERRORS_SAID: set[str] = set()
+
+
+def _logged(label: str, message: str) -> None:
+    """An error the first time ``label`` fails in this process, a warning after (bounded: one
+    entry per kind of write)."""
+    if label in _ERRORS_SAID:
+        log.warning("%s", message)
+        return
+    _ERRORS_SAID.add(label)
+    log.error("%s (said once as an error; later failures of %s are warnings)", message, label)
 
 
 def _passing(exc: BaseException) -> bool:

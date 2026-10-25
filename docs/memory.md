@@ -1,8 +1,7 @@
 # Memory
 
 Memory is on when `MEMORY_URL` is set (or `Harness(memory=MemoryClient(...))`), for every
-agent; `without={"memory"}` — or one part: `memory_push`, `memory_pull`, `records` — turns it
-off for an agent (`h.wrap`) or a run (`agent.run`)
+agent; `without={"memory"}` turns it off for an agent (`h.wrap`) or a run (`agent.run`)
 ([what is on, and how to turn it off](configuration.md#what-is-on-and-how-to-turn-it-off)). Every
 call the harness makes to the memory service is in `trellis/harness/clients/memory.py`, in the
 run's scope (tenant, user, agent, run, thread). With memory on, every run reads (push, pull)
@@ -19,7 +18,7 @@ Before the agent runs, `/v1/context` for the run's question — its token budget
 model's context window when the target says it (a `context_window` or `max_input_tokens`
 attribute on the target or its `model`, or a LangChain model's `profile`), between 2000 and
 8000, else 2000 — answered in
-the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, tools?}`, items cited
+the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, memory_ids?, tools?}`, items cited
 by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
 message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what
 the grounding check verifies the answer against. Where the input has no place for it — a
@@ -27,6 +26,21 @@ function target given text, a graph whose input has no `messages` — and the ru
 reads `trellis.current().context`, the agent answers without it: a warning says so once per
 agent (`memory_context`), naming the fix (read `agent.context`, or give the input its
 messages); the harness puts the context nowhere else.
+
+```python
+import trellis
+
+
+# a function target given text: the runtime it is given, or trellis.current() in code it calls
+async def answer(question: str, agent: trellis.Runtime) -> str:
+    return await my_llm(system=agent.context or "", user=question)
+
+
+# a graph whose state has no messages: a node reads the run's context
+def triage(state: Ticket) -> dict[str, str]:
+    context = trellis.current().context  # None when nothing was pushed
+    return {"answer": classify(state["question"], context)}
+```
 
 * `document_ids` when the run names documents (`agent.run(..., document_ids=[...])`, the ids
   `h.add_document` returned): the context draws its passages from those alone. Kept with the
@@ -76,8 +90,8 @@ the last listing stands, and a run when they were never listed goes without them
 | `profile_edit(block, old?, new)` | edit a pinned profile block |
 | `tool_search(task)` | the next step, plan, prefill and missing arguments among the run's own tools — the harness passes the run's toolbox with the call, and offers the tools it returns (`{tools: [{name, confidence, next?, args?, missing?}], plan?}`) to the model |
 
-`memory_search` and `tool_search` only read (they run unannounced); the others write. For a compiled graph they are built in
-with `h.tools(...)`. Inside a tool or a node, `trellis.current().memory` is the memory SDK's
+`memory_search` and `tool_search` only read (they run unannounced); the others write. A graph of
+your own gets them with `HarnessTools` (or `await h.memory_tools()`). Inside a tool or a node, `trellis.current().memory` is the memory SDK's
 context bound to the run, with all its verbs.
 
 ## What is recorded
@@ -117,8 +131,13 @@ Every write above is queued and the run moves on (`writes.py`); four writers dra
   other process at its first write). The service stores a replayed write that had in fact
   landed once (every write carries its idempotency key or message id). Without the directory,
   or for a write that is not data (the sampled grounding check, the model key, Code Mode
-  calls read back from the gateway), it is lost: counted (`trellis.writes.failed`) and, during a
-  run, a `warning` event.
+  calls read back from the gateway), it is lost.
+* Either way a write given up is never only a warning: it is counted (`trellis.writes.failed`,
+  and `trellis.writes.undelivered` with `outcome` `spooled` or `lost`), a `write_failed <label>`
+  span with an error status in the run's trace, a `write_failed` warning event while the run's
+  stream is open, and an error in the log — the first time each kind of write fails in the
+  process, a warning after that. `trellis doctor`'s "records failing" check fails while any
+  write waits in the spool, counting them by kind.
 
 So: delivered at least once while the process lives or, with a spool directory on a volume that
 outlives the process, after its next start; never silently dropped.
@@ -143,16 +162,19 @@ precedence **human > judge > system**:
   judge and people outrank it, and the service keeps an unverified `confirm` as the run's
   outcome only — it moves no memory's confidence, learned skill or tool statistic. What the
   service learns from comes from the judge's verdict on a sampled run and from people's
-  reviewed verdicts.
+  reviewed verdicts. The record keeps what the run's context showed, in its metadata under
+  `pushed`: the context's `bundle_id` and the ids of the memories in it (`memory_ids`, at
+  most 50).
 * **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
-  (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
+  (a fixed 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim, or a context that held no
   evidence (every claim would be "unsupported" against nothing), is no verdict and no score.
-* **human** — `h.feedback(run_id, verdict, correction=None)`, citing the memories the judge's
-  verdict found the answer rests on (`evidence_refs`: a run the sample verified; none otherwise),
-  whose confidence it moves. The memory service stores a
+* **human** — `h.feedback(run_id, verdict, correction=None)`, citing the memories the answer
+  rests on (`evidence_refs`), whose confidence it moves: the ones the judge's verdict found on a
+  run the sample verified, and on any other run the memories its context showed (the `system`
+  record's `pushed`); none when no context was pushed. The memory service stores a
   person's verdict as a vote that waits for the tenant administrator (`review.state ==
   "pending"`, its ADR 0028): it changes the run's outcome, and the confidence of what the run
   cited, only once approved (`GET /v1/feedback/pending`, `POST /v1/feedback/{id}/approve`

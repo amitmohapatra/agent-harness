@@ -30,6 +30,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from tests.integration.test_a2a_server import URL, asgi, caller, connect
 from tests.integration.test_claude import options
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
@@ -99,7 +100,7 @@ def dumped(events: list[Any]) -> str:
 
 
 async def test_the_event_stream_and_the_answer_carry_values_as_they_are(harness: Harness) -> None:
-    agent = harness.wrap(notifying, id="notifier", tools=[notify])
+    agent = arm(harness.wrap(notifying, id="notifier"), [notify])
     events = [e async for e in agent.stream("go", user="u")]
     data = {e.type: e.data for e in events if e.tool_call_id is not None}
     assert data[RunEventType.TOOL_CALL_ARGS]["args"] == ARGS
@@ -112,11 +113,11 @@ async def test_the_event_stream_and_the_answer_carry_values_as_they_are(harness:
 
 
 async def test_an_on_output_hook_masks_the_answer_and_the_stream_not_the_record() -> None:
-    async with Harness(config=Settings(), hooks=[Mask()]) as harness:
-        agent = harness.wrap(notifying, id="notifier", tools=[notify])
+    async with Harness(config=Settings()) as harness:
+        agent = arm(harness.wrap(notifying, id="notifier", hooks=[Mask()]), [notify])
         events = [e async for e in agent.stream("go", user="u")]
         result = await agent.run("go", user="u")
-        record = await harness.runs.get(result.run_id, tenant=await harness.tenant())
+        record = await harness.runs.get(result.run_id, tenant=await harness._tenant())
     assert not leaked(dumped(events)) and "[key]" in dumped(events)
     assert result.answer == "sent to [email]"
     assert record is not None and record.output == f"sent to {EMAIL}"  # the run's own record
@@ -125,7 +126,7 @@ async def test_an_on_output_hook_masks_the_answer_and_the_stream_not_the_record(
 
 async def test_the_model_reads_the_tool_output_as_it_is(harness: Harness) -> None:
     model = ScriptedChat([("notify", ARGS), "done"])
-    agent = harness.wrap(ReAct(system="You notify.", model=model), id="react", tools=[notify])
+    agent = arm(harness.wrap(ReAct(system_prompt="You notify.", model=model), id="react"), [notify])
     [e async for e in agent.stream("go", user="u")]
     told = model.requests[1]["messages"][-1]
     assert told["role"] == "tool" and SECRET in told["content"] and EMAIL in told["content"]
@@ -142,7 +143,7 @@ async def test_traces_mask_credentials_only(
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
     model = ScriptedChat([("notify", ARGS), "done"])
-    agent = harness.wrap(ReAct(system="You notify.", model=model), id="react", tools=[notify])
+    agent = arm(harness.wrap(ReAct(system_prompt="You notify.", model=model), id="react"), [notify])
     assert (await agent.run("go", user="u")).answer == "done"
     chats = [s for s in exporter.get_finished_spans() if s.name.startswith("chat")]
     assert len(chats) == 2
@@ -166,9 +167,9 @@ def test_a_long_output_is_a_preview_and_nothing_is_built_unheard() -> None:
 
 
 async def chat(hooks: list[Hooks]) -> str:
-    async with Harness(config=Settings(), hooks=hooks) as harness:
+    async with Harness(config=Settings()) as harness:
         app = FastAPI()
-        harness.wrap(notifying, id="chat", tools=[notify]).serve_chat(
+        arm(harness.wrap(notifying, id="chat", hooks=hooks), [notify]).serve_chat(
             app, identity=lambda request: "u1"
         )
         async with asgi(app) as http:
@@ -191,8 +192,8 @@ async def test_an_agui_stream_is_what_the_on_output_hooks_leave() -> None:
 async def test_a_raising_on_output_hook_withholds_what_it_was_given(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async with Harness(config=Settings(), hooks=[Boom()]) as harness:
-        agent = harness.wrap(notifying, id="boom", tools=[notify])
+    async with Harness(config=Settings()) as harness:
+        agent = arm(harness.wrap(notifying, id="boom", hooks=[Boom()]), [notify])
         with caplog.at_level(logging.ERROR, logger="trellis.hooks"):
             events = [e async for e in agent.stream("go", user="u")]
             result = await agent.run("go", user="u")
@@ -226,13 +227,13 @@ async def test_every_framework_shows_its_answer_through_the_hooks(
 ) -> None:
     said = f"write to {EMAIL}"
     target = {
-        "react": lambda: ReAct(system="s", model=ScriptedChat([said])),
+        "react": lambda: ReAct(system_prompt="s", model=ScriptedChat([said])),
         "langgraph": lambda: create_agent(ScriptedChat([said]), tools=[]),
         "openai_agents": lambda: OpenAIAgent(name="o", model=ScriptedModel([said])),
         "claude": lambda: options(tmp_path, [{"text": said}]),
     }[framework]()
-    async with Harness(config=Settings(), hooks=[Mask()]) as harness:
-        agent = harness.wrap(target, id=f"show-{framework}")
+    async with Harness(config=Settings()) as harness:
+        agent = harness.wrap(target, id=f"show-{framework}", hooks=[Mask()])
         result = await agent.run("hi", user="u")
     assert result.answer == "write to [email]"
 
@@ -259,9 +260,9 @@ async def a2a_pushes(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[list[byte
 async def test_a2a_task_updates_and_pushes_carry_values_as_they_are(
     a2a_pushes: list[bytes],
 ) -> None:
-    async with Harness(config=Settings(), hooks=[Mask()]) as harness:
+    async with Harness(config=Settings()) as harness:
         app = FastAPI()
-        harness.wrap(notifying, id="greeter", tools=[notify]).serve_a2a(app, URL)
+        arm(harness.wrap(notifying, id="greeter", hooks=[Mask()]), [notify]).serve_a2a(app, URL)
         async with asgi(app) as http:
             client = await connect(http)
             hook = TaskPushNotificationConfig(url="https://hooks.example.com/a2a", token="tok")
@@ -279,9 +280,7 @@ async def test_memory_gets_tool_records_and_the_transcript_as_they_are(
     memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spooled: list[dict[str, Any] | None] = []
-    async with Harness(
-        config=Settings(), memory=memory_service.client(), hooks=[Mask()]
-    ) as memory_harness:
+    async with Harness(config=Settings(), memory=memory_service.client()) as memory_harness:
         submit = memory_harness.writes.submit
 
         async def keep(label: str, work: Any, **kw: Any) -> None:
@@ -290,7 +289,7 @@ async def test_memory_gets_tool_records_and_the_transcript_as_they_are(
             await submit(label, work, **kw)
 
         monkeypatch.setattr(memory_harness.writes, "submit", keep)
-        agent = memory_harness.wrap(notifying, id="notifier", tools=[notify])
+        agent = arm(memory_harness.wrap(notifying, id="notifier", hooks=[Mask()]), [notify])
         assert (await agent.run("go", user="u")).answer == "sent to [email]"
         await memory_harness.writes.drain()
     [call] = [c for c in memory_service.named("record_tool") if c.body["tool"] == "notify"]

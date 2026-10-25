@@ -156,7 +156,7 @@ through the harness's background writes, so they are kept on disk across an outa
   (`remember="run"`) is not asked about again in it.
 
 A call is looked up by its tool's name when it is made. So a rule set after a graph was compiled
-with `h.tools(...)` still decides its calls, within the 30 s the rules are kept. This also holds
+still decides its calls, within the 30 s the rules are kept. This also holds
 for a tool an OpenAI Agents handoff or a Claude server carries, and for the memory service's
 own agent tools (their own risk decides unless the catalog names them). The span of each call carries
 `trellis.governance.action` ([observability.md](observability.md)).
@@ -172,7 +172,13 @@ An approver answers with `agent.resume(interrupt_id, decision, ...)`
 | cancel | the run ends `CANCELLED` |
 
 Each decision is also `TOOL_CALL` feedback, from which the memory service learns approval
-suggestions.
+suggestions. It learns them per agent, from that agent's decisions, and lists and accepts them
+in the agent's scope only. Governance reads them for each agent it governs calls of, at every
+refresh of the catalog (at once for an agent it had not seen), and accepts each one
+automatically, except for an `irreversible` tool, where a person accepts it. An accepted
+suggestion is the tool's `approve_when` in the tenant's catalog. `trellis doctor --agent <id>`
+lists the rules accepted for an agent; without `--agent` it lists those of the agents the key
+may act as.
 
 **Gate a tool in one place.** A framework's own approval gate pauses the run as the same
 approval and takes the same decisions
@@ -181,12 +187,23 @@ Such gates are LangChain's `HumanInTheLoopMiddleware`, Deep Agents' `interrupt_o
 Agents' `needs_approval`. A tool both gate is asked once: governance counts the framework's
 approval ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
 
-**A framework's own tools** — those not built with `h.tools` — are governed too:
-* an OpenAI Agents agent's `FunctionTool`s, by `h.wrap` itself, on a copy of the agent (yours is
-  not changed);
-* a `create_agent` or Deep Agents graph's tools, through `h.governance_middleware()` added when
-  the graph is built (`create_agent(..., middleware=[h.governance_middleware()])`; `ReAct` has
-  it).
+**A framework's own tools** — those not built with `h.tools` — are governed too, with nothing
+added to the agent:
+* every LangGraph tool node's calls inside a run — a `create_agent` or Deep Agents graph's, a
+  Deep Agent's `task` sub-agents' (their own graphs), a hand-built graph's `ToolNode` — through
+  the tool node's execution of a call, after the graph's own wrappers (installed once per
+  process; outside a harness run nothing changes; `h.governance_middleware()` and `ReAct`'s own
+  govern the same call once);
+* an OpenAI Agents agent's `FunctionTool`s and its MCP servers' calls, on a copy of the agent and
+  of every agent it hands off to or runs as a tool (`Agent.as_tool`: the tool runs the governed
+  copy of its agent) — yours are not changed. Its hosted tools (file search, web search, code
+  interpreter, a hosted MCP server's tools) run at the provider inside the model's step: they
+  are recorded and in the catalog, but no approval can stand before them;
+* Claude Code's built-ins and its MCP servers' tools, by its `PreToolUse` hook (below), and
+  recorded by its `PostToolUse` hooks.
+
+Each is of the run's tool set ([tools.md](tools.md#the-runs-tool-set)) and published to the
+tenant's catalog, where an administrator's risk and `approve_when` govern it.
 
 Each call is then decided as a harness tool's is — the catalog's risk, else the tool's declared
 one (`tool.metadata["side_effects"]`, or MCP-style `annotations`), else `write` (announced) —

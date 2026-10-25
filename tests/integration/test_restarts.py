@@ -20,6 +20,7 @@ from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool as lc_tool
 
+from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Harness, ReAct, Runtime, Settings, tool
@@ -106,7 +107,10 @@ async def crash_then_finish(
 ) -> Any:
     """The run started on the first worker, which dies mid-run; the second finishes it."""
     first, second = workers
-    dying, taking_over = (h.wrap(build(h), id="restart", **wrap) for h in (first, second))
+    tools = wrap.pop("tools", [])
+    dying, taking_over = (
+        arm(h.wrap(build(h), id="restart", **wrap), tools) for h in (first, second)
+    )
     store = first.runs
     assert isinstance(store, LocalRuns)
     handle = await dying.start(text, user="u", thread="t")
@@ -117,10 +121,10 @@ async def crash_then_finish(
         await dying.execute(
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
-    held, _ = store._leases[handle.run_id]
-    store._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+    held, _ = store._leases[handle.id]
+    store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
     assert await second.worker([taking_over]).run_once()
-    result = await handle.result(timeout=5)
+    result = await handle.result(wait=5)
     assert (await handle.status()).attempt == 2
     return taking_over, result
 
@@ -196,7 +200,7 @@ async def test_a_framework_approval_given_before_a_crash_is_not_asked_again(
     built = {
         h: create_agent(
             model,
-            tools=await h.tools(wire, boom, framework="langgraph"),
+            tools=await native_tools(h, wire, boom, framework="langgraph"),
             middleware=[HumanInTheLoopMiddleware(interrupt_on={"wire": True})],
             checkpointer=RunCheckpointer(),
         )
@@ -205,7 +209,7 @@ async def test_a_framework_approval_given_before_a_crash_is_not_asked_again(
     dying, taking_over = (h.wrap(built[h], id="restart") for h in workers)
     handle = await dying.start("pay ada", user="u", thread="t")
     assert await first.worker([dying]).run_once()
-    paused = await handle.result(timeout=5)
+    paused = await handle.result(wait=5)
     assert paused.interrupt is not None
     await dying.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     worker = first.worker([dying])
@@ -215,10 +219,10 @@ async def test_a_framework_approval_given_before_a_crash_is_not_asked_again(
         await dying.execute(
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
-    held, _ = store._leases[handle.run_id]
-    store._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+    held, _ = store._leases[handle.id]
+    store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
     assert await second.worker([taking_over]).run_once()
-    result = await handle.result(timeout=5)
+    result = await handle.result(wait=5)
     assert result.status is RunStatus.SUCCESS and result.answer == "wired", result.error
     assert done == ["wire ada"]  # approved once, wired once
 

@@ -27,6 +27,7 @@ from a2a.utils.errors import A2AError
 from fastapi import FastAPI
 from google.protobuf.json_format import MessageToDict
 
+from tests.support.arm import arm
 from trellis import Harness, Settings
 from trellis.contracts import RunStatus
 from trellis.harness.a2a.identity import EXTENSION_URI
@@ -364,7 +365,7 @@ async def test_an_answer_carries_a_comment_and_an_approval_remembered_for_the_ru
 
     harness = Harness(config=Settings())
     app = FastAPI()
-    harness.wrap(deployer, id="deployer", tools=[deploy]).serve_a2a(app, URL)
+    arm(harness.wrap(deployer, id="deployer"), [deploy]).serve_a2a(app, URL)
     async with asgi(app) as http:
         client = await connect(http)
         paused = await send(client, "deploy")

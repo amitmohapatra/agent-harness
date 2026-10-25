@@ -4,8 +4,9 @@ another wrapped agent that calls it as a tool, ``a2a(url)``.
 * ``agent.serve_chat(app, identity=...)`` — AG-UI over SSE: a run's events as they happen, a
   question as an interrupt the UI answers, a reconnect that replays from ``Last-Event-ID``;
 * ``agent.serve_a2a(app, url)`` — the agent card and A2A JSON-RPC at ``url``;
-* ``a2a(url)`` in another agent's ``tools=[...]`` — the remote agent as one tool: its question
-  becomes the caller's own pause, answered with ``agent.resume``, and goes back to it.
+* ``a2a(url)`` — the remote agent as one tool of another (``ReAct(subagents=[a2a(url)])``, or
+  ``agent.tools.call(a2a(url), ...)`` from a function): its question becomes the caller's own
+  pause, answered with ``agent.resume``, and goes back to it.
 
 ``identity=`` is how your deployment says who is calling (here: a header your auth proxy sets);
 without it every chat caller is ``anonymous``.
@@ -46,11 +47,6 @@ agent = h.wrap(concierge, id="concierge")
 agent.serve_chat(app, path="/agui", identity=user)
 
 
-async def assistant(input: str, runtime: Runtime) -> Any:
-    """Another agent: the concierge is one of its tools."""
-    return f"Done: {await runtime.tools.call('concierge', message=input)}"
-
-
 async def main() -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -76,10 +72,14 @@ async def main() -> None:
                 events = [line async for line in sse.aiter_lines() if line.startswith("data:")]
             print("AG-UI events:", len(events), "last:", events[-1][:100])
 
+        remote_concierge = a2a(f"{base}/a2a", name="concierge")
+
+        async def assistant(input: str, runtime: Runtime) -> Any:
+            """Another agent: the concierge is one of its tools."""
+            return f"Done: {await runtime.tools.call(remote_concierge, message=input)}"
+
         async with Harness() as caller:
-            helper = caller.wrap(
-                assistant, id="assistant", tools=[a2a(f"{base}/a2a", name="concierge")]
-            )
+            helper = caller.wrap(assistant, id="assistant")
             result = await helper.run("book a table", user="ada")
             while result.interrupt is not None:  # the concierge's question, asked here
                 print("the remote agent asks:", result.interrupt.question)

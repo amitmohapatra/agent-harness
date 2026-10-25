@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from agents import Agent, SQLiteSession, Usage, function_tool
 
+from tests.support.arm import with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
@@ -160,31 +161,42 @@ async def test_an_agent_tools_spending_counts_toward_the_runs_budget(harness: Ha
     assert "50 spent" in result.error.message
 
 
-async def test_an_agent_tools_own_ungoverned_tools_are_said_once(
-    harness: Harness, caplog: pytest.LogCaptureFixture
+async def test_an_agent_tools_own_tools_are_governed_as_the_runs(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """The agent an agent tool runs (``Agent.as_tool``) runs as a governed copy of its own: its
+    tools' calls are the run's — the catalog's rule asks a person about ``peek`` — and nothing
+    is said about tools the harness cannot reach."""
     _said_inside.cache_clear()
+    peeked: list[str] = []
 
     @function_tool
     def peek(order: str) -> str:
+        peeked.append(order)
         return "fine"
 
-    checker = Agent(name="checker", model=ScriptedModel(["ok"] * 2), tools=[peek])
-    model = ScriptedModel(["done", "done"])
+    checker = Agent(
+        name="checker",
+        model=ScriptedModel([("peek", {"order": "o1"}), "checked"], ids="checker_"),
+        tools=[peek],
+    )
+    model = ScriptedModel([("check", {"input": "o1"}), "done"])
     target = Agent(name="desk", model=model, tools=[checker.as_tool("check", "Check.")])
-    agent = harness.wrap(target, id="desk")
+    governance = Governance(FakeCatalog({"peek": Rule(risk="irreversible")}))
     with caplog.at_level(logging.WARNING, logger="trellis.harness"):
-        for _ in range(2):
-            assert (await agent.run("hi", user="u")).status is RunStatus.SUCCESS
-    [warning] = [r for r in caplog.records if "agent called as a tool" in r.getMessage()]
-    assert warning.__dict__["tools"] == "peek" and warning.__dict__["agent_tool"] == "check"
+        async with with_governance(Harness(config=Settings()), governance) as h:
+            paused = await h.wrap(target, id="desk").run("check o1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "peek"
+    assert peeked == []  # not run before a person approves it
+    assert not [r for r in caplog.records if "agent called as a tool" in r.getMessage()]
 
 
 async def test_an_agent_tools_call_asks_as_the_catalog_rules() -> None:
     checker = Agent(name="checker", model=ScriptedModel(["fine"], ids="checker_"))
     model = ScriptedModel([("check", {"input": "o1"}), "ok"])
     governance = Governance(FakeCatalog({"check": Rule(risk="irreversible")}))
-    async with Harness(config=Settings(), governance=governance) as h:
+    async with with_governance(Harness(config=Settings()), governance) as h:
         target = Agent(name="desk", model=model, tools=[checker.as_tool("check", "Check.")])
         paused = await h.wrap(target, id="desk").run("check o1", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None

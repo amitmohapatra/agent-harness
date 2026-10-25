@@ -24,10 +24,9 @@ memory off, the tools' own declared risk decides. A hook is for what such a rule
 refusal (`Deny`), a rewrite (`Rewrite`), a decision that needs outside data (an account frozen
 in your database), who reviews and on which screen (`Ask(assignee=, component=)`). Credentials
 in traces are masked for you ([observability.md](observability.md#redaction)) and time limits
-(`timeout=`) need no hook either; personal data is yours to define and mask, in these hooks.
+(`run_timeout=`, `call_timeout=`) need no hook either; personal data is yours to define and mask, in these hooks.
 
-**Where.** `Harness(hooks=[...])` for every agent of the harness; `h.wrap(..., hooks=[...])`
-for one agent, after the harness's. Way 2: `governed(fn, gov, ..., hooks=[...])` for your own
+**Where.** `h.wrap(..., hooks=[...])` for an agent's every run, in the order given. Way 2: `governed(fn, gov, ..., hooks=[...])` for your own
 tools, and each framework's own mechanism (below) outside a harness run.
 
 | | Tool hooks | Run hooks | Model hooks |
@@ -69,15 +68,15 @@ class Cards(Hooks):
         return dataclasses.replace(call, messages=[mask(m) for m in call.messages])
 
 
-h = Harness(hooks=[Cards()])
-agent = h.wrap(target, id="support", hooks=[Refunds()])
+h = Harness()
+agent = h.wrap(target, id="support", hooks=[Cards(), Refunds()])
 ```
 
 `call.messages` is in the framework's own form: LangChain messages for a graph, a `ReAct`
 included (`call.framework == "langgraph"`, the system message in `call.system`), Responses input items for the OpenAI Agents SDK (`"openai_agents"`,
 the instructions in `call.system`).
 
-**Automatic.** Hooks run in order: the harness's, then the agent's; a `Rewrite` is the next
+**Automatic.** Hooks run in the order given; a `Rewrite` is the next
 hook's call, and the first `Deny` or `Ask` decides (the hooks after it are not asked). A
 `before_tool` decision is journaled with the call: a resumed run — after a pause or a crash —
 reads it instead of asking the hooks again, so an `Ask` approved once is not asked again, and a
@@ -121,10 +120,10 @@ class MaskCards(Hooks):
         return item.replace(event.model_copy(update={"data": data}))
 
 
-h = Harness(hooks=[MaskCards()])
+agent = h.wrap(target, id="support", hooks=[MaskCards()])
 ```
 
-It runs in order (the harness's hooks, then the agent's), synchronously, on every streamed
+It runs in the order the hooks were given, synchronously, on every streamed
 delta: keep it fast, no I/O. With no hook overriding it nothing sent is wrapped. It never
 touches memory, the journal, A2A, the run's record, traces, or what the model and the tools
 see — `after_tool`/`before_model` are for those, as `Cards` above.

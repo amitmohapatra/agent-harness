@@ -36,13 +36,15 @@
 * store: a graph compiled without a store of its own is run, while memory is on, with the
   memory service as its long-term store (``bridges.store.MemoryStore``: ``runtime.store``,
   ``get_store()``, Deep Agents' ``StoreBackend``); a graph's own store is kept (said once);
-* helpers: a Deep Agent's ``task`` sub-agent is a child run of the run (``bridges.helpers``,
-  through the run's LangChain callbacks: ``hooks.langgraph``). Its tool calls are governed as
-  the run's (``h.tools``), and its model calls count toward the run's budget (``accounting``),
-  as are those of the graph's subgraphs and ``Send`` branches, which run inside the run;
+* helpers: a Deep Agent's ``task`` sub-agent is a full child run of the run
+  (``bridges.helpers``, from the governed ``task`` call: ``middleware.governed_call``): given
+  the memory context for its task, its tool calls governed as the run's and recorded under its
+  run, its outcome recorded; its model calls count toward the run's budget (``accounting``),
+  as do those of the graph's subgraphs and ``Send`` branches, which run inside the run;
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
-  ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; the harness's
-  ``configurable.thread_id`` wins over one given. The graph's own run arguments
+  ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; a
+  ``configurable.thread_id`` among them is refused (the thread is ``run(thread=)``, one owner).
+  The graph's own run arguments
   (:data:`RUN_ARGUMENTS`: ``context`` for a ``context_schema``, ``durability``) go to the call
   beside it.
 """
@@ -56,7 +58,7 @@ import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar, Final
 
-from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution
+from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
     Extracted,
     Invocation,
@@ -64,6 +66,8 @@ from trellis.harness.adapters.base import (
     NativePause,
     Output,
     ToolFormat,
+    helper,
+    unique,
 )
 from trellis.harness.asking import answer_of
 from trellis.harness.bounded import SAID_ONCE
@@ -87,6 +91,8 @@ CONTEXT_MESSAGE_ID: Final = "trellis-memory-context"
 MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
 #: The graph's own run arguments a run's framework options may carry, beside its config.
 RUN_ARGUMENTS: Final = ("context", "durability")
+#: Deep Agents' tool that runs a sub-agent.
+TASK_TOOL: Final = "task"
 
 
 class LangGraphAdapter:
@@ -98,6 +104,11 @@ class LangGraphAdapter:
         # every model call of the graph accounted to the run's budget, ModelHooks or not
         from trellis.harness import accounting  # noqa: F401
 
+        # and every tool node's calls governed, the harness's middleware or not
+        from trellis.harness.middleware import govern_tool_nodes
+
+        govern_tool_nodes()
+
         #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
         #: converts them itself, so nothing is converted for it here
         per_call = HARNESS_TOOLS in (getattr(target, "channels", None) or {})
@@ -108,6 +119,8 @@ class LangGraphAdapter:
         self.narrowed = None if per_call else _narrowed(target)
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
+        #: the graph's own tools (:meth:`native`), once read
+        self._native: list[ToolSpec] | None = None
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The graph's checkpointer, unless it checkpoints into its run."""
@@ -136,7 +149,7 @@ class LangGraphAdapter:
         try:
             return await self._graph(target, run.runtime).ainvoke(
                 _continued(target, native_input, run),
-                self._config(target, run, helpers),
+                self._config(target, run),
                 version="v2",
                 **_run_arguments(run.runtime),
             )
@@ -157,7 +170,7 @@ class LangGraphAdapter:
         try:
             async for part in self._graph(target, run.runtime).astream(
                 _continued(target, native_input, run),
-                self._config(target, run, helpers),
+                self._config(target, run),
                 stream_mode=["messages", "values"],
                 version="v2",
                 **_run_arguments(run.runtime),
@@ -241,18 +254,37 @@ class LangGraphAdapter:
                 f"framework_options for a graph are RunnableConfig keys and its run arguments: "
                 f"{', '.join(map(repr, unknown))} is none of {', '.join(known)}"
             )
-        if not isinstance(options.get("configurable", {}), Mapping):
+        configurable = options.get("configurable", {})
+        if not isinstance(configurable, Mapping):
             raise ConfigurationError("framework_options' configurable is a dict")
+        if "thread_id" in configurable:
+            raise ConfigurationError(
+                "framework_options' configurable.thread_id: the harness runs the graph on the "
+                "run's thread (or the run's own, for a graph that checkpoints into its run): "
+                "pass agent.run(thread=...) instead"
+            )
 
-    def native_tools(self, target: Any) -> list[str]:
+    async def native(self, target: Any) -> list[ToolSpec]:
         """A graph that binds its tools when it is built: what its tool nodes run
-        (:func:`bound_tools`), its own tools and the ones built with ``h.tools`` alike (a tool
-        a node binds to its model in its own code cannot be read). A graph that takes the
-        run's tools per model call (``ReAct``) has the run's toolbox as its tools: its nodes
-        hold only what its middleware offers on its own (a long task's files)."""
+        (:func:`graph_tools`: a Deep Agent's ``task`` sub-agents' tools too), as specs — the
+        ones built with ``h.tools`` are the run's harness tools, and a tool a node binds to its
+        model in its own code cannot be read; the graph's state tools (its plan, its virtual
+        files) are not tools of the run's set. A graph that takes the run's tools per model call
+        (``ReAct``) has the run's toolbox as its tools: its nodes hold only what its middleware
+        offers on its own. Read once per graph."""
         if not self.fixed_tools:
             return []
-        return [t.name for t in bound_tools(target) if isinstance(getattr(t, "name", None), str)]
+        if self._native is None:
+            from trellis.harness.middleware import STATE_TOOLS, spec_of
+            from trellis.harness.tools.convert.langchain import made
+
+            found = (
+                helper(spec_of(t)) if t.name == TASK_TOOL else spec_of(t)
+                for t in graph_tools(target)
+                if t.name not in STATE_TOOLS and not made(t)
+            )
+            self._native = unique(found)
+        return self._native
 
     def _graph(self, target: Any, runtime: Runtime) -> Any:
         """The graph run for ``target``: its narrowing copy, when it has one — given the
@@ -262,12 +294,9 @@ class LangGraphAdapter:
         return graph if store is None else graph.copy({"store": store})
 
     @staticmethod
-    def _config(target: Any, run: Invocation, helpers: Helpers) -> dict[str, Any]:
-        """The run's config: its framework options (less its run arguments), the harness's
-        thread id over theirs, and the run's helper callbacks (``hooks.langgraph``) beside
-        theirs."""
-        from trellis.harness.hooks.langgraph import HelperCallbacks
-
+    def _config(target: Any, run: Invocation) -> dict[str, Any]:
+        """The run's config: its framework options (less its run arguments) and the harness's
+        thread id (theirs names none: ``check_options``)."""
         runtime = run.runtime
         if _checkpointed(target):
             from langgraph.types import interrupt
@@ -277,21 +306,8 @@ class LangGraphAdapter:
         thread = thread_of(target, runtime)
         return {
             **options,
-            "callbacks": _with_handler(options.get("callbacks"), HelperCallbacks(helpers)),
             "configurable": {**options.get("configurable", {}), "thread_id": thread},
         }
-
-
-def _with_handler(given: Any, handler: Any) -> Any:
-    """The run's callbacks: ``handler`` beside the ones the run was given (a list of handlers,
-    or a callback manager — copied, the given one is not changed)."""
-    if given is None:
-        return [handler]
-    if isinstance(given, list):
-        return [*given, handler]
-    manager = given.copy()
-    manager.add_handler(handler, inherit=True)
-    return manager
 
 
 def _run_arguments(runtime: Runtime) -> dict[str, Any]:
@@ -440,6 +456,51 @@ def bound_tools(target: Any) -> list[Any]:
     for node in getattr(target, "nodes", {}).values():
         found.extend(getattr(getattr(node, "bound", None), "tools_by_name", {}).values())
     return found
+
+
+#: How deep :func:`graph_tools` looks for a ``task`` tool's sub-agents: a sub-agent's own
+#: sub-agents, and theirs.
+SUBAGENT_DEPTH: Final = 3
+
+
+def graph_tools(target: Any, depth: int = SUBAGENT_DEPTH) -> list[Any]:
+    """The tools a compiled graph's tool nodes run, and — a Deep Agent's ``task`` tool — the
+    tools of the sub-agent graphs it runs (:func:`subagent_graphs`), down to ``depth``."""
+    found = [t for t in bound_tools(target) if isinstance(getattr(t, "name", None), str)]
+    if depth <= 0:
+        return found
+    for tool in list(found):
+        if tool.name != TASK_TOOL:
+            continue
+        for graph in subagent_graphs(tool):
+            found.extend(graph_tools(graph, depth - 1))
+    return found
+
+
+def subagent_graphs(task: Any) -> list[Any]:
+    """The sub-agent graphs a Deep Agents ``task`` tool runs, as its code holds them (the
+    graphs its sub-agents were compiled to, by name); ``[]`` when they cannot be read (a
+    release laid out otherwise: its sub-agents' tools are then left out of the run's set)."""
+    from langgraph.pregel import Pregel
+
+    seen: set[int] = set()
+    graphs: dict[int, Any] = {}
+    pending = [getattr(task, "coroutine", None), getattr(task, "func", None)]
+    while pending:
+        fn = pending.pop()
+        if fn is None or id(fn) in seen or not hasattr(fn, "__closure__"):
+            continue
+        seen.add(id(fn))
+        for cell in fn.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:  # an empty cell
+                continue
+            if isinstance(value, dict):
+                graphs.update((id(v), v) for v in value.values() if isinstance(v, Pregel))
+            elif callable(value) and hasattr(value, "__closure__"):
+                pending.append(value)
+    return list(graphs.values())
 
 
 def _checkpointed(target: Any) -> bool:

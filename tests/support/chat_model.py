@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -26,6 +27,8 @@ class ScriptedChatModel(BaseChatModel):
     requests: list[dict[str, Any]] = Field(default_factory=list)
     #: the input and output tokens every reply reports (none by default)
     spends: tuple[int, int] | None = None
+    #: how long every call takes before it answers (a stalled provider: longer than its bound)
+    stall: float = 0.0
 
     @property
     def _llm_type(self) -> str:
@@ -34,6 +37,17 @@ class ScriptedChatModel(BaseChatModel):
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Runnable[Any, Any]:  # type: ignore[override]
         names = [convert_to_openai_tool(t)["function"]["name"] for t in tools]
         return self.bind(tools=names, **kwargs)
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        if self.stall:
+            await asyncio.sleep(self.stall)
+        return self._generate(messages, stop, **kwargs)
 
     def _generate(
         self,

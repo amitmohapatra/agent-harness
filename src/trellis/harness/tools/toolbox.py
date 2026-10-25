@@ -1,12 +1,12 @@
-"""An agent's toolbox: its own tools (``tools=[...]`` / ``h.tools``: functions, sub-agents,
-``a2a``, ``openapi``, the MCP servers it reaches itself — ``tools.mcp``) and every MCP tool its
-Bifrost virtual key allows (or, once it names any ``mcp(...)``, the tools of the Virtual MCPs
-it names), published to the tool catalog, with Code Mode where it is safe.
+"""An agent's toolbox: the tools its builder declares (``ReAct(tools=, subagents=)``:
+functions, sub-agents, ``a2a``, ``openapi``, the MCP servers it reaches itself — ``tools.mcp``)
+and every MCP tool its Bifrost virtual key allows, published to the tool catalog, with Code
+Mode where it is safe.
 
-1. **list** — the local sources, and the gateway's MCP listing for the virtual key, or each
-   named Virtual MCP's; an MCP server reached both directly and through the gateway is an
-   error (one path per server) (kept :data:`TOOLS_TTL_SECONDS`; while a listing fails the last one
-   stands, listed again after :data:`TOOLS_RETRY_SECONDS`); an MCP tool's side effects come
+1. **list** — the local sources, and the gateway's MCP listing for the virtual key; an MCP
+   server reached both directly and through the gateway is an error (one path per server)
+   (kept :data:`TOOLS_TTL_SECONDS`; while a listing fails the last one stands, listed again
+   after :data:`TOOLS_RETRY_SECONDS`); an MCP tool's side effects come
    from its server's annotations (:func:`side_effects_of`, idempotent when it says so), a local
    tool's from its declaration; a tool the gateway would run itself (its client's
    ``tools_to_auto_execute``: a call of it never reaches the harness) is left out, with a
@@ -20,8 +20,7 @@ it names), published to the tool catalog, with Code Mode where it is safe.
    the catalog's risk over the tools' own, and no approval rule), when there are at least
    :data:`CODE_MODE_MIN_SERVERS` of them or :data:`CODE_MODE_MIN_TOOLS` tools between them,
    are offered as Bifrost's Code Mode meta-tools (one script instead of many calls); every
-   other tool stays a normal tool, so no script ever reaches a tool that writes. Not through
-   Virtual MCPs: a script reaches every tool of a server, a Virtual MCP only some.
+   other tool stays a normal tool, so no script ever reaches a tool that writes.
 
 Whether a call runs, is announced or asks is not the toolbox's: governance decides it at each
 call (``trellis.harness.governance``, asked by the bridge).
@@ -63,13 +62,10 @@ TOOLS_RETRY_SECONDS: Final = 30.0
 
 @dataclass(frozen=True, slots=True)
 class Listing:
-    """What the toolbox holds: the local tools and the MCP definitions — with the Virtual MCP
-    each was listed through, when the agent names Virtual MCPs (``None``: the key's whole
-    reach)."""
+    """What the toolbox holds: the local tools and the MCP definitions the key allows."""
 
     local: list[Tool]
     defs: list[ToolDef]
-    slugs: dict[str, str] | None = None
     #: the annotations of the tools of the MCP servers reached directly, by tool name
     hints: dict[str, dict[str, Any]] | None = None
 
@@ -78,11 +74,8 @@ class Listing:
         return [t.name for t in self.local] + [d.name for d in self.defs]
 
 
-async def listed(
-    sources: Sequence[Source], *, gateway: Gateway | None, mcp: Sequence[str] | None = None
-) -> Listing:
-    """The tools' definitions: the local sources and the MCP tools the virtual key allows (or
-    the named Virtual MCPs hold: a tool in two of them is listed once, through the first),
+async def listed(sources: Sequence[Source], *, gateway: Gateway | None) -> Listing:
+    """The tools' definitions: the local sources and the MCP tools the virtual key allows,
     less those the gateway would run itself."""
     local: list[Tool] = []
     hints: dict[str, dict[str, Any]] = {}
@@ -93,10 +86,10 @@ async def listed(
             hints.update(source.annotations)
             servers[source.server or ""] += 1
     defs: list[ToolDef] = []
-    slugs: dict[str, str] | None = None
     if gateway is not None:
-        defs, slugs = await _mcp_listed(gateway, mcp)
-    listing = Listing(local, defs, slugs, hints)
+        defs = await gateway.tools()
+        defs = await _not_auto_executed(gateway, defs) if defs else defs
+    listing = Listing(local, defs, hints)
     both = sorted({d.client for d in defs} & set(servers))
     if both:
         raise ConfigurationError(
@@ -112,21 +105,6 @@ async def listed(
     if twice:
         raise ConfigurationError(f"two tools are named {', '.join(twice)}")
     return listing
-
-
-async def _mcp_listed(
-    gateway: Gateway, mcp: Sequence[str] | None
-) -> tuple[list[ToolDef], dict[str, str] | None]:
-    if mcp is None:
-        defs, slugs = await gateway.tools(), None
-    else:
-        defs, slugs = [], {}
-        for slug in mcp:
-            for d in await gateway.tools(slug):
-                if d.name not in slugs:
-                    slugs[d.name] = slug
-                    defs.append(d)
-    return (await _not_auto_executed(gateway, defs) if defs else defs), slugs
 
 
 async def _not_auto_executed(gateway: Gateway, defs: list[ToolDef]) -> list[ToolDef]:
@@ -157,7 +135,7 @@ async def _not_auto_executed(gateway: Gateway, defs: list[ToolDef]) -> list[Tool
 
 
 class Toolbox:
-    """One agent's toolbox in one tenant, kept fresh: the definitions every
+    """One agent's toolbox (``agent_id``'s) in one tenant, kept fresh: the definitions every
     :data:`TOOLS_TTL_SECONDS` (published through ``governance`` when they change; the last
     ones kept while listing fails), the Code Mode choice as governance's rules stand. One
     refresh at a time: concurrent runs that find it stale share one listing."""
@@ -168,14 +146,16 @@ class Toolbox:
         *,
         gateway: Gateway | None,
         governance: Governance,
-        mcp: Sequence[str] | None = None,
+        agent_id: str | None = None,
     ) -> None:
         self._sources = list(sources)
+        #: whose toolbox it is: governance reads the rules learned for that agent
+        self._agent_id = agent_id
         self._gateway = gateway
         self._governance = governance
         self._lock = asyncio.Lock()
         self._listings = Fresh(
-            functools.partial(listed, self._sources, gateway=gateway, mcp=mcp),
+            functools.partial(listed, self._sources, gateway=gateway),
             what="the tools (the local sources and the gateway's MCP listing)",
             ttl=TOOLS_TTL_SECONDS,
             retry=TOOLS_RETRY_SECONDS,
@@ -197,7 +177,7 @@ class Toolbox:
                     _linted(listing)
                 self._listing, self._tools = listing, {}
                 await _publish(self._governance, listing)
-            rules = await self._governance.rules(listing.names)
+            rules = await self._governance.rules(listing.names, agent_id=self._agent_id)
             if rules != self._rules:
                 self._tools, self._rules = {}, rules
             if code_mode not in self._tools:
@@ -216,7 +196,6 @@ class Toolbox:
 def _mcp(
     gateway: Gateway, listing: Listing, rules: dict[str, Rule | None], *, code_mode: bool
 ) -> list[Tool]:
-    slugs = listing.slugs
     tools = [
         Tool(
             _spec(
@@ -224,17 +203,12 @@ def _mcp(
                 side_effects=side_effects_of(d.annotations),
                 idempotent=bool(d.annotations and d.annotations.idempotent_hint),
             ),
-            functools.partial(
-                gateway.execute,
-                d.name,
-                clients=(d.client,),
-                slug=None if slugs is None else slugs[d.name],
-            ),
+            functools.partial(gateway.execute, d.name, clients=(d.client,)),
             feature="mcp",
         )
         for d in listing.defs
     ]
-    if slugs is not None or not code_mode:
+    if not code_mode:
         return tools
     scriptable = _scriptable(listing.defs, {t.name: t for t in tools}, rules)
     if not scriptable:

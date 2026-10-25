@@ -1,31 +1,31 @@
 # The Bifrost gateway
 
 The harness reaches models and MCP tools through Bifrost (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`):
-the tools a virtual key allows are the agent's ([tools.md](tools.md)), and `ReAct` and the LLM
-judge call models by name. This page is the rest of what the harness uses of the gateway —
-stored prompts, skills, Virtual MCPs, who a tool call is for — and what it makes sure the
-gateway never does for a run. Nothing here is configured beyond the two variables: every
-feature is off until an agent names it (`prompt=`, `skills=`, `mcp("name")`).
+the tools a virtual key allows are the agent's ([tools.md](tools.md)), and every model name is
+routed through it ([configuration.md](configuration.md#models)). This page is the rest of what
+the harness uses of the gateway — stored prompts, who a tool call is for — and what it makes
+sure the gateway never does for a run. Nothing here is configured beyond the two variables.
 
 | You want | Use | Section |
 |---|---|---|
-| a system prompt kept, versioned and changed in the gateway, not in code | `ReAct(..., prompt="triage")`, `llm_judge(..., prompt=)`, `h.model_headers(prompt=)` | [Prompts](#prompts) |
-| instructions the model reads only when a task needs them | `h.wrap(..., skills=["sql-review"])`, `skills(...)` | [Skills](#skills) |
-| an agent limited to some tools of some MCP servers | `h.wrap(..., tools=[mcp("finance-tools")])` | [Virtual MCPs](#virtual-mcps) |
+| a system prompt kept, versioned and changed in the gateway, not in code | `ReAct(system_prompt=stored("triage"))`, `await h.prompt("triage")` | [Prompts](#prompts) |
+| an agent limited to some tools of some MCP servers | the virtual key's MCP allow-list, in Bifrost | [Who a call is for](#who-a-call-is-for) |
 | an MCP server acting for the person a run is for | nothing: every call says who | [Who a call is for](#who-a-call-is-for) |
 | your framework's own MCP client on the gateway | its client at `/mcp` with the key — ungoverned | [Frameworks' own MCP clients](#frameworks-own-mcp-clients) |
 
 ## What the gateway never does for a run
 
-**Automatic.** Every model call the harness makes (a `ReAct` built with a model name, the
-judge) sends the gateway's deny-all MCP scope (`x-bf-mcp-include-clients` and
-`x-bf-mcp-include-tools`, empty): the gateway adds none of the key's MCP tools to the request
-and runs none itself (Agent Mode). A framework's own model client pointed at the gateway gets
-the same headers from `await h.model_headers()`:
+**Automatic.** Every model call the harness routes through the gateway (a model name, the
+judge; an OpenAI Agents run, the Claude CLI) sends the gateway's deny-all MCP scope
+(`x-bf-mcp-include-clients` and `x-bf-mcp-include-tools`, empty): the gateway adds none of the
+key's MCP tools to the request and runs none itself (Agent Mode). A model client of your own
+pointed at the gateway sends them itself (`bifrost_sdk.NO_GATEWAY_TOOLS`):
 
 ```python
+from bifrost_sdk import NO_GATEWAY_TOOLS
+
 model = ChatOpenAI(
-    base_url=BIFROST_URL, api_key=VIRTUAL_KEY, model=MODEL, default_headers=await h.model_headers()
+    base_url=BIFROST_URL, api_key=VIRTUAL_KEY, model=MODEL, default_headers=NO_GATEWAY_TOOLS
 )
 ```
 
@@ -57,121 +57,40 @@ the tool fails instead of running unseen.
 
 ## Prompts
 
-**What.** A stored prompt of the gateway's Prompt Repository: messages the gateway prepends to
-a model call, committed in versions (1, 2, 3, ...) by whoever owns the prompt, not by a deploy.
-The gateway is one prompt source among others — code, `.md` files, Langfuse — asked last
-([prompts.md](prompts.md) has them all, and the order): a name the others do not have is the
-gateway's.
+**What.** A stored prompt of the gateway's Prompt Repository: messages committed in versions
+(1, 2, 3, ...) by whoever owns the prompt, not by a deploy — the one place the harness reads
+stored prompts from ([prompts.md](prompts.md)).
 
 **When.** The instructions change more often than the code, or are owned by someone else
-(a support lead's tone, a legal rubric for the judge).
+(a support lead's tone, a legal rubric).
 
 **How.**
 
 ```python
-agent = h.wrap(ReAct(system="You answer tickets.", model=MODEL, prompt="triage"), id="triage")
-judge = llm_judge("Follows the tone guide.", prompt="tone-rubric@4")  # that version, always
+agent = h.wrap(ReAct(system_prompt=stored("triage"), model=MODEL), id="triage")
+rubric = await h.prompt("tone-rubric@4")  # that version, always: rubric.text, rubric.messages
 ```
 
-`"name"` is the latest committed version, `"name@3"` that one. The gateway prepends the
-prompt's messages to the request's own (the `ReAct`'s `system` and the conversation) and
-applies its `model_params` where the request sets none.
+`"name"` is the latest committed version, `"name@3"` that one. A `ReAct` whose prompt has no
+`{{variables}}`, its model a name routed through the gateway, has every model call select it
+(`x-bf-prompt-id`, `x-bf-prompt-version`): the gateway prepends the prompt's messages to the
+request's own and applies its `model_params` where the request sets none. Any other is
+rendered into the instructions.
 
 **Automatic.** The name is resolved to the prompt's id once and kept fresh
 (`REPOSITORY_TTL_SECONDS`, 300 s; the last answer stands while the gateway is down). A run
-pins the version at its first model call and journals it, so every call of the run — a resume
-on another worker included — selects the same version, even after a new commit. The gateway's
-log does not record which prompt a request selected, so every `chat` span says it:
-`trellis.prompt.name`, `trellis.prompt.id`, `trellis.prompt.version`.
-
-**Where.** `ReAct` and `llm_judge` call models themselves. Any other framework calls them
-through its own model client: `await h.model_headers(prompt="triage")` gives that client the
-prompt's headers (`x-bf-prompt-id`, `x-bf-prompt-version`) with the deny-all scope, pinned per
-run as a `ReAct`'s is. Every run of the harness pins each prompt handed out this way at its
-start — journaled (a resume keeps it), a `prompt` event, and `trellis.prompt.name`,
-`trellis.prompt.id`, `trellis.prompt.version` on the run's agent span — and the headers are
-read at each request: inside a run they select the version that run pinned, outside one the
-version resolved when they were made. How each client reads them:
-
-| Client | Per request |
-|---|---|
-| an OpenAI client, `AsyncOpenAI(default_headers=headers)` (the OpenAI Agents SDK's `OpenAIChatCompletionsModel`) | the client keeps the mapping and reads it at each request |
-| a LangChain chat model, `ChatOpenAI(default_headers=headers)` (LangGraph, Deep Agents) | the model copies its headers when it is built: the harness's `ModelHooks()` middleware (`create_agent(..., middleware=[ModelHooks()])`) selects the run's version on each call, and its `chat` span says it; without it, the version resolved when the model was built |
-| the Claude Code CLI, `ANTHROPIC_CUSTOM_HEADERS` lines in the options' `env` | read as the CLI starts, once per attempt: the run's copy of the options selects the run's version |
-
-A prompt handed out that a run cannot pin at its start (deleted from the gateway since) is a
-`prompt_unavailable` warning event, and that run's headers stay as they were resolved.
+pins the version at its first read and journals it, so every call of the run — a resume on
+another worker included — gets the same version, even after a new commit. The gateway's log
+does not record which prompt a request selected, so every `chat` span says it:
+`trellis.prompt.name`, `trellis.prompt.id`, `trellis.prompt.version`, and the run says it with a
+`prompt` event.
 
 **On failure.** A name the gateway does not have, a prompt with no committed version, a version
-past the latest, or two prompts of one name: `ConfigurationError`, saying which — `ReAct` and
-`llm_judge` refuse a malformed reference (`"triage@"`) when they are built; a version that is
-not a number (`"triage@latest"`), a model object or `prompt_vars=` with a gateway prompt (only a
-model name's calls go through the gateway, which prepends the prompt as stored) fail the run.
-A prompt that cannot be read at a run's first call (the gateway unreachable, never read before)
-fails the run with the gateway's error.
-
-## Skills
-
-**What.** [Agent Skills](https://agentskills.io) from the gateway's Skills Repository: a
-`SKILL.md` body of instructions and the files it refers to, published in immutable SemVer
-versions, one of them served. The gateway is one skill source among others — code, `SKILL.md`
-folders — asked last; skills of every source mix in one run ([skills.md](skills.md)).
-
-**When.** Instructions for kinds of task that most runs do not need: loading them all into
-every prompt costs tokens and attention; listing them and loading one when it fits does not.
-
-**How.**
-
-```python
-agent = h.wrap(target, id="analyst", skills=["sql-review", "refunds@1.2.0"])
-# a graph binds its tools when it is built: the same through h.tools
-graph = create_agent(model, tools=await h.tools(skills("sql-review"), framework="langgraph"))
-```
-
-`"name"` is the version served when a run starts; `"name@1.2.0"` that version.
-
-**Automatic**, for every framework (progressive disclosure):
-
-* at the start of a run each skill is pinned and journaled (a resumed run keeps the versions it
-  started with), and the run says which versions it used: a `skills` event
-  (`{"versions": {"sql-review": "1.3.0", ...}}`) and the `trellis.skills` attribute of its
-  span;
-* the context pushed into the framework's input gets a `## Skills` section, after the memory
-  context: each skill's name and description, and how to read one;
-* two read-only tools, always offered: `load_skill(name)` — the pinned version's `SKILL.md`
-  body and its file list — and `read_skill_file(name, path)`, one file. Both are harness tools:
-  every call goes through the bridge and is journaled, so a resumed run reads what it read.
-
-**On failure.** The gateway serves a file only of the version it serves now: reading a file of
-another pinned version — `"refunds@1.2.0"` while 1.3.0 is served, or a run that pinned 1.2.0
-before a rollout — is an error the model reads, saying both versions; the body still loads. A
-skill the gateway does not have, or cannot be reached for and never was, is a
-`skills_unavailable` warning event and the run goes on without it (the last copy read stands
-while the gateway is down). Skills named with no skill source at all (no `BIFROST_URL`, no
-`SKILLS_DIR`, none passed) fail the run with a `ConfigurationError`.
-
-## Virtual MCPs
-
-**What.** A Virtual MCP is a bundle of tools from several MCP servers behind one endpoint of the
-gateway (`/mcp/<slug>`), attached to virtual keys.
-
-**When.** One virtual key, several agents that should each see only some of its tools: a
-finance agent that sees the payment tools and not the CRM's.
-
-**How.** `h.wrap(target, id="payer", tools=[mcp("finance-tools")])` (a graph: `h.tools(
-mcp("finance-tools"), framework="langgraph")`). Without `mcp(...)` entries the agent has every
-tool its key allows, as before; with them, exactly the servers they name — these Virtual MCPs'
-tools (a tool in two of them is listed once, from the first), each listed and run through its
-bundle, and any server of the agent's own (`mcp("https://...")`, `mcp(stdio(...))`,
-[tools.md](tools.md)). The retired `mcp=["finance-tools"]` still works for one release. The key must be attached to each one
-(`admin.virtual_mcps.attach`, bifrost-sdk).
-
-**Automatic.** Governance, approvals, the journal and the records are the same as for any MCP
-tool. Code Mode is not used through a Virtual MCP: a script reaches every tool of a server, a
-bundle only some.
-
-**On failure.** A slug the key is not attached to fails the listing (`PermissionDeniedError`)
-and so the run, until the toolbox can list it; after a first good listing the last one stands.
+past the latest, or two prompts of one name: `ConfigurationError`, saying which — `stored(...)`
+refuses a malformed reference (`"triage@"`) where it is written; a version that is not a number
+(`"triage@latest"`) or a variable left unfilled fails the run. A prompt that cannot be read at a
+run's first call (the gateway unreachable, never read before) fails the run with the gateway's
+error.
 
 ## Who a call is for
 
@@ -212,22 +131,22 @@ past a write's single attempt.
 
 ## Whose run a model call is, and its trace
 
-Every model call the harness makes through the gateway — a `ReAct`'s, a judge's, and a
-framework client given `h.model_headers()` (an OpenAI client reads them per request) — carries
+Every model call the harness routes through the gateway — a model name's, a judge's, an OpenAI
+Agents run's (its client reads them per request), the Claude CLI's — carries
 Bifrost's dimension headers, which Bifrost puts on its logs, its OpenTelemetry spans and its
 metrics: `x-bf-dim-tenant`, `x-bf-dim-agent`, `x-bf-dim-run` and `x-bf-dim-user` — a hash of the
 user id, never the id itself (dimensions are not for personal data); a judge's also
 `x-bf-dim-purpose: judge`. Cost per agent, run and tenant is then Bifrost's report. Each call
 also carries the W3C `traceparent` of the span it is made in, which Bifrost's OTel plugin keeps:
 the gateway's span of the call is in the run's trace, whatever the framework. The harness's
-own `chat` spans stay where `ModelHooks` runs (a `ReAct`, a graph built with `h.tools`); for an
+own `chat` spans stay where `ModelHooks` runs (a `ReAct`, a graph given it); for an
 OpenAI Agents run its SDK's own tracing is left as you set it (the SDK exports to OpenAI unless
 you turn it off: `agents.set_tracing_disabled(True)`), said once when such an agent is wrapped.
 
 ## Frameworks' own MCP clients
 
-The gateway is an MCP server itself: `/mcp` (every tool the key allows) and `/mcp/<slug>` (one
-Virtual MCP), authenticated with the virtual key (`Authorization: Bearer <key>`).
+The gateway is an MCP server itself: `/mcp` (every tool the key allows), authenticated with the
+virtual key (`Authorization: Bearer <key>`).
 
 ```python
 # LangChain (langchain-mcp-adapters 0.3 needs mcp<2: an environment of its own)
@@ -256,7 +175,7 @@ options = ClaudeAgentOptions(
 )
 ```
 
-| | The framework's own MCP client | `h.tools(..., framework=...)` / `tools=` |
+| | The framework's own MCP client | the harness's (the key's MCP tools every run has) |
 |---|---|---|
 | Who runs a call | the framework, straight to the gateway | the harness's bridge, then the gateway |
 | Governance (run, announce, ask), approvals | none | every call |
@@ -264,7 +183,8 @@ options = ClaudeAgentOptions(
 | Records (memory's tool records, spans, events) | none | every call |
 | Use it when | the agent is not wrapped and nothing about its calls needs to be governed or recorded | anything wrapped, and anything with side effects |
 
-In a wrapped agent, use `h.tools`: a framework's own MCP client there makes calls the harness
+In a wrapped agent, use the harness's: every run has the key's MCP tools (a graph of yours
+gets them with `HarnessTools`), and a framework's own MCP client there makes calls the harness
 never sees.
 
 ## Reaching the gateway
@@ -274,10 +194,10 @@ The harness authenticates with the virtual key: `Authorization: Bearer` on compl
 use the gateway's OAuth 2.1 instead (`mcp_server_auth_mode: both`), which the harness does not
 need.
 
-The stored prompts, the skills, the MCP clients' Agent Mode lists and Code Mode's log are read
-through the gateway's management API (`/api`) with the same key. A gateway with admin auth on
-closes `/api` to virtual keys: there a prompt fails its run with the gateway's refusal, skills
-are a warning, the Agent Mode lists go unchecked and Code Mode's nested calls are not recorded.
+The stored prompts, the MCP clients' Agent Mode lists and Code Mode's log are read through the
+gateway's management API (`/api`) with the same key. A gateway with admin auth on closes `/api`
+to virtual keys: there a prompt fails its run with the gateway's refusal, the Agent Mode lists
+go unchecked and Code Mode's nested calls are not recorded.
 
 Runnable: [examples/03_way2_gateway/mcp_and_model_headers.py](../examples/03_way2_gateway/mcp_and_model_headers.py)
 (the gateway's MCP tools and `NO_GATEWAY_TOOLS` with no harness), and

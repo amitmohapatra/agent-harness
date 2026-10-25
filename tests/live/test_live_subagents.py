@@ -11,6 +11,7 @@ import pytest
 
 from tests.live.conftest import needs_memory, needs_runs
 from tests.live.test_live_reliability import Crash, claimed_again, died
+from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, tool
 from trellis.contracts import RunStatus
@@ -52,31 +53,35 @@ async def test_a_planner_with_two_children_one_asking_survives_a_killed_worker(
         return str(await agent.tools.call(confirm.spec.name, booking=booking))
 
     scout_model = ScriptedChat([(flights.spec.name, {"city": "Oslo"}), "Oslo: 2 a day"])
-    scout = harness.wrap(
-        ReAct(system="You find flights.", model=scout_model),
-        id=f"live-scout-{suffix}",
-        tools=[flights],
+    scout = arm(
+        harness.wrap(
+            ReAct(system_prompt="You find flights.", model=scout_model),
+            id=f"live-scout-{suffix}",
+        ),
+        [flights],
     )
-    hotel = harness.wrap(booker, id=f"live-booker-{suffix}", tools=[book, confirm])
+    hotel = arm(harness.wrap(booker, id=f"live-booker-{suffix}"), [book, confirm])
     model = ScriptedChat(
         [[(scout.id, {"message": "Oslo"}), (hotel.id, {"message": "Oslo"})], "Planned."]
     )
-    planner = harness.wrap(
-        ReAct(system="You plan trips.", model=model),
-        id=f"live-planner-{suffix}",
-        tools=[scout, hotel],
+    planner = arm(
+        harness.wrap(
+            ReAct(system_prompt="You plan trips.", model=model),
+            id=f"live-planner-{suffix}",
+        ),
+        [scout, hotel],
     )
     handle = await planner.start("Plan a weekend in Oslo", user="live-user")
     assert await claimed_again(harness, planner)
-    paused = await handle.result(timeout=30)
+    paused = await handle.result(wait=30)
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
     assert paused.interrupt.question == "Which budget?"
     asker = (paused.interrupt.payload or {})[SUBAGENT]
     assert asker["agent_id"] == hotel.id
     # the person's inbox holds the question once, on the planner's run
     inbox = await harness.inbox("user:live-user")
-    [entry] = [s for s in inbox if s.run_id in (handle.run_id, asker["run_id"])]
-    assert entry.run_id == handle.run_id and entry.awaiting is not None
+    [entry] = [s for s in inbox if s.run_id in (handle.id, asker["run_id"])]
+    assert entry.run_id == handle.id and entry.awaiting is not None
     resumed = await planner.resume(
         entry.awaiting.interrupt_id, "answer", answer="low", reviewer="live-user"
     )
@@ -84,14 +89,14 @@ async def test_a_planner_with_two_children_one_asking_survives_a_killed_worker(
     await died(harness, planner, handle)  # inside the booker, after it booked
     assert charged == ["Oslo low"]
     assert await claimed_again(harness, planner)
-    done = await handle.result(timeout=30)
+    done = await handle.result(wait=30)
     assert done.status is RunStatus.SUCCESS and done.answer == "Planned.", done.error
     assert charged == ["Oslo low"] and looked == ["Oslo"]  # no side effect repeated
     told = [m["content"] for m in model.requests[-1]["messages"] if m["role"] == "tool"]
     assert told == ["Oslo: 2 a day", "confirmed: booked Oslo (low)"]
-    kids = [s async for s in harness.runs.iterate(parent_run_id=handle.run_id)]
+    kids = [s async for s in harness.runs.iterate(parent_run_id=handle.id)]
     assert sorted(k.agent_id for k in kids) == sorted([scout.id, hotel.id])
     for kid in kids:
         record = await harness.runs.get(kid.run_id)
         assert record is not None and record.status is RunStatus.SUCCESS
-        assert record.user_id == "live-user" and record.thread_id == handle.run_id
+        assert record.user_id == "live-user" and record.thread_id == handle.id

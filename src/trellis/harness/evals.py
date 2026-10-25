@@ -33,15 +33,14 @@ builds experiments from: ``telemetry.Experiment``).
   ``async (input) -> answer`` otherwise — evaluated, and scored; :class:`EvalReport` says how
   each item went and the mean of each evaluator.
 * **Online** — :func:`judge` scores one case from any code. A wrapped agent does it by itself:
-  ``Harness(judges=[...])`` — after a sampled successful run (``TRELLIS_EVAL_SAMPLE``, by the
-  run id) each judge runs in the background writes queue, never on the request path, and its
+  ``h.wrap(judges=[...])`` — after a successful run each judge samples (``llm_judge(sample=)``,
+  by the run id) runs in the background writes queue, never on the request path, and its
   score lands on the run's trace. A judge that fails is a warning, never a failed run.
 """
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import functools
 import hashlib
 import json
@@ -68,11 +67,9 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline, telemetry
 from trellis.harness.clients.bifrost import Gateway, PromptPin
-from trellis.harness.gateways import OpenAICompatible, model_gateway, unserved
+from trellis.harness.gateways import ModelGateway, ProviderKey, model_gateway
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
-from trellis.harness.prompts import BifrostPrompts, Prompt, PromptSources
-from trellis.harness.repository import pinned
 from trellis.harness.settings import Settings
 
 if TYPE_CHECKING:
@@ -83,6 +80,11 @@ log = logging.getLogger("trellis.evals")
 
 #: Items evaluated at once by default.
 CONCURRENCY: Final = 4
+#: The share of a wrapped agent's successful runs (given a memory context) checked against
+#: it (``/v1/verify``: the grounding check), chosen by the run id: fixed.
+GROUNDING_SAMPLE: Final = 0.1
+#: The share of runs an online judge scores unless it says (``llm_judge(sample=)``).
+JUDGE_SAMPLE: Final = 0.1
 #: The user offline evaluation runs act for, unless ``user=`` names one (memory is scoped to it).
 EVAL_USER: Final = "trellis-evaluate"
 #: Who cancels an item's run that paused, so it does not wait in an inbox.
@@ -271,8 +273,8 @@ class EvalReport:
 class EvalServices:
     """What evaluation reaches: Langfuse (``None``: scores are ``score`` spans only, and a
     dataset must be given as items), the judge's gateway, and the model :func:`llm_judge` asks —
-    a judge's own (``llm_judge(model=)``), else ``judge_model`` (the deprecated
-    ``TRELLIS_JUDGE_MODEL``; a chat-completions object is asked as it is), else the gateway's
+    a judge's own (``llm_judge(model=)``), else ``judge_model`` (these services' default: a
+    name, or a chat-completions object asked as it is), else the gateway's
     judge alias :data:`JUDGE_ALIAS`, which the Bifrost admin routes to a model — never the
     judged agent's own. An alias the gateway does not route turns the judges off, said once.
     :meth:`from_env` reads the deployment from the environment, and a wrapped agent's
@@ -281,22 +283,26 @@ class EvalServices:
     langfuse: telemetry.Langfuse | None = None
     judge_gateway: Gateway | None = None
     judge_model: Any = None
-    #: where ``llm_judge(prompt=)`` is looked up (``None``: the judge's gateway only)
-    prompts: PromptSources | None = None
+    #: how a model name is routed without Bifrost (the harness's: ``Harness.model_gateway``)
+    models: ModelGateway | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> EvalServices:
         """The services the environment names: Langfuse through the OTLP variables, or its own
         keys (which also export the spans, unless the application installed its own tracer
         provider), the judge through ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else
-        ``BIFROST_VIRTUAL_KEY``) and ``TRELLIS_JUDGE_MODEL``. Close them with :meth:`aclose`
-        (or ``async with``)."""
-        settings = Settings.from_env(environ)
-        telemetry.configure(settings)
-        return cls.of(settings)
+        ``BIFROST_VIRTUAL_KEY``). Close them with :meth:`aclose` (or ``async with``)."""
+        telemetry.configure(environ)
+        return cls.of(Settings.from_env(environ), environ=environ)
 
     @classmethod
-    def of(cls, settings: Settings, *, gateway: Gateway | None = None) -> EvalServices:
+    def of(
+        cls,
+        settings: Settings,
+        *,
+        gateway: Gateway | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> EvalServices:
         """The services ``settings`` name. ``gateway`` is the agents' own (``Harness``): the
         judge's too, unless the judge has a virtual key of its own (its budget apart)."""
         own_key = settings.judge_virtual_key not in (None, settings.bifrost_virtual_key)
@@ -305,9 +311,9 @@ class EvalServices:
             key = settings.judge_virtual_key or settings.bifrost_virtual_key
             judge_gateway = Gateway(settings.bifrost_url, key)
         return cls(
-            langfuse=telemetry.Langfuse.of(settings),
+            langfuse=telemetry.Langfuse.of(environ),
             judge_gateway=judge_gateway,
-            judge_model=settings.judge_model,
+            models=model_gateway(settings),
         )
 
     def model(self, named: str | None = None) -> Any:
@@ -319,13 +325,13 @@ class EvalServices:
             return model
         if self.judge_gateway is not None:
             return _Named(self.judge_gateway, model)
-        gateway = model_gateway(Settings())  # no Bifrost here: the OpenAI SDK's endpoint, if any
-        if not isinstance(gateway, OpenAICompatible):
-            raise unserved("llm_judge")
-        if model == JUDGE_ALIAS:
+        # no Bifrost in the settings given (the harness's, else the environment's): the
+        # provider's own SDK, as the agents' models are routed
+        gateway = self.models or model_gateway(Settings.from_env())
+        if model == JUDGE_ALIAS or not isinstance(gateway, ProviderKey):
             raise ConfigurationError(
-                f"the judge alias {JUDGE_ALIAS!r} is Bifrost's: on the OpenAI-compatible "
-                f"gateway at {gateway.url} name the judge's model, llm_judge(model='...')"
+                f"the judge alias {JUDGE_ALIAS!r} is Bifrost's (BIFROST_URL): without it, name "
+                "the judge's model, llm_judge(model='openai:...')"
             )
         return gateway.judge(model)
 
@@ -358,7 +364,7 @@ class EvalServices:
 
     async def aclose(self) -> None:
         """Close the clients (the ones :meth:`from_env` made; a harness closes its own)."""
-        clients = (self.judge_gateway, self.langfuse, self.prompts)
+        clients = (self.judge_gateway, self.langfuse)
         await asyncio.gather(*(c.aclose() for c in clients if c is not None))
 
     async def __aenter__(self) -> EvalServices:
@@ -575,24 +581,26 @@ def _said(tools: Sequence[str]) -> str:
 @dataclass(frozen=True, slots=True)
 class llm_judge:
     """A judge model scores the answer against ``criteria`` (0 to 1, with its reasoning as the
-    comment, which names the judge's model). The model is ``model`` (a gateway model name: two
-    judges may use two models), else the one :func:`evaluate` or :func:`judge` was given
-    (:meth:`EvalServices.model`: ``TRELLIS_JUDGE_MODEL`` through ``BIFROST_URL`` with
-    ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). ``prompt`` names a prompt
-    (``"name"``, ``"name@version"``, or a ``Prompt``), looked up as every prompt is
-    (``EvalServices.prompts``): put before the judge's messages — by the gateway, for a stored
-    prompt of the gateway's (a judge model named, not a model object). A reply that is not the
-    JSON asked for is asked once more; a second one is no score, with a warning."""
+    comment, which names the judge's model). The model is ``model`` (a model name, routed as
+    every model name is: two judges may use two models), else the one :func:`evaluate` or
+    :func:`judge` was given (:meth:`EvalServices.model`: the gateway's judge alias through
+    ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). Online
+    (``h.wrap(judges=)``) it scores ``sample`` of the agent's successful runs, chosen by the
+    run id. A reply that is not the JSON asked for is asked once more; a second one is no
+    score, with a warning."""
 
     criteria: str
     name: str = "llm_judge"
-    prompt: str | Prompt | None = field(default=None, kw_only=True)
-    #: the gateway model this judge asks, over the services' (``TRELLIS_JUDGE_MODEL``)
+    #: the model this judge asks, over the services' default
     model: str | None = field(default=None, kw_only=True)
+    #: the share of runs it scores online, 0 to 1
+    sample: float = field(default=JUDGE_SAMPLE, kw_only=True)
 
     def __post_init__(self) -> None:
-        if isinstance(self.prompt, str):
-            pinned(self.prompt)
+        if not 0 <= self.sample <= 1:
+            raise ConfigurationError(
+                f"llm_judge(sample=) is a share of runs, 0 to 1: not {self.sample}"
+            )
 
     async def __call__(self, case: EvalCase) -> EvalScore | None:
         services = _services.get()
@@ -606,22 +614,6 @@ class llm_judge:
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user", "content": _judge_prompt(self.criteria, case)},
         ]
-        if self.prompt is not None:
-            gateway = services.judge_gateway
-            prompts = services.prompts or PromptSources(
-                [BifrostPrompts(gateway)] if gateway is not None else []
-            )
-            found = await prompts.get(self.prompt)
-            selected = found.pin()
-            if selected is None:
-                messages = [*found.messages(), *messages]
-            elif isinstance(model, _Named):
-                model = dataclasses.replace(model, prompt=selected)
-            else:
-                raise ConfigurationError(
-                    f"llm_judge(prompt=) names {found.ref}, a stored prompt of the gateway, "
-                    "which needs a Bifrost model name: the gateway prepends it"
-                )
         for attempt in range(2):
             message = _message(await model.complete(messages, temperature=0))
             content = message.get("content")
@@ -819,6 +811,13 @@ async def judge(
         except Exception as exc:
             log.warning("score %s of run %s was not posted: %s", score.name, ref, exc)
     return scores, failed
+
+
+def sample_of(evaluator: Evaluator) -> float:
+    """The share of runs an online judge scores (``llm_judge(sample=)``; another evaluator:
+    :data:`JUDGE_SAMPLE`)."""
+    found = getattr(evaluator, "sample", None)
+    return float(found) if isinstance(found, int | float) else JUDGE_SAMPLE
 
 
 def sampled(key: str, rate: float) -> bool:

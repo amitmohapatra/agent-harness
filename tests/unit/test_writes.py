@@ -159,7 +159,7 @@ async def test_a_queue_that_stays_full_gives_the_write_up_and_says_so(
     await asyncio.sleep(0)
     await writes.submit("second", held, events=events)  # no record: cannot be kept
     assert writes.failed == 1
-    assert seen[0].data["message"] == "second: the write queue stayed full"
+    assert seen[0].data["message"] == "second failed and is lost: the write queue stayed full"
     await writes.submit("kept", held, record={"op": "x", "scope": {}, "args": {}})
     assert writes.spooled == 1  # with a record, kept for the next start instead
     gate.set()
@@ -317,3 +317,66 @@ async def test_background_writes_belong_to_no_run() -> None:
     await writes.drain()
     assert seen == [None]
     await writes.aclose()
+
+
+# --------------------------------------------------------------------------- never only a warning
+
+
+@pytest.mark.parametrize("outcome", ["spooled", "lost"])
+async def test_a_failed_write_is_counted_traced_reported_and_logged_as_an_error_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    spans: Any,
+    outcome: str,
+) -> None:
+    spooled = outcome == "spooled"
+    counted: list[tuple[str, ...]] = []
+    monkeypatch.setattr(module.metrics, "write_failed", lambda label: counted.append((label,)))
+    monkeypatch.setattr(
+        module.metrics, "write_undelivered", lambda label, out: counted.append((label, out))
+    )
+    monkeypatch.setattr(module, "_ERRORS_SAID", set())
+    writes = Writes(spool=tmp_path if spooled else None)
+    events, seen = run_events()
+    events.trace_run = "run_parent"  # a sub-agent's run: its spans are in its parent's trace
+
+    async def down() -> None:
+        raise ConnectionError("memory is down")
+
+    record = {"op": "record_tool", "scope": {}, "args": {}}
+    with caplog.at_level(logging.WARNING, logger="trellis.writes"):
+        for _ in range(2):
+            await writes.submit("memory.record_tool", down, events=events, record=record)
+            await writes.drain()
+    await writes.aclose()
+    assert counted == [("memory.record_tool",), ("memory.record_tool", outcome)] * 2
+    said = [r for r in caplog.records if "memory.record_tool" in r.getMessage()]
+    assert [r.levelno for r in said] == [logging.ERROR, logging.WARNING]  # an error once
+    assert [e.data["code"] for e in seen] == ["write_failed", "write_failed"]
+    assert all("memory is down" in e.data["message"] for e in seen)
+    found = [s for s in spans.get_finished_spans() if s.name == "write_failed memory.record_tool"]
+    assert len(found) == 2
+    span = found[0]
+    assert span.status.status_code.name == "ERROR"
+    assert span.attributes["trellis.write.outcome"] == outcome
+    assert span.context.trace_id == module.telemetry.trace_id_of("run_parent")
+    assert span.events[0].name == "write_failed"
+
+
+async def test_a_failed_write_of_no_run_is_still_counted_and_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, spans: Any
+) -> None:
+    monkeypatch.setattr(module, "_ERRORS_SAID", set())
+    writes = Writes()
+
+    async def down() -> None:
+        raise ConnectionError("memory is down")
+
+    with caplog.at_level(logging.ERROR, logger="trellis.writes"):
+        await writes.submit("memory.model_key", down)
+        await writes.drain()
+    await writes.aclose()
+    assert writes.failed == 1
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+    assert spans.get_finished_spans() == ()  # no run to trace it in

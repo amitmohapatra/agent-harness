@@ -13,6 +13,7 @@ import pytest
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import memory_scope, seed
+from tests.support.arm import arm
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 
@@ -21,8 +22,8 @@ pytestmark = [pytest.mark.live, needs_memory]
 
 async def test_the_key_names_the_tenant_and_its_role() -> None:
     async with live_harness() as h:
-        key = await h.key()
-        assert key.tenant_id is not None and await h.tenant() == key.tenant_id
+        key = await h._key_info()
+        assert key.tenant_id is not None and await h._tenant() == key.tenant_id
         assert key.role in ("service", "admin") and h.memory is not None
 
 
@@ -39,7 +40,7 @@ async def test_an_approval_rule_in_the_catalog_decides_which_calls_wait() -> Non
         return await agent.tools.call(name, amount=input)
 
     async with live_harness() as h:
-        agent = h.wrap(payer, id=f"live-payer-{suffix}", tools=[pay])
+        agent = arm(h.wrap(payer, id=f"live-payer-{suffix}"), [pay])
         scope = await memory_scope(h, user="live-ada", agent_id=agent.id)
         # an admin's rule: payments over 100 wait for a person
         await scope.advanced.tools.put_catalog(
@@ -77,10 +78,12 @@ async def test_hints_narrow_a_large_toolbox_to_the_task() -> None:
         return [t.name for t in (await agent.tools.hints(input)).tools]
 
     async with live_harness() as h:
-        agent = h.wrap(
-            planner,
-            id=f"live-hints-{suffix}",
-            tools=[make(n, d) for n, d in zip(names, descriptions, strict=True)],
+        agent = arm(
+            h.wrap(
+                planner,
+                id=f"live-hints-{suffix}",
+            ),
+            [make(n, d) for n, d in zip(names, descriptions, strict=True)],
         )
         await agent.run("warm up the catalog", user="live-ada")  # publishes the tools
         await h.writes.drain()
@@ -103,7 +106,7 @@ async def test_a_large_table_is_a_run_artifact_served_back() -> None:
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         ref = paused.interrupt.payload_ref
         assert ref is not None and paused.interrupt.payload is None
-        stored = await h.runs.artifacts.download(ref.artifact_id, tenant=await h.tenant())
+        stored = await h.runs.artifacts.download(ref.artifact_id, tenant=await h._tenant())
         assert stored is not None and json.loads(stored) == {"table": rows}
         record = await h.runs.get(paused.run_id)
         assert record is not None and len(json.dumps(record.checkpoint)) < 16 * 1024
@@ -123,7 +126,7 @@ async def test_a_sampled_answer_is_verified_against_its_context() -> None:
     async def answer(input: str, agent: Runtime) -> str:
         return f"Your warehouse is in Berlin ({suffix})."
 
-    async with live_harness(eval_sample=1.0) as h:
+    async with live_harness(sampled=1.0) as h:
         agent = h.wrap(answer, id=f"live-grounded-{suffix}")
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         await seed(scope, f"The warehouse of {user} is in Berlin.", visibility="USER")

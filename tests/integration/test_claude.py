@@ -12,10 +12,11 @@ from typing import Any
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
 
+from tests.support.arm import arm
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
-from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolSpec
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolSpec
+from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED, native_spec
 from trellis.harness.journal import content_key
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
@@ -61,7 +62,7 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
         [{"tool": "refund", "args": {"order": "o1"}}, {"text": "refunded o1"}],
         system_prompt="You refund.",
     )
-    agent = harness.wrap(target, id="refunds", tools=[tool(refund.fn, side_effects="write")])
+    agent = arm(harness.wrap(target, id="refunds"), [tool(refund.fn, side_effects="write")])
     result = await agent.run("refund o1", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "refunded o1"
     assert refunds == ["o1"]
@@ -96,7 +97,7 @@ async def test_a_tool_whose_schema_declares_no_properties_takes_no_argument(
     the tool is offered as a JSON schema of an object without arguments."""
     target = options(tmp_path, [{"tool": "now", "args": {}}, {"text": "it is noon"}])
     asked.clear()
-    result = await harness.wrap(target, id="clock", tools=[NoArguments()]).run("time?", user="u")
+    result = await arm(harness.wrap(target, id="clock"), [NoArguments()]).run("time?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "it is noon"
     assert asked == [{}]  # offered with no argument, called with none
     [now] = await NoArguments().resolve()
@@ -120,7 +121,7 @@ async def test_a_tool_result_over_a_mebibyte_reaches_claude_as_a_preview(
 
     script = [{"tool": "export", "args": {"rows": 3}}, {"text": "{last}"}]
     own = options(tmp_path, script, max_buffer_size=1024 * 1024)
-    result = await harness.wrap(own, id="small", tools=[export]).run("export", user="u")
+    result = await arm(harness.wrap(own, id="small"), [export]).run("export", user="u")
     assert result.status is RunStatus.SUCCESS and "/large_tool_results/" in result.answer
     assert len(result.answer) < 25_000
 
@@ -129,10 +130,12 @@ async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(
     harness: Harness, tmp_path: Path
 ) -> None:
     refunds.clear()
-    agent = harness.wrap(
-        options(tmp_path, [{"tool": "refund", "args": {"order": "o2"}}, {"text": "done"}]),
-        id="refunds",
-        tools=[refund],
+    agent = arm(
+        harness.wrap(
+            options(tmp_path, [{"tool": "refund", "args": {"order": "o2"}}, {"text": "done"}]),
+            id="refunds",
+        ),
+        [refund],
     )
     paused = await agent.run("refund o2", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and refunds == []
@@ -154,10 +157,14 @@ async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
     """After a deny the call does not run: the resumed session is told so, not told to call
     again and expect its result."""
     refunds.clear()
-    agent = harness.wrap(
-        options(tmp_path, [{"tool": "refund", "args": {"order": "o3"}}, {"text": "not refunded"}]),
-        id="refunds-denied",
-        tools=[refund],
+    agent = arm(
+        harness.wrap(
+            options(
+                tmp_path, [{"tool": "refund", "args": {"order": "o3"}}, {"text": "not refunded"}]
+            ),
+            id="refunds-denied",
+        ),
+        [refund],
     )
     paused = await agent.run("refund o3", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -180,7 +187,7 @@ async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call
     """A pause that is not an approval names no call: the resumed session is told to make
     again the call that has no result yet."""
     script = [{"tool": "pick_warehouse", "args": {}}, {"text": "{last}"}]
-    agent = harness.wrap(options(tmp_path, script), id="shipping", tools=[pick_warehouse])
+    agent = arm(harness.wrap(options(tmp_path, script), id="shipping"), [pick_warehouse])
     asked = await agent.run("where does it ship from?", user="u1")
     assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
     assert asked.interrupt.tool_call is None
@@ -201,7 +208,7 @@ async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
         {"tool": "refund", "args": {"order": "o3"}},
         {"text": "done: {last}"},
     ]
-    agent = harness.wrap(options(tmp_path, script), id="ops", tools=[refund])
+    agent = arm(harness.wrap(options(tmp_path, script), id="ops"), [refund])
     asked = await agent.run("tidy up, then refund o3", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
     assert asked.interrupt.tool_call.tool == "Bash" and asked.interrupt.question == (
@@ -258,11 +265,13 @@ async def test_a_session_the_cli_no_longer_holds_is_run_again_from_its_prompt(
 ) -> None:
     refunds.clear()
     script = [{"tool": "refund", "args": {"order": "o4"}}, {"text": "done"}]
-    agent = harness.wrap(
-        # files checkpointed on this machine's disk: the session is not kept in the journal
-        options(tmp_path, script, enable_file_checkpointing=True),
-        id="moved",
-        tools=[refund],
+    agent = arm(
+        harness.wrap(
+            # files checkpointed on this machine's disk: the session is not kept in the journal
+            options(tmp_path, script, enable_file_checkpointing=True),
+            id="moved",
+        ),
+        [refund],
     )
     paused = await agent.run("refund o4", user="u1")
     assert paused.interrupt is not None
@@ -297,11 +306,12 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
     started = started_with(tmp_path)
     assert started["system_prompt"] == "You help."  # the team's, as it wrote it
-    # Claude's built-in tools are the agent's tools too: the context carries their hints
-    rendered = memory_service.context_text + "\n\n## Tools\n- Read (confidence 0.90)"
+    # Claude's built-in tools are the agent's tools too, sorted: the context carries their hints
+    rendered = memory_service.context_text + "\n\n## Tools\n- Agent (confidence 0.90)"
     assert started["context"] == rendered
     [asked] = memory_service.named("context")
-    assert asked.body["tools"]["available"][:2] == ["Read", "Glob"]
+    available = asked.body["tools"]["available"]
+    assert available == sorted(available) and {"Read", "Bash", "Skill"} <= set(available)
 
 
 async def test_without_memory_no_context_hook_is_registered(
@@ -323,7 +333,7 @@ async def test_the_hints_narrow_the_tools_for_the_run(
 
     memory_service.candidates = ["t2", "t5"]
     target = options(tmp_path, [{"text": "done"}])
-    await memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)]).run("x", user="u1")
+    await arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)]).run("x", user="u1")
     assert started_with(tmp_path)["tools"] == ["t2", "t5", *MEMORY_TOOLS, "read_file"]
 
 
@@ -346,7 +356,7 @@ async def test_mcp_servers_the_team_configured_as_a_file_or_json_stay(
     script = [{"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
     for configured in (config, str(config), json.dumps({"mcpServers": {"erp": erp}})):
         target = options(tmp_path, script, mcp_servers=configured)
-        agent = harness.wrap(target, id=f"mcp-{len(harness.agents)}", tools=[tool(refund.fn)])
+        agent = arm(harness.wrap(target, id=f"mcp-{len(harness.agents)}"), [tool(refund.fn)])
         assert (await agent.run("refund o9", user="u1")).answer == "done"
         servers = json.loads(started_with(tmp_path)["mcp_config"])["mcpServers"]
         assert servers["erp"] == erp and servers["trellis"]["type"] == "sdk"
@@ -367,7 +377,7 @@ async def test_a_large_result_is_previewed_naming_where_the_run_keeps_it(
     harness: Harness, tmp_path: Path
 ) -> None:
     script = [{"tool": "dump", "args": {}}, {"text": "{last}"}]
-    agent = harness.wrap(options(tmp_path, script), id="d", tools=[dump])
+    agent = arm(harness.wrap(options(tmp_path, script), id="d"), [dump])
     preview = (await agent.run("dump it", user="u1")).answer
     assert f"saved in the filesystem at this path: {KEPT}" in preview and len(preview) < 25_000
     assert "row 30000" in preview and "row 100" not in preview
@@ -383,7 +393,7 @@ async def test_a_kept_result_is_read_in_pages_after_a_pause(
         {"tool": "read_file", "args": {"file_path": KEPT, "offset": 10, "limit": 2}},
         {"text": "{last}"},
     ]
-    agent = harness.wrap(options(tmp_path, script), id="dumper", tools=[dump, refund])
+    agent = arm(harness.wrap(options(tmp_path, script), id="dumper"), [dump, refund])
     paused = await agent.run("dump it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
@@ -422,3 +432,37 @@ async def test_built_in_tools_are_governed_in_every_permission_mode(
     result = await agent.run("work", user="u1")
     assert result.answer == "said: Bash was not run: nothing runs here"
     assert built_ins(tmp_path) == []  # neither ran
+
+
+async def test_calls_claude_runs_itself_are_recorded_with_their_result_and_duration(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Its built-ins and its own MCP servers' tools run in the CLI: their ``PostToolUse`` (or
+    ``PostToolUseFailure``) records each as the run's tool call — on the stream, in the memory
+    service with its result or error and how long it took — while a harness tool's call is the
+    bridge's, recorded once."""
+    script = [
+        {"builtin": "Read", "args": {"file_path": "orders.csv"}},
+        {"builtin": "Grep", "args": {"pattern": "o3"}, "fails": "no such file"},
+        {"tool": "lookup", "args": {"sku": "A-1"}},
+        {"text": "done: {last}"},
+    ]
+
+    @tool(side_effects="read")
+    def lookup(sku: str) -> str:
+        """Units of a SKU."""
+        return f"{sku}: 3"
+
+    agent = arm(memory_harness.wrap(options(tmp_path, script), id="ops"), [lookup])
+    events = [e async for e in agent.stream("check o3", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS
+    await memory_harness.writes.drain()
+    recorded = {c.body["tool"]: c.body for c in memory_service.calls if c.name == "record_tool"}
+    assert set(recorded) == {"Read", "Grep", "lookup"}  # the harness tool once, by the bridge
+    assert recorded["Read"]["status"] == "ok" and recorded["Read"]["output"] == "Read ran"
+    assert recorded["Read"]["latency_ms"] >= 0
+    assert recorded["Grep"]["status"] == "error" and recorded["Grep"]["output"] == "no such file"
+    results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert [r["tool"] for r in results] == ["Read", "Grep", "lookup"]
+    assert native_spec("mcp__crm__find").server == "crm"
+    assert native_spec("Bash").side_effects == "irreversible"

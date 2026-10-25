@@ -4,18 +4,22 @@ redacted; which gateway serves model names and what it cannot do (``trellis.harn
 whether each service is reachable and takes its key — for the memory service also the key's
 role, the agents' model key, its readiness (``/health/ready``) and its version (``/version``);
 the approval rules accepted from the
-memory service's learned suggestions (governance accepts them automatically, but for a tool at
-the highest risk); whether the spool can be written and the Docker daemon answers; and what to
-set. It changes nothing: it suggests.
+memory service's learned suggestions — learned and accepted per agent: those of each agent the
+key may act as, and of each ``--agent`` named (governance accepts them automatically, but for a
+tool at the highest risk); whether the spool can be written, and the memory writes that failed
+and wait in it ("records failing"); whether the Docker daemon answers; and what to set. It
+changes nothing: it suggests.
 
 Exit code ``0`` when every check passes, ``1`` otherwise."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -24,8 +28,14 @@ from typing import Any, Final
 
 import httpx
 
-from trellis.harness.gateways import CAPABILITIES, ModelGateway, model_gateway
-from trellis.harness.settings import DEPRECATED, Settings, sourced
+from trellis.harness.gateways import (
+    CAPABILITIES,
+    GatewayKind,
+    ModelGateway,
+    model_gateway,
+    provider_keys,
+)
+from trellis.harness.settings import Settings, service_version, sourced
 
 #: The settings whose values are secrets: shown as set, never as their value.
 SECRETS: Final = frozenset(
@@ -51,6 +61,8 @@ MODEL_KEY_PATH: Final = "/v1/agents/model-key"
 #: The memory service's readiness answers that still serve (``degraded``: an optional
 #: dependency is down).
 READY: Final = frozenset({"ready", "degraded"})
+#: The check of the memory writes that failed and wait in the spool.
+RECORDS: Final = "records failing"
 #: How ``may_act_as`` names an agent a key may act as.
 AGENT_PRINCIPAL: Final = "agent:"
 
@@ -96,46 +108,50 @@ def effective(environ: Mapping[str, str] | None = None) -> list[tuple[str, str, 
 
 
 def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
-    """Which gateway serves model names, what named it, and what is off without it."""
-    gateway = model_gateway(settings, environ)
-    if gateway is None:
-        off = sorted(CAPABILITIES)
-        lines = [
-            "none: models are objects passed in code (no BIFROST_URL, no OPENAI_BASE_URL or "
-            "OPENAI_API_KEY)"
-        ]
-    else:
-        off = sorted(set(CAPABILITIES) - gateway.capabilities)
+    """How model names are routed, what named the route, the provider keys it leaves unused
+    (Bifrost wins over them) and what is off without Bifrost."""
+    gateway = model_gateway(settings)
+    keys = provider_keys(environ)
+    if gateway.kind is GatewayKind.BIFROST:
         lines = [f"{gateway.title} at {gateway.url} ({gateway.source})"]
+        if keys:
+            lines.append(
+                f"note: {', '.join(keys)} set, not used for model calls: Bifrost wins over a "
+                "provider key"
+            )
+    else:
+        said = ", ".join(keys) if keys else "none set"
+        lines = [f"provider keys: each provider's own SDK reads its own ({said})"]
+    off = sorted(set(CAPABILITIES) - gateway.capabilities)
     lines += [f"off: {CAPABILITIES[c]}" for c in off]
     return lines
 
 
-async def checks(settings: Settings, environ: Mapping[str, str] | None = None) -> list[Check]:
-    """Each service the settings name, reached with its key; the spool; the Docker daemon."""
-    env = os.environ if environ is None else environ
+async def checks(
+    settings: Settings, *, agents: Sequence[str] = (), docker: bool = False
+) -> list[Check]:
+    """Each service the settings name, reached with its key; the approval rules learned for
+    ``agents`` (and the agents the key may act as); the spool; the Docker daemon (``docker``:
+    ``DOCKER_HOST`` is set, where ``sandbox()`` makes its sandboxes)."""
     async with httpx.AsyncClient(timeout=CHECK_SECONDS) as client:
-        gateway, memory, rules, runs = await asyncio.gather(
-            _gateway(client, model_gateway(settings, env)),
+        gateway, (memory, key), runs = await asyncio.gather(
+            _gateway(client, model_gateway(settings)),
             _memory(client, settings),
-            _approval_rules(client, settings),
             _runs(client, settings),
         )
+        rules = await _approval_rules(client, settings, [*agents, *_acting_as(key)])
     done = [c for c in (gateway, *memory, rules, runs) if c is not None]
     if settings.spool_dir:
         done.append(_spool(settings.spool_dir))
-    if settings.sandbox == "docker":
+        done.append(_records(settings.spool_dir))
+    if docker:
         done.append(await _docker())
     return done
 
 
 def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     """What to set, from what is and is not set (never applied)."""
-    said = [
-        f"{name} is deprecated: use {instead}"
-        for name, instead in DEPRECATED.items()
-        if environ.get(name)
-    ]
+    said: list[str] = []
     if settings.bifrost_url:
         said.append(
             "model retries are the gateway's: set the provider's network_config.max_retries in "
@@ -146,7 +162,7 @@ def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
             "set TRELLIS_SPOOL_DIR to a lasting folder, or memory writes the service "
             "could not take are lost at a restart"
         )
-    if not settings.agent_version:
+    if not service_version(environ):
         said.append(
             "bake the version in at build time: OTEL_RESOURCE_ATTRIBUTES=service.version=..."
         )
@@ -155,27 +171,40 @@ def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     return said
 
 
-async def _gateway(client: httpx.AsyncClient, gateway: ModelGateway | None) -> Check | None:
-    """The gateway that serves model names, asked for its models with its key."""
-    if gateway is None:
+async def _gateway(client: httpx.AsyncClient, gateway: ModelGateway) -> Check | None:
+    """Bifrost, when it routes the model names, asked for its models with its key (a
+    provider's own SDK is not asked: its key is its own)."""
+    if gateway.kind is not GatewayKind.BIFROST:
         return None
     url = f"{gateway.url.rstrip('/')}/models"
     return await _reached(client, "gateway", url, {"Authorization": f"Bearer {gateway.probe_key}"})
 
 
-async def _memory(client: httpx.AsyncClient, s: Settings) -> list[Check]:
+async def _memory(
+    client: httpx.AsyncClient, s: Settings
+) -> tuple[list[Check], Mapping[str, Any] | None]:
     """The memory service: reached with the key (``/v1/keys/self``) and what the key is (its
-    role, the agents' model key), whether it is ready and which version it is."""
+    role, the agents' model key), whether it is ready and which version it is; and what it said
+    about the key (``None``: nothing)."""
     if not s.memory_url:
-        return []
+        return [], None
     base = s.memory_url.rstrip("/")
     headers = {"Authorization": f"Bearer {s.api_key or ''}"}
     reached, answer = await _asked(client, "memory", f"{base}{KEY_PATH}", headers)
     found = [reached, await _ready(client, base), await _version(client, base)]
     if answer is None:  # the key is not taken: nothing more can be asked with it
-        return found
+        return found, None
     key = answer.json()
-    return [*found, _role(key), await _model_key(client, s, base, headers, key)]
+    return [*found, _role(key), await _model_key(client, s, base, headers, key)], key
+
+
+def _acting_as(key: Mapping[str, Any] | None) -> list[str]:
+    """The agents a key is restricted to (its ``may_act_as``), by id."""
+    return [
+        principal.removeprefix(AGENT_PRINCIPAL)
+        for principal in (key or {}).get("may_act_as") or ()
+        if principal.startswith(AGENT_PRINCIPAL)
+    ]
 
 
 def _role(key: Mapping[str, Any]) -> Check:
@@ -213,11 +242,7 @@ async def _model_key(
             "BIFROST_VIRTUAL_KEY unset: the memory service's model work for these agents runs "
             "on the tenant's or the operator's key",
         )
-    named = [
-        principal.removeprefix(AGENT_PRINCIPAL)
-        for principal in key.get("may_act_as") or ()
-        if principal.startswith(AGENT_PRINCIPAL)
-    ]
+    named = _acting_as(key)
     if not named:
         return Check(
             "model key",
@@ -272,21 +297,37 @@ async def _version(client: httpx.AsyncClient, base: str) -> Check:
     )
 
 
-async def _approval_rules(client: httpx.AsyncClient, s: Settings) -> Check | None:
-    """The learned approval suggestions accepted so far, each by its tool and kind."""
+async def _approval_rules(
+    client: httpx.AsyncClient, s: Settings, agents: Sequence[str]
+) -> Check | None:
+    """The learned approval suggestions accepted so far, for each of ``agents`` (each by its
+    tool and kind): the service learns them from one agent's decisions and lists them in that
+    agent's scope only, so a tenant-wide read lists none."""
     if not s.memory_url:
         return None
+    if not agents:
+        return Check(
+            "approval_rules",
+            True,
+            "learned per agent: trellis doctor --agent <id> lists the rules accepted for one",
+        )
     url = f"{s.memory_url.rstrip('/')}{SUGGESTIONS_PATH}"
     headers = {"Authorization": f"Bearer {s.api_key or ''}"}
-    try:
-        response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        return Check("approval_rules", False, f"{url} cannot be reached ({type(exc).__name__})")
-    if not response.is_success:
-        return Check("approval_rules", False, f"{url} answered {response.status_code}")
-    found = response.json().get("suggestions") or []
-    accepted = [f"{x['tool']} ({x['suggestion']})" for x in found if x.get("accepted")]
-    return Check("approval_rules", True, f"accepted: {', '.join(accepted) or 'none'}")
+    said: list[str] = []
+    for agent in dict.fromkeys(agents):
+        asked = str(httpx.URL(url, params={"agent_id": agent}))
+        try:
+            response = await client.get(asked, headers=headers)
+        except httpx.HTTPError as exc:
+            return Check(
+                "approval_rules", False, f"{asked} cannot be reached ({type(exc).__name__})"
+            )
+        if not response.is_success:
+            return Check("approval_rules", False, f"{asked} answered {response.status_code}")
+        found = response.json().get("suggestions") or []
+        accepted = [f"{x['tool']} ({x['suggestion']})" for x in found if x.get("accepted")]
+        said.append(f"{agent}: {', '.join(accepted) or 'none'}")
+    return Check("approval_rules", True, f"accepted: {'; '.join(said)}")
 
 
 async def _runs(client: httpx.AsyncClient, s: Settings) -> Check | None:
@@ -340,6 +381,34 @@ def _spool(folder: str) -> Check:
     return Check("spool", True, f"{folder} can be written")
 
 
+def _records(folder: str) -> Check:
+    """Memory writes that failed — tool records, transcripts, outcomes, decisions — kept in
+    the spool for the next start to deliver (``writes.py``): the "records failing" check, which
+    fails while any wait there, counting them by kind."""
+    from trellis.harness.writes import SPOOL_FILE  # noqa: PLC0415 - writes imports telemetry
+
+    kinds: Counter[str] = Counter()
+    for path in sorted(Path(folder).glob(f"{SPOOL_FILE}*")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            return Check(RECORDS, False, f"{path} cannot be read ({exc.strerror or exc})")
+        for line in lines:
+            try:
+                kinds[str(json.loads(line).get("op") or "unknown")] += 1
+            except (ValueError, AttributeError):
+                kinds["unreadable"] += 1
+    if not kinds:
+        return Check(RECORDS, True, f"no memory write waits in {folder}")
+    waiting = ", ".join(f"{op}: {n}" for op, n in sorted(kinds.items()))
+    return Check(
+        RECORDS,
+        False,
+        f"{sum(kinds.values())} memory write(s) failed and wait in {folder} ({waiting}): they "
+        "are delivered at the next start; check the memory service (memory ready above)",
+    )
+
+
 async def _docker() -> Check:
     from trellis.harness.sandbox.docker import DockerSandbox  # noqa: PLC0415
 
@@ -372,20 +441,36 @@ def report(
 
 
 def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
-    del argv  # no options
+    """``trellis doctor [--agent ID ...]``: ``--agent`` names an agent whose learned approval
+    rules are listed (beside the agents the key may act as)."""
+    agents = _agents(list(argv or ()))
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
-    found = asyncio.run(checks(settings, env))
+    found = asyncio.run(checks(settings, agents=agents, docker=bool(env.get("DOCKER_HOST"))))
     said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
     sys.stdout.write(said + "\n")
     return 0 if all(c.ok for c in found) else 1
+
+
+def _agents(argv: list[str]) -> list[str]:
+    """The ``--agent ID`` (or ``--agent=ID``) options; anything else is refused."""
+    agents: list[str] = []
+    while argv:
+        given = argv.pop(0)
+        if given.startswith("--agent="):
+            agents.append(given.removeprefix("--agent="))
+        elif given == "--agent" and argv:
+            agents.append(argv.pop(0))
+        else:
+            raise SystemExit(f"usage: trellis doctor [--agent ID ...] (not {given!r})")
+    return agents
 
 
 def cli() -> int:
     """``trellis <command>``: ``trellis doctor``."""
     args = sys.argv[1:]
     if args[:1] != ["doctor"]:
-        sys.stderr.write("usage: trellis doctor\n")
+        sys.stderr.write("usage: trellis doctor [--agent ID ...]\n")
         return 2
     return main(args[1:])
 

@@ -145,7 +145,7 @@ async def test_memory_off_leaves_the_graph_without_a_store(harness: Harness) -> 
     assert seen == [None]  # LangGraph's default: no store
 
 
-@pytest.mark.parametrize("off", [{"memory"}, {"memory_pull"}])
+@pytest.mark.parametrize("off", [{"memory"}])
 async def test_without_memory_the_graph_has_no_store(
     memory_harness: Harness, memory_service: FakeMemoryService, off: set[str]
 ) -> None:
@@ -350,10 +350,10 @@ async def test_a_worker_that_dies_after_a_put_leaves_one_item(
             await dying.execute(
                 Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=runs)
             )
-        held, _ = runs._leases[handle.run_id]
-        runs._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+        held, _ = runs._leases[handle.id]
+        runs._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
         assert await second.worker([taking_over]).run_once()
-        result = await handle.result(timeout=5)
+        result = await handle.result(wait=5)
         assert result.status is RunStatus.SUCCESS, result.error
     finally:
         await first.aclose()

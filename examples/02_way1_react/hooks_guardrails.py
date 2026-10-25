@@ -74,8 +74,7 @@ def refund(number: str, amount: float) -> str:
 
 async def main() -> None:
     memory = ScriptedMemory(catalog=CATALOG)
-    # every agent: no card number reaches a model
-    async with Harness(hooks=[Cards()], **offline_blocks(memory=memory)) as h:
+    async with Harness(**offline_blocks(memory=memory)) as h:
         model = react_model(
             [
                 ("order", {"number": "o1"}),
@@ -83,8 +82,13 @@ async def main() -> None:
                 "Refunded 250 EUR on o1.",
             ]
         )
-        target = ReAct(system="You handle refunds. Look the order up first.", model=model)
-        agent = h.wrap(target, id="refunds", tools=[order, refund], hooks=[Refunds()])
+        target = ReAct(
+            system_prompt="You handle refunds. Look the order up first.",
+            model=model,
+            tools=[order, refund],
+        )
+        # in order: no card number reaches a model, then the refund rules
+        agent = h.wrap(target, id="refunds", hooks=[Cards(), Refunds()])
         paused = await agent.run("Refund order o1, card 4111111111111111.", user="ada")
         assert paused.interrupt is not None  # over 100: the catalog's rule asks
         print("waiting:", paused.interrupt.question)

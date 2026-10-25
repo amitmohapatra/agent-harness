@@ -22,6 +22,7 @@ from langchain.agents import create_agent
 from langchain_core.tools import tool as lc_tool
 from langgraph.graph import END, START, StateGraph
 
+from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
@@ -29,14 +30,8 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness.agent import UNREACHED_FIX
-from trellis.harness.clients.memory import CITED_MAX
+from trellis.harness.clients.memory import CITED_MAX, PUSHED_BUNDLE, PUSHED_MEMORIES
 from trellis.memory.errors import DependencyUnavailableError
-
-LANGFUSE = {
-    "langfuse_public_key": "pk",
-    "langfuse_secret_key": "sk",
-    "langfuse_host": "https://lf.test",
-}
 
 
 @tool(side_effects="read")
@@ -64,17 +59,18 @@ def warned(events: list[Any], code: str) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- 1. learning signal
 @pytest.mark.parametrize("framework", ["function", "react", "openai_agents"])
 async def test_a_sampled_run_is_verified_whatever_the_framework(
-    memory_service: FakeMemoryService, framework: str
+    memory_service: FakeMemoryService, framework: str, sampled: Any
 ) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return "you prefer email"
 
     targets: dict[str, Any] = {
         "function": fn,
-        "react": ReAct(system="s", model=ScriptedChat(["you prefer email"])),
+        "react": ReAct(system_prompt="s", model=ScriptedChat(["you prefer email"])),
         "openai_agents": OpenAIAgent(name="o", model=ScriptedModel(["you prefer email"])),
     }
-    async with harness_with(memory_service, eval_sample=1.0) as h:
+    sampled(1.0)
+    async with harness_with(memory_service) as h:
         result = await h.wrap(targets[framework], id="v").run("contact?", user="u")
         await h.writes.drain()
     [verified] = memory_service.named("verify")
@@ -85,7 +81,7 @@ async def test_a_sampled_run_is_verified_whatever_the_framework(
 
 @pytest.mark.parametrize(("sample", "verified"), [(0.0, False), (1.0, True)])
 async def test_a_runs_own_success_is_its_outcome_and_only_a_sampled_run_is_verified(
-    memory_service: FakeMemoryService, sample: float, verified: bool
+    memory_service: FakeMemoryService, sample: float, verified: bool, sampled: Any
 ) -> None:
     """The run's ``system`` confirm cites nothing (the service keeps it as the outcome only);
     the judge's verdict, on the sampled share, is what teaches."""
@@ -93,7 +89,8 @@ async def test_a_runs_own_success_is_its_outcome_and_only_a_sampled_run_is_verif
     async def fn(input: str, agent: Runtime) -> str:
         return "an answer"
 
-    async with harness_with(memory_service, eval_sample=sample) as h:
+    sampled(sample)
+    async with harness_with(memory_service) as h:
         result = await h.wrap(fn, id="g").run("q", user="u")
         await h.writes.drain()
     own = [f for f in memory_service.stored_feedback.values() if f["source"] == "system"]
@@ -125,8 +122,8 @@ async def test_a_sub_agents_run_reads_its_parents_notes_and_binds_its_group(
 
     async with harness_with(memory_service) as h:
         deeper = h.wrap(grandchild, id="deeper")
-        helper = h.wrap(child, id="helper", tools=[deeper.as_tool()])
-        top = h.wrap(parent, id="lead", tools=[helper.as_tool()])
+        helper = arm(h.wrap(child, id="helper"), [deeper])
+        top = arm(h.wrap(parent, id="lead"), [helper])
         result = await top.run("plan it", user="ada", thread="t1")
         await h.writes.drain()
     assert result.status is RunStatus.SUCCESS, result.error
@@ -162,8 +159,8 @@ async def test_a_sub_agents_run_keeps_its_scope_when_it_continues(
         return await agent.tools.call("payer", message=input)
 
     async with harness_with(memory_service) as h:
-        payer = h.wrap(child, id="payer", tools=[pay])
-        boss = h.wrap(parent, id="boss", tools=[payer.as_tool()])
+        payer = arm(h.wrap(child, id="payer"), [pay])
+        boss = arm(h.wrap(parent, id="boss"), [payer])
         paused = await boss.run("o-1", user="ada")
         assert paused.interrupt is not None
         done = await boss.resume(paused.run_id, "approve", reviewer="cfo")
@@ -193,7 +190,7 @@ async def test_an_openai_agents_own_tools_count_for_its_skills_and_hints(
     model = ScriptedModel(["done"])
     target = OpenAIAgent(name="o", model=model, tools=[make(i) for i in range(4)])
     async with harness_with(memory_service) as h:
-        await h.wrap(target, id="native", tools=[stock]).run("how many?", user="u")
+        await arm(h.wrap(target, id="native"), [stock]).run("how many?", user="u")
     [asked] = memory_service.named("context")
     # the harness's tool and the agent's own four: five, the hints' threshold
     assert asked.body["tools"]["available"] == ["stock", "own0", "own1", "own2", "own3"]
@@ -235,27 +232,47 @@ async def test_react_counts_its_toolbox_not_its_automatic_tools(
     offers on a long task (the files), which are not the agent's tools."""
     model = ScriptedChat(["seven"])
     async with harness_with(memory_service) as h:
-        await h.wrap(ReAct(system="s", model=model), id="r", tools=[stock]).run("q", user="u")
+        await arm(h.wrap(ReAct(system_prompt="s", model=model), id="r"), [stock]).run("q", user="u")
     [asked] = memory_service.named("context")
     assert asked.body["tools"]["available"] == ["stock"]
 
 
-def test_claudes_tools_are_its_built_ins_and_the_mcp_tools_it_names() -> None:
-    from claude_agent_sdk import ClaudeAgentOptions
+async def test_claudes_tools_are_its_built_ins_and_the_mcp_tools_it_names_lists_and_calls() -> None:
+    from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server
+    from claude_agent_sdk import tool as sdk_tool
 
     from trellis.harness.adapters.claude import BUILTIN_SIDE_EFFECTS, ClaudeAdapter
 
-    adapter = ClaudeAdapter()
-    assert adapter.native_tools(ClaudeAgentOptions()) == list(BUILTIN_SIDE_EFFECTS)
+    async def names(options: ClaudeAgentOptions, adapter: ClaudeAdapter | None = None) -> list[str]:
+        return [s.name for s in await (adapter or ClaudeAdapter()).native(options)]
+
+    assert await names(ClaudeAgentOptions()) == sorted(BUILTIN_SIDE_EFFECTS)
     narrowed = ClaudeAgentOptions(
         tools=["Read", "Bash"],
         disallowed_tools=["Bash", "mcp__crm__delete"],
         allowed_tools=["Read", "mcp__crm__find", "mcp__crm__delete", "mcp__trellis__stock"],
     )
-    assert adapter.native_tools(narrowed) == ["Read", "mcp__crm__find"]
-    assert adapter.native_tools(ClaudeAgentOptions(tools=[])) == []
+    assert await names(narrowed) == ["Read", "mcp__crm__find"]
+    assert await names(ClaudeAgentOptions(tools=[])) == []
     preset = ClaudeAgentOptions(tools={"type": "preset", "preset": "claude_code"})
-    assert adapter.native_tools(preset) == list(BUILTIN_SIDE_EFFECTS)
+    assert await names(preset) == sorted(BUILTIN_SIDE_EFFECTS)
+
+    @sdk_tool("lookup", "Look an order up.", {"order": str})
+    async def lookup(args: dict[str, Any]) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": "found"}]}
+
+    # an in-process server's tools are listed; a tool the agent was seen calling joins the set
+    server = create_sdk_mcp_server("orders", tools=[lookup])
+    adapter = ClaudeAdapter()
+    listing = ClaudeAgentOptions(tools=[], mcp_servers={"orders": server})
+    [found] = await adapter.native(listing)
+    assert (found.name, found.source, found.server) == ("mcp__orders__lookup", "mcp", "orders")
+    adapter.observed("mcp__wiki__search")
+    adapter.observed("Read")  # a built-in is declared, not learned
+    assert await names(listing, adapter) == ["mcp__orders__lookup", "mcp__wiki__search"]
+    odd: Any = {"type": "sdk", "name": "odd", "instance": object()}
+    broken = ClaudeAgentOptions(tools=[], mcp_servers={"odd": odd})
+    assert await names(broken) == []  # cannot be listed: said once, and left out
 
 
 async def test_a_function_has_no_tools_of_its_own(memory_service: FakeMemoryService) -> None:
@@ -263,7 +280,7 @@ async def test_a_function_has_no_tools_of_its_own(memory_service: FakeMemoryServ
         return "x"
 
     async with harness_with(memory_service) as h:
-        await h.wrap(fn, id="f", tools=[stock]).run("q", user="u")
+        await arm(h.wrap(fn, id="f"), [stock]).run("q", user="u")
     [asked] = memory_service.named("context")
     assert asked.body["tools"]["available"] == ["stock"]
 
@@ -288,11 +305,13 @@ async def test_without_tool_search_the_own_tools_still_bring_the_skills(
 # --------------------------------------------------------------------------- 5. feedback
 async def test_a_persons_verdict_cites_the_memories_the_answer_rested_on(
     memory_service: FakeMemoryService,
+    sampled: Any,
 ) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return "you prefer email"
 
-    async with harness_with(memory_service, eval_sample=1.0) as h:  # a verified run
+    sampled(1.0)
+    async with harness_with(memory_service) as h:  # a verified run
         result = await h.wrap(fn, id="f").run("contact?", user="u")
         await h.writes.drain()  # the check, and with it the judge's verdict
         # another voice on the run citing something else is not what the answer rested on
@@ -323,39 +342,71 @@ async def test_a_verdict_on_a_run_never_checked_cites_nothing(
 
 
 @pytest.mark.parametrize("listed", [200, 404])
-async def test_a_verdict_on_an_unverified_run_succeeds_citing_nothing(
-    memory_service: FakeMemoryService, listed: int
+async def test_a_verdict_on_an_unverified_run_cites_what_its_context_showed(
+    memory_service: FakeMemoryService, listed: int, sampled: Any
 ) -> None:
-    """Outside the sample the run has no judge's verdict: the person's verdict is sent, with
-    no citations, whether the service lists nothing on the run or knows nothing of it."""
+    """Outside the sample the run has no judge's verdict: the person's verdict cites the
+    memories the run's pushed context showed, which the run's own outcome record keeps with
+    its ``bundle_id`` — and is sent citing nothing when the service knows nothing of the
+    run."""
     if listed == 404:
         memory_service.failures["feedback_list"] = 404
 
     async def fn(input: str, agent: Runtime) -> str:
         return "an answer"
 
-    async with harness_with(memory_service, eval_sample=0.0) as h:
+    sampled(0.0)
+    async with harness_with(memory_service) as h:
         result = await h.wrap(fn, id="f").run("q", user="u")
         await h.writes.drain()
         stored = await h.feedback(result.run_id, "confirm")
     assert memory_service.named("verify") == []
-    if listed == 200:  # asked as the service's GET /v1/feedback takes it
-        [asked] = memory_service.named("feedback_list")
-        assert asked.query["target_kind"] == "run"
-        assert asked.query["target_id"] == asked.query["agent_run_id"] == result.run_id
+    [outcome] = [f for f in memory_service.named("feedback") if f.body["source"] == "system"]
+    kept = outcome.body["metadata"]  # flat: the service keeps metadata two levels deep
+    assert kept[PUSHED_BUNDLE].startswith("bnd_") and kept[PUSHED_MEMORIES] == ["mem_1", "mem_2"]
     [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
-    assert sent.body["evidence_refs"] == [] and stored is not None
+    assert stored is not None
+    if listed == 404:
+        assert sent.body["evidence_refs"] == []
+        return
+    [asked] = memory_service.named("feedback_list")  # as the service's GET /v1/feedback takes it
+    assert asked.query["target_kind"] == "run"
+    assert asked.query["target_id"] == asked.query["agent_run_id"] == result.run_id
+    cited = [(r["source_type"], r["source_id"]) for r in sent.body["evidence_refs"]]
+    assert cited == [("memory", "mem_1"), ("memory", "mem_2")]
+
+
+async def test_a_run_whose_context_showed_no_memory_cites_nothing(
+    memory_service: FakeMemoryService,
+    sampled: Any,
+) -> None:
+    memory_service.shown = []
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return "an answer"
+
+    sampled(0.0)
+    async with harness_with(memory_service) as h:
+        result = await h.wrap(fn, id="f").run("q", user="u")
+        await h.writes.drain()
+        await h.feedback(result.run_id, "confirm")
+    [outcome] = [f for f in memory_service.named("feedback") if f.body["source"] == "system"]
+    assert outcome.body["metadata"][PUSHED_MEMORIES] == []
+    [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
+    assert sent.body["evidence_refs"] == []
 
 
 async def test_the_cited_memories_are_each_once_and_bounded(
     memory_service: FakeMemoryService,
+    sampled: Any,
 ) -> None:
     memory_service.cited = [f"mem_{i}" for i in range(CITED_MAX + 10)] + ["mem_0"]
 
     async def fn(input: str, agent: Runtime) -> str:
         return "an answer"
 
-    async with harness_with(memory_service, eval_sample=1.0) as h:  # a verified run
+    sampled(1.0)
+    async with harness_with(memory_service) as h:  # a verified run
         result = await h.wrap(fn, id="f").run("q", user="u")
         await h.writes.drain()
         await h.feedback(result.run_id, "confirm")
@@ -417,14 +468,14 @@ async def test_the_documents_are_kept_with_the_run_and_its_sub_agents(
 
     async with harness_with(memory_service) as h:
         summarize = h.wrap(child, id="summarize")
-        lead = h.wrap(parent, id="lead", tools=[summarize.as_tool(), send])
+        lead = arm(h.wrap(parent, id="lead"), [summarize, send])
         handle = await lead.start("sum up", user="ada", document_ids=["doc_1"])
         assert await h.worker([lead]).run_once()
-        paused = await handle.result(timeout=5)
+        paused = await handle.result(wait=5)
         assert paused.interrupt is not None
         await lead.resume(paused.run_id, "approve", reviewer="ada")
         assert await h.worker([lead]).run_once()
-        done = await handle.result(timeout=5)
+        done = await handle.result(wait=5)
     assert done.status is RunStatus.SUCCESS
     contexts = memory_service.named("context")
     assert {c.scope["agent_id"] for c in contexts} == {"lead", "summarize"}
@@ -446,7 +497,7 @@ async def test_a_schedule_keeps_its_documents(harness: Harness) -> None:
         return "x"
 
     agent = harness.wrap(fn, id="nightly")
-    assert agent._metadata((), None, ["doc_9"]) == {"document_ids": ["doc_9"]}
+    assert agent._metadata(frozenset(), None, ["doc_9"]) == {"document_ids": ["doc_9"]}
 
 
 # --------------------------------------------------------------------------- 7. unreached
@@ -466,11 +517,18 @@ async def test_a_function_that_never_reads_its_context_is_told_once(
     assert caplog.text.count("reaches neither its input nor its code") == 1
 
 
-@pytest.mark.parametrize("given", ["reads", "messages", "no context"])
+@pytest.mark.parametrize("given", ["reads", "reads current()", "messages", "no context"])
 async def test_a_function_given_the_context_is_not_told(
     memory_service: FakeMemoryService, given: str
 ) -> None:
+    def helper() -> str:  # code the function calls: the run's context through current()
+        runtime = current()
+        assert runtime is not None
+        return f"{runtime.context}"
+
     async def reads(input: Any, agent: Runtime) -> str:
+        if given == "reads current()":
+            assert helper() == memory_service.context_text
         return f"{agent.context}" if given == "reads" else "fine"
 
     if given == "no context":

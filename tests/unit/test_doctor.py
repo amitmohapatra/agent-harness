@@ -24,7 +24,6 @@ ENV = {
     "TRELLIS_API_KEY": "trk_secret_5678",
     "RUNS_URL": "http://runs.test",
     "TRELLIS_SPOOL_DIR": "",
-    "PROMPTS_DIR": "./prompts",
 }
 
 
@@ -33,10 +32,9 @@ def test_the_settings_are_shown_with_their_sources_and_secrets_redacted() -> Non
     assert rows["bifrost_url"] == ("http://gw.test/v1", "BIFROST_URL")
     assert rows["bifrost_virtual_key"] == ("set (...1234)", "BIFROST_VIRTUAL_KEY")
     assert rows["api_key"][0] == "set (...5678)" and "secret" not in rows["api_key"][0]
-    assert rows["eval_sample"] == ("0.1", "default")
     assert rows["spool_dir"] == ("unset", "default")
+    assert set(rows) == set(Settings.model_fields)  # every setting, and nothing else
     assert doctor.shown("api_key", "short") == "set"
-    assert doctor.shown("otlp_headers", {"authorization": "Basic x"}) == "set"
 
 
 MEM = "http://mem.test"
@@ -46,10 +44,13 @@ VERSION = {"service": "trellis-memory", "version": "0.4.1", "api_version": "v1"}
 
 
 def memory_answers(
-    key: dict[str, Any] | None = None, *, ready: tuple[int, dict[str, Any]] = (200, READY)
+    key: dict[str, Any] | None = None,
+    *,
+    ready: tuple[int, dict[str, Any]] = (200, READY),
+    suggestions: bool = True,
 ) -> None:
-    """The memory service as ``doctor`` asks it: who the key is, readiness, version, the
-    approval suggestions."""
+    """The memory service as ``doctor`` asks it: who the key is, readiness, version, and no
+    approval suggestions for any agent."""
     respx.get(f"{MEM}{doctor.KEY_PATH}").mock(
         return_value=httpx.Response(200, json=key or SERVICE_KEY)
     )
@@ -57,29 +58,35 @@ def memory_answers(
         return_value=httpx.Response(ready[0], json=ready[1])
     )
     respx.get(f"{MEM}{doctor.VERSION_PATH}").mock(return_value=httpx.Response(200, json=VERSION))
-    respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}").mock(
-        return_value=httpx.Response(200, json={"suggestions": []})
-    )
+    if suggestions:  # none for any agent (else the test answers them itself)
+        respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}").mock(
+            return_value=httpx.Response(200, json={"suggestions": []})
+        )
 
 
 @respx.mock
 async def test_each_service_is_reached_with_its_key(tmp_path: Path) -> None:
     respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(200, json={}))
-    memory_answers()
+    memory_answers(suggestions=False)
     respx.get("http://mem.test/v1/keys/self").mock(return_value=httpx.Response(401))
     respx.get("http://runs.test/v1/runs/doctor-check").mock(return_value=httpx.Response(404))
     learned = [
         {"tool": "po", "suggestion": "auto_approve", "accepted": True},
         {"tool": "wire", "suggestion": "auto_approve", "accepted": False},
     ]
-    respx.get("http://mem.test/v1/tools/approval-suggestions").mock(
+    # learned per agent: the service lists an agent's in its scope only
+    respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}", params={"agent_id": "buyer"}).mock(
         return_value=httpx.Response(200, json={"suggestions": learned})
     )
+    respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}", params={"agent_id": "clerk"}).mock(
+        return_value=httpx.Response(200, json={"suggestions": []})
+    )
     settings = Settings.from_env({**ENV, "TRELLIS_SPOOL_DIR": str(tmp_path)})
-    found = {c.name: c for c in await doctor.checks(settings)}
+    found = {c.name: c for c in await doctor.checks(settings, agents=["buyer", "clerk", "buyer"])}
     assert found["gateway"].ok and found["runs"].ok and found["spool"].ok
     assert not found["memory"].ok and "refused the key (401)" in found["memory"].said
-    assert found["approval_rules"].said == "accepted: po (auto_approve)"  # wire waits
+    # wire waits for a person; each agent asked once
+    assert found["approval_rules"].said == "accepted: buyer: po (auto_approve); clerk: none"
     # what needs the key is not asked; readiness and the version need none
     assert "memory key" not in found and "model key" not in found
     assert found["memory ready"].ok and found["memory version"].ok
@@ -99,7 +106,7 @@ async def test_a_service_down_or_failing_is_a_failed_check(tmp_path: Path) -> No
     settings = Settings.from_env(
         {**ENV, "RUNS_URL": "", "TRELLIS_SPOOL_DIR": str(blocked / "spool")}
     )
-    found = {c.name: c for c in await doctor.checks(settings)}
+    found = {c.name: c for c in await doctor.checks(settings, agents=["buyer"])}
     assert "cannot be reached (ConnectError)" in found["gateway"].said
     assert found["memory"].said.endswith("answered 500") and "runs" not in found
     assert not found["approval_rules"].ok and found["approval_rules"].said.endswith("403")
@@ -200,23 +207,23 @@ async def test_the_docker_daemon_is_pinged_when_sandboxes_are_docker(
 ) -> None:
     monkeypatch.setenv("DOCKER_HOST", "tcp://docker.test:2375")
     respx.get("http://docker.test:2375/v1.43/_ping").mock(return_value=httpx.Response(200))
-    [check] = await doctor.checks(Settings(sandbox="docker"))
+    [check] = await doctor.checks(Settings(), docker=True)
     assert check.ok and check.said == "tcp://docker.test:2375 answered 200"
     respx.get("http://docker.test:2375/v1.43/_ping").mock(side_effect=httpx.ConnectError("x"))
-    [check] = await doctor.checks(Settings(sandbox="docker"))
+    [check] = await doctor.checks(Settings(), docker=True)
     assert not check.ok
 
 
 def test_suggestions_never_apply_anything() -> None:
     settings = Settings.from_env(ENV)
     said = doctor.suggestions(settings, ENV)
-    assert any(s.startswith("PROMPTS_DIR is deprecated") for s in said)
     assert any("network_config.max_retries" in s for s in said)
     assert any("TRELLIS_SPOOL_DIR" in s for s in said)
     assert any("service.version" in s for s in said)
-    assert doctor.suggestions(Settings(spool_dir="/s", agent_version="1"), {}) == []
-    lone = Settings(memory_url="http://m", spool_dir="/s", agent_version="1")
-    assert doctor.suggestions(lone, {}) == [
+    versioned = {"OTEL_RESOURCE_ATTRIBUTES": "service.version=1"}
+    assert doctor.suggestions(Settings(spool_dir="/s"), versioned) == []
+    lone = Settings(memory_url="http://m", spool_dir="/s")
+    assert doctor.suggestions(lone, versioned) == [
         "runs are kept in this process: set RUNS_URL for durable runs and workers"
     ]
 
@@ -268,10 +275,69 @@ def test_a_context_without_a_host_is_the_local_socket(tmp_path: Path) -> None:
 
 @respx.mock
 async def test_approval_rules_that_cannot_be_listed_fail_the_check() -> None:
-    memory_answers()
     respx.get("http://mem.test/v1/tools/approval-suggestions").mock(
         side_effect=httpx.ConnectError("down")
     )
+    memory_answers({**SERVICE_KEY, "may_act_as": ["agent:support"]}, suggestions=False)
     settings = Settings.from_env({"MEMORY_URL": "http://mem.test", "TRELLIS_API_KEY": "k"})
     found = {c.name: c for c in await doctor.checks(settings)}
     assert "cannot be reached (ConnectError)" in found["approval_rules"].said
+    assert "agent_id=support" in found["approval_rules"].said  # the agent the key acts as
+
+
+@respx.mock
+async def test_approval_rules_are_listed_per_agent_and_a_tenant_wide_read_lists_none() -> None:
+    memory_answers()
+    found = {c.name: c for c in await doctor.checks(Settings(memory_url=MEM, api_key="k"))}
+    rules = found["approval_rules"]
+    assert rules.ok and "trellis doctor --agent <id>" in rules.said
+    # a tenant-wide read would list nothing: suggestions are an agent's
+    assert not [c for c in respx.calls if c.request.url.path == doctor.SUGGESTIONS_PATH]
+
+
+def test_the_cli_names_agents(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[list[str]] = []
+
+    async def checks(settings: Settings, *, agents: list[str], docker: bool) -> list[doctor.Check]:
+        asked.append(agents)
+        return []
+
+    monkeypatch.setattr(doctor, "checks", checks)
+    assert doctor.main(["--agent", "a", "--agent=b"], {}) == 0
+    assert asked == [["a", "b"]]
+    for wrong in (["--agent"], ["--verbose"]):
+        with pytest.raises(SystemExit, match="usage: trellis doctor"):
+            doctor.main(wrong, {})
+
+
+def test_records_failing_lists_the_memory_writes_waiting_in_the_spool(tmp_path: Path) -> None:
+    from trellis.harness.writes import SPOOL_FILE
+
+    found = doctor._records(str(tmp_path))
+    assert found.ok and found.name == "records failing"
+    lines = [
+        json.dumps({"label": "memory.record_tool", "op": "record_tool"}),
+        json.dumps({"label": "memory.record_tool", "op": "record_tool"}),
+        json.dumps({"label": "memory.transcript", "op": "record_messages"}),
+        "not json",
+    ]
+    (tmp_path / SPOOL_FILE).write_text("\n".join(lines[:3]) + "\n")
+    (tmp_path / f"{SPOOL_FILE}.7.replaying").write_text(lines[3] + "\n")
+    failing = doctor._records(str(tmp_path))
+    assert not failing.ok
+    assert failing.said.startswith("4 memory write(s) failed and wait in")
+    assert "(record_messages: 1, record_tool: 2, unreadable: 1)" in failing.said
+
+
+def test_records_that_cannot_be_read_fail_the_check(tmp_path: Path) -> None:
+    from trellis.harness.writes import SPOOL_FILE
+
+    (tmp_path / SPOOL_FILE).mkdir()  # not a file
+    found = doctor._records(str(tmp_path))
+    assert not found.ok and "cannot be read" in found.said
+
+
+@respx.mock
+async def test_the_spool_and_its_waiting_records_are_checked(tmp_path: Path) -> None:
+    found = {c.name: c for c in await doctor.checks(Settings(spool_dir=str(tmp_path)))}
+    assert found["spool"].ok and found["records failing"].ok

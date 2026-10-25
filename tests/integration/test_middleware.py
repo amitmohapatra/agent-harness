@@ -6,7 +6,6 @@ the task, and the checkpoint kept in the run."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from typing import Any, cast
 
 import httpx2
@@ -14,14 +13,12 @@ import openai
 import pytest
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, Hooks, ModelCall, Settings, current, tool
 from trellis.contracts import ConfigurationError, ModelError, RunEventType, RunStatus
-from trellis.harness import telemetry
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
     LAST_STEP,
@@ -35,16 +32,7 @@ from trellis.harness.middleware import (
     model_error,
     read_result,
 )
-from trellis.harness.prompts import PromptSources, ResolvedPrompt
-
-
-@pytest.fixture
-def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
-    yield exporter
+from trellis.harness.prompts import ResolvedPrompt, stored
 
 
 @tool(side_effects="read")
@@ -75,7 +63,7 @@ async def test_a_graph_with_harness_tools_takes_the_runs_tools_sorted_per_call(
     alpha = tool(lambda: "a", name="alpha")
     model = ScriptedChatModel(turns=[("zeta", {}), "done"])
     target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="sorted", tools=[zeta, alpha])
+    agent = arm(harness.wrap(target, id="sorted"), [zeta, alpha])
     assert isinstance(agent.adapter, LangGraphAdapter)
     assert (agent.adapter.fixed_tools, agent.adapter.narrows) == (False, "turn")
     assert HARNESS_TOOLS in _HarnessToolsState.__annotations__  # how the harness tells
@@ -100,7 +88,7 @@ async def test_a_graphs_own_tools_stay_beside_the_runs(harness: Harness) -> None
 
     model = ScriptedChatModel(turns=[("mine", {"x": "1"}), "done"])
     target = graph(model, HarnessTools(), tools=[mine])
-    agent = harness.wrap(target, id="own", tools=[look])
+    agent = arm(harness.wrap(target, id="own"), [look])
     assert (await agent.run("x", user="u")).answer == "done"
     assert model.requests[0]["tools"] == ["look", "mine"]
     assert tool_messages(model, 1) == [("call_1_0", "mine 1")]
@@ -138,7 +126,7 @@ async def test_writes_run_one_at_a_time_in_the_models_order_beside_the_reads(
     batch = [("order", {"sku": "b"}), ("price", {"sku": "a"}), ("order", {"sku": "c"})]
     model = ScriptedChatModel(turns=[[*batch, ("price", {"sku": "b"})], "done"])
     target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="shop", tools=[price, order])
+    agent = arm(harness.wrap(target, id="shop"), [price, order])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     ordered = [h for h in happened if h.startswith("order")]
@@ -190,7 +178,7 @@ async def test_a_pause_in_a_step_keeps_what_finished_and_the_later_writes_wait(
     ]
     model = ScriptedChatModel(turns=[batch, "done"])
     target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="batch", tools=[confirm, slow, ship, bill])
+    agent = arm(harness.wrap(target, id="batch"), [confirm, slow, ship, bill])
     result = await agent.run("x", user="u")
     asked: list[tuple[str, int | None]] = []
     while result.status is RunStatus.PAUSED:
@@ -239,7 +227,7 @@ async def test_without_a_checkpointer_a_pause_stops_the_later_writes_and_replays
 
     script = ScriptedChatModel(turns=[[("ship", {"item": "a"}), ("ship", {"item": "b"})], "done"])
     target = graph(script, HarnessTools())
-    agent = harness.wrap(target, id="replayed", tools=[ship])
+    agent = arm(harness.wrap(target, id="replayed"), [ship])
     first = await agent.run("x", user="u")
     assert first.status is RunStatus.PAUSED and first.interrupt is not None
     assert ran == []
@@ -284,7 +272,7 @@ async def test_model_hooks_rewrite_the_call_and_the_span_carries_it_redacted(
         turns=[("echo", {"text": "hi", "api_key": "k1"}), ("echo", {"text": secret}), "done"]
     )
     target = graph(model, HarnessTools(), ModelHooks(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="hooked", tools=[echo], hooks=[hooks])
+    agent = arm(harness.wrap(target, id="hooked", hooks=[hooks]), [echo])
     await agent.run({"messages": [{"role": "user", "content": "go"}], "password": "pw"}, user="u")
     assert [c.framework for c in hooks.calls] == ["langgraph"] * 3
     assert model.seen[0][-1].content == "be brief"  # the rewritten call was the one made
@@ -333,8 +321,8 @@ async def test_a_model_call_past_its_time_is_a_retryable_model_error(harness: Ha
     agent = harness.wrap(target, id="slow")
     result = await agent.run("x", user="u")
     assert result.error is not None
-    assert result.error.message == "the model did not answer within 0.05s"
-    assert result.error.retryable
+    assert result.error.message == "the model did not answer within 0.05s: the step stalled"
+    assert result.error.retryable and result.error.code == "MODEL_TIMEOUT"
     assert isinstance(hooks.errors[0], ModelError)
     with pytest.raises(ModelError, match="did not answer"):
         await graph(Slow(turns=[]), ModelHooks(timeout=0.05)).ainvoke(
@@ -344,7 +332,7 @@ async def test_a_model_call_past_its_time_is_a_retryable_model_error(harness: Ha
 
 async def test_the_run_time_left_bounds_a_model_call(harness: Harness) -> None:
     target = graph(Slow(turns=[]), ModelHooks())
-    result = await harness.wrap(target, id="late").run("x", user="u", timeout=0.1)
+    result = await harness.wrap(target, id="late").run("x", user="u", run_timeout=0.1)
     assert result.status is RunStatus.TIMEOUT
 
 
@@ -382,10 +370,9 @@ async def test_a_model_client_error_reaches_the_run_as_a_model_error(harness: Ha
     assert result.error.code == "MODEL_ERROR" and "(429)" in result.error.message
 
 
-class Stored:
-    """A prompt source holding a stored prompt of the gateway and a text prompt."""
-
-    label = "test"
+class Repository:
+    """The gateway's prompt repository, as the harness reads it: a prompt with no variables and
+    one with."""
 
     def __init__(self) -> None:
         self.asked: list[str] = []
@@ -407,11 +394,11 @@ class Stored:
         )
 
 
-async def test_a_stored_prompt_is_pinned_for_the_run_sent_as_headers_and_journaled(
+async def test_a_stored_prompt_is_pinned_for_the_run_and_journaled(
     harness: Harness, spans: InMemorySpanExporter
 ) -> None:
-    source = Stored()
-    harness.prompts = PromptSources([source])
+    source = Repository()
+    harness.prompts._resolve = source.resolve  # type: ignore[method-assign]
 
     @tool(side_effects="read")
     async def confirm(item: str) -> str:
@@ -420,59 +407,51 @@ async def test_a_stored_prompt_is_pinned_for_the_run_sent_as_headers_and_journal
 
     model = ScriptedChatModel(turns=[("confirm", {"item": "a"}), "done"])
     target = graph(
-        model, HarnessTools(), ModelHooks(prompt="triage"), checkpointer=RunCheckpointer()
+        model, HarnessTools(), ModelHooks(prompt=stored("triage")), checkpointer=RunCheckpointer()
     )
-    agent = harness.wrap(target, id="pinned", tools=[confirm])
+    agent = arm(harness.wrap(target, id="pinned"), [confirm])
     paused = await agent.run("x", user="u")
     assert paused.interrupt is not None
     done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="r")
     assert done.answer == "done"
     assert source.asked == ["triage"]  # resolved once: the resume read the journal
-    headers = [r["extra_headers"] for r in model.requests]
-    assert headers == [{"x-bf-prompt-id": "p-1", "x-bf-prompt-version": "3"}] * 2
     chats = [dict(s.attributes or {}) for s in spans.get_finished_spans() if "chat" in s.name]
     assert {c["trellis.prompt.version"] for c in chats} == {3}
 
 
 async def test_any_other_prompt_is_rendered_into_the_instructions(harness: Harness) -> None:
-    harness.prompts = PromptSources([Stored()])
+    harness.prompts._resolve = Repository().resolve  # type: ignore[method-assign]
     model = ScriptedChatModel(turns=["done"])
-    hooks = ModelHooks(prompt="persona", prompt_vars={"who": "a pirate"})
+    hooks = ModelHooks(prompt=stored("persona", who="a pirate"))
     agent = harness.wrap(graph(model, hooks, system_prompt="You sell."), id="persona")
     assert (await agent.run("x", user="u")).answer == "done"
     sent = model.seen[0]
     assert sent[0].content == "Answer as a pirate.\n\nYou sell."
     assert [m.content for m in sent[1:]] == ["An example.", "x"]
-    stored = harness.wrap(graph(ScriptedChatModel(turns=["x"]), hooks_of("triage")), id="vars")
-    failed = await stored.run("x", user="u")
-    assert failed.error is not None and "no prompt_vars" in failed.error.message
+    unfilled = ModelHooks(prompt=stored("persona"))
+    agent = harness.wrap(graph(ScriptedChatModel(turns=["x"]), unfilled), id="vars")
+    failed = await agent.run("x", user="u")
+    assert failed.error is not None and "needs who: pass them" in failed.error.message
 
 
-def hooks_of(prompt: str) -> ModelHooks:
-    return ModelHooks(prompt=prompt, prompt_vars={"who": "x"})
-
-
-async def test_a_prompt_needs_a_run_and_a_source(harness: Harness) -> None:
-    with pytest.raises(ConfigurationError, match=r"h\.model_headers"):
-        await graph(ScriptedChatModel(turns=["x"]), ModelHooks(prompt="triage")).ainvoke(
+async def test_a_prompt_needs_a_run_and_the_gateway(harness: Harness) -> None:
+    hooks = ModelHooks(prompt=stored("triage"))
+    with pytest.raises(ConfigurationError, match="pinned for a harness run"):
+        await graph(ScriptedChatModel(turns=["x"]), hooks).ainvoke(
             {"messages": [HumanMessage("x")]}
         )
-    agent = harness.wrap(graph(ScriptedChatModel(turns=["x"]), ModelHooks(prompt="t")), id="np")
+    agent = harness.wrap(graph(ScriptedChatModel(turns=["x"]), hooks), id="np")
     result = await agent.run("x", user="u")
-    assert result.error is not None and "no prompt source" in result.error.message
+    assert result.error is not None and "set BIFROST_URL" in result.error.message
     with pytest.raises(ConfigurationError, match="seconds"):
         ModelHooks(timeout=0)
-    with pytest.raises(ConfigurationError):
-        ModelHooks(prompt="triage@")
-    with pytest.raises(ConfigurationError, match="prompt_vars"):
-        ModelHooks(prompt_vars={"a": 1})
 
 
 # --------------------------------------------------------------------------- StepLimit
 async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("look", {"item": "a"}), ("look", {"item": "b"}), "partial"])
     target = graph(model, HarnessTools(), StepLimit(2), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="limit", tools=[look])
+    agent = arm(harness.wrap(target, id="limit"), [look])
     events = [e async for e in agent.stream("x", user="u")]
     assert events[-1].data["result"] == "partial"
     last = model.requests[-1]
@@ -502,7 +481,7 @@ async def test_a_step_limit_with_no_tools_and_a_last_call_without_an_answer() ->
 async def test_the_same_call_repeated_stops_the_run(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("look", {"item": "a"})] * 3)
     target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
-    result = await harness.wrap(target, id="stall", tools=[look]).run("x", user="u")
+    result = await arm(harness.wrap(target, id="stall"), [look]).run("x", user="u")
     assert result.error is not None
     assert result.error.message == (
         "stopped: the model called 'look' with the same arguments 3 times in a row (a stall)"
@@ -530,7 +509,7 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
         ]
     )
     target = graph(model, HarnessTools(), StallGuard(), checkpointer=RunCheckpointer())
-    result = await harness.wrap(target, id="flaky", tools=[flaky]).run("x", user="u")
+    result = await arm(harness.wrap(target, id="flaky"), [flaky]).run("x", user="u")
     assert result.error is not None
     assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
     assert model.turns == ["never"]
@@ -553,7 +532,7 @@ async def test_read_result_reads_a_result_of_the_conversation_in_parts(harness: 
         ]
     )
     target = graph(model, HarnessTools(), tools=[read_result(30)], checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="reader", tools=[dump])
+    agent = arm(harness.wrap(target, id="reader"), [dump])
     assert (await agent.run("x", user="u")).answer == "done"
     assert READ_RESULT in model.requests[0]["tools"]
     assert tool_messages(model, 2)[-1][1] == (
@@ -605,18 +584,21 @@ async def test_a_pause_resumes_in_place_in_another_process(harness: Harness) -> 
 
     store = harness.runs
     first_model = ScriptedChatModel(turns=[("ship", {"item": "a"})])
-    first = harness.wrap(
-        graph(first_model, HarnessTools(), checkpointer=RunCheckpointer()), id="ship", tools=[ship]
+    first = arm(
+        harness.wrap(graph(first_model, HarnessTools(), checkpointer=RunCheckpointer()), id="ship"),
+        [ship],
     )
     paused = await first.run("x", user="u")
     assert paused.interrupt is not None
     # another process: its own graph, its own (empty) checkpointer, the same run store
     async with Harness(config=Settings(), runs=store) as other:
         second_model = ScriptedChatModel(turns=["done"])
-        second = other.wrap(
-            graph(second_model, HarnessTools(), checkpointer=RunCheckpointer()),
-            id="ship",
-            tools=[ship],
+        second = arm(
+            other.wrap(
+                graph(second_model, HarnessTools(), checkpointer=RunCheckpointer()),
+                id="ship",
+            ),
+            [ship],
         )
         done = await second.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.answer == "done", done.error
@@ -642,7 +624,7 @@ async def test_a_tool_that_asks_twice_is_answered_once_each(harness: Harness) ->
 
     model = ScriptedChatModel(turns=[("interview", {"name": "a"}), "done"])
     target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
-    agent = harness.wrap(target, id="twice", tools=[interview])
+    agent = arm(harness.wrap(target, id="twice"), [interview])
     paused = await agent.run("x", user="u")
     assert paused.interrupt is not None and paused.interrupt.question == "First?"
     again = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="one", reviewer="r")

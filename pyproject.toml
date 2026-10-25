@@ -1,6 +1,6 @@
 [project]
 name = "trellis-harness"
-version = "0.4.0"
+version = "0.5.0"
 description = "Attach memory, tools, approvals, durable runs and tracing to an agent you already built."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,7 +21,7 @@ classifiers = [
 # framework arrives with a newer trellis-harness.
 dependencies = [
   "trellis-contracts>=0.6.1,<0.7",
-  "trellis-memory>=0.4",
+  "trellis-memory>=0.5",
   "trellis-runs>=0.4.0",
   "bifrost-sdk>=0.3",
   "pydantic>=2.13,<3",

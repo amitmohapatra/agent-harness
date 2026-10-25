@@ -44,6 +44,7 @@ from tests.live.conftest import MODEL, OPS, _virtual_key, live_harness, needs_ga
 from tests.live.proof import MODEL_FAILURES, RUN_SECONDS
 from tests.live.support import Sent as Wire
 from tests.live.support import gateway_model
+from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
 from trellis import Harness, Hooks, ModelCall, ReAct, current
 from trellis.contracts import ToolSpec
@@ -242,13 +243,15 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
                 # what the assistant can do: told with the guidance
                 capabilities=can if switches.get("tool_guidance") else None,
             )
-            agent = h.wrap(
-                target,
-                id=f"tool-choice-{variant}",
-                tools=tools,
-                without={"mcp"},
-                hooks=[sent],
-                timeout=RUN_SECONDS,
+            agent = arm(
+                h.wrap(
+                    target,
+                    id=f"tool-choice-{variant}",
+                    without={"mcp"},
+                    hooks=[sent],
+                    run_timeout=RUN_SECONDS,
+                ),
+                tools,
             )
             rows: list[dict[str, Any]] = []
             for _ in range(REPEATS):
@@ -371,11 +374,13 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
 
         # Bifrost Code Mode: the wikis, read-only by the catalog, behind the meta-tools
         rules = {name: Rule(risk="read") for name in own if not name.startswith(OPS)}
-        coded = Harness(
-            config=settings(
-                bifrost_virtual_key=store_key, memory_url=None, runs_url=None, api_key=None
+        coded = with_governance(
+            Harness(
+                config=settings(
+                    bifrost_virtual_key=store_key, memory_url=None, runs_url=None, api_key=None
+                ),
             ),
-            governance=Governance(FakeCatalog(rules)),
+            Governance(FakeCatalog(rules)),
         )
         async with coded:
             wire, sent = Wire(), Sent()

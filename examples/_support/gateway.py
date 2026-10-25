@@ -6,7 +6,9 @@ listed on ``/mcp`` with their annotations (``readOnlyHint``, ``destructiveHint``
 ``/v1/mcp/tool/execute``. A client named in ``code_mode`` is a Code Mode client: its tools are
 not listed one by one but declared through the Code Mode meta-tools, and ``executeToolCode``
 runs a script's ``server.tool(arg=...)`` calls, logging each as the gateway's MCP log does (the
-harness reads them back). Everything else of the gateway (models, prompts, skills) is not here.
+harness reads them back). Its Prompt Repository holds :attr:`ScriptedGateway.prompts` (each a
+list of committed versions, their messages). Everything else of the gateway (models) is not
+here.
 
     gateway = ScriptedGateway({"erp-stock": McpTool(stock, read_only=True)})
     async with Harness(gateway=gateway.gateway()) as h: ...
@@ -15,11 +17,9 @@ harness reads them back). Everything else of the gateway (models, prompts, skill
 from __future__ import annotations
 
 import ast
-import inspect
 import itertools
 import json
 import re
-import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,11 +29,11 @@ import httpx
 from bifrost_sdk import Bifrost
 from bifrost_sdk.admin import Admin
 
+from trellis import tool as local_tool
 from trellis.harness.clients.bifrost import Gateway
 
 URL: Final = "http://gateway.offline/v1"
 META_TOOLS: Final = ("listToolFiles", "readToolFile", "getToolDocs", "executeToolCode")
-JSON_TYPES: Final = {str: "string", int: "integer", float: "number", bool: "boolean"}
 CALL: Final = re.compile(r"(\w+)\.(\w+)\(([^()]*)\)")
 
 
@@ -47,13 +47,12 @@ class McpTool:
 
     @property
     def description(self) -> str:
-        return inspect.getdoc(self.fn) or ""
+        """The docstring without its ``Args:`` (as the harness reads a local tool's)."""
+        return local_tool(self.fn).spec.description
 
     def schema(self) -> dict[str, Any]:
-        hints = typing.get_type_hints(self.fn)
-        params = inspect.signature(self.fn).parameters
-        properties = {n: {"type": JSON_TYPES.get(hints.get(n), "string")} for n in params}
-        return {"type": "object", "properties": properties, "required": list(properties)}
+        """The arguments' JSON schema, each described by the docstring's ``Args:``."""
+        return dict(local_tool(self.fn).spec.input_schema or {})
 
 
 @dataclass
@@ -62,6 +61,8 @@ class ScriptedGateway:
     tools: dict[str, McpTool]
     #: the clients that are Code Mode clients
     code_mode: frozenset[str] = frozenset()
+    #: the stored prompts, by name: each a list of committed versions (their chat messages)
+    prompts: dict[str, list[list[dict[str, Any]]]] = field(default_factory=dict)
     #: every tool the gateway executed, in order (a Code Mode script's nested calls included)
     executed: list[str] = field(default_factory=list)
     _log: list[dict[str, Any]] = field(default_factory=list)
@@ -94,9 +95,32 @@ class ScriptedGateway:
             return httpx.Response(200, json={"logs": logs})
         if path == "/api/mcp/clients":
             return httpx.Response(200, json={"clients": [], "count": 0})
-        if path in ("/api/prompt-repo/prompts", "/api/skills"):
-            return httpx.Response(200, json={"prompts": [], "skills": []})
+        if path.startswith("/api/prompt-repo/prompts"):
+            return self._prompts(path)
         return httpx.Response(404, json={"error": {"message": f"no route {path}"}})
+
+    def _prompts(self, path: str) -> httpx.Response:
+        """The Prompt Repository: the prompts, or one prompt's versions."""
+        if path == "/api/prompt-repo/prompts":
+            return httpx.Response(200, json={"prompts": [self._prompt(n) for n in self.prompts]})
+        name = path.removeprefix("/api/prompt-repo/prompts/p-").removesuffix("/versions")
+        rows = [self._version(name, n) for n in range(1, len(self.prompts[name]) + 1)]
+        return httpx.Response(200, json={"versions": rows})
+
+    def _prompt(self, name: str) -> dict[str, Any]:
+        latest = self._version(name, len(self.prompts[name]))
+        return {"id": f"p-{name}", "name": name, "latest_version": latest}
+
+    def _version(self, name: str, number: int) -> dict[str, Any]:
+        messages = self.prompts[name][number - 1]
+        return {
+            "id": number,
+            "prompt_id": f"p-{name}",
+            "version_number": number,
+            "messages": [{"order_index": i, "message": m} for i, m in enumerate(messages)],
+            "provider": "offline",
+            "model": "offline",
+        }
 
     def _listed(self) -> list[dict[str, Any]]:
         listed: list[dict[str, Any]] = [{"name": n, "inputSchema": {}} for n in META_TOOLS]

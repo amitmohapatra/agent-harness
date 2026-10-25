@@ -13,6 +13,7 @@ import pytest
 
 from tests.live.conftest import live_harness, needs_memory
 from tests.live.support import eventually, memory_scope
+from tests.support.arm import arm
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 
@@ -48,7 +49,7 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
         return "enough"
 
     async with live_harness() as h:
-        agent = h.wrap(restock, id=f"live-restock-{suffix}", tools=[lookup, reorder])
+        agent = arm(h.wrap(restock, id=f"live-restock-{suffix}"), [lookup, reorder])
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         run_ids: list[str] = []
         for n in range(APPROVALS):
@@ -97,6 +98,60 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
         assert all(f.review is None for f in stored if f.source == "system")
 
 
+# longer than the suite's 120 s: the decisions are learned from in the background
+@pytest.mark.timeout(300)
+async def test_a_learned_approval_rule_is_applied_automatically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool an administrator set to always ask, approved by people every time: the memory
+    service learns from the agent's decisions to stop asking, and governance accepts that
+    suggestion for the agent on its next refresh — the next call runs with no pause."""
+    from trellis.harness.governance import catalog as catalog_module
+
+    suffix = uuid.uuid4().hex[:8]
+    order_name = f"order_{suffix}"
+    user = f"live-user-{suffix}"
+
+    @tool(name=order_name, side_effects="write")
+    def order(sku: str, qty: int) -> str:
+        """Order units of a SKU."""
+        return f"ordered {qty} x {sku}"
+
+    async def buyer(input: str, agent: Runtime) -> str:
+        return str(await agent.tools.call(order_name, sku="A-1", qty=2))
+
+    async with live_harness() as h:
+        agent = arm(h.wrap(buyer, id=f"live-buyer-{suffix}"), [order])
+        scope = await memory_scope(h, user=user, agent_id=agent.id)
+        await scope.advanced.tools.put_catalog(
+            [{"name": order_name, "side_effects": "write", "approve_when": "true"}]
+        )
+        for n in range(APPROVALS):
+            paused = await agent.run("order two", user=user, thread=f"buy-{suffix}-{n}")
+            assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+            done = await agent.resume(
+                paused.interrupt.interrupt_id, "approve", reviewer=f"live-lead-{suffix}"
+            )
+            assert done.status is RunStatus.SUCCESS
+        await h.writes.drain()
+        assert h.writes.failed == 0
+
+        async def suggested() -> bool:
+            found = await scope.advanced.tools.approval_suggestions(tool=order_name)
+            return any(s.suggestion == "auto_approve" for s in found)
+
+        assert await eventually(suggested, within=120, every=3)
+        # governance's next refresh (now, not in 30 s) accepts it for this agent
+        later = catalog_module._now() + catalog_module.GOVERNANCE_TTL_SECONDS + 1
+        monkeypatch.setattr(catalog_module, "_now", lambda: later)
+        ran = await agent.run("order two", user=user, thread=f"buy-{suffix}-last")
+        assert ran.status is RunStatus.SUCCESS and ran.answer == "ordered 2 x A-1"
+        [entry] = await scope.advanced.tools.catalog(names=[order_name])
+        assert entry.approve_when and entry.approve_when != "true"  # the learned rule
+        found = await scope.advanced.tools.approval_suggestions(tool=order_name)
+        assert any(s.accepted for s in found)
+
+
 async def test_a_profile_block_an_agent_edits_is_in_the_next_context() -> None:
     suffix = uuid.uuid4().hex[:8]
     user = f"live-user-{suffix}"
@@ -129,7 +184,7 @@ async def test_the_virtual_key_is_registered_as_the_agents_model_key() -> None:
         await h.writes.drain()
         assert h.writes.failed == 0
         assert h.memory is not None  # the key is the agent's, read in the agent's scope
-        scope = h.memory.scoped(await h.tenant(), agent.id)
+        scope = h.memory.scoped(await h._tenant(), agent.id)
         status = await scope.ctx.advanced.model_keys.status()
     assert status.registered and not status.revoked
 

@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -24,13 +25,17 @@ from pydantic import BaseModel
 from trellis.contracts import (
     AgentPaused,
     ConfigurationError,
+    ErrorCategory,
     Interrupt,
     InterruptReason,
     InterruptResolution,
+    ModelError,
     Option,
     ToolCall,
     ToolError,
+    ToolSpec,
 )
+from trellis.harness import telemetry
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
@@ -41,11 +46,12 @@ from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
+    from trellis.harness.bridges.helpers import Helpers
+    from trellis.harness.budget import Budget
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
-    from trellis.harness.skills import ResolvedSkill
     from trellis.harness.tools.base import Tool
     from trellis.memory import MemoryContext
     from trellis.memory.models import ToolHints
@@ -56,9 +62,30 @@ log = logging.getLogger("trellis.run")
 #: artifact in agent-runs (``payload_ref``), not inside the question.
 INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 
+#: The tag of a framework's own tool that hands the work to another agent
+#: (``adapters.base.HELPER``, kept here: the runtime imports no adapter).
+HELPER: Final = "helper"
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
+
+#: The most one model call — a step, the provider's hosted tools it runs included — may go
+#: without an answer when nothing tighter bounds it (a ``call_timeout``, the run's time left):
+#: past it the step has stalled, and the run ends with a :class:`ModelTimeout`.
+STALL_SECONDS: Final = 600.0
+#: The message a stalled step's watchdog cancels the attempt with.
+STALLED: Final = "trellis: the model call stalled"
+
+
+class ModelTimeout(ModelError):
+    """A model call (a step) got no answer within its bound: ``min(call timeout, the run's
+    time left)``, else :data:`STALL_SECONDS`. A ``TIMEOUT`` error, retryable (a stalled
+    provider may answer the next time); ``details``: the ``step`` and its ``seconds``."""
+
+    code = "MODEL_TIMEOUT"
+    category = ErrorCategory.TIMEOUT
+    retryable = True
+
 
 _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=None)
 
@@ -113,6 +140,10 @@ class Runtime:
     #: how far memory covered the question (its ``evidence_status``: ``COMPLETE``,
     #: ``INCOMPLETE``, ``INSUFFICIENT``), when a context was pushed
     evidence: str | None = None
+    #: what the pushed memory context showed — its ``bundle_id`` and the ids of the memories
+    #: in it (``memory_ids``) — kept with the run's outcome record so a person's verdict on
+    #: the run cites them (``RunMemory.cited``); empty when nothing was pushed
+    pushed: dict[str, Any] = field(default_factory=dict)
     #: the question the run is working on (memory queries, tool-call tasks)
     task: str = ""
     #: the documents the run's memory context draws its passages from (``document_ids=``;
@@ -120,6 +151,16 @@ class Runtime:
     document_ids: list[str] | None = None
     #: this run's tools by name (the agent's own, the MCP tools, the memory pull tools)
     toolbox: dict[str, Tool] = field(default_factory=dict)
+    #: the tools the framework gives the model itself, beside the harness's (an OpenAI agent's
+    #: own and hosted tools, its MCP servers' and handoffs', Claude's built-ins and its MCP
+    #: servers', a graph's tool nodes', a Deep Agent's sub-agents'), by name: with the
+    #: toolbox they are the run's tool set (:meth:`tool_set`)
+    native: dict[str, ToolSpec] = field(default_factory=dict)
+    #: the sources the run's code added (``agent.tools.use``), beside its agent's
+    added: list[Any] = field(default_factory=list)
+    #: what each object given to ``agent.tools.use`` added, by its id (the object held, so the
+    #: id stays its own): a tool called again in the run joins it once
+    joined: dict[int, tuple[Any, list[str]]] = field(default_factory=dict)
     #: the tools offered to the model (``None``: all of them) — the tool hints' candidates,
     #: the memory tools, and every tool this run has used (``used``)
     offered: set[str] | None = None
@@ -128,10 +169,8 @@ class Runtime:
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
-    #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
-    skills: dict[str, ResolvedSkill] = field(default_factory=dict)
-    #: the prompts this attempt pinned (``PromptSources.pin``: a ``ReAct``'s ``prompt=``, the
-    #: stored prompts ``h.model_headers(prompt=)`` handed out), by their journal key
+    #: the stored prompts this attempt pinned (``Prompts.pin``: a ``ReAct``'s
+    #: ``system_prompt=stored(...)``), by their journal key
     prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
     #: the sandbox this attempt's sandbox tools work in, once one of them ran (``sandbox``)
     sandbox: Sandbox | None = None
@@ -163,17 +202,29 @@ class Runtime:
     ends_at: float | None = None
     #: when the run must have ended (its ``deadline``), which a sub-agent's run inherits
     deadline: datetime | None = None
-    #: the run whose tool call this run works in (a sub-agent's run, ``Agent.as_tool``): its
+    #: the run whose tool call this run works in (a sub-agent's run, a nested run): its
     #: journal is kept in the parent's, and saved with the parent's progress
     parent: Runtime | None = None
+    #: the most this run may spend: its own (``run(budget=)``, kept with its record), else its
+    #: agent's (``h.wrap(budget=)``); ``None``: no cap
+    budget: Budget | None = None
+    #: the helpers the framework spawns in this attempt (``bridges.helpers``), once its
+    #: adapter made them
+    helpers: Helpers | None = None
     #: the task the attempt runs in (``agent.cancel`` cancels it), and why it was cancelled
     running_in: asyncio.Task[Any] | None = None
     cancelled: str | None = None
     _asked: int = 0
     _steps: int = 0
+    #: the child runs this attempt started, by where it started them and their agent
+    _children: Counter[tuple[str, str]] = field(default_factory=Counter, repr=False)
     _saved_at: float | None = None
     #: one progress save at a time, so a later save never lands before an earlier one
     _saving: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    #: the model calls under way, each with the watchdog that ends the attempt when it stalls
+    _watched: dict[str, asyncio.TimerHandle] = field(default_factory=dict, repr=False)
+    #: the step that stalled (its watchdog cancelled the attempt): the attempt's error
+    stalled: ModelTimeout | None = None
 
     # ------------------------------------------------------------------ the memory context
     @property
@@ -245,20 +296,39 @@ class Runtime:
         self.events.custom(LOG, message=message, **fields)
 
     def tool_names(self) -> list[str]:
-        """The run's own tools (the memory service's pull tools are not candidates)."""
+        """The run's own harness tools (the memory service's pull tools are not candidates)."""
         return [name for name, found in self.toolbox.items() if found.spec.source != "memory"]
 
+    def tool_set(self) -> list[str]:
+        """The run's tool set: its harness tools (:meth:`tool_names`) and the framework's own
+        (:attr:`native`), each once — what the tool hints, ``tool_search`` and the narrowing
+        choose among."""
+        return list(dict.fromkeys([*self.tool_names(), *self.native]))
+
     def offers(self, name: str) -> bool:
-        """Whether the model is offered ``name`` now (per turn where the framework allows)."""
+        """Whether the model is offered ``name`` now (per turn where the framework allows): a
+        tool of the run's tool set the narrowing left out is not; a memory tool always is, and
+        so is a tool outside the set (a graph's own state tools, ``read_file``)."""
         if self.offered is None or name in self.offered or name in self.used:
             return True
         found = self.toolbox.get(name)
-        return found is not None and found.spec.source == "memory"
+        if found is not None:
+            return found.spec.source == "memory"
+        own = self.native.get(name)
+        return own is None or HELPER in own.tags  # a helper: never narrowed away
 
     def offer(self, names: Sequence[str]) -> None:
-        """Offer more tools (a ``tool_search`` found them)."""
+        """Offer more tools of the run's tool set (a ``tool_search`` found them)."""
         if self.offered is not None:
-            self.offered.update(n for n in names if n in self.toolbox)
+            self.offered.update(n for n in names if n in self.toolbox or n in self.native)
+
+    def child_number(self, place: str, agent_id: str) -> int:
+        """How many runs of ``agent_id`` this attempt started at ``place`` (a tool call's key,
+        or the run's id) before this one: the same in every attempt that makes the same
+        calls, so a re-run finds each child again (``subagents.child_run``)."""
+        n = self._children[(place, agent_id)]
+        self._children[(place, agent_id)] = n + 1
+        return n
 
     def next_step(self, count: int = 1) -> int:
         """The number of the run's next call — the first of ``count`` calls made at once,
@@ -304,6 +374,47 @@ class Runtime:
                 yield
         finally:
             _call.reset(token)
+
+    # ------------------------------------------------------------------ stalls
+    def model_started(self, key: str, seconds: float | None = None) -> None:
+        """A model call (``key``: the framework's id of it) began: its watchdog ends the
+        attempt with a :class:`ModelTimeout` unless :meth:`model_ended` comes within
+        ``seconds`` (else :data:`STALL_SECONDS`). The run's own time left bounds it too: the
+        run ends ``TIMEOUT`` when that comes first. A key already watched is watched anew."""
+        self.model_ended(key)
+        bound = STALL_SECONDS if seconds is None else seconds
+        loop = asyncio.get_running_loop()
+        self._watched[key] = loop.call_later(bound, self._stall, key, bound)
+
+    def model_ended(self, key: str) -> None:
+        """The model call ``key`` answered (or failed): its watchdog is off."""
+        found = self._watched.pop(key, None)
+        if found is not None:
+            found.cancel()
+
+    def unwatched(self) -> None:
+        """The attempt ended: every watchdog still on is off."""
+        for handle in self._watched.values():
+            handle.cancel()
+        self._watched.clear()
+
+    def _stall(self, key: str, seconds: float) -> None:
+        self._watched.pop(key, None)
+        task = self.running_in
+        if self.stalled is not None or task is None or task.done():
+            return
+        self.stalled = ModelTimeout(
+            f"the model did not answer within {seconds:g}s: the step stalled",
+            details={"step": key, "seconds": seconds},
+            source=self.agent.adapter.name,
+        )
+        log.warning("run %s: %s", self.run_id, self.stalled.message)
+        self.events.warning(ModelTimeout.code.lower(), self.stalled.message)
+        attributes = {"trellis.step": key, "trellis.step.seconds": seconds}
+        telemetry.failure(
+            self.trace_run, self.run_id, "model_timeout", self.stalled.message, attributes
+        )
+        task.cancel(STALLED)
 
     # ------------------------------------------------------------------ progress
     async def progress(self, *, now: bool) -> None:
@@ -499,23 +610,50 @@ def reason_of(resolution: InterruptResolution) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class Tools:
-    """``trellis.current().tools``: call this run's tools by name, and ask for hints."""
+    """``trellis.current().tools`` (a function target's ``agent.tools``): call this run's tools,
+    add more to it, and ask for hints."""
 
     runtime: Runtime
 
-    async def call(self, name: str, /, **args: Any) -> Any:
+    async def call(self, tool: Any, /, **args: Any) -> Any:
+        """Call one of the run's tools with ``args`` — governed, journaled, recorded, as every
+        call is (``tools.bridge``) — and return what it answered: a tool by name (the run's
+        toolbox: its builder's tools, the MCP tools the virtual key allows, the memory tools,
+        what :meth:`use` added), or a tool itself (``tool(fn)``, which joins the run first)."""
         from trellis.harness.tools.bridge import call  # noqa: PLC0415 - bridge imports runtime
 
+        name = tool if isinstance(tool, str) else (await self.use(tool))[0]
         found = self.runtime.toolbox.get(name)
         if found is None:
             raise ToolError(f"no tool {name!r} in this run", source="tools")
         return (await call(found, args)).output
 
+    async def use(self, *sources: Any) -> list[str]:
+        """Add the tools of ``sources`` — ``tool(fn)`` (a function is one), ``mcp(...)``,
+        ``openapi(...)``, ``sandbox()``, ``a2a(url)``, a wrapped agent (a sub-agent) — to this
+        run's toolbox, for :meth:`call`: the names they add, in order (a function target's own
+        tools; a builder's are declared on it)."""
+        from trellis.harness.tools.sources import as_source  # noqa: PLC0415 - imports runtime
+
+        names: list[str] = []
+        for given in sources:
+            known = self.runtime.joined.get(id(given))
+            if known is None:
+                source = as_source(given)
+                self.runtime.added.append(source)
+                resolved = list(await source.resolve())
+                for found in resolved:
+                    self.runtime.toolbox.setdefault(found.spec.name, found)
+                known = self.runtime.joined[id(given)] = (given, [t.spec.name for t in resolved])
+            names.extend(known[1])
+        return names
+
     async def hints(self, task: str) -> ToolHints:
-        """What the memory service suggests for ``task`` among this run's tools; the
-        candidates are offered to the model from then on."""
+        """What the memory service suggests for ``task`` among this run's tool set (its harness
+        tools and the framework's own); the candidates are offered to the model from then
+        on."""
         if self.runtime.run_memory is None:
             raise ConfigurationError("tool hints come from the memory service: set MEMORY_URL")
-        hints = await self.runtime.run_memory.tool_hints(task, self.runtime.tool_names())
+        hints = await self.runtime.run_memory.tool_hints(task, self.runtime.tool_set())
         self.runtime.offer([t.name for t in hints.tools])
         return hints  # type: ignore[no-any-return]

@@ -7,8 +7,8 @@ no harness.
   server, as the gateway runs it;
 * ``NO_GATEWAY_TOOLS`` — the headers for a model client of your own pointed at the gateway
   (``ChatOpenAI(default_headers=...)``): the gateway then adds none of its MCP tools to your
-  requests and runs none itself, so your code decides every call. (A wrapped agent's
-  ``h.model_headers()`` is the same, plus a stored prompt's selection.)
+  requests and runs none itself, so your code decides every call. (A wrapped agent's model
+  calls through the gateway carry them already.)
 
 Offline the gateway is a scripted one serving two functions; with ``BIFROST_URL`` (and
 ``BIFROST_VIRTUAL_KEY``) it is the real one and the tools are whatever the key allows.

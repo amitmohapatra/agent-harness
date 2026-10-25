@@ -13,14 +13,14 @@ from typing import Any
 
 import pytest
 
+from tests.support.gateway import FakeGateway
 from trellis import Harness, Settings
-from trellis.contracts import ConfigurationError, ToolSpec
+from trellis.contracts import ToolSpec
 from trellis.harness import budget, react, writes
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Published, Rule, Rules
 from trellis.harness.middleware import RunCheckpointer
-from trellis.harness.repository import Kept
 from trellis.harness.writes import SPOOL_FILE, Writes
 
 
@@ -43,10 +43,10 @@ def test_an_lru_forgets_the_least_recently_used_past_its_bound() -> None:
 
 async def test_per_tenant_state_is_bounded() -> None:
     async with Harness(config=Settings()) as h:
-        h._governance = LRU(3)
+        h._governances = LRU(3)
         for n in range(10):
-            h.governance(f"t{n}")
-        assert len(h._governance) == 3 and "t9" in h._governance
+            h._governance(f"t{n}")
+        assert len(h._governances) == 3 and "t9" in h._governances
 
         async def answer(input: str, agent: Any) -> str:
             return input
@@ -56,23 +56,6 @@ async def test_per_tenant_state_is_bounded() -> None:
         for n in range(10):
             agent._toolbox(f"t{n}")
         assert len(agent._toolboxes) == 3
-
-
-async def test_a_graph_built_too_long_before_its_wrap_is_said() -> None:
-    from langchain.agents import create_agent
-    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-
-    def double(x: int) -> int:
-        """Double a number."""
-        return 2 * x
-
-    async with Harness(config=Settings()) as h:
-        h._built = LRU(1)
-        old = await h.tools(double, framework="langgraph")
-        await h.tools(double, framework="langgraph")  # the first build is forgotten
-        graph = create_agent(GenericFakeChatModel(messages=iter([])), tools=old)
-        with pytest.raises(ConfigurationError, match="wrap a graph soon after building it"):
-            h.wrap(graph, id="g")
 
 
 class Catalog:
@@ -116,15 +99,14 @@ def test_threads_outside_a_run_are_bounded(monkeypatch: pytest.MonkeyPatch) -> N
     assert list(saver._threads) == ["thread3", "thread4"]
 
 
-async def test_kept_answers_are_bounded() -> None:
-    async def read(key: str) -> str:
-        return key.upper()
-
-    kept: Kept[str, str] = Kept(read, what=str)
-    kept._kept = LRU(2)
-    for key in ("a", "b", "c"):
-        assert await kept.get(key) == key.upper()
-    assert list(kept._kept) == ["b", "c"]
+async def test_the_gateways_prompts_kept_are_bounded() -> None:
+    fake = FakeGateway(prompts={name: [[{"role": "system", "content": name}]] for name in "abc"})
+    gateway = fake.gateway()
+    gateway._prompts = LRU(2)
+    for name in "abc":
+        assert (await gateway.prompt(name)).name == name
+    assert list(gateway._prompts) == ["b", "c"]
+    await gateway.aclose()
 
 
 def test_a_warning_said_once_per_name_remembers_a_bounded_number_of_names() -> None:

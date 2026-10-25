@@ -227,17 +227,16 @@ async def run_cell(
         ]
         if not todo:
             continue
-        built = Setup(system=taskset.system, **setup)
+        tools = catalog.catalogue(taskset.tools, size)
+        built = Setup(system=taskset.system, **setup, tools=tuple(tools))
         target, options = VARIANTS[variant].build(built)
         called = Called()
-        tools = catalog.catalogue(taskset.tools, size)
         changes = {t.spec.name for t in taskset.tools if t.spec.side_effects != "read"}
         agent = h.wrap(
             target,
             id=f"bench-{variant}-{taskset.name.replace(' ', '-')}-{size}",
-            tools=tools,
             hooks=[called],
-            timeout=run_seconds,
+            run_timeout=run_seconds,
             **options,
         )
         for repeat, task in todo:

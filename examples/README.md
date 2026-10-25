@@ -22,25 +22,25 @@ make examples-live                                # all of them, with the enviro
 ## 02_way1: one framework each, wrapped
 
 Each `agent.py` shows every piece that applies to its framework: memory (pushed and searched),
-local and MCP tools, governance and a person, a hook, `without=`, `timeout=` and
+local and MCP tools, governance and a person, a hook, `without=`, `run_timeout=` and
 `framework_options=`.
 
 | Example | Shows |
 |---|---|
-| [02_way1_react/agent.py](02_way1_react/agent.py) | `ReAct`: memory, a local and two MCP tools, a destructive call approved and resumed in place, a `Rewrite` hook, `timeout`, `framework_options`, a run `without={"memory"}` |
-| [02_way1_react/structured_output.py](02_way1_react/structured_output.py) | `ReAct(output=Forecast)`: a pydantic answer |
+| [02_way1_react/agent.py](02_way1_react/agent.py) | `ReAct`: memory, a local and two MCP tools, a destructive call approved and resumed in place, a `Rewrite` hook, `run_timeout`, `framework_options`, a run `without={"memory"}` |
+| [02_way1_react/structured_output.py](02_way1_react/structured_output.py) | `ReAct(response_format=Forecast)`: a pydantic answer |
 | [02_way1_react/hooks_guardrails.py](02_way1_react/hooks_guardrails.py) | a guardrail (`Deny`, `Ask` on a role, `Rewrite`) and card numbers masked in tool results and before the model reads them |
 | [02_way1_function/agent.py](02_way1_function/agent.py) | an async function: `agent.context`, `agent.memory`, an MCP tool and a local one through `agent.tools.call`, `agent.ask` with options, a `Deny` hook, `without=`, `cancel` (`framework_options` does not apply) |
 | [02_way1_function/memory_documents_feedback.py](02_way1_function/memory_documents_feedback.py) | `h.add_document` (the next context cites it), `agent.memory.search`, `h.feedback` (pending the tenant administrator) |
 | [02_way1_function/queue_worker_inbox.py](02_way1_function/queue_worker_inbox.py) | `agent.start` → a worker → `ask` with a diff → `h.inbox("role:legal")` → `resume` → the worker again |
-| [02_way1_function/reliability.py](02_way1_function/reliability.py) | a read retried, a write past its `timeout` (unknown effect, its idempotency key), a run past its `timeout`, `cancel` |
+| [02_way1_function/reliability.py](02_way1_function/reliability.py) | a read retried, a write past its `call_timeout` (unknown effect, its idempotency key), a run past its `run_timeout`, `cancel` |
 | [02_way1_function/schedule.py](02_way1_function/schedule.py) | `agent.schedule("weekdays", ...)`, fired now (`h.runs.schedules.fire`), run by a worker |
-| [02_way1_langgraph/agent.py](02_way1_langgraph/agent.py) | `create_agent` built with `h.tools` (local, MCP and memory tools), no checkpointer: the approval re-run against the journal; a hook, `timeout`, `framework_options`, `without=` |
+| [02_way1_langgraph/agent.py](02_way1_langgraph/agent.py) | `create_agent` with its own tools (governed; the catalog's risk) and `HarnessTools` (MCP and memory tools), no checkpointer: the approval re-run against the journal; a hook, `run_timeout`, `framework_options`, `without=` |
 | [02_way1_langgraph/stategraph.py](02_way1_langgraph/stategraph.py) | a hand-built `StateGraph` with a checkpointer: a harness approval in the tool node and the graph's own `interrupt()`, both resumed in place |
 | [02_way1_langgraph/hitl_middleware.py](02_way1_langgraph/hitl_middleware.py) | LangChain's `HumanInTheLoopMiddleware`: an edit, then a reject with a reason |
-| [02_way1_deepagents/agent.py](02_way1_deepagents/agent.py) | Deep Agents with `TodoListMiddleware`: a plan, an MCP lookup, an approval resumed in place; a `Deny` hook, `timeout`, `framework_options`, `without=` |
+| [02_way1_deepagents/agent.py](02_way1_deepagents/agent.py) | Deep Agents with `TodoListMiddleware`: a plan, an MCP lookup, an approval resumed in place; a `Deny` hook, `run_timeout`, `framework_options`, `without=` |
 | [02_way1_openai_agents/agent.py](02_way1_openai_agents/agent.py) | an OpenAI Agents `Agent`: harness tools added per run, an MCP lookup replayed on the resume, an `after_tool` audit hook, `max_turns` through `framework_options`, `without={"tool_search"}` |
-| [02_way1_openai_agents/handoff.py](02_way1_openai_agents/handoff.py) | a handoff to a specialist built with `h.tools(framework="openai_agents")` |
+| [02_way1_openai_agents/handoff.py](02_way1_openai_agents/handoff.py) | a handoff to a specialist with its own tools, each call governed |
 | [02_way1_claude/agent.py](02_way1_claude/agent.py) | `ClaudeAgentOptions`: the harness's tools as the `trellis` MCP server, an MCP lookup, an approval, a `Rewrite` hook, `max_turns`, `without=` (a scripted CLI offline) |
 
 ## 03_way2: one block each, no wrapping
@@ -55,7 +55,7 @@ local and MCP tools, governance and a person, a hook, `without=`, `timeout=` and
 | [03_way2_governance/openai_agents_recipe.py](03_way2_governance/openai_agents_recipe.py) | recipe: a plain OpenAI Agents `Agent`: `needs_approval` from governance, its `RunState` as the run's checkpoint, the inbox, a judge |
 | [03_way2_governance/claude_recipe.py](03_way2_governance/claude_recipe.py) | recipe: a plain Claude Agent SDK `query()`: `can_use_tool` from governance, the session as the checkpoint, the inbox, a judge |
 | [03_way2_evals/evaluate_and_judge.py](03_way2_evals/evaluate_and_judge.py) | `evaluate` on a plain function over a dataset, and `judge` on one run of your own |
-| [03_way2_a2a/remote.py](03_way2_a2a/remote.py) | `remote(url)` from plain code: a question answered by `on_input`, then by `reply` |
+| [03_way2_a2a/remote.py](03_way2_a2a/remote.py) | `a2a(url)` from plain code (`RemoteAgent` under it): a question answered by `on_input`, then by `reply` |
 | [03_way2_contracts/records.py](03_way2_contracts/records.py) | the records: `RunEvent`, `RunRecord`, `Interrupt`, `InterruptResolution.resolves`, `to_feedback`, `AgentError`, `classify` |
 | [03_way2_gateway/mcp_and_model_headers.py](03_way2_gateway/mcp_and_model_headers.py) | `bifrost_sdk`: the MCP tools with their annotations, `execute_tool` scoped to a server, `NO_GATEWAY_TOOLS` for your own model client |
 
@@ -75,15 +75,17 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 |---|---|
 | [hitl_forms_options_own_screen.py](05_features/hitl_forms_options_own_screen.py) | an approval rule in a hook, labelled options with several picks, a form (`form=`, `ui_schema=`), your own screen (`component=`, `props=`), a result from outside the run, `trellis.testing.Reviewer` |
 | [langgraph_interrupt_fields.py](05_features/langgraph_interrupt_fields.py) | a graph's own `interrupt({...})` with options, `multiple`, `component`, `props`, `assignee`; the inbox; resumed in place |
-| [subagents.py](05_features/subagents.py) | `agent.as_tool()`: a planner calling two agents at once, one asking a person through the planner |
-| [skills_and_prompts.py](05_features/skills_and_prompts.py) | prompts from a folder and from code, skills from a `SKILL.md` folder and from code, on a `ReAct` and on a function |
-| [sandbox.py](05_features/sandbox.py) | `sandbox()`: a script written and run in the run's own sandbox (Docker with `SANDBOX=docker`, else a provider of the example's own); then the provider governed with no harness |
+| [subagents.py](05_features/subagents.py) | `ReAct(subagents=[...])`: a planner calling two agents, one asking a person through the planner |
+| [stored_prompts.py](05_features/stored_prompts.py) | a stored prompt of the gateway as a `ReAct`'s instructions (`stored(...)`, pinned per run) and for any framework (`h.prompt`) |
+| [sandbox.py](05_features/sandbox.py) | `sandbox()`: a script written and run in the run's own sandbox (Docker when `DOCKER_HOST` is set, else a provider of the example's own); then the provider governed with no harness |
 | [serve_agui_and_a2a.py](05_features/serve_agui_and_a2a.py) | `serve_chat` (AG-UI) and `serve_a2a` on one FastAPI app; another agent calling it with `a2a(url)`, its question asked through the caller |
 | [trajectory_evals.py](05_features/trajectory_evals.py) | `h.evaluate`: `exact_match`, `contains`, `llm_judge`, `called`, `tool_sequence` and an evaluator of your own reading the trajectory |
-| [online_judges.py](05_features/online_judges.py) | `Harness(judges=[...])`: judges on live runs, in the background |
+| [online_judges.py](05_features/online_judges.py) | `h.wrap(judges=[llm_judge(..., sample=)])`: judges on a share of live runs, in the background |
 | [tracing_and_redaction.py](05_features/tracing_and_redaction.py) | the OTel spans of a run, exported to your own provider; a secret dropped and an e-mail masked in their attributes |
 | [own_scheduler.py](05_features/own_scheduler.py) | `ReAct` on blocks of your own: your run store, your scheduler loop (`agent.execute`), your governance, memory off |
 | [priority_and_concurrency.py](05_features/priority_and_concurrency.py) | `start(priority=)` claimed first; a busy conversation's second message waiting (`concurrency_key`) while others overtake it |
+| [model_routing.py](05_features/model_routing.py) | one `ReAct` on each route: through Bifrost (`BIFROST_URL`, its virtual key) and through the provider's own SDK (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) |
+| [without_combinations.py](05_features/without_combinations.py) | `without=` on `h.wrap` and on a run, added together: what each combination leaves on (`agent.uses`), the context, an MCP call; an unknown name refused |
 
 ## 06_scenarios: end to end
 
@@ -92,10 +94,12 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | [parallel_subagents_mixed_frameworks.py](06_scenarios/parallel_subagents_mixed_frameworks.py) | a `ReAct` planner calling a LangGraph, an OpenAI Agents and a function sub-agent at once; the function's question answered through the planner; the child runs |
 | [sql_approval_own_screen.py](06_scenarios/sql_approval_own_screen.py) | SQL that changes data asks `role:dba` on a `sql-review` screen: the inbox, an `edit` that adds a `WHERE`, then an approval remembered for the run |
 | [worker_crash_resume.py](06_scenarios/worker_crash_resume.py) | a worker dies after a payment; the lease lapses; another worker finishes the run and the payment is not made twice |
-| [scheduled_run_selection_limit.py](06_scenarios/scheduled_run_selection_limit.py) | a schedule with `without=`, `timeout=`, `framework_options=` and `priority=`, kept in its metadata and applied to the run it fires |
+| [scheduled_run_selection_limit.py](06_scenarios/scheduled_run_selection_limit.py) | a schedule with `without=`, `run_timeout=`, `framework_options=` and `priority=`, kept in its metadata and applied to the run it fires |
 | [gateway_code_mode_governed_evals.py](06_scenarios/gateway_code_mode_governed_evals.py) | read-only MCP servers behind Code Mode, a refund behind the catalog's `approve_when`, then `h.evaluate` on the answers and the trajectories |
 | [tool_choice.py](06_scenarios/tool_choice.py) | reliable tool choice, measured: a broad tool beside specific ones, multi-part requests, a change behind approval; `ReAct(tool_guidance=True, answer_check=True)` and `tool_coverage()` per item |
-| [planning_todolist.py](06_scenarios/planning_todolist.py) | opt-in planning: `ReAct(middleware=[TodoListMiddleware()])`, the plan shown by an `after_model` hook |
+| [child_runs_every_framework.py](06_scenarios/child_runs_every_framework.py) | each framework's own way of handing work to another agent is a child run: `ReAct(subagents=)`, a nested `run()` in a function and in a LangGraph tool, a Deep Agents `task`, `Agent.as_tool`, a Claude subagent; `h.runs.iterate(parent_run_id=)` |
+| [runs_every_framework.py](06_scenarios/runs_every_framework.py) | an agent of every framework queued with `start` (`RunHandle`, `priority=`), one worker for all; a schedule fired; a queued run cancelled |
+| [planning_todolist.py](06_scenarios/planning_todolist.py) | planning on a long task: `ReAct`'s own `write_todos` (on with `context_window=`), the plan shown by an `after_model` hook |
 
 ## What the examples share
 

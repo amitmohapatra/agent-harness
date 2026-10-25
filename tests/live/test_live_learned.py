@@ -20,6 +20,7 @@ import pytest
 
 from tests.live.conftest import live_harness, needs_memory
 from tests.live.support import eventually
+from tests.support.arm import arm
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 from trellis.memory import MemoryClient
@@ -98,14 +99,14 @@ async def test_an_agent_learns_a_skill_from_its_runs_and_its_next_runs_are_offer
 
     async def run(h: Any, user: str, n: int, agent: str = agent_id) -> None:
         if agent not in agents:
-            agents[agent] = h.wrap(refunds, id=agent, tools=[find_order, refund])
+            agents[agent] = arm(h.wrap(refunds, id=agent), [find_order, refund])
         done = await agents[agent].run("Refund order O-1", user=user, thread=f"live-r-{suffix}-{n}")
         assert done.status is RunStatus.SUCCESS and done.answer == "refunded pay-O-1", done
         await h.writes.drain()
         assert h.writes.failed == 0
 
     async with live_harness() as h:
-        tenant = await h.tenant()
+        tenant = await h._tenant()
         async with MemoryClient(os.environ["MEMORY_URL"], api_key=admin_key) as client:
             admin = client.bind(tenant_id=tenant)
 

@@ -23,6 +23,7 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
+from tests.support.arm import arm
 from tests.support.openapi import OpenAPI, runs_contract
 from trellis import Harness, Runtime, tool
 from trellis.contracts import (
@@ -332,7 +333,7 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
     wired: tuple[Harness, RunsService],
 ) -> None:
     h, service = wired
-    approving = h.wrap(approver, id="approver", tools=[refund])
+    approving = arm(h.wrap(approver, id="approver"), [refund])
     paused = await approving.run("o-1", user="ada")
     assert paused.interrupt is not None and paused.interrupt.tool_call is not None
     assert (await approving.resume(paused.interrupt.interrupt_id, "approve", reviewer="cfo")).answer
@@ -355,17 +356,17 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
     record = await h.runs.get(failed.run_id, tenant=TENANT)
     assert record is not None and record.error == failed.error
 
-    queued = h.wrap(billing, id="billing", tools=[charge])
+    queued = arm(h.wrap(billing, id="billing"), [charge])
     handle = await queued.start({"order": "o-3"}, user="ada")
     worker = h.worker([queued], concurrency=1)
     assert await worker.run_once()  # the charge is saved as progress, then it asks
-    first = await handle.result(timeout=5)
+    first = await handle.result(wait=5)
     assert first.interrupt is not None
     again = await queued.resume(first.interrupt.interrupt_id, "answer", answer="L", reviewer="a")
     assert again.status is RunStatus.QUEUED
     assert await worker.run_once()
-    assert (await handle.result(timeout=5)).answer == "charged o-3; L"
-    schedule = await queued.schedule("daily", {"order": "o-4"}, on_behalf_of="ada")
+    assert (await handle.result(wait=5)).answer == "charged o-3; L"
+    schedule = await queued.schedule("daily", user="ada", input={"order": "o-4"})
     assert schedule.cadence == "daily"
     assert await h.runs.get("run_missing", tenant=TENANT) is None
 
@@ -396,16 +397,16 @@ async def test_a_runs_limits_version_and_cancel_speak_the_runs_contract(
 ) -> None:
     h, service = wired
     deadline = datetime.now(UTC) + timedelta(hours=1)
-    queued = h.wrap(billing, id="billing", tools=[charge], version="2026.10")
-    handle = await queued.start({"order": "o-8"}, user="ada", timeout=60, deadline=deadline)
+    queued = arm(h.wrap(billing, id="billing", version="2026.10"), [charge])
+    handle = await queued.start({"order": "o-8"}, user="ada", run_timeout=60, deadline=deadline)
     record = await handle.status()
     assert (record.timeout_seconds, record.deadline, record.agent_version) == (
         60,
         deadline,
         "2026.10",
     )
-    assert (await handle.cancel(reason="a duplicate")).status is RunStatus.CANCELLED
-    timed = await h.wrap(failing, id="failing").run("x", user="ada", timeout=30)
+    assert (await queued.cancel(handle.id, reason="a duplicate")).status is RunStatus.CANCELLED
+    timed = await h.wrap(failing, id="failing").run("x", user="ada", run_timeout=30)
     assert timed.status is RunStatus.ERROR  # within its time: the error, not a timeout
     assert service.violations == [], "\n".join(service.violations)
     assert ("POST", "/v1/runs/{id}/cancel") in service.seen
@@ -421,18 +422,18 @@ async def test_a_journal_larger_than_a_checkpoint_travels_as_a_run_artifact(
         size = await agent.ask("Which size?", options=["S", "L"])
         return f"{len(history)}; {size}"
 
-    queued = h.wrap(exporting, id="exporting", tools=[export])
+    queued = arm(h.wrap(exporting, id="exporting"), [export])
     handle = await queued.start({"order": "o-7"}, user="ada")
     worker = h.worker([queued], concurrency=1)
     assert await worker.run_once()  # saved as progress, then paused: both by reference
-    first = await handle.result(timeout=5)
+    first = await handle.result(wait=5)
     assert first.interrupt is not None
-    record = await h.runs.get(handle.run_id, tenant=TENANT)
+    record = await h.runs.get(handle.id, tenant=TENANT)
     assert record is not None and record.checkpoint is not None
     assert set(record.checkpoint) == {JOURNAL_REF}
     await queued.resume(first.interrupt.interrupt_id, "answer", answer="S", reviewer="ada")
     assert await worker.run_once()
-    assert (await handle.result(timeout=5)).answer == f"{MAX_CHECKPOINT_BYTES + 1}; S"
+    assert (await handle.result(wait=5)).answer == f"{MAX_CHECKPOINT_BYTES + 1}; S"
     assert service.violations == [], "\n".join(service.violations)
     assert ("GET", "/v1/artifacts/{id}") in service.seen
 
@@ -474,8 +475,8 @@ async def test_a_platform_keys_runs_name_their_tenant_on_every_call(
     async def platform() -> KeyInfo:
         return KeyInfo(key_id="k", tenant_id=None, principal="platform", role="service")
 
-    monkeypatch.setattr(h, "key", platform)
-    approving = h.wrap(approver, id="approver", tools=[refund])
+    monkeypatch.setattr(h, "_key_info", platform)
+    approving = arm(h.wrap(approver, id="approver"), [refund])
     paused = await approving.run("o-1", user="ada", tenant="acme")
     assert paused.interrupt is not None
     [waiting] = await h.inbox(tenant="acme")
@@ -485,14 +486,14 @@ async def test_a_platform_keys_runs_name_their_tenant_on_every_call(
     await h.feedback(paused.run_id, "confirm", tenant="acme")
 
     reviewing = h.wrap(reviewer, id="reviewer")
-    queued = h.wrap(billing, id="billing", tools=[charge])
+    queued = arm(h.wrap(billing, id="billing"), [charge])
     asked = await reviewing.run("review", user="ada", tenant="acme")
     assert asked.interrupt is not None and asked.interrupt.payload_ref is not None
     handle = await queued.start({"order": "o-5"}, user="ada", tenant="acme")
     assert await h.worker([queued], concurrency=1).run_once()
-    first = await handle.result(timeout=5)
+    first = await handle.result(wait=5)
     assert first.interrupt is not None
-    await queued.schedule("daily", {"order": "o-6"}, on_behalf_of="ada", tenant="acme")
+    await queued.schedule("daily", user="ada", input={"order": "o-6"}, tenant="acme")
     assert service.violations == [], "\n".join(service.violations)
     assert service.tenants <= {"acme", None}  # a claim names none: the key's own queue
     assert "acme" in service.tenants

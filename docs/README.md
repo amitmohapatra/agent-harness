@@ -28,11 +28,12 @@ for you.
 
 | Page | |
 |---|---|
-| **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic, approvals, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
-| [tools.md](tools.md) | the toolbox and where tools come from, their side effects, tool hints, Code Mode, `h.tools` |
-| [gateway.md](gateway.md) | the Bifrost gateway: stored prompts, skills, Virtual MCPs (`mcp("name")`), who an MCP call is for, what the gateway never does for a run, frameworks' own MCP clients |
-| [prompts.md](prompts.md) | prompts from code, `.md` files (`PROMPTS_DIR`), Langfuse and the gateway: one name, the lookup order, `ReAct(prompt=)`, `h.prompt`, pinned per run |
-| [skills.md](skills.md) | Agent Skills from code, `SKILL.md` folders (`SKILLS_DIR`) and the gateway: progressive disclosure, pinned per run |
+| **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic (memory included), approvals, sub-agents and child runs, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
+| **Feature x framework** — which feature works with which framework, written from the test matrix | [matrix.md](matrix.md) |
+| [tools.md](tools.md) | the toolbox and where tools come from, their side effects, a framework's own tools, tool hints, Code Mode |
+| [gateway.md](gateway.md) | the Bifrost gateway: stored prompts, who an MCP call is for, what the gateway never does for a run, frameworks' own MCP clients |
+| [prompts.md](prompts.md) | stored prompts of the gateway: `stored(...)` as a `ReAct`'s instructions, `h.prompt` for any framework, pinned per run |
+| [skills.md](skills.md) | your framework's own Agent Skills, and the skills an agent learns (in its memory context) |
 | [subagents.md](subagents.md) | an agent in another's `tools=[...]`: child runs, their pauses answered through the parent, crashes, cancel, time |
 | [sandbox.md](sandbox.md) | `sandbox()`: commands and files in a sandbox of the run's own — its life, pauses, crashes, timeouts, governance |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed |
@@ -49,11 +50,11 @@ for you.
 
 | You have | Wrap | Page |
 |---|---|---|
-| a LangChain v1 agent (`create_agent`) or any compiled LangGraph graph | the graph, built with `await h.tools(..., framework="langgraph")` | [langgraph.md](frameworks/langgraph.md) |
-| a Deep Agent (`create_deep_agent`) | the graph it returns, built the same way | [deepagents.md](frameworks/deepagents.md) |
-| an OpenAI Agents SDK `Agent` (handoffs included) | the `Agent`, with `tools=[...]` | [openai-agents.md](frameworks/openai-agents.md) |
-| a Claude Agent SDK setup | the `ClaudeAgentOptions`, with `tools=[...]` | [claude-agent-sdk.md](frameworks/claude-agent-sdk.md) |
-| a model and tools, no framework | `ReAct(system=..., model=...)` | [react.md](frameworks/react.md) |
+| a LangChain v1 agent (`create_agent`) or any compiled LangGraph graph | the graph, its own tools governed (`HarnessTools()` adds the harness's) | [langgraph.md](frameworks/langgraph.md) |
+| a Deep Agent (`create_deep_agent`) | the graph it returns, the same way | [deepagents.md](frameworks/deepagents.md) |
+| an OpenAI Agents SDK `Agent` (handoffs included) | the `Agent`, its own tools governed | [openai-agents.md](frameworks/openai-agents.md) |
+| a Claude Agent SDK setup | the `ClaudeAgentOptions`, its own tools governed | [claude-agent-sdk.md](frameworks/claude-agent-sdk.md) |
+| a model and tools, no framework | `ReAct(system_prompt=..., model=..., tools=[...])` | [react.md](frameworks/react.md) |
 | code that decides itself (a workflow, a router, glue) | `async def fn(input, agent)` | [functions.md](frameworks/functions.md) |
 
 Every target gets the same harness: memory push and pull, governance and approvals, records,
@@ -98,7 +99,7 @@ governance, the prompt and skill sources — composed differently.
 | You want | Write | What you get |
 |---|---|---|
 | everything, from the deployment (Way 1) | `Harness()` | each block built from its environment variable, each off when its variable is unset |
-| some blocks of your own, the rest from the deployment | `Harness(runs=RunsClient(...), governance=Governance(...))` | the blocks you pass, used as they are (and yours to close); the others built from the environment |
+| some blocks of your own, the rest from the deployment | `Harness(runs=RunsClient(...), memory=MemoryClient(...))` | the clients you pass, used as they are (and yours to close); the others built from the environment |
 | a block off although the deployment names it | `Harness(memory=False)` (`gateway=False`, `runs=False`: runs kept in this process) | that block off for every agent of this harness |
 | your own scheduler or worker | `await agent.execute(job)` for each run it claims | the run's next attempt with its journal, governance, memory and limits ([runs.md](runs.md#workers)) |
 | `ReAct` (or any target) with your blocks | `Harness(<your blocks>).wrap(ReAct(...))` | one loop and one path: the same `ReAct` as Way 1, on your blocks |
@@ -106,14 +107,13 @@ governance, the prompt and skill sources — composed differently.
 
 ```python
 from trellis import Harness, ReAct
-from trellis.harness.governance import Governance
 from trellis.runs import RunsClient
 
 runs = RunsClient()  # RUNS_URL, TRELLIS_API_KEY
-h = Harness(runs=runs, memory=False, governance=Governance())
-agent = h.wrap(ReAct(system="You handle refunds.", model="provider/model"), id="refunds")
+h = Harness(runs=runs, memory=False)  # no memory: each tool by its own risk
+agent = h.wrap(ReAct(system_prompt="You handle refunds.", model="provider/model"), id="refunds")
 ```
 
 Every argument: [api.md](api.md#harness). Runnable:
 [examples/05_features/own_scheduler.py](../examples/05_features/own_scheduler.py) (its own run
-store, its own scheduler loop, governance, no memory).
+store, its own scheduler loop, no memory).

@@ -1,11 +1,11 @@
-"""A hand-built LangGraph ``StateGraph``: your nodes and edges stay as they are. Build the tool
-node with ``h.tools``, compile with a checkpointer, wrap the graph — and call ``agent.run`` /
-``agent.resume`` where you called ``graph.ainvoke``.
+"""A hand-built LangGraph ``StateGraph``: your nodes, edges and tools stay as they are. Compile
+with a checkpointer, wrap the graph — and call ``agent.run`` / ``agent.resume`` where you called
+``graph.ainvoke``.
 
 Two pauses, both resumed in place from the checkpoint (the model is not asked again):
 
-* the harness's: ``reorder`` is irreversible, so its call inside the tool node waits for a
-  person;
+* the harness's: the tool catalog says ``reorder`` is irreversible (offline: a scripted memory
+  service's), so its call inside the tool node waits for a person;
 * the graph's own: the ``confirm`` node calls LangGraph's ``interrupt()``, which the harness
   records as a question in the run store and answers with ``Command(resume=...)``.
 
@@ -17,23 +17,25 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from examples._support.offline import langchain_model
+from examples._support.memory import ScriptedMemory
+from examples._support.offline import langchain_model, offline_blocks
 from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
 
-from trellis import Harness, tool
+from trellis import Harness
 
 
-@tool(side_effects="read")
+@tool
 def stock(sku: str) -> int:
     """Units of a SKU in stock."""
     return {"SKU-1": 3}.get(sku, 0)
 
 
-@tool(side_effects="irreversible")
+@tool
 def reorder(sku: str, qty: int) -> str:
     """Order more units of a SKU from the supplier."""
     return f"ordered {qty} x {sku}"
@@ -67,7 +69,8 @@ def build(model: Any, tools: list[Any]) -> Any:
 
 
 async def main() -> None:
-    async with Harness() as h:
+    catalog = {"stock": {"risk": "read"}, "reorder": {"risk": "irreversible"}}
+    async with Harness(**offline_blocks(memory=ScriptedMemory(catalog=catalog))) as h:
         model = langchain_model(
             [
                 ("stock", {"sku": "SKU-1"}),
@@ -75,8 +78,7 @@ async def main() -> None:
                 "SKU-1 was at 3 units; ordered 20.",
             ]
         )
-        graph = build(model, await h.tools(stock, reorder, framework="langgraph"))
-        agent = h.wrap(graph, id="stock-graph")  # memory is on when MEMORY_URL is set
+        agent = h.wrap(build(model, [stock, reorder]), id="stock-graph")
 
         result = await agent.run("Top up SKU-1 if it is low.", user="ada", thread="stock-1")
         while result.interrupt is not None:

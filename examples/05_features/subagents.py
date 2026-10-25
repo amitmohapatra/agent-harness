@@ -1,6 +1,6 @@
-"""Sub-agents: an agent in another agent's ``tools=[...]`` — a ``ReAct`` planner delegating to
-two agents at once, one of which asks a person before it answers; the answer reaches it through
-the planner's resume.
+"""Sub-agents: wrapped agents in a ``ReAct``'s ``subagents=[...]`` — a planner delegating to two
+agents, one of which asks a person before it answers; the answer reaches it through the
+planner's resume.
 
     python -m examples.05_features.subagents
 """
@@ -29,23 +29,23 @@ def hotels(city: str, budget: str) -> str:
 async def booker(input: str, agent: Runtime) -> str:
     """Find a hotel in a city, once the traveller has chosen a budget."""
     budget = await agent.ask("Which budget?", options=["low", "high"])
-    return str(await agent.tools.call("hotels", city=input, budget=budget))
+    return str(await agent.tools.call(hotels, city=input, budget=budget))
 
 
 async def main() -> None:
     async with Harness() as h:
         scout = h.wrap(
             ReAct(
-                system="You find flights. Use the tool, then answer in one line.",
+                system_prompt="You find flights. Use the tool, then answer in one line.",
                 model=react_model([("flights", {"city": "Oslo"}), "Oslo: 2 a day, from 89 EUR"]),
+                tools=[flights],
             ),
             id="scout",
-            tools=[flights],
         )
-        hotel = h.wrap(booker, id="booker", tools=[hotels])
+        hotel = h.wrap(booker, id="booker")
         planner = h.wrap(
             ReAct(
-                system="You plan trips. Ask scout for flights and booker for a hotel, at once, "
+                system_prompt="You plan trips. Ask scout for flights and booker for a hotel, "
                 "then answer in two lines.",
                 model=react_model(
                     [
@@ -53,9 +53,9 @@ async def main() -> None:
                         "Flights: 2 a day from 89 EUR.\nHotel: Hotel Nord, 79 EUR a night.",
                     ]
                 ),
+                subagents=[scout, hotel],
             ),
             id="planner",
-            tools=[scout, hotel],  # both only read: they run at once
         )
         result = await planner.run("Plan a weekend in Oslo", user="ada")
         while result.interrupt is not None:  # the booker asks, through the planner

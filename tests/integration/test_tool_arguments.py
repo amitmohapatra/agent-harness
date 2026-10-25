@@ -19,6 +19,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
@@ -76,7 +77,7 @@ class _React:
         self.model = ScriptedChat([broken, ("stock", {"sku": "A-1"}), "42 units"])
 
     async def target(self, h: Harness) -> tuple[Any, list[Any]]:
-        return ReAct(system="s", model=self.model), [stock]
+        return ReAct(system_prompt="s", model=self.model), [stock]
 
     def told(self) -> str:
         return str(self.model.requests[1]["messages"][-1]["content"])
@@ -110,7 +111,7 @@ class _LangChain:
         self.model, self.build = _Unparsed(turns=turns, raw=raw), build
 
     async def target(self, h: Harness) -> tuple[Any, list[Any]]:
-        return self.build(self.model, await h.tools(stock, framework="langgraph")), []
+        return self.build(self.model, await native_tools(h, stock, framework="langgraph")), []
 
     def told(self) -> str:
         assert len(self.model.seen) > 1, "the model was never called again"
@@ -148,9 +149,7 @@ async def test_arguments_that_are_not_an_object_are_an_error_the_model_reads(
     refused = broken in getattr(case, "streamed", {})
     problem = getattr(case, "streamed", {}).get(broken, problem)
     target, tools = await case.target(harness)
-    events = [
-        e async for e in harness.wrap(target, id="args", tools=tools).stream("A-1?", user="u")
-    ]
+    events = [e async for e in arm(harness.wrap(target, id="args"), tools).stream("A-1?", user="u")]
     finished = events[-1]
     assert finished.type is RunEventType.RUN_FINISHED and finished.error is None, finished
     assert finished.data.get("result") == "42 units"
