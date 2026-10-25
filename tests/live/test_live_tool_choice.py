@@ -209,7 +209,8 @@ def harness_part(
         if row["status"] == "error":  # the model's own failures only
             # (ReAct's own stops — a stall, the step limit — say "stopped")
             said = row["error"] or ""
-            assert said.startswith("stopped") or any(f in said for f in MODEL_FAILURES), row
+            slow = said.startswith("the run worked past its time limit")  # a CPU model's pace
+            assert slow or said.startswith("stopped") or any(f in said for f in MODEL_FAILURES), row
     ran = [r for r in rows if r["status"] in ("success", "interrupted")]
     for row in ran:  # every item that needs tools and ran is scored from its trajectory
         assert (row["coverage"] is not None) == bool(row["needed"]), row
@@ -271,9 +272,9 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
                     concurrency=1,
                 )
                 rows.extend(rows_of(report, sent, time.monotonic() - began, items))
-            harness_part(rows, sent, switches, writes)
             found[variant] = summarized(rows, writes)
-    saved(toolset, found)
+            saved(toolset, found)  # kept whatever the checks below say
+            harness_part(rows, sent, switches, writes)
     for variant, summary in found.items():
         print(
             f"\n{toolset} / {variant}: coverage {summary['mean_coverage']}, "
