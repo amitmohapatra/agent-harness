@@ -296,7 +296,7 @@ async def test_a_request_the_server_refuses_as_too_large_is_fitted_by_its_count(
 
     with pytest.raises(ContextOverflowError):  # once only: a second refusal is the call's
         await fit.awrap_model_call(given, refused)
-    assert ours._RATIOS.get(ours._model_name(model) or "") == 1.25  # no size said
+    assert ours._RATIOS.get(ours._model_name(model) or "") is None  # no count said: kept
     ours._RATIOS._data.clear()
 
     async def broken(r: ModelRequest[Any]) -> ModelResponse[Any]:

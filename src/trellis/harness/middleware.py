@@ -1523,7 +1523,7 @@ class FitWindow(AgentMiddleware):
     The count is an estimate (Deep Agents'): when the model's server still refuses the request
     as over its window (its tokenizer makes more tokens of it), it is fitted again by the
     server's own count and sent once more (``refit``), that model's later calls fitted by the
-    learned ratio from the start.
+    learned ratio from the start (a refusal that states no count tightens that call only).
 
     When the instructions and the user's own message alone do not fit, the call fails with a
     :class:`ContextTooLarge` naming the window and the size. A request that fits is sent as it
@@ -1561,10 +1561,14 @@ class FitWindow(AgentMiddleware):
             real = _refused_size(exc)
             if real is None:
                 raise
-            # the server counts more than the estimate: fitted again by its count, once
+            # the server counts more than the estimate: fitted again by its count, once — a
+            # count it stated is the model's from then on; a refusal that states none (Deep
+            # Agents' own budget check after its summary) tightens this call only
             counted = _size(sent)
-            learned = max(ratio * 1.1, real / counted if real and counted else ratio * 1.25)
-            _RATIOS[name] = learned
+            if real and counted:
+                learned = _RATIOS[name] = max(ratio * 1.1, real / counted)
+            else:
+                learned = ratio * 1.25
             FITTED["refit"] += 1
             log.info("the model's server refused %s tokens: fitted again", real or "too many")
             return await handler(self._within(request, int(budget / learned)))
