@@ -1214,10 +1214,12 @@ _RULE: Final = re.compile(
 
 
 def ruled(messages: Sequence[BaseMessage]) -> bool:
-    """Whether the conversation's own system messages — the memory context pushed for the run,
-    the rules an input gives — hold a rule (:data:`_RULE`). The agent's instructions (the
+    """Whether the conversation's own leading system messages — the memory context pushed for
+    the run, the rules an input gives — hold a rule (:data:`_RULE`); read up to the first other
+    message, so a long run costs no more than a short one. The agent's instructions (the
     request's ``system_message``) are not among them: they always say what to do."""
-    return any(isinstance(m, SystemMessage) and _RULE.search(m.text) for m in messages)
+    leading = itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages)
+    return any(_RULE.search(m.text) for m in leading)
 
 
 class _CheckedState(AgentState[Any]):

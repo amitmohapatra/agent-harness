@@ -485,3 +485,5 @@ async def test_the_automatic_check_comes_with_a_rule_in_the_context(harness: Har
 def test_a_rule_is_read_in_the_conversations_own_system_messages(text: str, found: bool) -> None:
     assert ruled([SystemMessage(content=text), HumanMessage(content="never mind")]) is found
     assert ruled([HumanMessage(content=text)]) is False  # the user's words are no rule
+    later = [HumanMessage(content="hi"), SystemMessage(content=text)]
+    assert ruled(later) is False  # only the conversation's leading ones are read

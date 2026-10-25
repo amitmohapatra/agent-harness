@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final
 
 import jsonschema
 import pytest
@@ -16,8 +16,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult
 
 from benchmark.cost import __main__ as cli
-from benchmark.cost import catalog, prices, run, stats
-from benchmark.cost.variants import VARIANTS
+from benchmark.cost import catalog, prices, run, stats, variants
+from benchmark.cost.variants import VARIANTS, Setup
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Settings
 from trellis.harness.tools.lint import lint
@@ -174,7 +174,30 @@ TRAVEL_SCRIPT: list[Any] = [
 ]
 
 
-@pytest.mark.parametrize("variant", list(VARIANTS))
+#: The variants whose model calls follow the script one for one (the forced check asks once more
+#: per answer: ``test_the_forced_switches_are_reacts_own``).
+SCRIPTED: Final = [v for v in VARIANTS if v != "main+check"]
+
+
+def test_the_forced_switches_are_reacts_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: dict[str, Any] = {}
+
+    def recorded(*args: Any, **kwargs: Any) -> str:
+        built.update(kwargs)
+        return "graph"
+
+    monkeypatch.setattr(variants, "ReAct", recorded)
+    setup = Setup(system="s", model="m", window=None, max_steps=3)
+    for name, switches in (
+        ("main", (None, None)),
+        ("main+guidance", (True, None)),
+        ("main+check", (None, True)),
+    ):
+        assert VARIANTS[name].build(setup) == ("graph", {})
+        assert (built["tool_guidance"], built["answer_check"]) == switches
+
+
+@pytest.mark.parametrize("variant", SCRIPTED)
 async def test_a_cell_runs_every_task_and_records_each_run(
     variant: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

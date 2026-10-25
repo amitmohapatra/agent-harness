@@ -10,9 +10,10 @@ from typing import Any
 
 import pytest
 
+from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.sandbox import FakeSandboxes
-from trellis import Harness, ReAct, Runtime, docker_sandbox
+from tests.support.sandbox import FakeSandboxes, PausingSandboxes
+from trellis import Harness, ReAct, Runtime, docker_sandbox, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolError
 from trellis.harness.sandbox import SandboxSource
 from trellis.harness.sandbox.backend import ASYNC_ONLY, SandboxBackend, _error_of
@@ -128,3 +129,37 @@ async def test_react_runs_its_commands_in_the_sandbox_governed_and_recorded(
     assert ("delete", provider.made()[0]) in provider.calls  # the run's end deleted it
     result = await agent.run("again", user="u")
     assert result.status is RunStatus.ERROR  # the script ran out: a fresh run, a fresh box
+
+
+async def test_reacts_sandbox_is_paused_with_its_run_and_attached_by_the_resume(
+    harness: Harness,
+) -> None:
+    @tool(side_effects="irreversible")
+    def publish(text: str) -> str:
+        """Publish a text.
+
+        Args:
+            text: What.
+        """
+        return f"published {text}"
+
+    provider = PausingSandboxes()
+    model = ScriptedChatModel(
+        turns=[
+            ("execute", {"command": "echo drafted"}),
+            ("publish", {"text": "the draft"}),
+            ("execute", {"command": "echo again"}),
+            "published",
+        ]
+    )
+    graph = ReAct("s", model, backend=docker_sandbox(provider))
+    agent = arm(harness.wrap(graph, id="publisher"), [publish])
+    paused = await agent.run("draft and publish", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    made = provider.made()[0]
+    assert ("snapshot", made) in provider.calls and ("pause", made) in provider.calls
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.answer == "published", done.error
+    assert ("attach", made) in provider.calls  # the same sandbox, not a new one
+    assert provider.commands == ["echo drafted", "echo again"]
+    assert provider.made() == [made] and ("delete", made) in provider.calls

@@ -570,7 +570,7 @@ PLACED: Final = "ReActSummarization"
 
 def _placed(found: Any, name: str) -> Any:
     """``found`` (a middleware) named ``name``: Deep Agents keeps one middleware per name."""
-    found.__class__ = type(name, (type(found),), {"name": property(lambda self: name)})
+    found.__class__ = _named_class(type(found), name)
     return found
 
 
@@ -578,7 +578,13 @@ def _nothing(name: str) -> Any:
     """A middleware that does nothing, named ``name`` (the Deep Agents one it stands in for)."""
     from langchain.agents.middleware import AgentMiddleware
 
-    return type(name, (AgentMiddleware,), {"__module__": __name__})()
+    return _named_class(AgentMiddleware, name)()
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # one class per (base, name), not one per build
+def _named_class(base: type, name: str) -> type:
+    """A subclass of ``base`` whose middleware ``name`` is ``name``."""
+    return type(name, (base,), {"__module__": __name__, "name": property(lambda self: name)})
 
 
 def window_of(model: Any, given: int | None = None) -> tuple[int | None, str]:
