@@ -6,6 +6,7 @@ model call of a run (``accounting``) start and end it."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -96,12 +97,19 @@ async def test_a_second_stall_is_not_said_twice() -> None:
 
 async def test_a_stall_the_framework_swallowed_or_wrapped_is_still_the_attempts_error() -> None:
     runtime, _ = _runtime()
-    runtime.stalled = ModelTimeout("stalled")
     task = asyncio.current_task()
     assert task is not None
-    task.cancel()  # the watchdog's cancellation, which the framework did not let through
+    runtime.running_in = task
+    runtime.model_started("step-1", 0.01)
+    # the watchdog's cancellation reaches the attempt, and the framework does not let it
+    # through (a cancellation the task never got is not one a framework could swallow: on
+    # Python 3.12 ``uncancel`` leaves it pending, to cancel the task when it next yields)
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.sleep(5)
+    assert task.cancelling() == 1 and isinstance(runtime.stalled, ModelTimeout)
     assert pipeline._stalled(runtime) is runtime.stalled
     assert task.cancelling() == 0  # taken back
+    await asyncio.sleep(0)  # nothing left pending: the attempt goes on
     assert pipeline._stalled(runtime) is runtime.stalled  # nothing left to take back
     runtime.cancelled = "by a person"
     assert pipeline._stalled(runtime) is None  # a cancelled run's ending is its cancellation

@@ -53,9 +53,10 @@ import functools
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from contextlib import aclosing
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast
 
 from trellis.contracts import (
     ConfigurationError,
@@ -297,15 +298,18 @@ class ClaudeAdapter:
             self.seen.add(name)
 
     # ------------------------------------------------------------------ internals
-    async def _helped(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
+    async def _helped(
+        self, target: Any, native_input: Any, run: Invocation
+    ) -> AsyncGenerator[Any, None]:
         """The query's messages (:meth:`_messages`), each subagent Claude runs a helper of the
         run (``bridges.helpers``) from its ``Agent`` call to that call's result."""
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
         try:
-            async for message in self._messages(target, native_input, run):
-                await _subagents(helpers, message)
-                yield message
+            async with aclosing(self._messages(target, native_input, run)) as messages:
+                async for message in messages:
+                    await _subagents(helpers, message)
+                    yield message
         except BaseException as exc:
             error = exc
             raise
@@ -314,7 +318,7 @@ class ClaudeAdapter:
 
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """The query's messages — the session an earlier attempt kept resumed, when there is
         one the CLI still holds; else from the prompt."""
         from claude_agent_sdk import AssistantMessage, ResultMessage
@@ -322,31 +326,36 @@ class ClaudeAdapter:
         runtime = run.runtime
         journal = runtime.replay.journal
         resumed, answered = journal.session, False
-        async for message in self._query(target, native_input, run, resumed):
-            if (
-                resumed is not None
-                and not answered
-                and isinstance(message, ResultMessage)
-                and message.is_error
-            ):
-                # the CLI could not continue the session: the query again, from its prompt
-                why = "; ".join(message.errors or []) or message.subtype
-                runtime.events.warning(
-                    "claude_session", f"session {resumed} was not resumed ({why}): run again"
-                )
-                journal.session = None
-                async for again in self._query(target, native_input, run, None):
-                    yield again
+        # closed as it is left (``aclosing``): its CLI process ends here, in this loop
+        async with aclosing(self._query(target, native_input, run, resumed)) as messages:
+            async for message in messages:
+                if (
+                    resumed is not None
+                    and not answered
+                    and isinstance(message, ResultMessage)
+                    and message.is_error
+                ):
+                    # the CLI could not continue the session: the query again, from its prompt
+                    why = "; ".join(message.errors or []) or message.subtype
+                    runtime.events.warning(
+                        "claude_session", f"session {resumed} was not resumed ({why}): run again"
+                    )
+                    journal.session = None
+                    break
+                answered = answered or isinstance(message, AssistantMessage)
+                yield message
+            else:
                 return
-            answered = answered or isinstance(message, AssistantMessage)
-            yield message
+        async with aclosing(self._query(target, native_input, run, None)) as again:
+            async for message in again:
+                yield message
 
     async def _query(
         self, target: Any, native_input: Any, run: Invocation, session: str | None
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """One query (``session``: the one it resumes); the session it runs in kept in the
         journal as it goes."""
-        from claude_agent_sdk import ResultMessage, query
+        from claude_agent_sdk import ResultMessage
 
         runtime = run.runtime
         given = runtime.framework_options
@@ -356,19 +365,32 @@ class ClaudeAdapter:
         prompt = native_input.prompt if session is None else _resumed(native_input, run)
         steps.waiting()
         try:
-            async for message in query(prompt=prompt, options=options):
-                steps.waiting()  # the next message is the next step's
-                found = getattr(message, "session_id", None)
-                if isinstance(found, str):
-                    runtime.replay.journal.session = found
-                if isinstance(message, ResultMessage):
-                    _spent(runtime, options, message)
-                yield message
-                if runtime.pending is not None:
-                    # the run paused: stop here; the CLI process goes with it
-                    return
+            # closed as it is left (``aclosing``): its CLI process ends here, in this loop
+            async with aclosing(_queried(prompt, options)) as messages:
+                async for message in messages:
+                    steps.waiting()  # the next message is the next step's
+                    found = getattr(message, "session_id", None)
+                    if isinstance(found, str):
+                        runtime.replay.journal.session = found
+                    if isinstance(message, ResultMessage):
+                        _spent(runtime, options, message)
+                    yield message
+                    if runtime.pending is not None:
+                        # the run paused: stop here; the CLI process goes with it
+                        return
         finally:
             runtime.model_ended(STEP)
+
+
+def _queried(prompt: Any, options: Any) -> AsyncGenerator[Any, None]:
+    """The query's messages: what ``claude_agent_sdk.query`` runs, for its caller to close.
+    ``query`` iterates it with a bare ``async for``, so a caller that leaves early (a paused
+    run) leaves it to be collected — after the attempt's task, where its cleanup (the CLI
+    process's end) can no longer run, and the process outlives the run."""
+    from claude_agent_sdk._internal.client import InternalClient
+
+    messages = InternalClient().process_query(prompt=prompt, options=options)
+    return cast("AsyncGenerator[Any, None]", messages)
 
 
 async def _briefed(

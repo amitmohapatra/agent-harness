@@ -27,6 +27,7 @@ from trellis.contracts import (
     ToolCall,
 )
 from trellis.harness import budget
+from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
 from trellis.harness.adapters.claude import (
@@ -153,8 +154,6 @@ def test_structured_output_outranks_the_result_text() -> None:
 
 
 async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    import claude_agent_sdk
-
     messages = [
         AssistantMessage(content=[ToolUseBlock("t1", "mcp__trellis__x", {})], model="m"),
         AssistantMessage(content=[TextBlock(text=""), TextBlock(text="done")], model="m"),
@@ -171,12 +170,12 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     ]
     seen: list[ClaudeAgentOptions] = []
 
-    async def query(*, prompt: str, options: ClaudeAgentOptions) -> Any:
+    async def query(prompt: str, options: ClaudeAgentOptions) -> Any:
         seen.append(options)
         for message in messages:
             yield message
 
-    monkeypatch.setattr(claude_agent_sdk, "query", query)
+    monkeypatch.setattr(claude_adapter, "_queried", query)
     spent: list[dict[str, Any]] = []
     monkeypatch.setattr(budget, "account", lambda runtime, **given: spent.append(given))
     replay = SimpleNamespace(journal=Journal())
