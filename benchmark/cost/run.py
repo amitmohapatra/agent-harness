@@ -14,6 +14,7 @@ task success.
 
 from __future__ import annotations
 
+import collections
 import importlib
 import os
 import platform
@@ -34,6 +35,7 @@ from benchmark.cost import catalog, prices, stats
 from benchmark.cost.variants import VARIANTS, Setup
 from trellis import Harness, Hooks, Settings
 from trellis.contracts import ToolCall, ToolOutcome
+from trellis.harness.middleware import FITTED
 
 scenario = importlib.import_module("examples.06_scenarios.tool_choice")
 
@@ -242,6 +244,7 @@ async def run_cell(
         for repeat, task in todo:
             called.tools = []
             cpu_before = {name: procstat.cpu_seconds(pid) for name, pid in pids.items()}
+            fitted_before = collections.Counter(FITTED)
             began = time.monotonic()
             with metered() as meter:
                 report = await h.evaluate(
@@ -262,6 +265,7 @@ async def run_cell(
                 cpu=_used(cpu_before, pids),
             )
             row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
+            row["fitted"] = dict(collections.Counter(FITTED) - fitted_before)  # FitWindow's steps
             rows.append(row)
             if on_row is not None:
                 on_row(row)
