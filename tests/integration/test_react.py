@@ -4,6 +4,7 @@ on the gateway, and the user's middleware added or replacing by name."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -130,10 +131,13 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
     assert json.loads(request.content)["model"] == "provider/model"
 
 
-def test_each_gateway_model_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_event_loop_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     """langchain-openai's default client is one per gateway URL for the whole process: its
-    pooled connections would break a graph run in a later event loop."""
+    pooled connections would break a graph run in a later event loop. A routed name's chat
+    model is made once per route and event loop."""
     import openai
+
+    from trellis.harness.gateways import routed_chat_model
 
     monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")
     made: list[httpx.AsyncClient] = []
@@ -143,15 +147,26 @@ def test_each_gateway_model_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPa
         return made[-1]
 
     monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", client)
-    ReAct(system="s", model="provider/model")
-    ReAct(system="s", model="provider/model")
-    assert len(made) == 2 and made[0] is not made[1]
+    model = routed_chat_model("provider/model")
+
+    async def twice() -> tuple[Any, Any]:
+        return model.resolved(), model.resolved()
+
+    first, again = asyncio.run(twice())
+    other, _ = asyncio.run(twice())
+    assert first is again and first is not other and len(made) == 2
 
 
-def test_a_model_name_without_the_gateway_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_name_whose_provider_cannot_be_told_fails_the_run_saying_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("BIFROST_URL", raising=False)
-    with pytest.raises(ConfigurationError, match="BIFROST_URL"):
-        ReAct(system="s", model="some/model")
+    graph = ReAct(system="s", model="granite")  # built: the route is the run's to choose
+    async with Harness(config=Settings()) as h:
+        result = await h.wrap(graph, id="unnamed").run("x", user="u")
+    assert (
+        result.error is not None and "name its provider ('openai:granite'" in result.error.message
+    )
 
 
 def test_what_react_refuses() -> None:

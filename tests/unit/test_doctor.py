@@ -300,7 +300,7 @@ async def test_approval_rules_are_listed_per_agent_and_a_tenant_wide_read_lists_
 def test_the_cli_names_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     asked: list[list[str]] = []
 
-    async def checks(settings: Settings, env: Any, *, agents: list[str]) -> list[doctor.Check]:
+    async def checks(settings: Settings, *, agents: list[str]) -> list[doctor.Check]:
         asked.append(agents)
         return []
 

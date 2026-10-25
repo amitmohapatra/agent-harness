@@ -106,6 +106,7 @@ from trellis.harness import (
 from trellis.harness.adapters.langgraph import TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
+from trellis.harness.gateways import Capability, route_now
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
@@ -616,12 +617,13 @@ class ModelHooks(AgentMiddleware):
         timeout: float | None = None,
         prompt: str | Prompt | None = None,
         prompt_vars: dict[str, Any] | None = None,
-        gateway: bool = False,
+        routed: bool = False,
     ) -> None:
         super().__init__()
-        #: the model is the gateway's: every call carries the run's Bifrost dimensions and
-        #: its ``traceparent`` (``telemetry.gateway_headers``)
-        self.gateway = gateway
+        #: the model is a routed name (``gateways.routed_chat_model``): on a route that
+        #: attributes (Bifrost), every call carries the run's dimensions and its ``traceparent``
+        #: (``telemetry.gateway_headers``)
+        self.routed = routed
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
         if isinstance(prompt, str):
@@ -673,7 +675,8 @@ class ModelHooks(AgentMiddleware):
             request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
-            if self.gateway:  # in the model's span: the gateway's span of the call joins it
+            # in the model's span: the gateway's span of the call joins it
+            if self.routed and route_now().has(Capability.ATTRIBUTION):
                 sent = request.model_settings.get("extra_headers") or {}
                 headers = {**sent, **gateway_headers()}
                 request = request.override(

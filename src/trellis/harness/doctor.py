@@ -28,7 +28,13 @@ from typing import Any, Final
 
 import httpx
 
-from trellis.harness.gateways import CAPABILITIES, ModelGateway, model_gateway
+from trellis.harness.gateways import (
+    CAPABILITIES,
+    GatewayKind,
+    ModelGateway,
+    model_gateway,
+    provider_keys,
+)
 from trellis.harness.settings import DEPRECATED, Settings, sourced
 
 #: The settings whose values are secrets: shown as set, never as their value.
@@ -102,33 +108,31 @@ def effective(environ: Mapping[str, str] | None = None) -> list[tuple[str, str, 
 
 
 def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
-    """Which gateway serves model names, what named it, and what is off without it."""
-    gateway = model_gateway(settings, environ)
-    if gateway is None:
-        off = sorted(CAPABILITIES)
-        lines = [
-            "none: models are objects passed in code (no BIFROST_URL, no OPENAI_BASE_URL or "
-            "OPENAI_API_KEY)"
-        ]
-    else:
-        off = sorted(set(CAPABILITIES) - gateway.capabilities)
+    """How model names are routed, what named the route, the provider keys it leaves unused
+    (Bifrost wins over them) and what is off without Bifrost."""
+    gateway = model_gateway(settings)
+    keys = provider_keys(environ)
+    if gateway.kind is GatewayKind.BIFROST:
         lines = [f"{gateway.title} at {gateway.url} ({gateway.source})"]
+        if keys:
+            lines.append(
+                f"note: {', '.join(keys)} set, not used for model calls: Bifrost wins over a "
+                "provider key"
+            )
+    else:
+        said = ", ".join(keys) if keys else "none set"
+        lines = [f"provider keys: each provider's own SDK reads its own ({said})"]
+    off = sorted(set(CAPABILITIES) - gateway.capabilities)
     lines += [f"off: {CAPABILITIES[c]}" for c in off]
     return lines
 
 
-async def checks(
-    settings: Settings,
-    environ: Mapping[str, str] | None = None,
-    *,
-    agents: Sequence[str] = (),
-) -> list[Check]:
+async def checks(settings: Settings, *, agents: Sequence[str] = ()) -> list[Check]:
     """Each service the settings name, reached with its key; the approval rules learned for
     ``agents`` (and the agents the key may act as); the spool; the Docker daemon."""
-    env = os.environ if environ is None else environ
     async with httpx.AsyncClient(timeout=CHECK_SECONDS) as client:
         gateway, (memory, key), runs = await asyncio.gather(
-            _gateway(client, model_gateway(settings, env)),
+            _gateway(client, model_gateway(settings)),
             _memory(client, settings),
             _runs(client, settings),
         )
@@ -168,9 +172,10 @@ def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     return said
 
 
-async def _gateway(client: httpx.AsyncClient, gateway: ModelGateway | None) -> Check | None:
-    """The gateway that serves model names, asked for its models with its key."""
-    if gateway is None:
+async def _gateway(client: httpx.AsyncClient, gateway: ModelGateway) -> Check | None:
+    """Bifrost, when it routes the model names, asked for its models with its key (a
+    provider's own SDK is not asked: its key is its own)."""
+    if gateway.kind is not GatewayKind.BIFROST:
         return None
     url = f"{gateway.url.rstrip('/')}/models"
     return await _reached(client, "gateway", url, {"Authorization": f"Bearer {gateway.probe_key}"})
@@ -442,7 +447,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     agents = _agents(list(argv or ()))
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
-    found = asyncio.run(checks(settings, env, agents=agents))
+    found = asyncio.run(checks(settings, agents=agents))
     said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
     sys.stdout.write(said + "\n")
     return 0 if all(c.ok for c in found) else 1

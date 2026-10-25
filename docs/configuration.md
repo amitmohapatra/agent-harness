@@ -25,9 +25,9 @@ Each setting lives in one layer, decided by who owns it and how often it changes
   under their own names, never mirrored: `OTEL_*` by the OpenTelemetry SDK (the exporter's
   `OTEL_EXPORTER_OTLP_ENDPOINT`, `..._TRACES_ENDPOINT`, `..._HEADERS`; `OTEL_SERVICE_NAME`;
   `OTEL_RESOURCE_ATTRIBUTES`, whose `service.version` is the agents' version — bake it in at
-  build time), `LANGFUSE_*`, `DOCKER_HOST`, and — without Bifrost — the OpenAI SDK's
-  `OPENAI_BASE_URL` and `OPENAI_API_KEY`, which name the OpenAI-compatible endpoint model names
-  go to ([below](#where-a-model-name-goes));
+  build time), `LANGFUSE_*`, `DOCKER_HOST`, and — without Bifrost — the providers' own keys
+  (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`...), which each provider's SDK
+  reads ([below](#where-a-model-name-goes));
 * **the code** — the agent's behaviour: the model, prompts and skills (their sources given in
   code: `Harness(prompts=[prompts_dir("prompts")])`, nothing read from the working folder by
   itself — each source in use is logged), tools, MCP selection, the output schema, a budget,
@@ -50,17 +50,30 @@ accepted on its own (in effect or revoked), and what to set — it changes nothi
 
 ### Where a model name goes
 
-A model *name* (`ReAct(model="provider/model")`, `llm_judge(model="...")`) goes to exactly
-one gateway, chosen from what is set — never a chain of fallbacks
-(`trellis.harness.gateways`):
+Every model call of every framework is routed one way, chosen from the settings — never a
+chain of fallbacks (`trellis.harness.gateways`). The settings given in code
+(`Harness(config=Settings(...))`) route the runs' models over the environment's, whenever the
+agent was built:
 
-| Set | Model names go to | What else it can do |
+| Set | Model calls go | What else it can do |
 |---|---|---|
-| `BIFROST_URL` | Bifrost, with `BIFROST_VIRTUAL_KEY` | everything: the MCP tools and Virtual MCPs, Code Mode, the cost of each call (dollar budgets), fallbacks and retries, stored prompts, skills, the judge alias |
-| no `BIFROST_URL`; `OPENAI_BASE_URL` and/or `OPENAI_API_KEY` | that OpenAI-compatible endpoint (LiteLLM's proxy, Portkey, TrueFoundry, OpenRouter, vLLM, Ollama; OpenAI when only the key is set), read by the OpenAI SDK itself | models only: the client's own retries; a judge names its model (`llm_judge(model=)`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
-| neither | nowhere: a model name is an error naming these; models are objects you pass (`ReAct(model=ChatAnthropic(...))`, a framework's own client) | judges need `llm_judge(model=<an object>)` |
+| `BIFROST_URL` | through Bifrost, with `BIFROST_VIRTUAL_KEY` — it wins over a provider key also set (said once at start, and by `trellis doctor`) | everything: the MCP tools and Virtual MCPs, Code Mode, the cost of each call (dollar budgets), fallbacks and retries, stored prompts, skills, the judge alias, each call's run as its dimensions |
+| no `BIFROST_URL` | to the model's provider, through the provider's own SDK and key (`OPENAI_API_KEY` and `OPENAI_BASE_URL` for any OpenAI-compatible endpoint — LiteLLM's proxy, vLLM, Ollama —, `ANTHROPIC_API_KEY`...) | models only: the client's own retries; a judge by name is an OpenAI model (`llm_judge(model="openai:...")`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
 
-`trellis doctor` names the gateway, what named it, and what is off without it.
+A name says its provider — `openai/gpt-4o` or `openai:gpt-4o` — or starts the way its
+provider's do (`gpt-`, `o3`, `claude-`, `gemini-`, `mistral-`): it is mapped to the route's
+form (`openai/gpt-4o` on Bifrost, `openai:gpt-4o` for LangChain's `init_chat_model`). Per
+framework:
+
+| Framework | How its models are routed |
+|---|---|
+| `ReAct(model="name")` | its chat model routes each call as the harness running it says |
+| OpenAI Agents | an agent's model name (or the SDK's default) through Bifrost's chat completions (`RunConfig.model_provider`), unless the run's own `run_config` names a provider |
+| Claude Agent SDK | the CLI through Bifrost's Anthropic route (`ANTHROPIC_BASE_URL`, the virtual key), its headers in `ANTHROPIC_CUSTOM_HEADERS`, unless the options' own `env` names a base URL |
+| a model object you built (a `ChatOpenAI`, an OpenAI `Model`) | as you built it: with Bifrost set, a call that does not go through it is said once per agent and model |
+
+`trellis doctor` names the route, the provider keys it leaves unused, and what is off without
+Bifrost.
 
 | Variable | `Settings` field | Unset (default) | Example | Automatic when set |
 |---|---|---|---|---|

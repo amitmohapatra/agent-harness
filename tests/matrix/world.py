@@ -83,7 +83,7 @@ from trellis.runs import Worker as RunsWorker
 #: ``make matrix-models``: every ``ReAct`` cell names its model (``MATRIX_MODELS=named``)
 #: instead of passing a model object — the other two of the three model modes.
 NAMED: Final = os.environ.get("MATRIX_MODELS") == "named"
-NAMED_MODEL: Final = "local/small"
+NAMED_MODEL: Final = "openai/small"
 USER: Final = "ada"
 #: The agent's version and default time limit when those switches are on.
 VERSION: Final = "v-matrix"
@@ -451,7 +451,7 @@ class World:
                     serving.serve_models(self.monkeypatch)
                 else:
                     serving = self.compat = FakeGateway()
-                    serving.serve_openai_compatible(self.monkeypatch)
+                    serving.serve_provider_key(self.monkeypatch)
                 self._serving = serving
             serving.chat = PlannedChat(plan)
             return ReAct(system=SYSTEM, model=NAMED_MODEL), tools

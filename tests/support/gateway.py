@@ -66,9 +66,11 @@ class FakeGateway:
         return Gateway(URL, "vk", client=bifrost, admin=Admin(URL, client=api))
 
     def serve_models(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A gateway model ``ReAct`` builds (``ChatOpenAI`` on ``BIFROST_URL``) is answered
-        here, as the gateway's other routes are."""
+        """A gateway model ``ReAct`` builds (``ChatOpenAI`` on ``BIFROST_URL``), and an OpenAI
+        agent's (the SDK's ``AsyncOpenAI`` on it), is answered here, as the gateway's other
+        routes are."""
         import langchain_openai
+        import openai
 
         monkeypatch.setenv("BIFROST_URL", URL)
         monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
@@ -80,12 +82,19 @@ class FakeGateway:
                 kwargs["http_async_client"] = httpx.AsyncClient(transport=transport)
                 super().__init__(**kwargs)
 
-        monkeypatch.setattr(langchain_openai, "ChatOpenAI", Served)
+        class Client(openai.AsyncOpenAI):
+            def __init__(self, **kwargs: Any) -> None:
+                transport = httpx.MockTransport(handle)
+                kwargs["http_client"] = httpx.AsyncClient(transport=transport)
+                super().__init__(**kwargs)
 
-    def serve_openai_compatible(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """No Bifrost: an OpenAI-compatible endpoint (``OPENAI_BASE_URL``, as LiteLLM's proxy
-        or vLLM is) answering a model name's chat completions here — what a ``ReAct`` builds
-        and the OpenAI SDK's own client the judge uses."""
+        monkeypatch.setattr(langchain_openai, "ChatOpenAI", Served)
+        monkeypatch.setattr(openai, "AsyncOpenAI", Client)
+
+    def serve_provider_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No Bifrost: the OpenAI SDK's own endpoint (``OPENAI_BASE_URL``, as LiteLLM's proxy or
+        vLLM is) answering a model name's chat completions here — what a ``ReAct`` builds and
+        the OpenAI SDK's own client the judge uses."""
         import langchain_openai
         import openai
 

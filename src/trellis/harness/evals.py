@@ -68,7 +68,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline, telemetry
 from trellis.harness.clients.bifrost import Gateway, PromptPin
-from trellis.harness.gateways import OpenAICompatible, model_gateway, unserved
+from trellis.harness.gateways import ModelGateway, ProviderKey, model_gateway
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.prompts import BifrostPrompts, Prompt, PromptSources
@@ -281,6 +281,8 @@ class EvalServices:
     langfuse: telemetry.Langfuse | None = None
     judge_gateway: Gateway | None = None
     judge_model: Any = None
+    #: how a model name is routed without Bifrost (the harness's: ``Harness.model_gateway``)
+    models: ModelGateway | None = None
     #: where ``llm_judge(prompt=)`` is looked up (``None``: the judge's gateway only)
     prompts: PromptSources | None = None
 
@@ -308,6 +310,7 @@ class EvalServices:
             langfuse=telemetry.Langfuse.of(settings),
             judge_gateway=judge_gateway,
             judge_model=settings.judge_model,
+            models=model_gateway(settings),
         )
 
     def model(self, named: str | None = None) -> Any:
@@ -319,13 +322,13 @@ class EvalServices:
             return model
         if self.judge_gateway is not None:
             return _Named(self.judge_gateway, model)
-        gateway = model_gateway(Settings())  # no Bifrost here: the OpenAI SDK's endpoint, if any
-        if not isinstance(gateway, OpenAICompatible):
-            raise unserved("llm_judge")
-        if model == JUDGE_ALIAS:
+        # no Bifrost in the settings given (the harness's, else the environment's): the
+        # provider's own SDK, as the agents' models are routed
+        gateway = self.models or model_gateway(Settings.from_env())
+        if model == JUDGE_ALIAS or not isinstance(gateway, ProviderKey):
             raise ConfigurationError(
-                f"the judge alias {JUDGE_ALIAS!r} is Bifrost's: on the OpenAI-compatible "
-                f"gateway at {gateway.url} name the judge's model, llm_judge(model='...')"
+                f"the judge alias {JUDGE_ALIAS!r} is Bifrost's (BIFROST_URL): without it, name "
+                "the judge's model, llm_judge(model='openai:...')"
             )
         return gateway.judge(model)
 

@@ -30,12 +30,12 @@ the loop is the harness's. What it is built with:
   filesystem, sub-agents, approvals, call limits, PII, tool selection...), added before
   ``ModelHooks``; one named as a default one is refused, naming the parameter that sets it.
 
-A model name is a model of the deployment's one gateway (``trellis.harness.gateways``), asked
-through ``ChatOpenAI`` on its chat completions: Bifrost (``BIFROST_URL``, the virtual key
-``BIFROST_VIRTUAL_KEY``, from ``settings=`` or the environment; the deny-all MCP scope; the
-gateway owns retries, fallbacks and prompt caching), else any OpenAI-compatible endpoint the
-OpenAI SDK's ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` name (the client's own retries); with
-neither, a name is an error. Any LangChain chat model is used as it is. The context window is
+A model name is routed per call as the harness running it says (``trellis.harness.gateways``:
+``Harness(config=)``'s settings over the environment's): through Bifrost (``BIFROST_URL``, the
+virtual key ``BIFROST_VIRTUAL_KEY``; the deny-all MCP scope; the gateway owns retries,
+fallbacks and prompt caching), else to its provider through the provider's own SDK and key
+(``gpt-4o``, ``openai:gpt-4o``, ``anthropic:claude-...``; the client's own retries). Any
+LangChain chat model is used as it is. The context window is
 ``context_window``, else the model's LangChain profile (``model.profile``); when neither says,
 the window-scaled features are off, said once.
 """
@@ -54,9 +54,8 @@ from pydantic import BaseModel
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import MODEL_METADATA, WINDOW_METADATA, context_window
 from trellis.harness.bounded import SAID_ONCE
-from trellis.harness.gateways import Capability, ModelGateway, model_gateway, unserved
+from trellis.harness.gateways import routed_chat_model
 from trellis.harness.prompts import Prompt
-from trellis.harness.settings import Settings
 
 log = logging.getLogger("trellis.models")
 
@@ -89,7 +88,6 @@ def ReAct(
     answer_check: bool = False,
     capabilities: Mapping[str, bool] | None = None,
     effort: str | None = None,
-    settings: Settings | None = None,
 ) -> Any:
     """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name, or a
     LangChain chat model), its answer an ``output`` (a pydantic model or a JSON schema) when given.
@@ -106,8 +104,7 @@ def ReAct(
     more model call each); ``capabilities`` tells the model what it can and cannot do beyond its
     tools (``{"accept an image upload": False}``), so it answers such a question plainly. ``effort``
     is the reasoning effort sent with every call of a model name (``reasoning_effort``; the gateway
-    passes it on); ``settings`` are the gateway's address and key (``Harness(config=)``'s; else the
-    environment's)."""
+    passes it on)."""
     try:
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
@@ -132,7 +129,7 @@ def ReAct(
     named = model if isinstance(model, str) else None
     # the model call's bound is ``ModelHooks``' (with the run's time left): applied once, not
     # again by the model's own client
-    gateway, chat = _served(model, effort=effort, settings=settings)
+    chat = routed_chat_model(model, effort=effort) if isinstance(model, str) else model
     window, source = window_of(chat, context_window)
     if window is None:
         _unknown(named or type(chat).__name__)
@@ -183,7 +180,7 @@ def ReAct(
             timeout=model_timeout,
             prompt=prompt,
             prompt_vars=prompt_vars,
-            gateway=gateway is not None and gateway.has(Capability.ATTRIBUTION),
+            routed=isinstance(model, str),
         ),
     ]
     graph = create_agent(
@@ -260,24 +257,6 @@ def _unknown(name: str) -> None:
         "tools are off (ReAct(context_window=) turns them on)",
         name,
     )
-
-
-def _served(
-    model: Any, *, effort: str | None, settings: Settings | None
-) -> tuple[ModelGateway | None, Any]:
-    """The gateway that serves a model name, and the chat model it makes of it
-    (``trellis.harness.gateways``); any other model as it is, served by none."""
-    if not isinstance(model, str):
-        return None, model
-    gateway = model_gateway(settings or Settings.from_env())
-    if gateway is None:
-        raise unserved("ReAct")
-    return gateway, gateway.chat_model(model, effort=effort)
-
-
-def _gateway_model(model: Any, *, effort: str | None, settings: Settings | None) -> Any:
-    """The chat model for ``model`` (:func:`_served`'s), for a graph built by hand."""
-    return _served(model, effort=effort, settings=settings)[1]
 
 
 def _profiled(model: Any, window: int | None) -> Any:

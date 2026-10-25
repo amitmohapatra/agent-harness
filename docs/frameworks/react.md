@@ -46,7 +46,7 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 ```text
 ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
       context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None, effort=None, settings=None)
+      tool_guidance=False, answer_check=False, capabilities=None, effort=None)
 ```
 
 * `model` — a Bifrost model name: a `ChatOpenAI` on the gateway's chat completions
@@ -71,8 +71,9 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`, the
   same on every step; the gateway passes it on to the provider). For a chat model of your own,
   set it on that model.
-* `settings` — the gateway's address and key (`Harness(config=)`'s `Settings`); unset, the
-  environment's.
+* a model name is routed per call as the harness running the agent says — its
+  `Harness(config=)` settings over the environment's: through Bifrost, else to the provider
+  with its own key ([configuration.md](../configuration.md#where-a-model-name-goes)).
 * `prompt` — a prompt (`"triage"`, `"triage@3"`, a `Prompt`) from the prompt sources — code,
   `PROMPTS_DIR`, Langfuse, the gateway ([prompts.md](../prompts.md)) — looked up at the run's
   start and pinned for it (a resume reads the same one): a stored prompt of the gateway's is

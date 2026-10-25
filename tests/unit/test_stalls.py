@@ -15,6 +15,7 @@ import pytest
 from trellis.contracts import AgentExecutionContext, ErrorCategory, RunEvent
 from trellis.harness import accounting, pipeline
 from trellis.harness.events import RunEvents
+from trellis.harness.gateways import ProviderKey
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Replay
 from trellis.harness.runtime import STALLED, ModelTimeout, Runtime, _current
@@ -24,7 +25,10 @@ def _runtime() -> tuple[Runtime, list[RunEvent]]:
     seen: list[RunEvent] = []
     events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="a"))
     events.listen(seen.append)
-    agent: Any = SimpleNamespace(adapter=SimpleNamespace(name="langgraph"), without=frozenset())
+    harness = SimpleNamespace(model_gateway=ProviderKey())
+    agent: Any = SimpleNamespace(
+        adapter=SimpleNamespace(name="langgraph"), without=frozenset(), harness=harness
+    )
     identity = Identity(tenant="t", agent_id="a", run_id="run_1", user="u")
     runtime = Runtime(identity=identity, agent=agent, events=events, replay=Replay(Journal()))
     return runtime, seen

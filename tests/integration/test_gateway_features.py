@@ -268,10 +268,11 @@ async def test_the_claude_cli_selects_the_version_its_run_pinned(
     newer(fake, clock)
     assert (await agent.run("x", user="ada")).answer == "ok"
     sent = json.loads(record.read_text())["custom_headers"].splitlines()
-    assert sent[0] == "x-team: eu" and sent[-2:] == [
-        "x-bf-prompt-id: p-triage",
-        "x-bf-prompt-version: 3",
-    ]
+    assert sent[0] == "x-team: eu"
+    assert "x-bf-prompt-id: p-triage" in sent and "x-bf-prompt-version: 3" in sent
+    assert "x-bf-prompt-version: 2" not in sent
+    # Bifrost's own headers, routed automatically: the deny-all MCP scope, whose run it is
+    assert "x-bf-mcp-include-tools: " in sent and "x-bf-dim-agent: claude" in sent
     assert lines.endswith("x-bf-prompt-version: 2")  # the options' own: unchanged
 
 

@@ -42,9 +42,10 @@ import inspect
 import json
 import logging
 import types
+import weakref
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Final
+from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from trellis.contracts import (
     ConfigurationError,
@@ -65,10 +66,11 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
-from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.session import MemorySession
 from trellis.harness.features import MEMORY_TOOLS
+from trellis.harness.gateways import GatewayKind, per_loop
 from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
@@ -133,6 +135,15 @@ def sdk_tracing_said() -> bool:
     return True
 
 
+if TYPE_CHECKING:
+    from trellis.harness.gateways import Bifrost
+
+#: Bifrost's model providers, per event loop, by gateway (:func:`bifrost_provider`).
+_PROVIDERS: weakref.WeakKeyDictionary[Any, LRU[Any, Any]] = weakref.WeakKeyDictionary()
+#: How many of them one event loop keeps.
+PROVIDERS_KEPT: Final = 8
+
+
 class OpenAIAgentsAdapter:
     name: ClassVar[str] = "openai_agents"
     tool_format: ToolFormat = "openai_agents"
@@ -167,7 +178,7 @@ class OpenAIAgentsAdapter:
 
         helpers = Helpers(run.runtime, self.name)
         agent, hooks = self._agent(target, run, helpers), _hooks()
-        options = _options(run.runtime)
+        options = _options(run.runtime, target)
         error: BaseException | None = None
         try:
             given = await self._input(agent, native_input)
@@ -187,7 +198,7 @@ class OpenAIAgentsAdapter:
 
         helpers = Helpers(run.runtime, self.name)
         agent, hooks = self._agent(target, run, helpers), _hooks()
-        options = _options(run.runtime)
+        options = _options(run.runtime, target)
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
         error: BaseException | None = None
@@ -606,14 +617,91 @@ def _said_inside(agent_id: str, tool: str, tools: str) -> None:
     )
 
 
-def _options(runtime: Runtime) -> dict[str, Any]:
+def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
     """``Runner.run``'s options: the run's framework options, with the memory service's thread
     as the session (``bridges.session``) when the run keeps no thread of its own and memory is
-    on."""
+    on, and the model names routed through Bifrost when it serves the harness
+    (:func:`_routed`)."""
     options = dict(runtime.framework_options)
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
-    return options
+    return _routed(runtime, target, options)
+
+
+def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str, Any]:
+    """With Bifrost serving the harness, every model name of the run's agents goes through it
+    (``RunConfig.model_provider``: :func:`bifrost_provider`, the name mapped to Bifrost's
+    ``provider/model``) — unless the run's own ``run_config`` names a model provider of its
+    own (code over the environment). An agent whose model is an object of its own calls its
+    provider directly, which is said once per agent."""
+    from agents import Agent, RunConfig
+    from agents.models.multi_provider import MultiProvider
+
+    gateway = runtime.agent.harness.model_gateway
+    if gateway.kind is not GatewayKind.BIFROST:
+        return options
+    config = options.get("run_config") or RunConfig()
+    if not isinstance(config.model_provider, MultiProvider):
+        return options  # the run's own provider
+    for agent in reachable(target):
+        model = agent.model if isinstance(agent, Agent) else None
+        if model is not None and not isinstance(model, str):
+            _unrouted(runtime.agent_id, agent.name, type(model).__name__)
+    provider = bifrost_provider(cast("Bifrost", gateway))
+    return {**options, "run_config": dataclasses.replace(config, model_provider=provider)}
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent, of the most recent
+def _unrouted(agent_id: str, name: str, model: str) -> None:
+    log.warning(
+        "%s: the OpenAI agent %r has a model object (%s), which calls its provider directly, "
+        "not Bifrost: give it a model name to route it through BIFROST_URL",
+        agent_id,
+        name,
+        model,
+        extra={"agent_id": agent_id, "agent": name},
+    )
+
+
+def bifrost_provider(gateway: Bifrost) -> Any:
+    """The OpenAI Agents SDK's model provider for Bifrost: each model name (the SDK's default
+    for an agent naming none) mapped to Bifrost's form, asked on its chat completions with the
+    virtual key, the deny-all MCP scope and the run's dimensions and ``traceparent`` (read per
+    request), no retries of the client's own (the gateway retries). One per gateway and event
+    loop (a client's pooled connections belong to the loop that opened them)."""
+    providers = per_loop(_PROVIDERS, PROVIDERS_KEPT)
+    key = (gateway.url, gateway.key)
+    found = providers.get(key)
+    if found is None:
+        found = providers[key] = _bifrost_provider_class()(gateway)
+    return found
+
+
+@functools.cache
+def _bifrost_provider_class() -> type:
+    import openai
+    from agents.models import get_default_model
+    from agents.models.interface import ModelProvider
+    from agents.models.openai_provider import OpenAIProvider
+
+    from trellis.harness.gateways import BIFROST_CLIENT_RETRIES, NO_KEY
+    from trellis.harness.prompts import GatewayHeaders
+
+    class BifrostProvider(ModelProvider):
+        def __init__(self, gateway: Bifrost) -> None:
+            self.gateway = gateway
+            client = openai.AsyncOpenAI(
+                base_url=gateway.url,
+                api_key=gateway.key or NO_KEY,
+                default_headers=GatewayHeaders(),  # type: ignore[arg-type] # read per request
+                max_retries=BIFROST_CLIENT_RETRIES,
+            )
+            self.inner = OpenAIProvider(openai_client=client, use_responses=False)
+
+        def get_model(self, model_name: str | None) -> Any:
+            return self.inner.get_model(self.gateway.routed(model_name or get_default_model()))
+
+    return BifrostProvider
 
 
 def _thread_store(options: Mapping[str, Any]) -> Any:

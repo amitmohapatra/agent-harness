@@ -32,9 +32,12 @@
   ``SessionStore`` (``bridges.claude.JournalSessions``): the SDK writes it back for the CLI on
   any machine. A session the CLI cannot continue (options keeping their own store, a transcript
   it refuses) is a warning, and the query runs again from its prompt against the journal;
-* model headers: ``ANTHROPIC_CUSTOM_HEADERS`` in the options' ``env`` that select a stored
-  prompt the run pinned (``h.model_headers(prompt=)``) select the version it pinned — the CLI
-  reads them as it starts, once per attempt;
+* models: with Bifrost serving the harness, the CLI's model calls go through Bifrost's
+  Anthropic route with the virtual key (:func:`routed_env`; the options' own
+  ``ANTHROPIC_BASE_URL`` wins), carrying the deny-all MCP scope, the run's dimensions and its
+  ``traceparent`` as ``ANTHROPIC_CUSTOM_HEADERS``; lines there that select a stored prompt the
+  run pinned (``h.model_headers(prompt=)``) select the version it pinned — the CLI reads them
+  as it starts, once per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``hooks`` (the governance and context
   hooks go after theirs), ``can_use_tool`` (the
@@ -77,9 +80,10 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.bridges.helpers import Helpers, Kind
+from trellis.harness.gateways import NO_KEY, Bifrost
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
-from trellis.harness.prompts import selected_env
+from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders, selected_env
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
@@ -126,6 +130,8 @@ SEEN_KEPT: Final = 1024
 #: escaped as JSON, twice that at most.
 CLI_MESSAGE_BYTES: Final = 2 * 50 * 1024 * 1024
 #: The hook event every tool call is governed at, and the ones that report it ran or failed.
+#: Bifrost's route for Anthropic's API, under its root.
+ANTHROPIC_ROUTE: Final = "anthropic"
 TOOL_EVENT: Final = "PreToolUse"
 RAN_EVENT: Final = "PostToolUse"
 FAILED_EVENT: Final = "PostToolUseFailure"
@@ -508,10 +514,34 @@ def _options(
         changes["disallowed_tools"] = narrowed
     if session is not None:
         changes["resume"] = session
-    env = selected_env(options.env, runtime)
+    env = routed_env(selected_env(options.env, runtime) or options.env, runtime)
     if env is not None:
         changes["env"] = env
     return dataclasses.replace(options, **changes)
+
+
+def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
+    """The CLI's environment with its model calls routed through Bifrost when it serves the
+    harness (``None``: as it is): Bifrost's Anthropic route (``ANTHROPIC_BASE_URL``, the
+    virtual key as ``ANTHROPIC_API_KEY``) — unless the options' own ``env`` names a base URL
+    (code over the environment) — and, on Bifrost's route, its headers as
+    ``ANTHROPIC_CUSTOM_HEADERS`` lines beside the options' own: the deny-all MCP scope, the
+    run's dimensions and its ``traceparent`` (read as the CLI starts)."""
+    gateway = runtime.agent.harness.model_gateway
+    if not isinstance(gateway, Bifrost):
+        return None
+    given = dict(env)
+    route = f"{gateway.origin}/{ANTHROPIC_ROUTE}"
+    if "ANTHROPIC_BASE_URL" not in given:
+        given["ANTHROPIC_BASE_URL"] = route
+        given["ANTHROPIC_API_KEY"] = gateway.key or NO_KEY
+    if not given["ANTHROPIC_BASE_URL"].startswith(gateway.origin):
+        return given if given != env else None  # their own endpoint: no Bifrost headers
+    ours = GatewayHeaders().now()
+    lines = (given.get(CUSTOM_HEADERS) or "").splitlines()
+    kept = [line for line in lines if line.partition(":")[0].strip().lower() not in ours]
+    given[CUSTOM_HEADERS] = "\n".join([*kept, *(f"{k}: {v}" for k, v in ours.items())])
+    return given
 
 
 def _narrowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str] | None:

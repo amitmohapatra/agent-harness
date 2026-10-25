@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import Any, Final, Literal, TypeVar
 
@@ -37,7 +38,7 @@ from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.features import Feature, features
 from trellis.harness.fresh import Fresh
-from trellis.harness.gateways import model_gateway
+from trellis.harness.gateways import GatewayKind, bifrost_wins, model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
@@ -207,15 +208,15 @@ class Harness:
         self.skills = skills if isinstance(skills, SkillSources) else SkillSources(skills)
         self.evals.prompts = self.prompts
         telemetry.configure(s)
-        #: where a model name goes (``trellis.harness.gateways``): Bifrost, else an
-        #: OpenAI-compatible endpoint, else none
+        #: where a model name goes (``trellis.harness.gateways``): Bifrost, else the
+        #: provider's own SDK with its own key; these settings', not the environment's
         self.model_gateway = model_gateway(s)
+        if self.model_gateway.kind is GatewayKind.BIFROST:
+            bifrost_wins(os.environ)
         log.info(
-            "trellis harness: gateway %s, memory %s, runs %s, spool %s, traces %s, sandbox %s "
+            "trellis harness: models %s, memory %s, runs %s, spool %s, traces %s, sandbox %s "
             "(trellis doctor prints each setting and its source)",
-            "none"
-            if self.model_gateway is None
-            else f"{self.model_gateway.title} {self.model_gateway.url}",
+            f"{self.model_gateway.title} {self.model_gateway.url}",
             s.memory_url or "off",
             s.runs_url or "in process",
             s.spool_dir or "none",

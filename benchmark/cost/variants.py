@@ -55,10 +55,10 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
     from langchain.agents import create_agent
 
     from trellis.harness import middleware as ours
-    from trellis.harness.react import _gateway_model
+    from trellis.harness.gateways import routed_chat_model
 
     graph = create_agent(
-        _gateway_model(setup.model, effort=None, settings=None),
+        routed_chat_model(setup.model) if isinstance(setup.model, str) else setup.model,
         tools=[],
         system_prompt=setup.system,
         middleware=[
