@@ -141,8 +141,9 @@ class Budgeted(AgentMiddleware):
 # --------------------------------------------------------------------------- planning
 class Planning(_LongTasks, TodoListMiddleware):
     """LangChain's ``TodoListMiddleware``, offered on a long task (``planning``): until then
-    the model is sent neither ``write_todos`` nor its instructions. Named as LangChain's, so a
-    ``TodoListMiddleware`` given to ``ReAct(middleware=)`` replaces it (always on)."""
+    the model is not sent ``write_todos``. Its guidance travels in the tool's own description
+    (LangChain's), never in the instructions: the system prompt stays the same from the first
+    call to the last, so a provider's prompt cache keeps its prefix. Named as LangChain's."""
 
     def __init__(self, *, window: int | None = None) -> None:
         super().__init__()
@@ -158,7 +159,7 @@ class Planning(_LongTasks, TodoListMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> Any:
         if self.wanted(request):
-            return await super().awrap_model_call(request, handler)
+            return await handler(request)  # the tool, its description its guidance
         return await handler(without_tools(request, {TODOS}))
 
 

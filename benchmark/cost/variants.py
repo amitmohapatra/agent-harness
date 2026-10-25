@@ -17,6 +17,10 @@ same instructions and model. A new cost feature lands as one more entry of :data
 * ``agent`` — LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep Agents'
   ``PatchToolCallsMiddleware``): the harness's part without Deep Agents' (no result paging, no
   summarization, no file tools or helper) — the other base ``ReAct`` could have.
+* ``pieces`` — LangChain's ``create_agent`` with ``trellis.middleware()``'s pieces and Deep
+  Agents' own pieces attached by hand (its ``FilesystemMiddleware`` on the journal, its
+  summarization placed after the narrowing, ``PatchToolCallsMiddleware``; the scratch tools on a
+  long task): Deep Agents' capabilities on demand without ``create_deep_agent``'s assembly.
 * ``main+guidance``, ``main+check`` — ``main`` with ``tool_guidance=True`` or
   ``answer_check=True``: what each is worth when forced on.
 * ``main-<feature>`` — ``main`` without each feature it turns on by itself
@@ -34,7 +38,7 @@ from __future__ import annotations
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from trellis import ReAct
 from trellis.harness.react import PLACED, defaults_off
@@ -105,6 +109,48 @@ def main(
     return target, {}
 
 
+def pieces(setup: Setup) -> tuple[Any, dict[str, Any]]:
+    """``create_agent`` with the harness's middleware and Deep Agents' pieces, gated per call."""
+    from deepagents.middleware import FilesystemMiddleware
+    from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
+    from deepagents.middleware.summarization import create_summarization_middleware
+    from langchain.agents import create_agent
+
+    from trellis.harness import automatic, react
+    from trellis.harness import middleware as ours
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+    from trellis.harness.gateways import routed_chat_model
+
+    chat = routed_chat_model(setup.model) if isinstance(setup.model, str) else setup.model
+    model = react._profiled(chat, setup.window)
+    backend = automatic.JournalBackend()
+    stack = react._middleware(
+        max_steps=setup.max_steps,
+        max_repeats=ours.MAX_REPEATS,
+        call_timeout=None,
+        context_window=setup.window,
+        tool_guidance=None,
+        answer_check=None,
+        capabilities=None,
+        system_prompt=None,
+        held=automatic.SCRATCH,
+        files=False,
+        summarization=react._placed(create_summarization_middleware(model, backend), react.PLACED),
+    )
+    graph = create_agent(
+        model,
+        tools=[],
+        system_prompt=setup.system,
+        middleware=cast(
+            list[Any], [FilesystemMiddleware(backend=backend), PatchToolCallsMiddleware(), *stack]
+        ),
+        checkpointer=ours.RunCheckpointer(),
+        name="pieces",
+    )
+    setattr(graph, TOOLS_ATTRIBUTE, list(setup.tools))  # run by HarnessTools, as ReAct's are
+    return graph, {}
+
+
 def agent(setup: Setup) -> tuple[Any, dict[str, Any]]:
     """``create_agent`` with the harness's middleware: ``ReAct``'s settings, no Deep Agents."""
     from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
@@ -172,6 +218,11 @@ VARIANTS: Final[dict[str, Variant]] = {
         "agent",
         "create_agent with trellis.middleware(): the harness's part without Deep Agents",
         agent,
+    ),
+    "pieces": Variant(
+        "pieces",
+        "create_agent with middleware() and Deep Agents' pieces attached, gated per call",
+        pieces,
     ),
     "main+guidance": Variant(
         "main+guidance",

@@ -78,8 +78,9 @@ async def test_the_long_task_tools_come_with_the_models_long_after_th_call(
     assert offered(model, LONG_AFTER) >= LONG_TOOLS
     assert offered(model, LONG_AFTER + 1) >= LONG_TOOLS
     assert all(not offered(model, n) & LONG_TOOLS for n in range(LONG_AFTER))
-    prompt = str(model.seen[LONG_AFTER][0].content)
-    assert "write_todos" in prompt and "write_todos" not in str(model.seen[0][0].content)
+    # the instructions stay the same from the first call on (a prompt cache's prefix holds):
+    # the plan's guidance is the tool's own description
+    assert model.seen[LONG_AFTER][0].content == model.seen[0][0].content
 
 
 @pytest.mark.parametrize(
