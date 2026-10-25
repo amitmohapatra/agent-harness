@@ -256,3 +256,51 @@ def test_the_tools_keep_the_order_they_were_first_offered_in() -> None:
     assert order(c, b, a, d) == ["a", "c", "b", "d"]  # back in their places
     given = request([HumanMessage("hi")], [a])
     assert hooks._in_order(given, run) is given and hooks._in_order(given, None) is given  # type: ignore[arg-type]
+
+
+async def test_a_request_the_server_refuses_as_too_large_is_fitted_by_its_count() -> None:
+    from langchain_core.exceptions import ContextOverflowError
+
+    from trellis.contracts import ModelError
+
+    tools = [lc(f"tool_{n}") for n in range(30)]
+    given = request([HumanMessage("please refund order o-7")], tools)
+    window = int(_size(given) / 0.95) + 50  # fits by the estimate
+    seen: list[ModelRequest[Any]] = []
+    refusals = [
+        ModelError(
+            f"the model call failed (400): request ({_size(given) * 2} tokens) exceeds the "
+            "available context size",
+            source="langgraph",
+        )
+    ]
+
+    async def handler(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        seen.append(r)
+        if refusals:
+            raise refusals.pop()
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    fit, before = FitWindow(window), FITTED["refit"]
+    model = given.model
+    await fit.awrap_model_call(given, handler)
+    assert seen[0] is given and _size(seen[1]) <= int(window * 0.95) // 2  # the server's count
+    assert FITTED["refit"] == before + 1 and ours._RATIOS.get(ours._model_name(model) or "")
+    seen.clear()
+    await fit.awrap_model_call(given, handler)  # that model's later calls: fitted at once
+    assert len(seen) == 1 and len(seen[0].tools) < len(tools)
+    ours._RATIOS._data.clear()
+
+    async def refused(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        raise ContextOverflowError("prompt is too long")
+
+    with pytest.raises(ContextOverflowError):  # once only: a second refusal is the call's
+        await fit.awrap_model_call(given, refused)
+    assert ours._RATIOS.get(ours._model_name(model) or "") == 1.25  # no size said
+    ours._RATIOS._data.clear()
+
+    async def broken(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        raise ModelError("the model call failed (500): boom", source="langgraph")
+
+    with pytest.raises(ModelError, match="boom"):  # anything else is not a refusal
+        await fit.awrap_model_call(given, broken)

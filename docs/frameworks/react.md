@@ -289,7 +289,10 @@ smaller, step by step, only as far as it must, in this order:
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
 
 Each step taken is said on the run (a `warning` event, code `context_fit`, naming the steps) and
-in the log. Only when the instructions and the user's own message alone do not fit does the call
+in the log. The count is an estimate (Deep Agents'): when the model's server still refuses the
+request as over its window — its tokenizer makes more tokens of it — the request is fitted again
+by the server's own count and sent once more, and that model's later calls are fitted by the
+learned ratio from the start. Only when the instructions and the user's own message alone do not fit does the call
 fail: a `ContextTooLarge` (`CONTEXT_TOO_LARGE`) naming the window and the size. The memory
 context's own budget is unchanged (5% of the window, 2,000 to 8,000 tokens): it is the last
 thing shrunk, and only for a request that would overflow.

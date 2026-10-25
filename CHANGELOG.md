@@ -59,7 +59,9 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
   the optional guidance, the tools narrowed (the used, the hinted, the relevant kept), their
   descriptions compacted, older results cleared, older turns, and last the memory context's
   lowest-ranked items (never a rule, the standing instructions or the learned plan) — each step
-  said on the run (`context_fit`); a request that fits is sent unchanged. Only a user message
+  said on the run (`context_fit`); a request that fits is sent unchanged. A request the
+  model's server still refuses as too large (its tokenizer counts more than the estimate) is
+  fitted again by the server's count and sent once more. Only a user message
   that alone cannot fit fails: `ContextTooLarge` (`CONTEXT_TOO_LARGE`) naming the window and the
   size.
 - With tool hints, each call is also offered the tools the memory context names (a learned

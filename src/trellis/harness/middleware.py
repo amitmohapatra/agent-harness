@@ -1473,7 +1473,20 @@ FIT_CLEARED: Final = "[result cleared to fit the model's window: read_result(id=
 #: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
 #: how often each fired in this process (a bounded counter: these keys only).
 FIT_STEPS: Final = ("guidance", "tools", "descriptions", "results", "turns", "memory")
+#: ``refit``: a request the model's server refused as over its window, fitted again with the
+#: server's own count (:data:`_RATIOS`) and sent once more.
 FITTED: Final[collections.Counter[str]] = collections.Counter()
+#: A model's tokens per counted token, learned from a request its server refused as too large
+#: (the count is an estimate: a tokenizer may make more of the same text), by model name.
+_RATIOS: Final[LRU[str, float]] = LRU(64)
+#: A model server's refusal of a request over its window (OpenAI's, Anthropic's, llama.cpp's,
+#: vLLM's words), and the size it says the request was.
+_OVERFLOW: Final = re.compile(
+    r"context_length_exceeded|exceed\w* (?:the )?(?:available |maximum )?context|"
+    r"maximum context length|prompt is too long|input tokens exceed",
+    re.IGNORECASE,
+)
+_OVERFLOW_SIZE: Final = re.compile(r"(?:request \(|resulted in |too long: )(\d+) tokens")
 _WRITES_LINE: Final = re.compile(r"\n?These tools change data: [^\n]*")
 _WORD: Final = re.compile(r"[a-z0-9]+")
 
@@ -1507,6 +1520,11 @@ class FitWindow(AgentMiddleware):
        last first), never a line that states a rule, nor one of the standing instructions (the
        profile), the summary, the recent turns or the learned plan (its skills and tools).
 
+    The count is an estimate (Deep Agents'): when the model's server still refuses the request
+    as over its window (its tokenizer makes more tokens of it), it is fitted again by the
+    server's own count and sent once more (``refit``), that model's later calls fitted by the
+    learned ratio from the start.
+
     When the instructions and the user's own message alone do not fit, the call fails with a
     :class:`ContextTooLarge` naming the window and the size. A request that fits is sent as it
     is, the same object. ``window``: the model's input window in tokens, else its LangChain
@@ -1532,9 +1550,27 @@ class FitWindow(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         budget = self._budget(request)
-        if budget is None or _size(request) <= budget:
+        if budget is None:
             return await handler(request)
-        return await handler(self._fitted(request, budget))
+        name = _model_name(request.model) or ""
+        ratio = _RATIOS.get(name) or 1.0
+        sent = self._within(request, int(budget / ratio))
+        try:
+            return await handler(sent)
+        except Exception as exc:
+            real = _refused_size(exc)
+            if real is None:
+                raise
+            # the server counts more than the estimate: fitted again by its count, once
+            counted = _size(sent)
+            learned = max(ratio * 1.1, real / counted if real and counted else ratio * 1.25)
+            _RATIOS[name] = learned
+            FITTED["refit"] += 1
+            log.info("the model's server refused %s tokens: fitted again", real or "too many")
+            return await handler(self._within(request, int(budget / learned)))
+
+    def _within(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+        return request if _size(request) <= budget else self._fitted(request, budget)
 
     def _budget(self, request: ModelRequest[Any]) -> int | None:
         profile = getattr(request.model, "profile", None)
@@ -1601,6 +1637,21 @@ class FitWindow(AgentMiddleware):
         if kept == text:
             return request
         return request.override(system_message=SystemMessage(content=kept))
+
+
+def _refused_size(exc: BaseException) -> int | None:
+    """The size a model server said a request it refused as over its window was (0: not
+    said), or ``None`` when ``exc`` is no such refusal (nor caused by one)."""
+    from langchain_core.exceptions import ContextOverflowError  # noqa: PLC0415
+
+    seen: BaseException | None = exc
+    while seen is not None:
+        text = str(seen)
+        if isinstance(seen, ContextOverflowError) or _OVERFLOW.search(text):
+            said = _OVERFLOW_SIZE.search(text)
+            return int(said.group(1)) if said else 0
+        seen = seen.__cause__
+    return None
 
 
 def _size(request: ModelRequest[Any]) -> int:
