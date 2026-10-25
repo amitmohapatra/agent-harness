@@ -315,7 +315,23 @@ fail: a `ContextTooLarge` (`CONTEXT_TOO_LARGE`) naming the window and the size. 
 context's own budget is unchanged (5% of the window, 2,000 to 8,000 tokens): it is the last
 thing shrunk, and only for a request that would overflow.
 
-<!-- measured: shrink at 8,192 vs a larger window, from the Phase 2 Granite batch -->
+Measured on Granite 3.3 2B (CPU, llama.cpp behind Bifrost), the cost benchmark's ten tasks
+(simple, several-part, a ~100k-character result) among 50 tools, memory off:
+
+| | Window | Runs that completed | Tool coverage | Input tokens / run | Seconds / run | Steps that fired |
+|---|---|---|---|---|---|---|
+| without `FitWindow` | 8,192 | 7/10 (3 refused as over the window) | 1.00 | 13,339 | 162 | — |
+| `FitWindow` | 8,192 | 8/10 (2 stalls, the model's: `StallGuard` stopped them) | 1.00 | 15,207 | 189 | `tools` 6, `refit` 3 |
+| no need to fit | 16,384 | 9/10 (1 stall) | 1.00 | 15,802 | 181 | — |
+
+On the simple tasks the requests were the same as without it — the same tokens (13,518 a
+run) and the same time: a request that fits is sent as it is. With 100 tools on 8,192 tokens
+every run completed (coverage 0.96). The memory step, on ten requests whose user message
+plus memory context did not fit 8,192 tokens (the server refused them; the fact asked for was
+in the context's best-ranked items): 9/10 answered right with the memory context trimmed, 10/10
+with it whole on 16,384; without the step none of the ten fits the window. LangChain's
+`LLMToolSelectorMiddleware` on the same 50 tools completed 6/10 (coverage 0.60): it is not a
+default (`automatic.ToolSelection`, for a measurement).
 
 ## What else is automatic
 
