@@ -1,6 +1,6 @@
 [project]
 name = "trellis-harness"
-version = "0.5.0"
+version = "0.6.0"
 description = "Attach memory, tools, approvals, durable runs and tracing to an agent you already built."
 readme = "README.md"
 requires-python = ">=3.12"

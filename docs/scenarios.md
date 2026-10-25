@@ -137,7 +137,7 @@ A run started with `run`/`stream` resumes in the process that calls `resume`; on
 |---|---|
 | A person, in a chat UI that speaks AG-UI | `agent.serve_chat(app, identity=...)`: SSE with numbered events, reconnect after a dropped connection, interrupts as resume entries, large payloads as artifacts |
 | Another agent, any framework or vendor, that should call yours | `agent.serve_a2a(app, url)`: the agent card, JSON-RPC, streaming, signed push notifications; pauses are `input-required` |
-| Your agent needs another agent | `a2a(url)` in `tools=[...]` |
+| Your agent needs another agent | `a2a(url)` in `subagents=[...]` (a function target: `agent.tools.call(a2a(url), ...)`) |
 
 Both surfaces can be mounted on one FastAPI app
 ([examples/05_features/serve_agui_and_a2a.py](../examples/05_features/serve_agui_and_a2a.py)).

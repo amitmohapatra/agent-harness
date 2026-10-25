@@ -3,6 +3,77 @@
 What changed in each release of `trellis-harness`. The framework versions each release was
 tested with are in [docs/versioning.md](docs/versioning.md).
 
+## 0.6.0 — ReAct on Deep Agents; `middleware()` (unreleased)
+
+`ReAct` is Deep Agents' `create_deep_agent`, every Deep Agents feature native, with the
+harness's part on top — and that part is exported: `trellis.middleware()` gives a
+`create_agent` or `create_deep_agent` graph of your own what `ReAct` adds.
+
+### Breaking
+
+- `ReAct` builds on `create_deep_agent` (was LangChain's `create_agent`): Deep Agents' file
+  tools (on `backend=`), large-result eviction, summarization, sub-agents (`task`), skills,
+  memory files, permissions, dangling-call repair and prompt caching are its own. The new
+  signature, names following Deep Agents': `ReAct(system_prompt, model, *, tools, subagents,
+  skills, memory_files, permissions, backend, store, response_format, state_schema,
+  context_schema, cache, max_steps=12, max_repeats=3, call_timeout, context_window, effort,
+  tool_guidance=None, answer_check=None, capabilities, middleware, checkpointer)`
+  (`memory_files` is Deep Agents' `memory`; its `interrupt_on`, `name` and `debug` are not
+  exposed).
+- `ReAct(tools=)` refuses `sandbox()` (code runs in `backend=docker_sandbox()`) and agents
+  (`a2a(url)` and wrapped agents go in `subagents=`); `max_repeats` is 2 or more, as
+  `StallGuard` always required.
+- `tool_guidance` and `answer_check` default to `None`, automatic: the guidance with 20 tools
+  or more on a call, the check when the run's context holds a rule (measured: see Changed).
+  `False` turns either off.
+- `ReAct(store=)`, like `checkpointer=`, is for the graph run on its own: `h.wrap` refuses it.
+- `ReAct(middleware=)` with a Deep Agents middleware's name replaces Deep Agents' own (as
+  `create_deep_agent` does); one named as the harness's is still refused.
+- Removed, Deep Agents now owning them: `automatic.JournalFiles`, `automatic.FilesState`,
+  `automatic.ScratchFiles` (`automatic.LongTaskTools` offers Deep Agents' own scratch tools and
+  general-purpose helper on a long task); `ModelHooks(routed=)` (it sees a routed model itself).
+
+### Added
+
+- `trellis.middleware(*, max_steps, max_repeats, call_timeout, context_window, tool_guidance,
+  answer_check, capabilities, system_prompt)`: the harness's part of `ReAct` — the run's tools
+  per model call narrowed per turn (the memory and gateway MCP tools among them), the graph's
+  own tools governed, the stall guard, the step limit then a final answer, the budget's stop,
+  planning on a long task, older results cleared and read back, the tool guidance and answer
+  check, and `ModelHooks` (hooks, spans, `call_timeout`, a stored prompt pinned per run).
+  `h.wrap` says once when a `create_agent` or Deep Agents graph is wrapped without it.
+- `trellis.docker_sandbox()`: the run's sandbox (the lifecycle of `sandbox()`: made at the first
+  command, journaled, paused with the run, deleted at its end, reaped) as a Deep Agents backend
+  — `ReAct(backend=docker_sandbox())` or `create_deep_agent(backend=...)`; `execute` governed.
+- `ReAct(subagents=)` takes Deep Agents' `SubAgent` and `CompiledSubAgent` dicts (a `ReAct` graph
+  as the `runnable`) beside wrapped agents and `a2a(url)`: each `task` call a child run; a
+  declarative sub-agent gets the loop's guards and its model name routed, and a tool it names in
+  `interrupt_on` asks a person (its declared risk, as the catalog says).
+- On a backend outside the graph's state (a disk, a store, a sandbox) Deep Agents' file tools
+  are governed and published as any tool (`middleware.OUTSIDE_STATE`).
+- `RunCheckpointer` keeps a LangGraph `DeltaChannel`'s history (its last snapshot and the writes
+  since, replayed in the order they were applied) beside the latest checkpoint, so a Deep
+  Agents graph's `messages` and `files` come back whole on a resume anywhere.
+- `LIVE_SHARD=i/n` (`make live-shard`): the live suite in shards packed by the measured
+  durations (`tests/live/durations.json`, `make live-durations`), each under a job's limit on a
+  CPU model.
+- `benchmark.cost` variants `agent` (`create_agent` + `middleware()`), `main+guidance`,
+  `main+check`; `TRELLIS_LIVE_VARIANTS` picks the live tool-choice test's variants.
+
+### Changed
+
+- Deep Agents' summarization stands after the harness's middleware that narrow the tools, so
+  its budget counts what the model is sent.
+- The base and the automatic rules were chosen by one Granite batch (the cost benchmark's ten
+  tasks at 10 and 50 tools; the tool-choice store sets at 11 and 51 tools):
+  [docs/frameworks/react.md](docs/frameworks/react.md#tool-choice).
+
+### Fixed
+
+- A governed framework tool call inside a sub-agent whose call id equals its parent's `task`
+  call id (ids are unique per conversation only) was let through ungoverned; the marker is now
+  the tool's name and the call's id.
+
 ## 0.5.0 — one breaking release (unreleased)
 
 One API, each setting in its one place, no deprecated aliases: the environment says where the

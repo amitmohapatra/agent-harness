@@ -91,7 +91,7 @@ preview, then pages the rest with `read_file` (`file_path`, `offset` the line to
 | Target | Who cuts | Where the whole result is kept |
 |---|---|---|
 | `ReAct`, Deep Agents | Deep Agents' `FilesystemMiddleware` (on by default: [react.md](frameworks/react.md#the-middleware)) | the graph's state |
-| a `create_agent` graph | add `FilesystemMiddleware(tools=["read_file"])` | the graph's state |
+| a `create_agent` graph | add `FilesystemMiddleware(tools=["read_file"])` (or build it with `create_deep_agent`) | the graph's state |
 | OpenAI Agents, Claude | the harness, as Deep Agents does (`tools/results.py`; Deep Agents is not needed) | the run's journal: it stays readable for the rest of the run, across a pause and on another worker |
 | a function target, Way 2 | nobody: your code gets the whole result and decides what its model reads | — |
 

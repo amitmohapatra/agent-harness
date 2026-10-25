@@ -340,7 +340,7 @@ run's budget, planning on a long task, older results cleared and read back (with
 `call_timeout`, a `stored(...)` `system_prompt` pinned per run). Give the graph
 `checkpointer=RunCheckpointer()` (`trellis.harness.middleware`) for its checkpoint to live in the
 run. A `create_agent` or Deep Agents graph wrapped without it still runs governed and narrowed,
-said once ([frameworks/react.md](frameworks/react.md#the-middleware)).
+said once ([frameworks/react.md](frameworks/react.md#middleware-on-your-own-graph)).
 
 ## Budget
 

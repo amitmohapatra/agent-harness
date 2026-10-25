@@ -18,6 +18,12 @@ result = await writer.run("Write about lighthouses", user="ada")
 | You write | Automatic |
 |---|---|
 | `subagents=[agent]` | a child run per call: its id, its parent, its tenant, user, thread, time and trace; its pauses answered through the parent; its crash continued; its cancel with the parent; the tool's name (the agent's id), description (a function's docstring, else a generic one) and side effects (from the tools the child declares) |
+| `subagents=[{"name", "description", ...}]` — Deep Agents' `SubAgent` or `CompiledSubAgent` | called through Deep Agents' `task` tool, each call a child run of the run (a native helper: `bridges.helpers`) — given the memory context for its task, its tool calls governed and recorded under its run, its outcome recorded; a declarative one gets the loop's guards and its model name routed as the parent's, and a tool it names in `interrupt_on` asks a person (its risk, as the catalog says) |
+| `subagents=[a2a(url)]` | an agent served elsewhere, a tool like a wrapped one: its question asked through the parent |
+
+`ReAct`'s `subagents=` takes all three; another framework's agent reaches the same helpers its
+own way (a Deep Agents `task`, an OpenAI `Agent.as_tool`, a Claude subagent, a nested
+`agent.run`: [below](#where)).
 
 ## What
 

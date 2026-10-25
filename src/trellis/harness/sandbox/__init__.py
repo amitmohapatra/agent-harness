@@ -1,8 +1,10 @@
 """Sandboxes for any framework: ``sandbox()``, a place where the model runs commands and changes
-files away from the host.
+files away from the host (``ReAct`` and Deep Agents work in the same sandbox as their backend:
+``docker_sandbox()``, ``trellis.harness.sandbox.backend``).
 
-    agent = h.wrap(ReAct("You analyse data.", "gpt-4o", tools=[sandbox(image="python:3.12")]),
-                   id="analyst")
+    async def analyst(input: str, agent: Runtime) -> str:
+        await agent.tools.use(sandbox(image="python:3.12"))
+        ...
 
 The source gives the model three harness tools: :data:`EXEC` (a shell command: its exit code,
 stdout and stderr), :data:`READ` (a file, as text) and :data:`WRITE` (a file). Each call goes
@@ -83,8 +85,8 @@ REAP_SECONDS: Final = 600.0
 
 
 class SandboxSource:
-    """A sandbox's tools, as a tool source (``ReAct(tools=[...])``): what
-    :func:`sandbox` returns."""
+    """A sandbox's tools, as a tool source (``agent.tools.use(...)``, a framework's own tools):
+    what :func:`sandbox` returns, and what ``docker_sandbox()``'s backend works through."""
 
     def __init__(self, provider: SandboxProvider | None, spec: SandboxSpec, timeout: float) -> None:
         self.provider = provider

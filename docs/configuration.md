@@ -257,7 +257,7 @@ The arguments, each linked to its reference: what they are, their defaults, what
 | Where | Arguments |
 |---|---|
 | [`Harness(...)`](api.md#harness) | `config`, `memory`, `runs`, `gateway` (a client given is used as it is; `False` turns the service off whatever the environment says: [docs/README.md](README.md#composition-a-harness-is-the-blocks-you-give-it)) |
-| [`ReAct(...)`](api.md#react) | `system_prompt`, `model`, `tools`, `subagents`, `response_format`, `max_steps`, `max_repeats`, `call_timeout`, `context_window`, `effort`, `tool_guidance`, `answer_check`, `capabilities` (tool choice, all off by default: [frameworks/react.md](frameworks/react.md#tool-choice)), `middleware`, `checkpointer` |
+| [`ReAct(...)`](api.md#react) | must: `system_prompt`, `model`; usual: `tools`, `response_format`; optional: `subagents`, `skills`, `memory_files`, `backend`, `permissions`, `max_steps`, `call_timeout`, `effort`, `capabilities`; advanced: `middleware`, `state_schema`, `context_schema`, `cache`, `context_window`, `max_repeats`, `tool_guidance`, `answer_check` (tool choice, automatic by default: [frameworks/react.md](frameworks/react.md#tool-choice)), `store`, `checkpointer` |
 | [`h.wrap(...)`](api.md#hwrap) | `id`, `version`, `description`, `hooks`, `judges`, `budget`, `run_timeout`, `without`, `framework_options` |
 | [`agent.run` / `stream` / `start`](api.md#agentrun-agentstream-agentstart) | `user`, `thread`, `tenant`, `run_timeout`, `deadline`, `budget`, `without`, `framework_options`, `document_ids`; `start`: `priority`, `concurrency_key` |
 | [`agent.schedule(...)`](api.md#agentschedule) | `cron`, `user`, `input`, `tz`, `tenant`, `run_timeout`, `budget`, `without`, `framework_options`, `document_ids`, `priority`, `concurrency_key` |

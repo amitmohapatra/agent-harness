@@ -25,6 +25,10 @@ PAGE: Final = Path(__file__).resolve().parents[2] / "docs" / "matrix.md"
 #: The frameworks as the docs name them, in the matrix's order, with their pages.
 NAMES: Final = {
     "react": ("ReAct", "frameworks/react.md"),
+    "middleware": (
+        "middleware() on create_agent",
+        "frameworks/react.md#middleware-on-your-own-graph",
+    ),
     "function": ("function", "frameworks/functions.md"),
     "langgraph": ("LangGraph", "frameworks/langgraph.md"),
     "deepagents": ("Deep Agents", "frameworks/deepagents.md"),

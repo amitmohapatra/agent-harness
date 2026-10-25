@@ -7,7 +7,9 @@ its agents use (default :data:`DEFAULT_MODEL`), and ``TRELLIS_LIVE_MCP_URL``, th
 server (default the public DeepWiki, :data:`DEEPWIKI_URL`); ``TRELLIS_LIVE_TIMEOUT`` and
 ``TRELLIS_LIVE_MAX_TOKENS`` size the model-driven tests' runs to the model
 (``tests/live/proof.py``). The sandbox tests need only the Docker daemon (its socket), and
-make their sandboxes of ``SANDBOX_IMAGE`` when it is set.
+make their sandboxes of ``SANDBOX_IMAGE`` when it is set. ``LIVE_SHARD=i/n`` runs the i-th of
+n shards, packed by the last measured durations so each finishes under a job's limit on a CPU
+model (``tests/live/shards.py``, ``make live-shard``).
 
 The gateway gets MCP clients of that server for the session, under :data:`WIKIS` names, and
 virtual keys that allow some of their tools: an agent's MCP tools are exactly what its key
@@ -35,6 +37,7 @@ import pytest
 from bifrost_sdk import Bifrost, MCPClientConfig, MCPConnection
 from bifrost_sdk.admin import Admin
 
+from tests.live import shards
 from trellis import Harness, Settings
 from trellis.harness import agent as agent_module
 from trellis.harness import evals, telemetry
@@ -57,6 +60,23 @@ WIKI_TOOL: Final = "read_wiki_structure"
 #: The local ops server's client (``mcp_fixture.py``): a write, an irreversible and a
 #: header-authenticated tool.
 OPS: Final = "trellisliveops"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """``LIVE_SHARD=i/n``: only the live tests the i-th of n shards holds (``shards.assign``)."""
+    chosen = os.environ.get("LIVE_SHARD", "").strip()
+    if not chosen:
+        return
+    try:
+        which, total = shards.parse(chosen)
+    except ValueError as exc:
+        raise pytest.UsageError(str(exc)) from exc
+    live = [item.nodeid for item in items if "live" in item.keywords]
+    placed = shards.assign(live, total, shards.load())
+    dropped = [i for i in items if "live" in i.keywords and placed[i.nodeid] != which]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = [i for i in items if i not in dropped]
 
 
 def _env(name: str) -> str | None:

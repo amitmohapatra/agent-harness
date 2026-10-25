@@ -28,6 +28,7 @@ local and MCP tools, governance and a person, a hook, `without=`, `run_timeout=`
 | Example | Shows |
 |---|---|
 | [02_way1_react/agent.py](02_way1_react/agent.py) | `ReAct`: memory, a local and two MCP tools, a destructive call approved and resumed in place, a `Rewrite` hook, `run_timeout`, `framework_options`, a run `without={"memory"}` |
+| [02_way1_react/subagents.py](02_way1_react/subagents.py) | `ReAct(subagents=[...])` on Deep Agents: a `SubAgent` dict whose `interrupt_on` asks a person (resumed in place), a wrapped agent, and an A2A agent served on a real port — each call a child run |
 | [02_way1_react/structured_output.py](02_way1_react/structured_output.py) | `ReAct(response_format=Forecast)`: a pydantic answer |
 | [02_way1_react/hooks_guardrails.py](02_way1_react/hooks_guardrails.py) | a guardrail (`Deny`, `Ask` on a role, `Rewrite`) and card numbers masked in tool results and before the model reads them |
 | [02_way1_function/agent.py](02_way1_function/agent.py) | an async function: `agent.context`, `agent.memory`, an MCP tool and a local one through `agent.tools.call`, `agent.ask` with options, a `Deny` hook, `without=`, `cancel` (`framework_options` does not apply) |
@@ -39,6 +40,7 @@ local and MCP tools, governance and a person, a hook, `without=`, `run_timeout=`
 | [02_way1_langgraph/stategraph.py](02_way1_langgraph/stategraph.py) | a hand-built `StateGraph` with a checkpointer: a harness approval in the tool node and the graph's own `interrupt()`, both resumed in place |
 | [02_way1_langgraph/hitl_middleware.py](02_way1_langgraph/hitl_middleware.py) | LangChain's `HumanInTheLoopMiddleware`: an edit, then a reject with a reason |
 | [02_way1_deepagents/agent.py](02_way1_deepagents/agent.py) | Deep Agents with `TodoListMiddleware`: a plan, an MCP lookup, an approval resumed in place; a `Deny` hook, `run_timeout`, `framework_options`, `without=` |
+| [02_way1_deepagents/middleware.py](02_way1_deepagents/middleware.py) | `trellis.middleware()` on a `create_deep_agent` and a `create_agent` graph of your own: the MCP and memory tools per call, the graph's tool governed and approved, the resume in place |
 | [02_way1_openai_agents/agent.py](02_way1_openai_agents/agent.py) | an OpenAI Agents `Agent`: harness tools added per run, an MCP lookup replayed on the resume, an `after_tool` audit hook, `max_turns` through `framework_options`, `without={"tool_search"}` |
 | [02_way1_openai_agents/handoff.py](02_way1_openai_agents/handoff.py) | a handoff to a specialist with its own tools, each call governed |
 | [02_way1_claude/agent.py](02_way1_claude/agent.py) | `ClaudeAgentOptions`: the harness's tools as the `trellis` MCP server, an MCP lookup, an approval, a `Rewrite` hook, `max_turns`, `without=` (a scripted CLI offline) |
@@ -77,7 +79,7 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | [langgraph_interrupt_fields.py](05_features/langgraph_interrupt_fields.py) | a graph's own `interrupt({...})` with options, `multiple`, `component`, `props`, `assignee`; the inbox; resumed in place |
 | [subagents.py](05_features/subagents.py) | `ReAct(subagents=[...])`: a planner calling two agents, one asking a person through the planner |
 | [stored_prompts.py](05_features/stored_prompts.py) | a stored prompt of the gateway as a `ReAct`'s instructions (`stored(...)`, pinned per run) and for any framework (`h.prompt`) |
-| [sandbox.py](05_features/sandbox.py) | `sandbox()`: a script written and run in the run's own sandbox (Docker when `DOCKER_HOST` is set, else a provider of the example's own); then the provider governed with no harness |
+| [sandbox.py](05_features/sandbox.py) | `ReAct(backend=docker_sandbox())`: a script written and run with Deep Agents' `execute` in the run's own sandbox (Docker when `DOCKER_HOST` is set, else a provider of the example's own); then the provider governed with no harness |
 | [serve_agui_and_a2a.py](05_features/serve_agui_and_a2a.py) | `serve_chat` (AG-UI) and `serve_a2a` on one FastAPI app; another agent calling it with `a2a(url)`, its question asked through the caller |
 | [trajectory_evals.py](05_features/trajectory_evals.py) | `h.evaluate`: `exact_match`, `contains`, `llm_judge`, `called`, `tool_sequence` and an evaluator of your own reading the trajectory |
 | [online_judges.py](05_features/online_judges.py) | `h.wrap(judges=[llm_judge(..., sample=)])`: judges on a share of live runs, in the background |
