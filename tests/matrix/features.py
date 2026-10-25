@@ -42,7 +42,7 @@ from tests.support.arm import arm, native_tools
 from tests.support.memory import MEMORY_TOOLS
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
 from tests.support.sandbox import PausingSandboxes
-from trellis import Harness, ReAct, Runtime, Settings, a2a, mcp, stdio, stored, tool
+from trellis import Harness, ReAct, Runtime, Settings, a2a, mcp, middleware, stdio, stored, tool
 from trellis.contracts import (
     InterruptReason,
     RunEventType,
@@ -56,6 +56,7 @@ from trellis.harness.a2a import client as a2a_client
 from trellis.harness.clients import bifrost
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
+from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.sandbox import sandbox
 from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
@@ -185,8 +186,13 @@ async def native_approval(w: World) -> None:
                 return f"sent {order}"
 
             return OpenAIAgent(name="sender", model=GroupedModel(plan), tools=[send]), tools
-        native = await native_tools(h, *tools, framework=w.adapter)
         model = GroupedChatModel(plan=[], steps=list(plan))
+        if w.adapter == "middleware":  # the run's tools per call, the checkpoint in the run
+            gate = HumanInTheLoopMiddleware(interrupt_on={"note": True})
+            ours = middleware()
+            graph = create_agent(model, middleware=[gate, *ours], checkpointer=RunCheckpointer())
+            return graph, tools
+        native = await native_tools(h, *tools, framework=w.adapter)
         if w.adapter == "deepagents":
             from deepagents import create_deep_agent
 
@@ -327,8 +333,11 @@ def _parallel_target(w: World):
             return ReAct(system_prompt="You work.", model=GroupedChat(plan)), tools
         if w.adapter == "openai_agents":
             return OpenAIAgent(name="worker", model=GroupedModel(plan)), tools
-        native = await native_tools(h, *tools, framework=w.adapter)
         model = GroupedChatModel(plan=[], steps=list(plan))
+        if w.adapter == "middleware":
+            graph = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
+            return graph, tools
+        native = await native_tools(h, *tools, framework=w.adapter)
         if w.adapter == "deepagents":
             from deepagents import create_deep_agent
 
@@ -959,6 +968,10 @@ FEATURES: Final[list[Feature]] = [
                 "native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct "
                 "and Deep Agents have it by default)"
             ),
+            "middleware": NA(
+                "Deep Agents' own: middleware() adds what Deep Agents lacks; build on "
+                "create_deep_agent (as ReAct does), or add FilesystemMiddleware"
+            ),
         },
         way2=NA(
             "by design: a Way 2 caller's own code receives the whole result and decides what "
@@ -1315,6 +1328,7 @@ async def run_options_without(w: World) -> None:
 #: what its error says), and set far above it.
 TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
     "react": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
+    "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
@@ -1322,6 +1336,7 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
 }
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "react": {"recursion_limit": 50},
+    "middleware": {"recursion_limit": 50},
     "langgraph": {"recursion_limit": 50},
     "deepagents": {"recursion_limit": 50},
     "openai_agents": {"max_turns": 20},
