@@ -53,10 +53,12 @@ TOOL_SEARCH: Final = "tool_search"
 SOURCE_SYSTEM: Final = "trellis-harness"
 #: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
 DOCUMENTS: Final = "document_ids"
-#: The key of a run's own outcome record's metadata that keeps what its pushed context showed:
-#: ``{"bundle_id": ..., "memory_ids": [...]}`` (at most :data:`CITED_MAX` ids), so a person's
-#: verdict on an unverified run cites the memories the model was shown.
-PUSHED: Final = "pushed"
+#: The keys of a run's own outcome record's metadata that keep what its pushed context showed —
+#: its bundle and the ids of the memories in it (at most :data:`CITED_MAX`) — so a person's
+#: verdict on an unverified run cites the memories the model was shown. Flat: the service keeps
+#: a caller's metadata at most two levels deep.
+PUSHED_BUNDLE: Final = "pushed_bundle_id"
+PUSHED_MEMORIES: Final = "pushed_memory_ids"
 #: The most memories a person's verdict on a run cites (the memory service's bound on a
 #: verdict's evidence references).
 CITED_MAX: Final = 50
@@ -255,8 +257,8 @@ class RunMemory:
         """A verdict on this scope's run (``source`` ``system`` for how it ended, ``human``
         for a person's); ``key`` makes a retry store it once; ``evidence_refs`` are the
         memories its answer cited, whose confidence the verdict moves; ``metadata`` is kept
-        with it (the run's own: :data:`PUSHED`, what its context showed). The stored record comes
-        back: a person's verdict waits for the tenant administrator (``review.state``
+        with it (the run's own: :data:`PUSHED_MEMORIES`, what its context showed). The stored
+        record comes back: a person's verdict waits for the tenant administrator (``review.state``
         pending, ADR 0028 of the memory service) where the run's own status is applied at
         once."""
         run_id = self.ctx.scope.agent_run_id
@@ -280,8 +282,8 @@ class RunMemory:
         resolves the answer's claims against the run's context bundle and records the
         supporting memories with its verdict); a run that was not verified (most runs: the
         check takes a sample) cites the memories its pushed context showed, which its own
-        outcome record keeps (:data:`PUSHED`). Empty when the service holds no feedback on the
-        run (``NotFoundError``), or neither cites a memory."""
+        outcome record keeps (:data:`PUSHED_MEMORIES`). Empty when the service holds no
+        feedback on the run (``NotFoundError``), or neither cites a memory."""
         run_id = self.ctx.scope.agent_run_id
         assert run_id is not None
         try:
@@ -292,11 +294,8 @@ class RunMemory:
         refs = {ref.source_id: ref for verdict in judged for ref in verdict.evidence_refs}
         if not refs:
             own = [f for f in page.items if f.source == "system"]  # the run's own outcome
-            shown = own[0].metadata.get(PUSHED, {}) if own else {}
-            refs = {
-                mid: EvidenceRef(source_type="memory", source_id=mid)
-                for mid in shown.get("memory_ids", ())
-            }
+            shown = own[0].metadata.get(PUSHED_MEMORIES, ()) if own else ()
+            refs = {mid: EvidenceRef(source_type="memory", source_id=mid) for mid in shown}
         return list(refs.values())[:CITED_MAX]
 
     async def feedback(self, record: Any) -> None:

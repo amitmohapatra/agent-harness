@@ -158,6 +158,9 @@ class Runtime:
     native: dict[str, ToolSpec] = field(default_factory=dict)
     #: the sources the run's code added (``agent.tools.use``), beside its agent's
     added: list[Any] = field(default_factory=list)
+    #: what each object given to ``agent.tools.use`` added, by its id (the object held, so the
+    #: id stays its own): a tool called again in the run joins it once
+    joined: dict[int, tuple[Any, list[str]]] = field(default_factory=dict)
     #: the tools offered to the model (``None``: all of them) — the tool hints' candidates,
     #: the memory tools, and every tool this run has used (``used``)
     offered: set[str] | None = None
@@ -634,11 +637,15 @@ class Tools:
 
         names: list[str] = []
         for given in sources:
-            source = as_source(given)
-            self.runtime.added.append(source)
-            for found in await source.resolve():
-                self.runtime.toolbox.setdefault(found.spec.name, found)
-                names.append(found.spec.name)
+            known = self.runtime.joined.get(id(given))
+            if known is None:
+                source = as_source(given)
+                self.runtime.added.append(source)
+                resolved = list(await source.resolve())
+                for found in resolved:
+                    self.runtime.toolbox.setdefault(found.spec.name, found)
+                known = self.runtime.joined[id(given)] = (given, [t.spec.name for t in resolved])
+            names.extend(known[1])
         return names
 
     async def hints(self, task: str) -> ToolHints:

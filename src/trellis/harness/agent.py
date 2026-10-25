@@ -59,7 +59,8 @@ from trellis.harness.budget import BUDGET, Budget
 from trellis.harness.clients.memory import (
     CITED_MAX,
     DOCUMENTS,
-    PUSHED,
+    PUSHED_BUNDLE,
+    PUSHED_MEMORIES,
     RunMemory,
     Window,
     context_budget,
@@ -933,8 +934,9 @@ class Agent:
         its outcome (the judge's and a person's override it in the memory service). Its
         ``confirm`` is unverified, so the service keeps it as the outcome only: it moves no
         memory's confidence, learned skill or tool statistic. It keeps what the run's context
-        showed (``Runtime.pushed``, under :data:`PUSHED`): the memories a person's verdict on
-        the run cites when no grounding verdict did (``h.feedback``)."""
+        showed (``Runtime.pushed``, under :data:`PUSHED_BUNDLE` and :data:`PUSHED_MEMORIES`):
+        the memories a person's verdict on the run cites when no grounding verdict did
+        (``h.feedback``)."""
         memory = runtime.run_memory
         verdict = OUTCOME_VERDICTS.get(status)
         if memory is None or not runtime.uses("records") or verdict is None:
@@ -945,7 +947,12 @@ class Agent:
             "comment": note,
             "key": f"{runtime.run_id}:outcome",
             # what its context showed, which a person's verdict on the run cites
-            "metadata": {PUSHED: runtime.pushed} if runtime.pushed else None,
+            "metadata": {
+                PUSHED_BUNDLE: runtime.pushed["bundle_id"],
+                PUSHED_MEMORIES: runtime.pushed["memory_ids"],
+            }
+            if runtime.pushed
+            else None,
         }
         await self.harness.writes.submit(
             "memory.outcome",

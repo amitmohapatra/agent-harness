@@ -16,6 +16,7 @@ from typing import Any, Final, cast
 
 import pytest
 
+import trellis
 from tests.integration.test_progress import Crash, crash_once
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, with_governance
@@ -109,6 +110,9 @@ async def test_a_function_targets_own_sandbox_is_its_runs_and_deleted_at_the_end
 
     async def work(input: str, agent: Runtime) -> Any:
         assert await agent.tools.use(box) == ["sandbox_exec", "sandbox_read", "sandbox_write"]
+        assert await agent.tools.use(box) == ["sandbox_exec", "sandbox_read", "sandbox_write"]
+        current = trellis.current()
+        assert current is not None and len(current.added) == 1  # joined once, however often
         await agent.tools.call("sandbox_write", path="a.txt", content="hi")
         await agent.ask("Go on?")
         return await agent.tools.call("sandbox_read", path="a.txt")

@@ -201,7 +201,7 @@ class FakeMemoryService:
                     path=matched.groupdict(),
                     query=request.url.params,
                 )
-                refused = self._refusal(name, request)
+                refused = self._refusal(name, request) or _unbounded(body, request)
                 if refused is not None:
                     return refused
                 self.calls.append(call)
@@ -759,6 +759,37 @@ def problem(
     if retryable and status in (429, 503):
         headers["retry-after"] = retry_after
     return httpx.Response(status, content=json.dumps(body).encode(), headers=headers)
+
+
+#: The service's bounds on a caller's metadata object (its ``api/validation.py``), which its
+#: OpenAPI document does not say: keys, nesting (a flat object is 1) and serialised bytes.
+METADATA_MAX_KEYS: Final = 32
+METADATA_MAX_DEPTH: Final = 2
+METADATA_MAX_BYTES: Final = 8 * 1024
+
+
+def _depth(value: Any) -> int:
+    if isinstance(value, dict):
+        return 1 + max((_depth(v) for v in value.values()), default=0)
+    if isinstance(value, list):
+        return 1 + max((_depth(v) for v in value), default=0)
+    return 0
+
+
+def _unbounded(body: Any, request: httpx.Request) -> httpx.Response | None:
+    """``422`` for a body whose ``metadata`` or ``custom_metadata`` the service would refuse."""
+    for key in ("metadata", "custom_metadata"):
+        value = body.get(key) if isinstance(body, dict) else None
+        if not isinstance(value, dict):
+            continue
+        size = len(json.dumps(value, separators=(",", ":"), default=str).encode())
+        if (
+            len(value) > METADATA_MAX_KEYS
+            or _depth(value) > METADATA_MAX_DEPTH
+            or size > METADATA_MAX_BYTES
+        ):
+            return problem(422, request.url.path, detail=f"{key} out of the service's bounds")
+    return None
 
 
 def _conditional(request: httpx.Request, answer: Any) -> httpx.Response:

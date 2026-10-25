@@ -30,7 +30,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness.agent import UNREACHED_FIX
-from trellis.harness.clients.memory import CITED_MAX, PUSHED
+from trellis.harness.clients.memory import CITED_MAX, PUSHED_BUNDLE, PUSHED_MEMORIES
 from trellis.memory.errors import DependencyUnavailableError
 
 
@@ -362,8 +362,8 @@ async def test_a_verdict_on_an_unverified_run_cites_what_its_context_showed(
         stored = await h.feedback(result.run_id, "confirm")
     assert memory_service.named("verify") == []
     [outcome] = [f for f in memory_service.named("feedback") if f.body["source"] == "system"]
-    kept = outcome.body["metadata"][PUSHED]
-    assert kept["bundle_id"].startswith("bnd_") and kept["memory_ids"] == ["mem_1", "mem_2"]
+    kept = outcome.body["metadata"]  # flat: the service keeps metadata two levels deep
+    assert kept[PUSHED_BUNDLE].startswith("bnd_") and kept[PUSHED_MEMORIES] == ["mem_1", "mem_2"]
     [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
     assert stored is not None
     if listed == 404:
@@ -391,7 +391,7 @@ async def test_a_run_whose_context_showed_no_memory_cites_nothing(
         await h.writes.drain()
         await h.feedback(result.run_id, "confirm")
     [outcome] = [f for f in memory_service.named("feedback") if f.body["source"] == "system"]
-    assert outcome.body["metadata"][PUSHED]["memory_ids"] == []
+    assert outcome.body["metadata"][PUSHED_MEMORIES] == []
     [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
     assert sent.body["evidence_refs"] == []
 
