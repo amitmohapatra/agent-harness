@@ -5,7 +5,8 @@ Point ``ClaudeAgentOptions(cli_path=...)`` here and the real Claude Agent SDK dr
 control handshake, the prompt, the permission requests (``can_use_tool``) and tool calls into the
 SDK's in-process MCP servers (the ``mcp_message`` control requests the real CLI sends). What the
 "model" does is scripted in ``FAKE_CLAUDE_SCRIPT`` (JSON): ``{"tool": "<server tool name>",
-"args": {...}}`` calls a tool of the ``trellis`` server, ``{"builtin": "Bash", "args": {...}}``
+"args": {...}}`` calls a tool of the ``trellis`` server (``"server": "<name>"``: of another
+in-process server), ``{"builtin": "Bash", "args": {...}}``
 one of Claude Code's own (run here: a line in the ``FAKE_CLAUDE_BUILTINS`` file), ``{"text":
 "..."}`` answers (``{last}`` in it is the text of the last tool result, so an answer shows what
 the "model" read). ``FAKE_CLAUDE_RECORD`` names a file the CLI writes what it was started with
@@ -78,7 +79,8 @@ def argument(name: str) -> str | None:
 class Cli:
     def __init__(self) -> None:
         self.requests = 0
-        self.mcp_ready = False
+        #: the in-process servers initialized (``initialize``, then its notification)
+        self.mcp_ready: set[str] = set()
         #: the hooks the SDK registered, by event (its ``initialize`` request)
         self.hooks: dict[str, Any] = {}
         #: the subagent working now (its ``agent_id`` and ``agent_type``), as the real CLI
@@ -193,10 +195,10 @@ class Cli:
                     return response.get("response") or {}
         raise RuntimeError("stdin closed while waiting for the SDK")
 
-    def mcp(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def mcp(self, method: str, params: dict[str, Any], server: str = SERVER) -> dict[str, Any]:
         self.requests += 1
         message = {"jsonrpc": "2.0", "id": self.requests, "method": method, "params": params}
-        answer = self.control({"subtype": "mcp_message", "server_name": SERVER, "message": message})
+        answer = self.control({"subtype": "mcp_message", "server_name": server, "message": message})
         return answer["mcp_response"]
 
     def listed(self) -> list[str]:
@@ -204,12 +206,12 @@ class Cli:
         self.ready()
         return [t["name"] for t in self.mcp("tools/list", {})["result"]["tools"]]
 
-    def call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        self.ready()
-        return self.mcp("tools/call", {"name": name, "arguments": args})
+    def call_tool(self, name: str, args: dict[str, Any], server: str = SERVER) -> dict[str, Any]:
+        self.ready(server)
+        return self.mcp("tools/call", {"name": name, "arguments": args}, server)
 
-    def ready(self) -> None:
-        if not self.mcp_ready:
+    def ready(self, server: str = SERVER) -> None:
+        if server not in self.mcp_ready:
             self.mcp(
                 "initialize",
                 {
@@ -217,15 +219,16 @@ class Cli:
                     "capabilities": {},
                     "clientInfo": {"name": "fake-claude", "version": "1"},
                 },
+                server,
             )
             self.control(
                 {
                     "subtype": "mcp_message",
-                    "server_name": SERVER,
+                    "server_name": server,
                     "message": {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 }
             )
-            self.mcp_ready = True
+            self.mcp_ready.add(server)
 
     def permission(self, name: str, args: dict[str, Any], tool_id: str) -> dict[str, Any]:
         """What the SDK's ``can_use_tool`` says about a call — not asked, as the real CLI does
@@ -437,7 +440,8 @@ class Cli:
         check stopped the turn."""
         tool_id = tool_id or f"toolu_{step}"
         builtin = item.get("builtin")
-        name = builtin or f"mcp__{SERVER}__{item['tool']}"
+        server = item.get("server", SERVER)
+        name = builtin or f"mcp__{server}__{item['tool']}"
         args = item.get("args", {})
         call = [{"type": "tool_use", "id": tool_id, "name": name, "input": args}]
         send(assistant(session, call, parent=parent))
@@ -454,7 +458,7 @@ class Cli:
             content = [{"type": "text", "text": text}]
             self.post_tool_use(session, name, ran, tool_id, content=content, error=failure)
         elif allowed:
-            called = self.call_tool(item["tool"], ran)
+            called = self.call_tool(item["tool"], ran, server)
             answered = called.get("result") or {}
             error = bool(answered.get("isError")) or "error" in called
             content = answered.get("content") or [

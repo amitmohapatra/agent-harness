@@ -10,6 +10,7 @@ import asyncio
 import itertools
 from typing import Any
 
+from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, current, tool
 from trellis.contracts import RunEventType, RunStatus
@@ -51,7 +52,7 @@ async def test_reads_run_together_then_writes_one_at_a_time_in_the_models_order(
 
     batch = [("order", {"sku": "b"}), ("price", {"sku": "a"}), ("order", {"sku": "c"})]
     model = ScriptedChat([[*batch, ("price", {"sku": "b"})], "done"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="shop", tools=[price, order])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="shop"), [price, order])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     reads = [h for h in happened if h.startswith("price")]
@@ -93,7 +94,9 @@ async def test_a_pause_in_a_batch_keeps_what_finished_and_numbers_calls_in_order
 
     batch = [("ship", {"item": "c"}), ("confirm", {"item": "a"}), ("look", {"item": "b"})]
     model = ScriptedChat([batch, "done"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="batch", tools=[confirm, look, ship])
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model), id="batch"), [confirm, look, ship]
+    )
     result = await agent.run("x", user="u")
     asked: dict[str, int | None] = {}
     while result.status is RunStatus.PAUSED:
@@ -139,7 +142,7 @@ async def test_a_resumed_run_hands_each_call_its_output_whatever_order_they_fini
 
     batch = [("roll", {"die": "slow"}), ("roll", {"die": "quick"}), ("roll", {"die": "slow"})]
     model = ScriptedChat([batch, ("publish", {"results": "all"}), "done"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="dice", tools=[roll, publish])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="dice"), [roll, publish])
     paused = await agent.run("x", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     # the two identical calls ran one after another, beside the quick one
@@ -174,7 +177,7 @@ async def test_identical_calls_made_at_once_by_any_framework_take_their_turn(
             )
         )
 
-    result = await harness.wrap(both, id="both", tools=[charge]).run("x", user="u")
+    result = await arm(harness.wrap(both, id="both"), [charge]).run("x", user="u")
     assert result.answer == ["charged o1 #1", "charged o1 #2"]
     assert keys[0] != keys[1]
 
@@ -214,10 +217,10 @@ async def test_progress_saved_by_calls_made_at_once_goes_one_save_at_a_time(
         calls = [agent.tools.call("file", name=n) for n in "abc"]
         return list(await asyncio.gather(*calls))
 
-    agent = harness.wrap(three, id="files", tools=[file])
+    agent = arm(harness.wrap(three, id="files"), [file])
     handle = await agent.start("x", user="u")
     assert await harness.worker([agent]).run_once()
-    assert (await handle.result(timeout=5)).answer == ["filed a", "filed b", "filed c"]
+    assert (await handle.result(wait=5)).answer == ["filed a", "filed b", "filed c"]
     assert store.most == 1
     assert sum(len(v) for v in store.saved[-1]["calls"].values()) == 3  # the last save has all
 
@@ -243,7 +246,7 @@ async def test_cancelling_the_run_cancels_the_calls_running_beside_each_other(
         return "never"
 
     model = ScriptedChat([[("wait", {"name": "a"}), ("wait", {"name": "b"})]])
-    agent = harness.wrap(ReAct(system="s", model=model), id="waits", tools=[wait])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="waits"), [wait])
     running = asyncio.create_task(agent.run("x", user="u"))
     await asyncio.wait_for(both.wait(), 5)
     [record] = [r async for r in harness.runs.iterate(agent_id="waits")]
@@ -260,7 +263,9 @@ async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harnes
         return f"found {query}"
 
     model = ScriptedChat([("search", {"query": "a"}), ("search", {"query": "b"}), "partial"])
-    agent = harness.wrap(ReAct(system="s", model=model, max_steps=2), id="limit", tools=[search])
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model, max_steps=2), id="limit"), [search]
+    )
     events = [e async for e in agent.stream("x", user="u")]
     finished = events[-1]
     assert finished.data["result"] == "partial"
@@ -289,7 +294,7 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
             ("flaky", {"x": "bad"}),
         ]
     )
-    agent = harness.wrap(ReAct(system="s", model=model), id="flaky", tools=[flaky])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="flaky"), [flaky])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
@@ -299,7 +304,7 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
 async def test_the_tools_are_offered_in_a_stable_order(harness: Harness) -> None:
     tools = [tool(lambda: "z", name="zeta"), tool(lambda: "a", name="alpha")]
     model = ScriptedChat([("zeta", {}), "done"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="sorted", tools=tools)
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="sorted"), tools)
     await agent.run("x", user="u")
     names = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
     assert names == [["alpha", "zeta"]] * 2

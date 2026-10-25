@@ -1,8 +1,7 @@
 # Memory
 
 Memory is on when `MEMORY_URL` is set (or `Harness(memory=MemoryClient(...))`), for every
-agent; `without={"memory"}` — or one part: `memory_push`, `memory_pull`, `records` — turns it
-off for an agent (`h.wrap`) or a run (`agent.run`)
+agent; `without={"memory"}` turns it off for an agent (`h.wrap`) or a run (`agent.run`)
 ([what is on, and how to turn it off](configuration.md#what-is-on-and-how-to-turn-it-off)). Every
 call the harness makes to the memory service is in `trellis/harness/clients/memory.py`, in the
 run's scope (tenant, user, agent, run, thread). With memory on, every run reads (push, pull)
@@ -91,8 +90,8 @@ the last listing stands, and a run when they were never listed goes without them
 | `profile_edit(block, old?, new)` | edit a pinned profile block |
 | `tool_search(task)` | the next step, plan, prefill and missing arguments among the run's own tools — the harness passes the run's toolbox with the call, and offers the tools it returns (`{tools: [{name, confidence, next?, args?, missing?}], plan?}`) to the model |
 
-`memory_search` and `tool_search` only read (they run unannounced); the others write. For a compiled graph they are built in
-with `h.tools(...)`. Inside a tool or a node, `trellis.current().memory` is the memory SDK's
+`memory_search` and `tool_search` only read (they run unannounced); the others write. A graph of
+your own gets them with `HarnessTools` (or `await h.memory_tools()`). Inside a tool or a node, `trellis.current().memory` is the memory SDK's
 context bound to the run, with all its verbs.
 
 ## What is recorded
@@ -167,7 +166,7 @@ precedence **human > judge > system**:
   `pushed`: the context's `bundle_id` and the ids of the memories in it (`memory_ids`, at
   most 50).
 * **judge** — on a sampled share of successful runs with an answer (a structured one as its JSON)
-  (`TRELLIS_EVAL_SAMPLE`, default 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
+  (a fixed 10 %, chosen by the run id), `/v1/verify {bundle_id, answer, run_id}` checks the answer against the
   context the run was given; the service records the verdict itself (`source=judge`), and the
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim, or a context that held no

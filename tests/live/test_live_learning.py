@@ -13,6 +13,7 @@ import pytest
 
 from tests.live.conftest import live_harness, needs_memory
 from tests.live.support import eventually, memory_scope
+from tests.support.arm import arm
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 
@@ -48,7 +49,7 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
         return "enough"
 
     async with live_harness() as h:
-        agent = h.wrap(restock, id=f"live-restock-{suffix}", tools=[lookup, reorder])
+        agent = arm(h.wrap(restock, id=f"live-restock-{suffix}"), [lookup, reorder])
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         run_ids: list[str] = []
         for n in range(APPROVALS):
@@ -120,7 +121,7 @@ async def test_a_learned_approval_rule_is_applied_automatically(
         return str(await agent.tools.call(order_name, sku="A-1", qty=2))
 
     async with live_harness() as h:
-        agent = h.wrap(buyer, id=f"live-buyer-{suffix}", tools=[order])
+        agent = arm(h.wrap(buyer, id=f"live-buyer-{suffix}"), [order])
         scope = await memory_scope(h, user=user, agent_id=agent.id)
         await scope.advanced.tools.put_catalog(
             [{"name": order_name, "side_effects": "write", "approve_when": "true"}]
@@ -183,7 +184,7 @@ async def test_the_virtual_key_is_registered_as_the_agents_model_key() -> None:
         await h.writes.drain()
         assert h.writes.failed == 0
         assert h.memory is not None  # the key is the agent's, read in the agent's scope
-        scope = h.memory.scoped(await h.tenant(), agent.id)
+        scope = h.memory.scoped(await h._tenant(), agent.id)
         status = await scope.ctx.advanced.model_keys.status()
     assert status.registered and not status.revoked
 

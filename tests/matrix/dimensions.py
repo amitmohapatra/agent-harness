@@ -18,35 +18,36 @@ SWITCHES: Final[tuple[Switch, ...]] = (
     ),
     Switch(
         "gateway",
-        "the Bifrost gateway (MCP tools, skills, prompts)",
+        "the Bifrost gateway (MCP tools, stored prompts)",
         "BIFROST_URL, or Harness(gateway=); off: gateway=False",
     ),
-    Switch("judges", "online judges", "Harness(judges=[...]) and TRELLIS_EVAL_SAMPLE"),
+    Switch("judges", "online judges", "h.wrap(judges=[...]) (llm_judge(sample=))"),
     Switch(
         "grounding",
         "grounding checks",
-        "TRELLIS_EVAL_SAMPLE with memory; off: without='grounding'",
+        "a fixed share of runs with memory; off: without='grounding'",
         requires=frozenset({"memory"}),
         without="grounding",
     ),
     Switch("tracing", "tracing (OTel spans)", "OTEL_EXPORTER_OTLP_ENDPOINT, or the app's provider"),
-    Switch("agent_timeout", "the agent's time limit", "h.wrap(..., timeout=)"),
-    Switch("version", "the agent's version", "h.wrap(..., version=) or TRELLIS_AGENT_VERSION"),
-    Switch("hooks", "hooks around runs and tool calls", "h.wrap(hooks=[...]) / Harness(hooks=)"),
+    Switch("agent_timeout", "the agent's time limit", "h.wrap(..., run_timeout=)"),
+    Switch(
+        "version",
+        "the agent's version",
+        "h.wrap(..., version=) or OTEL_RESOURCE_ATTRIBUTES=service.version=",
+    ),
+    Switch("hooks", "hooks around runs and tool calls", "h.wrap(hooks=[...])"),
     # parts of a service, each off with without= while the service is on
     *(
         Switch(
             name, title, f"on with {'+'.join(needs)}; off: without={name!r}", frozenset(needs), name
         )
         for name, title, needs in (
-            ("memory_push", "memory push (the context)", ("memory",)),
-            ("memory_pull", "memory pull (the memory tools)", ("memory",)),
-            ("records", "memory records", ("memory",)),
-            # the hints come with the pushed context; Code Mode is scripts over the MCP tools
-            ("hints", "tool hints", ("memory", "memory_push")),
+            # the tool narrowing comes with the pushed context; Code Mode is scripts over the
+            # MCP tools
+            ("tool_search", "tool search (the narrowing)", ("memory",)),
             ("mcp", "the key's MCP tools (and Code Mode)", ("gateway",)),
             ("code_mode", "Code Mode", ("gateway", "mcp")),
-            ("skills", "skills", ("gateway",)),
         )
     ),
 )

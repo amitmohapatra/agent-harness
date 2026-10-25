@@ -1,6 +1,7 @@
-"""Way 2, A2A: call any A2A agent from plain code with ``remote()`` — no harness on the calling
-side. The remote agent's question comes back to your code: answered at once by ``on_input``,
-or raised as ``InputRequired`` and answered later with ``reply``.
+"""Way 2, A2A: call any A2A agent from plain code — ``a2a(url)`` is an async callable, and
+``RemoteAgent`` the client under it — with no harness on the calling side. The remote agent's
+question comes back to your code: answered at once by ``on_input``, or raised as
+``InputRequired`` and answered later with ``reply``.
 
 The agent called here is published by a harness (``serve_a2a``, its own FastAPI app served by
 uvicorn on a local port), but any A2A server is called the same way. A wrapped agent calls one
@@ -18,8 +19,8 @@ import threading
 import uvicorn
 from fastapi import FastAPI
 
-from trellis import Harness, Runtime
-from trellis.harness.a2a import InputRequired, remote
+from trellis import Harness, Runtime, a2a
+from trellis.harness.a2a import InputRequired, RemoteAgent
 
 
 async def planner(input: str, agent: Runtime) -> str:
@@ -47,11 +48,16 @@ async def main() -> None:
     published.wrap(planner, id="planner").serve_a2a(app, url)
     server = serve(app, port)
     try:
-        # plain code: the tenant is the one the published agent's key speaks for
-        tenant = await published.tenant()
-        async with remote(url, tenant=tenant, user="ada", on_input=lambda q: "us") as planner_agent:
-            print(planner_agent.card.name, "answers:", await planner_agent("the warehouse"))
-        async with remote(url, tenant=tenant, user="ada") as planner_agent:
+        # plain code: the tenant is the one the published agent's key speaks for (no
+        # TRELLIS_API_KEY here: the default tenant)
+        tenant = "default"
+
+        async def region(question: str) -> str:
+            return "us"
+
+        answer = await a2a(url)("the warehouse", user="ada", tenant=tenant, on_input=region)
+        print("planner answers:", answer)
+        async with RemoteAgent(url, tenant=tenant, user="ada") as planner_agent:
             try:
                 print(await planner_agent("the office"))
             except InputRequired as asked:

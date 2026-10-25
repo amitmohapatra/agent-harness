@@ -18,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import START, MessagesState, StateGraph
 
 from tests.support.adapters import BUILDERS, CLI
+from tests.support.arm import arm
 from tests.support.planned import Call
 from trellis import Harness, tool
 from trellis.contracts import ConfigurationError, RunOutcome, RunStatus
@@ -60,7 +61,7 @@ async def test_the_options_reach_the_frameworks_run_call_a_runs_over_its_agents(
 ) -> None:
     tight, said = TIGHT[framework]
     target, tools = await BUILDERS[framework](harness, [lookup], tmp_path, PLAN)
-    agent = harness.wrap(target, id="limited", tools=tools, framework_options=tight)
+    agent = arm(harness.wrap(target, id="limited", framework_options=tight), tools)
     failed = await agent.run("tides?", user="u")  # the agent's own limit
     assert failed.status is RunStatus.ERROR and failed.error is not None
     assert said in failed.error.message
@@ -86,7 +87,7 @@ async def test_a_queued_runs_options_are_kept_for_its_worker_and_its_resume(
     re-runs the turn and needs a second, ends where the framework's limit says."""
     plan: list[Call] = [("confirm", {"step": "go"}), ("lookup", {"topic": "tides"})]
     target, tools = await BUILDERS["openai_agents"](harness, [confirm, lookup], tmp_path, plan)
-    agent = harness.wrap(target, id="queued", tools=tools)
+    agent = arm(harness.wrap(target, id="queued"), tools)
     with pytest.raises(ConfigurationError, match=r"as JSON, and 'context' is not"):
         await agent.start("tides?", user="u", framework_options={"context": object()})
     handle = await agent.start("tides?", user="u", framework_options={"max_turns": 1})
@@ -178,7 +179,7 @@ async def test_claudes_options_merge_with_what_the_harness_sets(
         "FAKE_CLAUDE_RECORD": str(record),
         "FAKE_CLAUDE_SESSIONS": str(tmp_path),
     }
-    agent = harness.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="cc", tools=[lookup])
+    agent = arm(harness.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="cc"), [lookup])
     erp = {"type": "stdio", "command": "erp-mcp", "args": []}
     given = {"system_prompt": "Be brief.", "can_use_tool": own, "mcp_servers": {"erp": erp}}
     result = await agent.run("tides?", user="u", framework_options=given)
@@ -208,8 +209,8 @@ async def test_options_a_framework_cannot_take_are_refused_before_any_run(
 ) -> None:
     target, tools = await BUILDERS[framework](harness, [lookup], tmp_path, PLAN)
     with pytest.raises(ConfigurationError, match=said):
-        harness.wrap(target, id="refused", tools=tools, framework_options=options)
-    agent = harness.wrap(target, id="plain", tools=tools)
+        arm(harness.wrap(target, id="refused", framework_options=options), tools)
+    agent = arm(harness.wrap(target, id="plain"), tools)
     with pytest.raises(ConfigurationError, match=said):
         await agent.run("tides?", user="u", framework_options=options)
     with pytest.raises(ConfigurationError, match=said):
@@ -229,12 +230,12 @@ async def test_an_openai_sandbox_agent_runs_wrapped_with_its_run_config_as_an_op
 
     plan: list[Call] = [("lookup", {"topic": "tides"}), ("exec_command", {"cmd": "echo boxed"})]
     target = SandboxAgent(name="box", instructions="Work.", model=PlannedModel(plan))
-    refused = harness.wrap(target, id="bare", tools=[lookup])
+    refused = arm(harness.wrap(target, id="bare"), [lookup])
     failed = await refused.run("tides?", user="u")
     assert failed.error is not None and "RunConfig(sandbox=...)" in failed.error.message
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    agent = harness.wrap(
-        target, id="boxed", tools=[lookup], framework_options={"run_config": config}
+    agent = arm(
+        harness.wrap(target, id="boxed", framework_options={"run_config": config}), [lookup]
     )
     result = await agent.run("tides?", user="u")
     assert result.status is RunStatus.SUCCESS and "boxed" in str(result.answer), result
@@ -244,14 +245,14 @@ async def test_a_schedule_takes_what_start_takes_and_every_fired_run_carries_it(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target, tools = await BUILDERS["openai_agents"](harness, [lookup], tmp_path, PLAN)
-    agent = harness.wrap(target, id="nightly", tools=tools, timeout=60)
+    agent = arm(harness.wrap(target, id="nightly", run_timeout=60), tools)
     with pytest.raises(ConfigurationError, match="as JSON"):
-        await agent.schedule("manual", "x", on_behalf_of="ada", framework_options={"c": object()})
+        await agent.schedule("manual", user="ada", input="x", framework_options={"c": object()})
     schedule = await agent.schedule(
         "0 0 1 1 *",
-        "tides?",
-        on_behalf_of="ada",
-        timeout=30,
+        user="ada",
+        input="tides?",
+        run_timeout=30,
         without={"judges"},
         framework_options={"max_turns": 1},
         priority=5,
@@ -278,5 +279,5 @@ async def test_a_schedule_takes_what_start_takes_and_every_fired_run_carries_it(
     assert "Max turns (1) exceeded" in run.error.message
     monkeypatch.setattr(agent_module, "SCHEDULES_QUEUE", False)  # contracts before 0.6.1
     with pytest.raises(ConfigurationError, match=r"schedule\(priority=\) needs trellis-contracts"):
-        await agent.schedule("manual", "y", on_behalf_of="ada", priority=1)
-    assert (await agent.schedule("manual", "y", on_behalf_of="ada")).priority == 0
+        await agent.schedule("manual", user="ada", input="y", priority=1)
+    assert (await agent.schedule("manual", user="ada", input="y")).priority == 0

@@ -50,6 +50,7 @@ ROUTES: Final = [
     ("PUT", r"/v1/agents/model-key", "model_key"),
     ("POST", r"/v1/documents", "add_document"),
     ("GET", r"/v1/documents/(?P<document_id>[^/]+)", "document"),
+    ("GET", r"/v1/threads/(?P<thread_id>[^/]+)/messages", "thread_messages"),
 ]
 #: the uploaded file's bytes in a multipart body
 FILE_PART: Final = rb'filename="[^"]*"\r\n(?:[^\r]*\r\n)*\r\n(.*?)\r\n--'
@@ -236,6 +237,9 @@ class ScriptedMemory:
             "size_bytes": len(self.documents[document_id]),
             "job_ids": [self._id("job")],
         }
+
+    def _thread_messages(self, body: Any, request: httpx.Request, thread_id: str) -> dict[str, Any]:
+        return {"messages": []}  # a scripted conversation has no earlier turns
 
     def _document(self, body: Any, request: httpx.Request, document_id: str) -> dict[str, Any]:
         return {

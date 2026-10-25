@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.runs import LocalRuns
@@ -28,17 +29,17 @@ async def test_a_started_run_is_queued_until_a_worker_claims_it(harness: Harness
     assert (await handle.status()).status is RunStatus.QUEUED
     worker = harness.worker([agent])
     assert await worker.run_once() is True
-    paused = await handle.result(timeout=5)
+    paused = await handle.result(wait=5)
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     inbox = await harness.inbox("role:editor")
-    assert [r.run_id for r in inbox] == [handle.run_id]
+    assert [r.run_id for r in inbox] == [handle.id]
 
     resumed = await agent.resume(
         paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="ed"
     )
     assert resumed.status is RunStatus.QUEUED  # a queued run is continued by a worker
     assert await worker.run_once() is True
-    done = await handle.result(timeout=5)
+    done = await handle.result(wait=5)
     assert done.status is RunStatus.SUCCESS and done.answer == "sent=yes"
     assert await worker.run_once() is False
 
@@ -61,25 +62,25 @@ async def test_another_process_resumes_from_the_checkpoint_alone() -> None:
 
     store = LocalRuns()
     processes = [Harness(config=Settings(), runs=store) for _ in range(3)]
-    agents = [h.wrap(billing, id="billing", tools=[charge]) for h in processes]
+    agents = [arm(h.wrap(billing, id="billing"), [charge]) for h in processes]
     try:
         handle = await agents[0].start("order 7", user="u")
         assert await processes[0].worker([agents[0]]).run_once()
-        first = await handle.result(timeout=5)
+        first = await handle.result(wait=5)
         assert first.interrupt is not None
         await agents[1].resume(first.interrupt.interrupt_id, "answer", answer="L", reviewer="r")
         assert await processes[1].worker([agents[1]]).run_once()
-        second = await handle.result(timeout=5)
+        second = await handle.result(wait=5)
         assert second.interrupt is not None and second.interrupt.question == "Ship L?"
         await agents[2].resume(second.interrupt.interrupt_id, "answer", answer="yes", reviewer="r")
         assert await processes[2].worker([agents[2]]).run_once()
-        done = await handle.result(timeout=5)
+        done = await handle.result(wait=5)
     finally:
         for h in processes:
             await h.aclose()
     assert done.status is RunStatus.SUCCESS and done.answer == "charged 5; L; yes"
     assert charged == [5]  # the tool ran once, in the first process
-    assert (await store.get(handle.run_id)).checkpoint is None  # type: ignore[union-attr]
+    assert (await store.get(handle.id)).checkpoint is None  # type: ignore[union-attr]
 
 
 async def test_a_worker_runs_concurrently_and_stops_cleanly(harness: Harness) -> None:
@@ -93,7 +94,7 @@ async def test_a_worker_runs_concurrently_and_stops_cleanly(harness: Harness) ->
     agent = harness.wrap(slow, id="slow")
     handles = [await agent.start(f"job{i}", user="u") for i in range(3)]
     task = asyncio.create_task(harness.worker([agent], concurrency=3).run())
-    results = [await h.result(timeout=5) for h in handles]
+    results = [await h.result(wait=5) for h in handles]
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
@@ -113,12 +114,12 @@ async def test_a_schedule_fires_runs_for_the_worker(harness: Harness) -> None:
         return f"briefing for {agent.user}: {input}"
 
     agent = harness.wrap(briefing, id="briefing")
-    schedule = await agent.schedule("0 7 * * 1-5", "inbox", on_behalf_of="ada", tz="Europe/Berlin")
+    schedule = await agent.schedule("0 7 * * 1-5", user="ada", input="inbox", tz="Europe/Berlin")
     assert schedule.on_behalf_of == "ada" and schedule.timezone == "Europe/Berlin"
     # a redeploy schedules the same thing again: the one schedule, as it is
-    again = await agent.schedule("0 7 * * 1-5", "inbox", on_behalf_of="ada", tz="Europe/Paris")
+    again = await agent.schedule("0 7 * * 1-5", user="ada", input="inbox", tz="Europe/Paris")
     assert again.schedule_id == schedule.schedule_id and again.timezone == "Europe/Berlin"
-    other = await agent.schedule("0 7 * * 1-5", "outbox", on_behalf_of="ada")
+    other = await agent.schedule("0 7 * * 1-5", user="ada", input="outbox")
     assert other.schedule_id != schedule.schedule_id
     runs = harness.runs
     assert isinstance(runs, LocalRuns)

@@ -6,8 +6,8 @@ annotation queues live there. Trellis fills it two ways:
 | | Offline | Online |
 |---|---|---|
 | What | an agent run over a dataset, every answer scored | live runs scored as they happen |
-| Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, evaluators)` | automatic: `Harness(judges=[...])`, and the sampled grounding check |
-| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (`TRELLIS_EVAL_SAMPLE`, or `sample=`) |
+| Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, evaluators)` | automatic: `h.wrap(judges=[...])`, and the sampled grounding check |
+| Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (each judge's `sample`, a tenth by default) |
 | When | now: the call returns an `EvalReport` | after the run — in the background writes queue, never on the request path, when wrapped |
 | Where the scores go | each run's trace (Langfuse scores, and a `score` span); a Langfuse dataset's runs are linked to the dataset run | each run's trace (or the trace a case names) |
 
@@ -28,9 +28,10 @@ A wrapped agent is evaluated with nothing more than this:
 from trellis import Harness
 from trellis.harness.evals import exact_match, grounding, llm_judge
 
-# online, automatic: every sampled successful run is judged in the background
-async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quality")]) as h:
-    agent = h.wrap(graph, id="support")
+# online, automatic: each judge's share of successful runs is judged in the background
+quality = llm_judge("Polite, correct and concise.", name="quality", sample=0.2)
+async with Harness() as h:
+    agent = h.wrap(graph, id="support", judges=[quality])
 
     # offline: a Langfuse dataset by name, or the items themselves
     report = await h.evaluate(
@@ -42,17 +43,15 @@ async with Harness(judges=[llm_judge("Polite, correct and concise.", name="quali
     print(report)  # items by status, then each evaluator's mean, count, failures
 ```
 
-* **Automatic.** With memory on, a sampled share of successful runs is checked against the
-  context it was given (`TRELLIS_EVAL_SAMPLE`, [memory.md](memory.md)), and with `judges=`
-  a sampled share is judged (the same `TRELLIS_EVAL_SAMPLE`, [Online](#online-judges) below).
-  Nothing to call.
+* **Automatic.** With memory on, a fixed tenth of the successful runs is checked against the
+  context it was given ([memory.md](memory.md)), and with `judges=` each judge scores its
+  share of runs (`llm_judge(sample=)`, [Online](#online-judges) below). Nothing to call.
 * **`h.evaluate`** runs each item through the normal pipeline — memory, tools, governance and
-  approvals, the agent's time limit (`h.wrap(timeout=)`: a hung item ends `TIMEOUT`, an
+  approvals, the agent's time limit (`h.wrap(run_timeout=)`: a hung item ends `TIMEOUT`, an
   `error` item) — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
 * What it reaches is `h.evals`, an `EvalServices` the harness builds from its settings (sharing
-  its gateway and Langfuse client); each agent has its own copy, `agent.evals`, whose judge
-  falls back to the gateway model a `ReAct` target was built with when no judge model is set
-  ([The judge's model](#the-judges-model)).
+  its gateway; Langfuse from its own keys); `agent.evals` is the harness's, whose judge is the
+  gateway's judge alias, never the agent's own model ([The judge's model](#the-judges-model)).
 
 This works for every target ([framework pages](README.md#which-target)).
 
@@ -98,7 +97,7 @@ Built in:
 | `contains(name="contains", case_sensitive=False)` | whether the answer contains `expected` — each of them, for a list; the comment names what is missing |
 | `called(tool, *, before=None, args=None, name="called:<tool>")` | whether the run called `tool` — with `args`, each equal to the call's (its other arguments not compared) — and, with `before`, before its first call of `before` (which it must have made); the comment says what was called instead. No score without a trajectory |
 | `tool_sequence(tools, *, exact=False, name="tool_sequence")` | whether the run called `tools` in this order (other calls between and around them allowed), or — `exact` — exactly these calls; the comment lists the calls made. No score without a trajectory |
-| `llm_judge(criteria, *, name="llm_judge", prompt=None, model=None)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `model`: this judge's Bifrost model name, over `TRELLIS_JUDGE_MODEL` ([The judge's model](#the-judges-model)). `prompt`: a prompt (`"name"`, `"name@version"`, a `Prompt`) from the prompt sources — a rubric kept in code, a `.md` file, Langfuse or the gateway ([prompts.md](prompts.md)) — put before the judge's messages (a gateway prompt by the gateway, which needs a judge model name) |
+| `llm_judge(criteria, name="llm_judge", *, model=None, sample=0.1)` | a judge model's grade, 0 to 1, against `criteria` written in plain language; its reasoning is the comment. `model`: this judge's model name, over the gateway's judge alias ([The judge's model](#the-judges-model)). `sample`: the share of runs it scores online, chosen by the run id |
 
 ### Trajectories
 
@@ -183,7 +182,7 @@ is a `ConfigurationError`.
 | | |
 |---|---|
 | `llm_judge(criteria, model="name")` | this judge's own Bifrost model name: two judges of one run may ask two models |
-| the judge alias `trellis-judge` | else, the model name every judge asks through `BIFROST_URL`: an alias the Bifrost admin routes to the judging model, changed at runtime with no redeploy (`TRELLIS_JUDGE_MODEL`, deprecated, still names one for a release) |
+| the judge alias `trellis-judge` | else, the model name every judge asks through `BIFROST_URL`: an alias the Bifrost admin routes to the judging model, changed at runtime with no redeploy |
 | `TRELLIS_JUDGE_VIRTUAL_KEY` | the virtual key the judge's calls go through; unset: `BIFROST_VIRTUAL_KEY` |
 
 The judge never becomes the judged agent's own model. An alias the gateway does not route
@@ -204,7 +203,7 @@ verdict replayed for a merely similar answer would be wrong.
 with a prompt of the criteria plus the case — up to about 32 000 characters. Offline that is
 one call per item and judge; online it is one per *sampled* run and judge: at the default 10 %
 sample, 1 000 runs a day cost about 100 judge calls a day per judge. Sample down
-(`TRELLIS_EVAL_SAMPLE`), judge offline on a dataset instead, or use a cheaper deterministic
+(`llm_judge(sample=)`), judge offline on a dataset instead, or use a cheaper deterministic
 evaluator where one will do.
 
 ## Offline: `evaluate` and `h.evaluate`
@@ -287,7 +286,8 @@ spans do.
 ## Online: judges
 
 ```python
-h = Harness(judges=[llm_judge("Polite, correct and concise.", name="quality"), cites_policy])
+quality = llm_judge("Polite, correct and concise.", name="quality", sample=0.25)
+agent = h.wrap(graph, id="support", judges=[quality, cites_policy])
 ```
 
 After a successful run of a wrapped agent with an answer (a structured one as its JSON), if the run falls in the sample,
@@ -298,21 +298,20 @@ id (no `expected`). Its score goes on
 the run's trace; a judge that fails is a `warning` event on the run's stream (`judge_failed`)
 and a log line.
 
-**`TRELLIS_EVAL_SAMPLE`** is the share of runs evaluated, 0 to 1 — judged (with judges) and
-checked for grounding (with memory) — 0.1 when unset; `without={"judges"}` or
-`{"grounding"}` turns one of the two off. The run id decides — salted apart for the judges,
-so the two samples are independent — so a run is either always or never judged, whichever process asks. `judge(..., sample=rate)` from code you
+**The share of runs.** Each judge scores `sample` of the runs, 0 to 1 (`llm_judge(sample=)`;
+a judge of your own with a `sample` attribute says its own; else a tenth); a fixed tenth of the
+runs given a memory context is checked for grounding. `without={"judges"}` or `{"grounding"}`
+turns one of the two off. The run id decides — salted apart per judge, so the samples are
+independent — so a run is either always or never judged, whichever process asks. `judge(..., sample=rate)` from code you
 do not wrap samples the same way ([blocks/evaluation.md](blocks/evaluation.md#online-judge)).
 
 ## Langfuse setup
 
 Nothing beyond what already sends the traces there
 ([observability.md](observability.md#export)): Langfuse's own `LANGFUSE_PUBLIC_KEY`,
-`LANGFUSE_SECRET_KEY` and `LANGFUSE_HOST` (unset: Langfuse Cloud) — or, through a collector,
-`OTEL_EXPORTER_OTLP_HEADERS` with `Authorization=Basic <base64 public-key:secret-key>` and the
-endpoint Langfuse's (`…/api/public/otel`) or the headers naming its host (`x-langfuse-host`).
-The same credentials reach its public API for scores, datasets and dataset runs — the harness's
-and `EvalServices.from_env()`'s alike. Without them, scores are `score` spans on the run's trace
+`LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` (unset: Langfuse Cloud). The same keys reach its
+public API for scores, datasets and dataset runs — the harness's and
+`EvalServices.from_env()`'s alike. Without them, scores are `score` spans on the run's trace
 only (every OTLP backend gets those), and a dataset
 must be given as items.
 
@@ -344,7 +343,7 @@ make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
 |---|---|
 | Tasks | ten, from the tool-choice sets the live suite uses — the store set ([`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py)) and the held-out help desk and travel sets (`tests/live/heldout.py`): six short (two parts, a change behind approval, a read that sounds like a change), three long (four and five parts, each served by its own tool) and a large result — a help desk export of about 100,000 characters, past what `ReAct` pages. The report gives every figure for all of them and by length |
 | Catalogues | 10, 50, 100 and 500 tools (`--sizes`): each set's own tools, then distractors — 500 synthetic but realistic MCP-style tools (`<server>-<tool>`) of 25 servers (code hosting, CRM, billing, HR, monitoring, DNS...), list / get / create / update / delete of four kinds of record each, every one described and with a typed, described JSON schema; none is about the tasks' domains. The order is fixed, so a run is reproducible |
-| Variants | `baseline`: plain tools, everything off (`create_agent` with only what runs the harness's tools and bounds the loop; `without={"code_mode", "hints"}`). `main`: `ReAct` as it is built — result paging, context editing, summarization, `ToolGuidance` off, Code Mode where it applies (gateway MCP servers; the catalogues here are the agent's own tools, so it does not). `main-paging`, `main-context_editing`, `main-summarization`: `main` with that one piece off. A new feature is one more entry of `benchmark/cost/variants.py`, measured against these (`--variants`) |
+| Variants | `baseline`: plain tools, everything off (`create_agent` with only what runs the harness's tools and bounds the loop; `without={"code_mode", "tool_search"}`). `main`: `ReAct` as it is built — result paging, context editing, summarization, `ToolGuidance` off, Code Mode where it applies (gateway MCP servers; the catalogues here are the agent's own tools, so it does not). `main-paging`, `main-context_editing`, `main-summarization`: `main` with that one piece off. A new feature is one more entry of `benchmark/cost/variants.py`, measured against these (`--variants`) |
 | Per run | input, output and cached tokens (as the model reports them), model calls (every chat model call of the run, a summarization's included) and each call's seconds (the report gives their p50 and p95 per cell), wall time, the CPU seconds of the benchmark's own process and of each `--watch name=pid` process (the model server, the gateway; the report adds each one's peak memory), `tool_coverage` (the share of the task's needed tools called; for a run that ended in an error, from the calls it made) and task success (every needed tool called, no broader one, every other check of the task passed — `contains`, `picks`) |
 | Cost | `benchmark/cost/prices.py`: dollars per million tokens, cached input and cache writes priced apart, each price with its source and the date it was read. A model not in the table is reported with its tokens and no dollars; `--price-as` prices the same tokens at listed models' rates as well (an estimate: their tokenizers count differently) |
 | Report | `build/bench-cost.json` (every run, each cell's means and 95% intervals — Student's t over the runs) and `build/bench-cost.md` (the table), written after every cell |

@@ -156,7 +156,7 @@ through the harness's background writes, so they are kept on disk across an outa
   (`remember="run"`) is not asked about again in it.
 
 A call is looked up by its tool's name when it is made. So a rule set after a graph was compiled
-with `h.tools(...)` still decides its calls, within the 30 s the rules are kept. This also holds
+still decides its calls, within the 30 s the rules are kept. This also holds
 for a tool an OpenAI Agents handoff or a Claude server carries, and for the memory service's
 own agent tools (their own risk decides unless the catalog names them). The span of each call carries
 `trellis.governance.action` ([observability.md](observability.md)).

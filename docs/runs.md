@@ -16,21 +16,21 @@ signatures.
 | `agent.run` / `agent.stream` | `RUNNING` (recorded in process), then `PAUSED` or an ending |
 | `agent.start` | `QUEUED`; `RunHandle.result()` waits for a pause or an ending |
 | `agent.resume` | the next attempt: `RUNNING` for an in-process run, `QUEUED` again for one that came from the queue; `CANCELLED` on cancel |
-| `agent.cancel(run_id, reason=)` / `handle.cancel(reason=)` | `CANCELLED`: at once when queued or paused; a run running here stops now; one on a worker elsewhere is stopped by that worker at its next heartbeat |
-| `agent.schedule(cron, input, on_behalf_of=, tz=, tenant=, ...)` | a `Schedule`; each fire queues a run acting for `on_behalf_of`, with the run options `start` takes (below) |
+| `agent.cancel(run_id, reason=)` (a handle's: `agent.cancel(handle.id)`) | `CANCELLED`: at once when queued or paused; a run running here stops now; one on a worker elsewhere is stopped by that worker at its next heartbeat |
+| `agent.schedule(cron, user=, input=, tz=, tenant=, ...)` | a `Schedule`; each fire queues a run for `user`, with the run options `start` takes (below) |
 
-`run`, `stream` and `start` take `timeout=` (the most working time, in seconds, across every
+`run`, `stream` and `start` take `run_timeout=` (the most working time, in seconds, across every
 attempt — pauses and the queue not counted) and `deadline=` (when the run must have ended):
 past either the run ends `TIMEOUT`, never retried. They are the record's `timeout_seconds` and
 `deadline`, and agent-runs keeps the time worked (`worked_seconds`) across attempts and crashes;
-`h.wrap(..., version=)` (or `TRELLIS_AGENT_VERSION`) is its `agent_version`
+`h.wrap(..., version=)` (else `service.version` of `OTEL_RESOURCE_ATTRIBUTES`) is its
+`agent_version`
 ([reliability.md](reliability.md#run-time-limit-and-deadline)).
 
-`start` returns a `RunHandle`: `run_id`, `await handle.status()` (the `RunRecord`; a run the
-store does not have raises `ConfigurationError`), `await handle.cancel(reason=None)` and
-`await handle.result(timeout=None)`, which
+`start` returns a `RunHandle`: `id`, `await handle.status()` (the `RunRecord`; a run the
+store does not have raises `ConfigurationError`) and `await handle.result(wait=None)`, which
 reads the run every 0.5 s until it pauses or ends and returns a `Result` (`asyncio.timeout`
-raises `TimeoutError` past `timeout`). A queued run's input must be JSON (`start` refuses
+raises `TimeoutError` past `wait`). A queued run's input must be JSON (`start` refuses
 anything else); a run started in process records its input as JSON where it can and as text
 where it cannot, and so does its answer.
 
@@ -61,8 +61,7 @@ worker's id, the lease's length). A job of another agent is refused (`Configurat
 shows the queue order (`priority`, `concurrency_key`).
 
 `h.worker(agents, *, concurrency=None)` needs at least one agent. `concurrency` — runs executed
-at once — defaults to `TRELLIS_WORKER_CONCURRENCY`, else the machine's CPU count between 1 and
-8. `await worker.run()` claims and executes until stopped: an idle worker asks again after
+at once — defaults to the machine's CPU count between 1 and 8. `await worker.run()` claims and executes until stopped: an idle worker asks again after
 0.5 s, doubling the pause while the queue stays empty up to 10 s (half of it random, so a fleet
 of idle workers does not ask in step), and asks at once again after it got work.
 `await worker.run_once()` claims one run and executes it to its end or pause, and returns
@@ -201,7 +200,7 @@ run options as `start`, and every fired run gets them — agent-runs and `LocalR
 
 | Run option | `agent.start(...)` keeps it in | `agent.schedule(...)` keeps it in | Each fired run gets |
 |---|---|---|---|
-| `timeout=` (else the agent's `h.wrap(timeout=)`) | `RunStart.timeout_seconds` | `ScheduleSpec.timeout_seconds` | `timeout_seconds` |
+| `timeout=` (else the agent's `h.wrap(run_timeout=)`) | `RunStart.timeout_seconds` | `ScheduleSpec.timeout_seconds` | `timeout_seconds` |
 | the agent's `version` | `RunStart.agent_version` | `ScheduleSpec.agent_version` | `agent_version` |
 | `without=` | `RunStart.metadata["without"]` | `ScheduleSpec.metadata["without"]` | `metadata["without"]` |
 | `framework_options=` (JSON) | `RunStart.metadata["framework_options"]` | `ScheduleSpec.metadata["framework_options"]` | `metadata["framework_options"]` |

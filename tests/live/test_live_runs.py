@@ -19,6 +19,7 @@ import pytest
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import eventually, memory_scope
+from tests.support.arm import arm
 from trellis import Harness, Runtime, tool
 from trellis.contracts import (
     ConfigurationError,
@@ -59,7 +60,7 @@ def start(agent_id: str, tenant: str, **fields: object) -> RunStart:
 async def test_the_runs_client_speaks_agent_runs(harness: Harness) -> None:
     runs = harness.runs
     agent_id = f"live-wire-{uuid.uuid4().hex[:8]}"
-    tenant = await harness.tenant()
+    tenant = await harness._tenant()
     queued = await runs.start(start(agent_id, tenant), queue=True)
     assert queued.status is RunStatus.QUEUED
     took = await runs.claim("w1", [agent_id], lease_seconds=30)
@@ -107,7 +108,7 @@ async def test_a_lapsed_lease_puts_the_run_back_and_fences_the_old_worker(
 ) -> None:
     runs = harness.runs
     agent_id = f"live-lease-{uuid.uuid4().hex[:8]}"
-    tenant = await harness.tenant()
+    tenant = await harness._tenant()
     queued = await runs.start(start(agent_id, tenant), queue=True)
     assert await runs.claim("w1", [agent_id], lease_seconds=5) is not None
 
@@ -136,7 +137,7 @@ async def test_a_question_past_its_deadline_escalates_or_times_out(harness: Harn
     runs = harness.runs
     agent_id = f"live-escalate-{uuid.uuid4().hex[:8]}"
     soon = datetime.now(UTC) + timedelta(seconds=1)
-    tenant = await harness.tenant()
+    tenant = await harness._tenant()
     escalated = await runs.start(start(agent_id, tenant))
     await runs.pause(
         Interrupt(
@@ -202,23 +203,23 @@ async def test_ask_and_resume_continue_in_other_worker_processes(tmp_path: Path)
         handle = await agent.start({"order": "o-7", "amount": 40}, user="live-ada")
 
         with worker_process(suffix, ledger):
-            first = await handle.result(timeout=60)
+            first = await handle.result(wait=60)
         assert first.status is RunStatus.PAUSED and first.interrupt is not None
         assert first.interrupt.question == "Which size?"
         inbox = await h.inbox("role:ops")
-        assert handle.run_id in [r.run_id for r in inbox]
+        assert handle.id in [r.run_id for r in inbox]
         queued = await agent.resume(
             first.interrupt.interrupt_id, "answer", answer="L", reviewer="live-lee"
         )
         assert queued.status is RunStatus.QUEUED
 
         with worker_process(suffix, ledger):  # a different process continues it
-            second = await handle.result(timeout=60)
+            second = await handle.result(wait=60)
         assert second.interrupt is not None and second.interrupt.question == "Ship size L?"
         await agent.resume(second.interrupt.interrupt_id, "answer", answer="yes", reviewer="lee")
 
         with worker_process(suffix, ledger):
-            done = await handle.result(timeout=60)
+            done = await handle.result(wait=60)
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == "charged o-7 40; size L; ship yes"
         record = await handle.status()
@@ -262,7 +263,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
         sent = await agent.ask("Send it?", options=["yes", "no"])
         return f"{len(report)} {sent}"
 
-    agent = harness.wrap(reporter, id=f"live-report-{uuid.uuid4().hex[:8]}", tools=[export])
+    agent = arm(harness.wrap(reporter, id=f"live-report-{uuid.uuid4().hex[:8]}"), [export])
     handle = await agent.start("x", user="live-user")
     claimed = await harness.runs.claim("w-dies", [agent.id], lease_seconds=5)
     assert claimed is not None
@@ -280,7 +281,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
     worker = harness.worker([agent], concurrency=1)
     # once the backoff after a lapse has passed: replays the export from the artifact, asks
     assert await eventually(worker.run_once, within=SWEEP_SECONDS)
-    paused = await handle.result(timeout=30)
+    paused = await handle.result(wait=30)
     assert paused.interrupt is not None and exported == [3]
     record = await handle.status()
     assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
@@ -289,7 +290,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
         await agent.resume(asked, "answer", answer="maybe", reviewer="live-user")
     await agent.resume(asked, "answer", answer="yes", reviewer="live-user")
     assert await worker.run_once()
-    done = await handle.result(timeout=30)
+    done = await handle.result(wait=30)
     assert done.status is RunStatus.SUCCESS, done.error
     assert done.answer == f"{MAX_CHECKPOINT_BYTES + 1} yes" and exported == [3]
 
@@ -303,9 +304,9 @@ async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> N
         # at most one fire an hour (agent-runs' floor): the next minute but one
         minute = (datetime.now(UTC) + timedelta(minutes=2)).minute
         cron = f"{minute} * * * *"
-        first = await agent.schedule(cron, "inbox", on_behalf_of="live-ada", tz="Europe/Berlin")
+        first = await agent.schedule(cron, user="live-ada", input="inbox", tz="Europe/Berlin")
         # a redeploy schedules it again: agent-runs answers the one that exists, unchanged
-        schedule = await agent.schedule(cron, "inbox", on_behalf_of="live-ada")
+        schedule = await agent.schedule(cron, user="live-ada", input="inbox")
         assert schedule.schedule_id == first.schedule_id
         assert schedule.timezone == "Europe/Berlin"
         try:
@@ -325,5 +326,5 @@ async def test_a_schedule_fires_from_the_ticker_to_a_worker(tmp_path: Path) -> N
 
 
 async def _succeeded(h: Harness, agent_id: str) -> list[RunSummary]:
-    listed = h.runs.iterate(agent_id=agent_id, status=RunStatus.SUCCESS, tenant=await h.tenant())
+    listed = h.runs.iterate(agent_id=agent_id, status=RunStatus.SUCCESS, tenant=await h._tenant())
     return [summary async for summary in listed]

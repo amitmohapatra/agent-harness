@@ -1,13 +1,12 @@
-"""MCP servers as ``tools=[...]`` entries — one entry type for every MCP source:
+"""MCP servers of an agent's own, as ``ReAct(tools=[...])`` entries — one entry type for every
+MCP server the harness reaches itself:
 
 * ``mcp("https://host/mcp")`` — a server over HTTP (streamable), ``headers=`` for its auth;
 * ``mcp(stdio("npx", "@mcp/files"))`` — a local server the harness starts and talks to over
-  its stdin and stdout;
-* ``mcp("finance-tools")`` — a Bifrost Virtual MCP, by its name: the gateway lists and runs
-  its tools (``tools.toolbox``), Code Mode included where it fits.
+  its stdin and stdout.
 
-With a gateway and no ``mcp(...)`` entry, the agent has every MCP tool its virtual key allows,
-as before; once it names any, it has exactly the ones it names.
+The gateway's MCP tools are every run's: the ones the Bifrost virtual key allows (Bifrost's
+admin chooses them, per key), Code Mode included where it fits (``tools.toolbox``).
 
 A server the harness reaches itself (HTTP, stdio) is reached with the official MCP SDK
 (``mcp.Client``, the ``mcp`` extra): one connection per server and event loop, opened at the
@@ -21,7 +20,6 @@ paging, the run's records."""
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
 import re
 from collections.abc import Callable, Mapping
@@ -41,8 +39,6 @@ log = logging.getLogger("trellis.tools")
 
 #: An HTTP server's address.
 URL: Final = re.compile(r"^https?://", re.IGNORECASE)
-#: A Bifrost Virtual MCP's name (its slug).
-VIRTUAL: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 @dataclass(frozen=True)
@@ -106,15 +102,11 @@ class MCPSource:
         transport = next((t for t in TRANSPORTS if t.accepts(target)), None)
         if transport is None:
             raise ConfigurationError(
-                f"mcp({target!r}): give a server's URL (https://...), stdio(command, ...) for a "
-                "local server, or a Virtual MCP's name"
+                f"mcp({target!r}): give a server's URL (https://...), or stdio(command, ...) for "
+                "a local server (the gateway's MCP tools are the ones the virtual key allows: "
+                "every run has them)"
             )
         self.transport = transport
-        if transport.client is None and (name is not None or headers):
-            raise ConfigurationError(
-                f"mcp({target!r}) is a Virtual MCP of the gateway: it takes no name= or "
-                "headers= (the gateway names its servers and holds their keys)"
-            )
         self.server = None if name is None else server_name(name)
         if name is not None and not self.server:
             raise ConfigurationError(f"mcp(name={name!r}) has no letter or digit to name tools")
@@ -129,15 +121,8 @@ class MCPSource:
     def kind(self) -> McpKind:
         return self.transport.kind
 
-    @property
-    def virtual(self) -> str | None:
-        """The Virtual MCP's name, for one the gateway lists (``None``: a server of its own)."""
-        return self.target if self.transport.client is None else None  # type: ignore[return-value]
-
     async def resolve(self) -> list[Tool]:
         """The server's tools, listed through the connection (every page)."""
-        if self.virtual is not None:
-            raise ConfigurationError(f"{self!r} is listed by the gateway, not resolved")
         client = await self._connection.client()
         server = self.server or self._own_name(client)
         listed: list[Any] = []
@@ -198,7 +183,6 @@ class MCPSource:
         return named or self.transport.fallback_name(self.target) or UNNAMED
 
     def _client(self) -> Client:
-        assert self.transport.client is not None  # a Virtual MCP opens no connection
         return self.transport.client(self)
 
     async def aclose(self) -> None:
@@ -209,18 +193,16 @@ class MCPSource:
 class McpKind(StrEnum):
     HTTP = "http"
     STDIO = "stdio"
-    VIRTUAL = "virtual"
 
 
 @dataclass(frozen=True)
 class Transport:
     """One kind of ``mcp(...)`` target: what it accepts, the SDK client a server of it is
-    reached with (``None``: the gateway lists and runs it), and a name for a server that gives
-    itself none."""
+    reached with, and a name for a server that gives itself none."""
 
     kind: McpKind
     accepts: Callable[[Any], bool]
-    client: Callable[[MCPSource], Client] | None
+    client: Callable[[MCPSource], Client]
     fallback_name: Callable[[Any], str]
 
 
@@ -274,7 +256,6 @@ TRANSPORTS: Final[tuple[Transport, ...]] = (
     Transport(
         McpKind.HTTP, lambda t: isinstance(t, str) and bool(URL.match(t)), _http_client, _host_name
     ),
-    Transport(McpKind.VIRTUAL, lambda t: isinstance(t, str) and bool(VIRTUAL.match(t)), None, str),
 )
 #: A server that gives no name, at an address with none to take.
 UNNAMED: Final = "mcp"
@@ -297,14 +278,14 @@ def mcp(
     target: str | Stdio,
     *,
     name: str | None = None,
-    timeout: float | None = REMOTE_TIMEOUT_SECONDS,
+    call_timeout: float | None = REMOTE_TIMEOUT_SECONDS,
     headers: Mapping[str, str] | None = None,
 ) -> MCPSource:
-    """An MCP server's tools, as a ``tools=[...]`` entry: ``target`` is its URL, a local
-    server (:func:`stdio`) or a Bifrost Virtual MCP's name. ``name`` names its tools
-    (``<name>-<tool>``; else the server's own name), ``timeout`` is the most one call may
-    take, ``headers`` go with every HTTP request (its auth)."""
-    return MCPSource(target, name=name, timeout=timeout, headers=headers)
+    """An MCP server's tools, as a ``ReAct(tools=[...])`` entry: ``target`` is its URL, or a
+    local server (:func:`stdio`). ``name`` names its tools (``<name>-<tool>``; else the
+    server's own name), ``call_timeout`` is the most one call may take, ``headers`` go with
+    every HTTP request (its auth)."""
+    return MCPSource(target, name=name, timeout=call_timeout, headers=headers)
 
 
 @dataclass
@@ -368,36 +349,3 @@ class _Connection:
             stop.set()
         if task is not None and task.get_loop() is asyncio.get_running_loop():
             await asyncio.gather(task, return_exceptions=True)
-
-
-def split(
-    sources: list[Any], deprecated: list[str] | None = None
-) -> tuple[list[Any], list[str] | None]:
-    """``tools=[...]``'s sources less the Virtual MCPs they name, and those names: ``None`` when
-    no ``mcp(...)`` entry is among them (every MCP tool the key allows), else exactly the named
-    ones (none: no gateway MCP tool). ``deprecated``: the retired ``mcp=``'s names."""
-    named = [s for s in sources if isinstance(s, MCPSource)]
-    if not named and deprecated is None:
-        return sources, None
-    virtual = [s.virtual for s in named if s.virtual is not None]
-    kept = [s for s in sources if not (isinstance(s, MCPSource) and s.virtual is not None)]
-    return kept, list(dict.fromkeys([*(deprecated or ()), *virtual]))
-
-
-@functools.cache
-def retired_mcp(where: str) -> None:
-    """``mcp=`` (a release retired it), said once per place."""
-    log.warning(
-        "%s(mcp=[...]) is deprecated and goes in the next release: put mcp('<virtual-mcp>') in "
-        "tools=[...] (mcp=[]: without={'mcp'})",
-        where,
-    )
-
-
-@functools.cache
-def retired_as_tool() -> None:
-    """``Agent.as_tool()`` (a release retired it), said once."""
-    log.warning(
-        "agent.as_tool() is deprecated and goes in the next release: put the agent itself in "
-        "tools=[...] (it is a sub-agent there)"
-    )

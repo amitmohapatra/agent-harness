@@ -1,13 +1,12 @@
-"""``agent.as_tool()``: a wrapped agent as a tool another agent calls — a sub-agent.
+"""A wrapped agent as a tool another agent calls — a sub-agent:
 
-    research = h.wrap(ReAct(system="You research.", model=model), id="research", tools=[search])
-    writer = h.wrap(ReAct(system="You write.", model=model), id="writer",
-                    tools=[research.as_tool()])
+    research = h.wrap(ReAct("You research.", model, tools=[search]), id="research")
+    writer = h.wrap(ReAct("You write.", model, subagents=[research]), id="writer")
 
-Either side may be any target (ReAct, a function, LangGraph, OpenAI Agents, Claude), and any
-framework may call the tool (``tools=[...]``, or ``h.tools(..., framework=)``). The model decides
-when to delegate, and what to delegate at once. Calling the tool runs a *child run* of the
-sub-agent, inside the call:
+Either side may be any target (ReAct, a function, LangGraph, OpenAI Agents, Claude): a ``ReAct``
+names its sub-agents (``subagents=``), and any agent's code calls another with ``agent.run``,
+which is the same child run (:func:`child_run`). The model decides when to delegate, and what
+to delegate at once. Calling the tool runs a *child run* of the sub-agent, inside the call:
 
 * its id is derived from the parent's call (the parent run, the call, its occurrence: the
   call's ``idempotency_key``), so the parent's re-run finds it again; its record names its
@@ -34,8 +33,8 @@ call, else the run) and how many runs of that agent it started there.
 
 The tool only reads — and so runs beside the parent's other reads — when every tool the child
 declares only reads and it has none the harness does not run (a framework's own tools, whose
-effects are not known); otherwise it writes, and runs one at a time. ``side_effects=`` says
-otherwise.
+effects are not known); otherwise it writes, and runs one at a time. Its name is the agent's
+id, its description the agent's (``h.wrap(description=)``, else its function's docstring).
 """
 
 from __future__ import annotations
@@ -67,7 +66,7 @@ from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
-    from trellis.harness.features import Feature
+    from trellis.harness.budget import Budget
     from trellis.harness.runs import RunStore
 
 #: The key of a parent's interrupt payload naming the child that asked:
@@ -107,7 +106,7 @@ ASKED: Final = (
 
 
 class SubAgent:
-    """A wrapped agent as a tool source: what ``Agent.as_tool`` returns."""
+    """A wrapped agent as a tool source (a ``ReAct``'s ``subagents=``)."""
 
     def __init__(
         self,
@@ -166,7 +165,8 @@ async def child_run(
     tenant: str | None = None,
     timeout: float | None = None,  # noqa: ASYNC109 - the run's limit, kept across attempts
     deadline: datetime | None = None,
-    without: Collection[Feature] = (),
+    budget: Budget | None = None,
+    without: Collection[str] = (),
     framework_options: Mapping[str, Any] | None = None,
     document_ids: Sequence[str] | None = None,
 ) -> Result:
@@ -194,6 +194,7 @@ async def child_run(
         record_input=True,
         timeout=min(limits) if limits else None,
         deadline=deadline,
+        budget=budget,
         parent=parent,
         without=without,
         framework_options=framework_options,
@@ -291,21 +292,28 @@ async def _side_effects(agent: Agent) -> SideEffects:
 
 
 def _unseen(agent: Agent) -> bool:
-    """Whether the target has tools of its framework's own, which the harness does not run:
-    Claude's built-in tools, an OpenAI Agents agent's own tools or handoffs, a graph's tools
-    not built with ``h.tools``."""
-    from trellis.harness.harness import TOOLBOX  # noqa: PLC0415 - harness imports agent
+    """Whether the target has tools of its framework's own, whose effects the harness does not
+    know: a function target's (its code's calls), Claude's built-in tools, an OpenAI Agents
+    agent's own tools or handoffs, a graph's own tools (a ``ReAct``'s are only the harness's
+    own read tools)."""
+    from trellis.harness.middleware import READ_RESULT, STATE_TOOLS  # noqa: PLC0415 - react
 
     target, framework = agent.target, agent.adapter.name
+    if framework == "function":  # its code calls what it calls (``agent.tools.call``)
+        return not agent.sources
     if framework == "claude_agent_sdk":
         return True
     if framework == "openai_agents":
         return bool(target.tools or target.handoffs)
-    return any(TOOLBOX not in (getattr(t, "metadata", None) or {}) for t in bound_tools(target))
+    harness_own = {READ_RESULT, *STATE_TOOLS}
+    return any(getattr(t, "name", None) not in harness_own for t in bound_tools(target))
 
 
 def _described(agent: Agent) -> str:
-    """A function target's docstring (its first paragraph), else what the tool is for."""
+    """What the agent does: its own description (``h.wrap(description=)``), else a function
+    target's docstring (its first paragraph), else what the tool is for."""
+    if agent.description:
+        return agent.description
     target = agent.target
     doc = inspect.getdoc(target) if inspect.isfunction(target) else None
     first = (doc or "").split("\n\n")[0]

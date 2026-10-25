@@ -1,14 +1,15 @@
-"""The tools ``tools=[...]`` accepts — the ones this process runs itself: ``tool(fn)`` (a bare
-function in the list is ``tool(fn)``), ``a2a(url)`` (a remote agent) and ``openapi(spec)``; a
-wrapped agent in the list is a sub-agent (``trellis.harness.subagents``), and ``mcp(...)`` an
-MCP server's tools (``tools.mcp``) — without one, the MCP tools the agent's Bifrost virtual key
-allows, loaded automatically (``tools.toolbox``).
+"""The tools the harness runs itself — ``ReAct(tools=[...])``'s, and what a function target
+calls (``agent.tools.call``): ``tool(fn)`` (a bare function is ``tool(fn)``), ``a2a(url)`` (a
+remote agent) and ``openapi(spec)``; a wrapped agent is a sub-agent
+(``trellis.harness.subagents``), and ``mcp(...)`` an MCP server's tools (``tools.mcp``) —
+besides them, every run has the MCP tools the agent's Bifrost virtual key allows, loaded
+automatically (``tools.toolbox``).
 
 Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A local
 function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
 the tool catalog may override either (``trellis.harness.governance``). Each takes a
-``timeout``: the most one call may take (an OpenAPI operation and an A2A exchange have one by
-default, the same: :data:`~trellis.harness.tools.base.REMOTE_TIMEOUT_SECONDS`).
+``call_timeout``: the most one call may take (an OpenAPI operation and an A2A exchange have one
+by default, the same: :data:`~trellis.harness.tools.base.REMOTE_TIMEOUT_SECONDS`).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import functools
 import inspect
 import re
 import typing
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, overload
 
@@ -101,7 +102,7 @@ def tool(
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
-    timeout: float | None = None,
+    call_timeout: float | None = None,
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -110,7 +111,7 @@ def tool(
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
-    timeout: float | None = None,
+    call_timeout: float | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -120,7 +121,7 @@ def tool(
     description: str | None = None,
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
-    timeout: float | None = None,
+    call_timeout: float | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
@@ -130,7 +131,7 @@ def tool(
     its sections (``Args:``, ``Returns:``...), every other paragraph kept — "use it when / not
     when" included. ``idempotent``: a call repeated with the
     same idempotency key (``trellis.current().idempotency_key``) has its effect once, so it is
-    retried like a read and run again after a crash. ``timeout``: the most one call may take,
+    retried like a read and run again after a crash. ``call_timeout``: the most one call may take,
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped). A result that comes from outside the run (a person, another system) is an
     ``ask`` in the function: ``return await trellis.current().ask(question, expects=...)``.
@@ -141,7 +142,7 @@ def tool(
         description=description,
         side_effects=side_effects,
         idempotent=idempotent,
-        timeout=timeout,
+        timeout=call_timeout,
     )
     return made(fn) if fn is not None else made
 
@@ -236,7 +237,8 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
 
 
 class A2ASource:
-    """A remote A2A agent as one tool: a message in, its answer out."""
+    """A remote A2A agent: one tool (a message in, its answer out) for ``ReAct(tools=,
+    subagents=)``, and an async callable anywhere (``await a2a(url)("message")``)."""
 
     def __init__(self, url: str, name: str | None, timeout: float) -> None:
         self.url = url
@@ -248,11 +250,52 @@ class A2ASource:
 
         return [await remote_agent_tool(self.url, name=self.name, timeout=self.timeout)]
 
+    async def __call__(
+        self,
+        message: Any,
+        *,
+        user: str | None = None,
+        tenant: str | None = None,
+        thread: str | None = None,
+        on_input: Callable[[str], Awaitable[Any]] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        """The remote agent's answer to ``message``. Inside a run, as the run (its tenant, user
+        and thread; a remote question is the run's ``ask``); outside one, as ``tenant`` and
+        ``user`` (and ``thread``, the A2A context), a remote question answered by
+        ``on_input`` (else ``InputRequired``). ``headers`` go on every request (an edge's
+        ``Authorization``)."""
+        from trellis.harness.a2a.client import RemoteAgent  # noqa: PLC0415
+        from trellis.harness.runtime import current  # noqa: PLC0415 - runtime imports tools
 
-def a2a(url: str, *, name: str | None = None, timeout: float = REMOTE_TIMEOUT_SECONDS) -> A2ASource:
-    """The A2A agent whose card is at ``url`` (its base URL), as a tool. ``timeout``: the most
-    one exchange may take, in seconds."""
-    return A2ASource(url, name, timeout)
+        runtime = current()
+        if runtime is not None:
+            tenant, user = runtime.tenant, runtime.user
+            thread, on_input = runtime.thread or runtime.run_id, runtime.ask
+        if tenant is None or user is None:
+            raise ConfigurationError(
+                f"a2a({self.url!r}) called outside a run: pass tenant= and user="
+            )
+        async with RemoteAgent(
+            self.url,
+            tenant=tenant,
+            user=user,
+            thread=thread,
+            on_input=on_input,
+            name=self.name,
+            headers=headers,
+            timeout=self.timeout,
+        ) as agent:
+            return await agent(message)
+
+
+def a2a(
+    url: str, *, name: str | None = None, call_timeout: float = REMOTE_TIMEOUT_SECONDS
+) -> A2ASource:
+    """The A2A agent whose card is at ``url`` (its base URL): a tool, a sub-agent
+    (``ReAct(subagents=)``), or called directly (``await a2a(url)("message")``).
+    ``call_timeout``: the most one exchange may take, in seconds."""
+    return A2ASource(url, name, call_timeout)
 
 
 # --------------------------------------------------------------------------- OpenAPI
@@ -313,16 +356,16 @@ def openapi(
     only: Iterable[str] | None = None,
     base_url: str | None = None,
     headers: Mapping[str, str] | None = None,
-    timeout: float = REMOTE_TIMEOUT_SECONDS,
+    call_timeout: float = REMOTE_TIMEOUT_SECONDS,
 ) -> OpenAPISource:
     """The operations of an OpenAPI 3 document (a URL or the parsed document) as tools.
-    ``timeout``: the most one operation may take, in seconds."""
+    ``call_timeout``: the most one operation may take, in seconds."""
     return OpenAPISource(
         spec,
         only=None if only is None else list(only),
         base_url=base_url,
         headers=headers,
-        timeout=timeout,
+        timeout=call_timeout,
     )
 
 
@@ -412,9 +455,9 @@ def _sub_agent(item: Any) -> Source:
     return SubAgent(item, name=None, description=None, side_effects=None)
 
 
-#: The kinds of ``tools=[...]`` entry, registered here and only here, tried in this order: a
-#: wrapped agent (a sub-agent), anything that resolves to tools itself (``tool``, ``mcp``,
-#: ``a2a``, ``openapi``, ``sandbox``, ``skills``, a source of yours), a bare function.
+#: The kinds of tool entry, registered here and only here, tried in this order: a wrapped
+#: agent (a sub-agent), anything that resolves to tools itself (``tool``, ``mcp``, ``a2a``,
+#: ``openapi``, ``sandbox``, a source of yours), a bare function.
 ENTRY_KINDS: Final[tuple[EntryKind, ...]] = (
     EntryKind("agent", _is_agent, _sub_agent),
     EntryKind("source", lambda item: hasattr(item, "resolve"), lambda item: item),
@@ -423,11 +466,11 @@ ENTRY_KINDS: Final[tuple[EntryKind, ...]] = (
 
 
 def as_source(item: Source | Callable[..., Any] | Any) -> Source:
-    """A ``tools=[...]`` entry as a source, by the first :data:`ENTRY_KINDS` that accepts it."""
+    """A tool entry as a source, by the first :data:`ENTRY_KINDS` that accepts it."""
     for kind in ENTRY_KINDS:
         if kind.accepts(item):
             return kind.source(item)
     raise ConfigurationError(
         f"not a tool: {item!r} — give a function, tool(...), mcp(...), a2a(...), openapi(...), "
-        "sandbox(), skills(...) or a wrapped agent"
+        "sandbox() or a wrapped agent"
     )

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 import trellis
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.planned import Call
 from trellis import Harness, Hooks, Runtime, Settings, tool
 from trellis.contracts import (
@@ -57,7 +58,7 @@ async def test_a_choice_of_labelled_options_with_several_picks_on_every_adapter(
 ) -> None:
     plan: list[Call] = [("pick_plans", {"customer": "acme"})]
     target, tools = await BUILDERS[framework](harness, [pick_plans], tmp_path, plan)
-    agent = harness.wrap(target, id=f"plans-{framework}", tools=tools)
+    agent = arm(harness.wrap(target, id=f"plans-{framework}"), tools)
     paused = await agent.run("offer plans to acme", user="ada")
     asked = paused.interrupt
     assert asked is not None and asked.reason is InterruptReason.CHOICE, paused
@@ -163,7 +164,7 @@ async def test_without_agent_runs_a_run_hook_tells_whoever_waits() -> None:
     how a pause is told in process — the question, whose it is, the call under approval and
     the run to answer."""
     telling = Telling()
-    async with Harness(config=Settings(), hooks=[telling]) as h:
+    async with Harness(config=Settings()) as h:
         assert isinstance(h.runs, LocalRuns)
 
         @tool(side_effects="irreversible")
@@ -175,7 +176,7 @@ async def test_without_agent_runs_a_run_hook_tells_whoever_waits() -> None:
             plan = await agent.ask("Which plan?", options=["a", "b"], assignee="role:sales")
             return f"{plan}: {await agent.tools.call('wire', amount=5)}"
 
-        agent = h.wrap(fn, id="telling", tools=[wire])
+        agent = arm(h.wrap(fn, id="telling", hooks=[telling]), [wire])
         done = await Reviewer({"Which plan?": "a", "wire": "approve"}).run(agent, "go", user="ada")
     assert done.answer == "a: wired"
     assert telling.told == [
@@ -186,7 +187,7 @@ async def test_without_agent_runs_a_run_hook_tells_whoever_waits() -> None:
 
 async def test_a_sub_agents_question_is_carried_whole_and_told_once() -> None:
     telling = Telling()
-    async with Harness(config=Settings(), hooks=[telling]) as h:
+    async with Harness(config=Settings()) as h:
 
         async def child(input: str, agent: Runtime) -> Any:
             return await agent.ask(
@@ -198,12 +199,12 @@ async def test_a_sub_agents_question_is_carried_whole_and_told_once() -> None:
                 ui_schema={"x": 1},
             )
 
-        helper = h.wrap(child, id="helper")
+        helper = h.wrap(child, id="helper", hooks=[telling])
 
         async def parent(input: str, agent: Runtime) -> Any:
             return await agent.tools.call("helper", message="pick")
 
-        boss = h.wrap(parent, id="boss", tools=[helper.as_tool()])
+        boss = arm(h.wrap(parent, id="boss", hooks=[telling]), [helper])
         paused = await boss.run("go", user="ada")
         asked = paused.interrupt
         assert asked is not None

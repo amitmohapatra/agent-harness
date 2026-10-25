@@ -15,6 +15,7 @@ import pytest
 
 from tests.integration.test_progress import Crash, crash_once
 from tests.live.conftest import needs_docker
+from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import RunStatus
 from trellis.harness.runs import LocalRuns
@@ -24,9 +25,8 @@ from trellis.harness.sandbox.docker import API_VERSION, DOCKER_SOCKET
 
 pytestmark = [pytest.mark.live, needs_docker]
 
-#: The image the sandboxes are made of: the deployment's (``SANDBOX_IMAGE``), else Docker's
-#: default.
-PROVIDER: Final = DockerSandbox(Settings.from_env().sandbox_image)
+#: The sandboxes, of the provider's default image.
+PROVIDER: Final = DockerSandbox()
 UNKNOWN: Final = "it may or may not have taken effect: check before calling it again"
 #: Lists the processes of the sandbox (its image has no ps): their command lines.
 PROCESSES: Final = (
@@ -78,7 +78,7 @@ async def test_a_run_works_in_its_own_limited_offline_container_deleted_at_its_e
         return [total["exit_code"], await agent.tools.call("sandbox_read", path="out.txt")]
 
     spec = SandboxSpec(files={"data.csv": "n\n1\n2\n39\n"}, cpu=0.5, memory=128)
-    agent = harness.wrap(analyse, id="analyst", tools=[sandbox(PROVIDER, spec)])
+    agent = arm(harness.wrap(analyse, id="analyst"), [sandbox(PROVIDER, spec=spec)])
     result = await agent.run("add them up", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     assert result.answer == [0, "42\n"]
@@ -106,8 +106,8 @@ async def test_an_open_network_has_an_interface_and_a_command_out_of_time_is_kil
         left = await agent.tools.call("sandbox_exec", command=PROCESSES)
         return [net["stdout"].split(), late, left["stdout"]]
 
-    source = sandbox(PROVIDER, SandboxSpec(network="open"), timeout=10)
-    agent = harness.wrap(work, id="opener", tools=[source])
+    source = sandbox(PROVIDER, spec=SandboxSpec(network="open"), call_timeout=10)
+    agent = arm(harness.wrap(work, id="opener"), [source])
     result = await agent.run("go", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     interfaces, late, left = result.answer
@@ -124,7 +124,7 @@ async def test_a_paused_run_keeps_its_container_snapshotted_and_paused_and_resum
         await agent.ask("Publish the draft?")
         return await agent.tools.call("sandbox_exec", command="cat report.md")
 
-    agent = harness.wrap(work, id="publisher", tools=[sandbox(PROVIDER)])
+    agent = arm(harness.wrap(work, id="publisher"), [sandbox(PROVIDER)])
     waiting = await agent.run("write it", user="u")
     assert waiting.interrupt is not None
     name = f"trellis-{waiting.run_id}"
@@ -151,13 +151,13 @@ async def test_a_worker_that_dies_leaves_the_container_to_the_next_attempt(
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = harness.wrap(work, id="survivor", tools=[sandbox(PROVIDER)])
+    agent = arm(harness.wrap(work, id="survivor"), [sandbox(PROVIDER)])
     handle = await agent.start("go", user="u")
     await crash_once(store, agent, handle)
-    name = f"trellis-{handle.run_id}"
+    name = f"trellis-{handle.id}"
     made = (await engine("GET", f"/containers/{name}/json")).json()["Id"]
     assert await harness.worker([agent]).run_once()
-    done = await handle.result(timeout=60)
+    done = await handle.result(wait=60)
     assert done.answer == "1\n"  # the command ran once, in the one container
     assert await state(name) is None and made
 

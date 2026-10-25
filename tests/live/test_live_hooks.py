@@ -85,7 +85,7 @@ class Steering(Hooks):
 async def test_react_model_calls_through_the_gateway_go_through_the_hooks() -> None:
     steering = Steering()
     async with live_harness() as h:
-        target = ReAct(system="You reply in one word.", model=MODEL, max_steps=2)
+        target = ReAct(system_prompt="You reply in one word.", model=MODEL, max_steps=2)
         agent = h.wrap(target, id=f"live-steer-{uuid.uuid4().hex[:8]}", hooks=[steering])
         result = await agent.run("Tell me a long story about dragons.", user="live-user")
     assert result.status is RunStatus.SUCCESS, result.error

@@ -60,7 +60,7 @@ class People:
 async def people() -> AsyncIterator[People]:
     suffix = uuid.uuid4().hex[:8]
     async with live_harness() as h:
-        tenant = await h.tenant()
+        tenant = await h._tenant()
     priya, agent = f"priya-{suffix}", f"live-answering-{suffix}"
     async with MemoryClient(MEMORY_URL, api_key=ADMIN_KEY) as admin:
         keys = admin.administer(tenant).keys

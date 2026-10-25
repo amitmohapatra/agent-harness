@@ -20,7 +20,7 @@ flowchart LR
   own --> memory
   wrapped --> lf["Langfuse<br/>one trace per run, scores"]
   own --> lf
-  own -- "remote(url)" --> served["agent.serve_a2a(app, url)"]
+  own -- "a2a(url)" --> served["agent.serve_a2a(app, url)"]
   wrapped --- served
 ```
 
@@ -62,7 +62,7 @@ it must not do is run a wrapped agent's run with your own handler, or yours with
 ## Calling across
 
 * **Your code calls a wrapped agent**: serve it with `agent.serve_a2a(app, url)` and call it
-  with `remote(url, tenant=, user=)` ([a2a.md](a2a.md)). Its questions come back as
+  with `a2a(url)(message, tenant=, user=)` ([a2a.md](a2a.md)). Its questions come back as
   `InputRequired`, or go to your `on_input`.
 * **A wrapped agent calls your agent**: only through a server your agent has. Either serve it
   with the A2A SDK yourself, or wrap the function that calls it (any async function is a target,
@@ -81,7 +81,7 @@ reads and writes your own code needs.
 
 From Way 2 to Way 1: delete what the harness now does (the `governed` and `recorded` wrappers,
 the `RunsClient` calls, the context push, `judge`), declare each tool's side effects with
-`tool(fn, side_effects=...)`, build the agent's tools with `h.tools(...)`, and call
+`tool(fn, side_effects=...)` (or in the catalog for the graph's own tools), and call
 `h.wrap(graph).run(...)` where you called the graph. Its runs, memory and catalog are the same
 services, so nothing is migrated. From Way 1 to Way 2, the recipes show what to add:
 [LangGraph](langgraph.md), [OpenAI Agents SDK](openai-agents.md),

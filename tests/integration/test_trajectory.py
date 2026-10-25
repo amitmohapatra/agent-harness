@@ -11,6 +11,7 @@ from typing import Any, Final
 import pytest
 
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.planned import Call
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunStatus, ToolCall, ToolOutcome, ToolStatus
@@ -68,7 +69,7 @@ async def test_h_evaluate_gives_every_adapters_trajectory_to_its_evaluators(
     harness: Harness, framework: str, tmp_path: Path
 ) -> None:
     target, tools = await BUILDERS[framework](harness, [lookup, note], tmp_path, PLAN)
-    agent = harness.wrap(target, id=f"traj-{framework}", tools=tools)
+    agent = arm(harness.wrap(target, id=f"traj-{framework}"), tools)
     seen = Seen()
     evaluators = [
         seen,
@@ -96,16 +97,17 @@ async def test_h_evaluate_gives_every_adapters_trajectory_to_its_evaluators(
 
 @pytest.mark.parametrize("framework", list(BUILDERS))
 async def test_an_online_judge_sees_the_whole_trajectory_of_a_resumed_run(
-    framework: str, tmp_path: Path
+    framework: str, tmp_path: Path, sampled: Any
 ) -> None:
     """The call before the pause ran in the first attempt, the approved one in the second: the
     judge of the run reads both, once each, in order — whether the framework re-ran the run
     from its input (the first call replayed from the journal) or went on where it stopped."""
     seen = Seen()
-    async with Harness(config=Settings(eval_sample=1.0), judges=[seen]) as h:
+    sampled(1.0)
+    async with Harness(config=Settings()) as h:
         plan: list[Call] = [("lookup", {"topic": "o1"}), ("refund", {"order": "o1"})]
         target, tools = await BUILDERS[framework](h, [lookup, refund], tmp_path, plan)
-        agent = h.wrap(target, id=f"resumed-{framework}", tools=tools)
+        agent = arm(h.wrap(target, id=f"resumed-{framework}", judges=[seen]), tools)
         paused = await agent.run("refund o1", user="u")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="ops")

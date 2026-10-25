@@ -15,6 +15,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from opentelemetry.sdk.trace import TracerProvider
 
+from tests.support.arm import arm, native_tools
 from tests.support.models import ScriptedChat
 from trellis import Budget, Harness, ReAct, current, tool
 from trellis.contracts import RunStatus
@@ -67,7 +68,7 @@ def conversation(steps: int) -> list[Any]:
 # --------------------------------------------------------------------------- P8
 async def test_a_graph_without_model_hooks_spends_its_budget(harness: Harness) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), ("stock", {"sku": "b"}), "7"])
-    tools = await harness.tools(stock, framework="langgraph")
+    tools = await native_tools(harness, stock, framework="langgraph")
     graph = create_agent(model, tools=tools, system_prompt="s")
     agent = harness.wrap(graph, id="plain", budget=Budget(max_tokens=20))
     result = await agent.run("a?", user="u")
@@ -86,7 +87,7 @@ def spent() -> int:
 
 async def test_react_accounts_each_model_call_once(harness: Harness) -> None:
     model = ScriptedChat([("spent", {}), "done"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="once", tools=[spent])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="once"), [spent])
     assert (await agent.run("a?", user="u")).answer == "done"
     assert model.requests[1]["messages"][-1]["content"] == "15"  # one reply of 15 tokens
 
@@ -184,7 +185,7 @@ async def test_a_tool_set_is_converted_once_for_its_runs(
 
     monkeypatch.setattr(converted, "convert", counting)
     model = ScriptedChat(["one", "two", "three"])
-    agent = harness.wrap(ReAct(system="s", model=model), id="conv", tools=[stock])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="conv"), [stock])
     for n in range(3):
         await agent.run(f"run {n}", user="u")
     assert calls == [1]

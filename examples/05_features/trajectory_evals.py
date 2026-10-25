@@ -4,7 +4,7 @@ tools it called, in what order, with what arguments).
 
 * ``exact_match()``, ``contains()`` — against each item's ``expected``;
 * ``llm_judge(criteria)`` — a judge model grades the answer (offline a scripted judge; online
-  ``TRELLIS_JUDGE_MODEL``, a stronger model than the agent's);
+  the gateway's judge alias, or ``llm_judge(model=)``: a stronger model than the agent's);
 * ``called("lookup")``, ``tool_sequence(["lookup"], exact=True)`` — against the run's
   tool calls (``EvalCase.trajectory``); your own evaluator can read it too.
 
@@ -80,8 +80,12 @@ async def main() -> None:
     )
     async with Harness() as h:
         judge_offline(h)
-        target = ReAct(system="Answer with the name of the city only.", model=model)
-        agent = h.wrap(target, id="capitals", tools=[lookup, guess])
+        target = ReAct(
+            system_prompt="Answer with the name of the city only.",
+            model=model,
+            tools=[lookup, guess],
+        )
+        agent = h.wrap(target, id="capitals")
         report = await h.evaluate(
             agent,
             DATASET,

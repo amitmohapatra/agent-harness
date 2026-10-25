@@ -3,15 +3,15 @@ from the harness, added where LangChain and Deep Agents have no native piece. ``
 is a ``create_agent`` graph built with all of them, beside the native middleware it turns on;
 any ``create_agent`` or Deep Agents graph may take any of them:
 
-    graph = create_agent(model, middleware=[HarnessTools(), ModelHooks()],
+    graph = create_agent(model, tools=[refund], middleware=[ModelHooks()],
                          checkpointer=RunCheckpointer())
-    agent = h.wrap(graph, id="support", tools=[refund])
+    agent = h.wrap(graph, id="support")
 
 * :class:`HarnessTools` — the run's harness tools offered per model call (the tool hints'
   narrowing, the memory tools, what ``tool_search`` found), sorted by name so the cached prompt
   holds; every call goes through the bridge (``tools.bridge``: governance, journal, record),
   numbered in the model's order, and a call that does more than read waits for the earlier
-  ones of the same model step (the model's order); a graph with it takes ``h.wrap(tools=)``;
+  ones of the same model step (the model's order) — ``ReAct``'s ``tools=``;
 * :class:`ModelHooks` — around every model call: the run's ``before_model`` / ``after_model`` /
   ``on_error`` hooks, a ``chat`` span with the usage (redacted, as every span), the most the
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
@@ -59,7 +59,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
-from bifrost_sdk.headers import PROMPT_ID
 from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -109,8 +108,7 @@ from trellis.harness.bridges.helpers import Kind
 from trellis.harness.gateways import Capability, route_now
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
-from trellis.harness.prompts import Prompt, ResolvedPrompt, selected
-from trellis.harness.repository import pinned
+from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
@@ -178,18 +176,18 @@ class _Step:
 TOOLSETS: Final = 64
 #: The tools that only change the graph's own state (no effect outside the run, kept by its
 #: checkpoint): a ``GovernTools`` lets them through. Deep Agents' file tools are among them
-#: on its default ``StateBackend``; on a backend that writes to a real disk, give the graph
-#: governed tools instead (``h.tools``).
+#: on its default ``StateBackend``; on a backend that writes to a real disk, its file tools are
+#: governed as any other (give them their risk in the catalog).
 STATE_TOOLS: Final = frozenset(
     {"write_todos", "read_result", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
 )
 
 
 class GovernTools(AgentMiddleware):
-    """The framework's own tools of a ``create_agent`` or Deep Agents graph — those not built
-    with ``h.tools`` — run as the harness's are (``h.governance_middleware()``; ``ReAct`` has
-    it): :func:`governed_call`. Inside a harness run every tool node is governed so already
-    (:func:`govern_tool_nodes`); a call is governed once, whichever comes first."""
+    """The framework's own tools of a ``create_agent`` or Deep Agents graph run as the
+    harness's are (``h.governance_middleware()``; ``ReAct`` has it): :func:`governed_call`.
+    Inside a harness run every tool node is governed so already (:func:`govern_tool_nodes`);
+    a call is governed once, whichever comes first."""
 
     async def awrap_tool_call(
         self,
@@ -524,7 +522,7 @@ def _unbroken(request: ModelRequest[Any]) -> ModelRequest[Any]:
 
 def _offered(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
     """The request with only the tools the run offers now: a graph's are bound when it is
-    built (``h.tools``), so a part turned off afterwards (``h.wrap(without=)``, a run's
+    built, so a part turned off afterwards (``h.wrap(without=)``, a run's
     ``without=``) would still be offered (a call of it is refused: it is off), and so would the
     tools the tool hints leave out (``Runtime.offers``) — the harness's and the graph's own
     tools of the run's set alike; a tool outside the set (the graph's state tools) stays."""
@@ -602,21 +600,16 @@ class ModelHooks(AgentMiddleware):
     """Around every model call: the task kept ahead of a summary (the conversation's leading
     system messages, the pushed memory context among them, and its first user message), the
     run's model hooks (then ``hooks``), a ``chat`` span with the usage, at most ``timeout``
-    seconds (and what is left of the run's time), and the ``prompt`` of the harness's prompt
-    sources (``"name"``, ``"name@version"``, a ``Prompt``), pinned for the run: a stored prompt
-    of the gateway is selected by every call (headers the gateway reads: the model is a gateway
-    model, ``ChatOpenAI``); any other is rendered (``prompt_vars`` fill its ``{{variables}}``)
-    into the instructions, before the system prompt, its other messages before the
-    conversation. Without ``prompt``, a chat model whose own headers select a stored prompt
-    (``ChatOpenAI(default_headers=await h.model_headers(prompt=...))``) selects, on every call,
-    the version the run pinned."""
+    seconds (and what is left of the run's time), and the stored ``prompt`` of the gateway
+    (``stored("name", **vars)``), pinned for the run: with no variables to fill, on a routed
+    model through Bifrost, selected by every call (headers the gateway reads: it prepends it);
+    otherwise rendered into the instructions, its other messages before the conversation."""
 
     def __init__(
         self,
         *hooks: Hooks,
         timeout: float | None = None,
-        prompt: str | Prompt | None = None,
-        prompt_vars: dict[str, Any] | None = None,
+        prompt: Stored | None = None,
         routed: bool = False,
     ) -> None:
         super().__init__()
@@ -626,14 +619,9 @@ class ModelHooks(AgentMiddleware):
         self.routed = routed
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
-        if isinstance(prompt, str):
-            pinned(prompt)
-        if prompt_vars is not None and prompt is None:
-            raise ConfigurationError("prompt_vars= fills the variables of a prompt=")
         self.given = list(hooks)
         self.timeout = timeout
         self.prompt = prompt
-        self.prompt_vars = dict(prompt_vars or {})
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
@@ -663,7 +651,7 @@ class ModelHooks(AgentMiddleware):
         runtime = current()
         hooks = running(*self.given)
         request = _with_task(_unbroken(_offered(request, runtime)))
-        prompt = await self._pinned(runtime) or _selected(request, runtime)
+        prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
         name = _model_name(request.model)
@@ -696,33 +684,33 @@ class ModelHooks(AgentMiddleware):
         return reply
 
     async def _pinned(self, runtime: Runtime | None) -> ResolvedPrompt | None:
-        """The prompt's version this run uses: the journal's (a resumed run uses the same),
-        else the one its source gives now (journaled)."""
+        """The stored prompt's version this run uses: the journal's (a resumed run uses the
+        same), else the one the gateway serves now (journaled)."""
         if self.prompt is None:
             return None
         if runtime is None:
             raise ConfigurationError(
-                "ModelHooks(prompt=) pins the prompt for a harness run: outside one, render it "
-                "yourself (h.prompt_messages), or give the model client h.model_headers(prompt=)"
+                "a stored system_prompt is pinned for a harness run: outside one, render it "
+                "yourself (await h.prompt(...))"
             )
-        found = await runtime.agent.harness.prompts.pin(self.prompt, runtime)
-        if found.pin() is not None and self.prompt_vars:
-            raise ConfigurationError(
-                f"prompt= names {found.name}, a stored prompt of the gateway: the gateway "
-                "prepends it as it is stored (no prompt_vars=)"
-            )
-        return found
+        return await runtime.agent.harness.prompts.pin(self.prompt.ref, runtime)
 
     def _prompted(self, request: ModelRequest[Any], prompt: ResolvedPrompt) -> ModelRequest[Any]:
+        assert self.prompt is not None
         pin = prompt.pin()
-        if pin is not None:
+        if (
+            pin is not None
+            and not prompt.variables
+            and self.routed
+            and route_now().has(Capability.PROMPTS)
+        ):
             sent = request.model_settings.get("extra_headers", {})
             headers = {**sent, **pin.options().headers()}
             return request.override(
                 model_settings={**request.model_settings, "extra_headers": headers}
             )
-        rendered = prompt.messages(**self.prompt_vars)
-        own = [str(m["content"]) for m in rendered if m.get("role") == "system"]
+        rendered = prompt.messages(**self.prompt.values)
+        own = [message_text(m.get("content")) for m in rendered if m.get("role") == "system"]
         rest = [m for m in rendered if m.get("role") != "system"]
         system = request.system_message
         text = "\n\n".join(part for part in [*own, system.text if system else ""] if part)
@@ -730,16 +718,6 @@ class ModelHooks(AgentMiddleware):
             system_message=SystemMessage(content=text),
             messages=[*cast(list[AnyMessage], convert_to_messages(rest)), *request.messages],
         )
-
-
-def _selected(request: ModelRequest[Any], runtime: Runtime | None) -> ResolvedPrompt | None:
-    """The stored prompt the run pinned that the chat model's own headers select (a
-    ``ChatOpenAI(default_headers=await h.model_headers(prompt=...))``, which copied them when it
-    was built): each call then selects the version the run pinned."""
-    headers = getattr(request.model, "default_headers", None)
-    if runtime is None or not isinstance(headers, Mapping):
-        return None
-    return selected(runtime, headers.get(PROMPT_ID))
 
 
 def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:

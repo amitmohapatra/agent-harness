@@ -1,14 +1,15 @@
 """``sandbox()``: the model writes and runs code in its run's own sandbox, whatever the framework.
 
 The sandbox is made at the run's first sandbox call and deleted when the run ends; every call
-is a harness tool call (governed, journaled, recorded, at most its ``timeout``). With
-``SANDBOX=docker`` (and a Docker daemon) it is a container with no network, made of
-``SANDBOX_IMAGE`` (else ``python:3.12-slim``). Without it, this example plugs in a provider of
-its own — a temporary directory per run, run by this machine's shell, with no isolation at all:
-it only shows what a provider implements (E2B, Daytona or Modal plug in the same way).
-Then the same provider without a harness (Way 2): ``governed`` around a sandbox's ``exec``.
+is a harness tool call (governed, journaled, recorded, at most its ``call_timeout``).
+``sandbox()`` alone is a Docker container with no network (the daemon ``DOCKER_HOST`` names), of
+``sandbox(image=)`` (else ``python:3.12-slim``). Without ``DOCKER_HOST`` this example plugs in a
+provider of its own — a temporary directory per run, run by this machine's shell, with no
+isolation at all: it only shows what a provider implements (E2B, Daytona or Modal plug in the
+same way). Then the same provider without a harness (Way 2): ``governed`` around a sandbox's
+``exec``.
 
-    SANDBOX=docker python -m examples.05_features.sandbox
+    DOCKER_HOST=unix:///var/run/docker.sock python -m examples.05_features.sandbox
     python -m examples.05_features.sandbox
 """
 
@@ -26,16 +27,16 @@ from typing import Any
 
 from examples._support.offline import react_model
 
-from trellis import Harness, ReAct, Settings, sandbox
+from trellis import Harness, ReAct, sandbox
 from trellis.contracts import RunEventType, ToolError
 from trellis.harness.governance import Governance, governed
 from trellis.harness.sandbox import (
+    DockerSandbox,
     ExecResult,
     SandboxLost,
     SandboxProvider,
     SandboxRef,
     SandboxSpec,
-    configured,
 )
 
 SCRIPT = "import csv\nrows = list(csv.DictReader(open('sales.csv')))\n" + (
@@ -119,8 +120,8 @@ class Directory:
 
 
 async def main() -> None:
-    deployment = Settings.from_env()
-    provider: SandboxProvider = configured(deployment) if deployment.sandbox else TempDirs()
+    docker = bool(os.environ.get("DOCKER_HOST"))
+    provider: SandboxProvider = DockerSandbox() if docker else TempDirs()
     spec = SandboxSpec(files={"sales.csv": "region,units\nnorth,12\nsouth,30\n"})
     async with Harness() as h:
         model = react_model(
@@ -131,10 +132,11 @@ async def main() -> None:
             ]
         )
         analyst = ReAct(
-            system="You analyse data: write a Python script in your sandbox, run it, answer.",
+            system_prompt="You analyse data: write a Python script in your sandbox, run it.",
             model=model,
+            tools=[sandbox(provider, spec=spec, call_timeout=60)],
         )
-        agent = h.wrap(analyst, id="analyst", tools=[sandbox(provider, spec, timeout=60)])
+        agent = h.wrap(analyst, id="analyst")
         async for event in agent.stream("How many units did we sell?", user="ada"):
             if event.type is RunEventType.TOOL_CALL_RESULT:
                 print(event.data["tool"], "->", event.data["output"])

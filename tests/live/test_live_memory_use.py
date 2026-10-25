@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from tests.live.conftest import live_harness, needs_memory
+from tests.support.arm import arm
 from trellis import Harness, Runtime
 from trellis.contracts import RunStatus
 
@@ -40,7 +41,7 @@ async def test_a_sub_agent_reads_its_parents_notes_and_writes_to_its_group(
 
     user = f"live-{marker}"
     helper = harness.wrap(child, id=f"helper-{marker}")
-    lead = harness.wrap(parent, id=f"lead-{marker}", tools=[helper.as_tool()])
+    lead = arm(harness.wrap(parent, id=f"lead-{marker}"), [helper])
     result = await lead.run("start the task", user=user)
     assert result.status is RunStatus.SUCCESS, result.error
     assert marker in str(found["child"]), "the child reads the note its parent kept for its run"
@@ -55,7 +56,7 @@ async def test_a_sub_agent_reads_its_parents_notes_and_writes_to_its_group(
 
 
 async def test_a_sampled_run_is_labelled_by_its_check_and_cited_by_a_person() -> None:
-    async with live_harness(eval_sample=1.0) as harness:
+    async with live_harness(sampled=1.0) as harness:
         await _labelled_and_cited(harness)
 
 

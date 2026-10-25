@@ -35,7 +35,7 @@ from trellis.harness.gateways import (
     model_gateway,
     provider_keys,
 )
-from trellis.harness.settings import DEPRECATED, Settings, sourced
+from trellis.harness.settings import Settings, service_version, sourced
 
 #: The settings whose values are secrets: shown as set, never as their value.
 SECRETS: Final = frozenset(
@@ -127,9 +127,12 @@ def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     return lines
 
 
-async def checks(settings: Settings, *, agents: Sequence[str] = ()) -> list[Check]:
+async def checks(
+    settings: Settings, *, agents: Sequence[str] = (), docker: bool = False
+) -> list[Check]:
     """Each service the settings name, reached with its key; the approval rules learned for
-    ``agents`` (and the agents the key may act as); the spool; the Docker daemon."""
+    ``agents`` (and the agents the key may act as); the spool; the Docker daemon (``docker``:
+    ``DOCKER_HOST`` is set, where ``sandbox()`` makes its sandboxes)."""
     async with httpx.AsyncClient(timeout=CHECK_SECONDS) as client:
         gateway, (memory, key), runs = await asyncio.gather(
             _gateway(client, model_gateway(settings)),
@@ -141,18 +144,14 @@ async def checks(settings: Settings, *, agents: Sequence[str] = ()) -> list[Chec
     if settings.spool_dir:
         done.append(_spool(settings.spool_dir))
         done.append(_records(settings.spool_dir))
-    if settings.sandbox == "docker":
+    if docker:
         done.append(await _docker())
     return done
 
 
 def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     """What to set, from what is and is not set (never applied)."""
-    said = [
-        f"{name} is deprecated: use {instead}"
-        for name, instead in DEPRECATED.items()
-        if environ.get(name)
-    ]
+    said: list[str] = []
     if settings.bifrost_url:
         said.append(
             "model retries are the gateway's: set the provider's network_config.max_retries in "
@@ -163,7 +162,7 @@ def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
             "set TRELLIS_SPOOL_DIR to a lasting folder, or memory writes the service "
             "could not take are lost at a restart"
         )
-    if not settings.agent_version:
+    if not service_version(environ):
         said.append(
             "bake the version in at build time: OTEL_RESOURCE_ATTRIBUTES=service.version=..."
         )
@@ -447,7 +446,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     agents = _agents(list(argv or ()))
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
-    found = asyncio.run(checks(settings, agents=agents))
+    found = asyncio.run(checks(settings, agents=agents, docker=bool(env.get("DOCKER_HOST"))))
     said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
     sys.stdout.write(said + "\n")
     return 0 if all(c.ok for c in found) else 1

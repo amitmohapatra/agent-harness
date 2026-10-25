@@ -1,6 +1,6 @@
 """The serving surfaces against the real run store (and memory): AG-UI over SSE with a
 reconnect that replays, an A2A round trip over real HTTP between two harnesses, and the same
-served agent called from plain code with ``remote()``."""
+served agent called from plain code with ``RemoteAgent``."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ from fastapi import FastAPI, Request
 
 from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import free_port, memory_scope, serving
+from tests.support.arm import arm
 from trellis import Harness, Runtime, a2a
 from trellis.contracts import RunStatus
-from trellis.harness.a2a import InputRequired, remote
+from trellis.harness.a2a import InputRequired, RemoteAgent
 from trellis.harness.agui.sse import decode
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]
@@ -110,10 +111,12 @@ async def test_a2a_round_trip_with_a_remote_question(remote_url: str) -> None:
         return await agent.tools.call("planner", message=input)
 
     async with live_harness() as h:
-        agent = h.wrap(
-            caller,
-            id=f"live-caller-{uuid.uuid4().hex[:6]}",
-            tools=[a2a(remote_url, name="planner")],
+        agent = arm(
+            h.wrap(
+                caller,
+                id=f"live-caller-{uuid.uuid4().hex[:6]}",
+            ),
+            [a2a(remote_url, name="planner")],
         )
         paused = await agent.run(
             "the shop", user="live-ada", thread=f"live-a2a-{uuid.uuid4().hex[:6]}"
@@ -131,7 +134,7 @@ async def test_a2a_round_trip_with_a_remote_question(remote_url: str) -> None:
 
 async def test_remote_calls_the_served_agent_from_plain_code(remote_url: str) -> None:
     async with live_harness() as h:
-        tenant = await h.tenant()
+        tenant = await h._tenant()
     thread = f"live-remote-{uuid.uuid4().hex[:6]}"
     asked: list[str] = []
 
@@ -139,7 +142,7 @@ async def test_remote_calls_the_served_agent_from_plain_code(remote_url: str) ->
         asked.append(question)
         return "us"
 
-    async with remote(
+    async with RemoteAgent(
         remote_url, tenant=tenant, user="live-ada", thread=thread, on_input=answer
     ) as planner:
         assert planner.card.supported_interfaces[0].url == remote_url
@@ -147,7 +150,7 @@ async def test_remote_calls_the_served_agent_from_plain_code(remote_url: str) ->
         assert await planner("the shop") == "deploying the shop to us"
     assert asked == ["Which region?"]
 
-    async with remote(remote_url, tenant=tenant, user="live-ada", thread=thread) as planner:
+    async with RemoteAgent(remote_url, tenant=tenant, user="live-ada", thread=thread) as planner:
         with pytest.raises(InputRequired) as waiting:
             await planner("the warehouse")
         assert waiting.value.question == "Which region?"

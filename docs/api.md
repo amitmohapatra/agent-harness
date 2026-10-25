@@ -24,106 +24,96 @@ from trellis import (
     Settings,
     a2a,
     current,
+    llm_judge,
+    mcp,
     openapi,
     sandbox,
-    skills,
+    stdio,
+    stored,
     tool,
 )
 ```
 
+Each setting lives in one place: the environment says where the services are (and their
+keys); `Harness()` connects to them; the builder (`ReAct`, or your framework's own) says what
+the agent is — its model, its instructions, its tools; `h.wrap` says who it is and how every
+run of it goes; `agent.run` says what this call is
+([configuration.md](configuration.md#settings-and-the-environment)).
+
 ## Harness
 
 ```text
-Harness(config=None, *, runs=None, memory=None, gateway=None, governance=None, prompts=None,
-        skills=None, judges=(), hooks=())
+Harness(config=None, *, memory=None, runs=None, gateway=None)
 ```
 
-The deployment's blocks: the ones given, the rest built from the environment. `async with
-Harness() as h:` (or `await h.aclose()`) drains the background writes, exports the queued
-spans and closes the clients it built; a block you give is yours to close.
+The connections to the deployment's services: the ones given, the rest built from the
+environment. `async with Harness() as h:` (or `await h.aclose()`) drains the background writes,
+exports the queued spans and closes the clients it built; a client you give is yours to close.
 
 | Argument | Default | What it is |
 |---|---|---|
 | `config` | `Settings.from_env()` | the deployment as fields, instead of the environment ([Settings](#settings)) |
-| `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns(keep_finished=1000, keep_finished_seconds=3600)` (the finished runs it keeps, and how long), or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
 | `memory` | a `MemoryClient` with `MEMORY_URL`, else none | `trellis.memory.MemoryClient`; `False`: no memory whatever `MEMORY_URL` says ([memory.md](memory.md)) |
+| `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns(keep_finished=1000, keep_finished_seconds=3600)` (the finished runs it keeps, and how long), or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
 | `gateway` | a `Gateway` with `BIFROST_URL`, else none | `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`; `False`: no gateway ([gateway.md](gateway.md)) |
-| `governance` | the memory service's tool catalog, per tenant (with memory), else the tools' own risks | a `Governance`, used for every tenant ([governance.md](governance.md)) |
-| `prompts` | `PROMPTS_DIR`, Langfuse (its keys set), the gateway | the prompt sources, asked in order: `Prompt(...)`, `prompts_dir(...)`, `langfuse_prompts(...)`; `[]`: none ([prompts.md](prompts.md)) |
-| `skills` | `SKILLS_DIR`, the gateway | the skill sources: `Skill(...)`, `skills_dir(...)`; `[]`: none ([skills.md](skills.md)) |
-| `judges` | none | online evaluators run on a sampled share of successful runs ([evaluation.md](evaluation.md#online-judges)) |
-| `hooks` | none | `Hooks` around every wrapped agent's runs, model calls and tool calls ([hooks.md](hooks.md)) |
 
-`h.agents` is every agent it wraps, by id; `h.runs` the run store; `h.memory` the memory client
-(or `None`); `h.writes` the background writes (`await h.writes.drain()`).
+Governance is the memory service's tool catalog, per tenant (with memory), else each tool's own
+risk ([governance.md](governance.md)). `h.agents` is every agent it wraps, by id; `h.runs` the
+run store; `h.memory` the memory client (or `None`); `h.writes` the background writes (`await
+h.writes.drain()`).
 
 ### h.wrap
 
 ```text
-h.wrap(target, *, id, tools=(), version=None, mcp=None, skills=(), timeout=None, without=(),
-       hooks=(), framework_options=None, budget=None) -> Agent
+h.wrap(agent, *, id, version=None, description=None, hooks=(), judges=(), budget=None,
+       run_timeout=None, without=(), framework_options=None) -> Agent
 ```
 
-Attach the harness to `target`: a compiled LangGraph graph (Deep Agents and `ReAct` included),
+Attach the harness to `agent`: a `ReAct`, a compiled LangGraph graph (Deep Agents included),
 an OpenAI Agents `Agent`, `ClaudeAgentOptions`, or an async function `(input, agent)`. The
-framework is detected from its type and not modified.
+framework is detected from its type and not modified; its own tools are governed as it runs
+them ([tools.md](tools.md)).
 
 | Argument | Default | What it is |
 |---|---|---|
 | `id` | required | the agent's id: its runs, records, traces, catalog entries and inbox entries are under it |
-| `tools` | `()` | everything the agent can call: functions, [`tool`](#tool), [`mcp`](#mcp-stdio) servers, other wrapped agents (sub-agents), [`a2a`](#a2a), [`openapi`](#openapi), [`sandbox`](#sandbox), [`skills`](#skills); refused for a compiled graph, which takes `h.tools(...)` ([tools.md](tools.md)) |
-| `version` | `TRELLIS_AGENT_VERSION` | the agent's code version, recorded with each run it starts ([reliability.md](reliability.md#agent-version)) |
-| `mcp` | every MCP tool the virtual key allows | deprecated (one release, with a warning): `mcp("slug")` in `tools`; `[]` is `without={"mcp"}` ([gateway.md](gateway.md)) |
-| `skills` | `()` | skills by name (`"name"`, `"name@version"`) or given (`Skill(...)`) ([skills.md](skills.md)) |
-| `timeout` | no limit | the most working time of each run, in seconds, however it starts ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
-| `without` | `()` | what the harness does not do for any of its runs ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
-| `hooks` | `()` | this agent's hooks, after the harness's ([hooks.md](hooks.md)) |
-| `framework_options` | none | the framework's own options for every run's call, passed through ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
+| `version` | `service.version` of `OTEL_RESOURCE_ATTRIBUTES` | the agent's code version, recorded with each run it starts ([reliability.md](reliability.md#agent-version)) |
+| `description` | a function's docstring | what the agent does, as another agent (a sub-agent's tool) and the A2A card read it |
+| `hooks` | `()` | `Hooks` around its runs, model calls and tool calls, in order ([hooks.md](hooks.md)) |
+| `judges` | `()` | online evaluators, each on the share of successful runs it samples (`llm_judge(sample=)`; else a tenth) ([evaluation.md](evaluation.md#online-judges)) |
 | `budget` | none: no cap | the most each run may spend, a sub-agent's run counted toward its parent's ([`Budget`](#budget)) |
+| `run_timeout` | no limit | the most working time of each run, in seconds, however it starts ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
+| `without` | `()` | what the harness does not do for any of its runs: `memory`, `tool_search`, `mcp`, `code_mode`, `grounding`, `judges` ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
+| `framework_options` | none | the framework's own options for every run's call, passed through ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 
 A framework installed outside the range this release was tested with is said once in the log
-when its first target is wrapped ([versioning.md](versioning.md)).
+when its first target is wrapped ([versioning.md](versioning.md)). A `ReAct` built with a
+`checkpointer=` of its own is for running on its own: `h.wrap` refuses it.
 
-### h.tools
+### h.prompt
 
 ```text
-await h.tools(*sources, framework, mcp=None, without=()) -> list
+await h.prompt(ref, /, **values) -> Rendered
 ```
 
-The toolbox as the framework's own tools, for an agent built with them before it is wrapped:
-LangChain tools (`framework="langgraph"` or `"deepagents"`), `FunctionTool`s
-(`"openai_agents"`), one in-process MCP server (`"claude_agent_sdk"`). It holds `sources`
-(functions, `mcp(...)`, wrapped agents, `skills(...)`, `sandbox()`...), the MCP tools the key
-allows when no `mcp(...)` is among them (`mcp=`: deprecated, as in `h.wrap`) and the memory
-tools; `without=` leaves features' tools out
-([tools.md](tools.md#tools-built-into-the-agent-htools)).
+The gateway's stored prompt `ref` (`"name"`, `"name@3"`, or `stored(...)`), its
+`{{variables}}` filled with `values`: `.text` and `.messages` (its chat messages), for any
+framework. Inside a run it is pinned and journaled: a resumed run reads the same version
+([prompts.md](prompts.md)).
 
-### h.governance_middleware
+### h.memory_tools, h.governance_middleware
 
 ```text
+await h.memory_tools(*, tenant=None) -> list
 h.governance_middleware() -> AgentMiddleware
 ```
 
-A LangChain middleware that runs a `create_agent` or Deep Agents graph's own tools (those not
-built with `h.tools`) as harness tools are: governed, asked when governance asks, journaled,
-timed and traced ([governance.md](governance.md)). Add it when you build the graph; `ReAct` has
-it. An OpenAI Agents agent's own tools need nothing: `h.wrap` governs them on a copy.
-
-### h.prompt, h.prompt_messages, h.model_headers
-
-```text
-await h.prompt(ref, /, **values) -> str
-await h.prompt_messages(ref, /, **values) -> list[dict]
-await h.model_headers(*, prompt=None) -> Mapping[str, str]
-```
-
-`prompt` is the prompt `ref` names (`"name"`, `"name@version"`, a `Prompt`) from the first
-prompt source that has it, its `{{variables}}` filled; inside a run it is pinned and journaled
-([prompts.md](prompts.md)). `model_headers` are the headers for a framework's own model client
-pointed at the gateway: the deny-all MCP scope and, with `prompt=`, that stored prompt's
-selection, pinned per run — every run of the harness pins it at its start, and the headers,
-read at each request, select the version the run executing pinned (outside a run: the one
-resolved when they were made) ([gateway.md](gateway.md#prompts)).
+`memory_tools` are the memory service's agent tools as LangChain tools, for a graph built by
+hand: each call in the scope of the run that makes it ([memory.md](memory.md)).
+`governance_middleware` is a LangChain middleware that runs a `create_agent` or Deep Agents
+graph's own tools as the harness runs its own — governed, asked when governance asks,
+journaled, timed and traced — for code that does not wrap the graph
+([governance.md](governance.md)).
 
 ### h.worker
 
@@ -131,8 +121,8 @@ resolved when they were made) ([gateway.md](gateway.md#prompts)).
 h.worker(agents, *, concurrency=None) -> Worker
 ```
 
-Claims queued runs of these agents and executes them, `concurrency` at a time (default
-`TRELLIS_WORKER_CONCURRENCY`, else the CPU count from 1 to 8): `await worker.run()` until
+Claims queued runs of these agents and executes them, `concurrency` at a time (default: the
+CPU count, from 1 to 8): `await worker.run()` until
 `worker.stop()`, `await worker.serve()` (stopped by `SIGTERM`/`SIGINT`), `await
 worker.run_once()` ([runs.md](runs.md#workers)). From a shell:
 
@@ -167,8 +157,8 @@ What `h.wrap` returns.
 ### agent.run, agent.stream, agent.start
 
 ```text
-await agent.run(input, *, user, thread=None, tenant=None, timeout=None, deadline=None,
-                without=(), framework_options=None, document_ids=None) -> Result
+await agent.run(input, *, user, thread=None, tenant=None, run_timeout=None, deadline=None,
+                budget=None, without=(), framework_options=None, document_ids=None) -> Result
 agent.stream(...same...) -> AsyncIterator[RunEvent]
 await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 ```
@@ -179,8 +169,9 @@ await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 | `user` | required | whom the run is for: its memory scope, its approvals' default assignee |
 | `thread` | none (the run is its own) | the conversation: memory's thread, LangGraph's `thread_id`, the default `concurrency_key` |
 | `tenant` | the key's tenant | only for a platform key |
-| `timeout` | the agent's (`h.wrap(timeout=)`) | the most working time in seconds, across attempts, pauses not counted → `TIMEOUT` ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
+| `run_timeout` | the agent's (`h.wrap(run_timeout=)`) | the most working time in seconds, across attempts, pauses not counted → `TIMEOUT` ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
 | `deadline` | none | when the run must have ended → `TIMEOUT` |
+| `budget` | the agent's (`h.wrap(budget=)`) | the most this run may spend; kept with the run ([`Budget`](#budget)) |
 | `without` | `()` | parts off for this run, on top of the agent's; kept with the run ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | the agent's | the framework's own options for this run, over the agent's ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 | `document_ids` | none (every document the person's scope reads) | the documents (`h.add_document(...).document_id`) the run's memory context draws its passages from, none else; kept with the run and its sub-agents' runs ([memory.md](memory.md#push)) |
@@ -222,33 +213,32 @@ events until it ends, from any replica with `RUNS_URL`
 ### agent.schedule
 
 ```text
-await agent.schedule(cron, input, *, on_behalf_of, tz="UTC", tenant=None, timeout=None,
-                     without=(), framework_options=None, priority=0, concurrency_key=None,
-                     document_ids=None) -> Schedule
+await agent.schedule(cron, *, user, input, tz="UTC", tenant=None, run_timeout=None,
+                     budget=None, without=(), framework_options=None, document_ids=None,
+                     priority=0, concurrency_key=None) -> Schedule
 ```
 
-Queue a run on a cadence (cron, or `hourly`, `daily`, `weekly`, `weekdays`, `manual`), acting
-for `on_behalf_of`; each fired run takes the options `start` takes, kept in the schedule's
+Queue a run on a cadence (cron, or `hourly`, `daily`, `weekly`, `weekdays`, `manual`), for
+`user` with `input`; each fired run takes the options `start` takes, kept in the schedule's
 metadata ([runs.md](runs.md#schedules),
 [examples/06_scenarios/scheduled_run_selection_limit.py](../examples/06_scenarios/scheduled_run_selection_limit.py)).
 
-### agent.serve_chat, agent.serve_a2a (agent.as_tool, deprecated)
+### agent.serve_chat, agent.serve_a2a
 
 ```text
 agent.serve_chat(app, *, path="/agui", identity=None)
 agent.serve_a2a(app, url, *, identity=None)
-agent.as_tool(*, name=None, description=None, side_effects=None) -> SubAgent  # deprecated
 ```
 
-An agent in another agent's `tools=[...]` is its sub-agent: each call a child run
-([subagents.md](subagents.md)); `as_tool` still does the same for one release, with a
-warning. `serve_chat` mounts AG-UI routes on a FastAPI app;
-`serve_a2a` the agent card and A2A JSON-RPC at `url` ([surfaces.md](surfaces.md)).
+`serve_chat` mounts AG-UI routes on a FastAPI app; `serve_a2a` the agent card and A2A JSON-RPC
+at `url` ([surfaces.md](surfaces.md)). A wrapped agent in a `ReAct`'s `subagents=[...]` is its
+sub-agent: each call a child run ([subagents.md](subagents.md)).
 
 ## RunHandle
 
-`RunHandle` — what `agent.start` returns: `run_id`; `await handle.status()` (the `RunRecord`), `await handle.cancel(reason=None)`,
-`await handle.result(timeout=None)` (waits for a pause or an ending; a `Result`).
+`RunHandle` — what `agent.start` returns: `id` (the run's); `await handle.status()` (the
+`RunRecord`); `await handle.result(wait=None)` (waits for a pause or an ending, at most `wait`
+seconds; a `Result`). Cancel the run with `agent.cancel(handle.id)`.
 
 ## Result
 
@@ -268,16 +258,18 @@ a function target.
 | `idempotency_key` | inside a tool call: that call's key, the same in every attempt |
 | `remaining()` | the seconds the code may still take, or `None` |
 | `uses(feature)` | whether the run has that part on (`without=`) |
-| `await tools.call(name, **args)`, `await tools.hints(task)` | a tool call through the harness; the tool hints |
+| `await tools.call(tool, **args)` | a tool call through the harness: a tool of the run by name, or a tool itself (`tool(fn)`, `mcp(...)`, `a2a(url)`...: it joins the run first) |
+| `await tools.use(*sources)` | a function target's own tools added to the run (`sandbox()`, `mcp(...)`...): the names they add |
+| `await tools.hints(task)` | the memory service's tool hints for `task` |
 | `await ask(question, *, expects, form, table, diff, options, multiple, ui_schema, component, props, assignee, deadline, escalate_to)` | pause the run and return the answer on resume ([interrupts.md](interrupts.md#asking)) |
 | `log(message, **fields)` | a log line and a `log` event |
 
 ## ReAct
 
 ```text
-ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
-      context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None, effort=None)
+ReAct(system_prompt, model, *, tools=(), subagents=(), response_format=None, max_steps=12,
+      max_repeats=3, call_timeout=None, context_window=None, effort=None, tool_guidance=False,
+      answer_check=False, capabilities=None, middleware=(), checkpointer=None)
 ```
 
 A tool-calling agent for teams with no framework: a LangChain v1 `create_agent` graph with the
@@ -285,21 +277,21 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 
 | Argument | Default | What it is |
 |---|---|---|
-| `system` | required | the instructions (may be `""` with a `prompt`) |
-| `model` | required | a Bifrost model name (a `ChatOpenAI` on `BIFROST_URL`, no retries of its own: the gateway's) or any LangChain chat model |
-| `output` | none | a pydantic model or a JSON schema the answer is parsed into (LangChain's `response_format`) |
+| `system_prompt` | required | the instructions: a string, or `stored("name", **values)` — the gateway's stored prompt, pinned per run ([prompts.md](prompts.md)) |
+| `model` | required | a model name — through Bifrost with `BIFROST_URL`, else the provider's own SDK with its own key (`openai/...`, `anthropic/...`) — or any LangChain chat model ([configuration.md](configuration.md#models)) |
+| `tools` | `()` | what the agent can call: functions, [`tool`](#tool), LangChain tools, [`mcp`](#mcp-stdio) servers, [`openapi`](#openapi), [`sandbox`](#sandbox) ([tools.md](tools.md)); every run also has the MCP tools the virtual key allows and the memory tools |
+| `subagents` | `()` | agents it hands tasks to, each a tool whose call is a child run: wrapped agents (`h.wrap(...)`) and [`a2a(url)`](#a2a) ([subagents.md](subagents.md)) |
+| `response_format` | none | a pydantic model or a JSON schema the answer is parsed into |
 | `max_steps` | 12 | model calls with tools, then one more without (1 or more) |
 | `max_repeats` | 3 | identical calls in a row that stop the run (1 or more) |
-| `model_timeout` | none | the most one model call may take, in seconds |
+| `call_timeout` | none | the most one model call may take, in seconds |
 | `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
-| `prompt`, `prompt_vars` | none | a prompt of the prompt sources, pinned for the run, and its variables ([prompts.md](prompts.md)) |
-| `middleware` | `()` | more LangChain or Deep Agents middleware, added; one named like a default is refused |
-| `checkpointer` | `RunCheckpointer()` | the graph's checkpointer (the run's journal keeps the checkpoint) |
+| `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
 | `tool_guidance` | `False` | how to choose among tools, added to every call's instructions (`ToolGuidance`; [tool choice](frameworks/react.md#tool-choice)) |
 | `answer_check` | `False` | the draft answer checked against the request once, the tools still needed called, "no record" said plainly; the first change checked against the rules before it is made (`AnswerCheck`: one more model call each) |
 | `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
-| `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
-| `settings` | the environment's | the gateway's address and key (`Settings`, as `Harness(config=)` takes) |
+| `middleware` | `()` | more LangChain or Deep Agents middleware, added; one named like a default is refused |
+| `checkpointer` | the run's (`RunCheckpointer()`) | for the graph run on its own, outside the harness: `h.wrap` refuses a `ReAct` given one |
 
 ## Budget
 
@@ -307,8 +299,8 @@ native context middleware and the harness's ([frameworks/react.md](frameworks/re
 Budget(max_tokens=None, max_cost=None, max_tool_calls=None)
 ```
 
-The most one run may spend, set per agent (`h.wrap(budget=)`; none given: no cap, spending
-still counted): tokens (input and output, every model call), US dollars (what the gateway says
+The most one run may spend, set per agent (`h.wrap(budget=)`) or per run
+(`agent.run(budget=)`; none given: no cap, spending still counted): tokens (input and output, every model call), US dollars (what the gateway says
 each call cost — Bifrost's `usage.cost`; a call it put no cost on is counted in tokens, said
 once when a dollar cap is set) and harness tool calls; `None` is no limit. A sub-agent's
 spending counts toward its parent's, and a resumed run goes on from what it spent. At a limit
@@ -324,50 +316,61 @@ the gateway's (Bifrost's virtual-key budgets).
 ### tool
 
 ```text
-tool(fn, *, name=None, description=None, side_effects="write", idempotent=False, timeout=None)
+tool(fn, *, name=None, description=None, side_effects="write", idempotent=False,
+     call_timeout=None)
 @tool  /  @tool(...)
 ```
 
 A Python function (sync or async) as a tool: the schema from its signature (each parameter
 described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`; `idempotent` when a
-repeated call with its idempotency key has its effect once; `timeout` seconds per call
+repeated call with its idempotency key has its effect once; `call_timeout` seconds per call
 ([tools.md](tools.md)).
 
 ### mcp, stdio
 
 ```text
-mcp(target, *, name=None, timeout=120, headers=None)
+mcp(target, *, name=None, call_timeout=120, headers=None)
 stdio(command, *args, env=None, cwd=None)
 ```
 
 An MCP server's tools as a `tools=[...]` entry: `target` is its URL (`"https://host/mcp"`, over
-streamable HTTP, `headers=` sent with every request), a local server (`stdio(...)`: the harness
-starts it and talks over its stdin and stdout), or a Bifrost Virtual MCP's name. Tools are named
-`<name>-<tool>` (else the name the server gives itself); their side effects come from their
-annotations. Once an agent names any `mcp(...)`, its MCP tools are exactly the ones it names
-([tools.md](tools.md)). The `mcp` extra (the official MCP SDK).
+streamable HTTP, `headers=` sent with every request) or a local server (`stdio(...)`: the
+harness starts it and talks over its stdin and stdout). Tools are named `<name>-<tool>` (else
+the name the server gives itself); their side effects come from their annotations. The MCP
+tools the virtual key allows are the gateway's: every run has them ([tools.md](tools.md)). The
+`mcp` extra (the official MCP SDK).
 
 ### a2a
 
-`a2a(url, *, name=None, timeout=120)` — a remote A2A agent as one `write` tool
-([surfaces.md](surfaces.md#calling-a2a-agents-a2aurl--namenone-timeout120)).
+`a2a(url, *, name=None, call_timeout=120)` — a remote A2A agent: a sub-agent
+(`ReAct(subagents=[a2a(url)])`), a tool, or an async callable anywhere (`await
+a2a(url)(message, user=, tenant=)` outside a run, as the run inside one)
+([surfaces.md](surfaces.md#calling-a2a-agents)).
 
 ### openapi
 
-`openapi(spec, *, only=None, base_url=None, headers=None, timeout=120)` — an OpenAPI 3
+`openapi(spec, *, only=None, base_url=None, headers=None, call_timeout=120)` — an OpenAPI 3
 document's operations as tools, one per `operationId` ([tools.md](tools.md)).
 
 ### sandbox
 
-`sandbox(provider=None, spec=None, *, timeout=120)` — `sandbox_exec`, `sandbox_read`,
-`sandbox_write` in a sandbox of the run's own (`SANDBOX=docker`, or a provider of yours)
+`sandbox(provider=None, *, image=None, spec=None, call_timeout=120)` — `sandbox_exec`,
+`sandbox_read`, `sandbox_write` in a sandbox of the run's own: Docker (the daemon
+`DOCKER_HOST` names; `image`, else `python:3.12-slim`), or a provider of yours
 ([sandbox.md](sandbox.md)).
 
-### skills
+### stored
 
-`skills(*refs)` — skills by name or given as a tool source (`load_skill`, `read_skill_file`)
-([skills.md](skills.md)). `Prompt`, `prompts_dir`, `langfuse_prompts` are in
-`trellis.harness.prompts`; `Skill`, `skills_dir` in `trellis.harness.skills`.
+`stored(ref, /, **values)` — the gateway's stored prompt `ref` (`"name"`, `"name@3"`), its
+`{{variables}}` filled with `values`: a `ReAct`'s `system_prompt`, or `h.prompt(...)`'s
+reference ([prompts.md](prompts.md)).
+
+### llm_judge
+
+`llm_judge(criteria, name="llm_judge", *, model=None, sample=0.1)` — a judge model grades an
+answer against `criteria`: offline in `h.evaluate`, online in `h.wrap(judges=[...])` on the
+`sample` share of runs; `model` its own (else the gateway's judge alias)
+([evaluation.md](evaluation.md)).
 
 ## Hooks
 
@@ -385,12 +388,12 @@ None | Deny | Ask | Rewrite`, `after_tool(call, outcome) -> outcome`, `on_error(
 
 ## Settings
 
-`Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, otlp_endpoint=,
-otlp_headers=, spool_dir=, worker_concurrency=, agent_version=, grounding_sample=,
-judge_model=, judge_virtual_key=, judge_sample=, prompts_dir=, skills_dir=, langfuse_host=,
-langfuse_public_key=, langfuse_secret_key=, sandbox=, sandbox_image=)` — every field optional;
-`Settings.from_env()` is what `Harness()` reads. Each field, its variable, default and an
-example: [configuration.md](configuration.md#settings-and-the-environment).
+`Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, spool_dir=,
+judge_virtual_key=)` — every field optional; `Settings.from_env()` is what `Harness()` reads:
+`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL`,
+`TRELLIS_SPOOL_DIR`, `TRELLIS_JUDGE_VIRTUAL_KEY`. The tools' own variables (`OTEL_*`,
+`LANGFUSE_*`, the providers' keys, `DOCKER_HOST`) are read by their own SDKs. Each field, its
+variable, default and an example: [configuration.md](configuration.md#settings-and-the-environment).
 
 ## The blocks (Way 2)
 
@@ -400,7 +403,7 @@ example: [configuration.md](configuration.md#settings-and-the-environment).
 | Runs | `from trellis.runs import RunsClient, Worker` | [blocks/runs.md](blocks/runs.md) |
 | Governance | `from trellis.harness.governance import Governance, governed` | [blocks/governance.md](blocks/governance.md) |
 | Evaluation | `from trellis.harness.evals import EvalServices, evaluate, judge` | [blocks/evaluation.md](blocks/evaluation.md) |
-| A2A client | `from trellis.harness.a2a import remote` | [blocks/a2a.md](blocks/a2a.md) |
+| A2A client | `from trellis import a2a` (`trellis.harness.a2a.RemoteAgent` under it) | [blocks/a2a.md](blocks/a2a.md) |
 | Sandbox | `from trellis.harness.sandbox import DockerSandbox, SandboxSpec` | [sandbox.md](sandbox.md#way-2-without-a-harness) |
 | Contracts | `from trellis.contracts import RunStart, Interrupt, InterruptResolution` | [blocks/mixing.md](blocks/mixing.md#the-records-they-share) |
 | Gateway | `from bifrost_sdk import Bifrost, NO_GATEWAY_TOOLS` | [gateway.md](gateway.md) |

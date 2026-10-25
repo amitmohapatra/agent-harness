@@ -4,7 +4,7 @@ Two ways in, one way out. `serve_chat` puts an agent in front of a person's chat
 server-sent events); `serve_a2a` publishes it to other agents (A2A JSON-RPC); `a2a(url)` makes
 another agent one of this agent's tools. Each surface runs the agent through the same pipeline
 as `agent.run`, started the same way: the run record, memory, tools, approvals, traces, the
-agent's time limit (`h.wrap(timeout=)`), its version and what it is `without=` are the same
+agent's time limit (`h.wrap(run_timeout=)`), its version and what it is `without=` are the same
 whichever way a run came in — and whichever framework the agent is built with ([framework pages](README.md#which-target)). Both need an extra: `[agui]`
 (FastAPI) or `[a2a]` (the A2A SDK and FastAPI).
 The code is `trellis.harness.agui` (the AG-UI server) and `trellis.harness.a2a` (`server`, and
@@ -19,7 +19,7 @@ own framework and wants these servers wraps the part it serves: any async functi
 ([frameworks/functions.md](frameworks/functions.md)), so the function that calls your graph,
 your OpenAI Agents runner or your own loop is enough. Otherwise use the protocols' own SDKs
 (AG-UI's, the A2A SDK) with the Trellis blocks inside. *Calling* another agent needs none of
-this: `remote(url, tenant=, user=)` works from any code ([blocks/a2a.md](blocks/a2a.md), Way 2).
+this: `a2a(url)(message, tenant=, user=)` works from any code ([blocks/a2a.md](blocks/a2a.md), Way 2).
 
 ## AG-UI: `agent.serve_chat(app, *, path="/agui", identity=None)`
 
@@ -159,9 +159,14 @@ edge, at most 4096 characters, its tenant (when it names one) the key's — else
 (warned once per server). A header that is too long, not a JSON object, names another tenant
 or no user is refused.
 
-## Calling A2A agents: `a2a(url, *, name=None, timeout=120)`
+## Calling A2A agents
 
-A remote agent is one tool (`write`), named after its card (or `name`; unsafe characters become
+`a2a(url, *, name=None, call_timeout=120)` is a remote agent: a `ReAct`'s sub-agent
+(`subagents=[a2a(url)]`), a function target's tool (`agent.tools.call(a2a(url), message=...)`),
+or an async callable anywhere (`await a2a(url)(message, user=..., tenant=...)` outside a run —
+a remote question answered by `on_input=`, else `InputRequired`).
+
+As a tool, a remote agent is one tool (`write`), named after its card (or `name`; unsafe characters become
 `_`, at most 64), described by the card, taking `{"message": string}`. The card is read once;
 each call is a `RemoteAgent` ([blocks/a2a.md](blocks/a2a.md)) as the calling run.
 The message goes with the calling run's identity on the trusted-identity header (and the extension header) and its

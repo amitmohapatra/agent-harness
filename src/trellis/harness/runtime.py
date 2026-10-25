@@ -47,11 +47,11 @@ from trellis.runs import LeaseLostError
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.bridges.helpers import Helpers
+    from trellis.harness.budget import Budget
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
-    from trellis.harness.skills import ResolvedSkill
     from trellis.harness.tools.base import Tool
     from trellis.memory import MemoryContext
     from trellis.memory.models import ToolHints
@@ -156,6 +156,8 @@ class Runtime:
     #: servers', a graph's tool nodes', a Deep Agent's sub-agents'), by name: with the
     #: toolbox they are the run's tool set (:meth:`tool_set`)
     native: dict[str, ToolSpec] = field(default_factory=dict)
+    #: the sources the run's code added (``agent.tools.use``), beside its agent's
+    added: list[Any] = field(default_factory=list)
     #: the tools offered to the model (``None``: all of them) — the tool hints' candidates,
     #: the memory tools, and every tool this run has used (``used``)
     offered: set[str] | None = None
@@ -164,10 +166,8 @@ class Runtime:
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
-    #: the skills this run uses, as the versions pinned at its start read (``skills.py``)
-    skills: dict[str, ResolvedSkill] = field(default_factory=dict)
-    #: the prompts this attempt pinned (``PromptSources.pin``: a ``ReAct``'s ``prompt=``, the
-    #: stored prompts ``h.model_headers(prompt=)`` handed out), by their journal key
+    #: the stored prompts this attempt pinned (``Prompts.pin``: a ``ReAct``'s
+    #: ``system_prompt=stored(...)``), by their journal key
     prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
     #: the sandbox this attempt's sandbox tools work in, once one of them ran (``sandbox``)
     sandbox: Sandbox | None = None
@@ -199,9 +199,12 @@ class Runtime:
     ends_at: float | None = None
     #: when the run must have ended (its ``deadline``), which a sub-agent's run inherits
     deadline: datetime | None = None
-    #: the run whose tool call this run works in (a sub-agent's run, ``Agent.as_tool``): its
+    #: the run whose tool call this run works in (a sub-agent's run, a nested run): its
     #: journal is kept in the parent's, and saved with the parent's progress
     parent: Runtime | None = None
+    #: the most this run may spend: its own (``run(budget=)``, kept with its record), else its
+    #: agent's (``h.wrap(budget=)``); ``None``: no cap
+    budget: Budget | None = None
     #: the helpers the framework spawns in this attempt (``bridges.helpers``), once its
     #: adapter made them
     helpers: Helpers | None = None
@@ -604,17 +607,39 @@ def reason_of(resolution: InterruptResolution) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class Tools:
-    """``trellis.current().tools``: call this run's tools by name, and ask for hints."""
+    """``trellis.current().tools`` (a function target's ``agent.tools``): call this run's tools,
+    add more to it, and ask for hints."""
 
     runtime: Runtime
 
-    async def call(self, name: str, /, **args: Any) -> Any:
+    async def call(self, tool: Any, /, **args: Any) -> Any:
+        """Call one of the run's tools with ``args`` — governed, journaled, recorded, as every
+        call is (``tools.bridge``) — and return what it answered: a tool by name (the run's
+        toolbox: its builder's tools, the MCP tools the virtual key allows, the memory tools,
+        what :meth:`use` added), or a tool itself (``tool(fn)``, which joins the run first)."""
         from trellis.harness.tools.bridge import call  # noqa: PLC0415 - bridge imports runtime
 
+        name = tool if isinstance(tool, str) else (await self.use(tool))[0]
         found = self.runtime.toolbox.get(name)
         if found is None:
             raise ToolError(f"no tool {name!r} in this run", source="tools")
         return (await call(found, args)).output
+
+    async def use(self, *sources: Any) -> list[str]:
+        """Add the tools of ``sources`` — ``tool(fn)`` (a function is one), ``mcp(...)``,
+        ``openapi(...)``, ``sandbox()``, ``a2a(url)``, a wrapped agent (a sub-agent) — to this
+        run's toolbox, for :meth:`call`: the names they add, in order (a function target's own
+        tools; a builder's are declared on it)."""
+        from trellis.harness.tools.sources import as_source  # noqa: PLC0415 - imports runtime
+
+        names: list[str] = []
+        for given in sources:
+            source = as_source(given)
+            self.runtime.added.append(source)
+            for found in await source.resolve():
+                self.runtime.toolbox.setdefault(found.spec.name, found)
+                names.append(found.spec.name)
+        return names
 
     async def hints(self, task: str) -> ToolHints:
         """What the memory service suggests for ``task`` among this run's tool set (its harness

@@ -34,7 +34,7 @@ async def main() -> None:
 
         handle = await agent.start({"customer": "ACME", "terms": "net 30"}, user="ada")
         await worker.run_once()  # a worker claims the queued run; it pauses on the review
-        paused = await handle.result(timeout=10)
+        paused = await handle.result(wait=10)
         print("paused:", paused.status.value)
 
         [waiting] = await h.inbox("role:legal")
@@ -46,7 +46,7 @@ async def main() -> None:
         print("after the answer:", resumed.status.value)  # QUEUED: a worker continues it
 
         await worker.run_once()
-        done = await handle.result(timeout=10)
+        done = await handle.result(wait=10)
         print(done.status.value, done.answer)
 
 

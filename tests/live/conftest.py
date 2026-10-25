@@ -25,9 +25,9 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 from urllib.parse import urlsplit
 
 import httpx
@@ -36,6 +36,9 @@ from bifrost_sdk import Bifrost, MCPClientConfig, MCPConnection
 from bifrost_sdk.admin import Admin
 
 from trellis import Harness, Settings
+from trellis.harness import agent as agent_module
+from trellis.harness import evals, telemetry
+from trellis.harness.agent import Agent
 from trellis.harness.evals import Evaluator
 from trellis.harness.sandbox.docker import DOCKER_SOCKET
 from trellis.memory import MemoryClient
@@ -99,25 +102,46 @@ needs_docker = pytest.mark.skipif(
 
 
 def settings(**changes: object) -> Settings:
-    """The environment's deployment."""
-    return Settings.from_env().model_copy(update=changes)
+    """The environment's deployment, with ``changes`` (each a setting: checked)."""
+    return Settings(**{**Settings.from_env().model_dump(), **changes})
 
 
 class LiveHarness(Harness):
     """A harness whose memory client is given (it waits longer than a deployment's would, since
-    the services share one development machine), and closed with it."""
+    the services share one development machine), and closed with it; every agent it wraps is
+    judged by its ``judges``; ``sampled`` is the share of runs grounded and judged while it is
+    open (a fixed share in a deployment)."""
+
+    def __init__(self, *, judges: Sequence[Evaluator], sampled: float | None, **given: Any) -> None:
+        super().__init__(**given)
+        self.judges = list(judges)
+        self._samples = (agent_module.GROUNDING_SAMPLE, evals.JUDGE_SAMPLE)
+        if sampled is not None:
+            agent_module.GROUNDING_SAMPLE = evals.JUDGE_SAMPLE = sampled  # type: ignore[misc]
+
+    def wrap(self, target: Any, **given: Any) -> Agent:  # type: ignore[override]
+        given["judges"] = [*self.judges, *given.get("judges", ())]
+        return super().wrap(target, **given)
 
     async def aclose(self) -> None:
+        agent_module.GROUNDING_SAMPLE, evals.JUDGE_SAMPLE = self._samples  # type: ignore[misc]
         await super().aclose()
         if self.memory is not None:
             await self.memory.client.aclose()
 
 
 def live_harness(
-    key: str | None = None, *, judges: Sequence[Evaluator] = (), **changes: object
+    key: str | None = None,
+    *,
+    judges: Sequence[Evaluator] = (),
+    sampled: float | None = None,
+    langfuse: Mapping[str, str] | None = None,
+    **changes: object,
 ) -> Harness:
     """A harness for the environment's deployment, with the virtual key ``key`` (a session
-    key from the fixtures; the environment's otherwise) and the online ``judges``."""
+    key from the fixtures; the environment's otherwise), the online ``judges`` on every agent,
+    ``sampled`` (the share of runs grounded and judged) and Langfuse's variables
+    (``langfuse``: its scores and datasets, not its traces)."""
     if key is not None:
         changes["bifrost_virtual_key"] = key
     s = settings(**changes)
@@ -126,7 +150,10 @@ def live_harness(
         if s.memory_url is not None
         else None
     )
-    return LiveHarness(config=s, memory=memory, judges=judges)
+    h = LiveHarness(config=s, memory=memory, judges=judges, sampled=sampled)
+    if langfuse is not None:
+        h.evals.langfuse = telemetry.Langfuse.of(langfuse)
+    return h
 
 
 @pytest.fixture

@@ -3,7 +3,55 @@
 What changed in each release of `trellis-harness`. The framework versions each release was
 tested with are in [docs/versioning.md](docs/versioning.md).
 
-## Unreleased
+## 0.5.0 — one breaking release (unreleased)
+
+One API, each setting in its one place, no deprecated aliases: the environment says where the
+services are; `Harness()` connects to them; the builder (`ReAct`, or your framework's own) says
+what the agent is; `h.wrap` who it is and how its runs go; `agent.run` this call. Needs
+`trellis-memory` 0.5 (the memory service's prompt-form `memory_ids`).
+
+### Breaking: removed, with what replaces it
+
+- `h.wrap(tools=, mcp=, skills=, timeout=)`: tools are the builder's — `ReAct(tools=[...],
+  subagents=[...])`, or your framework's own tools, governed as it runs them (a graph adds the
+  harness's with `HarnessTools()`; a function target calls `agent.tools.call(tool, ...)`);
+  `h.wrap(run_timeout=)`.
+- `Harness(governance=, prompts=, skills=, hooks=, judges=)`: hooks and judges are
+  `h.wrap(hooks=, judges=)`; governance is the memory service's catalog; stored prompts are the
+  gateway's.
+- `h.tools`, `h.prompt_messages`, `h.model_headers` (the gateway's headers are sent for every
+  routed model call; Claude's automatically), `h.resolve`, `h.built_for`, and `h.key`,
+  `h.tenant`, `h.governance`, `h.toolbox`, `h.score` (internal now).
+- `agent.as_tool()` (a wrapped agent in `ReAct(subagents=)`), `remote()` (`a2a(url)` is an
+  async callable; `RemoteAgent` under it), `RunHandle.cancel` (`agent.cancel(handle.id)`),
+  `RunHandle.run_id` (`handle.id`), `handle.result(timeout=)` (`wait=`),
+  `agent.schedule(cron, input, on_behalf_of=)` (`schedule(cron, user=, input=)`).
+- The skills API (`skills`, `skills_dir`, `Skill`, the gateway's Skills Repository source) and
+  the prompt sources (`prompts_dir`, `Prompt`, Langfuse prompts): `stored("name", **values)` and
+  `h.prompt(...)` read the gateway's Prompt Repository, the one prompt store.
+- Virtual MCP selection (`mcp("slug")`): the key's MCP allow-list, in Bifrost.
+- `ReAct(system=, prompt=, prompt_vars=, model_timeout=, output=)`: `system_prompt=` (a string
+  or `stored(...)`), `call_timeout=`, `response_format=`; `ReAct(checkpointer=)` is for a graph
+  run on its own (`h.wrap` refuses it).
+- `tool/mcp/openapi/a2a/sandbox(timeout=)`: `call_timeout=`; `sandbox(provider, spec)`:
+  `sandbox(provider, image=, spec=)`, Docker when no provider is given.
+- `without=` names `memory_push`, `memory_pull`, `records`, `hints`, `skills`, `planning`,
+  `files`, `react_auto`: the six names are `memory`, `tool_search`, `mcp`, `code_mode`,
+  `grounding`, `judges`.
+- Environment: `PROMPTS_DIR`, `SKILLS_DIR`, `TRELLIS_AGENT_VERSION`,
+  `TRELLIS_WORKER_CONCURRENCY`, `SANDBOX`, `SANDBOX_IMAGE`, `TRELLIS_JUDGE_MODEL`,
+  `TRELLIS_EVAL_SAMPLE`, `TRELLIS_GROUNDING_SAMPLE`, `TRELLIS_JUDGE_SAMPLE`, `LANGFUSE_HOST`;
+  `Settings` has seven fields (`otlp_*` and `langfuse_*` are gone: their own SDKs read their
+  variables). A fixed tenth of runs is grounded; each judge's share is `llm_judge(sample=)`.
+
+### Added
+
+- `stored(...)`, `llm_judge` exported from `trellis`; `h.wrap(description=)`;
+  `run`/`stream`/`start`/`schedule(budget=)` (a run's own budget, kept with its record);
+  `agent.tools.use(*sources)`; `a2a(url)(message, user=, tenant=)` outside a run.
+- A Claude in-process MCP server's tool is governed by its annotations (`destructiveHint`:
+  asks), as the run's tool set lists it.
+- A function target as a sub-agent counts as a write unless its tools are declared.
 
 ### Changed
 

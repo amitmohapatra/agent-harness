@@ -11,7 +11,7 @@ import pytest
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, ImageContent, TextContent
 
-from trellis.contracts import ConfigurationError, ToolError
+from trellis.contracts import ToolError
 from trellis.harness.tools.mcp import MCPSource, _Connection, answer_of, mcp, stdio
 
 
@@ -89,11 +89,6 @@ async def test_a_server_error_is_the_calls_and_a_closed_connection_is_tried_agai
     with pytest.raises(ToolError, match="cannot be reached") as said:
         await source._call("x", {})
     assert said.value.retryable
-
-
-async def test_a_virtual_mcp_is_not_resolved_here() -> None:
-    with pytest.raises(ConfigurationError, match="listed by the gateway"):
-        await mcp("finance").resolve()
 
 
 async def test_a_connection_never_opened_closes_and_breaks_quietly() -> None:

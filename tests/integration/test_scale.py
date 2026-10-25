@@ -16,6 +16,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from tests.support.arm import arm
 from tests.support.runlog import LoggedRuns
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import RunEvent, RunEventType, RunOutcome, RunStatus
@@ -53,7 +54,7 @@ async def test_every_event_is_in_the_runs_log_before_its_pause_or_ending_is_reco
     logged: tuple[Harness, LoggedRuns],
 ) -> None:
     h, runs = logged
-    agent = h.wrap(charging, id="billing", tools=[charge])
+    agent = arm(h.wrap(charging, id="billing"), [charge])
     streamed: list[RunEvent] = []
     async for event in agent.stream("o-1", user="ada"):
         streamed.append(event)
@@ -76,7 +77,7 @@ async def test_agent_events_reads_a_run_from_the_log_wherever_it_ran(
     logged: tuple[Harness, LoggedRuns],
 ) -> None:
     h, _ = logged
-    agent = h.wrap(charging, id="billing", tools=[charge])
+    agent = arm(h.wrap(charging, id="billing"), [charge])
     paused = await agent.run("o-2", user="ada")
     assert paused.interrupt is not None
     follower = asyncio.create_task(_collect(agent.events(paused.run_id)))
@@ -92,14 +93,14 @@ async def test_a_worker_appends_its_runs_events_fenced_by_its_lease(
     logged: tuple[Harness, LoggedRuns],
 ) -> None:
     h, runs = logged
-    agent = h.wrap(charging, id="billing", tools=[charge])
+    agent = arm(h.wrap(charging, id="billing"), [charge])
     handle = await agent.start("o-3", user="ada", thread="chat-1", priority=5)
     worker = h.worker([agent], concurrency=1)
     assert await worker.run_once()
     record = await handle.status()
     assert (record.priority, record.concurrency_key) == (5, "thread:chat-1")
-    assert {w for r, w, _ in runs.appends if r == handle.run_id} == {worker.worker_id}
-    assert runs.logged(handle.run_id)[-1].outcome is RunOutcome.INTERRUPT
+    assert {w for r, w, _ in runs.appends if r == handle.id} == {worker.worker_id}
+    assert runs.logged(handle.id)[-1].outcome is RunOutcome.INTERRUPT
 
 
 async def test_the_log_is_best_effort_and_a_lost_lease_stops_it(caplog: Any) -> None:
@@ -144,7 +145,7 @@ async def test_the_log_is_best_effort_and_a_lost_lease_stops_it(caplog: Any) -> 
 
 
 async def test_in_process_events_follow_a_run_here_until_it_ends(harness: Harness) -> None:
-    agent = harness.wrap(charging, id="billing", tools=[charge])
+    agent = arm(harness.wrap(charging, id="billing"), [charge])
     paused = await agent.run("o-4", user="ada")
     assert paused.interrupt is not None
     follower = asyncio.create_task(_collect(agent.events(paused.run_id)))
@@ -201,7 +202,7 @@ async def test_a_reconnect_to_another_replica_reads_the_run_from_the_log() -> No
     for _ in range(2):
         h = Harness(config=Settings(), runs=runs)
         app = FastAPI()
-        h.wrap(billed, id="chat", tools=[charge]).serve_chat(
+        arm(h.wrap(billed, id="chat"), [charge]).serve_chat(
             app, identity=lambda r: r.headers.get("x-user", "u1")
         )
         replicas.append((h, app))
@@ -236,7 +237,7 @@ async def test_without_a_log_a_reconnect_must_reach_the_replica_that_served_it(
     harness: Harness,
 ) -> None:
     app = FastAPI()
-    harness.wrap(charging, id="chat", tools=[charge]).serve_chat(app, identity=lambda r: "u1")
+    arm(harness.wrap(charging, id="chat"), [charge]).serve_chat(app, identity=lambda r: "u1")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://c") as c:
         assert (await c.get("/agui/runs/run_x/events")).status_code == 404
 
@@ -262,7 +263,7 @@ async def test_a_rate_limited_start_is_one_clear_retryable_error_and_a_429_on_ch
     counted: list[str] = []
     monkeypatch.setattr(telemetry.metrics, "rate_limited", counted.append)
     async with Harness(config=Settings(), runs=Limited()) as h:
-        agent = h.wrap(charging, id="billing", tools=[charge])
+        agent = arm(h.wrap(charging, id="billing"), [charge])
         with pytest.raises(Throttled, match="try again after 7s") as raised:
             await agent.run("o", user="ada")
         error = raised.value.to_error()
@@ -285,7 +286,7 @@ async def test_a_rate_limited_start_is_one_clear_retryable_error_and_a_429_on_ch
 async def test_a_rate_limited_resume_says_to_try_later() -> None:
     runs = Limited()
     async with Harness(config=Settings(), runs=runs) as h:
-        agent = h.wrap(charging, id="billing", tools=[charge])
+        agent = arm(h.wrap(charging, id="billing"), [charge])
         record = await LocalRuns.start(
             runs, await agent._start("o", user="ada", thread=None, tenant=None)
         )
@@ -359,8 +360,8 @@ async def test_a_schedule_carries_the_agents_limit_and_version_to_every_fire(
     async def fn(input: str, agent: Runtime) -> str:
         return input
 
-    agent = harness.wrap(fn, id="briefing", timeout=60, version="2026.10")
-    schedule = await agent.schedule("manual", "brief", on_behalf_of="ada")
+    agent = harness.wrap(fn, id="briefing", run_timeout=60, version="2026.10")
+    schedule = await agent.schedule("manual", user="ada", input="brief")
     assert (schedule.timeout_seconds, schedule.agent_version) == (60, "2026.10")
 
 
@@ -371,11 +372,11 @@ async def test_queue_wait_is_measured_when_a_worker_claims(
     monkeypatch.setattr(
         telemetry.metrics, "queue_waited", lambda agent, s: waited.append((agent, s))
     )
-    agent = harness.wrap(charging, id="billing", tools=[charge])
+    agent = arm(harness.wrap(charging, id="billing"), [charge])
     handle = await agent.start("o-6", user="ada")
     worker = harness.worker([agent], concurrency=1)
     assert await worker.run_once()
-    paused = await handle.result(timeout=5)
+    paused = await handle.result(wait=5)
     assert paused.interrupt is not None
     await agent.resume(paused.interrupt.interrupt_id, "answer", answer="S", reviewer="lee")
     assert await worker.run_once()
@@ -455,6 +456,6 @@ async def test_waiting_for_a_result_waits_out_a_429(monkeypatch: pytest.MonkeyPa
         handle = await agent.start("o", user="ada")
         assert await h.worker([agent]).run_once()
         runs.refusals = [0.25, None]
-        result = await handle.result(timeout=5)
+        result = await handle.result(wait=5)
     assert result.status is RunStatus.SUCCESS and result.answer == "o"
     assert slept[:2] == [0.25, agent_module.POLL_SECONDS * 4]  # as asked, else a while

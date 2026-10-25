@@ -15,9 +15,11 @@ from pydantic import BaseModel
 
 from tests.live.conftest import MODEL
 from tests.live.proof import RUN_SECONDS, TEST_SECONDS, Proof, ended, governed, recorded, streamed
+from tests.support.arm import arm, native_tools
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
+from trellis.harness.prompts import GatewayHeaders
 
 URL = os.environ.get("BIFROST_URL")
 KEY = os.environ.get("BIFROST_VIRTUAL_KEY") or "unused"
@@ -59,11 +61,11 @@ async def test_react_calls_a_tool_and_answers_in_the_schema() -> None:
     question = "How many units of A-1 are in stock?"
     system = "Answer stock questions with the stock tool."
     async with harness() as h:
-        decisions = governed(h, await h.tenant())
+        decisions = governed(h, await h._tenant())
         proof = Proof()
-        target = ReAct(system=system, model=MODEL, output=Stock, max_steps=4)
-        agent = h.wrap(target, id="live-react", tools=[stock], hooks=[proof])
-        run = await streamed("react", agent.stream(question, user="live", timeout=RUN_SECONDS))
+        target = ReAct(system_prompt=system, model=MODEL, response_format=Stock, max_steps=4)
+        agent = arm(h.wrap(target, id="live-react", hooks=[proof]), [stock])
+        run = await streamed("react", agent.stream(question, user="live", run_timeout=RUN_SECONDS))
         ended(run)
         recorded(run, proof, decisions)
         assert proof.result is not None
@@ -75,9 +77,9 @@ async def test_react_calls_a_tool_and_answers_in_the_schema() -> None:
         if "stock" in run.started():
             return
         twin = PlannedChat([("stock", {"sku": "A-1"})], final='{"sku": "A-1", "units": {last}}')
-        target = ReAct(system=system, model=twin, output=Stock)
+        target = ReAct(system_prompt=system, model=twin, response_format=Stock)
         proof = Proof()
-        agent = h.wrap(target, id="live-react-twin", tools=[stock], hooks=[proof])
+        agent = arm(h.wrap(target, id="live-react-twin", hooks=[proof]), [stock])
         run = await streamed("react-twin", agent.stream(question, user="live"))
         ended(run)
         recorded(run, proof, decisions)
@@ -93,9 +95,9 @@ async def test_langgraph_with_a_model_pointed_at_bifrost() -> None:
             api_key=KEY,  # type: ignore[arg-type]
             model=MODEL,
             max_tokens=2048,  # type: ignore[call-arg]
-            default_headers=await h.model_headers(),
+            default_headers=GatewayHeaders(),
         )
-        graph = create_agent(model, tools=await h.tools(stock, framework="langgraph"))
+        graph = create_agent(model, tools=await native_tools(h, stock, framework="langgraph"))
         result = await h.wrap(graph, id="live-graph").run(
             "Units of A-1 in stock? Use the tool.", user="live"
         )
@@ -107,12 +109,10 @@ async def test_openai_agents_with_a_model_pointed_at_bifrost() -> None:
     async with harness() as h:
         model = OpenAIChatCompletionsModel(
             model=MODEL,
-            openai_client=AsyncOpenAI(
-                base_url=URL, api_key=KEY, default_headers=await h.model_headers()
-            ),
+            openai_client=AsyncOpenAI(base_url=URL, api_key=KEY, default_headers=GatewayHeaders()),
         )
         target = Agent(name="stock", instructions="Use the stock tool.", model=model)
-        result = await h.wrap(target, id="live-openai", tools=[stock]).run(
+        result = await arm(h.wrap(target, id="live-openai"), [stock]).run(
             "Units of A-1?", user="live"
         )
     assert result.status is RunStatus.SUCCESS, result.error

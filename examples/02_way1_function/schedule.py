@@ -24,7 +24,7 @@ async def briefing(input: str, agent: Runtime) -> str:
 async def main() -> None:
     async with Harness() as h:
         agent = h.wrap(briefing, id="briefing")
-        schedule = await agent.schedule("weekdays", "3 new tickets", on_behalf_of="ada")
+        schedule = await agent.schedule("weekdays", user="ada", input="3 new tickets")
         print("next run at", schedule.next_fire_at)
 
         fired = await h.runs.schedules.fire(schedule.schedule_id)  # now, not at 00:00

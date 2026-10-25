@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from agents import Agent, SQLiteSession, Usage, function_tool
 
+from tests.support.arm import with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
@@ -183,7 +184,7 @@ async def test_an_agent_tools_own_tools_are_governed_as_the_runs(
     target = Agent(name="desk", model=model, tools=[checker.as_tool("check", "Check.")])
     governance = Governance(FakeCatalog({"peek": Rule(risk="irreversible")}))
     with caplog.at_level(logging.WARNING, logger="trellis.harness"):
-        async with Harness(config=Settings(), governance=governance) as h:
+        async with with_governance(Harness(config=Settings()), governance) as h:
             paused = await h.wrap(target, id="desk").run("check o1", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "peek"
@@ -195,7 +196,7 @@ async def test_an_agent_tools_call_asks_as_the_catalog_rules() -> None:
     checker = Agent(name="checker", model=ScriptedModel(["fine"], ids="checker_"))
     model = ScriptedModel([("check", {"input": "o1"}), "ok"])
     governance = Governance(FakeCatalog({"check": Rule(risk="irreversible")}))
-    async with Harness(config=Settings(), governance=governance) as h:
+    async with with_governance(Harness(config=Settings()), governance) as h:
         target = Agent(name="desk", model=model, tools=[checker.as_tool("check", "Check.")])
         paused = await h.wrap(target, id="desk").run("check o1", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None

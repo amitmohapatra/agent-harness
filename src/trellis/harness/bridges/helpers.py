@@ -222,7 +222,7 @@ class Helpers:
         for run_id in left:
             record = await runs.get(run_id, tenant=parent.tenant)
             if record is None or HELPER not in record.metadata:
-                continue  # a sub-agent of the harness's own (``Agent.as_tool``) ends itself
+                continue  # a sub-agent's child run (``subagents``) ends itself
             await runs.finish(
                 run_id,
                 RunStatus.ERROR,

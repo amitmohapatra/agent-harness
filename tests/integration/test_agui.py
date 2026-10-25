@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, Request
 
+from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
 from trellis.harness.agui.events import AGUIEvent, AGUIEventType
@@ -51,7 +52,7 @@ def user_of(request: Request) -> str:
 async def client() -> AsyncIterator[httpx.AsyncClient]:
     harness = Harness(config=Settings())
     app = FastAPI()
-    harness.wrap(agent_fn, id="chat", tools=[refund]).serve_chat(app, identity=user_of)
+    arm(harness.wrap(agent_fn, id="chat"), [refund]).serve_chat(app, identity=user_of)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://agui", headers={"x-user": "u1"}
@@ -368,7 +369,7 @@ def test_an_sse_body_skips_lines_that_are_not_events() -> None:
 def serve(identity: Any = user_of, **wrap: Any) -> tuple[Harness, httpx.AsyncClient]:
     harness = Harness(config=Settings())
     app = FastAPI()
-    harness.wrap(agent_fn, id="chat", tools=[refund], **wrap).serve_chat(app, identity=identity)
+    arm(harness.wrap(agent_fn, id="chat", **wrap), [refund]).serve_chat(app, identity=identity)
     http = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://agui", headers={"x-user": "u1"}
     )
@@ -522,7 +523,7 @@ async def test_a_decision_or_a_role_outside_the_vocabulary_is_a_validation_error
 def test_the_routes_are_in_the_openapi_document() -> None:
     harness = Harness(config=Settings())
     app = FastAPI()
-    agent = harness.wrap(agent_fn, id="chat", tools=[refund])
+    agent = arm(harness.wrap(agent_fn, id="chat"), [refund])
     agent.serve_chat(app, identity=user_of)
     agent.serve_chat(app, path="/agui2", identity=user_of)  # a second mount: one tag
     doc = app.openapi()
@@ -589,7 +590,7 @@ async def test_a_resume_entry_carries_a_comment_and_the_interrupt_what_to_render
 
     harness = Harness(config=Settings())
     app = FastAPI()
-    harness.wrap(deployer, id="deployer", tools=[deploy]).serve_chat(app, identity=user_of)
+    arm(harness.wrap(deployer, id="deployer"), [deploy]).serve_chat(app, identity=user_of)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://agui", headers={"x-user": "u1"}

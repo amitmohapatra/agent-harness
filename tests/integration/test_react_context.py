@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.models import Script, ScriptedChat
 from trellis import Harness, ReAct, tool
@@ -49,8 +50,8 @@ async def test_older_results_are_cleared_past_half_the_window_and_read_back(
     script: list[Any] = [("page", {"n": n}) for n in range(1, 7)]
     script += [("read_result", {"id": "call_1"}), ("publish", {"name": "book"}), "done"]
     model = ScriptedChat(script=Summarizing(script))
-    target = ReAct(system="s", model=model, context_window=6000)
-    agent = memory_harness.wrap(target, id="book", tools=[page, publish])
+    target = ReAct(system_prompt="s", model=model, context_window=6000)
+    agent = arm(memory_harness.wrap(target, id="book"), [page, publish])
     paused = await agent.run("read the book", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
     cleared = [n for n in range(len(model.requests)) if CLEARED in contents(model, n)]
@@ -81,8 +82,8 @@ async def test_older_turns_are_summarized_and_their_history_kept_to_read(
     script: list[Any] = [("note", {"text": f"{n} " + "n" * 2400}) for n in range(5)]
     summarizing = Summarizing([*script, ("publish", {"name": "notes"}), "done"])
     model = ScriptedChat(script=summarizing)
-    target = ReAct(system="s", model=model, context_window=4000)
-    agent = memory_harness.wrap(target, id="notes", tools=[note, publish])
+    target = ReAct(system_prompt="s", model=model, context_window=4000)
+    agent = arm(memory_harness.wrap(target, id="notes"), [note, publish])
     paused = await agent.run("take five notes", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
     summaries = summarizing.summaries
@@ -104,7 +105,7 @@ async def test_older_turns_are_summarized_and_their_history_kept_to_read(
 
 async def test_a_message_list_without_a_user_message_still_runs(harness: Harness) -> None:
     model = ScriptedChat(["fine"])
-    target = ReAct(system="s", model=model, context_window=1000)
+    target = ReAct(system_prompt="s", model=model, context_window=1000)
     result = await harness.wrap(target, id="nouser").run(
         [{"role": "assistant", "content": "hello"}], user="u"
     )

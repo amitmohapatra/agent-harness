@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
@@ -96,7 +97,7 @@ async def crash_once(store: LocalRuns, agent: Any, handle: Any) -> None:
         await agent.execute(
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
-    lapse(store, handle.run_id)
+    lapse(store, handle.id)
 
 
 async def test_a_crash_after_a_write_does_not_run_the_write_again(harness: Harness) -> None:
@@ -110,13 +111,13 @@ async def test_a_crash_after_a_write_does_not_run_the_write_again(harness: Harne
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = harness.wrap(billing, id="billing", tools=[pay])
+    agent = arm(harness.wrap(billing, id="billing"), [pay])
     handle = await agent.start("invoice 7", user="u")
     await crash_once(store, agent, handle)
     record = await handle.status()
     assert record.status is RunStatus.RUNNING and record.checkpoint is not None
     assert await harness.worker([agent]).run_once()  # the next attempt
-    done = await handle.result(timeout=5)
+    done = await handle.result(wait=5)
     assert done.status is RunStatus.SUCCESS and done.answer == "paid 5"
     assert paid == [5]  # replayed from the checkpoint, not paid twice
     assert (await handle.status()).attempt == 2
@@ -135,8 +136,8 @@ async def test_a_resumed_react_run_replays_its_model_steps_and_its_writes(
         return "fine"
 
     model = ScriptedChat([("pay", {"amount": 3}), ("boom", {}), "paid 3"])
-    target = ReAct(system="You pay.", model=model)
-    agent = harness.wrap(target, id="payer", tools=[pay, boom])
+    target = ReAct(system_prompt="You pay.", model=model)
+    agent = arm(harness.wrap(target, id="payer"), [pay, boom])
     store = harness.runs
     assert isinstance(store, LocalRuns)
     handle = await agent.start("pay 3", user="u")
@@ -145,7 +146,7 @@ async def test_a_resumed_react_run_replays_its_model_steps_and_its_writes(
     model.turns = [("boom", {}), "paid 3"]
     asked_before = len(model.requests)
     assert await harness.worker([agent]).run_once()
-    done = await handle.result(timeout=5)
+    done = await handle.result(wait=5)
     assert done.answer == "paid 3" and paid == [3]
     # the first model step (it chose pay) came from the checkpoint: only the steps after it
     assert len(model.requests) - asked_before == 2
@@ -170,10 +171,10 @@ async def test_reads_are_saved_at_most_every_progress_interval(
             await agent.tools.call("balance", account=account)
         return await agent.tools.call("pay", amount=1)
 
-    agent = harness.wrap(reader, id="reader", tools=[balance, pay])
+    agent = arm(harness.wrap(reader, id="reader"), [balance, pay])
     handle = await agent.start("x", user="u")
     assert await harness.worker([agent]).run_once()
-    assert (await handle.result(timeout=5)).status is RunStatus.SUCCESS
+    assert (await handle.result(wait=5)).status is RunStatus.SUCCESS
     # the first read saves, the next two are within the interval, the write saves before it
     # runs (marked started) and after
     assert len(saved) == 3
@@ -187,7 +188,7 @@ async def test_an_in_process_run_saves_no_progress(harness: Harness) -> None:
     async def billing(input: str, agent: Runtime) -> str:
         return await agent.tools.call("pay", amount=1)
 
-    agent = harness.wrap(billing, id="billing", tools=[pay])
+    agent = arm(harness.wrap(billing, id="billing"), [pay])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.SUCCESS and paid == [1]
 
@@ -206,10 +207,10 @@ async def test_a_refused_progress_save_is_a_warning(
                 raise PayloadTooLargeError("413 PAYLOAD_TOO_LARGE", status=413)
 
         monkeypatch.setattr(h.runs, "heartbeat", refused)
-        agent = h.wrap(billing, id="billing", tools=[pay])
+        agent = arm(h.wrap(billing, id="billing"), [pay])
         handle = await agent.start("x", user="u")
         assert await h.worker([agent]).run_once()
-        assert (await handle.result(timeout=5)).answer == "paid 2"
+        assert (await handle.result(wait=5)).answer == "paid 2"
     assert "progress of run" in caplog.text and "413" in caplog.text
 
 
@@ -225,7 +226,7 @@ async def test_a_lease_lost_while_saving_progress_stops_the_run(
         await agent.tools.call("pay", amount=1)
         return await agent.tools.call("pay", amount=2)
 
-    agent = harness.wrap(billing, id="billing", tools=[pay])
+    agent = arm(harness.wrap(billing, id="billing"), [pay])
     handle = await agent.start("x", user="u")
     assert await harness.worker([agent]).run_once()
     assert paid == []  # nothing after the lost lease: the write's save before it runs failed
@@ -249,33 +250,33 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash() -> None:
 
     store = Bounded()
     async with Harness(config=Settings(), runs=store) as h:
-        agent = h.wrap(exporting, id="exporting", tools=[export])
+        agent = arm(h.wrap(exporting, id="exporting"), [export])
         handle = await agent.start("x", user="u")
         await crash_once(store, agent, handle)
         record = await handle.status()
         assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
         assert await h.worker([agent]).run_once()
-        done = await handle.result(timeout=5)
+        done = await handle.result(wait=5)
     assert done.answer == len(REPORT) and exported == [3]  # replayed, not exported again
 
 
 async def test_a_journal_larger_than_a_checkpoint_survives_a_pause() -> None:
     async with Harness(config=Settings(), runs=Bounded()) as h:
-        agent = h.wrap(reporter, id="reporter", tools=[export])
+        agent = arm(h.wrap(reporter, id="reporter"), [export])
         handle = await agent.start("x", user="u")
         worker = h.worker([agent])
         assert await worker.run_once()
-        paused = await handle.result(timeout=5)
+        paused = await handle.result(wait=5)
         assert paused.interrupt is not None
         record = await handle.status()
         assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
         await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
         assert await worker.run_once()
-        done = await handle.result(timeout=5)
+        done = await handle.result(wait=5)
     assert done.answer == f"{len(REPORT)} yes" and exported == [3]
 
     async with Harness(config=Settings(), runs=Bounded()) as h:  # resumed in its own process
-        agent = h.wrap(reporter, id="reporter", tools=[export])
+        agent = arm(h.wrap(reporter, id="reporter"), [export])
         asked = await agent.run("x", user="u")
         assert asked.interrupt is not None
         done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="no", reviewer="u")
@@ -285,7 +286,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_pause() -> None:
 async def test_a_journal_whose_artifact_is_gone_leaves_the_run_waiting(harness: Harness) -> None:
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = harness.wrap(reporter, id="reporter", tools=[export])
+    agent = arm(harness.wrap(reporter, id="reporter"), [export])
     paused = await agent.run("x", user="u")
     assert paused.interrupt is not None
     store._artifacts.clear()
@@ -317,11 +318,11 @@ async def test_a_write_running_when_its_worker_died_is_unknown_and_not_run_again
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = harness.wrap(billing, id="billing", tools=[wire])
+    agent = arm(harness.wrap(billing, id="billing"), [wire])
     handle = await agent.start("x", user="u")
     await crash_once(store, agent, handle)
     assert await harness.worker([agent]).run_once()
-    done = await handle.result(timeout=5)
+    done = await handle.result(wait=5)
     assert done.answer == (
         "wire was interrupted by a crash; it may or may not have taken effect: check before "
         "calling it again"
@@ -349,11 +350,11 @@ async def test_an_idempotent_write_runs_again_after_a_crash_with_the_same_key(
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = harness.wrap(saving, id="saving", tools=[upsert])
+    agent = arm(harness.wrap(saving, id="saving"), [upsert])
     handle = await agent.start("x", user="u")
     await crash_once(store, agent, handle)
     assert await harness.worker([agent]).run_once()
-    assert (await handle.result(timeout=5)).answer == "stored"
+    assert (await handle.result(wait=5)).answer == "stored"
     first, again = keys
     assert first is not None and first == again  # the service sees one request, twice
 
@@ -374,7 +375,7 @@ async def test_a_write_that_asks_or_fails_runs_again_on_resume(harness: Harness)
     async def poster(input: str, agent: Runtime) -> list[Any]:
         return [await agent.tools.call("post", text=t) for t in ("draft", "hi")]
 
-    agent = harness.wrap(poster, id="poster", tools=[post])
+    agent = arm(harness.wrap(poster, id="poster"), [post])
     paused = await agent.run("x", user="u")
     assert paused.interrupt is not None
     done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")

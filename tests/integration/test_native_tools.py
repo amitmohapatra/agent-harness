@@ -21,6 +21,7 @@ from langchain_core.tools import tool as langchain_tool
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from tests.support.arm import with_governance
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
@@ -112,11 +113,11 @@ async def test_a_graphs_own_tool_is_governed_journaled_recorded_and_published(
 async def test_a_graphs_own_tools_are_narrowed_with_the_harnesss(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    from tests.integration.test_memory_pipeline import many
+    from tests.integration.test_memory_pipeline import graph_tools
 
     memory_service.candidates = ["t1", "lookup"]
     model = ScriptedChatModel(turns=["done"])
-    tools = [*await memory_harness.tools(*many(6), framework="langgraph"), refund, lookup]
+    tools = [*graph_tools(6), refund, lookup]
     graph = create_agent(model, tools=tools)
     result = await memory_harness.wrap(graph, id="narrowed").run("look o1 up", user="u")
     assert result.status is RunStatus.SUCCESS
@@ -420,7 +421,7 @@ async def test_an_mcp_servers_error_and_a_rejected_call_reach_the_model_as_error
         results.append(await governed.call_tool("find", {"order": "o1"}))
         return "ok"
 
-    async with Harness(governance=Governance(FakeCatalog({"boom": Rule("read")}))) as h:
+    async with with_governance(Harness(), Governance(FakeCatalog({"boom": Rule("read")}))) as h:
         assert (await h.wrap(call, id="mcp-errors").run("x", user="u")).status is RunStatus.SUCCESS
     broke, found = results
     assert broke.is_error and broke.content[0].text == "boom failed: it broke"  # type: ignore[union-attr]

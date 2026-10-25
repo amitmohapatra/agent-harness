@@ -35,8 +35,7 @@
 * models: with Bifrost serving the harness, the CLI's model calls go through Bifrost's
   Anthropic route with the virtual key (:func:`routed_env`; the options' own
   ``ANTHROPIC_BASE_URL`` wins), carrying the deny-all MCP scope, the run's dimensions and its
-  ``traceparent`` as ``ANTHROPIC_CUSTOM_HEADERS``; lines there that select a stored prompt the
-  run pinned (``h.model_headers(prompt=)``) select the version it pinned — the CLI reads them
+  ``traceparent`` as ``ANTHROPIC_CUSTOM_HEADERS`` beside the options' own — the CLI reads them
   as it starts, once per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``hooks`` (the governance and context
@@ -83,7 +82,7 @@ from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Bifrost
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
-from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders, selected_env
+from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
@@ -514,7 +513,7 @@ def _options(
         changes["disallowed_tools"] = narrowed
     if session is not None:
         changes["resume"] = session
-    env = routed_env(selected_env(options.env, runtime) or options.env, runtime)
+    env = routed_env(options.env, runtime)
     if env is not None:
         changes["env"] = env
     return dataclasses.replace(options, **changes)
@@ -586,7 +585,13 @@ def _governance(own: Any, steps: Steps) -> Any:
         if name.startswith(f"mcp__{SERVER}__"):
             steps.started(call_id, name, args)  # the bridge records it
             return _decided("allow")
-        side_effects = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+        # its risk as the run's tool set has it (an in-process server's tool: its annotations)
+        known = runtime.native.get(name)
+        side_effects = (
+            known.side_effects
+            if known is not None
+            else BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+        )
         try:
             decided = await bridge.permitted(ToolSpec(name=name, side_effects=side_effects), args)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
@@ -632,7 +637,7 @@ def _recorded(steps: Steps) -> Any:
             output=given.get("error") if failed else _result_text(given.get("tool_response")),
             error_class="ClaudeToolError" if failed else None,
         )
-        spec = native_spec(name)
+        spec = steps.runtime.native.get(name) or native_spec(name)
         helpers = steps.runtime.helpers
         assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
         # a call a subagent made (the CLI names it: ``agent_type``) is recorded under its run

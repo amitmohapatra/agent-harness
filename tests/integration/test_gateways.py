@@ -107,7 +107,7 @@ async def test_a_name_through_a_provider_key(monkeypatch: pytest.MonkeyPatch) ->
     route = respx.post("http://litellm.test/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=REPLY)
     )
-    graph = ReAct(system="s", model="openai/gpt-x", context_window=50_000)
+    graph = ReAct(system_prompt="s", model="openai/gpt-x", context_window=50_000)
     async with Harness(config=Settings()) as h:
         assert h.model_gateway.kind is GatewayKind.PROVIDER_KEY
         result = await h.wrap(graph, id="direct").run("x", user="u")
@@ -132,7 +132,7 @@ async def test_the_settings_given_in_code_route_over_the_environment(
     respx.post("http://gw.test/mcp").mock(
         return_value=httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
     )
-    graph = ReAct(system="s", model="gpt-x", context_window=50_000)
+    graph = ReAct(system_prompt="s", model="gpt-x", context_window=50_000)
     with caplog.at_level(logging.INFO, logger="trellis.harness"):
         async with Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key="vk")) as h:
             assert (await h.wrap(graph, id="coded").run("x", user="u")).answer == "hi"
@@ -227,7 +227,7 @@ async def test_a_run_config_with_its_own_provider_or_a_model_object_is_kept(
 async def test_a_langchain_model_object_is_said_once_as_not_routed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    graph = ReAct(system="s", model=ScriptedChat(["one", "two"]))
+    graph = ReAct(system_prompt="s", model=ScriptedChat(["one", "two"]))
     async with Harness(config=Settings(bifrost_url=URL), gateway=FakeGateway().gateway()) as h:
         agent = h.wrap(graph, id="objects")
         with caplog.at_level(logging.WARNING, logger="trellis.harness"):
@@ -258,6 +258,22 @@ def test_claude_is_routed_through_bifrosts_anthropic_route() -> None:
     own = routed_env({"ANTHROPIC_BASE_URL": "http://bf/anthropic"}, _claude_runtime(bifrost))
     assert own is not None and "ANTHROPIC_API_KEY" not in own  # their key, from their env
     assert routed_env({}, _claude_runtime(ProviderKey())) is None  # the CLI's own key
+
+
+async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> None:
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from tests.support.adapters import CLI
+
+    record = tmp_path / "cli.json"
+    env = {"FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]), "FAKE_CLAUDE_RECORD": str(record)}
+    settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
+    async with Harness(config=settings, gateway=FakeGateway().gateway()) as h:
+        agent = h.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="claude")
+        assert (await agent.run("x", user="ada")).answer == "ok"
+    sent = json.loads(record.read_text())["custom_headers"].splitlines()
+    # Bifrost's own headers, routed automatically: the deny-all MCP scope, whose run it is
+    assert "x-bf-mcp-include-tools: " in sent and "x-bf-dim-agent: claude" in sent
 
 
 @respx.mock

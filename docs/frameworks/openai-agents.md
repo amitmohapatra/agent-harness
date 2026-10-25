@@ -1,15 +1,14 @@
 # OpenAI Agents SDK
 
 An `agents.Agent` is a target. The harness runs it with the SDK's own `Runner`, on a copy of
-your agent that also carries the harness tools; your agent object is never changed.
+your agent that also carries the harness's tools (the gateway's MCP tools, memory's); your agent
+object is never changed.
 
-**Install:** `pip install 'trellis-harness[openai-agents]'`. Your model is your own:
-`OpenAIChatCompletionsModel(model=..., openai_client=AsyncOpenAI(base_url=BIFROST_URL,
-default_headers=await h.model_headers(), ...))` to go through Bifrost (the headers keep the
-gateway from adding its MCP tools to the model's requests; `h.model_headers(prompt="triage")`
-also selects a stored prompt, the version each run pinned at its start, read by the client at
-every request: [gateway.md](../gateway.md#prompts)). `agents.set_tracing_disabled(True)` keeps the SDK's own tracing (which goes to
-OpenAI) off; the harness traces through OpenTelemetry.
+**Install:** `pip install 'trellis-harness[openai-agents]'`. A model name (or the SDK's
+default) goes through Bifrost when `BIFROST_URL` is set (`RunConfig.model_provider`, unless the
+run's own `run_config` names one), else to its provider with its own key
+([configuration.md](../configuration.md#models)). `agents.set_tracing_disabled(True)` keeps the
+SDK's own tracing (which goes to OpenAI) off; the harness traces through OpenTelemetry.
 
 This page is Way 1: the harness runs the agent. To keep calling `Runner.run` yourself and plug
 in the blocks (memory, `needs_approval` from governance, the `RunState` as the run's
@@ -19,50 +18,44 @@ checkpoint in agent-runs, a judge), see the Way 2 recipe:
 ## Using an existing OpenAI Agents project
 
 ```python
-from agents import Agent
-from trellis import Harness, tool
+from agents import Agent, function_tool
+from trellis import Harness
 
 h = Harness()
 
 
-@tool(side_effects="irreversible")
+@function_tool
 def create_po(supplier: str, amount: float) -> str:
-    """Create a purchase order."""
+    """Create a purchase order."""  # the catalog says it is irreversible: a person approves
     ...
 
 
-buyer = Agent(name="buyer", instructions="You create purchase orders.", model=model)
-agent = h.wrap(buyer, id="buyer", tools=[create_po])  # was: Runner.run(buyer, ...)
+buyer = Agent(
+    name="buyer", instructions="You create purchase orders.", model=model, tools=[create_po]
+)
+agent = h.wrap(buyer, id="buyer")  # was: Runner.run(buyer, ...)
 
 result = await agent.run("Order 12000 EUR of steel from ACME.", user="ada")
 if result.interrupt:  # create_po asks a person
     result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="cfo")
 ```
 
-`tools=[...]` on `wrap` are added next to the agent's own `tools` for each run (with the MCP
-tools the virtual key allows and, memory on, the memory tools). Your own `function_tool`s keep
-working and are left untouched; they are not governed, journaled or recorded by the harness.
+Your own `function_tool`s are governed as the SDK calls them — the catalog's risk and rules
+(an administrator's, in the memory service; without it, a write), approvals, the journal, the
+records — and each run's copy also carries the MCP tools the virtual key allows and, memory on,
+the memory tools.
 
-**Handoffs.** `wrap(tools=...)` reaches the agent you wrap. Every agent reachable through its
-`handoffs` (recursively, cycles included) runs as a copy whose own tools are governed like the
-wrapped agent's — hooks, the catalog's rules, the journal; your agents are not changed. A
-`Handoff` object (`handoff(agent, ...)`) hides its agent until it is invoked, so that agent's
-tools are not governed (said once at the first run): hand off to the `Agent` itself. A
-specialist that needs harness tools gets them when it is built:
+**Handoffs.** Every agent reachable through its `handoffs` (recursively, cycles included) runs
+as a copy whose own tools are governed like the wrapped agent's — hooks, the catalog's rules,
+the journal — and that has the memory tools; your agents are not changed. A `Handoff` object
+(`handoff(agent, ...)`) hides its agent until it is invoked, so that agent's tools are not
+governed (said once at the first run): hand off to the `Agent` itself.
 
 ```python
-refunds = Agent(
-    name="refunds",
-    instructions="You refund orders.",
-    model=model,
-    tools=await h.tools(refund, framework="openai_agents"),  # FunctionTools, still the harness's
-)
+refunds = Agent(name="refunds", instructions="You refund orders.", model=model, tools=[refund])
 triage = Agent(name="triage", instructions="Route requests.", model=model, handoffs=[refunds])
 agent = h.wrap(triage, id="support")
 ```
-
-Their calls go through the harness like any other — governed by the catalog as it is at each
-call, approvals, journal, records.
 
 **Arguments that are not JSON.** The SDK hands a tool the arguments as the model wrote them. A
 harness tool called with text that is not a JSON object does not run: the model reads "`<tool>`
@@ -132,14 +125,13 @@ record).
   clients) is the native choice for an agent that works on files and folders of skills. It runs
   only with `RunConfig(sandbox=SandboxRunConfig(client=...))`, which `h.wrap` does not pass:
   run it with `Runner.run` yourself and plug the blocks in
-  ([blocks/openai-agents.md](../blocks/openai-agents.md)). Under `h.wrap`, an `Agent` gets
-  `sandbox()` and `skills=[...]`: every command governed and journaled, skills from Bifrost's
-  registry pinned per run ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours),
+  ([blocks/openai-agents.md](../blocks/openai-agents.md),
+  [sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours),
   [skills.md](../skills.md#native-or-ours)).
 * **Prompts:** `Agent(prompt=Prompt(id=..., version=...))` is a prompt stored at OpenAI, for
   OpenAI's models through the Responses API; the harness passes it through untouched. For a
-  prompt from a folder, Langfuse or Bifrost, pinned per run:
-  `instructions=await h.prompt(...)` ([prompts.md](../prompts.md#native-or-ours)).
+  stored prompt of the gateway: `instructions=(await h.prompt("triage")).text`
+  ([prompts.md](../prompts.md#native-or-ours)).
 
 ## Approvals and pauses
 
@@ -162,7 +154,7 @@ also ask for it.
 
 The same as every target: `start` + `h.worker`/`python -m trellis.harness.worker` (progress saved after
 each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` as a tool,
-`h.evaluate` and online judges (`llm_judge` needs `TRELLIS_JUDGE_MODEL`). See
+`h.evaluate` and online judges (`llm_judge` asks the gateway's judge alias (or its own `model=`)). See
 [runs.md](../runs.md), [surfaces.md](../surfaces.md), [evaluation.md](../evaluation.md).
 
 ## Limits
@@ -176,10 +168,10 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 
 ## Run it
 
-* [`examples/02_way1_openai_agents/agent.py`](../../examples/02_way1_openai_agents/agent.py) — harness tools
-  added per run, an irreversible call approved.
+* [`examples/02_way1_openai_agents/agent.py`](../../examples/02_way1_openai_agents/agent.py) — the agent's
+  own tool governed, an irreversible call approved.
 * [`examples/02_way1_openai_agents/handoff.py`](../../examples/02_way1_openai_agents/handoff.py) — a handoff to a
-  specialist built with `h.tools`, its call approved.
+  specialist with its own tool, its call approved.
 * Tests: `tests/integration/test_openai_agents.py` (`needs_approval`: approve, reject with a
   reason, answer, edit), and against the real services `tests/live/test_live_matrix.py`
   (`openai-agents`).

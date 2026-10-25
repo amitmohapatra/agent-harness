@@ -1,8 +1,10 @@
 """``ReAct(...)``: a tool-calling agent for teams with no framework — LangChain's
 ``create_agent`` loop, with the native middleware a long run needs and the harness's on top.
 
-    agent = h.wrap(ReAct(system="You answer stock questions.", model="provider/model"),
-                   id="stock", tools=[quote])
+    agent = h.wrap(
+        ReAct("You answer stock questions.", "gpt-4o", tools=[quote], subagents=[research]),
+        id="stock",
+    )
 
 It returns the compiled graph (a LangGraph target: ``LangGraphAdapter`` runs it); nothing of
 the loop is the harness's. What it is built with:
@@ -15,12 +17,12 @@ the loop is the harness's. What it is built with:
   summarized and retried), Deep Agents' ``FilesystemMiddleware`` on the run's journal (a large
   tool result saved as a file, a head-and-tail preview in its place, ``read_file`` reading it),
   Deep Agents' ``PatchToolCallsMiddleware`` (a call left unanswered gets an answer), parallel
-  tool calls and ``response_format`` for ``output=``;
+  tool calls and ``response_format``;
 * **native, on when a task needs them** (``trellis.harness.automatic``) — planning and scratch
   files on a long task, on a known window with room for them;
-* **the harness's** (``trellis.harness.middleware``) — :class:`~.HarnessTools` (the run's
-  tools per model call, sorted; writes in the model's order), :class:`~.ModelHooks` (the
-  hooks, the ``chat`` span, ``model_timeout`` and the run's time left, the ``prompt`` pinned
+* **the harness's** (``trellis.harness.middleware``) — :class:`~.HarnessTools` (the run's tools
+  per model call, sorted; writes in the model's order), :class:`~.ModelHooks` (the hooks, the
+  ``chat`` span, ``call_timeout`` and the run's time left, the stored ``system_prompt`` pinned
   for the run, the gateway's attribution and trace headers), :class:`~.StepLimit`
   (``max_steps``, then one answer without tools), :class:`~.StallGuard` (``max_repeats``),
   :func:`~.read_result` (a cleared result read back, :class:`~.ReadTools` offering the read
@@ -52,10 +54,16 @@ from typing import Any, Final
 from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError
-from trellis.harness.adapters.base import MODEL_METADATA, WINDOW_METADATA, context_window
+from trellis.harness.adapters.base import (
+    MODEL_METADATA,
+    OWN_CHECKPOINTER,
+    TOOLS_ATTRIBUTE,
+    WINDOW_METADATA,
+    context_window,
+)
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.gateways import routed_chat_model
-from trellis.harness.prompts import Prompt
+from trellis.harness.prompts import Stored
 
 log = logging.getLogger("trellis.models")
 
@@ -72,38 +80,48 @@ CLEARED: Final = (
 
 
 def ReAct(
-    system: str,
+    system_prompt: str | Stored,
     model: str | Any,
     *,
-    output: type[BaseModel] | dict[str, Any] | None = None,
+    tools: Sequence[Any] = (),
+    subagents: Sequence[Any] = (),
+    response_format: type[BaseModel] | dict[str, Any] | None = None,
     max_steps: int = 12,
     max_repeats: int = 3,
-    model_timeout: float | None = None,
+    call_timeout: float | None = None,
     context_window: int | None = None,
-    prompt: str | Prompt | None = None,
-    prompt_vars: dict[str, Any] | None = None,
-    middleware: Sequence[Any] = (),
-    checkpointer: Any = None,
+    effort: str | None = None,
     tool_guidance: bool = False,
     answer_check: bool = False,
     capabilities: Mapping[str, bool] | None = None,
-    effort: str | None = None,
+    middleware: Sequence[Any] = (),
+    checkpointer: Any = None,
 ) -> Any:
-    """A ``create_agent`` graph answering with ``system`` and ``model`` (a gateway model name, or a
-    LangChain chat model), its answer an ``output`` (a pydantic model or a JSON schema) when given.
-    ``max_steps`` model calls with tools, then one without (:class:`~.StepLimit`); ``max_repeats``
-    steps repeating one call stop it (:class:`~.StallGuard`); a model call takes at most
-    ``model_timeout`` seconds; ``prompt`` is a prompt of the harness's prompt sources (``"name"``,
-    ``"name@version"``, a ``Prompt``) pinned for the run — a stored prompt of the gateway selected
-    by every call, any other rendered into the instructions (``prompt_vars`` fill its
-    ``{{variables}}``); ``middleware`` adds middleware (one named as a default is refused);
-    ``checkpointer`` replaces the run's (:class:`~.RunCheckpointer`). ``tool_guidance`` adds how to
-    choose among tools to every call's instructions (:class:`~.ToolGuidance`); ``answer_check`` has
-    the model check its answer against the request once before it is final, calling the tools still
-    needed, and the first change against the rules before it is made (:class:`~.AnswerCheck`: one
-    more model call each); ``capabilities`` tells the model what it can and cannot do beyond its
-    tools (``{"accept an image upload": False}``), so it answers such a question plainly. ``effort``
-    is the reasoning effort sent with every call of a model name (``reasoning_effort``; the gateway
+    """A ``create_agent`` graph answering with ``system_prompt`` (its instructions: a string, or
+    ``stored("name", **vars)``, a stored prompt of the gateway pinned for each run) and
+    ``model`` (a model name, routed per call — Bifrost, else the provider's own key — or a
+    LangChain chat model), its answer a ``response_format`` (a pydantic model or a JSON schema)
+    when given.
+
+    ``tools`` are what it may call: functions, ``tool(...)``, ``mcp(...)``, ``openapi(...)``,
+    ``sandbox()``, ``a2a(url)`` — run by the harness (governed, journaled, recorded) — and
+    LangChain tools, which the graph runs itself (governed as the harness's); ``subagents``
+    are agents it hands tasks to, each a tool whose call is a child run: wrapped agents
+    (``h.wrap(...)``) and ``a2a(url)``. Every run also has the MCP tools the virtual key
+    allows and the memory tools.
+
+    ``max_steps`` model calls with tools, then one without (:class:`~.StepLimit`);
+    ``max_repeats`` steps repeating one call stop it (:class:`~.StallGuard`); a model call
+    takes at most ``call_timeout`` seconds; ``middleware`` adds middleware (one named as a
+    default is refused); ``checkpointer`` is for the graph run on its own (``h.wrap`` refuses
+    it: a wrapped agent's runs checkpoint into the run, :class:`~.RunCheckpointer`).
+    ``tool_guidance`` adds how to choose among tools to every call's instructions
+    (:class:`~.ToolGuidance`); ``answer_check`` has the model check its answer against the
+    request once before it is final, calling the tools still needed, and the first change
+    against the rules before it is made (:class:`~.AnswerCheck`: one more model call each);
+    ``capabilities`` tells the model what it can and cannot do beyond its tools (``{"accept an
+    image upload": False}``), so it answers such a question plainly. ``effort`` is the
+    reasoning effort sent with every call of a model name (``reasoning_effort``; the gateway
     passes it on)."""
     try:
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
@@ -117,8 +135,8 @@ def ReAct(
         raise ConfigurationError(
             "ReAct needs the react extra: pip install 'trellis-harness[react]'"
         ) from exc
-    if model_timeout is not None and model_timeout <= 0:
-        raise ConfigurationError("model_timeout is a number of seconds over 0")
+    if call_timeout is not None and call_timeout <= 0:
+        raise ConfigurationError("call_timeout is a number of seconds over 0")
     for name, value in (("max_steps", max_steps), ("max_repeats", max_repeats)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ConfigurationError(f"{name} is a number of steps, 1 or more: not {value!r}")
@@ -177,24 +195,50 @@ def ReAct(
             else []
         ),
         ours.ModelHooks(
-            timeout=model_timeout,
-            prompt=prompt,
-            prompt_vars=prompt_vars,
+            timeout=call_timeout,
+            prompt=system_prompt if isinstance(system_prompt, Stored) else None,
             routed=isinstance(model, str),
         ),
     ]
+    own, run = _split(tools)
     graph = create_agent(
         chat,
-        tools=[ours.read_result()],
-        system_prompt=system,
+        tools=[ours.read_result(), *own],
+        system_prompt=None if isinstance(system_prompt, Stored) else system_prompt,
         middleware=stacked(defaults, middleware),
-        response_format=output,
+        response_format=response_format,
         checkpointer=checkpointer or ours.RunCheckpointer(),
         name="react",
     )
     # what the harness reads of the graph: the model's name, the window when known (the
-    # pushed memory context's budget is a share of it)
-    return graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
+    # pushed memory context's budget is a share of it), and the tools it runs for the agent
+    graph = graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
+    setattr(graph, TOOLS_ATTRIBUTE, [*run, *_subagents(subagents)])
+    setattr(graph, OWN_CHECKPOINTER, checkpointer is not None)
+    return graph
+
+
+def _split(tools: Sequence[Any]) -> tuple[list[Any], list[Any]]:
+    """``tools`` as the graph's own (LangChain tools: its tool node runs them, governed) and
+    the harness's (everything else: the run's toolbox)."""
+    from langchain_core.tools import BaseTool
+
+    own = [t for t in tools if isinstance(t, BaseTool)]
+    return own, [t for t in tools if not isinstance(t, BaseTool)]
+
+
+def _subagents(subagents: Sequence[Any]) -> list[Any]:
+    """``subagents=`` checked: wrapped agents and ``a2a(url)``, each a tool whose call is a
+    child run."""
+    from trellis.harness.agent import Agent
+    from trellis.harness.tools.sources import A2ASource
+
+    wrong = [s for s in subagents if not isinstance(s, Agent | A2ASource)]
+    if wrong:
+        raise ConfigurationError(
+            f"subagents= takes wrapped agents (h.wrap(...)) and a2a(url), not {wrong[0]!r}"
+        )
+    return list(subagents)
 
 
 #: What a default middleware of ``ReAct`` is set by, where a parameter sets it: a given one of
@@ -202,7 +246,7 @@ def ReAct(
 SET_BY: Final = {
     "StepLimit": "max_steps=",
     "StallGuard": "max_repeats=",
-    "ModelHooks": "model_timeout= and prompt= (and h.wrap(hooks=) for the hooks)",
+    "ModelHooks": "call_timeout= and system_prompt=stored(...) (and h.wrap(hooks=) for the hooks)",
     "RunCheckpointer": "checkpointer=",
     "ToolGuidance": "tool_guidance= and capabilities=",
     "AnswerCheck": "answer_check=",

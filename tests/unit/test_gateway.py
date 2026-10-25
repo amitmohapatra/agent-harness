@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from tests.support.gateway import FakeGateway, SkillVersions
+from tests.support.gateway import FakeGateway
 from trellis.contracts import ConfigurationError
 from trellis.harness import fresh
 from trellis.harness.clients import bifrost
@@ -108,36 +108,6 @@ async def test_a_completion_selects_the_prompt_and_never_the_gateways_mcp_tools(
     await gateway.aclose()
 
 
-async def test_a_skill_reads_as_served_or_as_a_version_kept_for_good() -> None:
-    fake = FakeGateway(
-        skills={
-            "sql": SkillVersions(
-                {"1.0.0": ("Old.", "v1", {}), "1.1.0": ("Reviews SQL.", "v2", {"a.md": "A"})},
-                served="1.1.0",
-            )
-        }
-    )
-    gateway = fake.gateway()
-    served = await gateway.skill("sql")
-    assert (served.version, served.body, [f.path for f in served.files]) == (
-        "1.1.0",
-        "v2",
-        ["a.md"],
-    )
-    old = await gateway.skill("sql", "1.0.0")
-    assert (old.version, old.description) == ("1.0.0", "Old.")
-    asked = fake.asked("/api/skills/s-sql")
-    assert await gateway.skill("sql", "1.0.0") == old
-    assert fake.asked("/api/skills/s-sql") == asked  # a published version never changes
-    assert await gateway.skill("sql") == served  # kept: read again after its TTL
-    assert await gateway.served("sql") == "1.1.0"  # read now, every time
-    assert await gateway.served("nope") is None
-    assert await gateway.skill_file("sql", "a.md") == b"A"
-    with pytest.raises(LookupError, match="no skill named 'nope'"):
-        await gateway.skill("nope")
-    await gateway.aclose()
-
-
 async def test_the_agent_mode_lists_of_the_mcp_clients() -> None:
     gateway = FakeGateway(auto={"erp": ["pay"], "crm": []}).gateway()
     assert await gateway.auto_executed() == {"erp": frozenset({"pay"}), "crm": frozenset()}
@@ -145,12 +115,7 @@ async def test_the_agent_mode_lists_of_the_mcp_clients() -> None:
 
 
 @respx.mock
-async def test_a_call_in_a_run_says_who_it_is_for_and_runs_through_its_virtual_mcp() -> None:
-    def rpc(request: httpx.Request) -> httpx.Response:
-        result = {"content": [{"type": "text", "text": "ada"}]}
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
-
-    bundle = respx.post(f"{GATEWAY}/mcp/finance").mock(side_effect=rpc)
+async def test_a_call_in_a_run_says_who_it_is_for() -> None:
     executed = respx.post(f"{GATEWAY}/v1/mcp/tool/execute").mock(
         return_value=httpx.Response(200, json={"role": "tool", "content": "ok"})
     )
@@ -160,18 +125,11 @@ async def test_a_call_in_a_run_says_who_it_is_for_and_runs_through_its_virtual_m
     )
     token = _current.set(run)  # type: ignore[arg-type]
     try:
-        assert await gateway.execute("ops-whoami", {}, clients=["ops"], slug="finance") == "ada"
         assert await gateway.execute("ops-whoami", {}, clients=["ops"]) == "ok"
     finally:
         _current.reset(token)
-    through, direct = bundle.calls[0].request, executed.calls[0].request
-    assert json.loads(through.content)["params"] == {"name": "ops-whoami", "arguments": {}}
-    assert "x-bf-mcp-include-clients" not in through.headers  # the bundle is the scope
+    direct = executed.calls[0].request
     assert direct.headers["x-bf-mcp-include-clients"] == "ops"
-    for request in (through, direct):
-        assert json.loads(request.headers[IDENTITY_HEADER]) == {
-            "tenant_id": "acme",
-            "user_id": "ada",
-        }
-        assert request.headers["x-bf-mcp-session-id"] == "acme:ada"
+    assert json.loads(direct.headers[IDENTITY_HEADER]) == {"tenant_id": "acme", "user_id": "ada"}
+    assert direct.headers["x-bf-mcp-session-id"] == "acme:ada"
     await gateway.aclose()

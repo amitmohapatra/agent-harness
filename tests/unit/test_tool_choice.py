@@ -17,7 +17,6 @@ from trellis import tool
 from trellis.contracts import ConfigurationError, ToolSpec
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.sandbox import sandbox
-from trellis.harness.skills import Skills
 from trellis.harness.tools.convert import claude, openai_agents
 from trellis.harness.tools.convert import langchain as lc
 from trellis.harness.tools.lint import MANY_TOOLS, MOST_TOOLS, Finding, lint
@@ -214,9 +213,8 @@ def test_too_many_tools_at_once() -> None:
 
 
 async def test_the_harness_own_tools_pass_the_check() -> None:
-    skills = await Skills(["triage"]).resolve()
     sandboxed = await sandbox().resolve()
-    assert lint([*CODE_MODE_TOOLS, *(t.spec for t in [*skills, *sandboxed])]) == []
+    assert lint([*CODE_MODE_TOOLS, *(t.spec for t in sandboxed)]) == []
 
 
 async def test_the_toolbox_logs_what_the_check_found_when_its_tools_change(

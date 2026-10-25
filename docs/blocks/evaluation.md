@@ -27,14 +27,13 @@ async with EvalServices.from_env() as services:  # Langfuse and the judge: the d
 
 | Variable | |
 |---|---|
-| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` (or `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`) | Langfuse's public API for scores, datasets and dataset runs ([Langfuse setup](../evaluation.md#langfuse-setup)); the spans are exported there too, unless your application installed its own tracer provider |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` | Langfuse's public API for scores, datasets and dataset runs ([Langfuse setup](../evaluation.md#langfuse-setup)); the spans are exported there too, unless your application installed its own tracer provider |
 | `BIFROST_URL`, `TRELLIS_JUDGE_VIRTUAL_KEY` (else `BIFROST_VIRTUAL_KEY`) | the judge's gateway |
-| `TRELLIS_JUDGE_MODEL` | the judge's model, unless a judge names its own (`llm_judge(..., model="name")`); with neither, `llm_judge` is a failure that says so (there is no agent model to fall back to) |
 
 An unset variable leaves a service out: no Langfuse means scores are `score` spans only and a
-dataset must be given as items; no judge means only `llm_judge` fails.
-`EvalServices(langfuse=, judge_gateway=, judge_model=, fallback_model=)` takes the same as
-fields; `judge_model` may also be a chat model object (anything with
+dataset must be given as items; no judge means only `llm_judge` fails. The judge's model is
+`llm_judge(model=)`, else the gateway's judge alias (there is no agent model to fall back to).
+`EvalServices(langfuse=, judge_gateway=, judge_model=, models=)` takes the same as fields; `judge_model` may also be a chat model object (anything with
 `async complete(messages, **body)`), which is how the offline examples script it.
 
 ## Offline: `evaluate`
@@ -178,7 +177,7 @@ function over a dataset and `judge` on one run, with a judge of its own and a ju
 
 `h.evaluate(agent, ...)` is `evaluate` with a wrapped agent as the target: each item runs
 through the harness's pipeline (memory, tools, governance) and is graded in its own memory
-scope. `Harness(judges=[...])` runs `judge` on a sampled share of every wrapped agent's
+scope. `h.wrap(..., judges=[...])` runs `judge` on a sampled share of that wrapped agent's
 successful runs, in the background ([evaluation.md](../evaluation.md)). The evaluators, the
 judge configuration and the sampling are the same, so a run your code judges with
 `sample=rate` is the same run the harness would judge.

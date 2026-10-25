@@ -50,8 +50,10 @@ from tests.live.proof import (
 )
 from tests.live.support import eventually, memory_scope, seed
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm, native_tools, resolved
 from trellis import Agent, Harness, ReAct, Runtime, tool
 from trellis.contracts import RunEventType, RunOutcome
+from trellis.harness.prompts import GatewayHeaders
 
 pytestmark = [pytest.mark.live, needs_gateway, needs_memory]
 
@@ -105,7 +107,7 @@ async def chat_model(h: Harness, wire: Wire) -> ChatOpenAI:
         model=MODEL,
         max_tokens=MAX_TOKENS,  # type: ignore[call-arg]
         max_retries=0,
-        default_headers=await h.model_headers(),
+        default_headers=GatewayHeaders(),
         http_async_client=wire.client(),
     )
 
@@ -115,14 +117,16 @@ Build = Callable[[Harness, str, Path], Awaitable[Built]]
 
 async def langgraph(h: Harness, wiki: str, tmp: Path) -> Built:
     wire = Wire()
-    tools = await h.tools(stock, framework="langgraph")  # + the key's MCP tool + memory tools
+    tools = await native_tools(
+        h, stock, framework="langgraph"
+    )  # + the key's MCP tool + memory tools
     graph = create_agent(await chat_model(h, wire), tools=tools, system_prompt=SYSTEM)
     return Built(graph, options={"recursion_limit": 2 * MAX_TURNS + 1}, wire=wire)
 
 
 async def deep_agent(h: Harness, wiki: str, tmp: Path) -> Built:
     wire = Wire()
-    tools = await h.tools(stock, framework="deepagents")
+    tools = await native_tools(h, stock, framework="deepagents")
     graph = create_deep_agent(model=await chat_model(h, wire), tools=tools, system_prompt=SYSTEM)
     return Built(graph, options={"recursion_limit": 2 * MAX_TURNS + 1}, wire=wire)
 
@@ -134,7 +138,7 @@ async def openai_agents(h: Harness, wiki: str, tmp: Path) -> Built:
         openai_client=AsyncOpenAI(
             base_url=BIFROST_URL,
             api_key=h.settings.bifrost_virtual_key,
-            default_headers=await h.model_headers(),
+            default_headers=GatewayHeaders(),
             http_client=wire.client(DefaultAsyncHttpxClient),
             max_retries=0,
         ),
@@ -145,7 +149,7 @@ async def openai_agents(h: Harness, wiki: str, tmp: Path) -> Built:
 
 
 async def react(h: Harness, wiki: str, tmp: Path) -> Built:
-    return Built(ReAct(system=SYSTEM, model=MODEL, max_steps=MAX_TURNS), [stock])
+    return Built(ReAct(system_prompt=SYSTEM, model=MODEL, max_steps=MAX_TURNS), [stock])
 
 
 async def function(h: Harness, wiki: str, tmp: Path) -> Built:
@@ -199,12 +203,12 @@ async def checked(h: Harness, name: str, built: Built, wiki: str, tenant: str) -
     suffix = uuid.uuid4().hex[:8]
     user, thread = f"live-user-{suffix}", f"live-thread-{suffix}"
     proof = Proof()
-    agent = h.wrap(built.target, id=f"live-{name}-{suffix}", tools=built.tools, hooks=[proof])
+    agent = arm(h.wrap(built.target, id=f"live-{name}-{suffix}", hooks=[proof]), built.tools)
     scope = await memory_scope(h, user=user, agent_id=agent.id, thread=thread)
     await seed(scope, f"The warehouse of {user} is in Berlin.", visibility="USER")
     decisions = governed(h, tenant)
     stream = agent.stream(
-        QUESTION, user=user, thread=thread, timeout=RUN_SECONDS, framework_options=built.options
+        QUESTION, user=user, thread=thread, run_timeout=RUN_SECONDS, framework_options=built.options
     )
     run = await streamed(name, stream)
     if built.wire is not None:
@@ -238,7 +242,7 @@ async def test_a_target_runs_with_memory_and_tools(
 ) -> None:
     planned = [name for name, _ in plan(deepwiki)]
     async with live_harness(wiki_key) as h:
-        tenant = await h.tenant()
+        tenant = await h._tenant()
         built = await TARGETS[framework](h, deepwiki, tmp_path)
         proven = await checked(h, framework, built, deepwiki, tenant)
         live = proven.run
@@ -258,7 +262,7 @@ async def test_a_target_runs_with_memory_and_tools(
         ok = {r["tool"] for r in run.results() if r["status"] == "ok"}
         assert set(planned) <= ok, run.results()
         # the key allows one tool of one wiki: the toolbox holds exactly that MCP tool
-        toolbox = await h.resolve(proven.agent.sources, tenant=tenant)
+        toolbox = await resolved(h, *proven.agent.sources)
         assert [t.name for t in toolbox if t.spec.source == "mcp"] == [f"{deepwiki}-{WIKI_TOOL}"]
         if framework == "claude_agent_sdk":
             started = json.loads((tmp_path / "cli.json").read_text())

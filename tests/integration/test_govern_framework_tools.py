@@ -13,6 +13,7 @@ from langchain.agents import create_agent
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 
+from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, tool
@@ -112,7 +113,7 @@ async def test_the_harness_tools_and_state_tools_go_through_as_they_are(
     )
     target = create_agent(  # type: ignore[call-overload]
         model,
-        tools=await harness.tools(wire, framework="langgraph"),
+        tools=await native_tools(harness, wire, framework="langgraph"),
         middleware=[TodoListMiddleware(), GovernTools()],  # type: ignore[list-item]
         checkpointer=InMemorySaver(),
     )

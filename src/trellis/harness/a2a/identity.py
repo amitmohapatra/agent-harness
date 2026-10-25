@@ -69,7 +69,7 @@ class HeaderIdentity:
         if not isinstance(claimed, Mapping):
             raise IdentityRefused("the platform identity header must be a JSON object")
         tenant = claimed.get("tenant_id")
-        served = self.harness.known_tenant
+        served = self.harness._known_tenant
         if tenant and tenant != served:
             raise IdentityRefused(f"tenant {tenant!r} is not served here")
         user = claimed.get("user_id")

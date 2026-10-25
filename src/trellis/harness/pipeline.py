@@ -11,7 +11,7 @@ part that knows the framework. Each attempt is one ``invoke_agent`` span in the 
 worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``serve_a2a`` and
 ``h.evaluate`` alike — from the run's record: its identity, its attempt, its version, and what
 is left of its time. The attempt works at most that (:class:`Budget`: its ``timeout`` — the
-agent's default, ``h.wrap(timeout=)``, when the run names none — less the time it already
+agent's default, ``h.wrap(run_timeout=)``, when the run names none — less the time it already
 worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.cancel``), it ends
 ``CANCELLED`` with the reason.
 """
@@ -58,6 +58,8 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.budget import BUDGET as KEPT_BUDGET
+from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
@@ -216,6 +218,7 @@ async def _attempt(
         used=set(journal.used),
         task=query_of(input),
         document_ids=record.metadata.get(DOCUMENTS),
+        budget=Spending.of(record.metadata.get(KEPT_BUDGET)) or agent.budget,
         started_at=datetime.now(UTC),
         ends_at=None if budget is None else time.monotonic() + budget.seconds,
         deadline=None if budget is None else budget.deadline,
@@ -333,7 +336,7 @@ async def _cancelled(
         settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
         identity, events = runtime.identity, runtime.events
         if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
-            await sandbox.ended(agent, journal.sandbox, identity.run_id)
+            await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
 
@@ -431,7 +434,7 @@ async def _concluded(
         assert extracted is not None
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
-        await sandbox.ended(agent, journal.sandbox, runtime.run_id)
+        await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
 
 

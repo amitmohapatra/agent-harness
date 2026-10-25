@@ -1,20 +1,21 @@
 """The variants the benchmark compares, each a ``(target, h.wrap options)`` built from the
 same instructions and model. A new cost feature lands as one more entry of :data:`VARIANTS`
-(with its ``without=`` the way to turn it off), so its saving is measured against these two.
+(its middleware left out the way to turn it off), so its saving is measured against these two.
 
 * ``baseline`` — the plain tool-calling loop, everything off: LangChain's ``create_agent``
   with only what runs the harness's tools and bounds the loop (``HarnessTools``,
   ``StallGuard``, ``StepLimit``, ``PatchToolCallsMiddleware``, ``ModelHooks``), no result
-  paging, no context editing, no summarization; ``without={"code_mode", "hints"}`` and every
-  automatic feature.
+  paging, no context editing, no summarization, no automatic feature;
+  ``without={"code_mode", "tool_search"}``.
 * ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: the features it turns
   on by itself (planning, scratch files, the ``task`` helper, tool search...), result paging
   (``FilesystemMiddleware``: a result over 80,000 characters saved, a preview sent), older
   results cleared past half the window, summarization near its end, ``ToolGuidance`` and
   ``AnswerCheck`` off, Code Mode where it applies (read-only Code Mode MCP servers of the
   gateway; this benchmark's catalogues are the harness's own tools, so it does not).
-* ``main-<feature>`` — ``main`` run ``without={feature}`` for each feature it turns on by
-  itself (:data:`AUTOMATIC`); ``main@8k`` — ``main`` on an 8,192-token window;
+* ``main-<feature>`` — ``main`` without each feature it turns on by itself
+  (:data:`AUTOMATIC`: its middleware left out); ``main@8k`` — ``main`` on an 8,192-token
+  window;
 * ``main-<piece>`` — ``main`` with one of its pieces off (:data:`PIECES`: ``paging``,
   ``context_editing``, ``summarization``), so each piece is measured on its own: the default
   middleware of that name left out (``react.defaults_off``).
@@ -41,6 +42,8 @@ class Setup:
     model: Any  # a gateway model name, or a LangChain chat model
     window: int | None
     max_steps: int
+    #: the harness tools every variant runs (a ``ReAct``'s ``tools=``)
+    tools: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,7 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
     from langchain.agents import create_agent
 
     from trellis.harness import middleware as ours
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
     from trellis.harness.gateways import routed_chat_model
 
     graph = create_agent(
@@ -71,24 +75,22 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
         checkpointer=ours.RunCheckpointer(),
         name="baseline",
     )
-    return graph, {"without": {"code_mode", "tool_search", *AUTOMATIC}}
+    setattr(graph, TOOLS_ATTRIBUTE, list(setup.tools))  # run by HarnessTools, as ReAct's are
+    return graph, {"without": {"code_mode", "tool_search"}}
 
 
 def main(
-    setup: Setup,
-    *,
-    off: tuple[str, ...] = (),
-    without: tuple[str, ...] = (),
-    window: int | None = None,
+    setup: Setup, *, off: tuple[str, ...] = (), window: int | None = None
 ) -> tuple[Any, dict[str, Any]]:
-    with defaults_off(*(PIECES[piece] for piece in off)):
+    with defaults_off(*({**PIECES, **AUTOMATIC}[name] for name in off)):
         target = ReAct(
             setup.system,
             setup.model,
             max_steps=setup.max_steps,
             context_window=window or setup.window,
+            tools=setup.tools,
         )
-    return target, {"without": set(without)} if without else {}
+    return target, {}
 
 
 #: ``main``'s pieces a ``main-<piece>`` variant turns off, by the name of their middleware.
@@ -99,10 +101,9 @@ PIECES: Final = {
 }
 
 
-#: The features ``ReAct`` turns on by itself (``trellis.harness.automatic``): a
-#: ``main-<feature>`` variant is ``main`` run ``without={feature}``, and ``baseline`` is
-#: without them all.
-AUTOMATIC: Final = ("planning", "files")
+#: The features ``ReAct`` turns on by itself (``trellis.harness.automatic``), by the name of
+#: their middleware: a ``main-<feature>`` variant is ``main`` with it left out.
+AUTOMATIC: Final = {"planning": "TodoListMiddleware", "files": "ScratchFiles"}
 #: The window ``main@8k`` assumes whatever the model's: a small local model's.
 SMALL_WINDOW: Final = 8_192
 
@@ -126,7 +127,7 @@ VARIANTS: Final[dict[str, Variant]] = {
         f"main-{feature}": Variant(
             f"main-{feature}",
             f"main without {feature}",
-            functools.partial(main, without=(feature,)),
+            functools.partial(main, off=(feature,)),
         )
         for feature in AUTOMATIC
     },

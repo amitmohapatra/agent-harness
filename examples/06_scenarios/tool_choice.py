@@ -178,7 +178,7 @@ def style_stock(style: str) -> Any:
     return {"style": style, "units": held[style]} if style in held else f"style {style} not found"
 
 
-@tool(side_effects="read", timeout=2)
+@tool(side_effects="read", call_timeout=2)
 async def transfer_status(transfer: str) -> str:
     """Where a stock transfer between stores is: packed, in transit or received.
 
@@ -480,8 +480,10 @@ async def main() -> None:
         ]
     )
     async with Harness() as h:
-        target = ReAct(SYSTEM, model, tool_guidance=True, answer_check=True, max_steps=6)
-        agent = h.wrap(target, id="store-ops", tools=TOOLS, without={"mcp"})
+        target = ReAct(
+            SYSTEM, model, tool_guidance=True, answer_check=True, max_steps=6, tools=TOOLS
+        )
+        agent = h.wrap(target, id="store-ops", without={"mcp"})
         report = await h.evaluate(
             agent, DATASET, EVALUATORS, run_name="tool-choice-offline", concurrency=1
         )

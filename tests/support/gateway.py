@@ -6,12 +6,9 @@ the harness calls, answered in the shapes the running gateway answers with.
   calls, and a ``ReAct`` gateway model's once :meth:`FakeGateway.serve_models` routes them;
 * ``/api/prompt-repo/prompts`` and ``/api/prompt-repo/prompts/{id}/versions`` —
   :attr:`FakeGateway.prompts`, by name: each a list of committed versions (their messages);
-* ``/api/skills``, ``/api/skills/{id}``, ``/api/skills/serve/{name}/files/{path}`` —
-  :attr:`FakeGateway.skills`, by name: the versions (description, body, files) and the one
-  served;
 * ``/api/mcp/clients`` — :attr:`FakeGateway.auto`, each client's ``tools_to_auto_execute``;
-* ``/mcp`` and ``/mcp/{slug}`` — :attr:`FakeGateway.bundles`, the tools listed (``""``: the
-  key's whole reach), and a ``tools/call`` answered with the tool's name and arguments.
+* ``/mcp`` — :attr:`FakeGateway.tools`, the tools the key reaches, and a ``tools/call``
+  answered with the tool's name and arguments.
 
 A request to a path ``down`` starts with fails as a gateway that cannot be reached (``"/"``:
 every request).
@@ -36,21 +33,11 @@ URL = "http://gw.test/v1"
 
 
 @dataclass
-class SkillVersions:
-    """One skill: each version's description, body and files (path -> text), and the one
-    served."""
-
-    versions: dict[str, tuple[str, str, dict[str, str]]]
-    served: str
-
-
-@dataclass
 class FakeGateway:
     turns: list[Turn] = field(default_factory=list)
     prompts: dict[str, list[list[dict[str, Any]]]] = field(default_factory=dict)
-    skills: dict[str, SkillVersions] = field(default_factory=dict)
     auto: dict[str, list[str]] = field(default_factory=dict)
-    bundles: dict[str, list[str]] = field(default_factory=dict)
+    tools: list[str] = field(default_factory=list)
     down: tuple[str, ...] = ()
     completions: list[httpx.Request] = field(default_factory=list)
     requests: list[httpx.Request] = field(default_factory=list)
@@ -130,38 +117,20 @@ class FakeGateway:
         if path == "/v1/chat/completions":
             self.completions.append(request)
             return self.chat.script.handle(request)
-        if path.startswith("/mcp"):
-            return self._rpc(
-                path.removeprefix("/mcp").removeprefix("/"), json.loads(request.content)
-            )
+        if path == "/mcp":
+            return self._rpc(json.loads(request.content))
         if path == "/api/prompt-repo/prompts":
             return httpx.Response(200, json={"prompts": [self._prompt(n) for n in self.prompts]})
         if path.startswith("/api/prompt-repo/prompts/p-"):
             name = path.removeprefix("/api/prompt-repo/prompts/p-").removesuffix("/versions")
             rows = [self._version(name, n) for n in range(1, len(self.prompts[name]) + 1)]
             return httpx.Response(200, json={"versions": rows})
-        if path == "/api/mcp/clients":
-            return httpx.Response(200, json={"clients": self._clients(), "count": len(self.auto)})
-        return self._skills(path, request)
+        assert path == "/api/mcp/clients", path
+        return httpx.Response(200, json={"clients": self._clients(), "count": len(self.auto)})
 
-    def _skills(self, path: str, request: httpx.Request) -> httpx.Response:
-        if path.startswith("/api/skills/serve/"):
-            name, _, file = path.removeprefix("/api/skills/serve/").partition("/files/")
-            skill = self.skills[name]
-            return httpx.Response(200, content=skill.versions[skill.served][2][file].encode())
-        if path == "/api/skills":
-            search = request.url.params.get("search", "")
-            found = [self._skill(n) | {"skill_md_body": ""} for n in self.skills if search in n]
-            return httpx.Response(200, json={"skills": found})
-        name = path.removeprefix("/api/skills/").removeprefix("s-")
-        version = request.url.params.get("version")
-        if name not in self.skills or version not in (None, *self.skills[name].versions):
-            return httpx.Response(404, json={"error": {"message": "not found"}})
-        return httpx.Response(200, json={"skill": self._skill(name, version)})
-
-    def _rpc(self, slug: str, message: dict[str, Any]) -> httpx.Response:
+    def _rpc(self, message: dict[str, Any]) -> httpx.Response:
         if message["method"] == "tools/list":
-            names = self.bundles.get(slug, [])
+            names = self.tools
             result: dict[str, Any] = {"tools": [{"name": n, "inputSchema": {}} for n in names]}
         else:
             text = json.dumps(message["params"])
@@ -184,22 +153,6 @@ class FakeGateway:
             "messages": rows,
             "provider": "local",
             "model": "small",
-        }
-
-    def _skill(self, name: str, version: str | None = None) -> dict[str, Any]:
-        skill = self.skills[name]
-        chosen = version or skill.served
-        description, body, files = skill.versions[chosen]
-        return {
-            "id": f"s-{name}",
-            "name": name,
-            "description": description,
-            "skill_md_body": body,
-            "latest_version": chosen,
-            "files": [
-                {"path": p, "source_type": "text", "file_size_bytes": len(t)}
-                for p, t in files.items()
-            ],
         }
 
     def _clients(self) -> list[dict[str, Any]]:

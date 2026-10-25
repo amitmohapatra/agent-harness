@@ -13,6 +13,7 @@ from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnCon
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
+from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, tool
 from trellis.contracts import ConfigurationError, InterruptReason, RunStatus
@@ -37,7 +38,7 @@ async def mailer(
 ) -> Any:
     graph = create_agent(
         model,
-        tools=await harness.tools(email, framework="langgraph"),
+        tools=await native_tools(harness, email, framework="langgraph"),
         middleware=[HumanInTheLoopMiddleware(interrupt_on={"email": review or True})],
         checkpointer=InMemorySaver(),
     )
@@ -200,7 +201,7 @@ async def test_a_deep_agent_interrupt_on_is_answered_with_harness_decisions(
     )
     graph = create_deep_agent(
         model=model,
-        tools=await harness.tools(email, framework="deepagents"),
+        tools=await native_tools(harness, email, framework="deepagents"),
         system_prompt="You send emails.",
         interrupt_on={"email": True},
         checkpointer=InMemorySaver(),

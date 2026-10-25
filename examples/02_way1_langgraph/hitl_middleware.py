@@ -3,8 +3,7 @@ pauses before ``send_email``; the harness records that pause as an approval in t
 and answers it with the middleware's own decisions — here an edit (the email goes out with the
 reviewer's text), then a reject with a reason the model reads.
 
-The gated tool is ``side_effects="write"``: the middleware asks, so the harness does not ask
-again.
+The gated tool is the graph's own: the middleware asks, so the harness does not ask again.
 
     python -m examples.02_way1_langgraph.hitl_middleware
 """
@@ -16,14 +15,15 @@ import asyncio
 from examples._support.offline import langchain_model
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 
-from trellis import Harness, tool
+from trellis import Harness
 
 outbox: list[str] = []
 
 
-@tool(side_effects="write")
+@tool
 def send_email(to: str, body: str) -> str:
     """Send an email."""
     outbox.append(f"{to}: {body}")
@@ -36,7 +36,7 @@ async def main() -> None:
         model = langchain_model([draft, "Sent.", draft, "Not sent: the order is on hold."])
         graph = create_agent(
             model,
-            tools=await h.tools(send_email, framework="langgraph"),
+            tools=[send_email],
             middleware=[HumanInTheLoopMiddleware(interrupt_on={"send_email": True})],
             checkpointer=InMemorySaver(),  # a middleware pause resumes from the checkpoint
         )

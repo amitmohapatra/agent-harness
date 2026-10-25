@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import RunStatus
@@ -43,7 +44,7 @@ async def test_each_decision_on_a_tool_call_is_feedback_once_with_a_fixed_id(
     answer: Any,
     verdict: str,
 ) -> None:
-    agent = memory_harness.wrap(_wipes, id="ops", tools=[wipe])
+    agent = arm(memory_harness.wrap(_wipes, id="ops"), [wipe])
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
     await agent.resume(paused.interrupt.interrupt_id, decision, answer=answer, reviewer="boss")
@@ -80,7 +81,7 @@ async def test_an_answer_or_a_cancel_judges_no_tool_call(
 async def test_a_cancelled_tool_call_is_not_feedback(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    agent = memory_harness.wrap(_wipes, id="ops", tools=[wipe])
+    agent = arm(memory_harness.wrap(_wipes, id="ops"), [wipe])
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
     result = await agent.resume(paused.interrupt.interrupt_id, "cancel", reviewer="boss")
@@ -94,7 +95,7 @@ async def test_a_resume_the_run_store_refuses_sends_no_feedback(
 ) -> None:
     """Another reviewer answered first: the store refuses this one, and the memory service
     must not learn from a decision that never took effect."""
-    agent = memory_harness.wrap(_wipes, id="ops", tools=[wipe])
+    agent = arm(memory_harness.wrap(_wipes, id="ops"), [wipe])
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
 
@@ -114,7 +115,7 @@ async def test_a_resume_the_run_store_refuses_sends_no_feedback(
 async def test_a_second_answer_to_the_same_pause_sends_nothing_more(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    agent = memory_harness.wrap(_wipes, id="ops", tools=[wipe])
+    agent = arm(memory_harness.wrap(_wipes, id="ops"), [wipe])
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
     await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="boss")
@@ -130,7 +131,7 @@ async def test_a_brief_memory_outage_is_retried_and_counted_once(
 ) -> None:
     memory_service.fail_times["feedback"] = 2
     async with Harness(config=Settings(), memory=memory_service.client(max_retries=3)) as h:
-        agent = h.wrap(_wipes, id="ops", tools=[wipe])
+        agent = arm(h.wrap(_wipes, id="ops"), [wipe])
         paused = await agent.run("wipe d1", user="u")
         assert paused.interrupt is not None
         await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
@@ -145,7 +146,7 @@ async def test_a_lasting_memory_outage_is_reported_and_the_run_still_continues(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     memory_service.fail.add("feedback")
-    agent = memory_harness.wrap(_wipes, id="ops", tools=[wipe])
+    agent = arm(memory_harness.wrap(_wipes, id="ops"), [wipe])
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
     result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")

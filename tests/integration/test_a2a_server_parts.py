@@ -41,6 +41,7 @@ from tests.integration.test_a2a_server import (
     task_id_of,
 )
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.planned import Call
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import (
@@ -103,7 +104,7 @@ async def test_the_identity_header_names_the_user_of_the_keys_tenant(
     resolve = HeaderIdentity(harness)
     with pytest.raises(IdentityRefused, match="not served here"):
         resolve(call_context("u1"))  # the key not asked yet: no tenant is served
-    await harness.key()
+    await harness._key_info()
     assert resolve(call_context("u1")) == "u1"
     with caplog.at_level(logging.WARNING, logger="trellis.a2a"):
         assert resolve(call_context(None)) == ANONYMOUS
@@ -125,7 +126,7 @@ async def test_the_identity_header_names_the_user_of_the_keys_tenant(
 )
 async def test_an_identity_header_it_cannot_act_on_is_refused(raw: str, reason: str) -> None:
     harness = Harness(config=Settings())
-    await harness.key()
+    await harness._key_info()
     with pytest.raises(IdentityRefused, match=reason):
         HeaderIdentity(harness)(call_context(raw=raw))
     await harness.aclose()
@@ -409,10 +410,10 @@ async def executor(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[RunEx
     # task's run does not wait for it
     monkeypatch.setattr(tasks_module, "OPEN_SECONDS", 0)
     harness = Harness(config=Settings())
-    await harness.key()  # what execute() asks first: the tenant the header is checked against
+    await harness._key_info()  # what execute() asks first: the tenant the header is checked against
     agent = harness.wrap(waiter, id="waiter")
     resolve = HeaderIdentity(harness)
-    tasks = RunTaskStore(harness.runs, agent_id="waiter", user_of=resolve, tenant=harness.tenant)
+    tasks = RunTaskStore(harness.runs, agent_id="waiter", user_of=resolve, tenant=harness._tenant)
     yield RunExecutor(agent, resolve, tasks), agent
     await harness.aclose()
 
@@ -613,7 +614,7 @@ async def test_tasks_cancel_stops_a_working_run_on_every_adapter(
     plan: list[Call] = [("wait", {"seconds": 30})]
     target, tools = await BUILDERS[framework](harness, [wait], tmp_path, plan)
     app = FastAPI()
-    harness.wrap(target, id="greeter", tools=tools).serve_a2a(app, URL)
+    arm(harness.wrap(target, id="greeter"), tools).serve_a2a(app, URL)
     async with asgi(app) as http:
         client = await connect(http)
         sent = asyncio.create_task(send(client, "wait"))

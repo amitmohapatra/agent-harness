@@ -200,7 +200,7 @@ class _Surface:
         """Start the run (or its resume) in the background; its buffer, and the number of
         the last event the caller already has."""
         agent = self.agent
-        tenant = await agent.harness.tenant()
+        tenant = await agent.harness._tenant()
         if body.resume:
             return await self._resume(body, body.resume[-1], user, tenant)
         if body.run_id and (safe_id(body.run_id) != body.run_id or self.hub.get(body.run_id)):
@@ -252,7 +252,7 @@ class _Surface:
         """Cancel the user's own run of this agent: 404 for anyone else's, 409 once it ended."""
         user = await self.user(request)
         agent = self.agent
-        tenant = await agent.harness.tenant()
+        tenant = await agent.harness._tenant()
         record = await agent.harness.runs.get(run_id, tenant=tenant)
         if record is None or record.agent_id != agent.id or record.user_id != user:
             raise HTTPException(404, f"no run {run_id}")
@@ -265,7 +265,7 @@ class _Surface:
     async def artifact(self, request: Request, run_id: str, artifact_id: str) -> Response:
         await self.user(request)
         agent = self.agent
-        tenant = await agent.harness.tenant()
+        tenant = await agent.harness._tenant()
         record = await agent.harness.runs.get(run_id, tenant=tenant)
         awaiting = record.awaiting if record is not None else None
         ref = awaiting.payload_ref if awaiting is not None else None
@@ -289,7 +289,7 @@ class _Surface:
         store = event_log(agent.harness.runs)
         if store is None:
             raise HTTPException(404, f"no run {run_id} here")
-        tenant = await agent.harness.tenant()
+        tenant = await agent.harness._tenant()
         record = await agent.harness.runs.get(run_id, tenant=tenant)
         if record is None or record.agent_id != agent.id or record.user_id != user:
             raise HTTPException(404, f"no run {run_id}")

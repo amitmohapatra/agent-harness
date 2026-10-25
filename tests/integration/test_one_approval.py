@@ -15,6 +15,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 
+from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.openai_model import ScriptedModel
 from trellis import Deny, Harness, Hooks, Settings, tool
@@ -48,7 +49,7 @@ async def gated(
 ) -> Any:
     return create_agent(
         model,
-        tools=await h.tools(*tools, framework="langgraph"),
+        tools=await native_tools(h, *tools, framework="langgraph"),
         middleware=[HumanInTheLoopMiddleware(interrupt_on=dict.fromkeys(gate, True))],
         checkpointer=saver or InMemorySaver(),
     )
@@ -123,7 +124,7 @@ async def test_a_resume_in_another_process_still_asks_once() -> None:
 
 
 async def test_an_sdk_approval_counts_for_governance(harness: Harness) -> None:
-    tools = await harness.tools(wire, framework="openai_agents")
+    tools = await native_tools(harness, wire, framework="openai_agents")
     wired = next(t for t in tools if t.name == "wire")
     model = ScriptedModel([("wire", {"to": "ada", "amount": 5}), "wired"])
     target = Agent(name="s", model=model, tools=[dataclasses.replace(wired, needs_approval=True)])

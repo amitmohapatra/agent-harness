@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.live.conftest import live_harness
+from tests.support.arm import arm
 from trellis import Runtime, tool
 
 SUFFIX = os.environ.get("TRELLIS_LIVE_SUFFIX", "local")
@@ -46,5 +47,5 @@ async def briefing(input: str, agent: Runtime) -> str:
     return f"briefing for {agent.user}: {input}"
 
 
-h.wrap(billing, id=f"live-billing-{SUFFIX}", tools=[charge])
+arm(h.wrap(billing, id=f"live-billing-{SUFFIX}"), [charge])
 h.wrap(briefing, id=f"live-briefing-{SUFFIX}")

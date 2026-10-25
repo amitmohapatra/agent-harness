@@ -94,7 +94,7 @@ governance decides as for any tool.
 customer id in the arguments: the catalog (`approve_when`), set once for every framework and
 process. With memory off there is no catalog, and the tools' own declared risk decides.
 
-**Where.** `h.wrap(..., hooks=[...])` or `Harness(hooks=[...])`, every adapter (the bridge) and
+**Where.** `h.wrap(..., hooks=[...])`, every adapter (the bridge) and
 `ReAct`; Way 2: `governed(fn, gov, ..., hooks=[...])`, whose `on_ask(decision)` gets the
 decision with the `Ask`'s `assignee`, `component` and `props`.
 
@@ -124,7 +124,9 @@ class FinanceReviews(Hooks):
 def refund(order: str, amount: int) -> str: ...
 
 
-agent = h.wrap(target, id="refunds", tools=[refund], hooks=[FinanceReviews()])
+agent = h.wrap(
+    ReAct(system_prompt=..., model=..., tools=[refund]), id="refunds", hooks=[FinanceReviews()]
+)
 ```
 
 A hook asks; it never approves a call governance asks about: an `irreversible` tool, or one
@@ -249,7 +251,7 @@ class Telling(Hooks):
             await page(result.interrupt.assignee, result.interrupt.question, run.run_id)
 
 
-h = Harness(hooks=[Telling()])
+agent = h.wrap(target, id="support", hooks=[Telling()])
 ```
 
 **Automatic.** agent-runs writes the delivery with the pause (one transaction) and its ticker

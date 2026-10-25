@@ -1,96 +1,80 @@
-"""Prompts, from wherever a team keeps them, for any framework: ``h.prompt("triage@3", **vars)``.
+"""Stored prompts: the gateway's Prompt Repository (Bifrost) is where a team keeps its prompts
+— versioned, edited without a redeploy — and the one place the harness reads them from.
 
-    h = Harness(prompts=[prompts_dir("prompts"), Prompt("greet", "Greet {{name}}.")])
-    agent = h.wrap(ReAct(system="", model=model, prompt="triage", prompt_vars={"team": "EU"}),
-                   id="triage")
-    instructions = await h.prompt("triage@3", team="EU")      # LangGraph, OpenAI Agents, ...
+    agent = h.wrap(ReAct(system_prompt=stored("triage", team="EU"), model="gpt-4o"), id="triage")
+    prompt = await h.prompt("triage@3", team="EU")       # any framework: .text, .messages
 
-A source answers ``resolve(name, version) -> ResolvedPrompt`` (:class:`PromptSource`): the text
-— or the chat messages — with ``{{var}}`` placeholders, the version it is, the source it came
-from and its config. ``version=None`` is the version the source serves now. Shipped:
-
-* code — :class:`Prompt` (``Prompt("greet", "Greet {{name}}.", version="1")``);
-* files — :func:`prompts_dir`: ``<name>.md`` (a ``support/triage.md`` is ``support/triage``),
-  its optional front matter a ``version`` (else the file's content digest), a ``description``
-  and any config;
-* Langfuse — :class:`LangfusePrompts`, Langfuse's prompt management (its public API: a version
-  by number, a label by name, ``production`` by default; text and chat prompts), reached with
-  ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` at ``LANGFUSE_HOST``;
-* Bifrost — :class:`BifrostPrompts`, the gateway's Prompt Repository (``BIFROST_URL``): where
-  the harness sets the model call's headers (``ReAct``, the LLM judge) the stored prompt is
-  *selected* — the gateway prepends it — and elsewhere its messages are its text.
-
-Where a name is looked up (:class:`PromptSources`): the sources the code passes
-(``Harness(prompts=[...])``, ``[]`` for none) in their order, instead of the environment's;
-not passed, ``PROMPTS_DIR``, then Langfuse (its keys set), then Bifrost (``BIFROST_URL`` set).
-The first that has it answers; a :class:`Prompt` given where a prompt is named is its own. A
-name none has is a ``ConfigurationError`` naming each source tried. Inside a run what was
-resolved is pinned — journaled, so a resumed run reads the same text even after the source
-changed — and said: a ``prompt`` event, and the ``trellis.prompt`` attribute of the span
-current then.
-
-A remote source keeps what it read (``repository.Kept``): while Langfuse cannot be reached the
-last copy read stands; a prompt never read is an error that says so.
+``"name"`` is the version the gateway serves now, ``"name@3"`` committed version 3
+(:func:`~trellis.harness.repository.pinned`). Inside a run what was resolved is pinned —
+journaled, so a resumed run reads the same version even after the prompt changed — and said: a
+``prompt`` event, and the ``trellis.prompt.*`` attributes of the span current then. A stored
+prompt with no ``{{variables}}`` to fill is *selected* by a ``ReAct`` model call through
+Bifrost (its headers: the gateway prepends it); one with variables, or off Bifrost, is rendered
+into the instructions. A prompt in code is a string.
 """
 
 from __future__ import annotations
 
-import asyncio
-import os
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final
 
 from bifrost_sdk import NO_GATEWAY_TOOLS
-from bifrost_sdk.headers import PROMPT_ID
 
-from trellis.contracts import ConfigurationError, HarnessError
+from trellis.contracts import ConfigurationError
 from trellis.harness import telemetry
-from trellis.harness.bounded import LRU
 from trellis.harness.clients.bifrost import Gateway, PromptPin
 from trellis.harness.journal import content_key
-from trellis.harness.repository import (
-    BIFROST,
-    PINNED,
-    Chain,
-    Kept,
-    NotFound,
-    digest,
-    front_matter,
-    inside,
-    journaled,
-    named,
-    pinned,
-)
+from trellis.harness.repository import BIFROST, PINNED, NotFound, journaled, named, pinned
 from trellis.harness.runtime import current
-from trellis.harness.settings import LANGFUSE_CLOUD, Settings, basic_auth
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
 
 #: The event (and the span attribute ``trellis.prompt``) a run's pinned prompt is said with.
 EVENT: Final = "prompt"
-#: Langfuse's own default label, the one a prompt is served by.
-PRODUCTION: Final = "production"
-#: A ``{{variable}}`` placeholder (Langfuse's syntax; spaces inside the braces allowed).
+#: A ``{{variable}}`` placeholder (spaces inside the braces allowed).
 VARIABLE: Final = re.compile(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}")
+#: The Claude Code CLI's own extra request headers (``Name: value`` lines), read as it starts.
+CUSTOM_HEADERS: Final = "ANTHROPIC_CUSTOM_HEADERS"
+
+
+@dataclass(frozen=True, slots=True)
+class Stored:
+    """A stored prompt of the gateway (:func:`stored`): its reference and the values its
+    ``{{variables}}`` are filled with."""
+
+    ref: str
+    values: Mapping[str, Any] = field(default_factory=dict)
+
+
+def stored(ref: str, /, **values: Any) -> Stored:
+    """The gateway's stored prompt ``ref`` (``"name"`` or ``"name@version"``), ``values``
+    filling its ``{{variables}}``: ``ReAct(system_prompt=stored("triage", team="EU"))``."""
+    pinned(ref)  # a malformed reference is refused where it is written
+    return Stored(ref, dict(values))
+
+
+@dataclass(frozen=True, slots=True)
+class Rendered:
+    """A prompt with its variables filled (``h.prompt``): its text, and its chat messages."""
+
+    text: str
+    messages: list[dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedPrompt:
-    """One version of a prompt, as its source gave it: a text, or chat messages."""
+    """One version of a stored prompt, as the gateway gave it: its chat messages, and the id a
+    model call through the gateway selects it by."""
 
     name: str
     version: str
-    #: which source it came from (its ``label``)
+    #: where it came from (the gateway's repository)
     source: str
-    text: str | None = None
-    chat: tuple[dict[str, Any], ...] | None = None
-    #: what the source keeps beside it (Langfuse's ``config``, a file's other front matter)
-    config: dict[str, Any] = field(default_factory=dict)
-    #: a stored prompt of the gateway: its id, which a model call selects it by
+    chat: tuple[dict[str, Any], ...] = ()
+    #: its id in the gateway, which a model call selects it by
     selection: str | None = None
 
     @property
@@ -99,55 +83,36 @@ class ResolvedPrompt:
 
     @property
     def variables(self) -> list[str]:
-        """The ``{{variables}}`` it needs filled, and the chat placeholders, in order."""
+        """The ``{{variables}}`` it needs filled, in order."""
         found: list[str] = []
         for text in self._texts():
             found.extend(VARIABLE.findall(text))
-        found.extend(str(m.get("name")) for m in self.chat or () if _placeholder(m))
         return list(dict.fromkeys(found))
 
     def render(self, **values: Any) -> str:
-        """The text with ``values`` filled in; a chat prompt of one message reads as its text.
-        ``ConfigurationError`` for a variable left unfilled."""
-        if self.text is not None:
-            self._check(values)
-            return _filled(self.text, values)
-        rendered = self.messages(**values)
-        if len(rendered) == 1 and isinstance(rendered[0].get("content"), str):
-            return rendered[0]["content"]
-        raise ConfigurationError(
-            f"the prompt {self.ref} ({self.source}) is {len(rendered)} chat messages: read it "
-            "as messages (h.prompt_messages)"
-        )
+        """The text with ``values`` filled in: its messages' contents, one after the other."""
+        texts = (message_text(m.get("content")) for m in self.messages(**values))
+        return "\n\n".join(t for t in texts if t)
 
     def messages(self, **values: Any) -> list[dict[str, Any]]:
-        """Chat messages with ``values`` filled in: a text prompt is one system message; a
-        chat placeholder (Langfuse's) is the list of messages its value is."""
-        self._check(values)
-        if self.text is not None:
-            return [{"role": "system", "content": _filled(self.text, values)}]
-        rendered: list[dict[str, Any]] = []
-        for message in self.chat or ():
-            if _placeholder(message):
-                filled = values[str(message.get("name"))]
-                if not isinstance(filled, list):
-                    raise ConfigurationError(
-                        f"the prompt {self.ref}: {message.get('name')} is a list of messages"
-                    )
-                rendered.extend(dict(m) for m in filled)
-                continue
-            content = message.get("content")
-            rendered.append(
-                {k: v for k, v in message.items() if k != "type"}
-                | {"content": _content(content, values)}
+        """Its chat messages with ``values`` filled in. ``ConfigurationError`` for a variable
+        left unfilled."""
+        missing = [v for v in self.variables if v not in values]
+        if missing:
+            raise ConfigurationError(
+                f"the prompt {self.ref} needs {', '.join(missing)}: pass them "
+                f"(stored({self.name!r}, {missing[0]}=...), h.prompt(ref, {missing[0]}=...))"
             )
-        return rendered
+        return [
+            {k: v for k, v in m.items() if k != "type"} | {"content": _content(m, values)}
+            for m in self.chat
+        ]
 
     def pin(self) -> PromptPin | None:
-        """How a model call through the gateway selects it (a stored prompt of the gateway's)."""
+        """How a model call through the gateway selects it."""
         if self.selection is None:
             return None
-        return PromptPin(self.name, self.selection, int(self.version), self.chat or ())
+        return PromptPin(self.name, self.selection, int(self.version), self.chat)
 
     def attributes(self) -> dict[str, Any]:
         """What a ``chat`` span says about it."""
@@ -162,36 +127,23 @@ class ResolvedPrompt:
     def record(self) -> dict[str, Any]:
         """What the journal keeps of it."""
         found = asdict(self)
-        found["chat"] = None if self.chat is None else list(self.chat)
+        found["chat"] = list(self.chat)
         return found
 
     @classmethod
     def of_record(cls, data: Mapping[str, Any]) -> ResolvedPrompt:
-        """It again, from the journal (an earlier harness journaled a ``ReAct``'s stored
-        prompt as its gateway selection only: ``name``, ``id``, ``version``)."""
-        if "source" not in data:
-            return cls(
-                name=data["name"],
-                version=str(data["version"]),
-                source=BIFROST,
-                selection=data["id"],
-            )
-        chat = data.get("chat")
+        """It again, from the journal."""
         return cls(
             name=data["name"],
-            version=data["version"],
-            source=data["source"],
-            text=data.get("text"),
-            chat=None if chat is None else tuple(dict(m) for m in chat),
-            config=dict(data.get("config") or {}),
-            selection=data.get("selection"),
+            version=str(data["version"]),
+            source=data.get("source") or BIFROST,
+            chat=tuple(dict(m) for m in data.get("chat") or ()),
+            selection=data.get("selection") or data.get("id"),
         )
 
     def _texts(self) -> list[str]:
-        if self.text is not None:
-            return [self.text]
         texts: list[str] = []
-        for message in self.chat or ():
+        for message in self.chat:
             content = message.get("content")
             if isinstance(content, str):
                 texts.append(content)
@@ -199,24 +151,13 @@ class ResolvedPrompt:
                 texts.extend(p["text"] for p in content if isinstance(p, dict) and "text" in p)
         return texts
 
-    def _check(self, values: Mapping[str, Any]) -> None:
-        missing = [v for v in self.variables if v not in values]
-        if missing:
-            raise ConfigurationError(
-                f"the prompt {self.ref} ({self.source}) needs {', '.join(missing)}: pass "
-                "them (h.prompt(ref, name=value), ReAct(prompt_vars=...))"
-            )
-
-
-def _placeholder(message: Mapping[str, Any]) -> bool:
-    return message.get("type") == "placeholder"
-
 
 def _filled(text: str, values: Mapping[str, Any]) -> str:
     return VARIABLE.sub(lambda m: str(values[m.group(1)]), text)
 
 
-def _content(content: Any, values: Mapping[str, Any]) -> Any:
+def _content(message: Mapping[str, Any], values: Mapping[str, Any]) -> Any:
+    content = message.get("content")
     if isinstance(content, str):
         return _filled(content, values)
     if isinstance(content, list):
@@ -229,246 +170,28 @@ def _content(content: Any, values: Mapping[str, Any]) -> Any:
     return content
 
 
-class PromptSource(Protocol):
-    """Where prompts come from: ``resolve`` raises a ``LookupError`` for a name — or a
-    version — it does not have."""
+class Prompts:
+    """The gateway's stored prompts (``Gateway.prompt``: resolved once, kept fresh), pinned
+    inside a run."""
 
-    @property
-    def label(self) -> str: ...
-
-    async def resolve(self, name: str, version: str | None) -> ResolvedPrompt: ...
-
-
-# --------------------------------------------------------------------------- code
-
-
-@dataclass(frozen=True, slots=True)
-class Prompt:
-    """A prompt in code: a text (or chat messages) with ``{{var}}`` placeholders. It is its
-    own source: ``Harness(prompts=[Prompt(...)])``, or given where a prompt is named
-    (``ReAct(prompt=Prompt(...))``, ``h.prompt(Prompt(...))``)."""
-
-    name: str
-    text: str | Sequence[Mapping[str, Any]]
-    version: str = "1"
-    config: Mapping[str, Any] = field(default_factory=dict, kw_only=True)
-
-    def __post_init__(self) -> None:
-        if not self.name or PINNED in self.name or not self.version:
-            raise ConfigurationError(f"Prompt({self.name!r}): a name without {PINNED}, a version")
-
-    @property
-    def label(self) -> str:
-        return "code"
-
-    @property
-    def resolved(self) -> ResolvedPrompt:
-        text, chat = (
-            (self.text, None)
-            if isinstance(self.text, str)
-            else (None, tuple(dict(m) for m in self.text))
-        )
-        return ResolvedPrompt(
-            self.name, self.version, self.label, text, chat, dict(self.config), None
-        )
-
-    async def resolve(self, name: str, version: str | None) -> ResolvedPrompt:
-        if name != self.name or version not in (None, self.version):
-            raise NotFound(f"holds {self.name}{PINNED}{self.version} only")
-        return self.resolved
-
-
-# --------------------------------------------------------------------------- files
-
-
-class PromptsDir:
-    """A folder of prompts (:func:`prompts_dir`), read at each resolve: what is on disk now."""
-
-    def __init__(self, path: str | os.PathLike[str]) -> None:
-        self.root = Path(path)
-        if not self.root.is_dir():
-            raise ConfigurationError(f"prompts_dir({str(self.root)!r}): no such folder")
-
-    @property
-    def label(self) -> str:
-        return f"prompts_dir({self.root})"
-
-    async def resolve(self, name: str, version: str | None) -> ResolvedPrompt:
-        return await asyncio.to_thread(self._resolve, name, version)
-
-    def _resolve(self, name: str, version: str | None) -> ResolvedPrompt:
-        file = inside(self.root, f"{name}.md")
-        if file is None:
-            raise NotFound(f"{name!r} is not a file name inside it (refused)")
-        if not file.is_file():
-            raise NotFound(f"it has no {name}.md")
-        raw = file.read_bytes()
-        meta, body = front_matter(raw.decode("utf-8", errors="replace"), where=str(file))
-        current = str(meta.pop("version", "") or digest(raw))
-        if version not in (None, current):
-            raise NotFound(f"{name}.md is version {current}, not {version}")
-        return ResolvedPrompt(name, current, self.label, text=body.strip(), config=meta)
-
-
-def prompts_dir(path: str | os.PathLike[str]) -> PromptsDir:
-    """A folder of prompts: ``<name>.md`` each (in subfolders too: ``support/triage``), with an
-    optional front matter — ``version`` (else the file's content digest), ``description``,
-    anything else kept as its config — and ``{{var}}`` placeholders in the body. A name that
-    would leave the folder (``..``, an absolute path, a link elsewhere) is refused."""
-    return PromptsDir(path)
-
-
-# --------------------------------------------------------------------------- Langfuse
-
-
-class LangfusePrompts:
-    """Langfuse's prompt management, through its public API (``GET
-    /api/public/v2/prompts/{name}``): ``name@3`` is version 3, ``name@staging`` the version
-    labelled ``staging``, ``name`` the one labelled ``production``. A version is read once; a
-    label again every ``repository.TTL_SECONDS``, the last copy standing while Langfuse cannot
-    be reached."""
-
-    def __init__(
-        self,
-        *,
-        public_key: str,
-        secret_key: str,
-        host: str | None = None,
-        client: telemetry.Langfuse | None = None,
-    ) -> None:
-        self.host = (host or LANGFUSE_CLOUD).rstrip("/")
-        self.client = client or telemetry.Langfuse(self.host, basic_auth(public_key, secret_key))
-        self._kept: Kept[tuple[str, str], dict[str, Any]] = Kept(
-            self._read, what=lambda key: f"the Langfuse prompt {named(*key)!r}"
-        )
-
-    @property
-    def label(self) -> str:
-        return f"Langfuse ({self.host})"
-
-    async def resolve(self, name: str, version: str | None) -> ResolvedPrompt:
-        chosen = version or PRODUCTION
-        number = chosen.isdigit()
-        try:
-            found = await self._kept.get((name, chosen), forever=number)
-        except Exception as exc:
-            raise HarnessError(
-                f"the prompt {named(name, version)!r} could not be read from {self.label} and "
-                f"was never read before: {type(exc).__name__}: {exc}",
-                retryable=True,
-            ) from exc
-        if found is None:
-            how = "version" if number else "labelled"
-            raise NotFound(f"no prompt {name!r} {how} {chosen}")
-        body = found.get("prompt")
-        chat = found.get("type") == "chat" or isinstance(body, list)
-        return ResolvedPrompt(
-            name=str(found.get("name") or name),
-            version=str(found["version"]),
-            source=self.label,
-            text=None if chat else str(body),
-            chat=tuple(dict(m) for m in body or ()) if chat else None,
-            config=dict(found.get("config") or {}),
-        )
-
-    async def _read(self, key: tuple[str, str]) -> dict[str, Any] | None:
-        name, chosen = key
-        if chosen.isdigit():
-            return await self.client.prompt(name, version=int(chosen))
-        return await self.client.prompt(name, label=chosen)
-
-    async def aclose(self) -> None:
-        await self.client.aclose()
-
-
-def langfuse_prompts(
-    *, public_key: str, secret_key: str, host: str | None = None
-) -> LangfusePrompts:
-    """Langfuse's prompts, with this project's keys (``host`` unset: Langfuse Cloud). A
-    deployment that sets ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` has it already."""
-    return LangfusePrompts(public_key=public_key, secret_key=secret_key, host=host)
-
-
-# --------------------------------------------------------------------------- Bifrost
-
-
-class BifrostPrompts:
-    """The gateway's Prompt Repository: ``name@3`` is committed version 3, ``name`` the latest
-    (``Gateway.prompt``: resolved once, kept fresh). Its id is what a model call through the
-    gateway selects it by; its messages are its text elsewhere."""
-
-    @property
-    def label(self) -> str:
-        return BIFROST
-
-    def __init__(self, gateway: Gateway) -> None:
+    def __init__(self, gateway: Gateway | None) -> None:
         self.gateway = gateway
 
-    async def resolve(self, name: str, version: str | None) -> ResolvedPrompt:
-        if version is not None and not (version.isdigit() and int(version) >= 1):
-            raise NotFound(f"a stored prompt's version is a number from 1, not {version!r}")
-        pin = await self.gateway.prompt(named(name, version))
-        return ResolvedPrompt(
-            name=pin.name,
-            version=str(pin.version),
-            source=self.label,
-            chat=pin.messages,
-            selection=pin.id,
-        )
+    async def get(self, ref: str, *, runtime: Runtime | None = None) -> ResolvedPrompt:
+        """The stored prompt ``ref`` names. Inside a run (``runtime``) it is pinned: an earlier
+        attempt's, from the journal, else resolved now and journaled, and said (its ``prompt``
+        event, the ``trellis.prompt`` attribute)."""
+        name, version = pinned(ref)
 
-
-# --------------------------------------------------------------------------- the order
-
-
-class PromptSources(Chain[ResolvedPrompt]):
-    """The prompt sources, in the order they are asked: the ones passed, or the deployment's
-    (:meth:`of`: ``PROMPTS_DIR``, Langfuse, Bifrost)."""
-
-    kind = "prompt"
-    hint = "pass Harness(prompts=[prompts_dir(...), ...]), or set the Langfuse keys or BIFROST_URL"
-
-    def __init__(self, sources: Sequence[PromptSource] = ()) -> None:
-        super().__init__(sources)
-
-    @classmethod
-    def of(cls, settings: Settings, *, gateway: Gateway | None = None) -> PromptSources:
-        """The sources ``settings`` name, in this order: ``prompts_dir``, Langfuse (both keys
-        set), the gateway (``gateway``)."""
-        sources: list[PromptSource] = []
-        if settings.prompts_dir:
-            sources.append(prompts_dir(settings.prompts_dir))
-        if settings.langfuse_public_key and settings.langfuse_secret_key:
-            sources.append(
-                LangfusePrompts(
-                    public_key=settings.langfuse_public_key,
-                    secret_key=settings.langfuse_secret_key,
-                    host=settings.langfuse_host,
-                )
-            )
-        if gateway is not None:
-            sources.append(BifrostPrompts(gateway))
-        return cls(sources)
-
-    async def get(
-        self, ref: str | Prompt, *, runtime: Runtime | None = None, kind: str = EVENT
-    ) -> ResolvedPrompt:
-        """The prompt ``ref`` names (``"name"``, ``"name@version"``, or a :class:`Prompt`), as
-        the first source that has it gives it. Inside a run (``runtime``) it is pinned: an
-        earlier attempt's, from the journal, else resolved now and journaled."""
-        key = _key(ref, kind)
-        if isinstance(ref, Prompt):
-
-            async def read() -> ResolvedPrompt:
-                return ref.resolved
-
-        else:
-            name, version = pinned(ref)
-
-            async def read() -> ResolvedPrompt:
-                return await self.find(name, version)
+        async def read() -> ResolvedPrompt:
+            return await self._resolve(name, version)
 
         found = await journaled(
-            runtime, key, read, dump=ResolvedPrompt.record, load=ResolvedPrompt.of_record
+            runtime,
+            content_key(EVENT, ref),
+            read,
+            dump=ResolvedPrompt.record,
+            load=ResolvedPrompt.of_record,
         )
         if runtime is not None:
             runtime.events.custom(
@@ -477,102 +200,47 @@ class PromptSources(Chain[ResolvedPrompt]):
             telemetry.attribute("trellis.prompt", found.ref)
         return found
 
-    async def pin(
-        self, ref: str | Prompt, runtime: Runtime, *, kind: str = EVENT
-    ) -> ResolvedPrompt:
-        """The prompt ``ref`` names as ``runtime``'s run uses it on every model call: pinned
-        once per attempt (:meth:`get`: the journal's, else resolved now and journaled; its
-        ``prompt`` event), kept on the runtime, and said on the span current then — the run's
-        agent span — as ``trellis.prompt.*`` (:meth:`ResolvedPrompt.attributes`)."""
-        key = _key(ref, kind)
+    async def pin(self, ref: str, runtime: Runtime) -> ResolvedPrompt:
+        """The stored prompt ``ref`` as ``runtime``'s run uses it on every model call: pinned
+        once per attempt (:meth:`get`), kept on the runtime, and said on the span current then
+        — the run's agent span — as ``trellis.prompt.*``."""
+        key = content_key(EVENT, ref)
         found = runtime.prompts.get(key)
         if found is None:
-            found = runtime.prompts[key] = await self.get(ref, runtime=runtime, kind=kind)
+            found = runtime.prompts[key] = await self.get(ref, runtime=runtime)
             telemetry.attributes(found.attributes())
         return found
 
-    async def render(self, ref: str | Prompt, /, **values: Any) -> str:
-        """The prompt's text, ``values`` filled in (pinned inside a run)."""
-        return (await self.get(ref, runtime=current())).render(**values)
+    async def rendered(self, ref: str | Stored, /, **values: Any) -> Rendered:
+        """The stored prompt with its variables filled (pinned inside a run): its text and its
+        chat messages."""
+        given = ref if isinstance(ref, Stored) else Stored(ref)
+        filled = {**given.values, **values}
+        found = await self.get(given.ref, runtime=current())
+        return Rendered(found.render(**filled), found.messages(**filled))
 
-    async def messages(self, ref: str | Prompt, /, **values: Any) -> list[dict[str, Any]]:
-        """The prompt as chat messages, ``values`` filled in (pinned inside a run)."""
-        return (await self.get(ref, runtime=current())).messages(**values)
-
-
-def _key(ref: str | Prompt, kind: str) -> str:
-    """Where the journal keeps ``ref``'s pinned version (and the runtime, for its attempt)."""
-    if isinstance(ref, Prompt):
-        return content_key(kind, [ref.name, ref.version])
-    return content_key(kind, ref)
-
-
-# --------------------------------------------------------------------------- model clients
-#: The journal's kind for a stored prompt a framework's model client selects
-#: (``h.model_headers(prompt=)``): the gateway's, whatever other source has the name.
-MODEL_PROMPT: Final = "model_prompt"
-#: The Claude Code CLI's own extra request headers (``Name: value`` lines), read as it starts.
-CUSTOM_HEADERS: Final = "ANTHROPIC_CUSTOM_HEADERS"
-
-
-class ModelPrompts:
-    """The gateway's stored prompts a framework's own model client selects
-    (``h.model_headers(prompt=)``): each run of the harness pins every one handed out at its
-    start (:meth:`pin`), and the headers handed out (:class:`ModelHeaders`) read, at each
-    request, the version the run executing pinned."""
-
-    def __init__(self, gateway: Gateway | None) -> None:
-        self.sources = None if gateway is None else PromptSources([BifrostPrompts(gateway)])
-        #: the references handed out, in order
-        self.refs: LRU[str, None] = LRU()
-
-    async def headers(self, ref: str) -> ModelHeaders:
-        """The headers selecting ``ref`` (``"name"``, ``"name@version"``): inside a run of
-        this harness pinned now; outside one resolved now, which is what they say outside a
-        run."""
-        if self.sources is None:
-            raise ConfigurationError("a stored prompt is the gateway's: set BIFROST_URL")
-        runtime = self._running()
-        if runtime is not None:
-            found = await self.sources.pin(ref, runtime, kind=MODEL_PROMPT)
-        else:
-            found = await self.sources.get(ref)
-        self.refs[ref] = None
-        return ModelHeaders(self, ref, _selection(found))
-
-    async def pin(self, runtime: Runtime) -> None:
-        """At the start of a run's attempt: every prompt handed out pinned for it
-        (:meth:`PromptSources.pin`). One that cannot be is a ``prompt_unavailable`` warning —
-        the run may not use it — and its headers stay the ones resolved when they were
-        handed out."""
-        if self.sources is None:
-            return
-        for ref in list(self.refs):
-            try:
-                await self.sources.pin(ref, runtime, kind=MODEL_PROMPT)
-            except Exception as exc:
-                runtime.events.warning(
-                    "prompt_unavailable", f"the stored prompt {ref!r} was not pinned: {exc}"
-                )
-
-    def selection(self, ref: str) -> PromptPin | None:
-        """``ref`` as the run executing now pinned it (``None``: outside a run of this
-        harness, or not pinned)."""
-        runtime = self._running()
-        found = None if runtime is None else runtime.prompts.get(_key(ref, MODEL_PROMPT))
-        return None if found is None else found.pin()
-
-    def _running(self) -> Runtime | None:
-        runtime = current()
-        if runtime is None or runtime.agent.harness.model_prompts is not self:
-            return None
-        return runtime
+    async def _resolve(self, name: str, version: str | None) -> ResolvedPrompt:
+        if self.gateway is None:
+            raise ConfigurationError(
+                f"the prompt {named(name, version)!r} is a stored prompt of the gateway: set "
+                "BIFROST_URL (a prompt in code is a string)"
+            )
+        if version is not None and not (version.isdigit() and int(version) >= 1):
+            raise NotFound(f"a stored prompt's version is a number from 1, not {version!r}")
+        pin = await self.gateway.prompt(named(name, version))
+        return ResolvedPrompt(
+            name=pin.name,
+            version=str(pin.version),
+            source=BIFROST,
+            chat=tuple(pin.messages),
+            selection=pin.id,
+        )
 
 
 class GatewayHeaders(Mapping[str, str]):
-    """``h.model_headers()``: the gateway's deny-all MCP scope, and — read each time they are
-    read, so a client that keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends them
-    per request — the run's Bifrost dimensions and its ``traceparent``."""
+    """The gateway's deny-all MCP scope and — read each time they are read, so a client that
+    keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends them per request — the run's
+    Bifrost dimensions and its ``traceparent``."""
 
     def now(self) -> dict[str, str]:
         from trellis.harness.telemetry import gateway_headers  # noqa: PLC0415
@@ -592,63 +260,9 @@ class GatewayHeaders(Mapping[str, str]):
         return f"GatewayHeaders({self.now()!r})"
 
 
-class ModelHeaders(Mapping[str, str]):
-    """``h.model_headers(prompt=)``: the gateway's deny-all MCP scope and a stored prompt's
-    selection (``x-bf-prompt-id``, ``x-bf-prompt-version``), read each time they are read — a
-    model client that keeps the mapping (``AsyncOpenAI(default_headers=...)``) sends, on each
-    request, the version pinned by the run executing; outside a run, the one resolved when
-    they were handed out."""
-
-    def __init__(self, owner: ModelPrompts, ref: str, resolved: PromptPin) -> None:
-        self._owner = owner
-        self._ref = ref
-        self._resolved = resolved
-
-    def now(self) -> dict[str, str]:
-        """The headers as a request made now sends them: the run's dimensions and trace too
-        (``telemetry.gateway_headers``)."""
-        from trellis.harness.telemetry import gateway_headers  # noqa: PLC0415
-
-        pin = self._owner.selection(self._ref) or self._resolved
-        return {**NO_GATEWAY_TOOLS, **pin.options().headers(), **gateway_headers()}
-
-    def __getitem__(self, name: str) -> str:
-        return self.now()[name]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.now())
-
-    def __len__(self) -> int:
-        return len(self.now())
-
-    def __repr__(self) -> str:
-        return f"ModelHeaders({self._ref!r}: {self.now()!r})"
-
-
-def _selection(found: ResolvedPrompt) -> PromptPin:
-    pin = found.pin()
-    assert pin is not None  # the gateway's prompts are selected by their id
-    return pin
-
-
-def selected(runtime: Runtime, prompt_id: str | None) -> ResolvedPrompt | None:
-    """The stored prompt the run pinned whose id is ``prompt_id`` (what a model client's
-    headers select), if any."""
-    if not prompt_id:
-        return None
-    return next((p for p in runtime.prompts.values() if p.selection == prompt_id), None)
-
-
-def selected_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
-    """A Claude Code CLI's environment for the run, when its ``ANTHROPIC_CUSTOM_HEADERS``
-    select a stored prompt the run pinned (an ``x-bf-prompt-id`` line): that selection with
-    the version pinned (``None``: nothing to change)."""
-    lines = (env.get(CUSTOM_HEADERS) or "").splitlines()
-    named = {k.strip().lower(): v.strip() for k, _, v in (line.partition(":") for line in lines)}
-    found = selected(runtime, named.get(PROMPT_ID))
-    if found is None:
-        return None
-    pin = _selection(found).options().headers()
-    kept = [line for line in lines if line.partition(":")[0].strip().lower() not in pin]
-    text = "\n".join([*kept, *(f"{name}: {value}" for name, value in pin.items())])
-    return {**env, CUSTOM_HEADERS: text}
+def message_text(content: Any) -> str:
+    """A message's text: a string as it is, the text parts of a multi-part content."""
+    if isinstance(content, str):
+        return content
+    parts = content if isinstance(content, list) else []
+    return "\n".join(p["text"] for p in parts if isinstance(p, dict) and p.get("type") == "text")

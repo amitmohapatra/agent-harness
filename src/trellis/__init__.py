@@ -4,7 +4,7 @@ built.
     from trellis import Harness
 
     h = Harness()                                   # the deployment is the environment
-    agent = h.wrap(graph, id="procurement")
+    agent = h.wrap(ReAct("You reorder stock.", "gpt-4o", tools=[reorder]), id="procurement")
     result = await agent.run("reorder SKU-1", user="u1")
 
 ``trellis`` is shared with the other trellis distributions (``trellis.contracts``,
@@ -23,14 +23,15 @@ __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent, RunHandle
     from trellis.harness.budget import Budget
+    from trellis.harness.evals import llm_judge
     from trellis.harness.harness import Harness
     from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Output, OutputKind, Rewrite
+    from trellis.harness.prompts import stored
     from trellis.harness.react import ReAct
     from trellis.harness.result import Result
     from trellis.harness.runtime import Runtime, current
     from trellis.harness.sandbox import sandbox
     from trellis.harness.settings import Settings
-    from trellis.harness.skills import skills
     from trellis.harness.tools.mcp import mcp, stdio
     from trellis.harness.tools.sources import a2a, openapi, tool
 
@@ -48,7 +49,8 @@ _EXPORTS = {
     "openapi": "trellis.harness.tools.sources",
     "mcp": "trellis.harness.tools.mcp",
     "stdio": "trellis.harness.tools.mcp",
-    "skills": "trellis.harness.skills",
+    "stored": "trellis.harness.prompts",
+    "llm_judge": "trellis.harness.evals",
     "sandbox": "trellis.harness.sandbox",
     "ReAct": "trellis.harness.react",
     "current": "trellis.harness.runtime",
@@ -78,11 +80,12 @@ __all__ = [
     "Settings",
     "a2a",
     "current",
+    "llm_judge",
     "mcp",
     "openapi",
     "sandbox",
-    "skills",
     "stdio",
+    "stored",
     "tool",
 ]
 

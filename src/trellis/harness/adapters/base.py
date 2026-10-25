@@ -117,7 +117,7 @@ class Adapter(Protocol):
     name: ClassVar[str]
     tool_format: ToolFormat
     #: the target's tools are fixed when it is built (a compiled graph): ``tools=`` is refused
-    #: at wrap time, and the harness tools come from ``h.tools(...)`` instead
+    #: at wrap time; the memory tools come from ``h.memory_tools()`` instead
     fixed_tools: bool
     narrows: Narrowing
     #: the framework takes a conversation's history as its own messages (``prepare_input``'s
@@ -219,6 +219,20 @@ WINDOW_ATTRIBUTES: Final = ("context_window", "max_input_tokens")
 #: model's name (when it was given one) and its context window.
 MODEL_METADATA: Final = "trellis_model"
 WINDOW_METADATA: Final = "trellis_context_window"
+
+
+#: The attribute a graph ``ReAct(...)`` built carries its declared tools on (``tools=``, its
+#: ``subagents=`` among them): what ``h.wrap`` gives its runs.
+TOOLS_ATTRIBUTE: Final = "trellis_tools"
+#: Set on a graph built with a checkpointer of its own (``ReAct(checkpointer=)``): for a run
+#: outside the harness only, so ``h.wrap`` refuses it.
+OWN_CHECKPOINTER: Final = "trellis_own_checkpointer"
+
+
+def declared_tools(target: Any) -> list[Any]:
+    """The tools ``target``'s builder declared for the harness to run (``ReAct(tools=,
+    subagents=)``); none for any other target: its tools are the framework's own."""
+    return list(getattr(target, TOOLS_ATTRIBUTE, None) or ())
 
 
 def metadata_of(target: Any) -> dict[str, Any]:

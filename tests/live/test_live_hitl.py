@@ -19,6 +19,7 @@ import pytest
 import trellis
 from tests.live.conftest import MODEL, live_harness, needs_gateway, needs_memory, needs_runs
 from tests.live.support import Forcing
+from tests.support.arm import arm
 from trellis import Ask, Hooks, ReAct, Runtime, tool
 from trellis.contracts import (
     InterruptDecision,
@@ -94,11 +95,13 @@ async def test_approvals_choices_comments_and_results_from_outside_through_agent
     wired.clear()
     async with live_harness() as h:
         assert isinstance(h.runs, RunsClient)
-        agent = h.wrap(
-            settle_account,
-            id=f"live-hitl-{uuid.uuid4().hex[:8]}",
-            tools=[wire, sign],
-            hooks=[WireRule()],
+        agent = arm(
+            h.wrap(
+                settle_account,
+                id=f"live-hitl-{uuid.uuid4().hex[:8]}",
+                hooks=[WireRule()],
+            ),
+            [wire, sign],
         )
         paused = await agent.run("settle", user="live-user")
         asked = paused.interrupt
@@ -161,7 +164,7 @@ async def test_approvals_choices_comments_and_results_from_outside_through_agent
 @pytest.mark.timeout(60)
 async def test_way_2_pauses_with_the_same_question_in_agent_runs() -> None:
     async with live_harness() as h:
-        tenant = await h.tenant()
+        tenant = await h._tenant()
         run = await h.runs.start(
             RunStart(run_id=new_id("run_"), tenant_id=tenant, agent_id="live-way2", input="x")
         )
@@ -180,7 +183,7 @@ async def test_way_2_pauses_with_the_same_question_in_agent_runs() -> None:
 async def test_a_react_agent_through_the_gateway_reads_a_result_from_outside() -> None:
     async with live_harness() as h:
         target = ReAct(
-            system="You get contracts signed. Always call the sign tool with the contract id "
+            system_prompt="You get contracts signed. Always call the sign tool with the contract id "
             "the user gives, then reply with what it returned.",
             model=MODEL,
             max_steps=3,
@@ -188,7 +191,7 @@ async def test_a_react_agent_through_the_gateway_reads_a_result_from_outside() -
             # may call again after the result instead of replying
             middleware=[Forcing(["sign", None])],
         )
-        agent = h.wrap(target, id=f"live-signer-{uuid.uuid4().hex[:8]}", tools=[sign])
+        agent = arm(h.wrap(target, id=f"live-signer-{uuid.uuid4().hex[:8]}"), [sign])
         paused = await agent.run("Get contract c-42 signed.", user="live-user")
         if paused.status is not RunStatus.PAUSED:
             pytest.skip(f"the model did not call the tool ({paused.status.value}: {paused.error})")
@@ -250,7 +253,7 @@ async def test_a_pause_reaches_a_webhook_with_what_a_notice_says() -> None:
             async def big_wire(input: str, agent: Runtime) -> Any:
                 return await agent.tools.call("wire", amount=900)
 
-            agent = h.wrap(big_wire, id=f"live-notice-{suffix}", tools=[wire], hooks=[WireRule()])
+            agent = arm(h.wrap(big_wire, id=f"live-notice-{suffix}", hooks=[WireRule()]), [wire])
             paused = await agent.run("wire 900", user="live-user")
             assert paused.interrupt is not None
             delivery = await _delivered(hook.secret, paused.run_id)
@@ -276,7 +279,7 @@ async def test_a_pause_reaches_a_webhook_with_what_a_notice_says() -> None:
             async def parent(input: str, agent: Runtime) -> Any:
                 return await agent.tools.call(helper.id, message="pick")
 
-            boss = h.wrap(parent, id=f"live-notice-boss-{suffix}", tools=[helper])
+            boss = arm(h.wrap(parent, id=f"live-notice-boss-{suffix}"), [helper])
             asked = await boss.run("go", user="live-user")
             assert asked.interrupt is not None
             told = await _delivered(hook.secret, asked.run_id)
@@ -284,7 +287,7 @@ async def test_a_pause_reaches_a_webhook_with_what_a_notice_says() -> None:
             assert told.data.run.awaiting.question == "Which plan?"
             [own] = [
                 s
-                async for s in h.runs.iterate(status=RunStatus.PAUSED, tenant=await h.tenant())
+                async for s in h.runs.iterate(status=RunStatus.PAUSED, tenant=await h._tenant())
                 if s.agent_id == helper.id
             ]
             record = await h.runs.get(own.run_id)

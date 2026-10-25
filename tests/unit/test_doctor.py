@@ -24,7 +24,6 @@ ENV = {
     "TRELLIS_API_KEY": "trk_secret_5678",
     "RUNS_URL": "http://runs.test",
     "TRELLIS_SPOOL_DIR": "",
-    "PROMPTS_DIR": "./prompts",
 }
 
 
@@ -33,10 +32,9 @@ def test_the_settings_are_shown_with_their_sources_and_secrets_redacted() -> Non
     assert rows["bifrost_url"] == ("http://gw.test/v1", "BIFROST_URL")
     assert rows["bifrost_virtual_key"] == ("set (...1234)", "BIFROST_VIRTUAL_KEY")
     assert rows["api_key"][0] == "set (...5678)" and "secret" not in rows["api_key"][0]
-    assert rows["eval_sample"] == ("0.1", "default")
     assert rows["spool_dir"] == ("unset", "default")
+    assert set(rows) == set(Settings.model_fields)  # every setting, and nothing else
     assert doctor.shown("api_key", "short") == "set"
-    assert doctor.shown("otlp_headers", {"authorization": "Basic x"}) == "set"
 
 
 MEM = "http://mem.test"
@@ -209,23 +207,23 @@ async def test_the_docker_daemon_is_pinged_when_sandboxes_are_docker(
 ) -> None:
     monkeypatch.setenv("DOCKER_HOST", "tcp://docker.test:2375")
     respx.get("http://docker.test:2375/v1.43/_ping").mock(return_value=httpx.Response(200))
-    [check] = await doctor.checks(Settings(sandbox="docker"))
+    [check] = await doctor.checks(Settings(), docker=True)
     assert check.ok and check.said == "tcp://docker.test:2375 answered 200"
     respx.get("http://docker.test:2375/v1.43/_ping").mock(side_effect=httpx.ConnectError("x"))
-    [check] = await doctor.checks(Settings(sandbox="docker"))
+    [check] = await doctor.checks(Settings(), docker=True)
     assert not check.ok
 
 
 def test_suggestions_never_apply_anything() -> None:
     settings = Settings.from_env(ENV)
     said = doctor.suggestions(settings, ENV)
-    assert any(s.startswith("PROMPTS_DIR is deprecated") for s in said)
     assert any("network_config.max_retries" in s for s in said)
     assert any("TRELLIS_SPOOL_DIR" in s for s in said)
     assert any("service.version" in s for s in said)
-    assert doctor.suggestions(Settings(spool_dir="/s", agent_version="1"), {}) == []
-    lone = Settings(memory_url="http://m", spool_dir="/s", agent_version="1")
-    assert doctor.suggestions(lone, {}) == [
+    versioned = {"OTEL_RESOURCE_ATTRIBUTES": "service.version=1"}
+    assert doctor.suggestions(Settings(spool_dir="/s"), versioned) == []
+    lone = Settings(memory_url="http://m", spool_dir="/s")
+    assert doctor.suggestions(lone, versioned) == [
         "runs are kept in this process: set RUNS_URL for durable runs and workers"
     ]
 
@@ -300,7 +298,7 @@ async def test_approval_rules_are_listed_per_agent_and_a_tenant_wide_read_lists_
 def test_the_cli_names_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     asked: list[list[str]] = []
 
-    async def checks(settings: Settings, *, agents: list[str]) -> list[doctor.Check]:
+    async def checks(settings: Settings, *, agents: list[str], docker: bool) -> list[doctor.Check]:
         asked.append(agents)
         return []
 

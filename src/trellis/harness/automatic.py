@@ -19,8 +19,6 @@ model calls are what they were before any of these existed (the tools, the instr
 * **A budget** given (``h.wrap(budget=)``) — :class:`Budgeted`: once it is spent, one more call
   without tools for the best answer with what the run has.
 
-``without={"planning"}`` (``"files"``) turns one off, for an agent or a run: the model is not
-offered it, and a call of it is refused as not available.
 """
 
 from __future__ import annotations
@@ -41,12 +39,9 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 from langchain.agents.middleware.todo import TodoListMiddleware
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.prebuilt.tool_node import ToolCallRequest
-from langgraph.types import Command
+from langchain_core.messages import AIMessage, HumanMessage
 
 from trellis.harness import budget
-from trellis.harness.features import Feature
 from trellis.harness.middleware import _named
 from trellis.harness.runtime import current
 
@@ -70,15 +65,6 @@ SCRATCH: Final = frozenset({"ls", "write_file", "edit_file"})
 MAX_FILE_CHARS: Final = 100_000
 MAX_RUN_CHARS: Final = 1_000_000
 RESERVED: Final = ("/large_tool_results/", "/conversation_history/")
-#: What a call of a feature the run is without reads.
-NOT_AVAILABLE: Final = "{tool} is not available in this run"
-
-
-def on(feature: Feature) -> bool:
-    """Whether ``feature`` is on: the run (and its agent) is not without it; outside a run,
-    always."""
-    runtime = current()
-    return runtime is None or runtime.uses(feature)
 
 
 def calls_made(request: ModelRequest[Any]) -> int:
@@ -114,25 +100,15 @@ class _LongTasks:
 
     window: int | None = None
 
-    def wanted(self, feature: Feature, request: ModelRequest[Any]) -> bool:
+    def wanted(self, request: ModelRequest[Any]) -> bool:
         roomy = self.window is not None and self.window >= MIN_WINDOW
-        return roomy and on(feature) and long_task(request)
+        return roomy and long_task(request)
 
 
 def without_tools(request: ModelRequest[Any], names: Collection[str]) -> ModelRequest[Any]:
     """The request without the tools ``names`` (the same request when it offers none)."""
     kept = [t for t in request.tools if _named(t) not in names]
     return request if len(kept) == len(request.tools) else request.override(tools=kept)
-
-
-def refused(call: dict[str, Any]) -> ToolMessage:
-    """The answer to a call of a tool of a feature the run is without."""
-    return ToolMessage(
-        content=NOT_AVAILABLE.format(tool=call["name"]),
-        tool_call_id=str(call["id"]),
-        name=call["name"],
-        status="error",
-    )
 
 
 # --------------------------------------------------------------------------- the budget
@@ -179,18 +155,9 @@ class Planning(_LongTasks, TodoListMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> Any:
-        if self.wanted("planning", request):
+        if self.wanted(request):
             return await super().awrap_model_call(request, handler)
         return await handler(without_tools(request, {TODOS}))
-
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
-    ) -> ToolMessage | Command[Any]:
-        if request.tool_call["name"] == TODOS and not on("planning"):
-            return refused(dict(request.tool_call))
-        return await handler(request)
 
 
 # --------------------------------------------------------------------------- files
@@ -275,7 +242,7 @@ class JournalFiles(FilesystemMiddleware):
 
 class ScratchFiles(_LongTasks, AgentMiddleware):
     """``ls``, ``write_file`` and ``edit_file`` (Deep Agents' ``FilesystemMiddleware``, which
-    ``ReAct`` builds with them) offered on a long task (``files``); refused without it."""
+    ``ReAct`` builds with them) offered on a long task."""
 
     def __init__(self, *, window: int | None = None) -> None:
         super().__init__()
@@ -286,15 +253,6 @@ class ScratchFiles(_LongTasks, AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        if self.wanted("files", request):
+        if self.wanted(request):
             return await handler(request)
         return await handler(without_tools(request, SCRATCH))
-
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
-    ) -> ToolMessage | Command[Any]:
-        if request.tool_call["name"] in SCRATCH and not on("files"):
-            return refused(dict(request.tool_call))
-        return await handler(request)

@@ -66,9 +66,8 @@ async def main() -> None:
     )
     async with Harness() as h:
         agent = h.wrap(
-            ReAct(system="You fix stuck orders with SQL.", model=model),
+            ReAct(system_prompt="You fix stuck orders with SQL.", model=model, tools=[run_sql]),
             id="analyst",
-            tools=[run_sql],
             hooks=[SqlReview()],
         )
         result = await agent.run("Retry the stuck order 7.", user="ada")

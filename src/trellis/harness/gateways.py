@@ -41,7 +41,6 @@ class Capability(StrEnum):
     COST = "cost"
     FALLBACKS = "fallbacks"
     PROMPTS = "prompts"
-    SKILLS = "skills"
     ATTRIBUTION = "attribution"
 
 
@@ -53,12 +52,11 @@ class GatewayKind(StrEnum):
 #: What each capability is, as ``doctor`` says it when it is off.
 CAPABILITIES: Final[dict[Capability, str]] = {
     Capability.MODELS: "model names (ReAct(model='name'), llm_judge(model='name'))",
-    Capability.MCP: "the gateway's MCP tools and Virtual MCPs (mcp('name'))",
+    Capability.MCP: "the gateway's MCP tools (the ones the virtual key allows)",
     Capability.CODE_MODE: "Code Mode",
     Capability.COST: "dollar budgets (Budget(max_cost=)) from the gateway's cost of each call",
     Capability.FALLBACKS: "model fallbacks and retries in the gateway",
-    Capability.PROMPTS: "stored prompts (prompt='name')",
-    Capability.SKILLS: "the gateway's Skills Repository",
+    Capability.PROMPTS: "stored prompts (stored('name'))",
     Capability.ATTRIBUTION: "each call's run, agent, tenant and user as the gateway's dimensions",
 }
 #: The provider a model name is of, by how the name starts, for a name that does not say

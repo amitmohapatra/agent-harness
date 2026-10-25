@@ -35,33 +35,46 @@ def temperature(city: str) -> float:
 
 h = Harness()
 target = ReAct(
-    system="You give weather advice. Use the tool, then answer.",
-    model="provider/model",  # a Bifrost model name (needs BIFROST_URL)
-    output=Forecast,  # optional: the answer parsed into it
+    system_prompt="You give weather advice. Use the tool, then answer.",
+    model="provider/model",  # through Bifrost with BIFROST_URL, else the provider's own key
+    tools=[temperature],
+    response_format=Forecast,  # optional: the answer parsed into it
 )
-agent = h.wrap(target, id="weather", tools=[temperature])
+agent = h.wrap(target, id="weather")
 result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answer: a Forecast
 ```
 
 ```text
-ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=None,
-      context_window=None, prompt=None, prompt_vars=None, middleware=(), checkpointer=None,
-      tool_guidance=False, answer_check=False, capabilities=None, effort=None)
+ReAct(system_prompt, model, *, tools=(), subagents=(), response_format=None, max_steps=12,
+      max_repeats=3, call_timeout=None, context_window=None, effort=None, tool_guidance=False,
+      answer_check=False, capabilities=None, middleware=(), checkpointer=None)
 ```
+
+* `system_prompt` — the instructions: a string, or `stored("triage", team="EU")`, the
+  gateway's stored prompt looked up at the run's start and pinned for it (a resume reads the
+  same one): with no variables to fill and a model name routed through Bifrost, every model
+  call selects it (the gateway prepends it); any other is rendered into the system message
+  ([prompts.md](../prompts.md)).
+* `tools` — what the agent can call: functions, `tool(...)`, LangChain tools (the graph's own,
+  governed as its tool node runs them), `mcp(...)`, `openapi(...)`, `sandbox()`
+  ([tools.md](../tools.md)). Every run also has the MCP tools the virtual key allows and,
+  memory on, the memory tools.
+* `subagents` — agents it hands tasks to: wrapped agents (`h.wrap(...)`) and `a2a(url)`, each a
+  tool whose call is a child run ([subagents.md](../subagents.md)).
 
 * `model` — a Bifrost model name: a `ChatOpenAI` on the gateway's chat completions
   (`BIFROST_URL`, needed when `ReAct` is called) with the agent's virtual key
   (`BIFROST_VIRTUAL_KEY`), the gateway's deny-all MCP scope (the harness gives the tools),
-  `timeout=model_timeout` and no retries of its own: the gateway owns retries (a provider's
+  `timeout=call_timeout` and no retries of its own: the gateway owns retries (a provider's
   `network_config.max_retries`, 0 by default — set it), fallbacks (the virtual key's) and
   prompt caching (`prompt_cache.auto_inject`). Or any LangChain chat model, used as it is
   (never replaced).
-* `output` — a Pydantic model or a JSON schema the answer is parsed into (LangChain's
-  `response_format`: the provider's structured output when LangChain knows the model has it,
+* `response_format` — a Pydantic model or a JSON schema the answer is parsed into (LangChain's:
+  the provider's structured output when LangChain knows the model has it,
   else a tool the model answers with, asked again when its answer does not fit — within
   `max_steps`).
-* `model_timeout` — the most one model call may take, in seconds, the gateway's retries and
-  fallbacks included; within what is left of the run's `timeout=`/`deadline=`.
+* `call_timeout` — the most one model call may take, in seconds, the gateway's retries and
+  fallbacks included; within what is left of the run's `run_timeout=`/`deadline=`.
 * `context_window` — the model's window in tokens; given, it wins. Unset, the model's
   LangChain profile (`model.profile["max_input_tokens"]`: a chat model of LangChain's that knows
   the model, or a `ChatOpenAI` whose model name LangChain knows). When neither says, the
@@ -74,18 +87,13 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 * a model name is routed per call as the harness running the agent says — its
   `Harness(config=)` settings over the environment's: through Bifrost, else to the provider
   with its own key ([configuration.md](../configuration.md#where-a-model-name-goes)).
-* `prompt` — a prompt (`"triage"`, `"triage@3"`, a `Prompt`) from the prompt sources — code,
-  `PROMPTS_DIR`, Langfuse, the gateway ([prompts.md](../prompts.md)) — looked up at the run's
-  start and pinned for it (a resume reads the same one): a stored prompt of the gateway's is
-  selected by every model call, which the gateway prepends (a model name only,
-  [gateway.md](../gateway.md#prompts)); any other is rendered (`prompt_vars` fill its
-  `{{variables}}`) into the system message before `system`, which may then be `""`.
 * `middleware` — more middleware, LangChain's, Deep Agents' or yours (below), added to the
   defaults; one with the name of a default one is refused, naming the parameter that sets it
-  (`StepLimit`: `max_steps`, `StallGuard`: `max_repeats`, `ModelHooks`: `model_timeout` and
-  `prompt`...). `max_steps` and `max_repeats` are 1 or more (12 and 3 by default).
-* `checkpointer` — the graph's checkpointer; by default `RunCheckpointer()`, which keeps the
-  graph's checkpoint in the run itself.
+  (`StepLimit`: `max_steps`, `StallGuard`: `max_repeats`, `ModelHooks`: `call_timeout` and
+  `system_prompt`...). `max_steps` and `max_repeats` are 1 or more (12 and 3 by default).
+* `checkpointer` — for the graph run on its own, outside the harness; wrapped, its runs keep
+  their checkpoint in the run itself (`RunCheckpointer()`), and `h.wrap` refuses a `ReAct`
+  given one.
 * `tool_guidance`, `answer_check`, `capabilities` — how to choose among tools, a check of the
   answer before it is final and of a change before it is made, and what the assistant can do
   beyond its tools ([below](#tool-choice)).
@@ -100,23 +108,23 @@ ReAct(system, model, *, output=None, max_steps=12, max_repeats=3, model_timeout=
 | `ContextEditingMiddleware` + `ClearToolUsesEdit` (LangChain) | a known window only: past half of it, the older tool results (all but the last 3) are cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a provider's prompt cache breaks rarely |
 | `create_summarization_middleware` (Deep Agents) | past 85% of the window (Deep Agents' own thresholds when the window is not known), the older turns are summarized by one model call, the last 10% kept; the turns it replaced are saved where `read_file` reads them (`/conversation_history/...`); oversized tool arguments in older turns are truncated first; a context overflow is summarized and retried. |
 | `PatchToolCallsMiddleware` (Deep Agents) | a tool call left with no answer (a crash, a cancel) gets one, so the conversation stays valid |
-| `response_format` (LangChain) | `output=` |
+| `response_format` (LangChain) | `response_format=` |
 | parallel tool calls (LangGraph) | the calls of one step run at once, each in its own task |
 
 **Native, on when a task needs them** (`trellis.harness.automatic`) — a long task: from the
 model's third call of a run's invocation, or at once when the request asks for steps (a list of
 three items or more, "step by step", "a plan"), on a model whose window is known and at least
 32,000 tokens (together they cost about 2,600 tokens a call). A shorter task is sent exactly what it
-was before they existed. Each is off with `without=` (the model is not offered it; a call of it
-answers that it is not available):
+was before they existed:
 
-| Middleware (`without=` name) | What it does |
+| Middleware | What it does |
 |---|---|
-| `TodoListMiddleware` (LangChain), `planning` | the `write_todos` tool and its instructions: a plan the model keeps |
-| `FilesystemMiddleware`'s scratch tools (Deep Agents), `files` | `ls`, `write_file` and `edit_file` beside `read_file`: notes and drafts kept as files, one at most 100,000 characters, a run's at most 1,000,000 |
-A `TodoListMiddleware` or `FilesystemMiddleware` given to `ReAct(middleware=)` replaces the
-automatic one (it is then always on). Delegation is your code's: a wrapped agent's
-another wrapped agent in `tools=[...]` ([subagents.md](../subagents.md)).
+| `TodoListMiddleware` (LangChain) | the `write_todos` tool and its instructions: a plan the model keeps |
+| `FilesystemMiddleware`'s scratch tools (Deep Agents) | `ls`, `write_file` and `edit_file` beside `read_file`: notes and drafts kept as files, one at most 100,000 characters, a run's at most 1,000,000 |
+
+They are `ReAct`'s own: a `TodoListMiddleware` or `FilesystemMiddleware` given to
+`ReAct(middleware=)` is refused. Delegation is `subagents=[...]`
+([subagents.md](../subagents.md)).
 
 **With a budget** (`h.wrap(budget=Budget(...))`, [api.md](../api.md#budget)): once the run's —
 or its parent's — is spent, one more call without tools for the best answer with what it has;
@@ -127,7 +135,7 @@ the run ends `PARTIAL`. No budget given, no cap.
 | Middleware | What it does |
 |---|---|
 | `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (sorted by name; the set only grows within a run, so a prompt cache keeps working) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order. Arguments that do not fit the tool's schema are an error the model reads; the tool does not run |
-| `ModelHooks` | the tools of a part the run is `without=` left out of every model call (a graph's own, bound when it was built, included); the `before_model`/`after_model` hooks around every model call (a `before_model` call is the call sent), its `chat` span (the messages redacted, the model, usage, finish reasons), `model_timeout` and what is left of the run's time, the `prompt` pinned for the run, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong (the model asked again), the broken arguments sent back as `{}`. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx (a queued run is queued again) |
+| `ModelHooks` | the tools of a part the run is `without=` left out of every model call (a graph's own, bound when it was built, included); the `before_model`/`after_model` hooks around every model call (a `before_model` call is the call sent), its `chat` span (the messages redacted, the model, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong (the model asked again), the broken arguments sent back as `{}`. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx (a queued run is queued again) |
 | `StepLimit` | after `max_steps` model calls the model is asked once more, with `tool_choice: "none"`, for its best answer with what it has; a `warning` event (`max_steps`) and a log line say so. No answer then fails the run |
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed (no such tool, arguments that do not fit, an error, a timeout), stop the run with a `ModelError` |
 | `read_result` (a tool) | reads a cleared tool result again, by its call's id, in pieces |
@@ -141,17 +149,16 @@ shows what the model is sent). Each works the same in any `create_agent` or Deep
 
 | Add | For |
 |---|---|
-| `TodoListMiddleware()` (LangChain) | a `write_todos` plan the model keeps from the first call (by default only a long task gets one) |
 | `FilesystemMiddleware()` (Deep Agents) | the whole virtual filesystem (`ls`, `write_file`, `edit_file`, `glob`, `grep`): in a `create_agent` or Deep Agents graph of your own (`ReAct` has the `read_file`-only one and refuses a second of that name) |
-| `SubAgentMiddleware(...)` (Deep Agents) | the `task` tool with sub-agents of the graph's own, run by Deep Agents (a wrapped agent's `as_tool()` is the harness's way, [subagents.md](../subagents.md)) |
+| `SubAgentMiddleware(...)` (Deep Agents) | the `task` tool with sub-agents of the graph's own, run by Deep Agents, each call a child run ([subagents.md](../subagents.md)) |
 | `HumanInTheLoopMiddleware(...)` (LangChain) | the framework's own approvals (the harness's are a tool's `ask`, [interrupts.md](../interrupts.md)) |
 | `ToolCallLimitMiddleware(...)` (LangChain) | a cap on the calls of a tool, or of all |
 | `PIIMiddleware(...)` (LangChain) | PII redacted, masked or refused in what the model reads |
 | `SummarizationMiddleware(...)` (LangChain) | LangChain's summarization, in a graph of your own (`ReAct` has Deep Agents' under that name, and refuses a second) |
 | `LLMToolSelectorMiddleware(...)` (LangChain) | many tools: a model call of its own picks those that fit the request, per model call, among the run's tools (`max_tools=`, `on_parsing_failure="all"` so a reply it cannot read offers every tool) |
 
-The harness middleware in a graph of your own: `HarnessTools()` makes the run's tools the
-graph's (`tools=[]` is then enough), `ModelHooks()` gives the hooks and the spans, and
+The harness middleware in a graph of your own: `HarnessTools()` makes the run's tools — the
+gateway's MCP tools, memory's — the graph's, beside its own, `ModelHooks()` gives the hooks and the spans, and
 `StepLimit`, `StallGuard`, `read_result()`, `ReadTools` and `RunCheckpointer()` work as above.
 
 ```python
@@ -160,12 +167,12 @@ from trellis.harness.middleware import HarnessTools, ModelHooks, RunCheckpointer
 
 graph = create_agent(
     model,
-    tools=[],
+    tools=[quote],  # LangChain tools: governed as the graph runs them
     system_prompt="...",
     middleware=[HarnessTools(), StepLimit(20), ModelHooks()],
     checkpointer=RunCheckpointer(),
 )
-agent = h.wrap(graph, id="mine", tools=[quote])
+agent = h.wrap(graph, id="mine")
 ```
 
 ## Tool choice
@@ -213,8 +220,8 @@ that needs no tool (a greeting, a rule the context holds) would be made to call 
 | Tool hints | each model call is offered the tools offered at that moment (the hinted ones, the memory tools, those already used, what a `tool_search` found) |
 | Model steps | the graph's checkpoint is the run's: a resume continues from the last step, so the model is not asked again for what it already decided |
 | Several calls in one step | the read-only calls run at once; the others one at a time, in the model's order; a call that pauses lets the others finish (journaled) before the run pauses, and the pauses of one step come one by one |
-| Sub-agents | another wrapped agent in `tools=[agent]` is a call like any other ([subagents.md](../subagents.md)) |
-| Skills | with `h.wrap(..., skills=[...])`: their names and descriptions in the context, `load_skill` and `read_skill_file` offered ([skills.md](../skills.md)) |
+| Sub-agents | another wrapped agent in `subagents=[agent]` is a call like any other ([subagents.md](../subagents.md)) |
+| Skills | the ones the agent learned, with its memory context ([skills.md](../skills.md#learned-skills)) |
 | Records, grounding, judges, tracing, trajectory | as for every target |
 
 ## Approvals, streaming, durable runs, surfaces, evaluation
@@ -222,10 +229,8 @@ that needs no tool (a greeting, a rule the context holds) would be made to call 
 A tool that asks pauses the run; `agent.resume(...)` continues the graph from its checkpoint
 and the approved call runs once. `agent.stream(...)` yields each step's text and the tool
 events. `start` + workers, `schedule`, `serve_chat`, `serve_a2a`, `a2a(url)` tools and
-`h.evaluate` work as for every target. `llm_judge` asks its own `model=`, else
-`TRELLIS_JUDGE_MODEL`; with neither, a `ReAct` built with a model name is judged by that model
-(said once: a model grading itself is biased — set a separate, stronger one), and one built
-with a model object needs a judge model ([evaluation.md](../evaluation.md#the-judges-model)).
+`h.evaluate` work as for every target. `llm_judge` asks its own `model=`, else the gateway's
+judge alias — never the agent's own model ([evaluation.md](../evaluation.md#the-judges-model)).
 
 `framework_options=` go into the graph's run config as for any graph (`recursion_limit`,
 `configurable`...: [langgraph.md](langgraph.md)); the thread is the run's.
@@ -234,7 +239,7 @@ with a model object needs a judge model ([evaluation.md](../evaluation.md#the-ju
 
 * [`examples/01_start/first_agent.py`](../../examples/01_start/first_agent.py) — two tools and an approval.
 * [`examples/02_way1_react/agent.py`](../../examples/02_way1_react/agent.py) — every piece on: memory, MCP
-  tools, an approval resumed in place, a hook, `timeout`, `framework_options`, `without=`.
+  tools, an approval resumed in place, a hook, `run_timeout`, `framework_options`, `without=`.
 * [`examples/02_way1_react/structured_output.py`](../../examples/02_way1_react/structured_output.py) — a tool, then a structured answer.
 * [`examples/06_scenarios/tool_choice.py`](../../examples/06_scenarios/tool_choice.py) — the four
   ways tool choice goes wrong, the two switches, `tool_coverage` per item.

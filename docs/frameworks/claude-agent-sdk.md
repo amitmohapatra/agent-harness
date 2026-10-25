@@ -1,16 +1,14 @@
 # Claude Agent SDK
 
 The target is the `ClaudeAgentOptions` your team already configured. The harness runs the SDK's
-`query(prompt, options)` on a copy of the options that also carries the harness tools; your
-options object is never changed.
+`query(prompt, options)` on a copy of the options that also carries the harness's tools (the
+gateway's MCP tools, memory's); your options object is never changed.
 
 **Install:** `pip install 'trellis-harness[claude-agent-sdk]'`, and the Claude Code CLI the SDK
 drives. Through Bifrost: `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic",
-"ANTHROPIC_API_KEY": "<virtual key>"}` in the options. A stored prompt of the gateway: its
-headers as the CLI's `ANTHROPIC_CUSTOM_HEADERS` lines (`"\n".join(f"{k}: {v}" for k, v in
-(await h.model_headers(prompt="triage")).items())`) — the CLI reads them as it starts, and the
-run's copy of the options selects the version the run pinned at its start
-([gateway.md](../gateway.md#prompts)).
+"ANTHROPIC_API_KEY": "<virtual key>"}` is set on the run's copy of the options by the harness
+when `BIFROST_URL` is set (unless your `env` names a base URL), with Bifrost's headers — the
+deny-all MCP scope, whose run it is — as `ANTHROPIC_CUSTOM_HEADERS` lines.
 
 This page is Way 1: the harness runs `query()`. To keep calling `query()` yourself and plug in
 the blocks (memory, `can_use_tool` from governance, the session as the run's checkpoint in
@@ -20,32 +18,42 @@ agent-runs, a judge), see the Way 2 recipe:
 ## Using an existing Claude Agent SDK project
 
 ```python
-from claude_agent_sdk import ClaudeAgentOptions
-from trellis import Harness, tool
+from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
+from mcp.types import ToolAnnotations
+from trellis import Harness
 
 h = Harness()
 
 
-@tool(side_effects="irreversible")
-def close_ticket(ticket: str) -> str:
-    """Close a support ticket."""
-    ...
+@tool(
+    "close_ticket",
+    "Close a support ticket.",
+    {"ticket": str},
+    annotations=ToolAnnotations(destructiveHint=True),
+)  # irreversible: a person approves it
+async def close_ticket(args: dict) -> dict: ...
 
 
-options = ClaudeAgentOptions(system_prompt="You triage support tickets.", allowed_tools=["Read"])
-agent = h.wrap(options, id="triage", tools=[close_ticket])  # was: query(prompt, options)
+options = ClaudeAgentOptions(
+    system_prompt="You triage support tickets.",
+    allowed_tools=["Read"],
+    mcp_servers={"desk": create_sdk_mcp_server("desk", tools=[close_ticket])},
+)
+agent = h.wrap(options, id="triage")  # was: query(prompt, options)
 
 result = await agent.run("Ticket T-9 is resolved; close it.", user="ada")
 if result.interrupt:
     result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="ada")
 ```
 
-The harness tools — `tools=[...]`, the MCP tools the Bifrost virtual key allows and, memory on,
-the memory tools — reach Claude as one in-process MCP server named `trellis` (tool names
-`mcp__trellis__<tool>`), added beside your own `mcp_servers` (a dict, a config file path or its
-JSON text); the harness's permission callback lets them through: the bridge is their check.
-To build options yourself instead, `await h.tools(..., framework="claude_agent_sdk")` returns
-that server's config (add it to `mcp_servers` as `"trellis"`).
+Your tools stay yours: your in-process servers (`create_sdk_mcp_server`), Claude Code's
+built-ins, your MCP servers — each call governed as the CLI makes it (below), its risk the
+server's annotations (`destructiveHint`: irreversible, `readOnlyHint`: read) unless the tool
+catalog says otherwise. The harness's tools — the MCP tools the Bifrost virtual key allows and,
+memory on, the memory tools — reach Claude as one more in-process MCP server named `trellis`
+(tool names `mcp__trellis__<tool>`), added beside your own `mcp_servers` (a dict, a config file
+path or its JSON text); the harness's permission callback lets them through: the bridge is
+their check.
 
 **`query(...)` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 
@@ -63,7 +71,8 @@ after any of yours:
   why.
 * **Risk.** `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `TodoWrite` read (they run);
   `Write`, `Edit`, `MultiEdit`, `NotebookEdit` write (they run, announced); `Bash` is
-  irreversible (it asks). Any other tool the CLI asks about (your own MCP server's) is a write.
+  irreversible (it asks). Your in-process server's tool is what its annotations say; any other
+  tool the CLI asks about (an MCP server's of yours) is a write.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)).
 * **Your own `can_use_tool`** is asked by the harness's hook after its decision, with the
@@ -76,15 +85,14 @@ after any of yours:
 
 * **Skills:** for `SKILL.md` folders the CLI discovers, use Claude's own:
   `ClaudeAgentOptions(skills=["name", ...] | "all")` (the SDK then allows the `Skill` tool and,
-  `setting_sources` unset, loads the user's and the project's settings). Use the
-  harness's (`h.wrap(..., skills=[...])`, on the `trellis` server) for skills from Bifrost's
-  registry, or a version pinned per run and replayed ([skills.md](../skills.md#native-or-ours)).
+  `setting_sources` unset, loads the user's and the project's settings)
+  ([skills.md](../skills.md#native-or-ours)).
 * **Sandbox:** prefer Claude's own `Bash` and file tools, confined with
   `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))`; the harness decides each
   call the CLI asks about (above), and a sandboxed `Bash` call is asked about only with
   `autoAllowBashIfSandboxed` false ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
-* **Prompts:** the options take text: `system_prompt=await h.prompt(...)` for a prompt from a
-  folder, Langfuse or Bifrost ([prompts.md](../prompts.md#native-or-ours)).
+* **Prompts:** the options take text: `system_prompt=(await h.prompt("triage")).text` for a
+  stored prompt of the gateway ([prompts.md](../prompts.md#native-or-ours)).
 
 ## What is automatic
 
@@ -146,8 +154,7 @@ await agent.run(
 ## Durable runs, workers, schedules, AG-UI, A2A, evaluation
 
 The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
-[evaluation.md](../evaluation.md)): the worker's machine needs the CLI; `llm_judge` needs
-`TRELLIS_JUDGE_MODEL`.
+[evaluation.md](../evaluation.md)): the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (or its own `model=`).
 
 ## Limits
 

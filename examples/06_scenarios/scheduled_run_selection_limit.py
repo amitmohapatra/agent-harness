@@ -1,10 +1,10 @@
 """Scenario: a scheduled run with its own selection of the harness's parts, a time limit, the
 framework's options and a queue priority — the options a schedule keeps for every run it fires.
 
-``agent.schedule(cron, input, on_behalf_of=, ...)`` takes what ``agent.start`` takes:
-``without=`` (here: no pushed memory context, no online judges — a nightly digest needs
-neither), ``timeout=`` (the most working time of each fired run), ``framework_options=`` (the
-graph's ``recursion_limit``) and ``priority=``. agent-runs keeps them in the schedule's
+``agent.schedule(cron, user=, input=, ...)`` takes what ``agent.start`` takes: ``without=``
+(here: no memory, no online judges — a nightly digest needs neither), ``run_timeout=`` (the
+most working time of each fired run), ``framework_options=`` (the graph's
+``recursion_limit``) and ``priority=``. agent-runs keeps them in the schedule's
 metadata and copies them into each run it fires; the worker that runs it applies them.
 
     python -m examples.06_scenarios.scheduled_run_selection_limit
@@ -30,15 +30,19 @@ async def main() -> None:
     memory = ScriptedMemory()
     model = react_model([("open_tickets", {}), "12 tickets are open."])
     async with Harness(**offline_blocks(memory=memory)) as h:
-        target = ReAct(system="You write a one-line digest of open tickets.", model=model)
-        agent = h.wrap(target, id="digest", tools=[open_tickets])
+        target = ReAct(
+            system_prompt="You write a one-line digest of open tickets.",
+            model=model,
+            tools=[open_tickets],
+        )
+        agent = h.wrap(target, id="digest")
         schedule = await agent.schedule(
             "0 7 * * 1-5",
-            "Morning digest",
-            on_behalf_of="ada",
+            user="ada",
+            input="Morning digest",
             tz="Europe/Paris",
             without={"memory", "judges"},
-            timeout=120,
+            run_timeout=120,
             framework_options={"recursion_limit": 12},
             priority=10,
         )
@@ -50,7 +54,7 @@ async def main() -> None:
         assert record is not None
         print(record.status.value, record.output, "| priority", record.priority)
         print("the fired run's options:", record.metadata, record.timeout_seconds)
-        print("contexts pushed:", memory.asked["context_"])  # 0: without memory_push
+        print("contexts pushed:", memory.asked["context_"])  # 0: without memory
 
 
 if __name__ == "__main__":

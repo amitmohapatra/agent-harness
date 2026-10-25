@@ -25,7 +25,8 @@ pip install -e ../agent-runs/sdk/python         # trellis.runs (the harness brin
 ```
 
 `trellis.memory` and `trellis.contracts` come with them. Set `MEMORY_URL`, `RUNS_URL` and
-`TRELLIS_API_KEY` for the services, and `BIFROST_URL` with `TRELLIS_JUDGE_MODEL` for the judge.
+`TRELLIS_API_KEY` for the services, and `BIFROST_URL` for the judge (its judge alias, or
+`llm_judge(model=)`).
 
 ## The tools: governed and recorded
 
@@ -214,10 +215,10 @@ graph. A webhook on `run.paused` tells the reviewer's UI instead of polling ([ru
 |---|---|---|
 | where the pause lives | your checkpointer, plus the `Interrupt` you send agent-runs | the harness: the graph's checkpointer, or a re-run against its journal without one |
 | the tools' governance | `governed(...)` on each tool | every harness tool, automatically |
-| time limits, retries | `governed(..., timeout=)` on each tool; your model client's timeout; `RunStart.timeout_seconds` (agent-runs ends the run) | `@tool(timeout=)`, `ReAct(model_timeout=)`, `run(timeout=, deadline=)`; reads retried, unknown writes never re-run, after a crash too |
+| time limits, retries | `governed(..., timeout=)` on each tool; your model client's timeout; `RunStart.timeout_seconds` (agent-runs ends the run) | `@tool(call_timeout=)`, `ReAct(call_timeout=)`, `run(timeout=, deadline=)`; reads retried, unknown writes never re-run, after a crash too |
 | recording | your `recorded` and `history.add` | the transcript, every tool call and the outcome, queued in the background with a spool |
 | memory push | your `SystemMessage` | a leading system message with a fixed id, one per checkpointed thread |
-| evaluation | `judge(...)` where you choose | `Harness(judges=[...])` on a sampled share, in the background |
+| evaluation | `judge(...)` where you choose | `h.wrap(judges=[...])` on a sampled share, in the background |
 | serving | yours | `serve_chat` (AG-UI) and `serve_a2a` |
 
 To move a graph between the two ways, or to run both in one deployment, see

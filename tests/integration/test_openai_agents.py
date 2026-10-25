@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from agents import Agent, SQLiteSession, Usage, function_tool
 
+from tests.support.arm import arm, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.openai_model import ScriptedModel
@@ -52,7 +53,7 @@ async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness
         [("eta", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped, arriving tomorrow"]
     )
     target = Agent(name="shipper", instructions="You ship orders.", model=model, tools=[eta])
-    agent = harness.wrap(target, id="shipper", tools=[tool(ship.fn, side_effects="write")])
+    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
     result = await agent.run("ship o1", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "shipped, arriving tomorrow"
     assert done == ["o1"]
@@ -61,7 +62,7 @@ async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness
 
 async def test_an_approval_pauses_and_a_resume_reruns_against_the_journal(harness: Harness) -> None:
     model = ScriptedModel([("ship", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped"])
-    agent = harness.wrap(Agent(name="shipper", model=model), id="shipper", tools=[ship])
+    agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
     paused = await agent.run("ship o1", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.reason is InterruptReason.APPROVAL and done == []
@@ -73,7 +74,7 @@ async def test_ask_inside_a_tool_returns_the_answer_on_resume(harness: Harness) 
     model = ScriptedModel(
         [("confirm", {"order": "o1"}), ("confirm", {"order": "o1"}), "customer said yes"]
     )
-    agent = harness.wrap(Agent(name="c", model=model), id="confirmer", tools=[confirm])
+    agent = arm(harness.wrap(Agent(name="c", model=model), id="confirmer"), [confirm])
     paused = await agent.run("check o1", user="u1")
     assert paused.interrupt is not None and paused.interrupt.options == ["yes", "no"]
     finished = await agent.resume(
@@ -152,7 +153,7 @@ async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(
     memory_service.candidates_for = {"find t4": ["t4", "eta"]}
     model = ScriptedModel([("tool_search", {"task": "find t4"}), ("t4", {"key": "k"}), "done"])
     target = Agent(name="n", model=model, tools=[eta])
-    agent = memory_harness.wrap(target, id="n", tools=[make(i) for i in range(6)])
+    agent = arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "done"
     memory_tools = MEMORY_TOOLS
     assert model.tools[0] == ["t2", *memory_tools]  # the agent's own eta is no candidate
@@ -312,7 +313,7 @@ async def test_a_large_result_is_previewed_and_read_in_pages_across_a_pause(
             "done",
         ]
     )
-    agent = harness.wrap(Agent(name="d", model=model, tools=[send]), id="dumper", tools=[dump])
+    agent = arm(harness.wrap(Agent(name="d", model=model, tools=[send]), id="dumper"), [dump])
     paused = await agent.run("dump it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     preview = model.inputs[1][-1]["output"]
@@ -329,9 +330,9 @@ async def test_a_large_result_is_previewed_and_read_in_pages_across_a_pause(
 async def test_an_agent_built_with_h_tools_gets_read_file_once(harness: Harness) -> None:
     model = ScriptedModel([("dump", {}), "done"])
     target = Agent(
-        name="d", model=model, tools=await harness.tools(dump, framework="openai_agents")
+        name="d", model=model, tools=await native_tools(harness, dump, framework="openai_agents")
     )
-    agent = harness.wrap(target, id="dumper", tools=[ship])
+    agent = arm(harness.wrap(target, id="dumper"), [ship])
     assert (await agent.run("dump it", user="u1")).answer == "done"
     assert model.tools[1].count("read_file") == 1
 
@@ -408,7 +409,7 @@ async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog(
     model = ScriptedModel([*[("transfer_to_billing", {}), ("refund", {"order": "o1"})] * 2, "ok"])
     triage, _, _ = _desk(model)
     governance = Governance(FakeCatalog({"refund": Rule(risk="irreversible")}))
-    async with Harness(config=Settings(), governance=governance) as h:
+    async with with_governance(Harness(config=Settings()), governance) as h:
         agent = h.wrap(triage, id="desk")
         paused = await agent.run("refund o1", user="u1")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -434,7 +435,7 @@ async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
         [("transfer_to_billing", {}), ("memory_search", {"query": "orders"}), "checked"]
     )
     triage, billing, _ = _desk(model)
-    agent = memory_harness.wrap(triage, id="desk", tools=[make(i) for i in range(6)])
+    agent = arm(memory_harness.wrap(triage, id="desk"), [make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "checked"
     assert model.tools[0] == ["t2", *MEMORY_TOOLS]
     # billing: its own refund narrowed away, the memory tools added (not triage's t0..t5)
@@ -470,8 +471,8 @@ async def test_a_token_budget_stops_the_run_without_any_hooks() -> None:
         [("track", {"order": "o1"}), "done"], usage=Usage(input_tokens=50, output_tokens=10)
     )
     async with Harness(config=Settings()) as h:
-        agent = h.wrap(
-            Agent(name="s", model=model), id="s", tools=[track], budget=Budget(max_tokens=10)
+        agent = arm(
+            h.wrap(Agent(name="s", model=model), id="s", budget=Budget(max_tokens=10)), [track]
         )
         result = await agent.run("track o1", user="u1")
     assert result.status is not RunStatus.SUCCESS and done == []  # the reply spent it
@@ -511,8 +512,8 @@ async def test_a_durable_session_keeps_the_thread(
 async def test_a_rule_that_cannot_be_evaluated_asks_and_is_recorded_on_the_run() -> None:
     model = ScriptedModel([("track", {"order": "o1"}), "done"])
     governance = Governance(FakeCatalog({"track": Rule(risk="read", approve_when="order >>")}))
-    async with Harness(config=Settings(), governance=governance) as h:
-        agent = h.wrap(Agent(name="s", model=model), id="rule", tools=[track])
+    async with with_governance(Harness(config=Settings()), governance) as h:
+        agent = arm(h.wrap(Agent(name="s", model=model), id="rule"), [track])
         events = [e async for e in agent.stream("track o1", user="u1")]
     assert done == []  # it asked a person instead of running
     assert any(e.type is RunEventType.INTERRUPT for e in events)

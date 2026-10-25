@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, InterruptReason, RunEventType, RunStatus
@@ -48,7 +49,7 @@ async def test_a_refused_key_is_a_configuration_error(
 ) -> None:
     memory_service.failures["key"] = status
     with pytest.raises(ConfigurationError, match="refused TRELLIS_API_KEY"):
-        await harness.tenant()
+        await harness._tenant()
 
 
 async def test_a_known_key_outlives_an_outage_and_is_read_again_later(
@@ -59,23 +60,23 @@ async def test_a_known_key_outlives_an_outage_and_is_read_again_later(
 ) -> None:
     now = [100.0]
     monkeypatch.setattr(fresh_module.time, "monotonic", lambda: now[0])
-    assert await harness.tenant() == "acme"
+    assert await harness._tenant() == "acme"
     memory_service.failures["key"] = 503
     now[0] += 601  # past the key's TTL: asked again, and the service is down
     with caplog.at_level(logging.WARNING, logger="trellis.fresh"):
-        assert await harness.tenant() == "acme"
-        assert await harness.tenant() == "acme"  # not asked again before the retry interval
+        assert await harness._tenant() == "acme"
+        assert await harness._tenant() == "acme"  # not asked again before the retry interval
     assert len(memory_service.named("key")) == 1
     assert caplog.text.count("could not be read again") == 1
     del memory_service.failures["key"]
     memory_service.tenant = "acme"
     now[0] += 31
-    assert await harness.tenant() == "acme"
+    assert await harness._tenant() == "acme"
     assert len(memory_service.named("key")) == 2
     memory_service.failures["key"] = 401  # revoked meanwhile: no stale answer hides that
     now[0] += 601
     with pytest.raises(ConfigurationError, match="refused"):
-        await harness.tenant()
+        await harness._tenant()
 
 
 async def test_memory_tools_that_cannot_be_listed_leave_the_run_without_them(
@@ -114,7 +115,7 @@ async def test_a_catalog_that_cannot_be_read_makes_writes_ask_and_the_run_goes_o
         await agent.tools.call("stock", sku="a")  # reads: still runs
         return await agent.tools.call("reorder", sku="a")  # writes: now asks
 
-    agent = harness.wrap(restocks, id="restocks", tools=[stock, reorder])
+    agent = arm(harness.wrap(restocks, id="restocks"), [stock, reorder])
     paused = await agent.run("restock a", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.reason is InterruptReason.APPROVAL

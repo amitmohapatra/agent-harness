@@ -245,7 +245,7 @@ async def test_an_agent_tool_given_no_text_is_a_helper_on_its_arguments() -> Non
 
     runs = LocalRuns()
     parent = runtime(runs)
-    parent.agent.budget = None
+    parent.budget = None
     parent.parent = None
     parent.replay = SimpleNamespace(journal=SimpleNamespace(spent={}))
     helpers = Helpers(parent, "openai_agents")

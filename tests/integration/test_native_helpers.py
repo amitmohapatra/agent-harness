@@ -20,6 +20,7 @@ from deepagents import create_deep_agent
 
 from tests.integration.test_bridge_claude import machine
 from tests.integration.test_restarts import Crash, crash_then_finish, workers  # noqa: F401
+from tests.support.arm import arm, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.durable import SharedSaver
@@ -92,7 +93,7 @@ def a_full_child(service: FakeMemoryService, run_id: str, child_id: str, tools: 
 
 @pytest.fixture
 async def asks() -> AsyncIterator[Harness]:
-    async with Harness(config=Settings(), governance=ASKS) as h:
+    async with with_governance(Harness(config=Settings()), ASKS) as h:
         yield h
 
 
@@ -101,7 +102,7 @@ TASK = ("task", {"description": "refund o1", "subagent_type": "checker"})
 
 
 async def deep(h: Harness, main: Any, sub: Any, *tools: Any, saver: Any = None) -> Any:
-    given = await h.tools(*(tools or (refund,)), framework="deepagents")
+    given = await native_tools(h, *(tools or (refund,)), framework="deepagents")
     return create_deep_agent(
         model=main,
         tools=given,
@@ -231,7 +232,7 @@ async def test_a_claude_subagents_built_in_asks_as_the_catalog_rules_and_a_rejec
     tmp_path: Path,
 ) -> None:
     governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
-    async with Harness(config=Settings(), governance=governance) as h:
+    async with with_governance(Harness(config=Settings()), governance) as h:
         agent = h.wrap(claude(tmp_path, [subagent("Bash"), {"text": "checked"}]), id="desk")
         paused = await agent.run("check o1", user="u")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -309,8 +310,8 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
     store = LocalRuns()
     first, second = (Harness(config=Settings(), runs=store) for _ in range(2))
     try:
-        dying = first.wrap(machine(tmp_path, "one", script), id="desk", tools=[die])
-        taking_over = second.wrap(machine(tmp_path, "two", script), id="desk", tools=[die])
+        dying = arm(first.wrap(machine(tmp_path, "one", script), id="desk"), [die])
+        taking_over = arm(second.wrap(machine(tmp_path, "two", script), id="desk"), [die])
         handle = await dying.start("check o1", user="u")
         worker = first.worker([dying])
         claimed = await store.claim(worker.worker_id, [dying.id])
@@ -318,10 +319,10 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
         job = Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         with pytest.RaisesGroup(Crash, flatten_subgroups=True):
             await dying.execute(job)
-        held, _ = store._leases[handle.run_id]
-        store._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+        held, _ = store._leases[handle.id]
+        store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
         assert await second.worker([taking_over]).run_once()
-        result = await handle.result(timeout=10)
+        result = await handle.result(wait=10)
         [child] = await children(second, result.run_id)
     finally:
         await first.aclose()
@@ -341,8 +342,8 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
         [("check", {"input": "check o1"}), ("check", {"input": "check o1"}), "ok"]
     )
     governance = Governance(FakeCatalog({"check": Rule(risk="irreversible")}))
-    async with Harness(
-        config=Settings(), memory=memory_service.client(), governance=governance
+    async with with_governance(
+        Harness(config=Settings(), memory=memory_service.client()), governance
     ) as h:
         agent = h.wrap(Agent(name="desk", model=model, tools=[tool_]), id="desk")
         paused = await agent.run("check o1", user="u")
@@ -372,7 +373,9 @@ async def test_an_agent_tool_paused_inside_is_the_same_child_after_the_resume(
 ) -> None:
     inner = ScriptedModel([*[("refund", {"order": "o1"})] * 2, "refunded o1"], ids="checker_")
     checker = Agent(
-        name="checker", model=inner, tools=await asks.tools(refund, framework="openai_agents")
+        name="checker",
+        model=inner,
+        tools=await native_tools(asks, refund, framework="openai_agents"),
     )
     model = ScriptedModel([*[("check", {"input": "refund o1"})] * 2, "ok"])
     target = Agent(name="desk", model=model, tools=[checker.as_tool("check", "Refund.")])

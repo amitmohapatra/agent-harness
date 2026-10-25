@@ -11,9 +11,9 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | `ConfigurationError: MEMORY_URL (and RUNS_URL) need TRELLIS_API_KEY` | both services refuse a call without a key | set `TRELLIS_API_KEY` (locally: the memory service's development key) ([onboarding.md](onboarding.md)) |
 | `ConfigurationError: the memory service at MEMORY_URL refused TRELLIS_API_KEY` | the key is wrong, revoked, or of another deployment | issue a key for this tenant ([onboarding.md](onboarding.md)) |
 | `ConfigurationError: ... could not be reached to say who TRELLIS_API_KEY is` | the first ask of `/v1/keys/self` failed (later outages keep the last answer) | check `MEMORY_URL` and that the service is up |
-| `ValidationError` from `Settings` | a sample outside 0–1, a concurrency under 1, an unknown `SANDBOX` | fix the variable ([configuration.md](configuration.md#settings-and-the-environment)) |
+| `ValidationError` from `Settings` | a field `Settings` does not have (a retired one: `eval_sample`, `sandbox`...) | drop it; its replacement is in [configuration.md](configuration.md#settings-and-the-environment) |
 | `ConfigurationError: cannot wrap X` | the target is not a compiled graph, an OpenAI Agents `Agent`, `ClaudeAgentOptions` or an async function | compile the graph (`graph.compile()`), or wrap an `async def (input, agent)` |
-| `ConfigurationError: a langgraph target binds its tools when it is built` | `tools=`, `mcp=` or `skills=` given to `h.wrap` for a compiled graph | build the graph with `await h.tools(..., framework="langgraph")` ([langgraph.md](frameworks/langgraph.md)) |
+| `TypeError: wrap() got an unexpected keyword argument 'tools'` | tools given to `h.wrap` | tools are the builder's: `ReAct(tools=[...])`, or your framework's own ([tools.md](tools.md)) |
 | `ConfigurationError: without= names no feature ...` | a name not in the `without=` table | use one of the names listed in the message ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `ConfigurationError` naming a `framework_options` key | the framework's run call cannot take it, or the harness keeps it for itself | see what each framework takes ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 | `ConfigurationError: ReAct with a model name needs BIFROST_URL` | `ReAct(model="name")` is a gateway model | set `BIFROST_URL`, or pass a LangChain chat model object |
@@ -56,20 +56,20 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | You see | Why | Do |
 |---|---|---|
 | `agent.context` is `None` | memory is off (`MEMORY_URL` unset, `without={"memory"}`) or the context read failed (a `warning` event) | check the environment and the run's events ([memory.md](memory.md)) |
-| `ConfigurationError: memory is off for this run` | `trellis.current().memory` with memory off | set `MEMORY_URL`, or check `agent.uses("memory_pull")` first |
+| `ConfigurationError: memory is off for this run` | `trellis.current().memory` with memory off | set `MEMORY_URL`, or check `agent.uses("memory_pull")` (the `memory` part) first |
 | `warning` events about writes, `trellis.writes.undelivered`, `trellis doctor` "records failing" | memory writes given up after retries | check the memory service; set `TRELLIS_SPOOL_DIR` on a volume that outlives the process ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
-| a run ended `MODEL_TIMEOUT` ("the step stalled") | a model call got no answer within its bound | the provider is slow or down; a `ReAct`'s `model_timeout` or the run's `timeout` ([reliability.md](reliability.md#stalled-model-calls)) |
+| a run ended `MODEL_TIMEOUT` ("the step stalled") | a model call got no answer within its bound | the provider is slow or down; a `ReAct`'s `call_timeout` or the run's `timeout` ([reliability.md](reliability.md#stalled-model-calls)) |
 | a person's feedback does not change memory | human feedback waits for the tenant administrator's review | approve it in the memory service; the trace score is there already |
 | no judge scores | the judge alias `trellis-judge` is not routed in Bifrost (the log says so once), or no `BIFROST_URL` | route the alias in Bifrost, or give `llm_judge(model=)` ([evaluation.md](evaluation.md#the-judges-model)) |
-| few runs judged | online judges score a sample (`TRELLIS_EVAL_SAMPLE`, 0.1 by default) | raise the sample |
+| few runs judged | an online judge scores a sample (`llm_judge(sample=)`, 0.1 by default) | raise its sample |
 | no traces | no `OTEL_EXPORTER_OTLP_ENDPOINT`, no Langfuse keys and no provider of your own | set it ([observability.md](observability.md#export)) |
 | a value shows as `[redacted]` in a span | its name or value looks like a secret | expected; redact more with a hook of your own ([observability.md](observability.md#redaction)) |
 
 ## FAQ
 
 **Do I have to change my agent's code?** No. Wrap the object you built; call `agent.run` where
-you called the framework. A compiled graph takes its harness tools from `h.tools(...)` when it
-is built — that is the one line inside it.
+you called the framework. A graph that should also have the harness's tools (the gateway's MCP
+tools, memory's) takes `HarnessTools()` in its middleware — that is the one line inside it.
 
 **Can I use only memory, or only the inbox?** Yes: import that block (Way 2,
 [docs/README.md](README.md#way-2-pluggable-blocks-your-framework-our-pieces)), or wrap and turn
@@ -100,6 +100,6 @@ the extras.
 [Asking](interrupts.md#asking) · [Hooks](hooks.md) · [Telling people](interrupts.md#telling-people) ·
 [An inbox of your own](interrupts.md#an-inbox-of-your-own) · [Queue order](runs.md#queue-order-and-busy-conversations) ·
 [Run events](runs.md#a-runs-events-from-anywhere) · [Gateway](gateway.md) ·
-[Prompts](prompts.md#on-failure) · [Skills](skills.md#on-failure) ·
+[Prompts](prompts.md#on-failure) ·
 [Sub-agents](subagents.md#on-failure) · [Sandbox](sandbox.md#on-failure) ·
 [Claude Agent SDK](frameworks/claude-agent-sdk.md#approvals-and-pauses)

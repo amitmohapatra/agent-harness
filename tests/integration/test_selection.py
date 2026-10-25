@@ -13,6 +13,7 @@ import pytest
 from pydantic import Field
 
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm, native_tools
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import Call, PlannedChatModel
 from tests.unit.test_toolbox import Def
@@ -24,7 +25,6 @@ from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.evals import EvalCase, EvalScore
 from trellis.harness.features import features
 from trellis.harness.middleware import ModelHooks
-from trellis.harness.skills import LOAD_SKILL, Skills
 
 #: The calls through which a run reaches the memory service.
 MEMORY_CALLS: Final = {"context", "agent_tools", "messages", "record_tool", "feedback", "verify"}
@@ -40,27 +40,12 @@ def reached(service: FakeMemoryService) -> set[str]:
     return {c.name for c in service.calls} & MEMORY_CALLS
 
 
-def test_a_retired_name_still_works_and_says_its_replacement(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from trellis.harness import features as module
-
-    module._deprecated.cache_clear()
-    with caplog.at_level("WARNING", logger="trellis.harness"):
-        assert features(["hints"]) == {"hints"}
-        assert features(["memory_pull"]) == {"memory_pull", "tool_search"}
-        features(["hints"])
-    said = [r.message for r in caplog.records if "is deprecated" in r.message]
-    assert len(said) == 2 and "use tool_search" in said[0]
-
-
 def test_without_names_features_and_refuses_anything_else() -> None:
     memory = {"memory_push", "memory_pull", "records", "hints", "tool_search"}
     assert features(["memory", "judges"]) == {*memory, "judges"}
     assert features(["mcp"]) == {"mcp", "code_mode"}
     assert features(["tool_search"]) == {"hints", "tool_search"}
-    assert features(["react_auto"]) == {"planning", "files"}
-    every = "memory, tool_search, mcp, code_mode, skills, judges, grounding, planning, files"
+    every = "memory, tool_search, mcp, code_mode, grounding, judges"
     with pytest.raises(
         ConfigurationError, match=f"names no feature 'memroy': the features are {every}"
     ):
@@ -84,7 +69,7 @@ async def test_a_run_without_memory_reaches_no_memory_on_every_adapter(
     plan: list[Call] = [("stock", {"sku": "A-1"})]
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         target, tools = await BUILDERS[framework](h, [stock], tmp_path, plan)
-        agent = h.wrap(target, id=f"stock-{framework}", tools=tools)
+        agent = arm(h.wrap(target, id=f"stock-{framework}"), tools)
         memory_service.calls.clear()  # a graph's memory tools were listed when it was built
         alone = await agent.run("How many A-1?", user="ada", without={"memory"})
         await h.writes.drain()
@@ -100,7 +85,9 @@ async def test_a_run_without_memory_reaches_no_memory_on_every_adapter(
     assert remembered.status is RunStatus.SUCCESS
 
 
-async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService) -> None:
+async def test_each_feature_turns_off_its_part(
+    memory_service: FakeMemoryService, sampled: Any
+) -> None:
     seen: list[dict[str, Any]] = []
 
     async def fn(input: str, agent: Runtime) -> str:
@@ -115,11 +102,10 @@ async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService
 
     defs = [Def(f"wiki-t{i}", "wiki") for i in range(20)]  # read only: Code Mode
     gateway = cast("Gateway", StubGateway([*defs, Def("erp-pay", "erp", annotations=None)]))
-    settings = Settings(eval_sample=1.0)
-    async with Harness(
-        config=settings, memory=memory_service.client(), gateway=gateway, judges=[judge]
-    ) as h:
-        agent = h.wrap(fn, id="all", tools=[stock])
+    sampled(1.0)
+    settings = Settings()
+    async with Harness(config=settings, memory=memory_service.client(), gateway=gateway) as h:
+        agent = arm(h.wrap(fn, id="all", judges=[judge]), [stock])
 
         async def run(*without: str) -> tuple[dict[str, Any], set[str]]:
             memory_service.calls.clear()
@@ -133,12 +119,13 @@ async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService
         assert "execute_tool_code" in everything["tools"] and "erp-pay" in everything["tools"]
         assert {"context", "messages", "verify"} <= calls
         assert judged == ["fine"]
-        pushed, calls = await run("memory_push")
-        assert pushed["context"] is None and "context" not in calls and "messages" in calls
-        pulled, _ = await run("memory_pull")
-        assert pulled["context"] and "memory_search" not in pulled["tools"]
-        _, calls = await run("records")
-        assert "context" in calls and not {"messages", "feedback"} & calls
+        alone, calls = await run("memory")
+        assert alone["context"] is None and "memory_search" not in alone["tools"]
+        assert not {"context", "agent_tools", "messages", "record_tool", "feedback"} & calls
+        searched, calls = await run("tool_search")
+        assert searched["context"] and "memory_search" in searched["tools"]
+        [asked] = memory_service.named("context")
+        assert asked.body["tools"]["hints"] is False
         _, calls = await run("grounding")
         assert "verify" not in calls
         await run("judges")
@@ -154,10 +141,10 @@ async def test_each_feature_turns_off_its_part(memory_service: FakeMemoryService
         ]
 
 
-async def test_without_hints_the_context_asks_for_no_tool_hints(
+async def test_without_tool_search_the_context_asks_for_no_tool_hints(
     memory_service: FakeMemoryService,
 ) -> None:
-    """Without hints the agent still asks with its tools (for the skills it learned), but no
+    """Without tool search the agent still asks with its tools (for the skills it learned), but no
     hints come back and every tool is offered."""
     many = [tool(lambda sku: sku, name=f"t{i}", side_effects="read") for i in range(5)]
 
@@ -165,42 +152,17 @@ async def test_without_hints_the_context_asks_for_no_tool_hints(
         return sorted(n for n in agent.toolbox if agent.offers(n))
 
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        agent = h.wrap(fn, id="hinted", tools=many)
+        agent = arm(h.wrap(fn, id="hinted"), many)
         await agent.run("q", user="u")
         [hinted] = memory_service.named("context")
         assert hinted.body["tools"] == {"available": [f"t{i}" for i in range(5)], "k": 8}
         memory_service.calls.clear()
-        offered = await h.wrap(fn, id="unhinted", tools=many, without={"hints"}).run("q", user="u")
+        offered = await arm(h.wrap(fn, id="unhinted", without={"tool_search"}), many).run(
+            "q", user="u"
+        )
         [unhinted] = memory_service.named("context")
         assert unhinted.body["tools"]["hints"] is False
         assert {f"t{i}" for i in range(5)} <= set(offered.answer), "every tool offered"
-
-
-async def test_without_skills_a_run_has_neither_the_section_nor_the_tools(
-    harness: Harness,
-) -> None:
-    async def fn(input: str, agent: Runtime) -> Any:
-        return [agent.context, sorted(agent.toolbox), agent.skills]
-
-    agent = harness.wrap(fn, id="skilled", tools=[Skills(["sql"])], without={"skills"})
-    result = await agent.run("q", user="u")  # no gateway asked: the skills are never pinned
-    assert result.answer == [None, [], {}]
-
-
-async def test_a_graphs_bound_tool_of_a_feature_turned_off_is_refused(
-    harness: Harness,
-) -> None:
-    """A compiled graph binds its tools when it is built: one of a feature the run is without
-    stays bound, and its call is an error the model reads."""
-    from langchain.agents import create_agent
-
-    graph = create_agent(
-        PlannedChatModel(plan=[(LOAD_SKILL, {"name": "sql"})], final="read: {last}"),
-        tools=await harness.tools(Skills(["sql"]), framework="langgraph"),
-    )
-    agent = harness.wrap(graph, id="graph", without={"skills"})
-    result = await agent.run("review", user="u")
-    assert result.answer == "read: load_skill is off in this run (without skills)"
 
 
 async def test_without_mcp_the_gateway_is_not_asked_for_the_keys_tools(
@@ -216,10 +178,10 @@ async def test_without_mcp_the_gateway_is_not_asked_for_the_keys_tools(
     async with Harness(
         config=Settings(), memory=memory_service.client(), gateway=cast("Gateway", stub)
     ) as h:
-        agent = h.wrap(fn, id="local", tools=[stock], without={"mcp"})
+        agent = arm(h.wrap(fn, id="local", without={"mcp"}), [stock])
         local = (await agent.run("q", user="u")).answer
         assert "stock" in local and "wiki-search" not in local
-        built = await h.tools(stock, framework="langgraph", without={"mcp", "memory_pull"})
+        built = await native_tools(h, stock, framework="langgraph", without={"mcp", "memory"})
         assert [t.name for t in built] == ["stock"]
         await h.writes.drain()
         assert stub.listed == 0
@@ -247,7 +209,7 @@ async def test_a_graph_with_the_middleware_is_offered_only_the_tools_its_run_use
     from langchain.agents import create_agent
 
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        tools = await h.tools(stock, framework="langgraph")
+        tools = await native_tools(h, stock, framework="langgraph")
         bound = sorted(t.name for t in tools)
         assert "memory_search" in bound and "stock" in bound
         model = Offering(plan=[("stock", {"sku": "A-1"})])
@@ -255,9 +217,9 @@ async def test_a_graph_with_the_middleware_is_offered_only_the_tools_its_run_use
         everything = h.wrap(graph, id="everything")
         assert (await everything.run("A-1?", user="u")).answer == "Done. A-1: 7"
         assert model.offered[-1] == bound
-        await everything.run("A-1?", user="u", without={"memory_pull"})
+        await everything.run("A-1?", user="u", without={"memory"})
         assert model.offered[-1] == ["stock"]
-        pulled = h.wrap(graph, id="unpulled", without={"memory_pull"})
+        pulled = h.wrap(graph, id="unpulled", without={"memory"})
         assert (await pulled.run("A-1?", user="u")).answer == "Done. A-1: 7"
         assert model.offered[-1] == ["stock"]
         request = cast("Any", Tools([]))
@@ -279,8 +241,8 @@ async def test_a_runs_own_without_adds_to_the_agents_and_holds_across_a_resume(
         return f"{input}: {await agent.ask('Go on?')}"
 
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        agent = h.wrap(asks, id="asks", without={"memory_push"})
-        paused = await agent.run("q", user="u", without={"records"})
+        agent = h.wrap(asks, id="asks", without={"judges"})
+        paused = await agent.run("q", user="u", without={"memory"})
         assert paused.interrupt is not None
         memory_service.calls.clear()
         done = await agent.resume(
@@ -302,28 +264,18 @@ async def test_a_queued_run_and_its_sub_agents_keep_its_without(
 
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         helper = h.wrap(child, id="helper")
-        boss = h.wrap(parent, id="boss", tools=[helper.as_tool()])
+        boss = arm(h.wrap(parent, id="boss"), [helper])
         handle = await boss.start("x", user="u", without={"memory"})
         memory_service.calls.clear()
         assert await h.worker([boss]).run_once()
-        done = await handle.result(timeout=5)
+        done = await handle.result(wait=5)
         await h.writes.drain()
         assert done.answer == "child did x"
-        [summary] = [r async for r in h.runs.iterate(parent_run_id=handle.run_id)]
+        [summary] = [r async for r in h.runs.iterate(parent_run_id=handle.id)]
         child_run = await h.runs.get(summary.run_id)
         assert child_run is not None
         assert child_run.metadata == {
             "without": ["hints", "memory_pull", "memory_push", "records", "tool_search"],
-            "agent_group": handle.run_id,  # the delegation tree, named by its top run
+            "agent_group": handle.id,  # the delegation tree, named by its top run
         }
     assert reached(memory_service) == set()
-
-
-async def test_mcp_empty_is_no_mcp_tools(harness: Harness) -> None:
-    async def fn(input: str, agent: Runtime) -> list[str]:
-        return sorted(agent.toolbox)
-
-    stub = StubGateway([Def("wiki-search", "wiki")])
-    async with Harness(config=Settings(), gateway=cast("Gateway", stub)) as h:
-        assert (await h.wrap(fn, id="all").run("q", user="u")).answer == ["wiki-search"]
-        assert (await h.wrap(fn, id="none", mcp=[]).run("q", user="u")).answer == []

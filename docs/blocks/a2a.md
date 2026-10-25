@@ -1,6 +1,6 @@
-# A2A: `trellis.harness.a2a.remote` (Way 2)
+# A2A: `trellis.harness.a2a.RemoteAgent` (Way 2)
 
-`remote(url, tenant=, user=)` calls another agent over A2A from any code, on any framework:
+`RemoteAgent(url, tenant=, user=)` (the client under `a2a(url)`) calls another agent over A2A from any code, on any framework:
 a `RemoteAgent` is an async callable, a message in and the remote agent's answer out. The
 remote side is any A2A server: a wrapped agent's `serve_a2a`, or another vendor's.
 
@@ -12,7 +12,7 @@ the function that calls it ([surfaces.md](../surfaces.md); any async function is
 
 ## Install and set up
 
-`remote` ships in the harness distribution with the `a2a` extra:
+`RemoteAgent` ships in the harness distribution with the `a2a` extra:
 
 ```bash
 pip install -e '../agent-harness[a2a]'    # the A2A SDK; no Harness needed
@@ -21,8 +21,8 @@ pip install -e '../agent-harness[a2a]'    # the A2A SDK; no Harness needed
 It reads no environment: who the call is for is an argument.
 
 ```text
-remote(url, *, tenant, user, thread=None, on_input=None, name=None, headers=None,
-       timeout=120.0, client=None) -> RemoteAgent
+RemoteAgent(url, *, tenant, user, thread=None, on_input=None, name=None, headers=None,
+            timeout=120.0, client=None, card=None)
 ```
 
 | | |
@@ -38,9 +38,9 @@ remote(url, *, tenant, user, thread=None, on_input=None, name=None, headers=None
 ## The API
 
 ```python
-from trellis.harness.a2a import InputRequired, remote
+from trellis.harness.a2a import InputRequired, RemoteAgent
 
-async with remote("https://planner.example/a2a", tenant="acme", user="ada") as planner:
+async with RemoteAgent("https://planner.example/a2a", tenant="acme", user="ada") as planner:
     try:
         plan = await planner("deploy the shop")
     except InputRequired as asked:  # the remote agent asks something
@@ -51,7 +51,7 @@ async with remote("https://planner.example/a2a", tenant="acme", user="ada") as p
   as a data part); the answer is the task's `result` artifact (several artifacts as a list), or
   its text. `message_id` names the message (the same id again is the same message to a server
   that deduplicates; the harness's `a2a(url)` tool sends its call's idempotency key).
-* `await agent.connect()` / `async with remote(...) as agent`: reads the card once (a call
+* `await agent.connect()` / `async with RemoteAgent(...) as agent`: reads the card once (a call
   connects first when nothing has); `aclose()` closes the HTTP client it opened.
 * `agent.card` is the remote `AgentCard`; `agent.spec` a contracts `ToolSpec` (`write`,
   `{"message": string}` in), for exposing it as a tool in any framework. Both after `connect`.
@@ -74,7 +74,7 @@ from typing import Any
 from langchain_core.tools import tool
 from langgraph.types import interrupt
 
-planner = remote(url, tenant="acme", user="ada", on_input=interrupt)
+planner = RemoteAgent(url, tenant="acme", user="ada", on_input=interrupt)
 
 
 @tool
@@ -103,8 +103,8 @@ should be governed ([governance.md](governance.md)): a remote agent is a `write`
 A wrapped agent calls remote agents with `a2a(url)` in its tools, which is built on `remote`:
 the identity and the thread are the calling run's, and `on_input` is the run's own `ask`, so a
 remote question pauses the calling run in agent-runs and the resumed run answers it
-([surfaces.md](../surfaces.md#calling-a2a-agents-a2aurl--namenone-timeout120)). A wrapped agent served
+([surfaces.md](../surfaces.md#calling-a2a-agents)). A wrapped agent served
 with `serve_a2a` is a remote agent your code calls with `remote` ([mixing.md](mixing.md)).
 
 [`examples/03_way2_a2a/remote.py`](../../examples/03_way2_a2a/remote.py) serves a wrapped agent over A2A, calls
-it as another agent's tool, and calls it from plain code with `remote()`.
+it as another agent's tool, and calls it from plain code with `a2a(url)` (or `RemoteAgent`).

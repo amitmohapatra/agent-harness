@@ -37,8 +37,10 @@ async def main() -> None:
         ]
     )
     async with Harness() as h:
-        target = ReAct(system="You keep stock above 10 units.", model=model)
-        agent = h.wrap(target, id="stock-keeper", tools=[stock, reorder])
+        target = ReAct(
+            system_prompt="You keep stock above 10 units.", model=model, tools=[stock, reorder]
+        )
+        agent = h.wrap(target, id="stock-keeper")
 
         result = await agent.run("Is SKU-1 low? Top it up if so.", user="ada")
         while result.interrupt is not None:  # reorder is irreversible: a person decides

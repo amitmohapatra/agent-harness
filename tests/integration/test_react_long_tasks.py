@@ -13,10 +13,10 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 
+from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
-from trellis.harness import automatic
 from trellis.harness.automatic import (
     LONG_AFTER,
     MIN_WINDOW,
@@ -78,7 +78,7 @@ async def test_the_long_task_tools_come_with_the_models_long_after_th_call(
 ) -> None:
     turns: list[Any] = [("stock", {"sku": f"a-{n}"}) for n in range(LONG_AFTER + 1)]
     model = ScriptedChatModel(turns=[*turns, "7 each"])
-    agent = harness.wrap(ReAct("s", model, context_window=ROOM), id="long", tools=[stock])
+    agent = arm(harness.wrap(ReAct("s", model, context_window=ROOM), id="long"), [stock])
     assert (await agent.run("how many a-0 .. a-3?", user="u")).answer == "7 each"
     # threshold - 1, at, + 1: none before, all from the LONG_AFTER-th call on
     assert not offered(model, LONG_AFTER - 1) & LONG_TOOLS
@@ -103,7 +103,7 @@ async def test_a_request_asking_for_steps_gets_them_from_the_first_call(
     harness: Harness, asked: str, long: bool
 ) -> None:
     model = ScriptedChatModel(turns=["7"])
-    await harness.wrap(ReAct("s", model, context_window=ROOM), id="steps", tools=[stock]).run(
+    await arm(harness.wrap(ReAct("s", model, context_window=ROOM), id="steps"), [stock]).run(
         asked, user="u"
     )
     assert (offered(model, 0) >= LONG_TOOLS) is long
@@ -113,37 +113,17 @@ async def test_a_request_asking_for_steps_gets_them_from_the_first_call(
 async def test_a_small_window_has_no_room_for_them(harness: Harness) -> None:
     model = ScriptedChatModel(turns=["7"])
     target = ReAct("s", model, context_window=MIN_WINDOW - 1)
-    await harness.wrap(target, id="small", tools=[stock]).run(STEPS + "count", user="u")
+    await arm(harness.wrap(target, id="small"), [stock]).run(STEPS + "count", user="u")
     assert not offered(model, 0) & LONG_TOOLS
     model = ScriptedChatModel(turns=["7"])
     target = ReAct("s", model, context_window=MIN_WINDOW)
-    await harness.wrap(target, id="room", tools=[stock]).run(STEPS + "count", user="u")
+    await arm(harness.wrap(target, id="room"), [stock]).run(STEPS + "count", user="u")
     assert offered(model, 0) >= LONG_TOOLS
-
-
-@pytest.mark.parametrize("feature", ["planning", "files"])
-async def test_without_a_feature_its_tools_are_neither_offered_nor_run(
-    harness: Harness, feature: str
-) -> None:
-    gone = {"planning": {"write_todos"}, "files": SCRATCH}[feature]
-    calls = {
-        "planning": ("write_todos", {"todos": []}),
-        "files": ("ls", {"path": "/"}),
-    }
-    model = ScriptedChatModel(turns=[calls[feature], "done"])
-    agent = harness.wrap(ReAct("s", model, context_window=ROOM), id=f"no-{feature}", tools=[stock])
-    result = await agent.run(STEPS + "x", user="u", without={feature})  # type: ignore[arg-type]
-    assert result.answer == "done"
-    assert offered(model, 0) & LONG_TOOLS == LONG_TOOLS - gone  # exactly its own removed
-    name = calls[feature][0]
-    assert result_of(model.seen[1]) == automatic.NOT_AVAILABLE.format(tool=name)
 
 
 async def test_a_window_not_known_has_none_of_them(harness: Harness) -> None:
     model = ScriptedChatModel(turns=["7"])
-    await harness.wrap(ReAct("s", model), id="unknown", tools=[stock]).run(
-        STEPS + "count", user="u"
-    )
+    await arm(harness.wrap(ReAct("s", model), id="unknown"), [stock]).run(STEPS + "count", user="u")
     assert not offered(model, 0) & LONG_TOOLS
 
 
@@ -153,7 +133,7 @@ async def test_a_plan_is_written_and_read_back(harness: Harness) -> None:
     model = ScriptedChatModel(
         turns=[("write_todos", {"todos": todos}), ("write_todos", {"todos": []}), "planned"]
     )
-    agent = harness.wrap(ReAct("s", model, context_window=ROOM), id="plan", tools=[stock])
+    agent = arm(harness.wrap(ReAct("s", model, context_window=ROOM), id="plan"), [stock])
     assert (await agent.run(STEPS + "count a-1", user="u")).answer == "planned"
     assert "count a-1" in result_of(model.seen[1])
     assert "Updated todo list" in result_of(model.seen[2])  # an empty plan is a plan too
@@ -172,7 +152,7 @@ async def test_scratch_files_are_written_edited_listed_and_read(harness: Harness
             "noted",
         ]
     )
-    agent = harness.wrap(ReAct("s", model, context_window=ROOM), id="files", tools=[stock])
+    agent = arm(harness.wrap(ReAct("s", model, context_window=ROOM), id="files"), [stock])
     assert (await agent.run(STEPS + "note a-1", user="u")).answer == "noted"
     assert "/notes.md" in result_of(model.seen[1])
     assert "/notes.md" in result_of(model.seen[3])
@@ -191,7 +171,7 @@ async def test_files_are_kept_across_a_pause(harness: Harness) -> None:
             "published",
         ]
     )
-    agent = harness.wrap(ReAct("s", model, context_window=ROOM), id="pause", tools=[publish])
+    agent = arm(harness.wrap(ReAct("s", model, context_window=ROOM), id="pause"), [publish])
     paused = await agent.run(STEPS + "publish", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
@@ -226,8 +206,8 @@ async def test_a_file_or_a_runs_files_too_large_are_refused() -> None:
 async def test_a_thousand_files_list(harness: Harness) -> None:
     writes = [("write_file", {"file_path": f"/f{n:04}.md", "content": "x"}) for n in range(1000)]
     model = ScriptedChatModel(turns=[writes, ("ls", {"path": "/"}), "listed"])
-    agent = harness.wrap(
-        ReAct("s", model, max_steps=4, context_window=ROOM), id="many", tools=[stock]
+    agent = arm(
+        harness.wrap(ReAct("s", model, max_steps=4, context_window=ROOM), id="many"), [stock]
     )
     assert (await agent.run(STEPS + "write", user="u")).answer == "listed"
     listing = result_of(model.seen[2])
@@ -255,7 +235,7 @@ async def test_files_written_before_a_crash_are_read_on_another_worker(
             "kept it",
         ]
     )
-    agent = harness.wrap(ReAct("s", model, context_window=ROOM), id="crash", tools=[boom])
+    agent = arm(harness.wrap(ReAct("s", model, context_window=ROOM), id="crash"), [boom])
     store = harness.runs
     assert isinstance(store, LocalRuns)
     handle = await agent.start(STEPS + "keep", user="u")
@@ -266,10 +246,10 @@ async def test_files_written_before_a_crash_are_read_on_another_worker(
         await agent.execute(
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
-    held, _ = store._leases[handle.run_id]
-    store._leases[handle.run_id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+    held, _ = store._leases[handle.id]
+    store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
     assert await harness.worker([agent]).run_once()
-    result = await handle.result(timeout=5)
+    result = await handle.result(wait=5)
     assert result.status is RunStatus.SUCCESS and result.answer == "kept it", result.error
     assert "kept" in result_of(model.seen[-1])
 

@@ -82,7 +82,7 @@ class Desk:
         return quote
 
     def transfer(self) -> Any:
-        @tool(side_effects="write", timeout=0.05)
+        @tool(side_effects="write", call_timeout=0.05)
         async def transfer(amount: int) -> str:
             """Transfer money (the bank never answers in time)."""
             self.done.append(("transfer", {"amount": amount}))
@@ -92,7 +92,7 @@ class Desk:
         return transfer
 
     def slow(self) -> Any:
-        @tool(side_effects="read", timeout=0.05)
+        @tool(side_effects="read", call_timeout=0.05)
         async def slow(sku: str) -> str:
             """A read that takes too long."""
             await asyncio.sleep(2)

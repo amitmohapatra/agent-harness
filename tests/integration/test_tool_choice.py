@@ -13,6 +13,7 @@ from langchain.agents.middleware import LLMToolSelectorMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, ReAct, tool
@@ -79,7 +80,7 @@ async def test_the_guidance_is_in_every_call_offering_tools_and_names_the_writes
 ) -> None:
     model = ScriptedChatModel(turns=[("look", {"item": "a"}), "done"])
     target = graph(model, HarnessTools(), ToolGuidance(), ModelHooks(), system_prompt="Base.")
-    result = await harness.wrap(target, id="g", tools=[look, note]).run("x", user="u")
+    result = await arm(harness.wrap(target, id="g"), [look, note]).run("x", user="u")
     assert result.answer == "done"
     for seen in model.seen:
         assert isinstance(seen[0], SystemMessage)
@@ -123,7 +124,7 @@ async def test_a_draft_that_skips_a_part_is_checked_and_the_missing_tool_called(
         turns=[("look", {"item": "a"}), "a is found.", ("note", {"text": "a"}), "a found, noted."]
     )
     target = graph(model, AnswerCheck(), HarnessTools(), ModelHooks())
-    agent = harness.wrap(target, id="c", tools=[look, note])
+    agent = arm(harness.wrap(target, id="c"), [look, note])
     events = [e async for e in agent.stream("look a up and note it", user="u")]
     assert events[-1].data["result"] == "a found, noted."
     assert checked(model) == [2]
@@ -143,7 +144,7 @@ async def test_a_change_claimed_in_text_is_called_and_reaches_its_approval(
     model = ScriptedChatModel(
         turns=["Done: the rule is set.", ("rule", {"item": "a", "low": 2, "high": 6})]
     )
-    agent = harness.wrap(ReAct("s", model, answer_check=True), id="w", tools=[look, rule])
+    agent = arm(harness.wrap(ReAct("s", model, answer_check=True), id="w"), [look, rule])
     result = await agent.run("create a rule for a, min 2 max 6", user="u")
     assert result.status is RunStatus.PAUSED and result.interrupt is not None
     assert result.interrupt.tool_call is not None and result.interrupt.tool_call.tool == "rule"
@@ -153,11 +154,11 @@ async def test_a_change_claimed_in_text_is_called_and_reaches_its_approval(
 async def test_checks_are_counted_and_an_empty_reply_keeps_the_draft(harness: Harness) -> None:
     model = ScriptedChatModel(turns=["first", ("look", {"item": "a"}), "second", "third"])
     target = graph(model, AnswerCheck(checks=2), HarnessTools(), ModelHooks())
-    result = await harness.wrap(target, id="n", tools=[look]).run("x", user="u")
+    result = await arm(harness.wrap(target, id="n"), [look]).run("x", user="u")
     assert result.answer == "third" and checked(model) == [1, 3]
     empty = ScriptedChatModel(turns=["the draft", ""])
     target = graph(empty, AnswerCheck(), HarnessTools(), ModelHooks())
-    assert (await harness.wrap(target, id="e", tools=[look]).run("x", user="u")).answer == (
+    assert (await arm(harness.wrap(target, id="e"), [look]).run("x", user="u")).answer == (
         "the draft"
     )
     with pytest.raises(ConfigurationError):
@@ -194,14 +195,14 @@ async def test_no_check_without_tools_and_a_structured_draft_is_shown_as_json(
 
     model = ScriptedChatModel(turns=[("Answer", {"value": "a"}), ("Answer", {"value": "b"})])
     target = graph(model, AnswerCheck(), HarnessTools(), ModelHooks(), response_format=Answer)
-    result = await harness.wrap(target, id="s", tools=[look]).run("x", user="u")
+    result = await arm(harness.wrap(target, id="s"), [look]).run("x", user="u")
     assert result.answer == Answer(value="b")
     assert model.seen[1][-2].content == '{"value": "a"}'
 
 
 async def test_after_the_step_limit_the_check_only_corrects_the_text(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("look", {"item": "a"}), "partial", "partial, checked"])
-    agent = harness.wrap(ReAct("s", model, answer_check=True, max_steps=1), id="l", tools=[look])
+    agent = arm(harness.wrap(ReAct("s", model, answer_check=True, max_steps=1), id="l"), [look])
     assert (await agent.run("x", user="u")).answer == "partial, checked"
     assert [r.get("tool_choice") for r in model.requests[1:]] == ["none", "none"]
 
@@ -215,7 +216,7 @@ async def test_a_run_narrowed_by_the_hints_is_offered_every_tool_from_the_check(
     tools = [look, note, rule, broken, tool(lambda: "x", name="extra", side_effects="read")]
     model = ScriptedChatModel(turns=["a draft", ("note", {"text": "a"}), "noted"])
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        agent = h.wrap(ReAct("s", model, answer_check=True), id="h", tools=tools)
+        agent = arm(h.wrap(ReAct("s", model, answer_check=True), id="h"), tools)
         assert (await agent.run("note a", user="u")).answer == "noted"
     memory = sorted(MEMORY_TOOLS)
     assert model.requests[0]["tools"] == sorted(["look", *memory])
@@ -229,7 +230,7 @@ async def test_the_native_tool_selector_picks_among_the_runs_tools(harness: Harn
     model = ScriptedChatModel(turns=[("note", {"text": "a"}), "noted"])
     picked = LLMToolSelectorMiddleware(model=selector, max_tools=1, on_parsing_failure="all")
     target = ReAct("s", model, middleware=[picked])
-    result = await harness.wrap(target, id="sel", tools=[look, note, rule]).run("x", user="u")
+    result = await arm(harness.wrap(target, id="sel"), [look, note, rule]).run("x", user="u")
     assert result.answer == "noted"
     assert [r["tools"] for r in model.requests] == [["note"], ["note"]]
     assert len(selector.seen) == 2
@@ -268,7 +269,7 @@ async def test_an_item_paused_for_approval_is_scored_by_tool_coverage_only(
     model = ScriptedChatModel(
         turns=[("rule", {"item": "a", "low": 2, "high": 6}), ("look", {"item": "a"}), "found"]
     )
-    agent = harness.wrap(ReAct("s", model), id="p", tools=[look, rule])
+    agent = arm(harness.wrap(ReAct("s", model), id="p"), [look, rule])
     dataset = [
         {"input": "rule for a", "expected": "x", "metadata": {"needed_tools": ["rule"]}},
         {"input": "look a up", "expected": "found", "metadata": {"needed_tools": ["look"]}},
@@ -292,7 +293,7 @@ async def test_an_item_paused_on_a_question_is_not_scored(harness: Harness) -> N
         return str(await run.ask(question))
 
     model = ScriptedChatModel(turns=[("ask_person", {"question": "which?"})])
-    agent = harness.wrap(ReAct("s", model), id="q", tools=[ask_person])
+    agent = arm(harness.wrap(ReAct("s", model), id="q"), [ask_person])
     report = await harness.evaluate(
         agent, [{"input": "x", "metadata": {"needed_tools": ["ask_person"]}}], [tool_coverage()]
     )
@@ -303,7 +304,7 @@ async def test_an_item_paused_on_a_question_is_not_scored(harness: Harness) -> N
 async def test_a_call_told_to_call_no_tool_is_not_checked(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("look", {"item": "a"}), "partial"])
     target = graph(model, HarnessTools(), StepLimit(1), AnswerCheck(), ModelHooks())
-    assert (await harness.wrap(target, id="none", tools=[look]).run("x", user="u")).answer == (
+    assert (await arm(harness.wrap(target, id="none"), [look]).run("x", user="u")).answer == (
         "partial"
     )
     assert checked(model) == [] and model.requests[-1]["tool_choice"] == "none"

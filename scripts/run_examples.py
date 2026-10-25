@@ -31,7 +31,7 @@ SERVICES = (
     "OTEL_EXPORTER_OTLP_HEADERS",
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
-    "SANDBOX",
+    "DOCKER_HOST",
 )
 #: the most one example may take, in seconds
 TIMEOUT = 180

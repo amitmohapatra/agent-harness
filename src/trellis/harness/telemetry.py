@@ -25,15 +25,15 @@ which the harness also sends). A callable evaluated with no harness gets a root 
 
 Every attempt of a run is in one trace whose id is derived from the run id
 (:func:`trace_id_of`), so a resume in another process, a score computed later and
-``h.feedback`` all land on the trace the run started. A sub-agent's run (``Agent.as_tool``)
+``h.feedback`` all land on the trace the run started. A sub-agent's run (a child run)
 works inside its parent's tool call: its spans are in the parent's trace, under that call.
 
 Export: ``OTEL_EXPORTER_OTLP_ENDPOINT`` (+ ``OTEL_EXPORTER_OTLP_HEADERS``) installs an OTLP/HTTP
 exporter — Langfuse's endpoint, or a collector (``deploy/otel-collector.yaml``) that sends
 every span to Datadog and the GenAI spans to Langfuse. Unset, Langfuse's own keys
-(``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, ``LANGFUSE_HOST``) stand for its endpoint
-and Basic auth (``Settings.from_env``). An application that configured OTel itself keeps its
-provider.
+(``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, ``LANGFUSE_BASE_URL``) stand for its
+endpoint and Basic auth (``settings.langfuse_keys``). An application that configured OTel
+itself keeps its provider.
 
 Scores and datasets: Langfuse takes scores through its public API, not OTLP. When the OTLP
 headers carry Langfuse's ``Authorization: Basic`` credentials, and the endpoint is Langfuse's
@@ -66,11 +66,12 @@ from trellis.contracts import ConfigurationError
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.redaction import redact_attributes
 from trellis.harness.settings import (
-    LANGFUSE_CLOUD,
     LANGFUSE_OTLP_PATH,
     OTEL_EXPORTER_ENV,
-    Settings,
     basic_auth,
+    langfuse_keys,
+    langfuse_otlp,
+    service_version,
 )
 
 log = logging.getLogger("trellis.telemetry")
@@ -84,8 +85,6 @@ LANGFUSE_SCORES_PATH: Final = "/api/public/scores"
 LANGFUSE_DATASET_PATH: Final = "/api/public/v2/datasets/{name}"
 LANGFUSE_ITEMS_PATH: Final = "/api/public/dataset-items"
 LANGFUSE_RUN_ITEMS_PATH: Final = "/api/public/dataset-run-items"
-#: Langfuse's prompt management: one prompt, by ``version`` or ``label`` (``prompts.py``).
-LANGFUSE_PROMPT_PATH: Final = "/api/public/v2/prompts/{name}"
 #: Dataset items one page asks for (Langfuse's default page size).
 LANGFUSE_PAGE: Final = 50
 SCORES_TIMEOUT_SECONDS: Final = 10.0
@@ -573,9 +572,7 @@ ScoreType = Literal["NUMERIC", "BOOLEAN", "CATEGORICAL"]
 
 class Langfuse:
     """Langfuse's public API as far as the harness uses it — scores on a run's trace, datasets
-    and dataset runs, reached with the OTLP exporter's own credentials (which the Langfuse keys
-    give when the OTLP endpoint is unset); prompts, reached with the Langfuse keys
-    (``prompts.py``)."""
+    and dataset runs — reached with Langfuse's own keys (:meth:`of`)."""
 
     def __init__(self, host: str, authorization: str, *, client: httpx.AsyncClient | None = None):
         self.host = host.rstrip("/")
@@ -586,13 +583,14 @@ class Langfuse:
         )
 
     @classmethod
-    def of(cls, settings: Settings) -> Langfuse | None:
-        """Langfuse's scores API, from its own settings (``LANGFUSE_BASE_URL``, unset: its
-        cloud, and the key pair), or ``None`` without both keys (scores stay spans)."""
-        public, secret = settings.langfuse_public_key, settings.langfuse_secret_key
-        if not (public and secret):
+    def of(cls, environ: Mapping[str, str] | None = None) -> Langfuse | None:
+        """Langfuse's scores API, from its own variables (``LANGFUSE_BASE_URL``, unset: its
+        cloud, and the key pair: :func:`~.settings.langfuse_keys`), or ``None`` without both
+        keys (scores stay spans)."""
+        found = langfuse_keys(os.environ if environ is None else environ)
+        if found is None:
             return None
-        host = (settings.langfuse_host or LANGFUSE_CLOUD).rstrip("/")
+        host, public, secret = found
         return cls(host, basic_auth(public, secret))
 
     async def post(
@@ -641,21 +639,6 @@ class Langfuse:
             page += 1
         return found.json(), items
 
-    async def prompt(
-        self, name: str, *, version: int | None = None, label: str | None = None
-    ) -> dict[str, Any] | None:
-        """The prompt ``name`` as Langfuse serves it (``version``, else ``label``): its
-        ``type`` (``text``, ``chat``), ``prompt``, ``version``, ``config``. ``None`` when
-        Langfuse has no such prompt, version or label."""
-        params: dict[str, Any] = {"version": version} if version is not None else {"label": label}
-        response = await self._client.get(
-            LANGFUSE_PROMPT_PATH.format(name=quote(name, safe="")), params=params
-        )
-        if response.status_code == httpx.codes.NOT_FOUND:
-            return None
-        response.raise_for_status()
-        return response.json()
-
     async def link(
         self,
         run_id: str,
@@ -703,23 +686,25 @@ METRICS_PATH: Final = "/v1/metrics"
 METRICS_EXPORT_MILLIS: Final = 60_000
 
 
-def configure(settings: Settings, environ: Mapping[str, str] | None = None) -> bool:
+def configure(environ: Mapping[str, str] | None = None) -> bool:
     """Install an OTLP exporter when the deployment asked for one — the OpenTelemetry SDK's own
     exporter variables (:data:`~.settings.OTEL_EXPORTER_ENV`, ``..._HEADERS``...), which its
-    exporter reads itself, else an endpoint given in code or derived from Langfuse's keys — and
-    one for the metrics, unless the endpoint is Langfuse's (traces only). A provider already
-    installed is kept, never replaced. Returns whether the traces' exporter was installed."""
+    exporter reads itself, else Langfuse's, derived from its keys (``LANGFUSE_*``:
+    :func:`~.settings.langfuse_otlp`) — and one for the metrics, unless the endpoint is
+    Langfuse's (traces only). A provider already installed is kept, never replaced. Returns
+    whether the traces' exporter was installed."""
     env = os.environ if environ is None else environ
     from_env = any(env.get(name) for name in OTEL_EXPORTER_ENV)
-    if not from_env and not settings.otlp_endpoint:
+    keys = None if from_env else langfuse_keys(env)
+    if not from_env and keys is None:
         return False
+    endpoint, headers = ("", {}) if keys is None else langfuse_otlp(*keys)
     if from_env:
-        endpoint = env.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        if endpoint:
-            _measured(endpoint, {}, env_headers=True)
+        given = env.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        if given:
+            _measured(given, {}, env_headers=True)
     else:
-        assert settings.otlp_endpoint is not None
-        _measured(settings.otlp_endpoint, settings.otlp_headers)
+        _measured(endpoint, headers)
     if not isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider):
         log.info("an OpenTelemetry tracer provider is already installed; keeping it")
         return False
@@ -737,14 +722,19 @@ def configure(settings: Settings, environ: Mapping[str, str] | None = None) -> b
     exporter = (
         OTLPSpanExporter()  # the SDK reads its own variables: endpoint, headers, traces endpoint
         if from_env
-        else OTLPSpanExporter(
-            endpoint=traces_url(settings.otlp_endpoint or ""), headers=settings.otlp_headers
-        )
+        else OTLPSpanExporter(endpoint=traces_url(endpoint), headers=headers)
     )
     provider = TracerProvider(resource=resource())
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     return True
+
+
+def agent_version() -> str | None:
+    """The agents' version as the OpenTelemetry resource has it (``service.version``, from
+    ``OTEL_RESOURCE_ATTRIBUTES``, read by the SDK): what a run records when its agent names
+    none (``h.wrap(version=)``)."""
+    return service_version(os.environ)
 
 
 #: The Bifrost dimension headers every gateway request the harness makes carries

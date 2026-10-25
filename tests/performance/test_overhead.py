@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings, tool
 
 ITERATIONS = 500
@@ -67,7 +68,7 @@ async def measure(call: Callable[[], Awaitable[Any]]) -> dict[str, float]:
 async def test_harness_overhead() -> None:
     async with Harness(config=Settings()) as h:
         plain = h.wrap(answer, id="plain")
-        tooled = h.wrap(with_tool, id="tooled", tools=[lookup])
+        tooled = arm(h.wrap(with_tool, id="tooled"), [lookup])
 
         async def stream() -> None:
             async for _ in plain.stream("hi", user="u"):

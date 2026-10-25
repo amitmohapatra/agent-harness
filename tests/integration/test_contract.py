@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, tool
 from trellis.contracts import ErrorCategory, RunEvent, RunEventType, RunStatus
@@ -42,12 +43,12 @@ async def _run(
 ) -> Any:
     plan = [("lookup", {"sku": "A-1"})]
     target, tools = await BUILDERS[framework](h, [lookup], tmp, plan, stall=stall)
-    agent = h.wrap(target, id=f"contract-{framework}", tools=tools)
+    agent = arm(h.wrap(target, id=f"contract-{framework}"), tools)
     if events is None:
         return await agent.run("How many A-1?", user="u1")
     async for event in agent.stream("How many A-1?", user="u1"):
         events.append(event)
-    record = await h.runs.get(events[0].run_id, tenant=await h.tenant())
+    record = await h.runs.get(events[0].run_id, tenant=await h._tenant())
     return record
 
 

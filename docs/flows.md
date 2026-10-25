@@ -65,7 +65,7 @@ sequenceDiagram
   W-)Mem: POST /v1/tools/invocations (the MCP call)
   W-)Mem: POST /v1/messages (transcript, one batch per attempt)
   W-)Mem: POST /v1/feedback (system: confirm)
-  W-)Mem: POST /v1/verify (sampled: TRELLIS_EVAL_SAMPLE) → grounding score
+  W-)Mem: POST /v1/verify (a sampled tenth) → grounding score
   W-)LF: score grounding on the run's trace
   User->>Agent: await h.feedback(run_id, "correct", correction)
   Agent->>Runs: get(run_id, tenant=)
@@ -81,8 +81,7 @@ the bridge runs is. Runnable: [examples/02_way1_react/agent.py](../examples/02_w
 What the harness does with the memory service around one run (`agent.py`:
 `Agent.push`, `Agent.record_tool`, `Agent.recorded_run`; `clients/memory.py`). Push is the
 context before the framework runs; pull is the memory tools the model calls itself; record is
-what the run leaves behind. `without=` turns each off (`memory_push`, `memory_pull`,
-`records`; `memory` all three).
+what the run leaves behind. `without={"memory"}` turns all three off.
 
 ```mermaid
 sequenceDiagram
@@ -94,13 +93,13 @@ sequenceDiagram
   participant Br as tools.bridge
   participant W as Writes (background)
 
-  Note over P,Mem: push (memory_push)
+  Note over P,Mem: push
   P->>A: push(task, the run's tool names)
   A->>Mem: POST /v1/context {query, scope, budget, tools.available (from 5 tools)}
   Mem-->>A: rendered, bundle_id, evidence_status, tools [name, confidence]
   A-->>P: the context, the tools offered (hints, memory tools, those already used)
   P->>FW: the context as a system message (window off when the framework keeps the thread)
-  Note over FW,Mem: pull (memory_pull)
+  Note over FW,Mem: pull
   FW->>Br: memory_search(query)
   Br->>Mem: POST /v1/agent-tools/memory_search {args, scope}
   Mem-->>Br: items [id, kind, text]
@@ -274,7 +273,7 @@ sequenceDiagram
   participant P as pipeline.attempt
   participant FW as Framework
 
-  Dev->>Agent: await agent.schedule("0 7 * * 1-5", input, on_behalf_of="ada", tz=, without={"judges"}, timeout=120, framework_options={...}, priority=10)
+  Dev->>Agent: await agent.schedule("0 7 * * 1-5", user="ada", input=input, tz=, without={"judges"}, run_timeout=120, framework_options={...}, priority=10)
   Agent->>Agent: check without= and framework_options= (JSON) now
   Agent->>AR: POST /v1/schedules ScheduleSpec{cadence, timezone, input, timeout_seconds, priority, concurrency_key, agent_version, metadata: {without, framework_options}}
   AR-->>Agent: Schedule (an upsert: same agent, person, cadence, input → the same one)
@@ -337,8 +336,8 @@ sequenceDiagram
 ```
 
 No model request ever gets the gateway's MCP tools: `bifrost-sdk` sends the deny-all scope
-(`NO_GATEWAY_TOOLS`) on completions, and a framework's own model client gets it from
-`h.model_headers()`.
+(`NO_GATEWAY_TOOLS`) on completions, and so does every model call the harness routes through
+the gateway (an OpenAI Agents run's, the Claude CLI's).
 
 ## Sub-agents
 
@@ -419,7 +418,7 @@ sequenceDiagram
 
 ## A2A
 
-The calling side is `remote(url)` (`a2a/client.py`) — what the `a2a(url)` tool runs inside a
+The calling side is `RemoteAgent(url)` (`a2a/client.py`) — what the `a2a(url)` tool runs inside a
 calling run; the serving side is another harness's `serve_a2a(app, url)` (or any A2A server).
 
 ```mermaid
@@ -451,7 +450,7 @@ sequenceDiagram
   end
 ```
 
-From plain code the same client is `remote(url, tenant=, user=)`: a question goes to `on_input`,
+From plain code the same client is `a2a(url)(message, tenant=, user=)`: a question goes to `on_input`,
 or is raised as `InputRequired` and answered with `reply(task_id, answer)`
 ([examples/03_way2_a2a/remote.py](../examples/03_way2_a2a/remote.py)). The serving side also
 sends signed push notifications to a client's webhook ([surfaces.md](surfaces.md)).
@@ -505,13 +504,13 @@ sequenceDiagram
   participant P as pipeline.attempt
   participant Runs as RunStore
   participant W as Writes (background)
-  participant J as judges (Harness(judges=[...]))
+  participant J as judges (h.wrap(judges=[...]))
   participant GW as Bifrost (judge key)
   participant LF as Langfuse
 
   User->>P: await agent.run(question, user=)
   P->>Runs: finish(SUCCESS, answer)
-  P->>P: sampled(run_id, TRELLIS_EVAL_SAMPLE)? and not without judges
+  P->>P: sampled(run_id, the judge's sample)? and not without judges
   P-)W: submit judge.<name> (one per judge)
   P-->>User: Result(SUCCESS, answer): nothing waits for the judges
   W->>J: judge(EvalCase(question, answer, context, memory, run_id, trajectory), [one judge])
@@ -554,7 +553,7 @@ sequenceDiagram
   SU->>RT: near the window's end: older turns summarized (one model call), history to a file
   RT->>MH: read_file / read_result offered only once there is something to read
   MH->>MH: before_model hooks, the pinned prompt, the task kept ahead of a summary
-  MH->>M: the request (chat span, model_timeout and the run's time left)
+  MH->>M: the request (chat span, call_timeout and the run's time left)
   M-->>MH: AIMessage with tool_calls [lookup, refund]
   MH->>MH: after_model hooks, usage on the span, a model error → ModelError (retryable?)
   MH-->>G: the response, back out through every layer

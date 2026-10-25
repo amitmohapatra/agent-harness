@@ -22,6 +22,7 @@ from claude_agent_sdk import ClaudeAgentOptions
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 
+from tests.support.arm import native_tools
 from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
 from trellis import Harness, ReAct, Runtime
 from trellis.harness.tools.convert import text_of
@@ -80,7 +81,7 @@ async def _react(
 ) -> Built:
     model = PlannedChat(plan, stall=stall)
     _saw(seen, model)
-    return ReAct(system=system, model=model), tools
+    return ReAct(system_prompt=system, model=model), tools
 
 
 async def _langgraph(
@@ -95,8 +96,8 @@ async def _langgraph(
 ) -> Built:
     model = PlannedChatModel(plan=plan, stall=stall)
     _saw(seen, model)
-    built = await h.tools(*tools, framework="langgraph")
-    return create_agent(model, tools=built, system_prompt=system), []
+    built = await native_tools(h, *tools, framework="langgraph")
+    return create_agent(model, tools=built, system_prompt=system), tools
 
 
 async def _graph(
@@ -117,7 +118,7 @@ async def _graph(
 
     model = PlannedChatModel(plan=plan, stall=stall)
     _saw(seen, model)
-    built = await h.tools(*tools, framework="langgraph")
+    built = await native_tools(h, *tools, framework="langgraph")
     bound = model.bind_tools(built)
 
     async def think(state: MessagesState) -> dict[str, Any]:
@@ -129,7 +130,7 @@ async def _graph(
     graph.add_edge(START, "model")
     graph.add_conditional_edges("model", tools_condition)
     graph.add_edge("tools", "model")
-    return graph.compile(), []
+    return graph.compile(), tools
 
 
 async def _deepagents(
@@ -144,8 +145,8 @@ async def _deepagents(
 ) -> Built:
     model = PlannedChatModel(plan=plan, stall=stall)
     _saw(seen, model)
-    built = await h.tools(*tools, framework="deepagents")
-    return create_deep_agent(model=model, tools=built, system_prompt=system), []
+    built = await native_tools(h, *tools, framework="deepagents")
+    return create_deep_agent(model=model, tools=built, system_prompt=system), tools
 
 
 async def _openai_agents(

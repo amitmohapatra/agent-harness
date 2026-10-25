@@ -1,24 +1,23 @@
 # Sub-agents: an agent as another agent's tool
 
-A wrapped agent in another agent's `tools=[...]` is its sub-agent: a tool of it. The model decides when to
+A wrapped agent in a `ReAct`'s `subagents=[...]` is its sub-agent: a tool of it. The model decides when to
 delegate and what to delegate at once; each call is a *child run* of the sub-agent, with its
 own record, journal and answer, inside the parent's call. Nothing to configure: you name the
 agents, the harness does the rest — the child's identity and time, its pauses, its crashes,
 its cancellation.
 
 ```python
-research = h.wrap(ReAct(system="You research.", model=model), id="research", tools=[search])
+research = h.wrap(ReAct(system_prompt="You research.", model=model, tools=[search]), id="research")
 writer = h.wrap(
-    ReAct(system="You write. Ask research for facts.", model=model),
+    ReAct(system_prompt="You write. Ask research for facts.", model=model, subagents=[research]),
     id="writer",
-    tools=[research],
 )
 result = await writer.run("Write about lighthouses", user="ada")
 ```
 
 | You write | Automatic |
 |---|---|
-| `tools=[agent]` (or `h.tools(agent, framework=...)`) | a child run per call: its id, its parent, its tenant, user, thread, time and trace; its pauses answered through the parent; its crash continued; its cancel with the parent; the tool's name (the agent's id), description (a function's docstring, else a generic one) and side effects (from the tools the child declares) |
+| `subagents=[agent]` | a child run per call: its id, its parent, its tenant, user, thread, time and trace; its pauses answered through the parent; its crash continued; its cancel with the parent; the tool's name (the agent's id), description (a function's docstring, else a generic one) and side effects (from the tools the child declares) |
 
 ## What
 
@@ -40,11 +39,13 @@ vendor); a sub-agent runs in the parent's process.
 
 ## Where
 
-Way 1, every target on either side: a `ReAct` parent with a function, LangGraph, OpenAI Agents,
-Claude or `ReAct` child, or any framework's parent calling the tool built by
-`h.tools(child, framework=...)`; every mode the parent runs in (`run`, `stream`,
+Way 1, every target as the child: a `ReAct` parent with a function, LangGraph, OpenAI Agents,
+Claude or `ReAct` child. Any code inside a run makes a child run too: a wrapped agent's
+`run`, `stream` or `start` called inside another's run (a tool, a node, a function target), and
+a framework's own helpers — an OpenAI Agents handoff or agent-as-tool, a Deep Agents `task`, a
+Claude subagent — each a child run of the run. Every mode the parent runs in (`run`, `stream`,
 `start` and workers, a resume in another process, `serve_chat`, `serve_a2a`). Way 2 has no
-sub-agent block: an agent you do not wrap calls another with `remote()`
+sub-agent block: an agent you do not wrap calls another with `a2a(url)`
 ([blocks/a2a.md](blocks/a2a.md)).
 
 ## How
@@ -57,15 +58,16 @@ def flights(city: str) -> str: ...
 async def booker(input: str, agent: Runtime) -> str:
     """Find a hotel in a city, once the traveller has chosen a budget."""
     budget = await agent.ask("Which budget?", options=["low", "high"])
-    return await agent.tools.call("hotels", city=input, budget=budget)
+    return await agent.tools.call(hotels, city=input, budget=budget)
 
 
-scout = h.wrap(ReAct(system="You find flights.", model=model), id="scout", tools=[flights])
-hotel = h.wrap(booker, id="booker", tools=[hotels])
+scout = h.wrap(ReAct(system_prompt="You find flights.", model=model, tools=[flights]), id="scout")
+hotel = h.wrap(booker, id="booker")
 planner = h.wrap(
-    ReAct(system="You plan trips: ask scout and booker at once.", model=model),
+    ReAct(
+        system_prompt="You plan trips: ask scout and booker.", model=model, subagents=[scout, hotel]
+    ),
     id="planner",
-    tools=[scout, hotel],
 )
 result = await planner.run("Plan a weekend in Oslo", user="ada")
 while result.interrupt:  # booker's question, asked through the planner
@@ -77,9 +79,8 @@ while result.interrupt:  # booker's question, asked through the planner
 The tool is named after the agent's id (name it for the model: `id="research"`), described by
 the function's docstring, and its side effects come from the tools the child declares. When
 the child does more (or less) than its tools say, set its risk in the tool catalog, where every
-tool's risk and approval rule live ([governance.md](governance.md)).
-`agent.as_tool(*, name=None, description=None, side_effects=None)` is deprecated: it works for
-one release, with a warning.
+tool's risk and approval rule live ([governance.md](governance.md)). `h.wrap(description=)`
+says what the agent does, over its docstring.
 
 ## Automatic
 
@@ -100,8 +101,8 @@ scores.
 
 **At once or one at a time.** The tool only reads when every tool the child declares only
 reads (its own, the MCP tools its key allows) and it has no tools the harness does not run (a
-framework's own: an OpenAI Agents agent's `function_tool`s or handoffs, a graph's tools not
-built with `h.tools`, Claude's built-in tools); otherwise it writes. In `ReAct` the reads run at
+framework's own: an OpenAI Agents agent's `function_tool`s or handoffs, a graph's own tools,
+Claude's built-in tools, a function target's calls); otherwise it writes. In `ReAct` the reads run at
 once and the writes one at a time, in the model's order
 ([react.md](frameworks/react.md)); governance treats the tool like any other (a write is
 announced; the catalog may say more).

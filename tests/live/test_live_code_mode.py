@@ -12,6 +12,7 @@ import pytest
 
 from tests.live.conftest import live_harness, needs_gateway, needs_memory
 from tests.live.support import eventually, memory_scope
+from tests.support.arm import resolved
 from trellis import Runtime
 from trellis.contracts import RunStatus
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
@@ -45,10 +46,10 @@ async def test_read_only_code_mode_servers_run_as_code_mode(
         await scope.advanced.tools.put_catalog(
             [{"name": n, "side_effects": "read", "source": "mcp"} for n in names]
         )
-        toolbox = await h.resolve(agent.sources, tenant=await h.tenant())
+        toolbox = await resolved(h, *agent.sources)
         assert [t.name for t in toolbox] == [s.name for s in CODE_MODE_TOOLS]
         await h.writes.drain()  # the harness's own publication of the tools...
-        again = await h.resolve(agent.sources, tenant=await h.tenant())
+        again = await resolved(h, *agent.sources)
         assert [t.name for t in again] == [s.name for s in CODE_MODE_TOOLS]  # ...keeps the admin's
 
         result = await agent.run("What does the React wiki cover?", user=user)

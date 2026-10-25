@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 
+from tests.support.arm import arm, native_tools
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import (
@@ -148,7 +149,7 @@ async def test_the_calls_a_script_made_are_recorded_from_the_gateways_log(
     gateway = LoggingGateway()
     given = cast("Gateway", gateway)
     async with Harness(config=Settings(), memory=memory_service.client(), gateway=given) as h:
-        result = await h.wrap(scripted, id="coder", tools=[Script()]).run("q", user="u")
+        result = await arm(h.wrap(scripted, id="coder"), [Script()]).run("q", user="u")
         await h.writes.drain()
     assert result.answer == "printed" and gateway.asked == [result.run_id]
     recorded = {c.body["tool"]: c.body for c in memory_service.named("record_tool")}
@@ -165,7 +166,7 @@ async def test_without_a_gateway_a_script_has_no_log_to_read(
     async def scripted(input: str, agent: Runtime) -> str:
         return await agent.tools.call("executeToolCode", code="print(1)")
 
-    await memory_harness.wrap(scripted, id="coder", tools=[Script()]).run("q", user="u")
+    await arm(memory_harness.wrap(scripted, id="coder"), [Script()]).run("q", user="u")
     await memory_harness.writes.drain()
     assert [c.body["tool"] for c in memory_service.named("record_tool")] == ["executeToolCode"]
 
@@ -294,14 +295,15 @@ async def test_feedback_with_memory_off_is_only_a_score(
 
 
 async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(
-    memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+    memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch, sampled: Any
 ) -> None:
 
     memory_service.claims = 0
     memory_service.unsupported = 0
     scored: list[Any] = []
     monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append(args))
-    settings = Settings(eval_sample=1.0)
+    sampled(1.0)
+    settings = Settings()
     async with Harness(config=settings, memory=memory_service.client()) as h:
 
         async def fn(input: str, agent: Runtime) -> str:
@@ -324,10 +326,9 @@ async def test_the_toolbox_for_openai_agents_is_function_tools(harness: Harness)
         return 1
 
     # with read_file, which pages a large result the run keeps (enabled once there is one)
-    [native, read_file] = await harness.tools(lookup, framework="openai_agents")
+    [native, read_file] = await native_tools(harness, lookup, framework="openai_agents")
     assert isinstance(native, FunctionTool) and native.name == "lookup"
     assert read_file.name == "read_file"
-    assert harness.built_for([native]) == ([], None)  # only LangGraph tools name their toolbox
 
 
 async def test_a_finish_already_recorded_is_not_a_failed_run(

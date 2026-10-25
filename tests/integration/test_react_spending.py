@@ -18,10 +18,12 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import BaseModel, Field
 
+from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Budget, Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import budget, react
+from trellis.harness.prompts import GatewayHeaders
 
 GATEWAY = "http://gw.test/v1"
 
@@ -167,7 +169,9 @@ SCHEMA = {
 async def test_a_valid_structured_answer_is_the_answer(output: Any) -> None:
     model = Spending(turns=[("Count", {"sku": "a-1", "units": 7})])
     async with Harness(config=Settings()) as h:
-        result = await h.wrap(ReAct("s", model, output=output), id="so").run("a-1?", user="u")
+        result = await h.wrap(ReAct("s", model, response_format=output), id="so").run(
+            "a-1?", user="u"
+        )
     answer = result.answer if isinstance(result.answer, dict) else result.answer.model_dump()
     assert answer == {"sku": "a-1", "units": 7}
 
@@ -177,7 +181,9 @@ async def test_an_answer_that_does_not_fit_is_asked_for_again_by_langchain() -> 
         turns=[("Count", {"sku": "a-1", "units": "many"}), ("Count", {"sku": "a-1", "units": 7})]
     )
     async with Harness(config=Settings()) as h:
-        result = await h.wrap(ReAct("s", model, output=Count), id="so").run("a-1?", user="u")
+        result = await h.wrap(ReAct("s", model, response_format=Count), id="so").run(
+            "a-1?", user="u"
+        )
     assert result.answer == Count(sku="a-1", units=7)
     told = model.seen[1][-1].text  # LangChain's tool strategy says what was wrong
     assert "Failed to parse structured output" in told and "units" in told
@@ -188,7 +194,7 @@ async def test_at_its_token_limit_a_run_answers_with_what_it_has_and_is_partial(
     runs.clear()
     model = Spending(turns=[("stock", {"sku": "a-1"}), ("stock", {"sku": "a-2"}), "a-1: 7"])
     async with Harness(config=Settings()) as h:
-        agent = h.wrap(ReAct("s", model), id="b", tools=[stock], budget=Budget(max_tokens=150))
+        agent = arm(h.wrap(ReAct("s", model), id="b", budget=Budget(max_tokens=150)), [stock])
         result = await agent.run("a-1 and a-2?", user="u")
     assert result.status is RunStatus.PARTIAL and result.answer == "a-1: 7"
     assert result.error is not None and result.error.code == budget.BUDGET_EXCEEDED
@@ -204,7 +210,7 @@ async def test_exactly_at_its_limit_a_run_starts_nothing_more() -> None:
     runs.clear()
     model = Spending(turns=[("stock", {"sku": "a-1"}), "nothing counted"])
     async with Harness(config=Settings()) as h:
-        agent = h.wrap(ReAct("s", model), id="b", tools=[stock], budget=Budget(max_tokens=110))
+        agent = arm(h.wrap(ReAct("s", model), id="b", budget=Budget(max_tokens=110)), [stock])
         result = await agent.run("a-1?", user="u")
     assert result.status is RunStatus.PARTIAL and runs == []
 
@@ -212,7 +218,7 @@ async def test_exactly_at_its_limit_a_run_starts_nothing_more() -> None:
 async def test_below_its_limit_a_run_is_not_stopped() -> None:
     model = Spending(turns=[("stock", {"sku": "a-1"}), "a-1: 7"])
     async with Harness(config=Settings()) as h:
-        agent = h.wrap(ReAct("s", model), id="b", tools=[stock], budget=Budget(max_tokens=111))
+        agent = arm(h.wrap(ReAct("s", model), id="b", budget=Budget(max_tokens=111)), [stock])
         result = await agent.run("a-1?", user="u")
     assert result.status is RunStatus.SUCCESS
 
@@ -221,7 +227,7 @@ async def test_without_a_budget_there_is_no_limit_but_spending_is_counted() -> N
     runs.clear()
     model = Spending(turns=[("stock", {"sku": "a-1"}), "a-1: 7"])
     async with Harness(config=Settings()) as h:
-        agent = h.wrap(ReAct("s", model), id="b", tools=[stock])  # no budget: no cap
+        agent = arm(h.wrap(ReAct("s", model), id="b"), [stock])  # no budget: no cap
         result = await agent.run("a-1?", user="u")
     assert result.status is RunStatus.SUCCESS
     assert runs[0].replay.journal.spent["tokens"] == 220  # both replies, counted
@@ -251,7 +257,7 @@ async def test_the_gateways_cost_is_what_the_run_spent() -> None:
         ]
     )
     async with harness() as h:
-        agent = h.wrap(ReAct("s", "granite/g"), id="cost", tools=[stock])
+        agent = arm(h.wrap(ReAct("s", "granite/g"), id="cost"), [stock])
         assert (await agent.run("a-1?", user="u")).answer == "7"
     spent = runs[0].replay.journal.spent
     assert spent["cost"] == 0.25 and spent["model_calls"] == 2
@@ -266,8 +272,9 @@ def test_a_reply_without_the_gateways_cost_says_none() -> None:
 async def test_a_structured_answer_at_the_budget_is_asked_for_without_other_tools() -> None:
     model = Spending(turns=[("stock", {"sku": "a-1"}), ("Count", {"sku": "a-1", "units": 7})])
     async with Harness(config=Settings()) as h:
-        agent = h.wrap(
-            ReAct("s", model, output=Count), id="b", tools=[stock], budget=Budget(max_tokens=1)
+        agent = arm(
+            h.wrap(ReAct("s", model, response_format=Count), id="b", budget=Budget(max_tokens=1)),
+            [stock],
         )
         result = await agent.run("a-1?", user="u")
     assert result.status is RunStatus.PARTIAL and result.answer == Count(sku="a-1", units=7)
@@ -286,7 +293,7 @@ async def test_every_gateway_call_says_whose_run_and_joins_its_trace(
     )
     async with harness() as h:
         result = await h.wrap(ReAct("s", "granite/g"), id="dims").run("hi?", user="ada")
-        given = await h.model_headers()
+        given = GatewayHeaders()
         assert dict(given) == dict(NO_GATEWAY_TOOLS) and len(given) == len(NO_GATEWAY_TOOLS)
         assert repr(given).startswith("GatewayHeaders(")  # read per request: nothing outside a run
     headers = chat.calls[0].request.headers

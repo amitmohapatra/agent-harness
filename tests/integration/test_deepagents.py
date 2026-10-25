@@ -6,6 +6,7 @@ from __future__ import annotations
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
+from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, tool
 from trellis.contracts import RunStatus
@@ -30,7 +31,7 @@ async def test_a_deep_agent_uses_its_own_tools_and_the_harness_tools(harness: Ha
     )
     graph = create_deep_agent(
         model=model,
-        tools=await harness.tools(refund, framework="deepagents"),
+        tools=await native_tools(harness, refund, framework="deepagents"),
         system_prompt="You process refunds.",
         checkpointer=InMemorySaver(),
     )

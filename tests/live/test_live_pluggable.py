@@ -48,7 +48,7 @@ from trellis.contracts import (
     new_id,
 )
 from trellis.harness import telemetry
-from trellis.harness.a2a import remote
+from trellis.harness.a2a import RemoteAgent
 from trellis.harness.evals import (
     EvalCase,
     EvalOutput,
@@ -545,7 +545,7 @@ async def test_the_graph_calls_a_remote_a2a_agent_and_answers_its_question(
         questions.append(question)
         return interrupt({"question": question})
 
-    async with remote(
+    async with RemoteAgent(
         planner_url,
         tenant=team.tenant,
         user=case.user,

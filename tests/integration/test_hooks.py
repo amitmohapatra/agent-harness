@@ -19,6 +19,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from tests.support.adapters import BUILDERS
+from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call, PlannedChat, PlannedChatModel, PlannedModel
 from trellis import Ask, Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, Runtime, Settings, tool
@@ -88,7 +89,7 @@ async def test_a_hook_denies_rewrites_and_checks_calls_on_every_adapter(
 ) -> None:
     plan: list[Call] = [("quote", {"sku": "secret"}), ("pay", {"amount": 500})]
     target, tools = await BUILDERS[framework](harness, [quote, pay], tmp_path, plan)
-    agent = harness.wrap(target, id=f"guarded-{framework}", tools=tools, hooks=[Guard()])
+    agent = arm(harness.wrap(target, id=f"guarded-{framework}", hooks=[Guard()]), tools)
     events = [e async for e in agent.stream("pay for the secret", user="u")]
     finished = events[-1]
     assert finished.outcome is not None and finished.outcome.value == "success", finished
@@ -113,7 +114,7 @@ async def test_a_hook_asks_a_person_and_its_decision_is_journaled_on_every_adapt
 
     hooks = Asking()
     target, tools = await BUILDERS[framework](harness, [quote], tmp_path, [("quote", {"sku": "A"})])
-    agent = harness.wrap(target, id=f"asking-{framework}", tools=tools, hooks=[hooks])
+    agent = arm(harness.wrap(target, id=f"asking-{framework}", hooks=[hooks]), tools)
     paused = await agent.run("quote A", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
     assert paused.interrupt.question == "Approve quote? Quote A for this customer?"
@@ -123,7 +124,7 @@ async def test_a_hook_asks_a_person_and_its_decision_is_journaled_on_every_adapt
     assert quoted == ["A"] and hooks.asked == 1  # the resumed run read the journal
 
 
-async def test_hooks_run_in_order_the_harness_then_the_agent() -> None:
+async def test_hooks_run_in_the_order_given() -> None:
     order: list[str] = []
 
     class Named(Hooks):
@@ -137,11 +138,10 @@ async def test_hooks_run_in_order_the_harness_then_the_agent() -> None:
     async def fn(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("quote", sku="A")
 
-    async with Harness(config=Settings(), hooks=[Named("harness")]) as h:
-        result = await h.wrap(fn, id="ordered", tools=[quote], hooks=[Named("agent")]).run(
-            "q", user="u"
-        )
-    assert order == ["harness", "agent"] and result.answer == "A-harness-agent costs 7"
+    async with Harness(config=Settings()) as h:
+        hooks = [Named("first"), Named("second")]
+        result = await arm(h.wrap(fn, id="ordered", hooks=hooks), [quote]).run("q", user="u")
+    assert order == ["first", "second"] and result.answer == "A-first-second costs 7"
 
 
 # --------------------------------------------------------------------------- run hooks
@@ -173,7 +173,7 @@ async def test_run_hooks_see_each_attempt_and_every_failure(harness: Harness) ->
         failed = await agent.tools.call("broken", sku="A")
         return f"{failed} / {await agent.ask('Go on?')}"
 
-    agent = harness.wrap(fn, id="watched", tools=[broken], hooks=[Watching()])
+    agent = arm(harness.wrap(fn, id="watched", hooks=[Watching()]), [broken])
     paused = await agent.run("go", user="u")
     assert paused.interrupt is not None
     done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
@@ -184,7 +184,7 @@ async def test_run_hooks_see_each_attempt_and_every_failure(harness: Harness) ->
         await asyncio.sleep(1)
         return "late"
 
-    timed_out = await harness.wrap(slow, id="slow", hooks=[Watching()], timeout=0.01).run(
+    timed_out = await harness.wrap(slow, id="slow", hooks=[Watching()], run_timeout=0.01).run(
         "slow", user="u"
     )
     assert failed.status is RunStatus.ERROR and timed_out.status is RunStatus.TIMEOUT
@@ -250,7 +250,7 @@ def _redacted(message: Any) -> Any:
 async def test_react_model_calls_go_through_the_hooks(harness: Harness) -> None:
     hooks = Redacting()
     model = PlannedChat([("quote", {"sku": "A"})])
-    agent = harness.wrap(ReAct(system="s", model=model), id="r", tools=[quote], hooks=[hooks])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="r", hooks=[hooks]), [quote])
     result = await agent.run("card 4111: quote A", user="u")
     assert result.answer == "Done. A costs 7"
     assert [c.framework for c in hooks.calls] == ["langgraph", "langgraph"]
@@ -262,7 +262,9 @@ async def test_react_model_calls_go_through_the_hooks(harness: Harness) -> None:
         async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
             raise ConnectionError("the model is down")
 
-    failing = harness.wrap(ReAct(system="s", model=Failing(turns=[])), id="down", hooks=[hooks])
+    failing = harness.wrap(
+        ReAct(system_prompt="s", model=Failing(turns=[])), id="down", hooks=[hooks]
+    )
     assert (await failing.run("q", user="u")).status is RunStatus.ERROR
     assert hooks.errors[-2:] == [("model", "ConnectionError"), ("run", "ConnectionError")]
 
@@ -271,7 +273,7 @@ async def test_a_react_model_call_out_of_time_is_a_model_error_the_hooks_see(
     harness: Harness,
 ) -> None:
     hooks = Redacting()
-    target = ReAct(system="s", model=ScriptedChatModel(turns=[], stall=5), model_timeout=0.01)
+    target = ReAct(system_prompt="s", model=ScriptedChatModel(turns=[], stall=5), call_timeout=0.01)
     result = await harness.wrap(target, id="slow", hooks=[hooks]).run("q", user="u")
     assert result.status is RunStatus.ERROR
     assert hooks.errors[0] == ("model", ModelTimeout.__name__)  # a ModelError
@@ -283,7 +285,7 @@ async def test_langchain_model_calls_go_through_the_middleware(
 ) -> None:
     hooks = Redacting()
     model = PlannedChatModel(plan=[("quote", {"sku": "A"})])
-    tools = await harness.tools(quote, framework="deepagents" if deep else "langgraph")
+    tools = await native_tools(harness, quote, framework="deepagents" if deep else "langgraph")
     graph = (
         create_deep_agent(model=model, tools=tools, middleware=[Middleware()])
         if deep

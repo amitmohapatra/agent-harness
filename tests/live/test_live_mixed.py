@@ -16,6 +16,7 @@ import pytest
 from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import StubLangfuse, eventually, memory_scope
 from tests.live.team import Team, graph
+from tests.support.arm import arm
 from tests.support.planned import PlannedChatModel
 from trellis import Runtime, tool
 from trellis.contracts import InterruptDecision, InterruptResolution, RunStatus
@@ -58,9 +59,9 @@ async def test_one_rule_gates_a_wrapped_agent_and_a_plain_graph() -> None:
 
     team = await Team.open(f"live-mixed-plain-{suffix}")
     with StubLangfuse() as langfuse:
-        async with live_harness(judges=[ordered], eval_sample=1.0, **langfuse.settings()) as h:
+        async with live_harness(judges=[ordered], sampled=1.0, langfuse=langfuse.environ()) as h:
             try:
-                wrapped = h.wrap(buyer, id=f"live-mixed-wrapped-{suffix}", tools=[place_order])
+                wrapped = arm(h.wrap(buyer, id=f"live-mixed-wrapped-{suffix}"), [place_order])
                 # the administrator's one rule, in the tenant's catalog
                 catalog = team.scope(user).advanced.tools
                 await catalog.put_catalog(

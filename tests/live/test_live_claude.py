@@ -21,6 +21,7 @@ from tests.live.conftest import (
     needs_claude_cli,
     needs_gateway,
 )
+from tests.support.arm import arm
 from trellis import tool
 from trellis.contracts import RunStatus
 from trellis.harness.journal import Journal
@@ -48,7 +49,7 @@ async def test_claude_runs_through_the_gateway_and_resumes_its_session(cli_home:
         env=claude_cli_env(),
     )
     async with live_harness() as h:
-        agent = h.wrap(options, id=f"live-claude-{uuid.uuid4().hex[:8]}", tools=[close_ticket])
+        agent = arm(h.wrap(options, id=f"live-claude-{uuid.uuid4().hex[:8]}"), [close_ticket])
         first = await agent.run("Close ticket T-1.", user="live-user")
         assert first.status in (RunStatus.SUCCESS, RunStatus.PAUSED), first.error
         if first.status is RunStatus.SUCCESS:
@@ -56,7 +57,7 @@ async def test_claude_runs_through_the_gateway_and_resumes_its_session(cli_home:
             pytest.skip("the live model answered without calling close_ticket")
         assert first.interrupt is not None and first.interrupt.tool_call is not None
         assert first.interrupt.tool_call.tool == "close_ticket" and closed == []
-        record = await h.runs.get(first.run_id, tenant=await h.tenant())
+        record = await h.runs.get(first.run_id, tenant=await h._tenant())
         assert record is not None
         journal = await Journal.read(record.checkpoint, h.runs.artifacts, tenant=record.tenant_id)
         assert journal.session  # the CLI's session, kept with the pause

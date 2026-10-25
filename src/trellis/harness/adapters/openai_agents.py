@@ -16,9 +16,9 @@
   (``bridges.session.MemorySession``), which owns the history the same way;
 * helpers: an agent called as a tool (``Agent.as_tool``) is a child run of the run
   (``bridges.helpers``): its call under the catalog's rules, what it spent on the run's budget,
-  its run record naming the run, its turns in memory. Its own tools are governed when built with
-  ``h.tools`` (the SDK runs the agent itself, which the harness cannot copy): any other is said
-  once;
+  its run record naming the run, its memory context, tool records and outcome. It runs the
+  governed copy of its agent; where the SDK's agent tool cannot be pointed at it, its own tools'
+  calls are not governed, which is said once;
 * pause: ``trellis.current().ask`` stops the run and a resume re-runs it against the journal;
   the SDK's own ``needs_approval`` tools pause with the SDK's ``RunState``, and a resume
   approves or rejects on that state and continues it (``RunState.approve``/``reject``). The SDK
@@ -343,7 +343,7 @@ def governed_agents(
     run the governed copy of their agent — recursively, each agent copied once, so handoffs that
     lead back are kept — ``added`` (the run's harness tools) on ``target``'s and ``shared``
     (the run's memory tools) on every other's. A tool an agent carries already (built with
-    ``h.tools``) is not added twice. A ``Handoff`` object hides its agent until it is invoked:
+    the harness) is not added twice. A ``Handoff`` object hides its agent until it is invoked:
     its tools cannot be reached, which is said once. With ``helpers``, each agent tool's call is
     a helper of the run. The agents you wrapped are not changed."""
     from agents import Agent
@@ -592,8 +592,9 @@ def _hidden_handoff(agent_id: str, to: str) -> None:
 
 
 def _ungoverned_inside(agent_id: str, tool: Any) -> None:
-    """Say once when an agent tool's agent has tools of its own not built with ``h.tools``:
-    the SDK runs that agent itself, so their calls are not governed."""
+    """Say once when an agent tool's agent has tools of its own the harness did not make and
+    the agent tool could not be pointed at the governed copy: the SDK runs that agent itself,
+    so their calls are not governed."""
     from agents import FunctionTool
 
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, MADE
@@ -612,7 +613,7 @@ def _ungoverned_inside(agent_id: str, tool: Any) -> None:
 def _said_inside(agent_id: str, tool: str, tools: str) -> None:
     log.warning(
         "an agent called as a tool runs its own tools inside the SDK, where the harness cannot "
-        "govern them: build them with h.tools so the catalog's rules apply",
+        "govern them: hand off to the agent instead, or give its tools to the agent calling it",
         extra={"agent_id": agent_id, "agent_tool": tool, "tools": tools},
     )
 

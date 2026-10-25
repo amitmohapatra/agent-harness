@@ -3,12 +3,13 @@ whose memory service is the in-process fake."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
 import httpx
 import pytest
 from agents import set_tracing_disabled
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -16,7 +17,8 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.support import memory as fake_memory
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
-from trellis.harness import telemetry
+from trellis.harness import agent as agent_module
+from trellis.harness import evals, telemetry
 
 set_tracing_disabled(True)
 
@@ -76,6 +78,19 @@ def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", OnHttpx)
 
 
+#: The application's own tracer provider, as a test process has it (exporting nothing).
+APPLICATIONS_PROVIDER = TracerProvider()
+
+
+@pytest.fixture(autouse=True)
+def an_applications_tracer_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tracer provider stands installed, as an application's would: a test that sets a
+    deployment's variables (Langfuse's keys, ``OTEL_*``) never installs the harness's exporter
+    in this process (``telemetry.configure`` keeps one already installed). The tests of
+    ``configure`` itself put the API's stand-in back."""
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: APPLICATIONS_PROVIDER)
+
+
 @pytest.fixture
 def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
     """The spans the harness ends during the test, in memory."""
@@ -84,6 +99,26 @@ def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("t"))
     yield exporter
+
+
+@pytest.fixture
+def sampled(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None]:
+    """Sets the share of successful runs checked for grounding and scored by a judge that names
+    none (fixed in a deployment: ``GROUNDING_SAMPLE``, ``JUDGE_SAMPLE``)."""
+
+    def share(value: float) -> None:
+        monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", value)
+        monkeypatch.setattr(evals, "JUDGE_SAMPLE", value)
+
+    return share
+
+
+@pytest.fixture
+def langfuse_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Langfuse's own variables set (its scores API at ``https://lf.test``)."""
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://lf.test")
 
 
 @pytest.fixture

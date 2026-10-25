@@ -19,14 +19,14 @@ def refund(order: str, amount: float) -> str:
 
 async def billing(input: dict, agent: Runtime) -> str:
     known = agent.context  # the memory context for the question (None: memory off)
-    receipt = await agent.tools.call("refund", order=input["order"], amount=input["amount"])
+    receipt = await agent.tools.call(refund, order=input["order"], amount=input["amount"])
     size = await agent.ask("Which size?", options=["S", "L"], assignee="role:ops")
     agent.log("asked", size=size)
     return f"{receipt}; size {size}"
 
 
 h = Harness()
-agent = h.wrap(billing, id="billing", tools=[refund])
+agent = h.wrap(billing, id="billing")
 result = await agent.run({"order": "o-7", "amount": 40, "question": "Refund o-7"}, user="ada")
 ```
 
@@ -36,7 +36,8 @@ result = await agent.run({"order": "o-7", "amount": 40, "question": "Refund o-7"
 |---|---|
 | `agent.context` | the pushed memory context (also a leading system message when the input is a message list) |
 | `agent.memory` | the memory SDK's verbs in the run's scope (`search`, `remember`, `history`, documents…; needs `MEMORY_URL`) |
-| `await agent.tools.call(name, **args)` | any tool of the run — yours, MCP, memory — through the bridge (governance, approvals, journal, records) |
+| `await agent.tools.call(tool, **args)` | a tool through the bridge (governance, approvals, journal, records): one of yours itself (`tool(fn)`, `mcp(...)`, `a2a(url)`, `sandbox()`...: it joins the run), or one of the run by name — the MCP tools the virtual key allows, memory's |
+| `await agent.tools.use(*sources)` | your tools added to the run (the names they add), to call by name |
 | `await agent.tools.hints(task)` | the tools that fit a task, from the memory service |
 | `await agent.ask(question, ...)` | a pause for a person ([interrupts.md](../interrupts.md)); returns the answer on resume |
 | `agent.log(message, **fields)` | a log line and a `log` event on the stream |
@@ -51,22 +52,22 @@ context (as above: add a `question`).
 
 A tool that asks, or `agent.ask(...)`, pauses the run; `agent.resume(...)` calls the function
 again from its input, and the journal returns the answers already given and the tool outputs
-already recorded — in order, by content. So: keep side effects in harness tools (a call through
-the bridge runs once), and code outside them runs again on each attempt.
+already recorded — in order, by content. So: keep side effects in tool calls (a call through
+the bridge runs once), and code outside them runs again on each attempt. A function's tools
+are its code's: as another agent's sub-agent its calls count as writes (they run one at a time).
 
 ## Native or ours
 
-A function has no framework of its own to bring skills, prompts or a sandbox: use the
-harness's — `h.wrap(fn, skills=[...])`, `await h.prompt(...)`, `tools=[sandbox()]` — every call
-governed and journaled ([skills.md](../skills.md#native-or-ours),
-[prompts.md](../prompts.md#native-or-ours),
+A function has no framework of its own to bring prompts or a sandbox: use the harness's —
+`await h.prompt(...)`, `agent.tools.call(sandbox(), ...)` (its sandbox the run's, paused and
+deleted with it) — every call governed and journaled ([prompts.md](../prompts.md#native-or-ours),
 [sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 
 ## Streaming, durable runs, surfaces, evaluation
 
 `stream` yields the tool events and `RUN_FINISHED` (a function has no text deltas). `start` +
 workers (the input must be JSON), `schedule`, `serve_chat`, `serve_a2a` and `h.evaluate` work as
-for every target; `llm_judge` needs `TRELLIS_JUDGE_MODEL`. An object with an `async __call__`
+for every target; `llm_judge` asks the gateway's judge alias (or its own `model=`). An object with an `async __call__`
 is a target too. Wrapping a function is also how code on its own framework gets the AG-UI and
 A2A servers, which serve wrapped agents only: wrap the function that calls your graph or runner
 ([surfaces.md](../surfaces.md#surfaces)).

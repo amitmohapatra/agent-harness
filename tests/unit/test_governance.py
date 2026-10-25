@@ -671,8 +671,8 @@ def test_memory_without_a_key_is_a_configuration_error() -> None:
 
 
 async def test_the_harness_keeps_one_governance_per_tenant(harness: Harness) -> None:
-    acme = harness.governance("acme")
-    assert harness.governance("acme") is acme and harness.governance("globex") is not acme
+    acme = harness._governance("acme")
+    assert harness._governance("acme") is acme and harness._governance("globex") is not acme
     assert acme.catalog is None and acme.tenant == "acme"  # memory off: the tools' own risks
 
 
@@ -684,7 +684,7 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
     service.fail.add("put_catalog")  # unavailable: the write is kept in the spool
     settings = Settings(spool_dir=str(tmp_path))
     async with Harness(config=settings, memory=service.client()) as h:
-        governance = h.governance("acme")
+        governance = h._governance("acme")
         assert isinstance(governance.catalog, MemoryCatalog)
         assert governance.catalog.ctx.scope.tenant_id == "acme"
         await governance.publish(SPECS)

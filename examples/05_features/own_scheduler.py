@@ -19,7 +19,6 @@ from typing import Final
 from examples._support.offline import Runs, react_model, runs_store
 
 from trellis import Agent, Harness, ReAct, tool
-from trellis.harness.governance import Governance
 from trellis.runs import Job
 
 LEASE_SECONDS: Final = 60
@@ -47,12 +46,16 @@ async def scheduler(runs: Runs, agent: Agent, worker_id: str) -> None:
 
 async def main() -> None:
     runs = runs_store()
-    async with Harness(runs=runs, memory=False, governance=Governance()) as h:
+    async with Harness(runs=runs, memory=False) as h:  # each tool by its own risk
         model = react_model(
             [("order", {"number": "o1"}), ("refund", {"number": "o1"}), "Refunded order o1."]
         )
-        target = ReAct(system="You handle refunds. Check the order first.", model=model)
-        agent = h.wrap(target, id="refunds", tools=[order, refund], timeout=300)
+        target = ReAct(
+            system_prompt="You handle refunds. Check the order first.",
+            model=model,
+            tools=[order, refund],
+        )
+        agent = h.wrap(target, id="refunds", run_timeout=300)
         handle = await agent.start("Refund order o1 if it was paid.", user="ada")
         await scheduler(runs, agent, "my-scheduler")
         paused = await handle.result()

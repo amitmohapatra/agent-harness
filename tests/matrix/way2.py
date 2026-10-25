@@ -1,6 +1,6 @@
 """Way 2: the blocks without a Harness, each used the way the docs show (``docs/blocks``,
 ``examples/03_way2_governance/*_recipe.py``): ``governed`` around a tool, the run store and ``trellis.runs.Worker``,
-the memory SDK, ``judge``/``grounding``, ``remote()``, the redactor. A block is framework-neutral
+the memory SDK, ``judge``/``grounding``, ``RemoteAgent``, the redactor. A block is framework-neutral
 — your code calls it whatever the framework — so these run as the ``function`` adapter (the
 framework recipes are the ``W2R`` row)."""
 
@@ -30,7 +30,7 @@ from trellis.contracts import (
     ToolOutcome,
     new_id,
 )
-from trellis.harness.a2a import remote
+from trellis.harness.a2a import RemoteAgent
 from trellis.harness.evals import EvalCase, EvalServices, judge
 from trellis.harness.evals import grounding as grounding_block
 from trellis.harness.governance import Decision, Denied, Governance, Rejected, governed
@@ -321,16 +321,6 @@ async def key_tools(w: World) -> None:
     assert names == [KEY_TOOL], names
 
 
-async def virtual_mcps(w: World) -> None:
-    w.fake_gateway.bundles["billing"] = ["billing-invoice"]
-    gateway = w.fake_gateway.gateway()
-    try:
-        names = [t.name for t in await gateway.client.tools(slug="billing")]
-    finally:
-        await gateway.aclose()
-    assert names == ["billing-invoice"], names
-
-
 # --------------------------------------------------------------------------- evaluation
 async def judges(w: World) -> None:
     seen: list[EvalCase] = []
@@ -376,7 +366,7 @@ async def remote_agent(w: World) -> None:
     served.wrap(greeter, id="greeter").serve_a2a(app, url)
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://a2a.remote")
     try:
-        async with remote(url, tenant="default", user=USER, client=http) as agent:
+        async with RemoteAgent(url, tenant="default", user=USER, client=http) as agent:
             assert await agent("world") == "hello world"
     finally:
         await http.aclose()

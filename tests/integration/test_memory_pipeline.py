@@ -15,6 +15,7 @@ import respx
 from agents import Agent as OpenAIAgent
 from langchain.agents import create_agent
 
+from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.models import ScriptedChat
@@ -40,6 +41,19 @@ def many(n: int) -> list[Any]:
             return f"t{i}:{key}"
 
         return tool(lookup, name=f"t{i}", side_effects="read", description=f"Tool {i}.")
+
+    return [make(i) for i in range(n)]
+
+
+def graph_tools(n: int) -> list[Any]:
+    """``n`` LangChain tools of a graph's own (the framework's: the harness narrows them)."""
+    from langchain_core.tools import StructuredTool
+
+    def make(i: int) -> Any:
+        def lookup(key: str) -> str:
+            return f"t{i}:{key}"
+
+        return StructuredTool.from_function(lookup, name=f"t{i}", description=f"Tool {i}.")
 
     return [make(i) for i in range(n)]
 
@@ -87,7 +101,9 @@ async def test_push_injects_the_context_as_a_system_message(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat(["7 units"])
-    agent = memory_harness.wrap(ReAct(system="You answer stock questions.", model=model), id="s")
+    agent = memory_harness.wrap(
+        ReAct(system_prompt="You answer stock questions.", model=model), id="s"
+    )
     result = await agent.run("how many a?", user="u1", thread="t1")
     assert result.answer == "7 units"
     instructions, context = model.requests[0]["messages"][:2]
@@ -108,7 +124,7 @@ async def test_a_small_toolbox_gets_its_learned_skills_and_every_tool(
     tool hints, so the model is offered every tool."""
     memory_service.learned_skills = "- refund-an-order: t0 -> t1 (worked 100% of 3 runs)"
     model = ScriptedChat(["done"])
-    agent = memory_harness.wrap(ReAct(system="s", model=model), id="refunds", tools=many(2))
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="refunds"), many(2))
     result = await agent.run("refund order O-1", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     [context] = memory_service.named("context")
@@ -145,7 +161,7 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     memory_service.candidates = ["t3", "t1"]
     memory_service.candidates_for = {"archive it": ["t5"]}
     model = ScriptedChat([("t3", {"key": "a"}), ("tool_search", {"task": "archive it"}), "done"])
-    agent = memory_harness.wrap(ReAct(system="s", model=model), id="n", tools=many(6))
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
     result = await agent.run("look up a", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
 
@@ -180,7 +196,8 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
     model = ScriptedChatModel(
         turns=[("t3", {"key": "a"}), ("tool_search", {"task": "archive it"}), "done", "plain"]
     )
-    tools = [*await memory_harness.tools(*many(6), framework="langgraph"), own]
+    memory_tools = await native_tools(memory_harness, framework="langgraph")
+    tools = [*graph_tools(6), *memory_tools, own]
     graph = create_agent(model, tools=tools)
     agent = memory_harness.wrap(graph, id="graph-hinted")
     assert (agent.adapter.fixed_tools, agent.adapter.narrows) == (True, "turn")
@@ -207,7 +224,7 @@ async def test_the_hints_narrow_what_a_deep_agent_is_offered(
 
     memory_service.candidates = ["t2"]
     model = ScriptedChatModel(turns=[("t2", {"key": "b"}), "done"])
-    tools = await memory_harness.tools(*many(6), framework="deepagents")
+    tools = [*graph_tools(6), *await native_tools(memory_harness, framework="deepagents")]
     graph = create_deep_agent(model=model, tools=tools)
     result = await memory_harness.wrap(graph, id="deep-hinted").run("look up b", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
@@ -244,7 +261,7 @@ async def test_without_candidates_every_tool_is_offered(
     memory_service.omit_candidates = omit
     memory_service.candidates = []
     model = ScriptedChat(["done"])
-    await memory_harness.wrap(ReAct(system="s", model=model), id="n", tools=many(6)).run(
+    await arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6)).run(
         "x", user="u"
     )
     # all the agent's, memory's (and ReAct's own)
@@ -259,7 +276,7 @@ async def test_tool_search_answers_among_the_runs_tools_and_offers_them(
     async def fn(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("tool_search", task="reorder")
 
-    agent = memory_harness.wrap(fn, id="h", tools=many(6))
+    agent = arm(memory_harness.wrap(fn, id="h"), many(6))
     result = await agent.run("x", user="u")
     # what the model reads: the choice, its confidence, how it has done, the arguments found
     # and missing, the plan — and nothing empty
@@ -292,7 +309,7 @@ async def test_tools_hints_inside_a_run(
     async def fn(input: str, agent: Runtime) -> Any:
         return await agent.tools.hints("reorder")
 
-    result = await memory_harness.wrap(fn, id="h", tools=[stock]).run("reorder a", user="u")
+    result = await arm(memory_harness.wrap(fn, id="h"), [stock]).run("reorder a", user="u")
     assert isinstance(result.answer, ToolHints) and result.answer.tools[0].name == "stock"
     # the candidates are the run's own tools, never the memory service's pull tools
     assert memory_service.named("tool_hints")[0].body["available"] == ["stock"]
@@ -303,7 +320,7 @@ async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat([("memory_search", {"query": "preferences"}), "email"])
-    agent = memory_harness.wrap(ReAct(system="s", model=model), id="prefs")
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="prefs")
     result = await agent.run("how do I like to be contacted?", user="u1")
     assert result.answer == "email"
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
@@ -322,7 +339,7 @@ async def test_an_agent_searches_what_was_said_as_the_service_offers_it(
     the model made it, in the run's scope, and adds nothing."""
     args = {"query": "order number", "kinds": ["message"]}
     model = ScriptedChat([("memory_search", args), "4471"])
-    agent = memory_harness.wrap(ReAct(system="s", model=model), id="recall")
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="recall")
     result = await agent.run("what was my order number?", user="u1", thread="t-new")
     assert result.answer == "4471"
     [search] = [t for t in model.requests[0]["tools"] if t["function"]["name"] == "memory_search"]
@@ -338,7 +355,7 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
-    agent = memory_harness.wrap(ReAct(system="s", model=model), id="stock", tools=[stock])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="stock"), [stock])
     result = await agent.run("how many a?", user="u1")
     await memory_harness.writes.drain()
     [batch] = memory_service.named("messages")
@@ -423,7 +440,7 @@ async def test_an_approval_decision_is_feedback_on_the_tool_call(
     async def fn(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("wipe", disk="d1")
 
-    agent = memory_harness.wrap(fn, id="ops", tools=[wipe])
+    agent = arm(memory_harness.wrap(fn, id="ops"), [wipe])
     paused = await agent.run("wipe d1", user="u")
     assert paused.interrupt is not None
     await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="boss")
@@ -530,7 +547,7 @@ async def test_the_catalog_decides_tiers_and_approvals(
     async def fn(input: int, agent: Runtime) -> Any:
         return await agent.tools.call("pay", amount=input)
 
-    agent = memory_harness.wrap(fn, id="payer", tools=[pay])
+    agent = arm(memory_harness.wrap(fn, id="payer"), [pay])
     assert (await agent.run(50, user="u")).answer == "paid 50"
     paused = await agent.run(500, user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
@@ -551,19 +568,17 @@ async def test_the_catalog_decides_tiers_and_approvals(
 
 
 # --------------------------------------------------------------------------- grounding
+@pytest.mark.usefixtures("langfuse_env")
 @respx.mock
 async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
     memory_service: FakeMemoryService,
+    sampled: Any,
 ) -> None:
     scores = respx.post("https://lf.test/api/public/scores").mock(
         return_value=httpx.Response(200, json={"id": "x"})
     )
-    langfuse = {
-        "langfuse_public_key": "pk",
-        "langfuse_secret_key": "sk",
-        "langfuse_host": "https://lf.test",
-    }
-    async with harness_with(memory_service, **langfuse, eval_sample=1.0) as h:
+    sampled(1.0)
+    async with harness_with(memory_service) as h:
 
         async def fn(input: str, agent: Runtime) -> str:
             return "you prefer email"
@@ -588,8 +603,10 @@ async def test_a_sampled_run_is_verified_and_scored_on_its_trace(
 
 async def test_a_structured_answer_is_verified_as_its_json(
     memory_service: FakeMemoryService,
+    sampled: Any,
 ) -> None:
-    async with harness_with(memory_service, eval_sample=1.0) as h:
+    sampled(1.0)
+    async with harness_with(memory_service) as h:
 
         async def fn(input: str, agent: Runtime) -> dict[str, str]:
             return {"contact": "email"}
@@ -600,17 +617,21 @@ async def test_a_structured_answer_is_verified_as_its_json(
     assert verified.body["answer"] == '{"contact": "email"}'
 
 
-async def test_an_unsampled_run_is_not_verified(memory_service: FakeMemoryService) -> None:
+async def test_an_unsampled_run_is_not_verified(
+    memory_service: FakeMemoryService, sampled: Any
+) -> None:
     async def fn(input: str, agent: Runtime) -> str:
         return "answer"
 
-    async with harness_with(memory_service, eval_sample=0.0) as h:
+    sampled(0.0)
+    async with harness_with(memory_service) as h:
         await h.wrap(fn, id="n").run("q", user="u")
         await h.writes.drain()
     assert memory_service.named("verify") == []
 
 
 # --------------------------------------------------------------------------- feedback
+@pytest.mark.usefixtures("langfuse_env")
 @respx.mock
 async def test_feedback_fans_out_to_langfuse_and_the_memory_service(
     memory_service: FakeMemoryService,
@@ -618,13 +639,7 @@ async def test_feedback_fans_out_to_langfuse_and_the_memory_service(
     scores = respx.post("https://lf.test/api/public/scores").mock(
         return_value=httpx.Response(200, json={"id": "x"})
     )
-    # (an OTLP endpoint would install a global exporter: the scores API is reached by name)
-    langfuse = {
-        "langfuse_public_key": "pk",
-        "langfuse_secret_key": "sk",
-        "langfuse_host": "https://lf.test",
-    }
-    async with harness_with(memory_service, **langfuse) as h:
+    async with harness_with(memory_service) as h:
 
         async def fn(input: str, agent: Runtime) -> str:
             return "12"
@@ -690,7 +705,7 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     not a confident guess; the harness says so to the model with the context."""
     memory_service.evidence_status = status
     model = ScriptedChat(["I don't know your sister's name."])
-    agent = memory_harness.wrap(ReAct(system="You help.", model=model), id="s")
+    agent = memory_harness.wrap(ReAct(system_prompt="You help.", model=model), id="s")
     events = [e async for e in agent.stream("What is my sister's name?", user="u1")]
     system = model.requests[0]["messages"][1]["content"]
     assert system.startswith(memory_service.context_text)
@@ -763,7 +778,9 @@ async def test_an_approval_rule_set_after_a_graph_was_built_governs_its_calls(
         return f"paid {amount}"
 
     model = ScriptedChatModel(turns=[("pay", {"amount": 500}), "paid"])
-    graph = create_agent(model, tools=await memory_harness.tools(pay, framework="langgraph"))
+    graph = create_agent(
+        model, tools=await native_tools(memory_harness, pay, framework="langgraph")
+    )
     memory_service.catalog = {"pay": {"side_effects": "write", "approve_when": "amount > 100"}}
     rules_expire(monkeypatch)
     agent = memory_harness.wrap(graph, id="graph-payer")
@@ -804,7 +821,7 @@ async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
     billing = OpenAIAgent(
         name="billing",
         model=Model("b", [("pay", {"amount": 500}), ("pay", {"amount": 500}), "paid"]),
-        tools=await memory_harness.tools(pay, framework="openai_agents"),
+        tools=await native_tools(memory_harness, pay, framework="openai_agents"),
     )
     triage = OpenAIAgent(
         name="triage",

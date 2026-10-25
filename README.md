@@ -39,9 +39,9 @@ make install                         # uv sync (the sibling repositories are pat
 | I need | One line | More |
 |---|---|---|
 | my existing agent with memory, approvals and traces | `agent = h.wrap(graph, id="triage")` | [frameworks](docs/README.md#way-1-wrapped-the-harness-runs-your-agent) |
-| a tool-calling agent, no framework | `h.wrap(ReAct(system="...", model="provider/model"), id="a")` | [react.md](docs/frameworks/react.md) |
+| a tool-calling agent, no framework | `h.wrap(ReAct(system_prompt="...", model="provider/model", tools=[...]), id="a")` | [react.md](docs/frameworks/react.md) |
 | the agent to remember the user | `export MEMORY_URL=... TRELLIS_API_KEY=...` | [memory.md](docs/memory.md) |
-| a tool of my own | `h.wrap(target, id="a", tools=[lookup])` | [tools.md](docs/tools.md) |
+| a tool of my own | `ReAct(..., tools=[lookup])`, or your framework's own tool (governed as it runs) | [tools.md](docs/tools.md) |
 | the gateway's MCP tools | `export BIFROST_URL=... BIFROST_VIRTUAL_KEY=...` | [gateway.md](docs/gateway.md) |
 | a person to approve a risky call | `@tool(side_effects="irreversible")`, then `agent.resume(id, "approve", reviewer="lee")` | [governance.md](docs/governance.md) |
 | to ask a person something | `await trellis.current().ask("Which plan?", options=["basic", "pro"])` | [interrupts.md](docs/interrupts.md) |
@@ -49,15 +49,15 @@ make install                         # uv sync (the sibling repositories are pat
 | runs that outlive the process | `await agent.start(...)` and `python -m trellis.harness.worker app:h` | [runs.md](docs/runs.md) |
 | a run on a cadence | `await agent.schedule("weekdays", "Digest", on_behalf_of="ada")` | [runs.md](docs/runs.md#schedules) |
 | a part turned off | `await agent.run(q, user="ada", without={"memory"})` | [configuration.md](docs/configuration.md#what-is-on-and-how-to-turn-it-off) |
-| a time limit | `h.wrap(target, id="a", timeout=600)` | [reliability.md](docs/reliability.md) |
+| a time limit | `h.wrap(target, id="a", run_timeout=600)` | [reliability.md](docs/reliability.md) |
 | the framework's own options | `h.wrap(graph, id="a", framework_options={"recursion_limit": 50})` | [configuration.md](docs/configuration.md#the-frameworks-own-run-options) |
-| sub-agents | `h.wrap(planner, id="p", tools=[scout])` | [subagents.md](docs/subagents.md) |
+| sub-agents | `ReAct(..., subagents=[scout])` | [subagents.md](docs/subagents.md) |
 | a chat UI, or other agents calling mine | `agent.serve_chat(app)`, `agent.serve_a2a(app, url)` | [surfaces.md](docs/surfaces.md) |
-| to call another agent | `h.wrap(target, id="a", tools=[a2a("https://...")])` | [surfaces.md](docs/surfaces.md) |
+| to call another agent | `ReAct(..., subagents=[a2a("https://...")])`, or `await a2a("https://...")(message)` | [surfaces.md](docs/surfaces.md) |
 | a score for a test set | `await h.evaluate(agent, dataset, [exact_match(), called("lookup")])` | [evaluation.md](docs/evaluation.md) |
-| quality on live traffic | `Harness(judges=[llm_judge("Polite and correct.")])` | [evaluation.md](docs/evaluation.md) |
+| quality on live traffic | `h.wrap(target, id="a", judges=[llm_judge("Polite and correct.")])` | [evaluation.md](docs/evaluation.md) |
 | traces in Langfuse | `export LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=...` (`LANGFUSE_HOST=...` unless on Langfuse Cloud) | [observability.md](docs/observability.md) |
-| code run away from the host | `h.wrap(target, id="a", tools=[sandbox()])` with `SANDBOX=docker` | [sandbox.md](docs/sandbox.md) |
+| code run away from the host | `ReAct(..., tools=[sandbox()])` (Docker) | [sandbox.md](docs/sandbox.md) |
 | only one piece, in my own loop | `from trellis.memory import MemoryClient` (or runs, governance, evals) | [Way 2](#two-ways-to-use-trellis) |
 
 Every line has a runnable example: [examples/](examples/README.md).
@@ -73,7 +73,7 @@ answers and traces it all.
 **Way 2, pluggable blocks: your framework, our pieces.** Your framework keeps running the agent,
 untouched, and your code calls the blocks it wants where it chooses: `trellis.memory`,
 `trellis.runs` (durable runs, the inbox, workers, webhooks), `trellis.harness.governance`,
-`trellis.harness.evals`, `trellis.harness.a2a.remote`. Your framework's own pause (a LangGraph
+`trellis.harness.evals`, `a2a(url)` (`from trellis import a2a`). Your framework's own pause (a LangGraph
 checkpointer and `interrupt`, an OpenAI Agents `RunState`, a Claude session) stays the pause.
 
 **Without the harness: the SDKs alone.** `trellis.memory`, `trellis.runs`, `trellis.contracts`
@@ -87,7 +87,7 @@ All three use the same services and the same records, so one deployment mixes th
 | Question | Way 1, wrapped | Way 2, blocks |
 |---|---|---|
 | Should Trellis run your agent loop? | Yes: `agent.run`, `agent.stream`, `agent.start` call the framework for you | No: you call `graph.ainvoke`, `Runner.run`, `query()` as today |
-| Do you need to serve the agent over AG-UI or A2A? | `agent.serve_chat(app)`, `agent.serve_a2a(app, url)` | Serving is the harness's; *calling* A2A agents is a block (`remote`) |
+| Do you need to serve the agent over AG-UI or A2A? | `agent.serve_chat(app)`, `agent.serve_a2a(app, url)` | Serving is the harness's; *calling* A2A agents is a block (`a2a(url)`) |
 | Should durable pause and resume be handled for you? | Yes: the resumed run replays its journal, so no question is asked twice and no side effect repeats | You keep your framework's state and hand agent-runs its checkpoint |
 | Is the framework code something you cannot change? | It is unchanged, but its runs go through `agent.run` | Nothing changes: the blocks are calls around it |
 | Do you want only one capability? | You get all of them, each on with its service; turn parts off with `without=` | Import that one block |
@@ -114,7 +114,7 @@ flowchart LR
 | [agent-memory-service](https://github.com/amitmohapatra/agent-memory-service) | `trellis-memory` (`trellis.memory`) | the memory service and its SDK: context, records, documents, the tool catalog, feedback |
 | [agent-runs](https://github.com/amitmohapatra/agent-runs) | `trellis-runs` (`trellis.runs`) | durable runs: records, the queue and leases, pauses, the inbox, schedules, webhooks |
 | [agent-contracts](https://github.com/amitmohapatra/agent-contracts) | `trellis-contracts` (`trellis.contracts`) | the records every block takes and returns |
-| [bifrost-sdk](https://github.com/amitmohapatra/bifrost-sdk) | `bifrost-sdk` (`bifrost_sdk`) | the client of the Bifrost gateway: models, MCP tools, prompts, skills |
+| [bifrost-sdk](https://github.com/amitmohapatra/bifrost-sdk) | `bifrost-sdk` (`bifrost_sdk`) | the client of the Bifrost gateway: models, MCP tools, prompts |
 
 How they fit, and the harness inside: [docs/architecture.md](docs/architecture.md). Which
 versions this release was tested with: [docs/versioning.md](docs/versioning.md).
@@ -145,15 +145,15 @@ pip install -e '.[langgraph]'    # or any extras, below
 One distribution; each framework is an extra (the core imports none of them), pinned to the
 range this release was tested with: `langgraph` (LangGraph and LangChain's `create_agent`),
 `deepagents`, `react` (`ReAct`), `openai-agents`, `claude-agent-sdk`, `agui` (`serve_chat`),
-`a2a` (`serve_a2a`, `a2a()`, `remote()`), `otel` (OTLP export), `all`. A Way 2 team that wants
+`a2a` (`serve_a2a`, `a2a()`), `otel` (OTLP export), `all`. A Way 2 team that wants
 only `trellis.memory`, `trellis.runs` or `trellis.contracts` installs that one sibling.
 
 ## Configuration
 
 The environment holds the endpoints and keys: `BIFROST_URL`, `BIFROST_VIRTUAL_KEY`,
-`TRELLIS_JUDGE_VIRTUAL_KEY` (optional), `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL`,
-`TRELLIS_EVAL_SAMPLE` (optional), `TRELLIS_SPOOL_DIR` and `SANDBOX`; the tools' own standard
-variables (`OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`) are read by their SDKs. Everything else is in
+`TRELLIS_JUDGE_VIRTUAL_KEY` (optional), `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL` and
+`TRELLIS_SPOOL_DIR`; the tools' own standard variables (`OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`,
+the providers' keys) are read by their SDKs. Everything else is in
 code; `trellis doctor` prints each setting and where it came from. Each one, its default, an
 example and what it turns on: [docs/configuration.md](docs/configuration.md) (and
 [`.env.example`](.env.example)). A real deployment, from running services to a configured

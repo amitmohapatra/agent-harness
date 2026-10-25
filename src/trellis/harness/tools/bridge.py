@@ -338,7 +338,7 @@ async def _decided(
     not when a reviewer approved the tool for the rest of the run (``remember="run"``) — and
     what came of it: the call (with an approver's edited arguments), announced when it is to
     be, or the outcome of a call the approver rejected."""
-    governance = runtime.agent.harness.governance(runtime.tenant)
+    governance = runtime.agent.harness._governance(runtime.tenant)
     decision = await governance.check(
         spec.name, call.args, side_effects=spec.side_effects, agent_id=runtime.agent_id
     )

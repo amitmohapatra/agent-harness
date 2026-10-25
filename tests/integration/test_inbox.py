@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
+from tests.support.arm import arm
 from trellis import Harness, Runtime, tool
 from trellis.contracts import ConfigurationError, InterruptReason, RunStatus
 
@@ -29,7 +30,7 @@ async def refunds(input: Any, agent: Runtime) -> Any:
 async def test_paused_runs_are_listed_and_answered_with_h_inbox_and_agent_resume(
     harness: Harness,
 ) -> None:
-    agent = harness.wrap(refunds, id="refunds", tools=[refund])
+    agent = arm(harness.wrap(refunds, id="refunds"), [refund])
     paused = await agent.run("go", user="ada")
     [listed] = await harness.inbox("role:sales")
     assert (listed.run_id, listed.agent_id, listed.assignee) == (
@@ -99,7 +100,7 @@ async def test_a_screen_of_your_own_lists_and_answers_with_the_same_two_calls(
             raise HTTPException(409, str(exc)) from exc
         return {"status": result.status.value}
 
-    agent = harness.wrap(refunds, id="refunds", tools=[refund])
+    agent = arm(harness.wrap(refunds, id="refunds"), [refund])
     paused = await agent.run("go", user="ada")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
