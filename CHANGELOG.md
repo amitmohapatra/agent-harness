@@ -94,7 +94,9 @@ harness's part on top — and that part is exported: `trellis.middleware()` give
 - AG-UI: a resume sent right after its pause could end with `RUN_ERROR` ("the run ended
   without a result"): the paused attempt, still finishing (its end hooks, its records) after
   announcing the pause, found the run's buffer reopened by the resume and said the run ended.
-  Each attempt now answers for its own end only.
+  Each attempt now answers for its own end only, and a stream closes when its attempt returned
+  (after `RUN_FINISHED`, once the turn is written to memory and the end hooks ran): the next
+  message's context holds the turn, and a resume finds the paused attempt done.
 - A governed framework tool call inside a sub-agent whose call id equals its parent's `task`
   call id (ids are unique per conversation only) was let through ungoverned; the marker is now
   the tool's name and the call's id.
