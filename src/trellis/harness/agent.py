@@ -127,7 +127,9 @@ UNREACHED_FIX: Final = {
 TURN_WRITE_SECONDS: Final = 5.0
 #: What the model is told when memory has nothing for the question (``evidence_status``
 #: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
-#: the user's history, instead of a confident guess the memory never held.
+#: the user's history, instead of a confident guess the memory never held. Not when a hinted
+#: tool answers the question (its confidence at least :data:`NARROW_FLOOR`): told "do not
+#: guess", a weak model searched memory in loops instead of calling it.
 ABSTAIN_NOTES: Final = {
     "INSUFFICIENT": (
         "## Memory\nMemory holds nothing about this question. If the answer depends on "
@@ -862,7 +864,8 @@ class Agent:
             "bundle_id": pushed.bundle_id,
             "memory_ids": pushed.memory_ids[:CITED_MAX],
         }
-        note = ABSTAIN_NOTES.get(status)
+        # a question a hinted tool answers is no question memory must answer
+        note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
         rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
         runtime.context = rendered or None
         runtime.events.emit(

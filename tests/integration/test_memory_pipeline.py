@@ -776,6 +776,19 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     assert loaded.data["evidence_status"] == status
 
 
+async def test_no_abstain_note_when_a_hinted_tool_answers_the_question(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """S4: "Memory holds nothing ... do not guess" on a question a hinted tool answers drove a
+    weak model into memory_search loops; a confident hint means a tool answers it."""
+    memory_service.evidence_status = "INSUFFICIENT"
+    memory_service.candidates = ["t3"]
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    await agent.run("what is the daily meal allowance", user="u")
+    assert "## Memory" not in model.requests[0]["messages"][1]["content"]
+
+
 async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:

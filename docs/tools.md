@@ -146,7 +146,9 @@ the only way to reach it.
 
 A tenant's tools are published to the catalog when a worker starts (the key's tenant), and a
 tenant's first hints wait — at most 5 s (`INDEX_WAIT_SECONDS`) — until the catalog says tool
-search finds them (`GET /v1/tools`, `indexed`): asked before, every hint is a zero.
+search finds them (`GET /v1/tools`, `indexed`): asked before, every hint is a zero. A confident hint (0.5
+or more) also means a tool answers the question: the "Memory holds nothing … do not guess" note
+is then left out of the context.
 
 ## Code Mode
 
