@@ -337,7 +337,7 @@ def ReAct(
     )
     profiled = _profiled(chat, window)
     stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
-    instructions = None if stored_prompt is not None else system_prompt
+    instructions = system_prompt if not isinstance(system_prompt, Stored) else None
     if not _deep(
         backend=backend,
         native=native,
@@ -367,7 +367,7 @@ def ReAct(
                     middleware,
                 ),
             ],
-            response_format=response_format,
+            response_format=cast(Any, response_format),  # a JSON schema too, at run time
             state_schema=state_schema,
             context_schema=context_schema,
             checkpointer=checkpointer or ours.RunCheckpointer(),
