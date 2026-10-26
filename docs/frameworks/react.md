@@ -137,7 +137,35 @@ window), each with `middleware()` and `FitWindow`, ten different tasks per class
 **A** `create_agent` (today's `ReAct`), **B** `create_deep_agent`, **C** `create_agent` with Deep
 Agents' pieces attached and offered per call.
 
-<!-- measured: the base comparison -->
+| Class (ten tasks each) | Base | Completed | Answered right | Input tokens / run (± 95% CI) | Model calls | p50 s |
+|---|---|---|---|---|---|---|
+| simple, 10 tools | A | 9/10 | 8/10 | 2,860 ± 1,400 | 1.8 | 14.7 |
+| | B | 10/10 | 8/10 | 2,450 ± 610 | 1.7 | 16.7 |
+| | C | 10/10 | 8/10 | 2,450 ± 610 | 1.7 | 15.3 |
+| multi-step, 10 tools | A | 10/10 | 10/10 | 2,930 ± 150 | 2.0 | 26.3 |
+| | B | 10/10 | 10/10 | 2,930 ± 150 | 2.0 | 26.2 |
+| | C | 10/10 | 10/10 | 2,950 ± 150 | 2.0 | 34.8 |
+| wide (4–5 parts), 10 tools | A | 9/10 | 8/10 | 3,470 ± 1,100 | 2.1 | 57.6 |
+| | B | 9/10 | 8/10 | 3,630 ± 1,200 | 2.2 | 58.0 |
+| | C | 8/10 | 7/10 | 3,610 ± 1,200 | 2.2 | 58.9 |
+| a ~100k-character result | A | **10/10** | 2/10 | 4,540 ± 2,300 | 2.1 | 67.6 |
+| | B | 5/10 | 2/10 | 10,400 ± 7,500 | 2.9 | 175.9 |
+| | C | 6/10 | 0/10 | 11,600 ± 7,700 | 3.5 | 125.0 |
+| mixed, 50 tools | A | 10/10 | 9/10 | 16,400 ± 2,400 | 2.2 | 160.1 |
+| | B | 9/10 | 8/10 | 16,000 ± 2,000 | 2.3 | 159.4 |
+| | C | 8/10 | 8/10 | 15,400 ± 2,700 | 2.2 | 184.4 |
+| mixed, 100 tools | A | 8/10 | 8/10 | 15,400 ± 2,600 | 2.1 | 336.8 |
+| | B | 7/10 | 7/10 | 13,700 ± 1,400 | 2.1 | 311.6 |
+| | C | 8/10 | 8/10 | 13,800 ± 2,700 | 2.1 | 348.4 |
+| mixed, 50 tools, memory on (hints) | A | 9/10 | 7/10 | 5,590 ± 1,200 | 2.0 | 96.7 |
+| | B | 9/10 | 7/10 | 6,350 ± 1,300 | 2.1 | 117.5 |
+| | C | 9/10 | 7/10 | 5,840 ± 950 | 2.1 | 94.5 |
+
+Runs that did not complete were stopped by `StallGuard` (the model repeating a call). Tool
+coverage was 0.9–1.0 for every base and class; peak memory 145–151 MB for each; building and
+wrapping the graph took 15–23 ms for A and C, 39–49 ms for B (Deep Agents compiles its
+general-purpose helper). Cached-token share, cost at hosted prices and CPU seconds were within
+each other's intervals in every class but the large result, where A read a third of B's tokens.
 
 A simple task costs the same on all three — the same instructions (Deep Agents' main agent
 adds no base prompt) and tools. A is `ReAct`: no less accurate on any class, and on a large

@@ -80,8 +80,9 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 - Python 3.13 beside 3.12: CI's gates (lint, types, tests, examples, docs, the matrix, the
   overhead benchmark) and the weekly canary run on both (`python-version: ["3.12", "3.13"]`);
   the 3.13 classifier.
-- `benchmark.cost` variants `agent` (`create_agent` + `middleware()`), `pieces`,
-  `main+guidance`, `main+check`, `main+selector`, `main@16k`; `TRELLIS_LIVE_VARIANTS` picks the live tool-choice test's variants.
+- `benchmark.cost` variants `deep` (`ReAct` on Deep Agents) and `deep-<piece>`, `pieces`,
+  `main+guidance`, `main+check`, `main+selector`, `main@16k`; `--suite classes` (ten tasks per
+  class) and `--memory`; `TRELLIS_LIVE_VARIANTS` picks the live tool-choice test's variants.
 
 ### Changed
 
@@ -91,12 +92,16 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   once per growth, not reordered.
 - Deep Agents' summarization stands after the harness's middleware that narrow the tools, so
   its budget counts what the model is sent.
-- The base and the automatic rules were chosen by one Granite batch (the cost benchmark's ten
-  tasks at 10, 50 and 100 tools; the tool-choice store set at 11 and 51 tools): `ReAct` on
-  `create_deep_agent` with `middleware()`; the guidance and the check off by default — the
-  guidance raised coverage (0.89 to 1.00) but made the model call changes on 4 of 16 items that
-  asked for none, the check added a model call per answer for no gain, and both broke the
-  context's rule: [docs/frameworks/react.md](docs/frameworks/react.md#tool-choice).
+- The base was chosen by one Granite batch, each base with `middleware()` and `FitWindow`, ten
+  different tasks per class (simple, multi-step, wide, a ~100k-character result, 50 and 100
+  tools, 50 tools with memory on): `create_agent` equalled the best on simple tasks and was as
+  good or better on every other class — on the large result it completed 10/10 runs where
+  `create_deep_agent` completed 5/10 and Deep Agents' pieces on `create_agent` 6/10 —
+  [docs/frameworks/react.md](docs/frameworks/react.md#the-base). The guidance and the check are
+  off by default: the guidance raised coverage (0.89 to 1.00) but made the model call changes
+  on 4 of 16 items that asked for none, the check added a model call per answer for no gain,
+  and both broke the context's rule
+  ([docs/frameworks/react.md](docs/frameworks/react.md#tool-choice)).
 
 ### Fixed
 
