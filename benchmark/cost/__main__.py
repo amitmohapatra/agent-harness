@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import sys
@@ -53,6 +54,22 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sizes", default=",".join(map(str, catalog.SIZES)))
     parser.add_argument("--variants", default=",".join(DEFAULT), help=f"of {', '.join(VARIANTS)}")
     parser.add_argument("--sets", default="", help="task sets by name (default: all)")
+    parser.add_argument(
+        "--suite",
+        choices=("default", "classes"),
+        default="default",
+        help="the ten tasks (default), or ten tasks per class (catalog.CLASSES)",
+    )
+    parser.add_argument(
+        "--classes",
+        default="",
+        help="with --suite classes: the classes run (default: all), 'mix' the mixed ten",
+    )
+    parser.add_argument(
+        "--memory",
+        action="store_true",
+        help="memory on: the environment's MEMORY_URL (its context and tool hints)",
+    )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--window", type=int, default=None, help="the model's context window")
     parser.add_argument("--max-steps", type=int, default=6)
@@ -91,11 +108,22 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _in(task: dict, classes: set[str]) -> bool:
+    """Whether a task is of one of ``classes`` (``mix``: the mixed ten)."""
+    meta = task["metadata"]
+    return meta.get("length") in classes or ("mix" in classes and bool(meta.get("mix")))
+
+
 async def bench(args: argparse.Namespace) -> dict:
     sizes = [int(s) for s in _list(args.sizes)]
     variants = _list(args.variants)
     chosen = set(_list(args.sets))
-    sets = [s for s in catalog.task_sets() if not chosen or s.name in chosen]
+    suite = catalog.class_sets() if args.suite == "classes" else catalog.task_sets()
+    sets = [s for s in suite if not chosen or s.name in chosen]
+    classes = set(_list(args.classes))
+    if classes:
+        sets = [dataclasses.replace(s, tasks=[t for t in s.tasks if _in(t, classes)]) for s in sets]
+        sets = [s for s in sets if s.tasks]
     window, source = window_of(None, args.window)
     setup = {
         "model": args.model,
@@ -134,7 +162,7 @@ async def bench(args: argparse.Namespace) -> dict:
         rows.append(row)
         written()
 
-    async with run.harness() as h:
+    async with run.harness(memory=args.memory) as h:
         for size in sizes:
             for variant in variants:
                 await run.run_cell(

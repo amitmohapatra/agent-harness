@@ -79,6 +79,40 @@ def test_ten_tasks_in_three_sets_each_named() -> None:
     assert (lengths.count("short"), lengths.count("long"), lengths.count("large")) == (6, 3, 1)
 
 
+def test_the_class_suite_has_ten_distinct_tasks_per_class_on_their_own_tools() -> None:
+    sets = catalog.class_sets()
+    tasks = [t for s in sets for t in s.tasks]
+    kinds = [t["metadata"]["length"] for t in tasks]
+    assert {k: kinds.count(k) for k in catalog.CLASSES} == dict.fromkeys(catalog.CLASSES, 10)
+    assert len({t["metadata"]["task"] for t in tasks}) == 40
+    assert sum(bool(t["metadata"]["mix"]) for t in tasks) == 10
+    for taskset in sets:
+        own = {t.spec.name for t in taskset.tools}
+        assert all(set(t["metadata"]["needed_tools"]) <= own for t in taskset.tasks)
+    large = [t for t in tasks if t["metadata"]["length"] == "large"]
+    assert {t["expected"] for t in large} >= {"NET-0001", "DES-1100"}
+
+
+async def test_the_command_picks_a_suites_classes_and_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def cell(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
+        seen["tasks"] = [t["metadata"]["task"] for s in kwargs["sets"] for t in s.tasks]
+        seen["memory"] = h.memory is not None
+        return []
+
+    monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: Settings()))
+    monkeypatch.setattr(cli.run, "run_cell", cell)
+    out = str(tmp_path / "b")
+    common = ["--model", "m", "--sizes", "50", "--variants", "main", "--out", out]
+    await cli.bench(cli.arguments([*common, "--suite", "classes", "--classes", "mix"]))
+    assert len(seen["tasks"]) == 10 and seen["memory"] is False
+    await cli.bench(cli.arguments([*common, "--suite", "classes", "--classes", "large"]))
+    assert len(seen["tasks"]) == 10 and all("export" in t for t in seen["tasks"])
+
+
 # --------------------------------------------------------------------------- statistics
 def test_the_interval_is_students_t() -> None:
     assert stats.interval([]) == {"mean": None, "ci95": None, "n": 0}
