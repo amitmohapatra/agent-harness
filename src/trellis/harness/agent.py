@@ -108,6 +108,10 @@ MEMORY: Final = frozenset(COVERS["memory"])
 SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.model_fields)
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
+#: The best tool hint's confidence below which the hints narrow nothing: every tool is offered
+#: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
+#: service scores relative to the best match); nothing matching scores 0 to 0.1.
+NARROW_FLOOR: Final = 0.5
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
 UNREACHED_FIX: Final = {
@@ -810,18 +814,25 @@ class Agent:
         it carries the skills the agent learned for the task, and - from five tools, the
         service's threshold - the tools that fit, whose candidates narrow the tools the model is
         offered (the ``hints`` feature), the framework's own among them where the framework
-        lets them be narrowed. A failure is a warning."""
+        lets them be narrowed. The tenant's first hints wait for its tools to be indexed
+        (``Toolbox.indexed``); hints below :data:`NARROW_FLOOR` narrow nothing; the tools
+        behind Code Mode are asked about too, and a hint naming one keeps the meta-tools that
+        reach it. A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
         own = runtime.tool_set()
         hints = runtime.uses("hints")
+        box = self._toolbox(runtime.tenant)
+        behind = box.hidden(code_mode=runtime.uses("code_mode")) if hints else []
+        if hints:
+            await box.indexed()
         window = self.window(runtime)
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
                     runtime.task,
-                    tools=own or None,
+                    tools=[*own, *behind] or None,
                     window=window,
                     hints=hints,
                     budget=self.context_budget,
@@ -836,10 +847,15 @@ class Agent:
                 pushed.conversation.messages if pushed.conversation else []
             )
         # candidates the model is offered — the hints, and the tools the context names (the
-        # plan of a skill learned for the task lists its steps); no hint narrows nothing
+        # plan of a skill learned for the task lists its steps); no hint, or none confident
+        # enough, narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
-        if hints and candidates and self.adapter.narrows != "none":
-            runtime.offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
+        best = max((t.confidence for t in pushed.tools or ()), default=0.0)
+        if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
+            offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
+            if set(pushed.tool_names) & set(behind):  # reached through the meta-tools
+                offered |= {n for n, t in runtime.toolbox.items() if t.feature == "code_mode"}
+            runtime.offered = offered
         status = pushed.evidence_status
         runtime.evidence = status
         runtime.pushed = {

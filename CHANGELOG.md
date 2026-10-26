@@ -114,6 +114,13 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 - A governed framework tool call inside a sub-agent whose call id equals its parent's `task`
   call id (ids are unique per conversation only) was let through ungoverned; the marker is now
   the tool's name and the call's id.
+- A tenant's first runs were offered the toolbox's alphabetically first tools: the hints were
+  asked before the tools just published were indexed, every hint a zero. A worker now publishes
+  its agents' tools before its first claim, a toolbox's first hints wait (at most 5 s) until
+  the catalog says tool search finds them, and hints whose best confidence is under 0.5 narrow
+  nothing (every tool offered, with `tool_search`).
+- Under Code Mode the narrowing dropped the meta-tools, cutting a run off from every tool behind
+  them. The hints are asked about those tools too, and when one is hinted the meta-tools stay.
 
 ## 0.5.0 — one breaking release (unreleased)
 

@@ -423,6 +423,31 @@ async def test_the_memory_catalog_says_what_it_knows_conditionally() -> None:
     assert (await catalog.read(["erp-get_stock"], etag=newer))[1] is None
 
 
+async def test_the_memory_catalog_says_whether_tool_search_finds_the_tools() -> None:
+    """B13: what the service lists as not indexed yet is waited for; a service that does not
+    say (``indexed`` absent) is taken as ready, and so is a tool it does not list."""
+    service = FakeMemoryService(catalog={"a": {"indexed": True}, "b": {"indexed": False}})
+    catalog = MemoryCatalog(service.client().bind(tenant_id="acme"))
+    assert await catalog.indexed(["a", "missing"]) is True
+    assert await catalog.indexed(["a", "b"]) is False
+    service.catalog["b"] = {}
+    assert await catalog.indexed(["a", "b"]) is True
+
+
+async def test_governance_says_indexed_once_nothing_is_still_being_published() -> None:
+    assert await Governance().indexed(["refund"]) is True, "no catalog: nothing to wait for"
+    catalog, sends = FakeCatalog(), []
+
+    async def submit(entries: list[dict[str, object]], send: Any) -> None:
+        sends.append(send)  # held: still being published
+
+    governance = Governance(catalog, submit=submit)
+    await governance.publish(SPECS)
+    assert await governance.indexed(["refund"]) is False and catalog.index_asked == []
+    await sends[0]()
+    assert await governance.indexed(["refund"]) is True and catalog.index_asked == [["refund"]]
+
+
 async def test_catalog_entries_carry_what_is_known_and_no_more() -> None:
     service = FakeMemoryService()
     await MemoryCatalog(service.client().bind(tenant_id="t")).publish(

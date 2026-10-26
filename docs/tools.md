@@ -138,7 +138,15 @@ more tools, the model is then offered:
 | function | n/a: it calls tools by name |
 
 A tool outside the offered set still runs if the model calls it. When the context call fails,
-or the service names no tools, every tool is offered.
+the service names no tools, or its best hint's confidence is under 0.5 (`NARROW_FLOOR`:
+nothing matched the task, as before the index has the tools), every tool is offered — the
+window fits them — with `tool_search` among the memory tools. The tools behind Code Mode are
+asked about too; when the service names one, the Code Mode meta-tools stay in the offered set,
+the only way to reach it.
+
+A tenant's tools are published to the catalog when a worker starts (the key's tenant), and a
+tenant's first hints wait — at most 5 s (`INDEX_WAIT_SECONDS`) — until the catalog says tool
+search finds them (`GET /v1/tools`, `indexed`): asked before, every hint is a zero.
 
 ## Code Mode
 

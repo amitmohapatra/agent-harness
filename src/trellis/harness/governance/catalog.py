@@ -84,6 +84,11 @@ class Catalog(Protocol):
 
     async def publish(self, entries: Sequence[Mapping[str, object]]) -> None: ...
 
+    async def indexed(self, names: Sequence[str]) -> bool:
+        """Whether tool search finds the named tools as they were published: none of them
+        waits for its index."""
+        ...
+
     async def feedback(self, record: Feedback) -> None: ...
 
     async def suggestions(self, agent_id: str) -> Sequence[ApprovalSuggestion]:
@@ -120,6 +125,12 @@ class MemoryCatalog:
 
     async def publish(self, entries: Sequence[Mapping[str, object]]) -> None:
         await self.ctx.advanced.tools.put_catalog([dict(e) for e in entries])
+
+    async def indexed(self, names: Sequence[str]) -> bool:
+        """No listed entry says it is not indexed yet (``indexed: false``); a service that
+        does not say is taken as ready."""
+        entries = await self.ctx.advanced.tools.catalog(names=list(names))
+        return all((e.model_extra or {}).get("indexed") is not False for e in entries)
 
     async def feedback(self, record: Feedback) -> None:
         """A person's decision on a call, as the ``TOOL_CALL`` feedback approval suggestions

@@ -156,6 +156,16 @@ class Governance:
         found = await rules.get(names, agent_id=agent) if rules is not None else None
         return {name: (found or {}).get(name) for name in names}
 
+    async def indexed(self, names: Sequence[str]) -> bool:
+        """Whether tool search finds ``names`` as published: nothing is still being sent, and
+        the catalog says none of them waits for its index. Without a catalog, nothing to wait
+        for."""
+        if self.catalog is None:
+            return True
+        if self._published.pending:
+            return False
+        return await self.catalog.indexed(names)
+
     async def publish(
         self,
         specs: Sequence[ToolSpec],

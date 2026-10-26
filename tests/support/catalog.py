@@ -31,6 +31,11 @@ class FakeCatalog:
         self.suggestions_fail: set[str] = set()
         #: the agents whose suggestions were read, in order
         self.suggestions_asked: list[str] = []
+        #: how many times ``indexed`` answers "not yet" before it answers "yes", whether it
+        #: fails, and the names it was asked about
+        self.unindexed = 0
+        self.index_fails = False
+        self.index_asked: list[list[str]] = []
 
     def suggest(self, tool: str, rule: str, *, agent: str = "buyer") -> None:
         """A suggestion learned for ``tool`` from ``agent``'s decisions: accepted, ``rule`` is
@@ -51,6 +56,13 @@ class FakeCatalog:
             )
         )
         self.learned[found] = rule
+
+    async def indexed(self, names: Sequence[str]) -> bool:
+        self.index_asked.append(list(names))
+        if self.index_fails:
+            raise ConnectionError("the catalog is down")
+        self.unindexed -= 1
+        return self.unindexed < 0
 
     async def suggestions(self, agent_id: str) -> Sequence[ApprovalSuggestion]:
         """The agent's own, as the service lists them (in its scope)."""
