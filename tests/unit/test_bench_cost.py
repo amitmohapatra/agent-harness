@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Final
 
 import jsonschema
 import pytest
@@ -16,8 +16,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult
 
 from benchmark.cost import __main__ as cli
-from benchmark.cost import catalog, prices, run, stats
-from benchmark.cost.variants import VARIANTS
+from benchmark.cost import catalog, prices, run, stats, variants
+from benchmark.cost.variants import VARIANTS, Setup
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Settings
 from trellis.harness.tools.lint import lint
@@ -77,6 +77,40 @@ def test_ten_tasks_in_three_sets_each_named() -> None:
     assert len(tasks) == 10 == len({t["metadata"]["task"] for t in tasks})
     lengths = [t["metadata"]["length"] for t in tasks]
     assert (lengths.count("short"), lengths.count("long"), lengths.count("large")) == (6, 3, 1)
+
+
+def test_the_class_suite_has_ten_distinct_tasks_per_class_on_their_own_tools() -> None:
+    sets = catalog.class_sets()
+    tasks = [t for s in sets for t in s.tasks]
+    kinds = [t["metadata"]["length"] for t in tasks]
+    assert {k: kinds.count(k) for k in catalog.CLASSES} == dict.fromkeys(catalog.CLASSES, 10)
+    assert len({t["metadata"]["task"] for t in tasks}) == 40
+    assert sum(bool(t["metadata"]["mix"]) for t in tasks) == 10
+    for taskset in sets:
+        own = {t.spec.name for t in taskset.tools}
+        assert all(set(t["metadata"]["needed_tools"]) <= own for t in taskset.tasks)
+    large = [t for t in tasks if t["metadata"]["length"] == "large"]
+    assert {t["expected"] for t in large} >= {"NET-0001", "DES-1100"}
+
+
+async def test_the_command_picks_a_suites_classes_and_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def cell(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
+        seen["tasks"] = [t["metadata"]["task"] for s in kwargs["sets"] for t in s.tasks]
+        seen["memory"] = h.memory is not None
+        return []
+
+    monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: Settings()))
+    monkeypatch.setattr(cli.run, "run_cell", cell)
+    out = str(tmp_path / "b")
+    common = ["--model", "m", "--sizes", "50", "--variants", "main", "--out", out]
+    await cli.bench(cli.arguments([*common, "--suite", "classes", "--classes", "mix"]))
+    assert len(seen["tasks"]) == 10 and seen["memory"] is False
+    await cli.bench(cli.arguments([*common, "--suite", "classes", "--classes", "large"]))
+    assert len(seen["tasks"]) == 10 and all("export" in t for t in seen["tasks"])
 
 
 # --------------------------------------------------------------------------- statistics
@@ -174,7 +208,30 @@ TRAVEL_SCRIPT: list[Any] = [
 ]
 
 
-@pytest.mark.parametrize("variant", list(VARIANTS))
+#: The variants whose model calls follow the script one for one (the forced check asks once more
+#: per answer: ``test_the_forced_switches_are_reacts_own``).
+SCRIPTED: Final = [v for v in VARIANTS if v != "main+check"]
+
+
+def test_the_forced_switches_are_reacts_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: dict[str, Any] = {}
+
+    def recorded(*args: Any, **kwargs: Any) -> str:
+        built.update(kwargs)
+        return "graph"
+
+    monkeypatch.setattr(variants, "ReAct", recorded)
+    setup = Setup(system="s", model="m", window=None, max_steps=3)
+    for name, switches in (
+        ("main", (None, None)),
+        ("main+guidance", (True, None)),
+        ("main+check", (None, True)),
+    ):
+        assert VARIANTS[name].build(setup) == ("graph", {})
+        assert (built["tool_guidance"], built["answer_check"]) == switches
+
+
+@pytest.mark.parametrize("variant", SCRIPTED)
 async def test_a_cell_runs_every_task_and_records_each_run(
     variant: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -320,7 +377,7 @@ async def _one_row(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
     return [row]
 
 
-@pytest.mark.parametrize(("variant", "paged"), [("main", True), ("main-paging", False)])
+@pytest.mark.parametrize(("variant", "paged"), [("deep", True), ("deep-paging", False)])
 async def test_a_main_piece_is_measured_on_its_own(
     variant: str, paged: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:

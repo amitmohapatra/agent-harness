@@ -2,9 +2,10 @@
 
 `create_deep_agent(...)` returns a compiled LangGraph graph, so a Deep Agent is wrapped like any
 graph — everything on the [LangGraph page](langgraph.md) applies: its own tools governed as it
-runs them, the harness's added with `HarnessTools`, `agent.run`/`stream`/`resume` instead of
-`graph.ainvoke`, pauses in place with a checkpointer.
-This page is what is particular to Deep Agents.
+runs them, the harness's added with `middleware=trellis.middleware()` (or `HarnessTools` alone),
+`agent.run`/`stream`/`resume` instead of `graph.ainvoke`, pauses in place with a checkpointer.
+This page is what is particular to Deep Agents. `ReAct` is a Deep Agent built this way
+([react.md](react.md)): every Deep Agents feature, plus the harness's middleware.
 
 **Install:** `pip install 'trellis-harness[deepagents]'` (brings `[langgraph]`).
 
@@ -15,16 +16,17 @@ LangGraph graph, and the Way 2 recipe applies as it is: [blocks/langgraph.md](..
 
 ```python
 from deepagents import create_deep_agent
-from langchain.agents.middleware import TodoListMiddleware
-from langgraph.checkpoint.memory import InMemorySaver
-from trellis.harness.middleware import HarnessTools
+from trellis import middleware
+from trellis.harness.middleware import RunCheckpointer
 
 tools = [refund, lookup_order]  # LangChain tools: the graph's own, governed as it runs them
 graph = create_deep_agent(
     model=model,
     tools=tools,
     system_prompt="You process refund requests.",
-    middleware=[TodoListMiddleware(), HarnessTools()],  # planning; the MCP and memory tools
+    # the harness's part of ReAct: the MCP and memory tools per call, narrowed per turn; the
+    # step limit and stall guard; the hooks, spans and call_timeout; planning on a long task
+    middleware=middleware(max_steps=20, call_timeout=60),
     subagents=[
         {
             "name": "order-checker",
@@ -35,11 +37,19 @@ graph = create_deep_agent(
         }
     ],
     interrupt_on={"send_email": True},  # Deep Agents' own approvals (optional)
-    checkpointer=InMemorySaver(),  # pauses resume in place
+    checkpointer=RunCheckpointer(),  # the checkpoint in the run: a resume continues in place
 )
 agent = h.wrap(graph, id="refunds")
 result = await agent.run("Refund order o-7.", user="ada", thread="ticket-7")
 ```
+
+Without `middleware()` the graph still runs governed and narrowed (said once at `h.wrap`):
+the gateway's MCP tools and the memory tools, the step limit, the stall guard, the hooks and
+`call_timeout` are what it adds ([react.md](react.md#middleware-on-your-own-graph)). Any
+checkpointer of yours works too (`InMemorySaver`, Postgres); `RunCheckpointer()` keeps the
+latest checkpoint in the run's journal — Deep Agents' delta-kept `messages` and `files`
+included — so a resume on another worker continues it. Runnable:
+[examples/02_way1_deepagents/middleware.py](../../examples/02_way1_deepagents/middleware.py).
 
 ## What the harness sees in a Deep Agent
 

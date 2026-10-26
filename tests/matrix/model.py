@@ -16,7 +16,15 @@ if TYPE_CHECKING:
     from tests.matrix.world import World
 
 #: The targets, as the adapters name themselves (``claude`` is the Claude Agent SDK).
-ADAPTERS: Final = ("react", "function", "langgraph", "deepagents", "openai_agents", "claude")
+ADAPTERS: Final = (
+    "react",
+    "middleware",
+    "function",
+    "langgraph",
+    "deepagents",
+    "openai_agents",
+    "claude",
+)
 #: Way 1 (``h.wrap`` on a deployment), Way 2 (the blocks, no Harness), with blocks: the team's
 #: own blocks (``Harness(runs=, memory=, gateway=, governance=).wrap(ReAct(...))`` and its own
 #: worker around ``agent.execute``; ReAct only, so far).

@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 from deepagents import create_deep_agent
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from tests.support.adapters import BUILDERS
@@ -24,7 +24,12 @@ from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import ConfigurationError, RunStatus, ToolSpec
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.evals import tool_coverage
-from trellis.harness.middleware import ANSWER_CHECK, TOOL_GUIDANCE, AnswerCheck, ToolGuidance
+from trellis.harness.middleware import (
+    ANSWER_CHECK,
+    TOOL_GUIDANCE,
+    AnswerCheck,
+    ToolGuidance,
+)
 from trellis.harness.tools.convert import langchain as lc
 from trellis.harness.tools.lint import MOST_TOOLS, lint
 
@@ -101,7 +106,7 @@ async def test_hundreds_of_tools_narrowed_by_hints_widen_to_the_writes_only(
         assert (await agent.run("note a", user="u")).answer == "noted"
     memory = sorted(MEMORY_TOOLS)
     assert model.requests[0]["tools"] == sorted(["r000", *memory])
-    assert model.requests[1]["tools"] == sorted(["note", "r000", *memory])
+    assert model.requests[1]["tools"] == [*sorted(["r000", *memory]), "note"]  # appended
     assert [f.code for f in lint([t.spec for t in [*reads, note]])][-1] == "too_many_tools"
 
 
@@ -206,7 +211,7 @@ async def test_failing_slow_malformed_and_huge_mcp_results_reach_the_model() -> 
     assert any("erp-raises failed: the server failed" in s for s in said)
     assert any("erp-slow timed out" in s for s in said)
     assert any("<object object at" in s for s in said)  # garbage: its text
-    assert any("/large_tool_results/" in s for s in said)  # huge: saved, a preview read
+    assert any("x" * 1_000 in s for s in said)  # huge: it reaches the model (no window known)
     assert checks(model) == 1
 
 
@@ -413,7 +418,7 @@ async def test_capabilities_are_said_with_or_without_the_guidance(harness: Harne
 
 
 def test_only_the_requests_own_results_count_as_nothing_found() -> None:
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage
 
     from trellis.harness.middleware import _no_record
 
@@ -423,3 +428,28 @@ def test_only_the_requests_own_results_count_as_nothing_found() -> None:
     assert _no_record([*now[:1], ToolMessage("ST-1: 4", tool_call_id="3")], None) == ""
     # no request in the conversation at all: every result counts
     assert "no record" in _no_record([ToolMessage("[]", tool_call_id="4")], None)
+
+
+# --------------------------------------------------------------------------- automatic (None)
+def lookers(count: int) -> list[Any]:
+    def look_up(item: str) -> str:
+        """Look an item up in one of the shelves."""
+        return item
+
+    return [tool(look_up, name=f"look_{n}", side_effects="read") for n in range(count)]
+
+
+async def test_automatic_is_off_as_measured_many_tools_and_a_rule_alike(
+    harness: Harness,
+) -> None:
+    """``None`` (the default) adds neither the guidance nor the check — measured on a small
+    model, the guidance made it call changes nobody asked for and the check broke a rule."""
+    many = lookers(30)
+    model = ScriptedChatModel(turns=["made it"])
+    agent = arm(harness.wrap(ReAct("s", model, context_window=64_000), id="auto"), [*many, rule])
+    said = [
+        {"role": "system", "content": "Remembered: never make a rule for a-1."},
+        {"role": "user", "content": "make a rule for a-1"},
+    ]
+    assert (await agent.run(said, user="u")).answer == "made it"
+    assert guided(model) == [False] and checks(model) == 0

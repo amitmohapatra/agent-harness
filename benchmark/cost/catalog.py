@@ -476,6 +476,179 @@ def task_sets() -> list[TaskSet]:
     ]
 
 
+#: The class suite's task classes (``--suite classes``), and the tasks ``mix`` marks for the
+#: catalogues of 50 and 100 tools: four simple, three multi-step, three wide.
+CLASSES: Final = ("simple", "multi", "wide", "large")
+#: The teams whose ticket export the large tasks read, and its id prefix (``ticket_export``).
+TEAMS: Final = (
+    "network",
+    "desktop",
+    "security",
+    "servers",
+    "cloud",
+    "database",
+    "mobile",
+    "printing",
+    "identity",
+    "storage",
+)
+
+
+def _classed(item: dict[str, Any], name: str, kind: str, *, mix: bool = False) -> dict[str, Any]:
+    task = _task(item, name, kind)
+    return {**task, "metadata": {**task["metadata"], "mix": mix}}
+
+
+def class_sets() -> list[TaskSet]:
+    """Ten tasks per class across the three domains — ``simple`` (one tool, a change behind
+    approval, a read that sounds like a change, a record that does not exist, a capability),
+    ``multi`` (two or three parts), ``wide`` (four or five parts, or four items), ``large`` (a
+    ~100k-character export, the oldest or newest id of ten teams) — each a different task."""
+    data, more = scenario.DATASET, scenario.MORE
+    five_parts = next(i for i in more if len(i["metadata"]["needed_tools"]) == 5)
+    hd, tr = heldout.HELPDESK, heldout.TRAVEL
+    item = scenario.item
+    store = [
+        _classed(data[3], "store: a change behind approval", "simple"),
+        _classed(data[4], "store: which store first", "simple", mix=True),
+        _classed(more[1], "store: supplier delivery", "simple", mix=True),
+        _classed(more[3], "store: the overview", "simple"),
+        _classed(more[-1], "store: a read before a change", "simple"),
+        _classed(data[0], "store: two parts", "multi", mix=True),
+        _classed(data[1], "store: help and data", "multi"),
+        _classed(data[2], "store: three parts", "multi"),
+        _classed(
+            item(
+                "For store S40: which styles are in excess, and when does the supplier deliver "
+                "more of ST-101?",
+                ["excess_stock", "supplier_eta"],
+            ),
+            "store: excess and delivery",
+            "multi",
+        ),
+        _classed(five_parts, "store: five parts", "wide", mix=True),
+        _classed(
+            item(
+                "For store S40: what is in excess, which styles lost the most sales, what can be "
+                "allocated, and what are its past allocations?",
+                ["excess_stock", "lost_sales", "allocatable_stock", "allocation_history"],
+            ),
+            "store: four parts at S40",
+            "wide",
+        ),
+        _classed(
+            item(
+                "For style ST-101: its weekly demand at S12, the supplier's next delivery, its "
+                "stock at S40, and where in the app I create a stock rule.",
+                ["store_demand", "supplier_eta", "style_stock", "app_help"],
+            ),
+            "store: four parts on a style",
+            "wide",
+        ),
+        _classed(
+            item(
+                "Store S7: how is it doing overall, which styles lost the most sales, what is in "
+                "excess, and what can be allocated?",
+                ["store_overview", "lost_sales", "excess_stock", "allocatable_stock"],
+            ),
+            "store: four parts at S7",
+            "wide",
+        ),
+    ]
+    help_desk = [
+        _classed(hd[2], "help desk: a change behind approval", "simple"),
+        _classed(hd[3], "help desk: a read before a change", "simple", mix=True),
+        _classed(hd[4], "help desk: no such record", "simple"),
+        _classed(hd[0], "help desk: two parts", "multi", mix=True),
+        _classed(hd[1], "help desk: knowledge and tickets", "multi"),
+        _classed(
+            item(
+                "Who is laptop LT-2290 assigned to, and which of the network team's tickets "
+                "breach their SLA?",
+                ["asset_owner", "sla_breaches"],
+            ),
+            "help desk: owner and breaches",
+            "multi",
+        ),
+        _classed(LONG_HELP_DESK, "help desk: four parts", "wide", mix=True),
+        _classed(
+            item(
+                "For the desktop team: its open high-priority tickets, its SLA breaches, the "
+                "knowledge base on printer setup, and who laptop LT-1001 is assigned to.",
+                ["tickets_by_priority", "sla_breaches", "knowledge_base", "asset_owner"],
+            ),
+            "help desk: four parts for desktop",
+            "wide",
+        ),
+        _classed(
+            item(
+                "Show me the desk dashboard, the security team's high-priority tickets, its SLA "
+                "breaches, and how to reset MFA from the knowledge base.",
+                ["desk_dashboard", "tickets_by_priority", "sla_breaches", "knowledge_base"],
+            ),
+            "help desk: four parts for security",
+            "wide",
+        ),
+        *(
+            _classed(
+                item(
+                    f"Export all of the {team} team's tickets and tell me the id of the "
+                    f"{'oldest' if n % 2 == 0 else 'newest'} one.",
+                    ["ticket_export"],
+                    expected=f"{team[:3].upper()}-{1 if n % 2 == 0 else EXPORT_TICKETS:04d}",
+                ),
+                f"help desk: the {team} export",
+                "large",
+            )
+            for n, team in enumerate(TEAMS)
+        ),
+    ]
+    travel = [
+        _classed(tr[2], "travel: a change behind approval", "simple"),
+        _classed(tr[3], "travel: a read before a change", "simple", mix=True),
+        _classed(tr[0], "travel: two parts", "multi", mix=True),
+        _classed(tr[1], "travel: three parts", "multi"),
+        _classed(
+            item(
+                "What does the travel policy say about hotels, and which expense claims does "
+                "e-401 have pending?",
+                ["travel_policy", "expense_claims"],
+            ),
+            "travel: policy and claims",
+            "multi",
+        ),
+        _classed(LONG_TRAVEL, "travel: four parts", "wide", mix=True),
+        _classed(
+            item(
+                "For employee e-512: trips this year, booked flights, pending expense claims and "
+                "the travel policy on taxis.",
+                ["trip_summary", "flight_bookings", "expense_claims", "travel_policy"],
+            ),
+            "travel: four parts for e-512",
+            "wide",
+        ),
+        _classed(
+            item(
+                "For e-401 and for e-512: each one's booked flights and pending expense claims.",
+                ["flight_bookings", "expense_claims"],
+            ),
+            "travel: four items for two employees",
+            "wide",
+        ),
+    ]
+    store_tools = [t for t in scenario.TOOLS if t.spec.name != "transfer_status"]  # it hangs
+    return [
+        TaskSet("store", scenario.SYSTEM, store_tools, store),
+        TaskSet(
+            "help desk",
+            heldout.HELPDESK_SYSTEM,
+            [*heldout.HELPDESK_TOOLS, ticket_export],
+            help_desk,
+        ),
+        TaskSet("travel", heldout.TRAVEL_SYSTEM, heldout.TRAVEL_TOOLS, travel),
+    ]
+
+
 def catalogue(tools: list[Any], size: int) -> list[Any]:
     """A set's own tools and the distractors up to ``size`` tools (its own tools alone when
     they are already as many)."""

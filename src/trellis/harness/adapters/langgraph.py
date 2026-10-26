@@ -117,6 +117,8 @@ class LangGraphAdapter:
         #: the graph run in its place: a ``create_agent`` graph whose model calls narrow its
         #: bound tools to those the run offers (``None``: ``target`` itself is run)
         self.narrowed = None if per_call else _narrowed(target)
+        if self.narrowed is not None:
+            _without_middleware(str(getattr(target, "name", None) or "LangGraph"))
         per_turn = per_call or self.narrowed is not None
         self.narrows: Narrowing = "turn" if per_turn else "none"
         #: the graph's own tools (:meth:`native`), once read
@@ -265,23 +267,25 @@ class LangGraphAdapter:
             )
 
     async def native(self, target: Any) -> list[ToolSpec]:
-        """A graph that binds its tools when it is built: what its tool nodes run
-        (:func:`graph_tools`: a Deep Agent's ``task`` sub-agents' tools too), as specs — the
-        ones built with ``h.tools`` are the run's harness tools, and a tool a node binds to its
-        model in its own code cannot be read; the graph's state tools (its plan, its virtual
-        files) are not tools of the run's set. A graph that takes the run's tools per model call
-        (``ReAct``) has the run's toolbox as its tools: its nodes hold only what its middleware
-        offers on its own. Read once per graph."""
-        if not self.fixed_tools:
-            return []
+        """What the graph's tool nodes run (:func:`graph_tools`: a Deep Agent's ``task``
+        sub-agents' tools too), as specs — the harness's own (converted: the run's toolbox
+        has them) are not among them, and a tool a node binds to its model in its own code
+        cannot be read; the graph's state tools (its plan, its virtual files) are not tools of
+        the run's set, unless their backend is outside the state (``OUTSIDE_STATE``), nor is
+        the graph's own machinery (``MACHINERY``: ``ReAct``'s idle ``execute``, its
+        general-purpose helper). A graph
+        that takes the run's tools per model call (``ReAct``, ``middleware()``) has its own
+        LangChain tools and sub-agents here, beside the run's toolbox. Read once per graph."""
         if self._native is None:
-            from trellis.harness.middleware import STATE_TOOLS, spec_of
+            from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE, STATE_TOOLS, spec_of
             from trellis.harness.tools.convert.langchain import made
 
             found = (
                 helper(spec_of(t)) if t.name == TASK_TOOL else spec_of(t)
                 for t in graph_tools(target)
-                if t.name not in STATE_TOOLS and not made(t)
+                if (t.name not in STATE_TOOLS or (t.metadata or {}).get(OUTSIDE_STATE))
+                and not (t.metadata or {}).get(MACHINERY)
+                and not made(t)
             )
             self._native = unique(found)
         return self._native
@@ -329,6 +333,20 @@ def memory_store(target: Any, runtime: Runtime) -> Any | None:
     from trellis.harness.bridges.store import MemoryStore
 
     return MemoryStore(runtime.run_memory.ctx, asyncio.get_running_loop())
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per graph name, of the most recent
+def _without_middleware(name: str) -> None:
+    """Said when a ``create_agent`` or Deep Agents graph is wrapped without the harness's
+    middleware (``trellis.middleware()``): it still runs governed and narrowed, but without
+    what the middleware gives."""
+    log.warning(
+        "the graph %s is wrapped without the harness's middleware: its tools are governed and "
+        "narrowed, but it has no memory or gateway MCP tools, no step limit or stall guard, no "
+        "model hooks, call_timeout or budget stop, and no checkpoint in the run — build it with "
+        "middleware=trellis.middleware() (and checkpointer=RunCheckpointer())",
+        name,
+    )
 
 
 @functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent and store type, of the most recent

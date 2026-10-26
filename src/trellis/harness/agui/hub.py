@@ -42,6 +42,12 @@ class RunBuffer:
         self._changed.set()
         self._changed = asyncio.Event()
 
+    def finish(self) -> None:
+        """The run's attempt returned: its readers' streams end (its events are all in)."""
+        self.finished = True
+        self._changed.set()
+        self._changed = asyncio.Event()
+
     def reopen(self) -> None:
         """A resumed run: readers wait for its next attempt again."""
         self.finished = False

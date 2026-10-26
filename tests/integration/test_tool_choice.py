@@ -220,7 +220,9 @@ async def test_a_run_narrowed_by_the_hints_is_offered_every_tool_from_the_check(
         assert (await agent.run("note a", user="u")).answer == "noted"
     memory = sorted(MEMORY_TOOLS)
     assert model.requests[0]["tools"] == sorted(["look", *memory])
-    assert model.requests[1]["tools"] == sorted([t.spec.name for t in tools] + memory)
+    first = sorted(["look", *memory])  # the tools offered later follow, by name
+    widened = sorted({t.spec.name for t in tools} - set(first))
+    assert model.requests[1]["tools"] == [*first, *widened]
 
 
 # --------------------------------------------------------------------------- native selector
@@ -308,3 +310,35 @@ async def test_a_call_told_to_call_no_tool_is_not_checked(harness: Harness) -> N
         "partial"
     )
     assert checked(model) == [] and model.requests[-1]["tool_choice"] == "none"
+
+
+async def test_the_measured_selector_picks_without_hints_past_its_threshold_keeping_used(
+    harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    from trellis.harness.automatic import ToolSelection
+
+    found = [tool(lambda q: q, name=f"find_{n}", side_effects="read") for n in range(6)]
+    model = ScriptedChatModel(
+        turns=[
+            ("ToolSelectionResponse", {"tools": ["find_1"]}),
+            ("find_1", {"q": "a"}),
+            ("ToolSelectionResponse", {"tools": ["find_2"]}),
+            "found",
+        ]
+    )
+    target = ReAct("s", model, middleware=[ToolSelection(above=2, keep=1)])
+    result = await arm(harness.wrap(target, id="picks"), found).run("find a", user="u")
+    assert result.answer == "found", result.error
+    offered = [
+        sorted(r["tools"]) for r in model.requests if r["tools"] != ["ToolSelectionResponse"]
+    ]
+    assert offered == [["find_1"], ["find_1", "find_2"]]  # the used one kept
+    # with hints, the hints narrow: no selector call
+    memory_service.candidates = ["find_0"]
+    hinted = ScriptedChatModel(turns=["found"])
+    from trellis import Settings
+
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        target = ReAct("s", hinted, middleware=[ToolSelection(above=0, keep=1)])
+        assert (await arm(h.wrap(target, id="h"), found).run("x", user="u")).answer == "found"
+    assert sorted(hinted.requests[0]["tools"]) == sorted(["find_0", *MEMORY_TOOLS])

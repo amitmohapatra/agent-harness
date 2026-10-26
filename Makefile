@@ -30,6 +30,15 @@ test:  ## Every test except the benchmark and the live ones, at 100% line and br
 test-live:  ## Opt-in tests against running services (BIFROST_URL, MEMORY_URL, RUNS_URL, TRELLIS_API_KEY)
 	$(PYTEST) -q -m live
 
+.PHONY: live-shard
+live-shard:  ## One shard of the live suite (LIVE_SHARD=i/n), packed by the measured durations to finish under a job's limit
+	@mkdir -p build
+	LIVE_SHARD=$(LIVE_SHARD) $(PYTEST) -q -m live -p no:cacheprovider --junitxml=build/live-$(subst /,-of-,$(LIVE_SHARD)).xml
+
+.PHONY: live-durations
+live-durations:  ## tests/live/durations.json from the live shards' JUnit reports (build/live-*.xml)
+	$(PY) -m tests.live.shards build/live-*.xml
+
 .PHONY: bench
 bench:  ## Harness overhead vs the committed baseline (writes build/benchmark-results.json)
 	$(PYTEST) tests/performance -m performance -q -s

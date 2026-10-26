@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import contextlib
 import copy
 import functools
@@ -54,7 +55,15 @@ import logging
 import re
 import types
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
@@ -80,6 +89,7 @@ from langchain_core.messages import (
     ToolMessage,
     convert_to_messages,
 )
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langchain_core.tools import BaseTool, StructuredTool
@@ -90,9 +100,11 @@ from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
+    DeltaChannelHistory,
     get_checkpoint_id,
     get_checkpoint_metadata,
 )
+from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
@@ -102,10 +114,10 @@ from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
-from trellis.harness.adapters.langgraph import TASK_TOOL
+from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
-from trellis.harness.gateways import Capability, route_now
+from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
@@ -179,8 +191,25 @@ TOOLSETS: Final = 64
 #: on its default ``StateBackend``; on a backend that writes to a real disk, its file tools are
 #: governed as any other (give them their risk in the catalog).
 STATE_TOOLS: Final = frozenset(
-    {"write_todos", "read_result", "ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+    {
+        "write_todos",
+        "read_result",
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "delete",
+        "glob",
+        "grep",
+    }
 )
+#: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
+#: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
+OUTSIDE_STATE: Final = "trellis_outside_state"
+#: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
+#: (``ReAct``'s: Deep Agents' ``execute`` on a backend that runs nothing, its general-purpose
+#: ``task`` helper, offered on a long task only): it is left out of the run's tool set.
+MACHINERY: Final = "trellis_machinery"
 
 
 class GovernTools(AgentMiddleware):
@@ -199,7 +228,9 @@ class GovernTools(AgentMiddleware):
 
 #: The call a governed run of a framework's own tool is executing (:func:`governed_call`): the
 #: layers under it (a tool node inside a ``GovernTools``) let it through, governed once.
-_GOVERNING: ContextVar[str | None] = ContextVar("trellis_governing", default=None)
+#: By the tool's name and the call's id: a call id is unique in one conversation only, and a
+#: sub-agent's calls are another's.
+_GOVERNING: ContextVar[tuple[str, str] | None] = ContextVar("trellis_governing", default=None)
 
 
 async def governed_call(
@@ -214,7 +245,8 @@ async def governed_call(
     ``Command`` (a Deep Agent's ``task`` updating the graph's state) included — and, replayed
     from the journal, as the message the model read. The harness's tools, the graph's state
     tools (:data:`STATE_TOOLS`), a call already governed and any call outside a run are let
-    through as they are."""
+    through as they are — a file tool of a backend outside the graph's state
+    (:data:`OUTSIDE_STATE`) is governed."""
     runtime = current()
     call = request.tool_call
     own = request.tool
@@ -223,14 +255,14 @@ async def governed_call(
         or own is None
         or converted.made(own)  # the harness's own: its call goes through the bridge itself
         or call["name"] in runtime.toolbox
-        or call["name"] in STATE_TOOLS
-        or _GOVERNING.get() == call["id"]
+        or (call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE))
+        or _GOVERNING.get() == (call["name"], str(call["id"]))
     ):
         return await handler(request)
     produced: list[ToolMessage | Command[Any]] = []
 
     async def run(args: dict[str, Any]) -> Any:
-        token = _GOVERNING.set(call["id"])
+        token = _GOVERNING.set((call["name"], str(call["id"])))
         try:
             done = await _helped(runtime, call["name"], str(call["id"]), args, ran)
         finally:
@@ -610,18 +642,17 @@ class ModelHooks(AgentMiddleware):
         *hooks: Hooks,
         timeout: float | None = None,
         prompt: Stored | None = None,
-        routed: bool = False,
     ) -> None:
         super().__init__()
-        #: the model is a routed name (``gateways.routed_chat_model``): on a route that
-        #: attributes (Bifrost), every call carries the run's dimensions and its ``traceparent``
-        #: (``telemetry.gateway_headers``)
-        self.routed = routed
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
         self.given = list(hooks)
         self.timeout = timeout
         self.prompt = prompt
+        #: each run's tools in the order they were first offered (:meth:`_in_order`)
+        self._order: weakref.WeakKeyDictionary[Runtime, dict[str, int]] = (
+            weakref.WeakKeyDictionary()
+        )
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
@@ -650,7 +681,7 @@ class ModelHooks(AgentMiddleware):
     ) -> ModelResponse[Any]:
         runtime = current()
         hooks = running(*self.given)
-        request = _with_task(_unbroken(_offered(request, runtime)))
+        request = self._in_order(_with_task(_unbroken(_offered(request, runtime))), runtime)
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
@@ -663,8 +694,10 @@ class ModelHooks(AgentMiddleware):
             request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
-            # in the model's span: the gateway's span of the call joins it
-            if self.routed and route_now().has(Capability.ATTRIBUTION):
+            # in the model's span: the gateway's span of the call joins it. A model name the
+            # harness routes (``gateways.routed_chat_model``), on a route that attributes
+            # (Bifrost): every call carries the run's dimensions and its ``traceparent``
+            if routed(request.model) and route_now().has(Capability.ATTRIBUTION):
                 sent = request.model_settings.get("extra_headers") or {}
                 headers = {**sent, **gateway_headers()}
                 request = request.override(
@@ -682,6 +715,20 @@ class ModelHooks(AgentMiddleware):
             await hooks.answered(call, reply)
             _replied(span, reply)
         return reply
+
+    def _in_order(self, request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
+        """The tools in the order the run first offered them — the first call's by name, each
+        tool offered later (a ``tool_search`` find, a long task's tools) after them — so a
+        provider's prompt cache, whose prefix the tools open, keeps it while the set only
+        grows: a tool offered again returns to its place, never moving the others."""
+        if runtime is None or len(request.tools) < 2:
+            return request
+        order = self._order.setdefault(runtime, {})
+        for name in sorted({_named(t) for t in request.tools} - order.keys()):
+            order[name] = len(order)
+        tools = sorted(request.tools, key=lambda t: order[_named(t)])
+        same = all(a is b for a, b in zip(tools, request.tools, strict=True))
+        return request if same else request.override(tools=tools)
 
     async def _pinned(self, runtime: Runtime | None) -> ResolvedPrompt | None:
         """The stored prompt's version this run uses: the journal's (a resumed run uses the
@@ -701,7 +748,7 @@ class ModelHooks(AgentMiddleware):
         if (
             pin is not None
             and not prompt.variables
-            and self.routed
+            and routed(request.model)
             and route_now().has(Capability.PROMPTS)
         ):
             sent = request.model_settings.get("extra_headers", {})
@@ -1017,14 +1064,20 @@ def read_result(most: int = READ_LIMIT) -> BaseTool:
 
 
 class ReadTools(AgentMiddleware):
-    """``read_file`` offered once the graph's state has a file to read (a large result saved, a
-    summarized history: Deep Agents' ``StateBackend``), ``read_result`` once a result reads as
-    ``placeholder`` (cleared): a small model offered them from the start reads nothing, again
-    and again. Both stay callable."""
+    """The tools that read back what was put aside, offered once there is something to read:
+    ``read_result`` (:func:`read_result`, which it adds to the graph) once a result reads as
+    ``placeholder`` (cleared by a ``ContextEditingMiddleware``), and Deep Agents' ``read_file``
+    once the graph's state holds a file (a large result saved, a summarized history) — a small
+    model offered them from the start reads nothing, again and again. Both stay callable.
+    ``placeholder=None``: no ``read_result`` (nothing is cleared); ``files=True``: ``read_file``
+    always offered (its files are outside the graph's state: a disk, a store, a sandbox, the
+    skills)."""
 
-    def __init__(self, placeholder: str) -> None:
+    def __init__(self, placeholder: str | None, *, files: bool = False) -> None:
         super().__init__()
         self.placeholder = placeholder
+        self.files = files
+        self.tools = [read_result()] if placeholder is not None else []
 
     async def awrap_model_call(
         self,
@@ -1032,14 +1085,16 @@ class ReadTools(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         unused = set()
-        if not request.state.get("files"):
-            unused.add("read_file")
-        if not any(
+        if not self.files and not request.state.get("files"):
+            unused.add(READ_FILE)
+        if self.placeholder is None or not any(
             isinstance(m, ToolMessage) and m.content == self.placeholder for m in request.messages
         ):
             unused.add(READ_RESULT)
         kept = [t for t in request.tools if _named(t) not in unused]
-        return await handler(request.override(tools=kept))
+        return await handler(
+            request if len(kept) == len(request.tools) else request.override(tools=kept)
+        )
 
 
 # --------------------------------------------------------------------------- tool choice
@@ -1150,7 +1205,7 @@ class ToolGuidance(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         parts = []
-        if request.tools and self.text is not None:
+        if self.text is not None and _counted(request.tools):
             writes = _writes_offered(request)
             parts.append(self.text)
             if writes:
@@ -1163,6 +1218,19 @@ class ToolGuidance(AgentMiddleware):
         if not parts:
             return await handler(request)
         return await handler(request.override(system_message=_appended(request, "\n".join(parts))))
+
+
+def _counted(tools: Sequence[BaseTool | dict[str, Any]]) -> int:
+    """The tools of a call that are not the graph's own state tools (:data:`STATE_TOOLS`)."""
+    return sum(_named(t) not in STATE_TOOLS for t in tools)
+
+
+#: What says a line of the memory context states a rule (``FitWindow`` never trims it): a rule,
+#: a policy, a "never", an "always", a "must", something forbidden or not allowed.
+_RULE: Final = re.compile(
+    r"\b(?:rules?|polic(?:y|ies)|never|always|must|forbid\w*|prohibit\w*|not allowed)\b",
+    re.IGNORECASE,
+)
 
 
 class _CheckedState(AgentState[Any]):
@@ -1199,7 +1267,13 @@ class AnswerCheck(AgentMiddleware):
 
     state_schema = _CheckedState
 
-    def __init__(self, checks: int = 1, *, writes: bool = True, text: str = ANSWER_CHECK) -> None:
+    def __init__(
+        self,
+        checks: int = 1,
+        *,
+        writes: bool = True,
+        text: str = ANSWER_CHECK,
+    ) -> None:
         super().__init__()
         if checks < 1:
             raise ConfigurationError("AnswerCheck makes at least 1 check (or leave it out)")
@@ -1298,10 +1372,9 @@ def _empty(message: ToolMessage) -> bool:
 
 
 def _tools(request: ModelRequest[Any], runtime: Runtime | None) -> bool:
-    """Whether the model has tools to call beyond the readers of earlier results: the run's
-    own, or the graph's."""
-    own = [t for t in request.tools if _named(t) not in (READ_RESULT, READ_FILE)]
-    return bool(own) or bool(runtime is not None and runtime.tool_names())
+    """Whether the model has tools to call beyond the graph's state tools (the readers of
+    earlier results among them): the run's own, or the graph's."""
+    return _counted(request.tools) > 0 or bool(runtime is not None and runtime.tool_names())
 
 
 def _changing(runtime: Runtime | None) -> list[str]:
@@ -1370,6 +1443,428 @@ def _appended(request: ModelRequest[Any], text: str) -> SystemMessage:
     return SystemMessage(content=[*system.content, {"type": "text", "text": text}])
 
 
+# --------------------------------------------------------------------------- the window
+#: What one model call's request may hold, as a share of the window: what Deep Agents'
+#: summarization budgets (its ``_input_budget``: 95%, less the reply's tokens), so a request
+#: :class:`FitWindow` fitted is one the summarization after it never refuses.
+FIT_SHARE: Final = 0.95
+#: Tools a narrowing keeps at least, beside the ones the run already used (then the
+#: descriptions are compacted before any of them is dropped).
+FIT_KEEP: Final = 8
+#: A compacted tool description's most characters (its first sentence, at most this).
+FIT_DESCRIPTION: Final = 120
+#: What a tool result cleared to fit reads as (``read_result`` reads it back: the state keeps it).
+FIT_CLEARED: Final = "[result cleared to fit the model's window: read_result(id=<this call's id>)]"
+#: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
+#: how often each fired in this process (a bounded counter: these keys only).
+FIT_STEPS: Final = ("guidance", "tools", "descriptions", "results", "turns", "memory")
+#: ``refit``: a request the model's server refused as over its window, fitted again with the
+#: server's own count (:data:`_RATIOS`) and sent once more.
+FITTED: Final[collections.Counter[str]] = collections.Counter()
+#: A model's tokens per counted token, by model name: learned from what its replies say their
+#: requests were, and from a request its server refused as too large (the count is an
+#: estimate: a tokenizer makes more or fewer tokens of the same text); within ``FIT_RATIOS``.
+_RATIOS: Final[LRU[str, float]] = LRU(64)
+FIT_RATIOS: Final = (0.8, 2.0)
+#: A model server's refusal of a request over its window (OpenAI's, Anthropic's, llama.cpp's,
+#: vLLM's words), and the size it says the request was.
+_OVERFLOW: Final = re.compile(
+    r"context_length_exceeded|exceed\w* (?:the )?(?:available |maximum )?context|"
+    r"maximum context length|prompt is too long|input tokens exceed",
+    re.IGNORECASE,
+)
+_OVERFLOW_SIZE: Final = re.compile(r"(?:request \(|resulted in |too long: )(\d+) tokens")
+_WRITES_LINE: Final = re.compile(r"\n?These tools change data: [^\n]*")
+_WORD: Final = re.compile(r"[a-z0-9]+")
+
+
+class ContextTooLarge(ModelError):
+    """The user's own message, with the instructions, does not fit the model's window."""
+
+    code = "CONTEXT_TOO_LARGE"
+
+
+class FitWindow(AgentMiddleware):
+    """A model call never fails because its request does not fit the window. Before each call,
+    when the request (its messages, instructions and tools, counted as Deep Agents counts them)
+    is over :data:`FIT_SHARE` of the window less the reply's tokens, it is made smaller, step
+    by step, only as far as it must, each step said on the run (a ``context_fit`` warning and a
+    log line) and counted (:data:`FITTED`):
+
+    1. ``guidance`` — the optional guidance in the instructions (``optional``: ``ToolGuidance``'s);
+    2. ``tools`` — the offered tools narrowed to the most relevant: those the run already used
+       always kept, then those the tool hints chose, then by the words they share with the
+       request, at least :data:`FIT_KEEP`;
+    3. ``descriptions`` — the kept tools' descriptions compacted (the first sentence, no
+       parameter descriptions);
+    4. ``results`` — older tool results cleared (``read_result`` reads them back), then the
+       tools narrowed past :data:`FIT_KEEP`, then the longest results cut to their head and
+       tail;
+    5. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
+       to a summarization after it: ``ReAct``'s summarizes them);
+    6. ``memory`` — last, only when the latest turn would still not fit: the memory context's
+       lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
+       last first), never a line that states a rule, nor one of the standing instructions (the
+       profile), the summary, the recent turns or the learned plan (its skills and tools).
+
+    The count is an estimate (Deep Agents'): when the model's server still refuses the request
+    as over its window (its tokenizer makes more tokens of it), it is fitted again by the
+    server's own count and sent once more (``refit``), that model's later calls fitted by the
+    learned ratio from the start (a refusal that states no count tightens that call only); the
+    ratio is also learned from what each reply says its request was, so a request that fits by
+    the model's own count is sent as it is.
+
+    When the instructions and the user's own message alone do not fit, the call fails with a
+    :class:`ContextTooLarge` naming the window and the size. A request that fits is sent as it
+    is, the same object. ``window``: the model's input window in tokens, else its LangChain
+    profile's; neither known, it steps aside."""
+
+    def __init__(
+        self,
+        window: int | None = None,
+        *,
+        optional: Sequence[str] = (TOOL_GUIDANCE,),
+        turns: bool = True,
+    ) -> None:
+        super().__init__()
+        if window is not None and window <= 0:
+            raise ConfigurationError("a window is a number of tokens over 0")
+        self.window = window
+        self.optional = tuple(optional)
+        self.turns = turns
+        #: each run's tools its last narrowed call kept (:func:`_narrowed`'s ``before``)
+        self._kept: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = weakref.WeakKeyDictionary()
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        budget = self._budget(request)
+        if budget is None:
+            return await handler(request)
+        name = _model_name(request.model) or ""
+        ratio = _RATIOS.get(name) or 1.0
+        sent, counted = self._within(request, int(budget / ratio))
+        try:
+            reply = await handler(sent)
+            _calibrated(name, counted, reply)
+            return reply
+        except Exception as exc:
+            real = _refused_size(exc)
+            if real is None:
+                raise
+            # the server counts more than the estimate: fitted again by its count, once — a
+            # count it stated is the model's from then on; a refusal that states none (Deep
+            # Agents' own budget check after its summary) tightens this call only
+            if real and counted:
+                learned = _RATIOS[name] = max(ratio * 1.1, real / counted)
+            else:
+                learned = ratio * 1.25
+            FITTED["refit"] += 1
+            log.info("the model's server refused %s tokens: fitted again", real or "too many")
+            return await handler(self._within(request, int(budget / learned))[0])
+
+    def _within(self, request: ModelRequest[Any], budget: int) -> tuple[ModelRequest[Any], int]:
+        """The request fitted to ``budget`` (counted tokens), and its count."""
+        size = _size(request)
+        if size <= budget:
+            return request, size
+        fitted = self._fitted(request, budget)
+        return fitted, _size(fitted)
+
+    def _budget(self, request: ModelRequest[Any]) -> int | None:
+        profile = getattr(request.model, "profile", None)
+        window = self.window or (
+            profile.get("max_input_tokens") if isinstance(profile, dict) else None
+        )
+        if not isinstance(window, int) or isinstance(window, bool):
+            return None
+        reply = 0
+        for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            value = request.model_settings.get(key, getattr(request.model, key, None))
+            if isinstance(value, int) and not isinstance(value, bool):
+                reply = max(reply, value)
+        return max(0, int(window * FIT_SHARE) - reply)
+
+    def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+        runtime = current()
+        before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
+        taken: list[str] = []
+        steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
+            self._without_guidance,
+            lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
+            lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
+            lambda r, b: _cut(_narrowed(_cleared(r), b, runtime, least=0, before=before), b),
+            lambda r, b: _latest(r) if self.turns else r,
+            lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
+        )
+        for name, step in zip(FIT_STEPS, steps, strict=True):
+            if name == "memory" and not self.turns and _size(_latest(request)) <= budget:
+                break  # the summarization after it makes it fit: memory stays whole
+            smaller = step(request, budget)
+            if smaller is not request:
+                taken.append(name)
+                FITTED[name] += 1
+                request = smaller
+            if _size(request) <= budget:
+                break
+        size = _size(request if self.turns else _latest(request))
+        if size > budget and _size(_bare(request)) > budget:
+            raise ContextTooLarge(
+                f"the instructions and the user's message alone are about "
+                f"{_size(_bare(request))} tokens, more than the {budget} this model's window "
+                "holds for a request: shorten the message or use a model with a larger window",
+                source="langgraph",
+                details={"budget": budget, "size": size},
+            )
+        if runtime is not None and ("tools" in taken or "results" in taken):
+            self._kept[runtime] = frozenset(_named(t) for t in request.tools)
+        said = (
+            f"the request was made to fit the model's window ({budget} tokens): {', '.join(taken)}"
+        )
+        log.info("%s", said)
+        if runtime is not None and taken:
+            runtime.events.warning("context_fit", said)
+        return request
+
+    def _without_guidance(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+        system = request.system_message
+        if system is None:
+            return request
+        text = system.text
+        kept = text
+        for optional in self.optional:
+            kept = kept.replace(f"\n\n{optional}", "").replace(optional, "")
+        if kept != text:
+            kept = _WRITES_LINE.sub("", kept)
+        if kept == text:
+            return request
+        return request.override(system_message=SystemMessage(content=kept))
+
+
+def _calibrated(name: str, counted: int, reply: Any) -> None:
+    """The model's tokens per counted token, from what its reply says the request was
+    (``usage_metadata``): the count is an estimate, over a tokenizer's count or under it; a
+    request that fits the window by the model's own count is then not narrowed. Averaged with
+    what was learned, within :data:`FIT_RATIOS`."""
+    said = reply.result[-1] if isinstance(reply, ModelResponse) and reply.result else reply
+    usage = getattr(said, "usage_metadata", None) or {}
+    real = usage.get("input_tokens")
+    if not isinstance(real, int) or real <= 0 or counted <= 0:
+        return
+    low, high = FIT_RATIOS
+    observed = min(high, max(low, real / counted))
+    known = _RATIOS.get(name)
+    _RATIOS[name] = observed if known is None else (known + observed) / 2
+
+
+def _refused_size(exc: BaseException) -> int | None:
+    """The size a model server said a request it refused as over its window was (0: not
+    said), or ``None`` when ``exc`` is no such refusal (nor caused by one)."""
+    from langchain_core.exceptions import ContextOverflowError  # noqa: PLC0415
+
+    seen: BaseException | None = exc
+    while seen is not None:
+        text = str(seen)
+        if isinstance(seen, ContextOverflowError) or _OVERFLOW.search(text):
+            said = _OVERFLOW_SIZE.search(text)
+            return int(said.group(1)) if said else 0
+        seen = seen.__cause__
+    return None
+
+
+def _size(request: ModelRequest[Any]) -> int:
+    """The request's tokens, as Deep Agents' summarization counts them."""
+    system = [request.system_message] if request.system_message is not None else []
+    return count_tokens_approximately([*system, *request.messages], tools=list(request.tools))
+
+
+def _bare(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with only its instructions and the user's latest message, no tools."""
+    asked = next((m for m in reversed(request.messages) if isinstance(m, HumanMessage)), None)
+    return request.override(messages=[asked] if asked is not None else [], tools=[])
+
+
+def _narrowed(
+    request: ModelRequest[Any],
+    budget: int,
+    runtime: Runtime | None,
+    *,
+    least: int,
+    before: Collection[str] = (),
+) -> ModelRequest[Any]:
+    """The request's tools ranked — those the run used (and the graph's own state tools),
+    those an earlier call of the run kept (``before``: the same set call after call, so a
+    prompt cache keeps its prefix), those the tool hints chose, then by the words they share
+    with the user's latest message — and kept in that order while they fit what the messages
+    leave, at least ``least`` (the used ones always)."""
+    tools = list(request.tools)
+    if not tools:
+        return request
+    used = set(runtime.used) if runtime is not None else set()
+    hinted = (runtime.offered or set()) if runtime is not None else set()
+    asked = next((m.text for m in reversed(request.messages) if isinstance(m, HumanMessage)), "")
+    words = set(_WORD.findall(asked.lower()))
+
+    def rank(item: tuple[int, BaseTool | dict[str, Any]]) -> tuple[int, int, int]:
+        n, tool = item
+        name = _named(tool)
+        must = name in used or name in STATE_TOOLS
+        shared = len(words & set(_WORD.findall(f"{name} {_described(tool)}".lower())))
+        tier = 0 if must else 1 if name in before else 2 if name in hinted else 3
+        return (tier, -shared, n)
+
+    room = budget - _size(request.override(tools=[]))
+    kept: list[BaseTool | dict[str, Any]] = []
+    for _, tool in sorted(enumerate(tools), key=rank):
+        must = _named(tool) in used or _named(tool) in STATE_TOOLS
+        cost = count_tokens_approximately([], tools=[tool])
+        if must or len(kept) < least or cost <= room:
+            kept.append(tool)
+            room -= cost
+    if len(kept) == len(tools):
+        return request
+    order = {id(t): n for n, t in enumerate(tools)}  # the offered order kept (a cache's prefix)
+    return request.override(tools=sorted(kept, key=lambda t: order[id(t)]))
+
+
+def _described(tool: BaseTool | dict[str, Any]) -> str:
+    if isinstance(tool, dict):
+        return str((tool.get("function") or tool).get("description") or "")
+    return tool.description or ""
+
+
+def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
+    """A tool as its definition with the description cut to its first sentence (at most
+    :data:`FIT_DESCRIPTION` characters) and no parameter descriptions."""
+    from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: PLC0415
+
+    found = copy.deepcopy(convert_to_openai_tool(tool))
+    function = found.get("function", found)
+    first = re.split(r"(?<=[.!?])\s", str(function.get("description") or ""), maxsplit=1)[0]
+    function["description"] = first[:FIT_DESCRIPTION]
+    for spec in (function.get("parameters") or {}).get("properties", {}).values():
+        spec.pop("description", None)
+    return found
+
+
+def _cleared(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the tool results before the latest model step cleared."""
+    messages = list(request.messages)
+    last = max((n for n, m in enumerate(messages) if isinstance(m, AIMessage)), default=-1)
+    changed = False
+    for n, message in enumerate(messages[:last]):
+        if isinstance(message, ToolMessage) and message.content != FIT_CLEARED:
+            messages[n] = message.model_copy(update={"content": FIT_CLEARED})
+            changed = True
+    return request.override(messages=messages) if changed else request
+
+
+def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with its leading system messages and its latest turn only (from the user's
+    latest message on)."""
+    messages = list(request.messages)
+    lead = list(itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages))
+    asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=None)
+    if asked is None or asked <= len(lead):
+        return request
+    return request.override(messages=[*lead, *messages[asked:]])
+
+
+#: The memory context's sections (``## ...``), its items' lines (``- ...``) and their handles
+#: (``[m3]``), the sections kept whole — the standing instructions (the profile), the summary,
+#: the recent turns, the learned plan (its skills, tools, procedures) — and the section that
+#: names the best-ranked items (the memory service's rendering).
+_SECTION: Final = re.compile(r"^##\s+(.*)$")
+_ITEM_LINE: Final = re.compile(r"^\s*[-*] ")
+_HANDLE: Final = re.compile(r"\[([^\]\s]+)\]")
+_KEPT_SECTION: Final = re.compile(
+    r"^(profile|conversation summary|recent conversation|learned skills|tools|procedures?|plan)\b",
+    re.IGNORECASE,
+)
+_RANKED_SECTION: Final = "most relevant"
+
+
+def _remembered_less(
+    request: ModelRequest[Any],
+    budget: int,
+    *,
+    after: Callable[[ModelRequest[Any]], ModelRequest[Any]] | None = None,
+) -> ModelRequest[Any]:
+    """The request with the memory context's lowest-ranked items left out until it (``after``
+    it is reduced so: the latest turn) fits — those the best-ranked section does not name
+    first, the last line first, then the best-ranked ones, their last first; never a line of a
+    kept section (:data:`_KEPT_SECTION`), nor one that states a rule (:data:`_RULE`)."""
+    messages = list(request.messages)
+    at = next(
+        (
+            n
+            for n, m in enumerate(messages)
+            if isinstance(m, SystemMessage) and m.id == CONTEXT_MESSAGE_ID
+        ),
+        None,
+    )
+    if at is None:
+        return request
+    lines = messages[at].text.split("\n")
+    items: list[tuple[int, str]] = []  # (line, its section)
+    section = ""
+    for n, line in enumerate(lines):
+        if heading := _SECTION.match(line.strip()):
+            section = heading.group(1).strip().casefold()
+        elif _ITEM_LINE.match(line) and not _KEPT_SECTION.match(section) and not _RULE.search(line):
+            items.append((n, section))
+    best = {
+        handle
+        for n, where in items
+        if where == _RANKED_SECTION
+        for handle in _HANDLE.findall(lines[n])
+    }
+    ranked = {
+        n
+        for n, where in items
+        if where == _RANKED_SECTION or not best.isdisjoint(_HANDLE.findall(lines[n]))
+    }
+    lowest = [n for n, _ in reversed(items) if n not in ranked]
+    lowest += sorted(ranked, reverse=True)
+    over = _size(after(request) if after is not None else request) - budget
+    gone: set[int] = set()
+    for n in lowest:
+        if over <= 0:
+            break
+        gone.add(n)
+        over -= len(lines[n]) // 4 + 1
+    if not gone:
+        return request
+    kept = "\n".join(line for n, line in enumerate(lines) if n not in gone)
+    messages[at] = messages[at].model_copy(update={"content": kept})
+    return request.override(messages=messages)
+
+
+def _cut(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+    """The longest tool results cut to their head and tail until the request fits."""
+    messages = list(request.messages)
+    over = _size(request) - budget
+    for n in sorted(
+        (n for n, m in enumerate(messages) if isinstance(m, ToolMessage)),
+        key=lambda n: -len(messages[n].text),
+    ):
+        if over <= 0:
+            break
+        text = messages[n].text
+        # tokens to characters, as the count does, and room for the marker said in its place
+        keep = max(200, len(text) - over * 4 - 64)
+        if keep >= len(text):
+            continue
+        half = keep // 2
+        gone = len(text) - keep
+        cut = f"{text[:half]}\n…[{gone} characters cut to fit the window]…\n{text[-half:]}"
+        messages[n] = messages[n].model_copy(update={"content": cut})
+        over -= (len(text) - len(cut)) // 4
+    return request.override(messages=messages) if messages != list(request.messages) else request
+
+
 # --------------------------------------------------------------------------- checkpoints
 #: Outside a run, how many threads :class:`RunCheckpointer` keeps (the most recently used).
 THREADS_KEPT: Final = 10_000
@@ -1381,8 +1876,15 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     (``Journal.graph``), saved with the run's progress and with its pause. A resume in any
     worker continues where the graph stopped: the model is not asked again, a summary is not
     written again, a tool that finished beside a pause is not run again. Outside a run it is
-    an in-memory checkpointer. A graph whose state uses LangGraph's ``DeltaChannel`` needs the
-    whole history and is not for it."""
+    an in-memory checkpointer.
+
+    A channel kept as deltas (LangGraph's ``DeltaChannel``: Deep Agents' ``messages`` and
+    ``files``) is stored in a checkpoint only every so many updates (its snapshot); in between
+    the graph rebuilds it from the writes since (``get_delta_channel_history``). With the
+    latest checkpoint only, those writes would be gone: each such channel keeps its last
+    snapshot and the writes applied since, beside the checkpoint (``deltas``), and they are
+    what the history returns — a new snapshot starts them again, so they never hold more than
+    the channel's own updates since its last one."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1457,15 +1959,74 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     ) -> RunnableConfig:
         thread_id, ns = _where(config)
         slot = self._slot(thread_id)
-        writes = [w for w in (slot.get(ns) or {}).get("writes", []) if w[0] >= checkpoint["id"]]
+        before = slot.get(ns) or {}
+        parent = _configurable(config).get("checkpoint_id")
+        kept = before.get("writes", [])
+        # the writes the new checkpoint applied — those of the one it follows — in the order
+        # they were applied (the tasks' paths, LangGraph's ``apply_writes``), not finished in
+        applied = sorted(
+            (w for w in kept if w[0] == parent and before.get("id") == parent),
+            key=lambda w: (w[5], w[2]),
+        )
         slot[ns] = {
             "id": checkpoint["id"],
             "checkpoint": self._dumped(checkpoint),
             "metadata": self._dumped(get_checkpoint_metadata(config, metadata)),
-            "parent": _configurable(config).get("checkpoint_id"),
-            "writes": writes,
+            "parent": parent,
+            "writes": [w for w in kept if w[0] >= checkpoint["id"]],
+            "deltas": self._deltas(before.get("deltas") or {}, checkpoint, metadata, applied),
         }
         return _config(thread_id, ns, checkpoint["id"])
+
+    def _deltas(
+        self,
+        kept: Mapping[str, Any],
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        applied: Sequence[Sequence[Any]],
+    ) -> dict[str, Any]:
+        """Each delta channel's last stored value and the writes applied since (``kept``, then
+        what this checkpoint holds or ``applied``): the channels the checkpoint's metadata
+        counts updates of (``counters_since_delta_snapshot``), those it stores a snapshot of,
+        and those kept before."""
+        values = checkpoint["channel_values"]
+        counted = cast(Mapping[str, Any], metadata.get("counters_since_delta_snapshot") or {})
+        names = {*kept, *counted, *(k for k, v in values.items() if isinstance(v, _DeltaSnapshot))}
+        deltas: dict[str, Any] = {}
+        for name in sorted(names):
+            if name in values:  # stored whole: the history starts again from it
+                deltas[name] = {"seed": self._dumped(values[name]), "writes": []}
+                continue
+            entry = kept.get(name) or {"seed": None, "writes": []}
+            added = [[w[1], w[4]] for w in applied if w[3] == name]
+            deltas[name] = {**entry, "writes": [*entry["writes"], *added]} if added else entry
+        return deltas
+
+    def get_delta_channel_history(
+        self, *, config: RunnableConfig, channels: Sequence[str]
+    ) -> Mapping[str, DeltaChannelHistory]:
+        """The delta channels' last stored values and the writes since, for the latest
+        checkpoint (an earlier one is not kept: nothing)."""
+        thread_id, ns = _where(config)
+        record = self._slot(thread_id).get(ns) or {}
+        wanted = get_checkpoint_id(config)
+        latest = not wanted or wanted == record.get("id")
+        deltas = (record.get("deltas") or {}) if latest else {}
+        found: dict[str, DeltaChannelHistory] = {}
+        for name in channels:
+            entry = deltas.get(name) or {"seed": None, "writes": []}
+            history: DeltaChannelHistory = {
+                "writes": [(task, name, self._loaded(value)) for task, value in entry["writes"]]
+            }
+            if entry["seed"] is not None:
+                history["seed"] = self._loaded(entry["seed"])
+            found[name] = history
+        return found
+
+    async def aget_delta_channel_history(
+        self, *, config: RunnableConfig, channels: Sequence[str]
+    ) -> Mapping[str, DeltaChannelHistory]:
+        return self.get_delta_channel_history(config=config, channels=channels)
 
     def put_writes(
         self,
@@ -1556,6 +2117,8 @@ def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfi
 
 __all__ = [
     "AnswerCheck",
+    "ContextTooLarge",
+    "FitWindow",
     "HarnessTools",
     "ModelHooks",
     "ReadTools",

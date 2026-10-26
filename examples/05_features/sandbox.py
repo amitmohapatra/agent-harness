@@ -1,13 +1,14 @@
-"""``sandbox()``: the model writes and runs code in its run's own sandbox, whatever the framework.
+"""Code run away from the host: ``ReAct(backend=docker_sandbox())`` — Deep Agents' ``execute``
+and file tools work in the run's own sandbox (``sandbox()`` gives any other framework the same
+sandbox as tools) — then the same provider without a harness (Way 2): ``governed`` around a
+sandbox's ``exec``.
 
-The sandbox is made at the run's first sandbox call and deleted when the run ends; every call
-is a harness tool call (governed, journaled, recorded, at most its ``call_timeout``).
-``sandbox()`` alone is a Docker container with no network (the daemon ``DOCKER_HOST`` names), of
-``sandbox(image=)`` (else ``python:3.12-slim``). Without ``DOCKER_HOST`` this example plugs in a
-provider of its own — a temporary directory per run, run by this machine's shell, with no
-isolation at all: it only shows what a provider implements (E2B, Daytona or Modal plug in the
-same way). Then the same provider without a harness (Way 2): ``governed`` around a sandbox's
-``exec``.
+``docker_sandbox()`` alone is a Docker container with no network (the daemon ``DOCKER_HOST``
+names), of ``docker_sandbox(image=)`` (else ``python:3.12-slim``). Without ``DOCKER_HOST`` this
+example plugs in a provider of its own — temporary directories of this machine (no isolation: an
+example of the interface only). Either way the sandbox lives as its run does: made at the first
+command, named in the run's journal, deleted at its end; ``execute`` is governed and recorded as
+any tool.
 
     DOCKER_HOST=unix:///var/run/docker.sock python -m examples.05_features.sandbox
     python -m examples.05_features.sandbox
@@ -27,7 +28,7 @@ from typing import Any
 
 from examples._support.offline import react_model
 
-from trellis import Harness, ReAct, sandbox
+from trellis import Harness, ReAct, docker_sandbox
 from trellis.contracts import RunEventType, ToolError
 from trellis.harness.governance import Governance, governed
 from trellis.harness.sandbox import (
@@ -126,15 +127,15 @@ async def main() -> None:
     async with Harness() as h:
         model = react_model(
             [
-                ("sandbox_write", {"path": "total.py", "content": SCRIPT}),
-                ("sandbox_exec", {"command": "python3 total.py"}),
+                ("execute", {"command": f"cat > total.py << 'EOF'\n{SCRIPT}EOF"}),
+                ("execute", {"command": "python3 total.py"}),
                 "We sold 42 units.",
             ]
         )
         analyst = ReAct(
             system_prompt="You analyse data: write a Python script in your sandbox, run it.",
             model=model,
-            tools=[sandbox(provider, spec=spec, call_timeout=60)],
+            backend=docker_sandbox(provider, spec=spec, call_timeout=60),
         )
         agent = h.wrap(analyst, id="analyst")
         async for event in agent.stream("How many units did we sell?", user="ada"):

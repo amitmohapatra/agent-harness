@@ -14,6 +14,7 @@ task success.
 
 from __future__ import annotations
 
+import collections
 import importlib
 import os
 import platform
@@ -34,6 +35,7 @@ from benchmark.cost import catalog, prices, stats
 from benchmark.cost.variants import VARIANTS, Setup
 from trellis import Harness, Hooks, Settings
 from trellis.contracts import ToolCall, ToolOutcome
+from trellis.harness.middleware import FITTED
 
 scenario = importlib.import_module("examples.06_scenarios.tool_choice")
 
@@ -126,12 +128,15 @@ class Called(Hooks):
         return outcome
 
 
-def harness() -> Harness:
+def harness(*, memory: bool = False) -> Harness:
     """The environment's harness with nothing but the model: memory, the run store, tracing
-    and the gateway's MCP tools off, so no service's data is read or written."""
-    config = Settings.from_env().model_copy(
-        update={"memory_url": None, "runs_url": None, "otlp_endpoint": None}
-    )
+    and the gateway's MCP tools off, so no service's data is read or written — ``memory``:
+    the environment's memory service on (its context and tool hints)."""
+    config = Settings.from_env()
+    off = {"runs_url": None, "otlp_endpoint": None} | ({} if memory else {"memory_url": None})
+    config = config.model_copy(update=off)
+    if memory:
+        return Harness(config=config, gateway=False)
     return Harness(config=config, memory=False, gateway=False)
 
 
@@ -242,6 +247,7 @@ async def run_cell(
         for repeat, task in todo:
             called.tools = []
             cpu_before = {name: procstat.cpu_seconds(pid) for name, pid in pids.items()}
+            fitted_before = collections.Counter(FITTED)
             began = time.monotonic()
             with metered() as meter:
                 report = await h.evaluate(
@@ -262,6 +268,7 @@ async def run_cell(
                 cpu=_used(cpu_before, pids),
             )
             row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
+            row["fitted"] = dict(collections.Counter(FITTED) - fitted_before)  # FitWindow's steps
             rows.append(row)
             if on_row is not None:
                 on_row(row)

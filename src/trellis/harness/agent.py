@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -48,6 +49,7 @@ from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
     OWN_CHECKPOINTER,
+    OWN_STORE,
     context_window,
     declared_tools,
     merged,
@@ -158,6 +160,11 @@ class Agent:
             raise ConfigurationError(
                 f"{id}: ReAct(checkpointer=) is for the graph run on its own: a wrapped agent's "
                 "runs checkpoint into the run (leave checkpointer= out)"
+            )
+        if getattr(target, OWN_STORE, False):
+            raise ConfigurationError(
+                f"{id}: ReAct(store=) is for the graph run on its own: a wrapped agent's store "
+                "is the memory service (leave store= out)"
             )
         self.harness = harness
         self.target = target
@@ -828,10 +835,11 @@ class Agent:
             runtime.history = from_window(
                 pushed.conversation.messages if pushed.conversation else []
             )
-        # candidates the model is offered; no candidates at all narrows nothing
+        # candidates the model is offered — the hints, and the tools the context names (the
+        # plan of a skill learned for the task lists its steps); no hint narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
         if hints and candidates and self.adapter.narrows != "none":
-            runtime.offered = set(candidates)
+            runtime.offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
         status = pushed.evidence_status
         runtime.evidence = status
         runtime.pushed = {
@@ -1242,6 +1250,13 @@ def graded(answer: Any) -> str:
     if answer is None or isinstance(answer, str):
         return answer or ""
     return json.dumps(pipeline.jsonable(answer), default=str)
+
+
+def named_in(text: str, names: Collection[str]) -> set[str]:
+    """The tool ``names`` that ``text`` names, as whole words (a learned skill's steps in the
+    memory context, a hint's line): one pass over the text, whatever the number of tools."""
+    found = set(re.findall(r"[A-Za-z0-9_.:-]+", text or ""))
+    return {name for name in names if name in found}
 
 
 def gated_tools(target: Any) -> set[str]:

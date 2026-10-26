@@ -10,11 +10,18 @@ model calls are what they were before any of these existed (the tools, the instr
 
   * ``planning`` — LangChain's ``TodoListMiddleware`` (:class:`Planning`): the ``write_todos``
     tool and its instructions;
-  * ``files`` — Deep Agents' ``FilesystemMiddleware`` with ``ls``, ``write_file`` and
-    ``edit_file`` besides ``read_file`` (:class:`ScratchFiles` offers them), on a
-    :class:`JournalBackend`: the files are the graph's state, so the run's journal keeps them
-    (a pause, a crash, another worker), each at most :data:`MAX_FILE_CHARS` and all of a run's
-    at most :data:`MAX_RUN_CHARS`.
+  * ``files`` — Deep Agents' scratch file tools (:data:`SCRATCH`: ``ls``, ``write_file``,
+    ``edit_file``, ``delete``, ``glob``, ``grep``) beside ``read_file``, and its
+    general-purpose ``task`` helper when the agent has no sub-agents of its own
+    (:class:`LongTaskTools` offers them; Deep Agents' ``FilesystemMiddleware`` and
+    ``SubAgentMiddleware`` have them all along), on a :class:`JournalBackend`: the files are
+    the graph's state, so the run's journal keeps them (a pause, a crash, another worker), each
+    at most :data:`MAX_FILE_CHARS` and all of a run's at most :data:`MAX_RUN_CHARS`.
+
+* **Many tools and no tool hints** — :class:`ToolSelection` (off unless a measurement turns it
+  on: ``react.defaults_on``): LangChain's ``LLMToolSelectorMiddleware`` picks the tools that
+  fit, by one model call of its own, when the run has no hints from memory (off, unreachable
+  or cold) and a call offers more than :data:`SELECT_ABOVE` tools.
 
 * **A budget** given (``h.wrap(budget=)``) — :class:`Budgeted`: once it is spent, one more call
   without tools for the best answer with what the run has.
@@ -25,16 +32,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
-from typing import Annotated, Any, Final, NotRequired
+from typing import Any, Final, cast
 
 from deepagents.backends import StateBackend
 from deepagents.backends.protocol import EditResult, WriteResult
 from deepagents.backends.utils import file_data_to_string
-from deepagents.middleware import FilesystemMiddleware
-from deepagents.middleware.filesystem import _file_data_reducer
 from langchain.agents.middleware import (
     AgentMiddleware,
-    AgentState,
+    LLMToolSelectorMiddleware,
     ModelRequest,
     ModelResponse,
 )
@@ -57,8 +62,11 @@ _ITEM: Final = re.compile(r"(?m)^\s*(?:\d{1,2}[.)]|[-*•])\s+\S")
 _CUE: Final = re.compile(r"\bstep[- ]by[- ]step\b|\bmulti-?step\b|\b(?:a|the|your) plan\b", re.I)
 #: ``write_todos``: the planning tool.
 TODOS: Final = "write_todos"
-#: The scratch file tools a long task is offered (``read_file`` reads paged results anyway).
-SCRATCH: Final = frozenset({"ls", "write_file", "edit_file"})
+#: Deep Agents' scratch file tools a long task is offered (``read_file`` reads saved results
+#: anyway: ``ReadTools``).
+SCRATCH: Final = frozenset({"ls", "write_file", "edit_file", "delete", "glob", "grep"})
+#: Deep Agents' sub-agent tool: its general-purpose helper is a long task's.
+TASK: Final = "task"
 #: A file the model writes holds at most this many characters; all of a run's at most
 #: :data:`MAX_RUN_CHARS`. What the harness saves itself (a large result, a summarized
 #: history) is not counted.
@@ -111,6 +119,40 @@ def without_tools(request: ModelRequest[Any], names: Collection[str]) -> ModelRe
     return request if len(kept) == len(request.tools) else request.override(tools=kept)
 
 
+# --------------------------------------------------------------------------- tool selection
+#: The tools a call offers past which :class:`ToolSelection` selects, and how many it keeps.
+SELECT_ABOVE: Final = 20
+SELECT_KEEP: Final = 10
+
+
+class ToolSelection(AgentMiddleware):
+    """LangChain's ``LLMToolSelectorMiddleware`` (its own model call picks at most ``keep``
+    tools that fit the request; a reply it cannot read offers every tool), used only when the
+    run has no tool hints — memory off, unreachable or cold — and a call offers more than
+    ``above`` tools; the tools the run already used are kept."""
+
+    def __init__(self, *, above: int = SELECT_ABOVE, keep: int = SELECT_KEEP) -> None:
+        super().__init__()
+        self.above = above
+        self.keep = keep
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        runtime = current()
+        hinted = runtime is not None and runtime.offered is not None
+        if hinted or len(request.tools) <= self.above:
+            return await handler(request)
+        used = sorted(runtime.used) if runtime is not None else []
+        selector = LLMToolSelectorMiddleware(
+            max_tools=self.keep, always_include=used, on_parsing_failure="all"
+        )
+        # it calls the handler with the tools it picked, and returns its reply
+        return cast("ModelResponse[Any]", await selector.awrap_model_call(request, handler))
+
+
 # --------------------------------------------------------------------------- the budget
 class Budgeted(AgentMiddleware):
     """The run's budget (``budget``; ``trellis.harness.budget``; ``ModelHooks`` counts what
@@ -139,8 +181,9 @@ class Budgeted(AgentMiddleware):
 # --------------------------------------------------------------------------- planning
 class Planning(_LongTasks, TodoListMiddleware):
     """LangChain's ``TodoListMiddleware``, offered on a long task (``planning``): until then
-    the model is sent neither ``write_todos`` nor its instructions. Named as LangChain's, so a
-    ``TodoListMiddleware`` given to ``ReAct(middleware=)`` replaces it (always on)."""
+    the model is not sent ``write_todos``. Its guidance travels in the tool's own description
+    (LangChain's), never in the instructions: the system prompt stays the same from the first
+    call to the last, so a provider's prompt cache keeps its prefix. Named as LangChain's."""
 
     def __init__(self, *, window: int | None = None) -> None:
         super().__init__()
@@ -156,7 +199,7 @@ class Planning(_LongTasks, TodoListMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> Any:
         if self.wanted(request):
-            return await super().awrap_model_call(request, handler)
+            return await handler(request)  # the tool, its description its guidance
         return await handler(without_tools(request, {TODOS}))
 
 
@@ -214,39 +257,16 @@ class JournalBackend(StateBackend):
         return super().edit(file_path, old_string, new_string, replace_all)
 
 
-class FilesState(AgentState[Any]):
-    """The graph's files, merged by Deep Agents' own reducer as a plain channel: Deep Agents
-    keeps them in a ``DeltaChannel``, which needs every earlier checkpoint — the run's
-    checkpointer keeps the latest only (``RunCheckpointer``), so a resume would find no
-    files."""
+class LongTaskTools(_LongTasks, AgentMiddleware):
+    """Deep Agents' tools that only a long task is offered (``tools``: the scratch file tools,
+    and ``task`` when its only sub-agent is its general-purpose one): until then the model is
+    sent neither them nor what they cost. Deep Agents' ``FilesystemMiddleware`` and
+    ``SubAgentMiddleware`` have them all along."""
 
-    files: Annotated[NotRequired[dict[str, Any]], _file_data_reducer]
-
-
-class JournalFiles(FilesystemMiddleware):
-    """Deep Agents' ``FilesystemMiddleware`` on a :class:`JournalBackend`, its files in a
-    channel the run's journal keeps whole (:class:`FilesState`): a large result saved there, a
-    summarized history and the scratch files are all there after a pause, a crash or a move to
-    another worker. ``tools``: the file tools it has (``ReAct``: ``read_file`` and the scratch
-    tools :class:`ScratchFiles` offers). Named as Deep Agents', so a ``FilesystemMiddleware``
-    given to ``ReAct(middleware=)`` replaces it."""
-
-    def __init__(self, backend: JournalBackend, *, tools: list[Any]) -> None:
-        super().__init__(backend=backend, tools=tools)
-        self.state_schema = FilesState  # type: ignore[assignment]
-
-    @property
-    def name(self) -> str:
-        return FilesystemMiddleware.__name__
-
-
-class ScratchFiles(_LongTasks, AgentMiddleware):
-    """``ls``, ``write_file`` and ``edit_file`` (Deep Agents' ``FilesystemMiddleware``, which
-    ``ReAct`` builds with them) offered on a long task."""
-
-    def __init__(self, *, window: int | None = None) -> None:
+    def __init__(self, *, window: int | None = None, tools: Collection[str] = SCRATCH) -> None:
         super().__init__()
         self.window = window
+        self.held = frozenset(tools)
 
     async def awrap_model_call(
         self,
@@ -255,4 +275,4 @@ class ScratchFiles(_LongTasks, AgentMiddleware):
     ) -> ModelResponse[Any]:
         if self.wanted(request):
             return await handler(request)
-        return await handler(without_tools(request, SCRATCH))
+        return await handler(without_tools(request, self.held))

@@ -1,7 +1,7 @@
 """Every adapter, built to follow one plan of tool calls: the table the behaviour tests run over
-(``BUILDERS``) — the function target, ``ReAct``, LangChain's ``create_agent``, a graph built by
-hand (``StateGraph`` with a ``ToolNode``), Deep Agents, the OpenAI Agents SDK and the Claude
-Agent SDK (the real SDK driving the scripted CLI). Each model
+(``BUILDERS``) — the function target, ``ReAct``, LangChain's ``create_agent`` (on its own, and
+with ``trellis.middleware()``), a graph built by hand (``StateGraph`` with a ``ToolNode``), Deep
+Agents, the OpenAI Agents SDK and the Claude Agent SDK (the real SDK driving the scripted CLI). Each model
 makes the plan's calls in order and answers ``FINAL`` with the last result it read
 (``tests.support.planned``), so a test sees what reached the model. ``system`` is the
 instructions the framework's agent is built with (a function has none), and ``seen`` gets the
@@ -24,7 +24,8 @@ from langchain.agents import create_agent
 
 from tests.support.arm import native_tools
 from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
-from trellis import Harness, ReAct, Runtime
+from trellis import Harness, ReAct, Runtime, middleware
+from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.tools.convert import text_of
 
 CLI: Final = str(Path(__file__).resolve().parent / "fake_claude_cli.py")
@@ -98,6 +99,26 @@ async def _langgraph(
     _saw(seen, model)
     built = await native_tools(h, *tools, framework="langgraph")
     return create_agent(model, tools=built, system_prompt=system), tools
+
+
+async def _middleware(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    plan: list[Call],
+    *,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+    stall: float = 0.0,
+) -> Built:
+    """``create_agent`` given the harness's part of ``ReAct`` (``trellis.middleware()``) and the
+    run's checkpointer: the run's tools come per model call, as ``ReAct``'s do."""
+    model = PlannedChatModel(plan=plan, stall=stall)
+    _saw(seen, model)
+    graph = create_agent(
+        model, system_prompt=system, middleware=middleware(), checkpointer=RunCheckpointer()
+    )
+    return graph, tools
 
 
 async def _graph(
@@ -196,6 +217,7 @@ BUILDERS: Final[dict[str, Builder]] = {
     "function": _function,
     "react": _react,
     "langgraph": _langgraph,
+    "middleware": _middleware,
     "graph": _graph,
     "deepagents": _deepagents,
     "openai_agents": _openai_agents,

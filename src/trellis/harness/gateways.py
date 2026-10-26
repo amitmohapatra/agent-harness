@@ -331,6 +331,11 @@ def routed_chat_model(model: str, *, effort: str | None = None) -> Any:
     return _routed_class()(model_name=model, effort=effort, profile=_profile_of(model))
 
 
+def routed(model: Any) -> bool:
+    """Whether ``model`` is a model name the harness routes (:func:`routed_chat_model`)."""
+    return isinstance(model, _routed_class())
+
+
 def route_now() -> ModelGateway:
     """The route a model call made now takes: the harness's of the run in this task, else the
     environment's."""

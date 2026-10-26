@@ -117,6 +117,7 @@ models only — the MCP tools, Code Mode, stored prompts and dollar budgets are 
 |---|---|---|
 | my existing agent with memory, approvals and traces | `agent = h.wrap(graph, id="triage")` | [frameworks](docs/README.md#way-1-wrapped-the-harness-runs-your-agent) |
 | a tool-calling agent, no framework | `h.wrap(ReAct(system_prompt="...", model="provider/model", tools=[...]), id="a")` | [react.md](docs/frameworks/react.md) |
+| `ReAct`'s harness part in my own `create_agent` / `create_deep_agent` | `create_deep_agent(model, tools, middleware=middleware(), checkpointer=RunCheckpointer())` | [react.md](docs/frameworks/react.md#middleware-on-your-own-graph) |
 | the agent to remember the user | `export MEMORY_URL=... TRELLIS_API_KEY=...` | [memory.md](docs/memory.md) |
 | a tool of my own | `ReAct(..., tools=[lookup])`, or your framework's own tool (governed as it runs) | [tools.md](docs/tools.md) |
 | the gateway's MCP tools | `export BIFROST_URL=... BIFROST_VIRTUAL_KEY=...` | [gateway.md](docs/gateway.md) |
@@ -134,7 +135,7 @@ models only — the MCP tools, Code Mode, stored prompts and dollar budgets are 
 | a score for a test set | `await h.evaluate(agent, dataset, [exact_match(), called("lookup")])` | [evaluation.md](docs/evaluation.md) |
 | quality on live traffic | `h.wrap(target, id="a", judges=[llm_judge("Polite and correct.")])` | [evaluation.md](docs/evaluation.md) |
 | traces in Langfuse | `export LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=...` (`LANGFUSE_HOST=...` unless on Langfuse Cloud) | [observability.md](docs/observability.md) |
-| code run away from the host | `ReAct(..., tools=[sandbox()])` (Docker) | [sandbox.md](docs/sandbox.md) |
+| code run away from the host | `ReAct(..., backend=docker_sandbox())` (Docker) | [sandbox.md](docs/sandbox.md) |
 | only one piece, in my own loop | `from trellis.memory import MemoryClient` (or runs, governance, evals) | [Way 2](#two-ways-to-use-trellis) |
 
 Every line has a runnable example: [examples/](examples/README.md).

@@ -3,6 +3,118 @@
 What changed in each release of `trellis-harness`. The framework versions each release was
 tested with are in [docs/versioning.md](docs/versioning.md).
 
+## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
+
+`ReAct` is LangChain's `create_agent` with the harness's part on top, and Deep Agents'
+`create_deep_agent`, every Deep Agents feature native, when a Deep Agents capability is asked
+for — and that part is exported: `trellis.middleware()` gives a `create_agent` or
+`create_deep_agent` graph of your own what `ReAct` adds.
+
+### Breaking
+
+- `ReAct` takes Deep Agents' capabilities: given `backend=` (file tools, large-result eviction,
+  summarization; `docker_sandbox()` for `execute`), a `SubAgent`/`CompiledSubAgent` sub-agent
+  (`task`), `skills=`, `memory_files=` or `permissions=`, it is `create_deep_agent` (prompt
+  caching, its long-task scratch files and helper); otherwise `create_agent` with
+  `middleware()` and dangling-call repair — the base measured as good or better on every class
+  of task (see Changed). The new signature, names following Deep Agents': `ReAct(system_prompt,
+  model, *, tools, subagents, skills, memory_files, permissions, backend, store,
+  response_format, state_schema, context_schema, cache, max_steps=12, max_repeats=3,
+  call_timeout, context_window, effort, tool_guidance=None, answer_check=None, capabilities,
+  middleware, checkpointer)`
+  (`memory_files` is Deep Agents' `memory`; its `interrupt_on`, `name` and `debug` are not
+  exposed).
+- `ReAct(tools=)` refuses `sandbox()` (code runs in `backend=docker_sandbox()`) and agents
+  (`a2a(url)` and wrapped agents go in `subagents=`); `max_repeats` is 2 or more, as
+  `StallGuard` always required.
+- `tool_guidance` and `answer_check` default to `None`, automatic — which, measured on a small
+  model, keeps both off (see Changed); `True` turns either on, `False` keeps it off.
+- `ReAct(store=)`, like `checkpointer=`, is for the graph run on its own: `h.wrap` refuses it.
+- `ReAct(middleware=)` with a Deep Agents middleware's name replaces Deep Agents' own (as
+  `create_deep_agent` does); one named as the harness's is still refused.
+- Removed, Deep Agents now owning them: `automatic.JournalFiles`, `automatic.FilesState`,
+  `automatic.ScratchFiles` (`automatic.LongTaskTools` offers Deep Agents' own scratch tools and
+  general-purpose helper on a long task); `ModelHooks(routed=)` (it sees a routed model itself).
+
+### Added
+
+- `trellis.middleware(*, max_steps, max_repeats, call_timeout, context_window, tool_guidance,
+  answer_check, capabilities, system_prompt)`: the harness's part of `ReAct` — the run's tools
+  per model call narrowed per turn (the memory and gateway MCP tools among them), the graph's
+  own tools governed, the stall guard, the step limit then a final answer, the budget's stop,
+  planning on a long task, older results cleared and read back, the tool guidance and answer
+  check, and `ModelHooks` (hooks, spans, `call_timeout`, a stored prompt pinned per run).
+  `h.wrap` says once when a `create_agent` or Deep Agents graph is wrapped without it.
+- `trellis.docker_sandbox()`: the run's sandbox (the lifecycle of `sandbox()`: made at the first
+  command, journaled, paused with the run, deleted at its end, reaped) as a Deep Agents backend
+  — `ReAct(backend=docker_sandbox())` or `create_deep_agent(backend=...)`; `execute` governed.
+- `ReAct(subagents=)` takes Deep Agents' `SubAgent` and `CompiledSubAgent` dicts (a `ReAct` graph
+  as the `runnable`) beside wrapped agents and `a2a(url)`: each `task` call a child run; a
+  declarative sub-agent gets the loop's guards and its model name routed, and a tool it names in
+  `interrupt_on` asks a person (its declared risk, as the catalog says).
+- On a backend outside the graph's state (a disk, a store, a sandbox) Deep Agents' file tools
+  are governed and published as any tool (`middleware.OUTSIDE_STATE`).
+- `RunCheckpointer` keeps a LangGraph `DeltaChannel`'s history (its last snapshot and the writes
+  since, replayed in the order they were applied) beside the latest checkpoint, so a Deep
+  Agents graph's `messages` and `files` come back whole on a resume anywhere.
+- `FitWindow` (in `middleware()`, so `ReAct`'s too): a run never fails because a request does
+  not fit the window. Over it, the request is made to fit step by step, only as far as needed —
+  the optional guidance, the tools narrowed (the used, the hinted, the relevant kept), their
+  descriptions compacted, older results cleared, older turns, and last the memory context's
+  lowest-ranked items (never a rule, the standing instructions or the learned plan) — each step
+  said on the run (`context_fit`); a request that fits is sent unchanged. A request the
+  model's server still refuses as too large (its tokenizer counts more than the estimate) is
+  fitted again by the server's count and sent once more; the model's tokens per counted token
+  are learned from what its replies say their requests were, so a request that fits by the
+  model's own count is sent as it is, and a run's narrowed tools stay the same call after call
+  while they fit. Only a user message
+  that alone cannot fit fails: `ContextTooLarge` (`CONTEXT_TOO_LARGE`) naming the window and the
+  size.
+- With tool hints, each call is also offered the tools the memory context names (a learned
+  skill's steps), beside the hinted, the used, the memory tools and what `tool_search` found.
+- `automatic.ToolSelection`: LangChain's `LLMToolSelectorMiddleware` used only with no tool hints
+  and over 20 tools — measured (`benchmark.cost` variant `main+selector`), not a default.
+- `LIVE_SHARD=i/n` (`make live-shard`): the live suite in shards packed by the measured
+  durations (`tests/live/durations.json`, `make live-durations`), each under a job's limit on a
+  CPU model.
+- Python 3.13 beside 3.12: CI's gates (lint, types, tests, examples, docs, the matrix, the
+  overhead benchmark) and the weekly canary run on both (`python-version: ["3.12", "3.13"]`);
+  the 3.13 classifier.
+- `benchmark.cost` variants `deep` (`ReAct` on Deep Agents) and `deep-<piece>`, `pieces`,
+  `main+guidance`, `main+check`, `main+selector`, `main@16k`; `--suite classes` (ten tasks per
+  class) and `--memory`; `TRELLIS_LIVE_VARIANTS` picks the live tool-choice test's variants.
+
+### Changed
+
+- A run's tools are offered in the order first offered (the first call's by name, those offered
+  later after them, a tool offered again in its old place), not re-sorted by name each call: the
+  set only grows at its end, so a provider's prompt cache (whose prefix the tools open) is broken
+  once per growth, not reordered.
+- Deep Agents' summarization stands after the harness's middleware that narrow the tools, so
+  its budget counts what the model is sent.
+- The base was chosen by one Granite batch, each base with `middleware()` and `FitWindow`, ten
+  different tasks per class (simple, multi-step, wide, a ~100k-character result, 50 and 100
+  tools, 50 tools with memory on): `create_agent` equalled the best on simple tasks and was as
+  good or better on every other class — on the large result it completed 10/10 runs where
+  `create_deep_agent` completed 5/10 and Deep Agents' pieces on `create_agent` 6/10 —
+  [docs/frameworks/react.md](docs/frameworks/react.md#the-base). The guidance and the check are
+  off by default: the guidance raised coverage (0.89 to 1.00) but made the model call changes
+  on 4 of 16 items that asked for none, the check added a model call per answer for no gain,
+  and both broke the context's rule
+  ([docs/frameworks/react.md](docs/frameworks/react.md#tool-choice)).
+
+### Fixed
+
+- AG-UI: a resume sent right after its pause could end with `RUN_ERROR` ("the run ended
+  without a result"): the paused attempt, still finishing (its end hooks, its records) after
+  announcing the pause, found the run's buffer reopened by the resume and said the run ended.
+  Each attempt now answers for its own end only, and a stream closes when its attempt returned
+  (after `RUN_FINISHED`, once the turn is written to memory and the end hooks ran): the next
+  message's context holds the turn, and a resume finds the paused attempt done.
+- A governed framework tool call inside a sub-agent whose call id equals its parent's `task`
+  call id (ids are unique per conversation only) was let through ungoverned; the marker is now
+  the tool's name and the call's id.
+
 ## 0.5.0 — one breaking release (unreleased)
 
 One API, each setting in its one place, no deprecated aliases: the environment says where the

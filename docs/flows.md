@@ -522,7 +522,8 @@ sequenceDiagram
 
 ## ReAct: one model step through the middleware
 
-`ReAct(...)` builds a `create_agent` graph whose middleware wrap every model call and every
+`ReAct(...)` builds a `create_agent` graph (a `create_deep_agent` one when a Deep Agents
+capability is asked for) whose middleware wrap every model call and every
 tool call (`react.py`, `middleware.py`; order in
 [architecture.md](architecture.md#the-middleware)). One step: the model is asked, it calls two
 tools, the calls go through the bridge.

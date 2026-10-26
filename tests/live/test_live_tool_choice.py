@@ -58,16 +58,23 @@ from trellis.harness.tools.lint import lint
 scenario = importlib.import_module("examples.06_scenarios.tool_choice")
 
 REPEATS: Final = int(os.environ.get("TRELLIS_LIVE_REPEATS", "").strip() or 1)
-VARIANTS: Final[dict[str, dict[str, bool]]] = {
-    "baseline": {},
-    "guidance": {"tool_guidance": True},
+VARIANTS: Final[dict[str, dict[str, bool | None]]] = {
+    "baseline": {"tool_guidance": False, "answer_check": False},
+    "guidance": {"tool_guidance": True, "answer_check": False},
+    "check": {"tool_guidance": False, "answer_check": True},
     "guidance+check": {"tool_guidance": True, "answer_check": True},
+    "auto": {"tool_guidance": None, "answer_check": None},  # ReAct's defaults
 }
 #: The tool sets — tools, items, instructions, capabilities, the variants run — the store's
 #: (the reproduction set), the same among 51 tools, and the held-out ones (``heldout.py``),
 #: reported apart.
 Set = tuple[list[Any], list[dict[str, Any]], str, dict[str, bool], tuple[str, ...]]
-BOTH: Final = ("baseline", "guidance+check")
+#: The variants each set runs: ``TRELLIS_LIVE_VARIANTS`` (comma-separated), else these two.
+BOTH: Final = tuple(
+    v.strip()
+    for v in (os.environ.get("TRELLIS_LIVE_VARIANTS") or "baseline,guidance+check").split(",")
+    if v.strip() in VARIANTS
+)
 SETS: Final[dict[str, Set]] = {
     "reproduction: store, 11 tools": (
         scenario.TOOLS,
@@ -195,14 +202,15 @@ def saved(section: str, found: dict[str, Any]) -> None:
 
 
 def harness_part(
-    rows: list[dict[str, Any]], sent: Sent, switches: dict[str, bool], writes: set[str]
+    rows: list[dict[str, Any]], sent: Sent, switches: dict[str, bool | None], writes: set[str]
 ) -> None:
     """What the harness must have done, whatever the model chose."""
     for row in rows:
         if row["status"] == "error":  # the model's own failures only
             # (ReAct's own stops — a stall, the step limit — say "stopped")
             said = row["error"] or ""
-            assert said.startswith("stopped") or any(f in said for f in MODEL_FAILURES), row
+            slow = said.startswith("the run worked past its time limit")  # a CPU model's pace
+            assert slow or said.startswith("stopped") or any(f in said for f in MODEL_FAILURES), row
     ran = [r for r in rows if r["status"] in ("success", "interrupted")]
     for row in ran:  # every item that needs tools and ran is scored from its trajectory
         assert (row["coverage"] is not None) == bool(row["needed"]), row
@@ -214,9 +222,9 @@ def harness_part(
     ids = {r["run_id"] for r in ran}
     if switches.get("tool_guidance"):
         assert not (ids & set(sent.unguided)), sent.unguided
-    if not switches.get("answer_check"):
+    if switches.get("answer_check") is False:
         assert not sent.checked and not sent.write_checked
-    else:
+    elif switches.get("answer_check"):
         # every answer was checked, or followed the check of a change (a rule refused it)
         answered = {r["run_id"] for r in ran if r["status"] == "success"}
         assert answered <= sent.checked | sent.write_checked, answered - sent.checked
@@ -241,7 +249,7 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
                 tool_guidance=switches.get("tool_guidance", False),
                 answer_check=switches.get("answer_check", False),
                 # what the assistant can do: told with the guidance
-                capabilities=can if switches.get("tool_guidance") else None,
+                capabilities=can if switches.get("tool_guidance") is not False else None,
             )
             agent = arm(
                 h.wrap(
@@ -264,9 +272,9 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
                     concurrency=1,
                 )
                 rows.extend(rows_of(report, sent, time.monotonic() - began, items))
-            harness_part(rows, sent, switches, writes)
             found[variant] = summarized(rows, writes)
-    saved(toolset, found)
+            saved(toolset, found)  # kept whatever the checks below say
+            harness_part(rows, sent, switches, writes)
     for variant, summary in found.items():
         print(
             f"\n{toolset} / {variant}: coverage {summary['mean_coverage']}, "

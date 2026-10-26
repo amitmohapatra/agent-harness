@@ -35,6 +35,7 @@ def reorder(sku: str, qty: int) -> str:
 
 
 # 1. your graph, with HarnessTools for the gateway's MCP tools and the memory tools
+#    (or middleware=trellis.middleware(): all of ReAct's harness part, below)
 graph = create_agent(model, tools=[stock, reorder], middleware=[HarnessTools()], checkpointer=saver)
 #    ...or your own StateGraph: ToolNode([stock, reorder]), model.bind_tools(...)
 
@@ -61,6 +62,17 @@ without memory, run records or traces, and a harness tool refuses to run (`ToolE
 inside a Harness run"). Config the graph needs at run time goes in the
 input, the graph's defaults or `graph.with_config(...)` before wrapping (still a graph); the
 harness sets `configurable.thread_id` itself (the run's thread, else the run id).
+
+## middleware(): ReAct's harness part on your graph
+
+`create_agent(model, tools, middleware=trellis.middleware(...),
+checkpointer=RunCheckpointer())` gives a `create_agent` graph everything `ReAct` adds on top of
+Deep Agents: the run's tools per model call narrowed per turn (the memory and gateway MCP tools
+among them), the graph's own tools governed, `max_steps` then a final answer, the stall guard,
+the hooks and spans, `call_timeout`, the budget's stop, planning on a long task, older results
+cleared and read back with a `context_window`, the tool guidance and the answer check
+([react.md](react.md#middleware-on-your-own-graph)). A `create_agent` graph wrapped without it
+is still narrowed and governed, said once at `h.wrap`.
 
 ## What is automatic
 

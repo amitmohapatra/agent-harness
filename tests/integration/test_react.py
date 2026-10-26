@@ -1,6 +1,7 @@
-"""``ReAct(...)``: a LangChain ``create_agent`` graph — native tool messages, structured output,
-the native middleware on by default and the harness's on top (in their order), a model name
-on the gateway, and the user's middleware added or replacing by name."""
+"""``ReAct(...)``: a Deep Agents ``create_deep_agent`` graph — native tool messages, structured
+output, Deep Agents' middleware and the harness's on top (in their order), a model name on the
+gateway, and the user's middleware added (refused when named as the harness's, replacing Deep
+Agents' by name)."""
 
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import LangGraphAdapter
+from trellis.harness.automatic import JournalBackend
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.react import defaults_off, stacked
 
@@ -193,9 +195,12 @@ def test_a_react_with_its_own_checkpointer_runs_on_its_own_and_is_not_wrapped(
     harness.wrap(ReAct(system_prompt="s", model=ScriptedChat([])), id="run")  # the run's
 
 
-def test_subagents_are_wrapped_agents_and_a2a(harness: Harness) -> None:
-    with pytest.raises(ConfigurationError, match="subagents= takes wrapped agents"):
+def test_subagents_are_deep_agents_own_wrapped_agents_and_a2a(harness: Harness) -> None:
+    with pytest.raises(ConfigurationError, match="not a ScriptedChat"):
         ReAct(system_prompt="s", model=ScriptedChat([]), subagents=[ScriptedChat([])])
+    graph = ReAct(system_prompt="s", model=ScriptedChat([]))
+    with pytest.raises(ConfigurationError, match="CompiledSubAgent"):
+        ReAct(system_prompt="s", model=ScriptedChat([]), subagents=[graph])
 
 
 def test_the_window_is_the_models_profile_else_the_default() -> None:
@@ -228,17 +233,19 @@ def test_given_middleware_is_added_before_model_hooks_and_replaces_nothing() -> 
         stacked(defaults, [Named("A")])
 
 
-async def test_a_summarization_middleware_given_is_refused_naming_the_default() -> None:
+async def test_a_deep_agents_middleware_given_replaces_its_own_by_name() -> None:
     model = ScriptedChat(["hi"])
     mine = SummarizationMiddleware(model, trigger=("messages", 100))
-    with pytest.raises(ConfigurationError, match="SummarizationMiddleware is ReAct's own"):
-        ReAct(system_prompt="s", model=model, middleware=[mine])
+    graph = ReAct(system_prompt="s", model=model, middleware=[mine])
+    assert "SummarizationMiddleware.before_model" in graph.nodes  # LangChain's, in its place
+    with pytest.raises(ConfigurationError, match=r"StepLimit is ReAct's own \(max_steps=\)"):
+        ReAct(system_prompt="s", model=model, middleware=[ours.StepLimit(3)])
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 2.5, "3", None])
-@pytest.mark.parametrize("name", ["max_steps", "max_repeats"])
-def test_steps_and_repeats_are_one_or_more(name: str, value: Any) -> None:
-    with pytest.raises(ConfigurationError, match=f"{name} is a number of steps, 1 or more"):
+@pytest.mark.parametrize(("name", "least"), [("max_steps", 1), ("max_repeats", 2)])
+def test_steps_and_repeats_are_whole_numbers(name: str, least: int, value: Any) -> None:
+    with pytest.raises(ConfigurationError, match=f"{name} is a number of steps, {least} or more"):
         ReAct(system_prompt="s", model=ScriptedChat(["hi"]), **{name: value})
 
 
@@ -280,8 +287,16 @@ async def test_the_middleware_run_in_their_order(
     ]:
         recorded(cls, label)
     model = ScriptedChat([("stock", {"sku": "a"}), "7"])
-    graph = ReAct(system_prompt="s", model=model, middleware=[Mine()], context_window=128_000)
+    graph = ReAct(
+        system_prompt="s",
+        model=model,
+        middleware=[Mine()],
+        context_window=128_000,
+        backend=JournalBackend(),  # on Deep Agents
+    )
     await arm(harness.wrap(graph, id="order"), [stock]).run("x", user="u")
+    # Deep Agents' files first, the harness's next; Deep Agents' summarization after what
+    # narrows the tools, so it counts what is sent
     model_order = ["files", "tools", "stall", "steps", "clear", "summary", "mine", "hooks"]
     first_call = [s.split()[1] for s in seen[: len(model_order)]]
     assert first_call == model_order  # outermost first: ModelHooks sees what is sent
@@ -394,7 +409,8 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
         [("dump", {}), ("read_file", {"file_path": "/large_tool_results/call_1"}), "done"]
     )
     result = await arm(
-        harness.wrap(ReAct(system_prompt="s", model=model), id="dumper"), [dump]
+        harness.wrap(ReAct(system_prompt="s", model=model, backend=JournalBackend()), id="dumper"),
+        [dump],
     ).run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     told = model.requests[1]["messages"][-1]["content"]

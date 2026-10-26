@@ -12,6 +12,7 @@ from tests.support.memory import FakeMemoryService
 from tests.support.models import Script, ScriptedChat
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
+from trellis.harness.automatic import JournalBackend
 from trellis.harness.react import CLEARED
 
 
@@ -82,7 +83,8 @@ async def test_older_turns_are_summarized_and_their_history_kept_to_read(
     script: list[Any] = [("note", {"text": f"{n} " + "n" * 2400}) for n in range(5)]
     summarizing = Summarizing([*script, ("publish", {"name": "notes"}), "done"])
     model = ScriptedChat(script=summarizing)
-    target = ReAct(system_prompt="s", model=model, context_window=4000)
+    # Deep Agents' summarization: a ReAct on Deep Agents (a backend given)
+    target = ReAct(system_prompt="s", model=model, context_window=4000, backend=JournalBackend())
     agent = arm(memory_harness.wrap(target, id="notes"), [note, publish])
     paused = await agent.run("take five notes", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
