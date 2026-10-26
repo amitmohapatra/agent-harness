@@ -211,7 +211,7 @@ async def test_failing_slow_malformed_and_huge_mcp_results_reach_the_model() -> 
     assert any("erp-raises failed: the server failed" in s for s in said)
     assert any("erp-slow timed out" in s for s in said)
     assert any("<object object at" in s for s in said)  # garbage: its text
-    assert any("/large_tool_results/" in s for s in said)  # huge: saved, a preview read
+    assert any("x" * 1_000 in s for s in said)  # huge: it reaches the model (no window known)
     assert checks(model) == 1
 
 

@@ -166,7 +166,7 @@ src/trellis/
     middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, StepLimit,
                        StallGuard, ReadTools, read_result, ToolGuidance, AnswerCheck;
                        RunCheckpointer (the latest checkpoint, delta channels' history beside it)
-    react.py           ReAct(...): create_deep_agent with middleware(), the harness's part
+    react.py           ReAct(...): create_agent (create_deep_agent on demand) with middleware()
     automatic.py       what a long task is offered (planning, scratch tools), the budget's stop
     subagents.py       a wrapped agent in tools=[...]: a tool, each call a child run
     sandbox/           sandbox(): the run's own sandbox as three tools (base: the provider
@@ -434,7 +434,7 @@ flowchart LR
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
 | LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | the graph's own, governed as it runs them; the harness's with `HarnessTools()` | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
-| `ReAct` (a `create_deep_agent` graph with `middleware()`) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
+| `ReAct` (a `create_agent` graph — `create_deep_agent` on demand — with `middleware()`) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
 | Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through a `PreToolUse` hook | per run | a `UserPromptSubmit` hook |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |
@@ -446,9 +446,10 @@ entry point (`graph.ainvoke`, `Runner.run`, `query`) is not intercepted: call
 
 ## The middleware
 
-`ReAct(...)` is a Deep Agents `create_deep_agent` graph with the harness's `middleware()`
-(`react.py`); any `create_agent` or Deep Agents graph may take `middleware()` too. The stack
-`ReAct` builds, in order — each `wrap_model_call` wraps the ones after it, so the first is
+`ReAct(...)` is LangChain's `create_agent` graph with the harness's `middleware()` — a Deep Agents
+`create_deep_agent` graph when a Deep Agents capability is asked for (`backend=`, a sub-agent of
+its own, `skills=`, `memory_files=`, `permissions=`) — (`react.py`); any `create_agent` or Deep
+Agents graph may take `middleware()` too. The stack `ReAct` builds on Deep Agents, in order — each `wrap_model_call` wraps the ones after it, so the first is
 outermost; Deep Agents' own first, then the harness's (Deep Agents' summarization placed after
 what narrows the tools, so it counts what is sent), then Deep Agents' tail:
 

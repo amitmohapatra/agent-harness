@@ -377,7 +377,7 @@ async def _one_row(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
     return [row]
 
 
-@pytest.mark.parametrize(("variant", "paged"), [("main", True), ("main-paging", False)])
+@pytest.mark.parametrize(("variant", "paged"), [("deep", True), ("deep-paging", False)])
 async def test_a_main_piece_is_measured_on_its_own(
     variant: str, paged: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:

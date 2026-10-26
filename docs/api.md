@@ -274,8 +274,10 @@ ReAct(system_prompt, model, *, tools=(), subagents=(), skills=None, memory_files
       capabilities=None, middleware=(), checkpointer=None)
 ```
 
-A tool-calling agent for teams with no framework: Deep Agents' `create_deep_agent`, every feature
-of it native, with the harness's [`middleware()`](#middleware) on top
+A tool-calling agent for teams with no framework: LangChain's `create_agent` with the harness's
+[`middleware()`](#middleware) — Deep Agents' `create_deep_agent`, every feature of it native, when
+a Deep Agents capability is asked for (`backend`, a sub-agent of its own, `skills`,
+`memory_files`, `permissions`)
 ([frameworks/react.md](frameworks/react.md)). The parameter names are Deep Agents' where both have
 one.
 

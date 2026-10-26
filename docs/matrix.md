@@ -158,7 +158,7 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 10. a function target runs its own calls
 11. native: the graph runs a turn's calls its own way (N3); HarnessTools orders the writes (ReAct has it)
 12. native: the framework runs a turn's calls its own way (N3)
-13. Deep Agents' own: middleware() adds what Deep Agents lacks; build on create_deep_agent (as ReAct does), or add FilesystemMiddleware
+13. Deep Agents' own: middleware() adds what Deep Agents lacks; build on create_deep_agent (as ReAct does given a backend), or add FilesystemMiddleware
 14. a function target gets the whole result: it has no context to fill
 15. native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct and Deep Agents have it by default)
 16. a function target has no model context

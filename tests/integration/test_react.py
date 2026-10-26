@@ -29,6 +29,7 @@ from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.adapters.base import context_window
 from trellis.harness.adapters.langgraph import LangGraphAdapter
+from trellis.harness.automatic import JournalBackend
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.react import defaults_off, stacked
 
@@ -286,7 +287,13 @@ async def test_the_middleware_run_in_their_order(
     ]:
         recorded(cls, label)
     model = ScriptedChat([("stock", {"sku": "a"}), "7"])
-    graph = ReAct(system_prompt="s", model=model, middleware=[Mine()], context_window=128_000)
+    graph = ReAct(
+        system_prompt="s",
+        model=model,
+        middleware=[Mine()],
+        context_window=128_000,
+        backend=JournalBackend(),  # on Deep Agents
+    )
     await arm(harness.wrap(graph, id="order"), [stock]).run("x", user="u")
     # Deep Agents' files first, the harness's next; Deep Agents' summarization after what
     # narrows the tools, so it counts what is sent
@@ -402,7 +409,8 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
         [("dump", {}), ("read_file", {"file_path": "/large_tool_results/call_1"}), "done"]
     )
     result = await arm(
-        harness.wrap(ReAct(system_prompt="s", model=model), id="dumper"), [dump]
+        harness.wrap(ReAct(system_prompt="s", model=model, backend=JournalBackend()), id="dumper"),
+        [dump],
     ).run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     told = model.requests[1]["messages"][-1]["content"]

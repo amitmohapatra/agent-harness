@@ -53,6 +53,7 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
+from trellis.harness.automatic import JournalBackend
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
@@ -369,7 +370,13 @@ async def parallel_writes(w: World) -> None:
 # --------------------------------------------------------------------------- context
 async def large_result(w: World) -> None:
     d = Desk()
-    o = (await w.go([d.report(100_000)], [("report", {"name": "q3"})])).succeeded()
+
+    async def deep(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
+        # ReAct on Deep Agents: a backend given (the journal's), its file tools and paging
+        return ReAct("You read.", PlannedChat(plan), backend=JournalBackend()), tools
+
+    target = deep if w.adapter == "react" else None
+    o = (await w.go([d.report(100_000)], [("report", {"name": "q3"})], target=target)).succeeded()
     assert "/large_tool_results/" in o.text, f"the model read all {len(o.text)} characters"
     assert len(o.text) < 25_000
 
@@ -989,7 +996,8 @@ FEATURES: Final[list[Feature]] = [
         "F26",
         "large results: saved as a file, a head-and-tail preview read in pages (read_file)",
         "F26",
-        "automatic: Deep Agents' FilesystemMiddleware (ReAct's, Deep Agents' by default); "
+        "automatic: Deep Agents' FilesystemMiddleware (ReAct's given a backend, Deep Agents' by "
+        "default); "
         "OpenAI Agents and Claude: the same cut, kept in the run (tools.results)",
         large_result,
         adapters={
@@ -1000,7 +1008,7 @@ FEATURES: Final[list[Feature]] = [
             ),
             "middleware": NA(
                 "Deep Agents' own: middleware() adds what Deep Agents lacks; build on "
-                "create_deep_agent (as ReAct does), or add FilesystemMiddleware"
+                "create_deep_agent (as ReAct does given a backend), or add FilesystemMiddleware"
             ),
         },
         way2=NA(

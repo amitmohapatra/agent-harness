@@ -7,28 +7,25 @@ same instructions and model. A new cost feature lands as one more entry of :data
   ``StallGuard``, ``StepLimit``, ``PatchToolCallsMiddleware``, ``ModelHooks``), no result
   paging, no context editing, no summarization, no automatic feature;
   ``without={"code_mode", "tool_search"}``.
-* ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: Deep Agents'
-  ``create_deep_agent`` with the harness's middleware — the features it turns on by itself
-  (planning, scratch files, the ``task`` helper, tool search...), result paging
-  (``FilesystemMiddleware``: a large result saved, a preview sent), older results cleared past
-  half the window, summarization near its end, ``ToolGuidance`` and ``AnswerCheck`` automatic
-  (``None``), Code Mode where it applies (read-only Code Mode MCP servers of the gateway; this
-  benchmark's catalogues are the harness's own tools, so it does not).
-* ``agent`` — LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep Agents'
-  ``PatchToolCallsMiddleware``): the harness's part without Deep Agents' (no result paging, no
-  summarization, no file tools or helper) — the other base ``ReAct`` could have.
+* ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: with no Deep Agents
+  capability asked for, LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep
+  Agents' ``PatchToolCallsMiddleware``) — planning on a long task, older results cleared past
+  half the window, the request fitted to the window (``FitWindow``), ``ToolGuidance`` and
+  ``AnswerCheck`` off by default.
+* ``deep`` — ``ReAct`` on Deep Agents (a backend given: the journal's), ``create_deep_agent``
+  with the harness's middleware: result paging (``FilesystemMiddleware``: a large result saved,
+  a preview sent), summarization near the window's end, the scratch files and the ``task``
+  helper on a long task.
 * ``pieces`` — LangChain's ``create_agent`` with ``trellis.middleware()``'s pieces and Deep
   Agents' own pieces attached by hand (its ``FilesystemMiddleware`` on the journal, its
   summarization placed after the narrowing, ``PatchToolCallsMiddleware``; the scratch tools on a
-  long task): Deep Agents' capabilities on demand without ``create_deep_agent``'s assembly.
+  long task): Deep Agents' capabilities gated per call without ``create_deep_agent``'s assembly.
 * ``main+guidance``, ``main+check`` — ``main`` with ``tool_guidance=True`` or
   ``answer_check=True``: what each is worth when forced on.
-* ``main-<feature>`` — ``main`` without each feature it turns on by itself
-  (:data:`AUTOMATIC`: its middleware left out); ``main@8k`` — ``main`` on an 8,192-token
-  window;
-* ``main-<piece>`` — ``main`` with one of its pieces off (:data:`PIECES`: ``paging``,
-  ``context_editing``, ``summarization``), so each piece is measured on its own: the default
-  middleware of that name left out (``react.defaults_off``).
+* ``main-planning``, ``deep-files`` — without a feature turned on by itself (:data:`AUTOMATIC`:
+  its middleware left out); ``main@8k`` — ``main`` on an 8,192-token window;
+* ``deep-<piece>`` — ``deep`` with one of Deep Agents' pieces off (:data:`PIECES`: ``paging``,
+  ``context_editing``, ``summarization``), each measured on its own (``react.defaults_off``).
 
 :data:`DEFAULT` are the variants a run compares unless ``--variants`` says.
 """
@@ -96,7 +93,11 @@ def main(
     on: tuple[str, ...] = (),
     window: int | None = None,
     switches: dict[str, bool] | None = None,
+    deep: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
+    """``ReAct`` as it is built — ``deep``: on Deep Agents (a backend given: the journal's)."""
+    from trellis.harness.automatic import JournalBackend
+
     named = PIECES | AUTOMATIC
     with defaults_off(*(named[name] for name in off)), defaults_on(*on):
         target = ReAct(
@@ -107,6 +108,7 @@ def main(
             tools=setup.tools,
             tool_guidance=(switches or {}).get("tool_guidance"),
             answer_check=(switches or {}).get("answer_check"),
+            backend=JournalBackend() if deep else None,
         )
     return target, {}
 
@@ -153,32 +155,7 @@ def pieces(setup: Setup) -> tuple[Any, dict[str, Any]]:
     return graph, {}
 
 
-def agent(setup: Setup) -> tuple[Any, dict[str, Any]]:
-    """``create_agent`` with the harness's middleware: ``ReAct``'s settings, no Deep Agents."""
-    from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-    from langchain.agents import create_agent
-
-    from trellis import middleware
-    from trellis.harness import middleware as ours
-    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
-    from trellis.harness.gateways import routed_chat_model
-
-    graph = create_agent(
-        routed_chat_model(setup.model) if isinstance(setup.model, str) else setup.model,
-        tools=[],
-        system_prompt=setup.system,
-        middleware=[
-            PatchToolCallsMiddleware(),
-            *middleware(max_steps=setup.max_steps, context_window=setup.window),
-        ],
-        checkpointer=ours.RunCheckpointer(),
-        name="agent",
-    )
-    setattr(graph, TOOLS_ATTRIBUTE, list(setup.tools))  # run by HarnessTools, as ReAct's are
-    return graph, {}
-
-
-#: ``main``'s pieces a ``main-<piece>`` variant turns off, by the name of their middleware.
+#: ``deep``'s pieces a ``deep-<piece>`` variant turns off, by the name of their middleware.
 PIECES: Final = {
     "paging": "FilesystemMiddleware",
     "context_editing": "ContextEditingMiddleware",
@@ -197,29 +174,29 @@ VARIANTS: Final[dict[str, Variant]] = {
     "baseline": Variant("baseline", "plain tools, everything off", baseline),
     "main": Variant(
         "main",
-        "ReAct as main builds it: result paging, context editing, summarization; ToolGuidance off",
+        "ReAct as it is built: create_agent with middleware() (no Deep Agents capability asked)",
         main,
     ),
+    "deep": Variant(
+        "deep",
+        "ReAct on Deep Agents (a backend given): its file tools, paging, summarization, helper",
+        functools.partial(main, deep=True),
+    ),
     **{
-        f"main-{piece}": Variant(
-            f"main-{piece}",
-            f"main with {piece.replace('_', ' ')} off",
-            functools.partial(main, off=(piece,)),
+        f"deep-{piece}": Variant(
+            f"deep-{piece}",
+            f"deep with {piece.replace('_', ' ')} off",
+            functools.partial(main, off=(piece,), deep=True),
         )
         for piece in PIECES
     },
-    **{
-        f"main-{feature}": Variant(
-            f"main-{feature}",
-            f"main without {feature}",
-            functools.partial(main, off=(feature,)),
-        )
-        for feature in AUTOMATIC
-    },
-    "agent": Variant(
-        "agent",
-        "create_agent with trellis.middleware(): the harness's part without Deep Agents",
-        agent,
+    "main-planning": Variant(
+        "main-planning", "main without planning", functools.partial(main, off=("planning",))
+    ),
+    "deep-files": Variant(
+        "deep-files",
+        "deep without its long-task files",
+        functools.partial(main, off=("files",), deep=True),
     ),
     "pieces": Variant(
         "pieces",

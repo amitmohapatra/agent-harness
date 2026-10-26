@@ -26,6 +26,7 @@ from trellis import Harness, ReAct, a2a, middleware, sandbox, stored, tool
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.adapters.langgraph import bound_tools, graph_tools
+from trellis.harness.automatic import JournalBackend
 from trellis.harness.gateways import routed
 from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE, RunCheckpointer
 from trellis.harness.react import PLACED, _native, defaults_off
@@ -279,8 +280,15 @@ def test_a_react_with_its_own_store_runs_on_its_own_and_is_not_wrapped(
 
 
 # --------------------------------------------------------------------------- backends
-def test_on_the_graphs_state_the_file_tools_are_its_own_and_execute_is_machinery() -> None:
+def test_without_a_deep_agents_capability_react_is_langchains_loop() -> None:
+    """No backend, sub-agent of its own, skills, memory files or permissions: ``create_agent``
+    with the harness's part — no file tools, no ``task`` (measured the better base)."""
     graph = ReAct("s", ScriptedChatModel(turns=[]))
+    assert {t.name for t in graph_tools(graph)} == {"write_todos"}  # planning, on a long task
+
+
+def test_on_the_graphs_state_the_file_tools_are_its_own_and_execute_is_machinery() -> None:
+    graph = ReAct("s", ScriptedChatModel(turns=[]), backend=JournalBackend())
     outside = marked(graph, OUTSIDE_STATE)
     assert not any(outside.values())
     machinery = marked(graph, MACHINERY)

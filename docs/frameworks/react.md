@@ -1,13 +1,16 @@
 # ReAct: a tool-calling agent with no framework of yours
 
-For a team with no agent framework: `ReAct(system_prompt, model)` returns a Deep Agents
-`create_deep_agent` graph — every Deep Agents feature native (file tools on a backend, large
-results saved as files, summarization near the window's end, sub-agents, skills, memory files,
-permissions, dangling-call repair, prompt caching) — with the harness's own middleware on top:
-[`middleware()`](#middleware-on-your-own-graph), what Deep Agents has no piece for. `h.wrap` runs
-it as it runs any LangGraph graph ([langgraph.md](langgraph.md)): nothing of the loop is the
-harness's. Install the `react` extra (`pip install 'trellis-harness[react]'`: LangGraph,
-LangChain, `langchain-openai` and Deep Agents).
+For a team with no agent framework: `ReAct(system_prompt, model)` returns LangChain's
+`create_agent` graph with the harness's own middleware — [`middleware()`](#middleware-on-your-own-graph)
+— and dangling-call repair. Ask for a Deep Agents capability — `backend=` (file tools), a
+sub-agent of its own (`subagents=`), `skills=`, `memory_files=`, `permissions=` — and it is a
+Deep Agents `create_deep_agent` graph instead, every Deep Agents feature native (large results
+saved as files, summarization near the window's end, sub-agents, skills, memory files,
+permissions, prompt caching), the same middleware on top. Both bases were measured; the plain one
+was as good or better on every class of task ([the base](#the-base)). `h.wrap` runs it as it runs
+any LangGraph graph ([langgraph.md](langgraph.md)): nothing of the loop is the harness's. Install
+the `react` extra (`pip install 'trellis-harness[react]'`: LangGraph, LangChain,
+`langchain-openai` and Deep Agents).
 
 `ReAct` runs wrapped, with the blocks of the harness that wraps it — the deployment's
 (`Harness()`), or your own: `Harness(runs=..., governance=..., memory=False).wrap(ReAct(...))`,
@@ -127,26 +130,33 @@ Not exposed: Deep Agents' `interrupt_on` — approvals are the [catalog](../gove
 sub-agent's `interrupt_on` becomes its tools' declared risk: a tool named there asks a person) —
 `name` (the wrap's `id`) and `debug`.
 
-## Lean by default: Deep Agents' capabilities on demand
+## The base
 
-A simple task costs what it cost before Deep Agents: the same instructions (Deep Agents' main
-agent adds no base prompt), the run's tools and nothing else. Each capability is offered on the
-turn that needs it — by the harness's per-call tool set, never always on:
+Three bases were measured on Granite 3.3 2B (CPU, llama.cpp behind Bifrost, an 8,192-token
+window), each with `middleware()` and `FitWindow`, ten different tasks per class:
+**A** `create_agent` (today's `ReAct`), **B** `create_deep_agent`, **C** `create_agent` with Deep
+Agents' pieces attached and offered per call.
 
-| Capability | Offered when |
+<!-- measured: the base comparison -->
+
+A simple task costs the same on all three — the same instructions (Deep Agents' main agent
+adds no base prompt) and tools. A is `ReAct`: no less accurate on any class, and on a large
+result it completed every run where B and C stalled half of theirs, after Deep Agents saved the
+result as a file and the model went looking. Deep Agents' capabilities stay a parameter away:
+
+| Capability | When |
 |---|---|
 | planning (`write_todos`) | a long task: the model's third call, or a request asking for steps, on a window of 32,000 tokens or more |
-| scratch files (`ls`, `write_file`, `edit_file`, `delete`, `glob`, `grep`) and the general-purpose helper (`task`) | the same long task (on the default backend) |
-| `read_file` | once a result was saved as a file (Deep Agents' eviction of a large result) or a summary saved the history; from the start on a backend of yours, with skills or memory files |
 | `read_result` | once an older result was cleared past half the window |
-| summarization | near the window's end (Deep Agents' thresholds) |
-| `task` with your sub-agents | when you give `subagents=` |
-| `execute` | when the backend is a sandbox (`docker_sandbox()`) |
-| skills, memory files | when you give `skills=`, `memory_files=` |
+| file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `docker_sandbox()` (with `execute`) |
+| `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict; on a long task, Deep Agents' general-purpose helper too |
+| skills, memory files, permissions | `skills=`, `memory_files=`, `permissions=` |
 
-The guidance for a capability travels in its tool's description, offered that turn — never in
-the instructions — so the system prompt is the same from the first call to the last and a
-provider's prompt cache keeps its prefix.
+On Deep Agents, the scratch files and the general-purpose helper are offered on a long task only
+(on the graph's state), `read_file` once a result was saved as a file, and each capability's
+guidance travels in its tool's description, offered that turn — never in the instructions — so
+the system prompt is the same from the first call to the last and a provider's prompt cache
+keeps its prefix.
 
 ## The middleware
 

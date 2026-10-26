@@ -3,21 +3,25 @@
 What changed in each release of `trellis-harness`. The framework versions each release was
 tested with are in [docs/versioning.md](docs/versioning.md).
 
-## 0.6.0 — ReAct on Deep Agents; `middleware()` (unreleased)
+## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
-`ReAct` is Deep Agents' `create_deep_agent`, every Deep Agents feature native, with the
-harness's part on top — and that part is exported: `trellis.middleware()` gives a
-`create_agent` or `create_deep_agent` graph of your own what `ReAct` adds.
+`ReAct` is LangChain's `create_agent` with the harness's part on top, and Deep Agents'
+`create_deep_agent`, every Deep Agents feature native, when a Deep Agents capability is asked
+for — and that part is exported: `trellis.middleware()` gives a `create_agent` or
+`create_deep_agent` graph of your own what `ReAct` adds.
 
 ### Breaking
 
-- `ReAct` builds on `create_deep_agent` (was LangChain's `create_agent`): Deep Agents' file
-  tools (on `backend=`), large-result eviction, summarization, sub-agents (`task`), skills,
-  memory files, permissions, dangling-call repair and prompt caching are its own. The new
-  signature, names following Deep Agents': `ReAct(system_prompt, model, *, tools, subagents,
-  skills, memory_files, permissions, backend, store, response_format, state_schema,
-  context_schema, cache, max_steps=12, max_repeats=3, call_timeout, context_window, effort,
-  tool_guidance=None, answer_check=None, capabilities, middleware, checkpointer)`
+- `ReAct` takes Deep Agents' capabilities: given `backend=` (file tools, large-result eviction,
+  summarization; `docker_sandbox()` for `execute`), a `SubAgent`/`CompiledSubAgent` sub-agent
+  (`task`), `skills=`, `memory_files=` or `permissions=`, it is `create_deep_agent` (prompt
+  caching, its long-task scratch files and helper); otherwise `create_agent` with
+  `middleware()` and dangling-call repair — the base measured as good or better on every class
+  of task (see Changed). The new signature, names following Deep Agents': `ReAct(system_prompt,
+  model, *, tools, subagents, skills, memory_files, permissions, backend, store,
+  response_format, state_schema, context_schema, cache, max_steps=12, max_repeats=3,
+  call_timeout, context_window, effort, tool_guidance=None, answer_check=None, capabilities,
+  middleware, checkpointer)`
   (`memory_files` is Deep Agents' `memory`; its `interrupt_on`, `name` and `debug` are not
   exposed).
 - `ReAct(tools=)` refuses `sandbox()` (code runs in `backend=docker_sandbox()`) and agents

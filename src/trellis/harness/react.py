@@ -1,5 +1,6 @@
-"""``ReAct(...)``: a tool-calling agent for teams with no framework — Deep Agents'
-``create_deep_agent``, every feature of it native, with the harness's middleware on top:
+"""``ReAct(...)``: a tool-calling agent for teams with no framework — LangChain's
+``create_agent`` with the harness's middleware, and, when a Deep Agents capability is asked for,
+Deep Agents' ``create_deep_agent``, every feature of it native:
 
     agent = h.wrap(
         ReAct("You answer stock questions.", "gpt-4o", tools=[quote], subagents=[research]),
@@ -9,18 +10,20 @@
 It returns the compiled graph (a LangGraph target: ``LangGraphAdapter`` runs it); nothing of the
 loop is the harness's. What it is built with:
 
-* **Deep Agents, native** — its file tools on a backend (``backend=``: the graph's state by
-  default — a :class:`~.automatic.JournalBackend`, kept by the run's journal — a disk, a store,
-  a composite of them, or the run's sandbox: ``docker_sandbox()``), a large tool result saved as
-  a file with a preview in its place, summarization near the window's end, dangling tool calls
-  answered, prompt caching, its sub-agents (``subagents=``: the ``task`` tool), ``skills=``,
-  ``memory_files=`` (its ``AGENTS.md``-style memory), ``permissions=``, ``response_format``,
-  parallel tool calls;
-* **the harness's** — :func:`middleware`, what Deep Agents has no piece for: the run's tools per
+* **LangChain's loop** — ``create_agent``, dangling tool calls answered (Deep Agents'
+  ``PatchToolCallsMiddleware``), ``response_format``, parallel tool calls: the base measured
+  best on a small model (``docs/frameworks/react.md#the-base``);
+* **Deep Agents, on demand** — given ``backend=`` (its file tools on the graph's state, a disk, a
+  store, a composite, or the run's sandbox: ``docker_sandbox()``), a sub-agent of its own
+  (``subagents=``: the ``task`` tool), ``skills=``, ``memory_files=`` (its ``AGENTS.md``-style
+  memory) or ``permissions=``, it is ``create_deep_agent``: a large tool result saved as a file
+  with a preview in its place, summarization near the window's end, prompt caching, and, on a
+  long task, its scratch tools and general-purpose helper;
+* **the harness's** — :func:`middleware`, what neither has a piece for: the run's tools per
   model call (narrowed per turn: the tool hints, the memory and gateway MCP tools), governed
   with full parity; the model hooks, ``call_timeout`` and model routing; ``max_steps`` then a
   final answer; ``max_repeats``; older results cleared past half the window and read back; the
-  run's budget; planning and Deep Agents' scratch tools offered on a long task
+  request fitted to the window; the run's budget; planning on a long task
   (``trellis.harness.automatic``); optional tool guidance and an answer check; and the graph's
   checkpoint in the run (:class:`~.middleware.RunCheckpointer`: a resume continues in place);
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware, added before
@@ -265,7 +268,9 @@ def ReAct(
     middleware: Sequence[Any] = (),
     checkpointer: Any = None,
 ) -> Any:
-    """A Deep Agents graph (``create_deep_agent``) answering with ``system_prompt`` (its
+    """A LangChain agent graph (``create_agent``; ``create_deep_agent`` when a Deep Agents
+    capability is asked for: ``backend``, a sub-agent of its own, ``skills``, ``memory_files``,
+    ``permissions``) answering with ``system_prompt`` (its
     instructions: a string, or ``stored("name", **vars)``, a stored prompt of the gateway pinned
     for each run) and ``model`` (a model name, routed per call — Bifrost, else the provider's own
     key — or a LangChain chat model), its answer a ``response_format`` (a pydantic model or a
@@ -283,10 +288,11 @@ def ReAct(
     ``backend=docker_sandbox()``. Every run also has the MCP tools the virtual key allows and the
     memory tools.
 
-    Deep Agents' own, passed as they are: ``skills``, ``memory_files`` (its ``memory``:
-    ``AGENTS.md``-style files loaded into the instructions), ``permissions``, ``backend`` (by
-    default the graph's state, kept in the run's journal), ``state_schema``, ``context_schema``,
-    ``cache``; ``store`` and ``checkpointer`` are for the graph run on its own (``h.wrap``
+    Deep Agents' own, passed as they are, any of them making it Deep Agents' graph: ``skills``,
+    ``memory_files`` (its ``memory``: ``AGENTS.md``-style files loaded into the instructions),
+    ``permissions``, ``backend`` (``JournalBackend()``: the graph's state, kept in the run's
+    journal); LangChain's: ``state_schema``, ``context_schema``, ``cache``; ``store`` and
+    ``checkpointer`` are for the graph run on its own (``h.wrap``
     refuses them: a wrapped agent's runs keep their checkpoint in the run, and its store is the
     memory service).
 
@@ -297,7 +303,9 @@ def ReAct(
     try:
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
+        from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
+        from langchain.agents import create_agent
 
         from trellis.harness import automatic
         from trellis.harness import middleware as ours
@@ -328,6 +336,48 @@ def ReAct(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
     profiled = _profiled(chat, window)
+    stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
+    instructions = None if stored_prompt is not None else system_prompt
+    if not _deep(
+        backend=backend,
+        native=native,
+        skills=skills,
+        memory_files=memory_files,
+        permissions=permissions,
+    ):
+        # no Deep Agents capability asked for: LangChain's loop with the harness's part — the
+        # base measured best (docs/frameworks/react.md#the-base)
+        graph = create_agent(
+            profiled,
+            tools=own,
+            system_prompt=instructions,
+            middleware=[
+                PatchToolCallsMiddleware(),
+                *stacked(
+                    _middleware(
+                        max_steps=max_steps,
+                        max_repeats=max_repeats,
+                        call_timeout=call_timeout,
+                        context_window=window,
+                        tool_guidance=tool_guidance,
+                        answer_check=answer_check,
+                        capabilities=capabilities,
+                        system_prompt=stored_prompt,
+                    ),
+                    middleware,
+                ),
+            ],
+            response_format=response_format,
+            state_schema=state_schema,
+            context_schema=context_schema,
+            checkpointer=checkpointer or ours.RunCheckpointer(),
+            store=store,
+            cache=cache,
+            name="react",
+        )
+        return _described(
+            graph, named, window, [*run, *helpers], checkpointer=checkpointer, store=store
+        )
     files_backend = backend if backend is not None else automatic.JournalBackend()
     # files outside the graph's state (a disk, a store, a sandbox) are the agent's from the
     # start, and governed; in its state, a long task is offered the scratch tools — and the
@@ -344,7 +394,7 @@ def ReAct(
         tool_guidance=tool_guidance,
         answer_check=answer_check,
         capabilities=capabilities,
-        system_prompt=system_prompt if isinstance(system_prompt, Stored) else None,
+        system_prompt=stored_prompt,
         held=held,
         files=outside or bool(skills) or bool(memory_files),
         summarization=_placed(create_summarization_middleware(profiled, files_backend), PLACED),
@@ -352,7 +402,7 @@ def ReAct(
     graph = create_deep_agent(
         profiled,
         tools=own,
-        system_prompt=None if isinstance(system_prompt, Stored) else system_prompt,
+        system_prompt=instructions,
         # Deep Agents' summarization stands after the harness's narrowing, which it counts
         middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware)],
         subagents=cast(Any, native),  # Deep Agents' own dicts, as given
@@ -369,10 +419,38 @@ def ReAct(
         name="react",
     )
     _declared(graph, backend=files_backend, outside=outside, helper_only=not native)
-    # what the harness reads of the graph: the model's name, the window when known (the
-    # pushed memory context's budget is a share of it), and the tools it runs for the agent
+    return _described(
+        graph, named, window, [*run, *helpers], checkpointer=checkpointer, store=store
+    )
+
+
+def _deep(
+    *,
+    backend: Any,
+    native: Sequence[Any],
+    skills: Sequence[str] | None,
+    memory_files: Sequence[str] | None,
+    permissions: Sequence[Any] | None,
+) -> bool:
+    """Whether a Deep Agents capability is asked for — files on a backend, a sub-agent of its
+    own, skills, memory files, permissions — so ``ReAct`` is ``create_deep_agent``'s."""
+    return backend is not None or bool(native or skills or memory_files or permissions)
+
+
+def _described(
+    graph: Any,
+    named: str | None,
+    window: int | None,
+    run: list[Any],
+    *,
+    checkpointer: Any,
+    store: Any,
+) -> Any:
+    """What the harness reads of the graph: the model's name, the window when known (the
+    pushed memory context's budget is a share of it), the tools it runs for the agent, and
+    whether its checkpointer and store are its own."""
     graph = graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
-    setattr(graph, TOOLS_ATTRIBUTE, [*run, *helpers])
+    setattr(graph, TOOLS_ATTRIBUTE, run)
     setattr(graph, OWN_CHECKPOINTER, checkpointer is not None)
     setattr(graph, OWN_STORE, store is not None)
     return graph
