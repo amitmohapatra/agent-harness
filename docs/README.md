@@ -33,7 +33,7 @@ for you.
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, a framework's own tools, tool hints, Code Mode |
 | [gateway.md](gateway.md) | the Bifrost gateway: stored prompts, who an MCP call is for, what the gateway never does for a run, frameworks' own MCP clients |
 | [prompts.md](prompts.md) | stored prompts of the gateway: `stored(...)` as a `ReAct`'s instructions, `h.prompt` for any framework, pinned per run |
-| [skills.md](skills.md) | your framework's own Agent Skills, and the skills an agent learns (in its memory context) |
+| [skills.md](skills.md) | skill sources (`trellis.skills`: a folder, Bifrost, Langfuse, your store) in each framework's own skills slot, pinned per run; and the skills an agent learns (in its memory context) |
 | [subagents.md](subagents.md) | an agent in another's `tools=[...]`: child runs, their pauses answered through the parent, crashes, cancel, time |
 | [sandbox.md](sandbox.md) | `sandbox()`: commands and files in a sandbox of the run's own — its life, pauses, crashes, timeouts, governance |
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed |

@@ -67,7 +67,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
-from trellis.harness import budget
+from trellis.harness import budget, skills
 from trellis.harness.adapters.base import (
     Extracted,
     Invocation,
@@ -360,6 +360,10 @@ class ClaudeAdapter:
         runtime = run.runtime
         given = runtime.framework_options
         target = dataclasses.replace(target, **given) if given else target
+        # a skill source's plugin written for this run (its pinned skills), removed after it
+        plugins, written = await skills.for_run(target.plugins)
+        if written:
+            target = dataclasses.replace(target, plugins=plugins)
         steps = Steps(runtime, self)
         options = _options(target, native_input.context, run, session, steps)
         prompt = native_input.prompt if session is None else _resumed(native_input, run)
@@ -380,6 +384,7 @@ class ClaudeAdapter:
                         return
         finally:
             runtime.model_ended(STEP)
+            skills.removed(written)
 
 
 def _queried(prompt: Any, options: Any) -> AsyncGenerator[Any, None]:

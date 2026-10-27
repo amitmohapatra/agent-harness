@@ -316,6 +316,12 @@ def surface() -> Surface:
             for _, cls in inspect.getmembers(module, inspect.isclass):
                 if cls.__module__.startswith(("trellis.", "bifrost_sdk")):
                     _add(found, cls, platform=True)
+            # a module's own functions, called on it (``skills.combine(...)``)
+            found.attributes |= {
+                name
+                for name, fn in inspect.getmembers(module, inspect.isfunction)
+                if fn.__module__ == module.__name__ and not name.startswith("_")
+            }
             source = Path(getattr(module, "__file__", "") or "")
             if source.suffix == ".py":
                 text = source.read_text(encoding="utf-8")

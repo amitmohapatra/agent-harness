@@ -80,6 +80,7 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | [subagents.py](05_features/subagents.py) | `ReAct(subagents=[...])`: a planner calling two agents, one asking a person through the planner |
 | [stored_prompts.py](05_features/stored_prompts.py) | a stored prompt of the gateway as a `ReAct`'s instructions (`stored(...)`, pinned per run) and for any framework (`h.prompt`) |
 | [sandbox.py](05_features/sandbox.py) | `ReAct(backend=sandbox())`: a script written and run with Deep Agents' `execute` in the run's own sandbox (Docker when `DOCKER_HOST` is set, else a provider of the example's own); then the provider governed with no harness |
+| [skill_sources.py](05_features/skill_sources.py) | `trellis.skills`: a folder of `SKILL.md` skills and a team's own store combined (a user's version wins over the tenant's), read by `ReAct` through Deep Agents' own skills middleware and by a function through `list_skills`/`load_skill` |
 | [serve_agui_and_a2a.py](05_features/serve_agui_and_a2a.py) | `serve_chat` (AG-UI) and `serve_a2a` on one FastAPI app; another agent calling it with `a2a(url)`, its question asked through the caller |
 | [trajectory_evals.py](05_features/trajectory_evals.py) | `h.evaluate`: `exact_match`, `contains`, `llm_judge`, `called`, `tool_sequence` and an evaluator of your own reading the trajectory |
 | [online_judges.py](05_features/online_judges.py) | `h.wrap(judges=[llm_judge(..., sample=)])`: judges on a share of live runs, in the background |

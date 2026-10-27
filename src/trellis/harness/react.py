@@ -63,6 +63,7 @@ from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.gateways import routed_chat_model
 from trellis.harness.prompts import Stored
 from trellis.harness.removed import removed
+from trellis.harness.skills import skill_set
 
 log = logging.getLogger("trellis.models")
 
@@ -244,7 +245,7 @@ def ReAct(
     *,
     tools: Sequence[Any] = (),
     subagents: Sequence[Any] = (),
-    skills: list[str] | None = None,
+    skills: Any = None,
     memory_files: list[str] | None = None,
     permissions: list[Any] | None = None,
     backend: Any = None,
@@ -281,12 +282,13 @@ def ReAct(
     ``backend=sandbox()``, the run's own sandbox. Every run also has the MCP tools the virtual
     key allows and the memory tools.
 
-    Deep Agents' own, passed as they are, any of them making it Deep Agents' graph: ``skills``,
+    ``skills`` is a skill source (``trellis.skills``: a store's skills, pinned per run, read by Deep
+    Agents' own skills middleware through a route of the backend), or Deep Agents' own skill source
+    paths. Deep Agents' own, passed as they are, any of them making it Deep Agents' graph:
     ``memory_files`` (its ``memory``: ``AGENTS.md``-style files loaded into the instructions),
     ``permissions``, ``backend`` (``JournalBackend()``: the graph's state, kept in the run's
-    journal); LangChain's: ``state_schema``, ``context_schema``, ``cache``. Its checkpoint is
-    kept in the run (:class:`~.middleware.RunCheckpointer`) and its store is the memory
-    service.
+    journal); LangChain's: ``state_schema``, ``context_schema``, ``cache``. Its checkpoint is kept
+    in the run (:class:`~.middleware.RunCheckpointer`) and its store is the memory service.
 
     The loop's settings are :func:`middleware`'s: ``max_steps``, ``max_repeats``,
     ``call_timeout`` (each model call's), ``context_window`` (else the model's profile),
@@ -313,6 +315,7 @@ def ReAct(
         system_prompt=None,
     )
     backend = _backend(backend)
+    sourced = skill_set(skills)
     if effort is not None and not isinstance(model, str):
         raise ConfigurationError("effort is for a model name: set it on your own chat model")
     named = model if isinstance(model, str) else None
@@ -368,6 +371,10 @@ def ReAct(
         )
         return _described(graph, named, window, [*run, *helpers])
     files_backend = backend if backend is not None else automatic.JournalBackend()
+    graph_backend = files_backend
+    if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
+        fed = sourced.deep_agent(files_backend)
+        graph_backend, skills = fed["backend"], fed["skills"]
     # files outside the graph's state (a disk, a store, a sandbox) are the agent's from the
     # start, and governed; in its state, a long task is offered the scratch tools — and the
     # general-purpose helper, when the agent has no sub-agent of its own
@@ -385,7 +392,7 @@ def ReAct(
         system_prompt=stored_prompt,
         held=held,
         files=outside or bool(skills) or bool(memory_files),
-        summarization=_placed(create_summarization_middleware(profiled, files_backend), PLACED),
+        summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
     )
     graph = create_deep_agent(
         profiled,
@@ -397,7 +404,7 @@ def ReAct(
         skills=skills,
         memory=memory_files,
         permissions=permissions,
-        backend=files_backend,
+        backend=graph_backend,
         response_format=response_format,
         state_schema=state_schema,
         context_schema=context_schema,
@@ -405,7 +412,7 @@ def ReAct(
         cache=cache,
         name="react",
     )
-    _declared(graph, backend=files_backend, outside=outside, helper_only=not native)
+    _declared(graph, backend=graph_backend, outside=outside, helper_only=not native)
     return _described(graph, named, window, [*run, *helpers])
 
 
@@ -413,7 +420,7 @@ def _deep(
     *,
     backend: Any,
     native: Sequence[Any],
-    skills: Sequence[str] | None,
+    skills: Any,
     memory_files: Sequence[str] | None,
     permissions: Sequence[Any] | None,
 ) -> bool:
