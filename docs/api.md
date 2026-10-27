@@ -233,7 +233,7 @@ agent.serve_a2a(app, url, *, identity=None)
 `serve_chat` mounts AG-UI routes on a FastAPI app; `serve_a2a` the agent card and A2A JSON-RPC
 at `url` ([surfaces.md](surfaces.md)). Both take the caller from the trusted
 `X-Trellis-Identity` header the platform's edge sets, unless `identity=` names it another way;
-a chat request without either is `401`. A wrapped agent in a `ReAct`'s `subagents=[...]` is its
+a call without either is `401` on both surfaces. A wrapped agent in a `ReAct`'s `subagents=[...]` is its
 sub-agent: each call a child run ([subagents.md](subagents.md)).
 
 ## RunHandle

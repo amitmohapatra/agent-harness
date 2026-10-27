@@ -9,7 +9,8 @@ another wrapped agent that calls it as a tool, ``a2a(url)``.
   pause, answered with ``agent.resume``, and goes back to it.
 
 ``identity=`` is how your deployment says who is calling (here: a header your auth proxy sets);
-without it every chat caller is ``anonymous``.
+without it both surfaces read the trusted ``X-Trellis-Identity`` header, and a call without it
+is ``401``.
 
     uvicorn examples.05_features.serve_agui_and_a2a:app --port 8000   # serve it
     python -m examples.05_features.serve_agui_and_a2a                  # exercise it and exit

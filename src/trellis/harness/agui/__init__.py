@@ -192,14 +192,8 @@ class _Surface:
     async def user(self, request: Request) -> str:
         """The caller: ``identity(request)``, else the trusted header (``401`` without one)."""
         if self.identity is None:
-            raw = request.headers.get(IDENTITY_HEADER)
-            if not raw:
-                raise HTTPException(
-                    401,
-                    f"no {IDENTITY_HEADER} header: the platform's authenticating edge sets it, "
-                    "or the deployment names the user with serve_chat(identity=...)",
-                )
             try:
+                raw = request.headers.get(IDENTITY_HEADER)
                 return trusted_user(raw, await self.agent.harness._tenant())
             except IdentityRefused as exc:
                 raise HTTPException(401, str(exc)) from exc

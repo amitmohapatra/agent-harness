@@ -5,7 +5,8 @@ What leaves the process for a run says who it is for in one trusted header,
 (A2A), and its MCP tool calls through the gateway, which forwards it to the MCP servers whose
 ``allowed_extra_headers`` name it. What arrives with it — set (and overwritten) by the
 platform's authenticating edge — is read the same way on both surfaces (:func:`trusted_user`:
-``serve_a2a``, ``serve_chat``).
+``serve_a2a``, ``serve_chat``): without it a call is refused (``401``) unless the deployment
+names its callers another way (``identity=``).
 """
 
 from __future__ import annotations
@@ -118,10 +119,15 @@ class IdentityRefused(PermissionError):
     """The call carries an identity this deployment will not act on."""
 
 
-def trusted_user(raw: str, served: str | None) -> str:
+def trusted_user(raw: str | None, served: str | None) -> str:
     """The user a trusted identity header names: ``{"tenant_id": ..., "user_id": ...}``, its
-    tenant (when it names one) the one ``TRELLIS_API_KEY`` speaks for (``served``). Anything
-    else is :class:`IdentityRefused`."""
+    tenant (when it names one) the one ``TRELLIS_API_KEY`` speaks for (``served``). No header,
+    or anything else, is :class:`IdentityRefused`: nobody is anonymous."""
+    if not raw:
+        raise IdentityRefused(
+            f"no {IDENTITY_HEADER} header: the platform's authenticating edge sets it, or the "
+            "deployment names the caller with identity=..."
+        )
     if len(raw) > HEADER_MAX_CHARS:
         raise IdentityRefused("the platform identity header is too long")
     try:

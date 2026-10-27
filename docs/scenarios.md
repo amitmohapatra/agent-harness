@@ -144,8 +144,8 @@ Both surfaces can be mounted on one FastAPI app
 Code that is not wrapped (any framework) calls another agent with `a2a(url)(message, tenant=, user=)`
 ([blocks/a2a.md](blocks/a2a.md)). Identity is always
 the deployment's: both surfaces read the trusted `X-Trellis-Identity` header an authenticating
-edge in front sets, or `identity=` names the caller another way. Without either, a chat request
-is `401`, and an A2A call runs as `anonymous`.
+edge in front sets, or `identity=` names the caller another way. Without either, a call is
+`401` on both.
 
 Both show up in the app's OpenAPI document (tags `agui`, `a2a`). With several replicas, keep a
 chat thread on one (sticky sessions): its events are buffered in the process that serves it

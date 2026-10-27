@@ -164,11 +164,14 @@ request whose `method` is one of the protocol's: `SendMessage`, `SendStreamingMe
 `GetExtendedAgentCard`; answered with a JSON-RPC response, or server-sent events for the
 streaming ones). The SDK's routes still answer every request; the descriptions never do.
 
-Identity: `identity(context)` returns the user; by default the trusted `x-trellis-identity`
-header — JSON `{"tenant_id": ..., "user_id": ...}`, set by the deployment's authenticating
-edge, at most 4096 characters, its tenant (when it names one) the key's — else `anonymous`
-(warned once per server). A header that is too long, not a JSON object, names another tenant
-or no user is refused.
+Identity, the rule `serve_chat` keeps: by default the trusted `x-trellis-identity` header —
+JSON `{"tenant_id": ..., "user_id": ...}`, set by the deployment's authenticating edge, at most
+4096 characters, its tenant (when it names one) the key's. A JSON-RPC call without it, or with
+one that is too long, not a JSON object, names another tenant or no user, is `401` with a
+problem document, before the SDK reads it; nobody runs as anonymous. The card stays public.
+`identity(context)` returns the user instead, for a deployment that authenticates another way
+(then no header is required). The harness's own `a2a(url)` calls send the header for the run
+they are made in.
 
 ## Calling A2A agents
 

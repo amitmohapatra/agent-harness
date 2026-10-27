@@ -50,6 +50,10 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
     `serve_a2a` does (its tenant, when named, the key's): a request without it is `401`, never
     `anonymous`. `identity=` stays the override. `IdentityRefused` and the header's parsing
     (`trusted_user`) moved to `trellis.harness.identity`, shared by both surfaces.
+  - `serve_a2a` keeps the same rule: a JSON-RPC call without the trusted header, or with one
+    refused, is `401` (a problem document) before the SDK reads it, never run as `anonymous`
+    (`trellis.harness.a2a.identity.ANONYMOUS` removed); the card stays public, and
+    `identity=` stays the override. The harness's own `a2a(url)` calls send the header.
   - `h.feedback` takes a person's verdict only — `confirm`, `reject`, `correct` — and refuses
     `approve` and `edit`, the system's record of a decision on a paused action
     (`agent.resume`). `VERDICT_SCORES` lost their entries.
