@@ -16,6 +16,8 @@ jobs:
         python-version: ["3.12", "3.13"]
     env:
       UV_PYTHON: ${{ matrix.python-version }}
+      KIMI_DISABLE_TELEMETRY: "1"
+      KIMI_CODE_NO_AUTO_UPDATE: "1"
     defaults:
       run:
         working-directory: agent-harness
@@ -53,6 +55,21 @@ jobs:
           cache-dependency-glob: agent-harness/uv.lock
       - name: Install
         run: uv sync --all-extras
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Kimi Code, the program kimi() drives over ACP: the version compat.BINARIES pins, in a
+      # prefix of its own, cached. The Kimi tests run it (tests/integration/test_kimi.py, the
+      # matrix's Kimi column), its model a planned endpoint on the runner: no Moonshot key.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.kimi-code-npm
+          key: kimi-code-2.1.1-node22-${{ runner.os }}
+      - name: Install Kimi Code
+        run: |
+          [ -x ~/.kimi-code-npm/bin/kimi ] || npm install -g --prefix ~/.kimi-code-npm @moonshot-ai/kimi-code@2.1.1
+          echo "$HOME/.kimi-code-npm/bin" >> "$GITHUB_PATH"
+          ~/.kimi-code-npm/bin/kimi --version
       - name: Lint
         run: make lint
       - name: Typecheck
@@ -69,9 +86,6 @@ jobs:
       - name: Docs check
         # every relative link and anchor resolves; every snippet parses and names the real API
         run: make docs-check
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - name: Mermaid diagrams
         # every ```mermaid block parses, with the same mermaid GitHub renders (11.x)
         run: |

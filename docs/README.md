@@ -28,7 +28,7 @@ for you.
 
 | Page | |
 |---|---|
-| **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic (memory included), approvals, sub-agents and child runs, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
+| **Frameworks** — one page each: install, the lines to add to an existing project, what is automatic (memory included), approvals, sub-agents and child runs, streaming, durable runs, surfaces, evaluation, limits | [LangGraph and LangChain](frameworks/langgraph.md) (`create_agent`, a hand-built `StateGraph`, checkpointers, `HumanInTheLoopMiddleware`) · [Deep Agents](frameworks/deepagents.md) · [OpenAI Agents SDK](frameworks/openai-agents.md) · [Claude Agent SDK](frameworks/claude-agent-sdk.md) · [Kimi Code (ACP)](frameworks/kimi.md) · [ReAct](frameworks/react.md) · [plain functions](frameworks/functions.md) |
 | **Feature x framework** — which feature works with which framework, written from the test matrix | [matrix.md](matrix.md) |
 | [tools.md](tools.md) | the toolbox and where tools come from, their side effects, a framework's own tools, tool hints, Code Mode |
 | [gateway.md](gateway.md) | the Bifrost gateway: stored prompts, who an MCP call is for, what the gateway never does for a run, frameworks' own MCP clients |
@@ -54,6 +54,7 @@ for you.
 | a Deep Agent (`create_deep_agent`) | the graph it returns, the same way | [deepagents.md](frameworks/deepagents.md) |
 | an OpenAI Agents SDK `Agent` (handoffs included) | the `Agent`, its own tools governed | [openai-agents.md](frameworks/openai-agents.md) |
 | a Claude Agent SDK setup | the `ClaudeAgentOptions`, its own tools governed | [claude-agent-sdk.md](frameworks/claude-agent-sdk.md) |
+| Kimi Code | `kimi(...)`: its own tools, sub-agents and swarms, governed over ACP | [kimi.md](frameworks/kimi.md) |
 | a model and tools, no framework | `ReAct(system_prompt=..., model=..., tools=[...])` | [react.md](frameworks/react.md) |
 | code that decides itself (a workflow, a router, glue) | `async def fn(input, agent)` | [functions.md](frameworks/functions.md) |
 

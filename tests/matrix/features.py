@@ -38,6 +38,7 @@ from tests.matrix.world import (
     World,
     approve_all,
 )
+from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, native_tools
 from tests.support.memory import MEMORY_TOOLS
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
@@ -264,11 +265,17 @@ async def idempotency(w: World) -> None:
     assert key is not None and key.startswith(f"{o.run_id}:"), key
 
 
+#: How long ``cancel`` waits for the run to reach its tool, at most (it cancels it there): a
+#: guard against a run that never gets there, not a measure — Kimi Code in ``elsewhere`` starts
+#: twice before it does (a second or two each, several on a loaded CI runner).
+STARTED_SECONDS: Final = 30.0
+
+
 async def cancel(w: World) -> None:
     d = Desk()
 
     async def cancelling(run_id: str) -> None:
-        await asyncio.wait_for(d.started.wait(), 10)
+        await asyncio.wait_for(d.started.wait(), STARTED_SECONDS)
         await w.cancel(run_id, "a duplicate")
 
     o = await w.go([d.wait()], [("wait", {"seconds": 30})], during=cancelling)
@@ -284,15 +291,27 @@ async def cancel(w: World) -> None:
 #: (the run then timed out with no model called): 2 s leaves that margin five times over, and
 #: ``hold`` holds far longer, so the limit still ends the run.
 RUN_LIMIT: Final = 2.0
+#: Kimi Code takes ~1.8 s to start here (a Node program, before it answers ``initialize``), once
+#: per attempt, and far longer on a loaded CI runner: the run's limit leaves this much for each
+#: start. ``elsewhere`` starts it twice (it pauses first, then another process resumes it), all
+#: within the run's one limit; ``hold`` holds longer than either limit.
+KIMI_START_SECONDS: Final = 6.0
+
+
+def run_limit(w: World) -> float:
+    if w.adapter != "kimi":
+        return RUN_LIMIT
+    starts = 2 if w.mode == "elsewhere" else 1
+    return RUN_LIMIT + starts * KIMI_START_SECONDS
 
 
 async def run_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run_timeout=RUN_LIMIT)
+    o = await w.go([d.hold()], [("hold", {})], run_timeout=run_limit(w))
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
     assert o.record.error is not None and o.record.error.code == "run_timeout"
-    assert o.record.timeout_seconds == RUN_LIMIT
+    assert o.record.timeout_seconds == run_limit(w)
     # the limit ran out where the cell means it to: in the tool, which the model asked for
     assert d.started.is_set() and d.ran("hold") == []
 
@@ -335,6 +354,8 @@ def _parallel_target(w: World):
             return ReAct(system_prompt="You work.", model=GroupedChat(plan)), tools
         if w.adapter == "openai_agents":
             return OpenAIAgent(name="worker", model=GroupedModel(plan)), tools
+        if w.adapter == "kimi":  # a planned endpoint takes grouped steps itself
+            return await BUILDERS["kimi"](h, tools, w.tmp, plan)  # type: ignore[arg-type]
         model = GroupedChatModel(plan=[], steps=list(plan))
         if w.adapter == "middleware":
             graph = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
@@ -871,6 +892,10 @@ FEATURES: Final[list[Feature]] = [
                 "G5 (can_use_tool, session resume) concerns Claude's built-in tools, which "
                 "the scripted CLI cannot call: the live suite's"
             ),
+            "kimi": NA(
+                "Kimi's own permission requests are the run's governance (F32): it has no "
+                "approval setting of its own to give"
+            ),
         },
         modes={
             "elsewhere": NA("the graph's in-memory checkpointer is the pausing process's own"),
@@ -975,6 +1000,7 @@ FEATURES: Final[list[Feature]] = [
         adapters={
             "function": NA("a function target runs its own calls (asyncio.gather)"),
             "claude": ONE_CALL_AT_A_TIME,
+            "kimi": NA("native: Kimi runs a turn's calls itself, one after the other (N3)"),
         },
         way2=NA("your framework runs its calls"),
     ),
@@ -1035,6 +1061,7 @@ FEATURES: Final[list[Feature]] = [
             "deepagents": NATIVE_CONTEXT,
             "openai_agents": OWN_CONTEXT,
             "claude": OWN_CONTEXT,
+            "kimi": OWN_CONTEXT,
         },
         way2=NA("native middleware: a graph is built with it"),
     ),
@@ -1046,7 +1073,7 @@ FEATURES: Final[list[Feature]] = [
         fits_the_window,
         adapters={
             a: NA("ReAct's and middleware()'s: add middleware() to a graph to have it")
-            for a in ("function", "langgraph", "deepagents", "openai_agents", "claude")
+            for a in ("function", "langgraph", "deepagents", "openai_agents", "claude", "kimi")
         },
         way2=NA("native middleware: a graph is built with it"),
     ),
@@ -1069,7 +1096,7 @@ FEATURES: Final[list[Feature]] = [
         needs=frozenset({"memory"}),
         adapters={
             a: NA("checked by F41 (what the model is sent)")
-            for a in ("react", "langgraph", "deepagents", "openai_agents", "claude")
+            for a in ("react", "langgraph", "deepagents", "openai_agents", "claude", "kimi")
         },
         way2=NA("checked by F41"),
     ),
@@ -1326,10 +1353,10 @@ async def hook_runs(w: World) -> None:
 # --------------------------------------------------------------------------- a run's own options
 async def run_options_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": RUN_LIMIT})
+    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": run_limit(w)})
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.timeout_seconds == RUN_LIMIT
+    assert o.record.timeout_seconds == run_limit(w)
     assert d.started.is_set() and d.ran("hold") == []  # it ran out in the tool (``RUN_LIMIT``)
 
 
@@ -1354,13 +1381,15 @@ async def run_options_without(w: World) -> None:
 
 #: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
 #: what its error says), and set far above it.
-TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
+TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
     "react": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
     "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
+    # Kimi ends a turn at its step limit with no answer, as a turn it finished (no error)
+    "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, None),
 }
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "react": {"recursion_limit": 50},
@@ -1369,6 +1398,7 @@ ROOMY: Final[dict[str, dict[str, Any]]] = {
     "deepagents": {"recursion_limit": 50},
     "openai_agents": {"max_turns": 20},
     "claude": {"max_turns": 20},
+    "kimi": {"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "50"}},
 }
 
 
@@ -1384,6 +1414,9 @@ async def framework_options(w: World) -> None:
         assert o.record.metadata.get("framework_options") == tight, o.record.metadata
     else:
         o = await w.go([d.lookup()], plan, framework_options=tight)
+    if said is None:  # stopped at the limit with no answer (Kimi), not failed
+        assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
+        return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
     assert said in o.record.error.message, o.record.error.message
 

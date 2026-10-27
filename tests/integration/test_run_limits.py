@@ -528,7 +528,10 @@ async def test_a_call_cut_short_still_ends_on_the_stream_on_every_adapter(
 
     async def watch() -> None:
         async for event in agent.stream(
-            "wait", user="u", run_timeout=1 if cut == "timeout" else 30
+            # Kimi takes a second or two to start: its time limit leaves it room to call
+            "wait",
+            user="u",
+            run_timeout=(5 if framework == "kimi" else 1) if cut == "timeout" else 30,
         ):
             events.append(event)
 

@@ -25,10 +25,15 @@ too).
 | `openai-agents` | `openai-agents` | `>=0.22.3,<0.23` | 0.22.3 |
 | `claude-agent-sdk` | `claude-agent-sdk` | `>=0.2.160,<0.3` | 0.2.160 |
 | `a2a-sdk` | `a2a` | `>=1.1,<1.2` | 1.1.5 |
+| `agent-client-protocol` | `kimi` | `>=0.12.1,<0.13` | 0.12.1 |
+
+| Program | Driven by | Tested range | Tested | |
+|---|---|---|---|---|
+| `kimi` (`@moonshot-ai/kimi-code`, npm) | `kimi()`, over ACP (`adapters.acp`) | `>=2.1.1,<2.2` | 2.1.1 | refused outside the range (below); Node 22.19 or later |
 
 | Sibling | Pinned | Tested | Service |
 |---|---|---|---|
-| `trellis-contracts` | `>=0.6.1,<0.7` | 0.6.1 | — |
+| `trellis-contracts` | `>=0.6.2,<0.7` | 0.6.2 | — |
 | `trellis-memory` | `>=0.5` | 0.5.0 | agent-memory-service 0.3.0 with the prompt-form `memory_ids` (`docs/openapi.json`) |
 | `trellis-runs` | `>=0.4.0` | 0.4.1 | agent-runs 0.4.0 (`docs/openapi.json`) |
 | `bifrost-sdk` | `>=0.3` | 0.3.0 | the Bifrost gateway |
@@ -80,6 +85,17 @@ platform is not yet published: the siblings are path sources of the same checkou
 
 The ranges live in one place, `src/trellis/harness/compat.py` (`TESTED`); `pyproject.toml`
 says the same and `tests/unit/test_compat.py` fails when they disagree.
+
+## Agent programs
+
+Kimi Code is not a Python distribution: the harness drives the `kimi` program over the Agent
+Client Protocol, and what it reads — Kimi's tool names, its permission requests, its sub-agents'
+results, its usage log — is the program's own surface, which no install pins. Its tested range
+is `compat.BINARIES` (`kimi-code`: `>=2.1.1,<2.2`), checked when a run starts, from the version
+Kimi reports in ACP's `initialize`; outside it the run fails, naming the version that answered
+and the install command (`npm install -g @moonshot-ai/kimi-code@2.1.1`). The Python Kimi CLI
+(`kimi-cli`) and the Python `kimi-agent-sdk` are archived upstream: their final releases run
+nothing, which is why Kimi is driven through ACP.
 
 ## When the installed version is outside the range
 

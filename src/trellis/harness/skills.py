@@ -5,6 +5,7 @@ and agent — fed to each framework's own skills slot:
     ReAct("You review SQL.", model, skills=src)                  # ReAct
     create_deep_agent(model, **src.deep_agent())                 # Deep Agents: skills= and backend=
     ClaudeAgentOptions(**src.claude())                           # Claude: a local plugin of skills
+    kimi(model="kimi-k2", **src.kimi())                           # Kimi Code: its skills folder
     SandboxAgent(..., capabilities=[*Capabilities.default(), src.openai()])  # OpenAI: Skills
     await agent.tools.use(src.tools())                           # no skills slot: list/load tools
 
@@ -451,6 +452,12 @@ class SkillSet:
         ``ClaudeAgentOptions``' arguments for it — for code that runs the SDK itself."""
         await write_plugin(self, Path(path), scope)
         return {"plugins": [{"type": "local", "path": str(path)}], "skills": "all"}
+
+    def kimi(self) -> dict[str, Any]:
+        """``kimi()``'s arguments for these skills: the run's pinned skills written into a home
+        of the run's own for Kimi Code (``KIMI_CODE_HOME/skills``, which ``kimi acp`` reads),
+        each attempt, removed with the run (``adapters.acp.RunHome``) — ``kimi(**src.kimi())``."""
+        return {"skills": self}
 
     def openai(self, scope: Scope | None = None) -> Any:
         """The OpenAI Agents SDK's own ``Skills`` capability for a ``SandboxAgent``: the run's

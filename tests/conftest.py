@@ -121,10 +121,19 @@ def langfuse_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LANGFUSE_BASE_URL", "https://lf.test")
 
 
+async def _kimi_endpoints_stopped() -> None:
+    """The model endpoints a Kimi target of the test was given (``tests.support.adapters``),
+    stopped before the test's loop closes."""
+    from tests.support.kimi import detached
+
+    await detached()
+
+
 @pytest.fixture
 async def harness() -> AsyncIterator[Harness]:
     async with Harness(config=Settings()) as h:
         yield h
+    await _kimi_endpoints_stopped()
 
 
 @pytest.fixture
@@ -136,3 +145,4 @@ def memory_service() -> FakeMemoryService:
 async def memory_harness(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         yield h
+    await _kimi_endpoints_stopped()

@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from typing import Final
 
+from trellis.contracts import ConfigurationError
+
 log = logging.getLogger("trellis.harness")
 
 #: Each framework distribution's tested range: ``(lowest, first not tested)``, as
@@ -29,6 +31,18 @@ TESTED: Final[Mapping[str, tuple[str, str]]] = {
     "openai-agents": ("0.22.3", "0.23"),
     "claude-agent-sdk": ("0.2.160", "0.3"),
     "a2a-sdk": ("1.1", "1.2"),
+    "agent-client-protocol": ("0.12.1", "0.13"),
+}
+#: The agent programs an adapter drives over a protocol, not a Python distribution (an ACP
+#: agent's server, ``adapters.acp``): each one's tested range, and how to install it. Unlike a
+#: distribution's, a version outside it is refused (:func:`require_binary`): the program's
+#: protocol surface — its tool names, its permission requests, its usage log — is what the
+#: adapter reads, and nothing pins it but this check.
+BINARIES: Final[Mapping[str, tuple[str, str]]] = {
+    "kimi-code": ("2.1.1", "2.2"),
+}
+INSTALL: Final[Mapping[str, str]] = {
+    "kimi-code": "npm install -g @moonshot-ai/kimi-code@2.1.1",
 }
 #: The distributions each adapter runs on (by the adapter's name), checked when a target of
 #: its type is wrapped; one that is not installed is not checked.
@@ -36,6 +50,7 @@ FRAMEWORKS: Final[Mapping[str, tuple[str, ...]]] = {
     "langgraph": ("langgraph", "langchain-core", "langchain", "deepagents", "langchain-openai"),
     "openai_agents": ("openai-agents",),
     "claude_agent_sdk": ("claude-agent-sdk",),
+    "acp": ("agent-client-protocol",),
     "function": (),
 }
 #: What the warning tells the reader to do.
@@ -57,7 +72,11 @@ def tested(distribution: str, installed: str) -> bool:
     with no range is not the harness's to judge)."""
     if distribution not in TESTED:
         return True
-    low, high = (release(v) for v in TESTED[distribution])
+    return _within(installed, TESTED[distribution])
+
+
+def _within(installed: str, tested_range: tuple[str, str]) -> bool:
+    low, high = (release(v) for v in tested_range)
     found = release(installed)
     width = max(len(low), len(high), len(found))
 
@@ -94,4 +113,28 @@ def check(adapter: str) -> list[str]:
     return given
 
 
-__all__ = ["ADVICE", "FRAMEWORKS", "TESTED", "check", "installed", "release", "tested"]
+def require_binary(name: str, found: str, *, command: str) -> None:
+    """Refuse an agent program (``BINARIES``) whose version, as it reports it, is outside the
+    range this release tested — or that does not report one."""
+    low, high = BINARIES[name]
+    if found and _within(found, (low, high)):
+        return
+    said = f"{name} {found}" if found else f"a {name} that reports no version"
+    raise ConfigurationError(
+        f"{said} answers at {command!r}, but this trellis-harness was tested with "
+        f"{name}>={low},<{high}: install it ({INSTALL[name]}), or {ADVICE}"
+    )
+
+
+__all__ = [
+    "ADVICE",
+    "BINARIES",
+    "FRAMEWORKS",
+    "INSTALL",
+    "TESTED",
+    "check",
+    "installed",
+    "release",
+    "require_binary",
+    "tested",
+]

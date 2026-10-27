@@ -303,12 +303,12 @@ class World:
         self._tap(monkeypatch)
         #: what every scripted model was sent and offered
         self.models = ModelLog(monkeypatch)
-        #: the tools each Claude run was given (its CLI lists them itself)
+        #: the tools each Claude or Kimi run was given (its CLI lists them itself)
         self.claude_offered: list[list[str]] = []
         converted = pipeline.convert
 
         def converting(tool_format: Any, tools: Any) -> Any:
-            if tool_format == "claude":
+            if tool_format in ("claude", "mcp"):
                 self.claude_offered.append([t.name for t in tools])
             return converted(tool_format, tools)
 
@@ -372,8 +372,11 @@ class World:
         self.team_catalog.rules = dict(rules)
 
     async def aclose(self) -> None:
+        from tests.support.kimi import detached
+
         for h in [*self.harnesses, *self.others]:
             await h.aclose()
+        await detached()  # the Kimi cells' model endpoints
 
     def contract_violations(self) -> list[str]:
         """What the memory service's document refused, taken (``tests/conftest.py`` would fail
@@ -704,9 +707,12 @@ class World:
         return [json.loads(p.read_text()) for p in sorted(self.tmp.glob("cli-*.json"))]
 
     def said(self) -> str:
-        """Everything the models under test were sent."""
+        """Everything the models under test were sent (Kimi's: its endpoints')."""
+        from tests.support.kimi import attached_endpoints
+
         claude = json.dumps(self.claude_records())
-        return self.models.said() + "\n" + claude
+        kimi = "\n".join(e.said() for e in attached_endpoints())
+        return self.models.said() + "\n" + claude + "\n" + kimi
 
     def spans(self) -> list[ReadableSpan]:
         return list(self.exporter.get_finished_spans()) if self.exporter is not None else []

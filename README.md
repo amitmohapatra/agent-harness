@@ -78,7 +78,8 @@ An agent you already built is wrapped the same way — `h.wrap(graph, id=...)`, 
 as the framework runs it. One page per framework says what to add to an existing project:
 [LangGraph and LangChain](docs/frameworks/langgraph.md), [Deep Agents](docs/frameworks/deepagents.md),
 [OpenAI Agents SDK](docs/frameworks/openai-agents.md),
-[Claude Agent SDK](docs/frameworks/claude-agent-sdk.md), [ReAct](docs/frameworks/react.md),
+[Claude Agent SDK](docs/frameworks/claude-agent-sdk.md), [Kimi Code](docs/frameworks/kimi.md),
+[ReAct](docs/frameworks/react.md),
 [plain functions](docs/frameworks/functions.md); which feature works with which:
 [docs/matrix.md](docs/matrix.md), written from the tests. Run it now, with no services:
 

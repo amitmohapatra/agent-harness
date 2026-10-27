@@ -41,6 +41,7 @@ the harness's two tools.
 | `ReAct` | `ReAct(skills=src)` | Deep Agents' `SkillsMiddleware`: the skills a `/skills/` route of the graph's backend (`CompositeBackend`), listed in the system prompt, each `SKILL.md` read with `read_file` |
 | Deep Agents (your graph) | `create_deep_agent(model, **src.deep_agent())`; with a sandbox, `**deep_agent(sandbox(), src)` | the same, in its one `backend=`: the sandbox the composite's default, the skills its `/skills/` route |
 | Claude Agent SDK | `ClaudeAgentOptions(**src.claude())` | a local plugin (`plugins=`, `skills="all"`): the harness writes the run's skills into a folder of the run's own before each query and removes it after; the CLI finds them as `trellis:<name>` |
+| Kimi Code | `kimi(**src.kimi())` | Kimi's own skills folder (`$KIMI_CODE_HOME/skills`): the harness writes the run's skills there, in a home of the run's own, before each attempt; Kimi lists them and loads one with its `Skill` tool ([frameworks/kimi.md](frameworks/kimi.md#native-or-ours-sandbox-skills-hooks)) |
 | OpenAI Agents SDK, `SandboxAgent` | `capabilities=[..., src.openai()]` | the SDK's `Skills` capability, lazily loaded: listed in its instructions, copied into the sandbox by its `load_skill` |
 | OpenAI `Agent`, LangGraph, a function | `src.tools()` (`agent.tools.use(...)`) | none: `list_skills` and `load_skill(name, path=None)`, harness tools (governed, journaled, recorded) |
 

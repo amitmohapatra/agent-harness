@@ -66,7 +66,7 @@ def merged(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
     return found
 
 
-ToolFormat = Literal["langchain", "openai_agents", "claude", "none"]
+ToolFormat = Literal["langchain", "openai_agents", "claude", "mcp", "none"]
 Narrowing = Literal["turn", "run", "none"]
 
 

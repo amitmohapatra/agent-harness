@@ -40,6 +40,7 @@ that still defines `before_model` or `after_model` is refused where it is given
 | Deep Agents | the bridge | the pipeline | the same: `create_deep_agent(..., middleware=[yours])` |
 | OpenAI Agents SDK | the bridge | the pipeline | the agent's own `AgentHooks` (`Agent(hooks=...)`: `on_llm_start`, `on_llm_end`), reported, not rewritten |
 | Claude Agent SDK | the bridge (its harness tools); a built-in tool (`Bash`, `Write`...) that asks for permission: `before_tool` with governance, in the permission callback ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md)) | the pipeline | the CLI makes the model calls: its own hooks (`ClaudeAgentOptions(hooks=...)`), which have no model-call event |
+| Kimi Code | the bridge (its harness tools); a call of Kimi's own it asks permission for (`Bash`, `Write`...): `before_tool` with governance, in ACP's `session/request_permission` (a `Rewrite` ends the turn and Kimi calls again with the new arguments: [frameworks/kimi.md](frameworks/kimi.md#approvals-and-pauses)) | the pipeline | Kimi makes the model calls: its own hooks (`hooks` in its `config.toml`); ACP shows no model call |
 
 `on_error("model", ...)` still sees a model call that failed, where the harness runs the call
 (`ReAct`, a graph with `ModelHooks`).
