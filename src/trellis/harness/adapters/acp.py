@@ -92,7 +92,7 @@ from trellis.harness.gateways import NO_KEY, Bifrost
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
-from trellis.harness.runtime import Paused, Runtime
+from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
 
@@ -127,6 +127,9 @@ EDITED: Final = (
     "A reviewer changed the arguments of your call to {tool}, so it was not run. Call {tool} "
     "again now with exactly these arguments: {args}"
 )
+#: Why the person denied the call, after the resumed session is told they did (ACP's answer
+#: carries no reason: the prompt does).
+DENIED_WHY: Final = "Their reason: {why}"
 #: Why a sub-agent whose call failed without saying why ended.
 SUBAGENT_FAILED: Final = "the sub-agent's call failed"
 #: A swarm member in Kimi's ``AgentSwarm`` result.
@@ -383,6 +386,8 @@ class ACPInput:
     answered: ToolCall | None = None
     #: the person denied that call (``REJECT``): it does not run
     denied: bool = False
+    #: why they denied it, when they said
+    why: str | None = None
 
 
 class ACPRunError(RuntimeError):
@@ -458,10 +463,12 @@ class ACPAdapter:
         pending: Pending,
         resolution: InterruptResolution,
     ) -> Any:
+        denied = resolution.decision is InterruptDecision.REJECT
         return dataclasses.replace(
             native_input,
             answered=pending.interrupt.tool_call,
-            denied=resolution.decision is InterruptDecision.REJECT,
+            denied=denied,
+            why=reason_of(resolution) if denied else None,
         )
 
     def check_options(self, options: Mapping[str, Any]) -> None:
@@ -759,7 +766,9 @@ class Attempt:
             return RESUMED
         harness = call.tool in self.runtime.toolbox
         told = RESUMED_DENIED if native_input.denied else RESUMED_CALL
-        return told.format(tool=f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool)
+        said = told.format(tool=f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool)
+        why = native_input.why
+        return f"{said} {DENIED_WHY.format(why=why)}" if why else said
 
     async def _turn(self, prompt: Any) -> AsyncGenerator[Any, None]:
         if isinstance(prompt, str):

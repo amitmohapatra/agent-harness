@@ -285,15 +285,21 @@ async def cancel(w: World) -> None:
 #: (the run then timed out with no model called): 2 s leaves that margin five times over, and
 #: ``hold`` holds far longer, so the limit still ends the run.
 RUN_LIMIT: Final = 2.0
+#: Kimi Code takes a second or two to start (a Node program): its limit leaves it that room.
+KIMI_RUN_LIMIT: Final = 6.0
+
+
+def run_limit(w: World) -> float:
+    return KIMI_RUN_LIMIT if w.adapter == "kimi" else RUN_LIMIT
 
 
 async def run_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run_timeout=RUN_LIMIT)
+    o = await w.go([d.hold()], [("hold", {})], run_timeout=run_limit(w))
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
     assert o.record.error is not None and o.record.error.code == "run_timeout"
-    assert o.record.timeout_seconds == RUN_LIMIT
+    assert o.record.timeout_seconds == run_limit(w)
     # the limit ran out where the cell means it to: in the tool, which the model asked for
     assert d.started.is_set() and d.ran("hold") == []
 
@@ -982,6 +988,7 @@ FEATURES: Final[list[Feature]] = [
         adapters={
             "function": NA("a function target runs its own calls (asyncio.gather)"),
             "claude": ONE_CALL_AT_A_TIME,
+            "kimi": NA("native: Kimi runs a turn's calls itself, one after the other (N3)"),
         },
         way2=NA("your framework runs its calls"),
     ),
@@ -1334,10 +1341,10 @@ async def hook_runs(w: World) -> None:
 # --------------------------------------------------------------------------- a run's own options
 async def run_options_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": RUN_LIMIT})
+    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": run_limit(w)})
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.timeout_seconds == RUN_LIMIT
+    assert o.record.timeout_seconds == run_limit(w)
     assert d.started.is_set() and d.ran("hold") == []  # it ran out in the tool (``RUN_LIMIT``)
 
 

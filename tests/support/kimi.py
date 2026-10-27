@@ -50,6 +50,8 @@ REPLY_USAGE: Final = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens
 #: What Kimi writes before a tool's result, and around an MCP result's extras.
 _WALL_TIME = re.compile(r"^Wall time: [0-9.]+ seconds\n")
 _EXTRAS = re.compile(r"\n?<mcp-result-extras>.*</mcp-result-extras>\s*$", re.DOTALL)
+#: What Kimi puts before a failed tool's result.
+_FAILED = re.compile(r"^<system>ERROR: [^<]*</system>\n?")
 #: A tool result of a call that did not run: the run paused on it, or stopped the turn.
 NOT_RUN: Final = ("approval request was cancelled", "Waiting for a person's approval.")
 #: The harness's prompts after a rejection and an edit (``adapters.acp``) and a denied resume.
@@ -70,7 +72,7 @@ def text_of(content: Any) -> str:
 
 def result_text(content: Any) -> str:
     """A tool result as the model reads it, less Kimi's wall time and MCP extras."""
-    return _EXTRAS.sub("", _WALL_TIME.sub("", text_of(content))).strip()
+    return _FAILED.sub("", _EXTRAS.sub("", _WALL_TIME.sub("", text_of(content)))).strip()
 
 
 def kimi_name(tool: str) -> str:
