@@ -38,6 +38,7 @@ from tests.matrix.world import (
     World,
     approve_all,
 )
+from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, native_tools
 from tests.support.memory import MEMORY_TOOLS
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
@@ -335,6 +336,8 @@ def _parallel_target(w: World):
             return ReAct(system_prompt="You work.", model=GroupedChat(plan)), tools
         if w.adapter == "openai_agents":
             return OpenAIAgent(name="worker", model=GroupedModel(plan)), tools
+        if w.adapter == "kimi":  # a planned endpoint takes grouped steps itself
+            return await BUILDERS["kimi"](h, tools, w.tmp, plan)  # type: ignore[arg-type]
         model = GroupedChatModel(plan=[], steps=list(plan))
         if w.adapter == "middleware":
             graph = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
@@ -871,6 +874,10 @@ FEATURES: Final[list[Feature]] = [
                 "G5 (can_use_tool, session resume) concerns Claude's built-in tools, which "
                 "the scripted CLI cannot call: the live suite's"
             ),
+            "kimi": NA(
+                "Kimi's own permission requests are the run's governance (F32): it has no "
+                "approval setting of its own to give"
+            ),
         },
         modes={
             "elsewhere": NA("the graph's in-memory checkpointer is the pausing process's own"),
@@ -1035,6 +1042,7 @@ FEATURES: Final[list[Feature]] = [
             "deepagents": NATIVE_CONTEXT,
             "openai_agents": OWN_CONTEXT,
             "claude": OWN_CONTEXT,
+            "kimi": OWN_CONTEXT,
         },
         way2=NA("native middleware: a graph is built with it"),
     ),
@@ -1046,7 +1054,7 @@ FEATURES: Final[list[Feature]] = [
         fits_the_window,
         adapters={
             a: NA("ReAct's and middleware()'s: add middleware() to a graph to have it")
-            for a in ("function", "langgraph", "deepagents", "openai_agents", "claude")
+            for a in ("function", "langgraph", "deepagents", "openai_agents", "claude", "kimi")
         },
         way2=NA("native middleware: a graph is built with it"),
     ),
@@ -1069,7 +1077,7 @@ FEATURES: Final[list[Feature]] = [
         needs=frozenset({"memory"}),
         adapters={
             a: NA("checked by F41 (what the model is sent)")
-            for a in ("react", "langgraph", "deepagents", "openai_agents", "claude")
+            for a in ("react", "langgraph", "deepagents", "openai_agents", "claude", "kimi")
         },
         way2=NA("checked by F41"),
     ),
@@ -1354,13 +1362,15 @@ async def run_options_without(w: World) -> None:
 
 #: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
 #: what its error says), and set far above it.
-TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
+TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
     "react": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
     "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
+    # Kimi ends a turn at its step limit with no answer, as a turn it finished (no error)
+    "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, None),
 }
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "react": {"recursion_limit": 50},
@@ -1369,6 +1379,7 @@ ROOMY: Final[dict[str, dict[str, Any]]] = {
     "deepagents": {"recursion_limit": 50},
     "openai_agents": {"max_turns": 20},
     "claude": {"max_turns": 20},
+    "kimi": {"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "50"}},
 }
 
 
@@ -1384,6 +1395,9 @@ async def framework_options(w: World) -> None:
         assert o.record.metadata.get("framework_options") == tight, o.record.metadata
     else:
         o = await w.go([d.lookup()], plan, framework_options=tight)
+    if said is None:  # stopped at the limit with no answer (Kimi), not failed
+        assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
+        return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
     assert said in o.record.error.message, o.record.error.message
 

@@ -284,7 +284,7 @@ class FakeAgent:
                 for p in sorted(folder.rglob("*"))
                 if p.is_file()
             }
-            linked = sorted(p.name for p in HOME.iterdir() if p.is_symlink())
+            linked = sorted(p.name for p in HOME.iterdir() if p.is_symlink())  # noqa: ASYNC240
             record("skills", {"files": found, "linked": linked})
             return None
         if "error" in step:

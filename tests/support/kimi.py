@@ -217,9 +217,7 @@ class _Shared:
         return await self.endpoints[request.path_params["name"]]._chat(request)
 
     async def start(self) -> None:
-        app = Starlette(
-            routes=[Route("/{name}/v1/chat/completions", self._chat, methods=["POST"])]
-        )
+        app = Starlette(routes=[Route("/{name}/v1/chat/completions", self._chat, methods=["POST"])])
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
         server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
         self.task = asyncio.create_task(server.serve())
@@ -234,9 +232,7 @@ class _Shared:
 
 
 #: The shared servers, by event loop (each test has its own loop).
-_SHARED: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Shared] = (
-    weakref.WeakKeyDictionary()
-)
+_SHARED: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Shared] = weakref.WeakKeyDictionary()
 
 
 def attached_endpoints() -> list[PlannedEndpoint]:

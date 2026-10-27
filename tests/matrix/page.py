@@ -34,6 +34,7 @@ NAMES: Final = {
     "deepagents": ("Deep Agents", "frameworks/deepagents.md"),
     "openai_agents": ("OpenAI Agents", "frameworks/openai-agents.md"),
     "claude": ("Claude Agent SDK", "frameworks/claude-agent-sdk.md"),
+    "kimi": ("Kimi Code (ACP)", "frameworks/kimi.md"),
 }
 
 

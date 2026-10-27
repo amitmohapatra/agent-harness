@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, Final, Literal
 if TYPE_CHECKING:
     from tests.matrix.world import World
 
-#: The targets, as the adapters name themselves (``claude`` is the Claude Agent SDK).
+#: The targets, as the adapters name themselves (``claude`` is the Claude Agent SDK, ``kimi``
+#: Kimi Code over ACP).
 ADAPTERS: Final = (
     "react",
     "middleware",
@@ -24,6 +25,7 @@ ADAPTERS: Final = (
     "deepagents",
     "openai_agents",
     "claude",
+    "kimi",
 )
 #: Way 1 (``h.wrap`` on a deployment), Way 2 (the blocks, no Harness), with blocks: the team's
 #: own blocks (``Harness(runs=, memory=, gateway=, governance=).wrap(ReAct(...))`` and its own

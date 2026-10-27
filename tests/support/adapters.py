@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 import pytest
-
 from agents import Agent as OpenAIAgent
 from claude_agent_sdk import ClaudeAgentOptions
 from deepagents import create_deep_agent
