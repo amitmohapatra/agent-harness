@@ -183,8 +183,9 @@ class PlannedEndpoint:
         return StreamingResponse(_chunks(reply), media_type="text/event-stream")
 
     async def attached(self) -> PlannedEndpoint:
-        """This endpoint on the event loop's shared server (made the first time, ended with
-        the loop): for a target built where nothing can close a server of its own."""
+        """This endpoint on the event loop's shared server (made the first time, stopped at the
+        test's end: :func:`detached`): for a target built where nothing can close a server of
+        its own."""
         loop = asyncio.get_running_loop()
         shared = _SHARED.get(loop)
         if shared is None:
@@ -223,10 +224,15 @@ class _Shared:
         app = Starlette(routes=[Route("/{name}/v1/chat/completions", self._chat, methods=["POST"])])
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
         server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
+        self.server = server
         self.task = asyncio.create_task(server.serve())
         while not server.started:  # noqa: ASYNC110 - uvicorn says so with a flag only
             await asyncio.sleep(0.01)
         self.origin = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+
+    async def stop(self) -> None:
+        self.server.should_exit = True
+        await self.task
 
     def add(self, endpoint: PlannedEndpoint) -> str:
         name = f"e{len(self.endpoints)}"
@@ -236,6 +242,14 @@ class _Shared:
 
 #: The shared servers, by event loop (each test has its own loop).
 _SHARED: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Shared] = weakref.WeakKeyDictionary()
+
+
+async def detached() -> None:
+    """This loop's shared server stopped, if a test started one: at the test's end, before its
+    loop closes (a server left serving there is cancelled mid-lifespan)."""
+    shared = _SHARED.pop(asyncio.get_running_loop(), None)
+    if shared is not None:
+        await shared.stop()
 
 
 def attached_endpoints() -> list[PlannedEndpoint]:

@@ -22,7 +22,7 @@ HUGE: Final = MAX_CHECKPOINT_BYTES + 1
 #: How long ``wait`` waits at most (a cancel or a time limit ends it sooner).
 WAIT_SECONDS: Final = 1.0
 #: How long ``hold`` holds at most: far past any run time limit a cell sets, which ends it.
-HOLD_SECONDS: Final = 10.0
+HOLD_SECONDS: Final = 30.0
 
 
 class Desk:

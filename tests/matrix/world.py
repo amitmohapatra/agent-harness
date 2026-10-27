@@ -372,8 +372,11 @@ class World:
         self.team_catalog.rules = dict(rules)
 
     async def aclose(self) -> None:
+        from tests.support.kimi import detached
+
         for h in [*self.harnesses, *self.others]:
             await h.aclose()
+        await detached()  # the Kimi cells' model endpoints
 
     def contract_violations(self) -> list[str]:
         """What the memory service's document refused, taken (``tests/conftest.py`` would fail

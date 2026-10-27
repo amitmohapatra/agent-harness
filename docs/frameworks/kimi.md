@@ -66,6 +66,7 @@ command="kimi")`:
 | Questions | Kimi's `AskUserQuestion` is the run's question (`Runtime.ask`): a durable pause, the answer one of its options |
 | Spending | Kimi's own usage log (`usage.record` lines: every model request of the main agent and of every sub-agent) is read as the turn runs: tokens count toward the budget, and past it the turn is cancelled and the run ends `PARTIAL`. Dollars are not counted yet (a follow-up reads them from the gateway's log): a `max_cost` budget does not see Kimi's spending |
 | Stalls | a model step that sends nothing for `STALL_SECONDS` (a tool's time not counted) ends the run with a `ModelTimeout` |
+| Cancel and time limits | a cancelled run, or one past its `run_timeout`, ends the attempt: a harness tool still under way is cancelled with it (recorded `cancelled` or `timeout`), as an in-process tool is, then the `kimi` process ends. Kimi starts in a second or two per attempt, inside the run's time limit |
 | Grounding, judges, tracing | as for every target |
 
 ## Approvals and pauses

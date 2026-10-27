@@ -265,11 +265,17 @@ async def idempotency(w: World) -> None:
     assert key is not None and key.startswith(f"{o.run_id}:"), key
 
 
+#: How long ``cancel`` waits for the run to reach its tool, at most (it cancels it there): a
+#: guard against a run that never gets there, not a measure — Kimi Code in ``elsewhere`` starts
+#: twice before it does (a second or two each, several on a loaded CI runner).
+STARTED_SECONDS: Final = 30.0
+
+
 async def cancel(w: World) -> None:
     d = Desk()
 
     async def cancelling(run_id: str) -> None:
-        await asyncio.wait_for(d.started.wait(), 10)
+        await asyncio.wait_for(d.started.wait(), STARTED_SECONDS)
         await w.cancel(run_id, "a duplicate")
 
     o = await w.go([d.wait()], [("wait", {"seconds": 30})], during=cancelling)
@@ -285,13 +291,18 @@ async def cancel(w: World) -> None:
 #: (the run then timed out with no model called): 2 s leaves that margin five times over, and
 #: ``hold`` holds far longer, so the limit still ends the run.
 RUN_LIMIT: Final = 2.0
-#: Kimi Code takes a second or two to start (a Node program), once per attempt: its limit
-#: leaves that room for two attempts (``elsewhere`` pauses first), and still runs out in ``hold``.
-KIMI_RUN_LIMIT: Final = 8.0
+#: Kimi Code takes ~1.8 s to start here (a Node program, before it answers ``initialize``), once
+#: per attempt, and far longer on a loaded CI runner: the run's limit leaves this much for each
+#: start. ``elsewhere`` starts it twice (it pauses first, then another process resumes it), all
+#: within the run's one limit; ``hold`` holds longer than either limit.
+KIMI_START_SECONDS: Final = 6.0
 
 
 def run_limit(w: World) -> float:
-    return KIMI_RUN_LIMIT if w.adapter == "kimi" else RUN_LIMIT
+    if w.adapter != "kimi":
+        return RUN_LIMIT
+    starts = 2 if w.mode == "elsewhere" else 1
+    return RUN_LIMIT + starts * KIMI_START_SECONDS
 
 
 async def run_timeout(w: World) -> None:

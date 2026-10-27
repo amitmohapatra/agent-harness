@@ -474,6 +474,37 @@ async def test_a_cancelled_run_stops_the_agent(harness: Harness, tmp_path: Path)
     assert result.status is RunStatus.CANCELLED
 
 
+waited: list[str] = []
+waiting = asyncio.Event()
+
+
+@tool(side_effects="read")
+async def wait_long(seconds: int) -> str:
+    """Wait a number of seconds, then say so."""
+    waiting.set()
+    await asyncio.sleep(seconds)
+    waited.append("done")
+    return "waited"
+
+
+async def test_a_cancelled_run_cancels_the_harness_call_under_way(
+    harness: Harness, tmp_path: Path
+) -> None:
+    waited.clear()
+    waiting.clear()
+    # under the second the server is given to stop in: the call is cancelled, not waited for
+    script = [{"tool": "wait_long", "args": {"seconds": 1}}, {"text": "late"}]
+    agent = arm(harness.wrap(fake(tmp_path, script), id="waits"), [wait_long])
+    handle = asyncio.create_task(agent.run("x", user="u1"))
+    await asyncio.wait_for(waiting.wait(), 30)
+    [run] = [s async for s in harness.runs.iterate(agent_id="waits")]
+    await agent.cancel(run.run_id, reason="enough")
+    result = await handle
+    assert result.status is RunStatus.CANCELLED
+    await asyncio.sleep(1.5)  # past when the call would have ended
+    assert waited == []  # cut short with the run, never finished after it
+
+
 # --------------------------------------------------------------------------- failures
 async def test_a_process_that_ends_mid_turn_fails_the_run_with_its_stderr(
     harness: Harness, tmp_path: Path
