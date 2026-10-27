@@ -695,3 +695,32 @@ async def test_a_sandboxed_command_that_fails_or_outlives_the_run(
     assert crashed["signal"] == "SIGKILL" and "the sandbox is gone" in crashed["output"]
     assert "HOME" in record["started"][0]["env"] and "KIMI_CODE_HOME" in record["started"][0]["env"]
     assert "sleep 30" in sandboxes.killed  # the command still running when the run ended
+
+
+# --------------------------------------------------------------------------- skills
+async def test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linked(
+    harness: Harness, tmp_path: Path
+) -> None:
+    from tests.support.skills import SkillStore
+    from trellis.skills import combine
+
+    store = SkillStore()
+    store.put(
+        "sql-review",
+        "Check every JOIN.",
+        description="Reviews SQL.",
+        files={"rules.md": "No SELECT *."},
+    )
+    usual = tmp_path / "home"
+    usual.mkdir()
+    (usual / "config.toml").write_text("default_model = 'k2'\n")
+    target = fake(tmp_path, [{"skills": True}, {"text": "ok"}], **combine(store).kimi())
+    result = await harness.wrap(target, id="skilled").run("review", user="ada")
+    assert result.status is RunStatus.SUCCESS, result.error
+    [seen] = recorded(tmp_path)["skills"]
+    assert "Check every JOIN." in seen["files"]["sql-review/SKILL.md"]
+    assert seen["files"]["sql-review/rules.md"] == "No SELECT *."
+    assert seen["linked"] == ["config.toml"]  # its own configuration; no credentials kept here
+    started = recorded(tmp_path)["started"][0]["env"]["KIMI_CODE_HOME"]
+    gone = not Path(started).exists()  # noqa: ASYNC240
+    assert started != str(usual) and gone  # the run's, removed with it

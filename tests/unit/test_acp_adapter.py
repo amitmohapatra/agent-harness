@@ -105,3 +105,17 @@ def test_a_usage_log_reads_from_where_the_attempt_began(tmp_path: Any) -> None:
     with log.open("a") as file:
         file.write('{"type": "usage.record", "usage": {"output": 2}}\n')
     assert [r["usage"]["output"] for r in usage.records()] == [2]
+
+
+def test_a_run_home_of_an_agent_with_no_profile_keeps_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOME_SETTING", "kept")
+    target = acp.ACPAgent(command=("agent",), env={"OWN": "1"}, skills=object())
+    home = acp.RunHome(target, SimpleNamespace(run_id="run_home_test"))  # type: ignore[arg-type]
+    env = home.env()
+    assert env["SOME_SETTING"] == "kept" and env["OWN"] == "1"
+    assert "KIMI_CODE_HOME" not in env or env["KIMI_CODE_HOME"] != str(home.agent_home)
+    import shutil
+
+    shutil.rmtree(home.root)

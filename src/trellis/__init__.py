@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 
 if TYPE_CHECKING:
+    from trellis.harness.adapters.acp import kimi
     from trellis.harness.agent import Agent, RunHandle
     from trellis.harness.budget import Budget
     from trellis.harness.evals import llm_judge
@@ -53,6 +54,7 @@ _EXPORTS = {
     "llm_judge": "trellis.harness.evals",
     "sandbox": "trellis.harness.sandbox",
     "ReAct": "trellis.harness.react",
+    "kimi": "trellis.harness.adapters.acp",
     "middleware": "trellis.harness.react",
     "current": "trellis.harness.runtime",
     "Agent": "trellis.harness.agent",
@@ -90,6 +92,7 @@ __all__ = [
     "a2a",
     "current",
     "deep_agent",
+    "kimi",
     "llm_judge",
     "mcp",
     "middleware",

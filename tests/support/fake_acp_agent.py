@@ -277,6 +277,16 @@ class FakeAgent:
             sys.stderr.write(step["crash"] + "\n")
             sys.stderr.flush()
             os._exit(3)
+        if "skills" in step:  # what its skills folder holds, as Kimi reads it
+            folder = HOME / "skills"
+            found = {
+                str(p.relative_to(folder)): p.read_text()
+                for p in sorted(folder.rglob("*"))
+                if p.is_file()
+            }
+            linked = sorted(p.name for p in HOME.iterdir() if p.is_symlink())
+            record("skills", {"files": found, "linked": linked})
+            return None
         if "error" in step:
             raise RequestError.internal_error({"why": step["error"]})
         if "orphan" in step:  # an update of a call it never said it started

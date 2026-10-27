@@ -304,8 +304,10 @@ class ACPAgent:
     "args", "env"}`` for stdio, ``{"type": "http", "name", "url", "headers"}``), ``mode`` (a
     session mode it lists that asks before acting: :data:`GOVERNED_MODES`), ``model`` (a model
     name the gateway serves, where the agent's profile routes it), ``sandbox`` (``sandbox()``:
-    the agent's shell commands and file writes go to the run's sandbox, :class:`Sandboxed`)
-    and ``profile`` (what the harness knows of it: :data:`KIMI`)."""
+    the agent's shell commands and file writes go to the run's sandbox, :class:`Sandboxed`),
+    ``skills`` (a ``SkillSet``, ``**src.kimi()``: the run's pinned skills in the agent's own
+    skills folder, :class:`RunHome`) and ``profile`` (what the harness knows of it:
+    :data:`KIMI`)."""
 
     command: tuple[str, ...]
     env: Mapping[str, str] = field(default_factory=dict)
@@ -314,6 +316,7 @@ class ACPAgent:
     mode: str | None = None
     model: str | None = None
     sandbox: Any = None
+    skills: Any = None
     profile: Profile | None = None
 
     def __post_init__(self) -> None:
@@ -331,6 +334,7 @@ def kimi(
     mcp_servers: Sequence[Mapping[str, Any]] = (),
     mode: str | None = None,
     sandbox: Any = None,
+    skills: Any = None,
     command: str = "kimi",
 ) -> ACPAgent:
     """Kimi Code (``@moonshot-ai/kimi-code``, its ``kimi acp`` server) as a target: ``model``
@@ -338,7 +342,8 @@ def kimi(
     ``KIMI_MODEL_*`` in ``env``), ``cwd`` where it works, ``env`` over this process's,
     ``mcp_servers`` of its own beside the harness's, ``mode`` its session mode (``"default"``
     or ``"plan"``), ``sandbox`` a ``sandbox()`` its ``Bash`` commands and file writes go to
-    (its reads do not: :class:`Sandboxed`), ``command`` the ``kimi`` executable."""
+    (its reads do not: :class:`Sandboxed`), ``skills`` a ``SkillSet`` (``**src.kimi()``), its
+    skills for each run, ``command`` the ``kimi`` executable."""
     return ACPAgent(
         command=(command, "acp"),
         env=dict(env or {}),
@@ -347,6 +352,7 @@ def kimi(
         mode=mode,
         model=model,
         sandbox=sandbox,
+        skills=skills,
         profile=KIMI,
     )
 
@@ -502,16 +508,19 @@ class ACPAdapter:
         runtime = run.runtime
         target = given(target, runtime.framework_options)
         profile = target.profile
-        boxed = Sandboxed(target, runtime) if target.sandbox is not None else None
-        env = boxed.env() if boxed is not None else {**os.environ, **target.env}
+        own = target.sandbox is not None or target.skills is not None
+        home = RunHome(target, runtime) if own else None
+        boxed = Sandboxed(target, runtime, home) if home is not None and target.sandbox else None
+        env = home.env() if home is not None else {**os.environ, **target.env}
         if profile is not None and profile.routed is not None:
             profile.routed(env, runtime, target.model)
         cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
         attempt = Attempt(self, runtime, target, boxed)
         capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()
         async with contextlib.AsyncExitStack() as stack:
-            if boxed is not None:
-                stack.push_async_callback(boxed.closed)
+            if home is not None:
+                stack.push_async_callback(home.closed)
+                await home.skills()
             servers = [_server(s) for s in target.mcp_servers]
             if run.native_tools is not None:
                 servers.append(await stack.enter_async_context(_harness_server(run.native_tools)))
@@ -1089,6 +1098,75 @@ READS_NOT_ISOLATED: Final = (
 )
 
 
+class RunHome:
+    """A home of the run's own for the agent (a sandboxed run's, or one given skills): the
+    folder the agent keeps its state in (its profile's ``home``: Kimi's ``KIMI_CODE_HOME``,
+    its sessions and its skills) and a working directory, both kept across the run's attempts
+    on this machine and removed with the run.
+
+    * **skills** (``ACPAgent(skills=...)``, ``**src.kimi()``): the run's pinned skills are
+      written into the agent's own skills folder (``<home>/skills/<name>/SKILL.md`` and its
+      files: ``skills.write_plugin``) before each attempt — the versions the run pinned, so a
+      resume reads the same ones;
+    * **a run that is not sandboxed** keeps this process's environment, and the agent's own
+      configuration and login (``config.toml``, ``credentials``) are linked into the run's home
+      from the agent's usual one;
+    * **a sandboxed run** (:class:`Sandboxed`) gets an environment of :data:`SANDBOXED_ENV`
+      and the agent's own ``env`` only, its ``HOME`` the run's too, nothing linked: no
+      credential of this machine's reaches it (its model comes through the gateway, or from
+      ``env``)."""
+
+    #: what of the agent's usual home a run's home links to (its configuration, its login)
+    LINKED: Final = ("config.toml", "credentials")
+
+    def __init__(self, target: ACPAgent, runtime: Runtime) -> None:
+        from trellis.contracts import stable_id
+
+        self.target = target
+        self.runtime = runtime
+        self.root = Path(tempfile.gettempdir()) / SANDBOXED_ROOT / stable_id(runtime.run_id)
+        self.home = self.root / "home"
+        self.agent_home = self.home / ".agent"
+        self.work = str(self.root / "work")
+        self.agent_home.mkdir(parents=True, exist_ok=True)
+        Path(self.work).mkdir(parents=True, exist_ok=True)
+
+    def env(self) -> dict[str, str]:
+        profile = self.target.profile
+        variable = profile.home if profile is not None else None
+        if self.target.sandbox is not None:
+            env = {k: os.environ[k] for k in SANDBOXED_ENV if k in os.environ}
+            env = {**env, **self.target.env, "HOME": str(self.home)}
+        else:
+            env = {**os.environ, **self.target.env}
+            if variable is not None:
+                self._linked(Path(env.get(variable) or KIMI_HOME).expanduser())
+        if variable is not None:  # the run's, whatever the environment says
+            env[variable] = str(self.agent_home)
+        return env
+
+    def _linked(self, usual: Path) -> None:
+        for name in self.LINKED:
+            found, link = usual / name, self.agent_home / name
+            if found.exists() and not link.exists():
+                link.symlink_to(found)
+
+    async def skills(self) -> None:
+        """The run's pinned skills, in the agent's skills folder (``<home>/skills``)."""
+        if self.target.skills is None:
+            return
+        from trellis.harness import skills
+
+        shutil.rmtree(self.agent_home / "skills", ignore_errors=True)  # an earlier attempt's
+        await skills.write_plugin(self.target.skills, self.agent_home)
+
+    async def closed(self) -> None:
+        """The attempt ended: the run's home and working directory removed with the run (kept
+        while it waits on a person: the next attempt resumes the agent's session from them)."""
+        if self.runtime.pending is None:
+            shutil.rmtree(self.root, ignore_errors=True)
+
+
 class Sandboxed:
     """A run's agent working with the run's sandbox (``ACPAgent(sandbox=sandbox())``): it is
     given ACP's file and terminal capabilities, served here — ``fs/write_text_file`` and
@@ -1100,34 +1178,19 @@ class Sandboxed:
     (``Read`` looks a file up on the host first; ``Glob`` and ``Grep`` never ask the client).
     What the harness can do it does: the agent's process gets a home and a working directory of
     the run's own, both empty, and an environment of :data:`SANDBOXED_ENV` and the agent's own
-    ``env`` only — and each run says that its reads are not isolated
+    ``env`` only (:class:`RunHome`) — and each run says that its reads are not isolated
     (:data:`READS_NOT_ISOLATED`)."""
 
-    def __init__(self, target: ACPAgent, runtime: Runtime) -> None:
-        from trellis.contracts import stable_id
-
+    def __init__(self, target: ACPAgent, runtime: Runtime, home: RunHome) -> None:
         self.target = target
         self.runtime = runtime
         self.source = target.sandbox
-        root = Path(tempfile.gettempdir()) / SANDBOXED_ROOT / stable_id(runtime.run_id)
-        self.root = root
-        self.home = root / "home"
-        self.work = str(root / "work")
-        self.home.mkdir(parents=True, exist_ok=True)
-        Path(self.work).mkdir(parents=True, exist_ok=True)
+        self.work = home.work
         self.terminals: dict[str, tuple[asyncio.Task[Any], int | None]] = {}
         self._made = False
         runtime.added.append(self.source)  # its end (and its pause) find it
         _said_reads(runtime.agent_id)
         runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
-
-    def env(self) -> dict[str, str]:
-        env = {k: os.environ[k] for k in SANDBOXED_ENV if k in os.environ}
-        env = {**env, **self.target.env, "HOME": str(self.home)}
-        profile = self.target.profile
-        if profile is not None and profile.home is not None:  # the run's, whatever env says
-            env[profile.home] = str(self.home / ".agent")
-        return env
 
     def capabilities(self) -> Any:
         from acp.schema import ClientCapabilities, FileSystemCapabilities
@@ -1209,13 +1272,6 @@ class Sandboxed:
         for task in running:
             task.cancel()
         await asyncio.gather(*running, return_exceptions=True)
-
-    async def closed(self) -> None:
-        """The attempt ended: the agent's home and working directory removed with the run
-        (kept while it waits on a person: the next attempt resumes the agent's session from
-        them)."""
-        if self.runtime.pending is None:
-            shutil.rmtree(self.root, ignore_errors=True)
 
 
 def _ran(task: asyncio.Task[Any]) -> tuple[str, int | None, str | None]:
@@ -1302,6 +1358,7 @@ __all__ = [
     "ACPInput",
     "ACPRunError",
     "Profile",
+    "RunHome",
     "Sandboxed",
     "UsageLog",
     "kimi",
