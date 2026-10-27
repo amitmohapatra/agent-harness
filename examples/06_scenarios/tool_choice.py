@@ -365,13 +365,35 @@ HARDER: Final = [
 SCENARIOS: Final = [*DATASET, *MORE, *HARDER]
 
 
+#: Words that mark the clause an answer concludes in ("S40 first", "S12 should get it").
+CONCLUDES: Final = ("first", "should", "priorit")
+
+
+def concluded(answer: str) -> str | None:
+    """The store ``answer`` concludes on: the first one named in the first clause that says
+    which goes first, or in the nearest clause before it when that one names none ("..., so
+    it should"); without such a clause, the last one named. Not the first named: "S12 has 3
+    weeks, S40 0.2: S40 first" concludes on S40."""
+
+    def named(text: str) -> list[str]:
+        return [s for _, s in sorted((text.find(s), s) for s in STORES if s in text)]
+
+    clauses = re.split(r"[.;:,!?\n]", answer)
+    for i, clause in enumerate(clauses):
+        if any(cue in clause.casefold() for cue in CONCLUDES):
+            found = next((n for c in reversed(clauses[: i + 1]) if (n := named(c))), None)
+            if found:
+                return found[0]
+    last = max(((answer.rfind(s), s) for s in STORES if s in answer), default=None)
+    return last[1] if last else None
+
+
 async def picks(case: EvalCase) -> EvalScore | None:
-    """Of an item with an expected store, whether the first store the answer names is it."""
+    """Of an item with an expected store, whether the store the answer concludes on is it."""
     if case.expected not in STORES or not isinstance(case.output, str):
         return None
-    named = sorted((case.output.find(s), s) for s in STORES if s in case.output)
-    first = named[0][1] if named else None
-    return EvalScore("picks", first == case.expected, f"first named: {first}")
+    store = concluded(case.output)
+    return EvalScore("picks", store == case.expected, f"concludes on: {store}")
 
 
 #: Words an answer says a part cannot be answered with.

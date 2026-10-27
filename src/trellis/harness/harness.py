@@ -438,6 +438,26 @@ class Harness:
             raise ConfigurationError(f"TRELLIS_API_KEY speaks for {own!r}, not {requested!r}")
         return own
 
+    async def _published(self, agents: Sequence[Agent]) -> None:
+        """Each agent's tools published to the key's tenant now - at a worker's start - so
+        tool search has them indexed before the first run asks for hints. A platform key
+        knows no tenant (each run's first one publishes); a failure is a warning, and the
+        first run publishes them anyway."""
+        if self.memory is None:
+            return
+        try:
+            tenant = (await self._key_info()).tenant_id
+        except Exception as exc:
+            log.warning("the tools were not published at start: %s", exc)
+            return
+        if tenant is None:
+            return
+        for agent in agents:
+            try:
+                await agent._toolbox(tenant).tools()
+            except Exception as exc:
+                log.warning("%s: its tools were not published at start: %s", agent.id, exc)
+
     @property
     def _known_tenant(self) -> str | None:
         """The key's tenant once it has been asked (``None`` before, or for a platform key)."""

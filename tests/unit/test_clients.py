@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -140,6 +140,60 @@ async def test_code_mode_calls_are_read_back_from_the_log_by_the_run_id(
     # the log is read again until two reads agree: it is written behind the calls
     assert route.call_count == 2
     await gateway.aclose()
+
+
+async def test_a_scripts_calls_are_recorded_in_the_order_they_ran_at_the_scripts_step() -> None:
+    """B17: a script's calls were recorded after the run's own, numbered by the memory service
+    in the order the log came back: a tool the run called after the script came first in a
+    learned procedure. Each is now recorded in log-time order at its script's step."""
+    from trellis.harness.agent import Agent
+
+    t0 = datetime(2026, 9, 30, tzinfo=UTC)
+
+    def logged(id: str, at: float, name: str, q: str) -> SimpleNamespace:
+        at_ = t0 + timedelta(seconds=at)
+        return SimpleNamespace(
+            id=id,
+            timestamp=at_,
+            name=name,
+            arguments={"q": q},
+            result="r",
+            error=None,
+            latency_ms=1,
+        )
+
+    class Log:
+        async def code_mode_calls(self, run_id: str, since: datetime) -> list[SimpleNamespace]:
+            return [
+                logged("l3", 31, "wiki-read", "c"),
+                logged("l2", 12, "wiki-read", "b"),
+                logged("l1", 11, "wiki-search", "a"),
+                logged("l0", 9.5, "wiki-list", "z"),  # the gateway's clock a little behind
+            ]
+
+    recorded: list[tuple[int | None, str]] = []
+
+    class Records:
+        async def record_tool(self, call: ToolCall, outcome: ToolOutcome) -> None:
+            recorded.append((call.step, call.tool))
+
+    class Writes:
+        async def submit(self, name: str, work: Any, events: Any = None) -> None:
+            await work()
+
+    agent = SimpleNamespace(harness=SimpleNamespace(gateway=Log(), writes=Writes()))
+    runtime = SimpleNamespace(
+        run_memory=Records(),
+        uses=lambda feature: True,
+        run_id="run_1",
+        started_at=t0,
+        task="t",
+        events=None,
+        # two scripts: at step 1, and at step 4 after the run's own calls at steps 2 and 3
+        code_mode_scripts=[(t0 + timedelta(seconds=10), 1), (t0 + timedelta(seconds=30), 4)],
+    )
+    await Agent.imported_code_mode_calls(cast("Agent", agent), cast("Any", runtime))
+    assert recorded == [(1, "wiki-list"), (1, "wiki-search"), (1, "wiki-read"), (4, "wiki-read")]
 
 
 # --------------------------------------------------------------------------- memory

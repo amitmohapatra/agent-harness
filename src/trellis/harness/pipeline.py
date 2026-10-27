@@ -764,7 +764,7 @@ async def _succeeded(
     await agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
     await agent.grounded(runtime, answer, pushed)
     await agent.judged(runtime, answer, pushed)
-    if runtime.used_code_mode:
+    if runtime.code_mode_scripts:
         await agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)
 

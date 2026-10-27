@@ -115,6 +115,8 @@ class FakeMemoryService:
     learned_skills: str = ""
     #: candidates for a particular task, over ``candidates``
     candidates_for: dict[str, list[str]] = field(default_factory=dict)
+    #: the best candidate's confidence in the context (each next one 0.1 less)
+    top_confidence: float = 0.9
     #: the claims ``/v1/verify`` finds, and how many of them the evidence does not support
     claims: int = 5
     unsupported: int = 1
@@ -271,12 +273,14 @@ class FakeMemoryService:
             and len(available) >= HINTS_MIN_TOOLS
         ):
             chosen = self._candidates("", available)
+            top = self.top_confidence
             rendered += "\n\n## Tools\n" + "\n".join(
-                f"- {n} (confidence {0.9 - i / 10:.2f})" for i, n in enumerate(chosen)
+                f"- {n} (confidence {top - i / 10:.2f})" for i, n in enumerate(chosen)
             )
             if not self.omit_candidates:
                 answer["tools"] = [
-                    {"name": n, "confidence": round(0.9 - i / 10, 2)} for i, n in enumerate(chosen)
+                    {"name": n, "confidence": round(max(0.0, top - i / 10), 2)}
+                    for i, n in enumerate(chosen)
                 ]
             answer["rendered"] = rendered
         answer["token_estimate"] = len(rendered) // 4
@@ -708,7 +712,7 @@ def _catalog_tool(name: str, fields: dict[str, Any]) -> dict[str, Any]:
         "schema_hash": "0" * 16,
         "workspace_id": None,
     }
-    entry.update({k: v for k, v in fields.items() if k in entry or k == "risk"})
+    entry.update({k: v for k, v in fields.items() if k in entry or k in ("risk", "indexed")})
     entry.setdefault("risk", entry["side_effects"] or derived)
     return entry
 

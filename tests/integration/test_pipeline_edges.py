@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -127,12 +128,25 @@ class LoggingGateway:
 
     async def code_mode_calls(self, run_id: str, since: Any) -> list[Any]:
         self.asked.append(run_id)
+        now = datetime.now(UTC)
         return [
             SimpleNamespace(
-                name="wiki-search", arguments={"q": "x"}, result="found", error=None, latency_ms=4
+                id="l1",
+                timestamp=now,
+                name="wiki-search",
+                arguments={"q": "x"},
+                result="found",
+                error=None,
+                latency_ms=4,
             ),
             SimpleNamespace(
-                name="wiki-read", arguments="not an object", result=None, error="boom", latency_ms=1
+                id="l2",
+                timestamp=now,
+                name="wiki-read",
+                arguments="not an object",
+                result=None,
+                error="boom",
+                latency_ms=1,
             ),
         ]
 

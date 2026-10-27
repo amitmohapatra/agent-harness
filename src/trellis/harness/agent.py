@@ -108,6 +108,10 @@ MEMORY: Final = frozenset(COVERS["memory"])
 SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.model_fields)
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
+#: The best tool hint's confidence below which the hints narrow nothing: every tool is offered
+#: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
+#: service scores relative to the best match); nothing matching scores 0 to 0.1.
+NARROW_FLOOR: Final = 0.5
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
 UNREACHED_FIX: Final = {
@@ -123,7 +127,9 @@ UNREACHED_FIX: Final = {
 TURN_WRITE_SECONDS: Final = 5.0
 #: What the model is told when memory has nothing for the question (``evidence_status``
 #: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
-#: the user's history, instead of a confident guess the memory never held.
+#: the user's history, instead of a confident guess the memory never held. Not when a hinted
+#: tool answers the question (its confidence at least :data:`NARROW_FLOOR`): told "do not
+#: guess", a weak model searched memory in loops instead of calling it.
 ABSTAIN_NOTES: Final = {
     "INSUFFICIENT": (
         "## Memory\nMemory holds nothing about this question. If the answer depends on "
@@ -810,18 +816,25 @@ class Agent:
         it carries the skills the agent learned for the task, and - from five tools, the
         service's threshold - the tools that fit, whose candidates narrow the tools the model is
         offered (the ``hints`` feature), the framework's own among them where the framework
-        lets them be narrowed. A failure is a warning."""
+        lets them be narrowed. The tenant's first hints wait for its tools to be indexed
+        (``Toolbox.indexed``); hints below :data:`NARROW_FLOOR` narrow nothing; the tools
+        behind Code Mode are asked about too, and a hint naming one keeps the meta-tools that
+        reach it. A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
         own = runtime.tool_set()
         hints = runtime.uses("hints")
+        box = self._toolbox(runtime.tenant)
+        behind = box.hidden(code_mode=runtime.uses("code_mode")) if hints else []
+        if hints:
+            await box.indexed()
         window = self.window(runtime)
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
                     runtime.task,
-                    tools=own or None,
+                    tools=[*own, *behind] or None,
                     window=window,
                     hints=hints,
                     budget=self.context_budget,
@@ -836,17 +849,23 @@ class Agent:
                 pushed.conversation.messages if pushed.conversation else []
             )
         # candidates the model is offered — the hints, and the tools the context names (the
-        # plan of a skill learned for the task lists its steps); no hint narrows nothing
+        # plan of a skill learned for the task lists its steps); no hint, or none confident
+        # enough, narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
-        if hints and candidates and self.adapter.narrows != "none":
-            runtime.offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
+        best = max((t.confidence for t in pushed.tools or ()), default=0.0)
+        if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
+            offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
+            if set(pushed.tool_names) & set(behind):  # reached through the meta-tools
+                offered |= {n for n, t in runtime.toolbox.items() if t.feature == "code_mode"}
+            runtime.offered = offered
         status = pushed.evidence_status
         runtime.evidence = status
         runtime.pushed = {
             "bundle_id": pushed.bundle_id,
             "memory_ids": pushed.memory_ids[:CITED_MAX],
         }
-        note = ABSTAIN_NOTES.get(status)
+        # a question a hinted tool answers is no question memory must answer
+        note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
         rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
         runtime.context = rendered or None
         runtime.events.emit(
@@ -1034,17 +1053,24 @@ class Agent:
             await self.harness.writes.submit(f"judge.{name}", work, events=events)
 
     async def imported_code_mode_calls(self, runtime: Runtime) -> None:
+        """The calls the run's Code Mode scripts made, read back from the gateway's log and
+        recorded in the order they ran, each at the step of the script that made it
+        (:func:`script_step`): a learned procedure takes its steps in that order, a tool the
+        run called after the script after them."""
         memory, gateway = runtime.run_memory, self.harness.gateway
         if memory is None or gateway is None or not runtime.uses("records"):
             return
         run_id, since, task = runtime.run_id, runtime.started_at or datetime.now(UTC), runtime.task
+        scripts = list(runtime.code_mode_scripts)
 
         async def work() -> None:
-            for entry in await gateway.code_mode_calls(run_id, since):
+            logged = await gateway.code_mode_calls(run_id, since)
+            for entry in sorted(logged, key=lambda e: (e.timestamp, e.id)):
                 call = ToolCall(
                     tool=entry.name,
                     args=entry.arguments if isinstance(entry.arguments, dict) else {},
                     task=task,
+                    step=script_step(scripts, entry.timestamp),
                 )
                 outcome = ToolOutcome(
                     tool=entry.name,
@@ -1242,6 +1268,14 @@ class Turns:
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
+
+
+def script_step(scripts: Sequence[tuple[datetime, int | None]], at: datetime) -> int | None:
+    """The step of the Code Mode script a call logged ``at`` ran in: of ``scripts`` (when each
+    started, its step; in the order they started; at least one), the last one started by
+    then, else the first (the gateway's clock a little behind the harness's)."""
+    started = [step for when, step in scripts if when <= at]
+    return started[-1] if started else scripts[0][1]
 
 
 def graded(answer: Any) -> str:

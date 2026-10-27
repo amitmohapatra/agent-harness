@@ -9,7 +9,9 @@ holds finish for a grace period before it releases the rest (cancelled with
 worker at once). This module hands it each claimed run's agent (``Agent.execute``: the next
 attempt, with the run's checkpoint as its journal and the working time its lease says is
 left) and, around the loop, the harness's background writes: started before the first claim
-(it replays what an earlier process spooled), drained when the loop ends.
+(it replays what an earlier process spooled), drained when the loop ends. Before the first
+claim, too, the agents' tools are published to the key's tenant, so tool search has them
+indexed when the first run asks for hints.
 
     h.worker([agent]).run()                         # in your own process
     python -m trellis.harness.worker app.main:h     # every agent wrapped by that Harness
@@ -85,6 +87,8 @@ class Worker:
 
     async def _writing(self, loop: Awaitable[None]) -> None:
         self.harness.writes.start()  # replays what an earlier process could not deliver
+        # the tools published before the first claim, so the first run's hints find them
+        await self.harness._published(list(self.agents.values()))
         try:
             await loop
         finally:

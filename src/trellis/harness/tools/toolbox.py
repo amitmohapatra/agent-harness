@@ -16,6 +16,8 @@ Mode where it is safe.
    tools described alike, too many at once), logged as warnings when the names listed change;
 3. **publish** — every tool goes to the catalog (MCP tools with their annotations, local tools
    with their declared side effects) through governance, in the background, once per content;
+   a tenant's first hints wait, at most :data:`INDEX_WAIT_SECONDS`, until tool search finds
+   them (:meth:`Toolbox.indexed`): asked before, every hint is a zero;
 4. **Code Mode** — the Code Mode servers whose tools all only read (as governance says now:
    the catalog's risk over the tools' own, and no approval rule), when there are at least
    :data:`CODE_MODE_MIN_SERVERS` of them or :data:`CODE_MODE_MIN_TOOLS` tools between them,
@@ -58,6 +60,10 @@ CODE_MODE_MIN_TOOLS: Final = 20
 #: definitions stand and are listed again after :data:`TOOLS_RETRY_SECONDS`.
 TOOLS_TTL_SECONDS: Final = 300.0
 TOOLS_RETRY_SECONDS: Final = 30.0
+#: How long a toolbox's first hints wait for tool search to find the tools it published, and
+#: how often it looks.
+INDEX_WAIT_SECONDS: Final = 5.0
+INDEX_POLL_SECONDS: Final = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +172,10 @@ class Toolbox:
         #: the tools as the rules last stood — with Code Mode and without — and those rules
         self._tools: dict[bool, list[Tool]] = {}
         self._rules: dict[str, Rule | None] | None = None
+        #: the tools Code Mode reaches through its meta-tools, as the tools were last built
+        self._hidden: dict[bool, list[str]] = {}
+        #: whether the first hints waited for the index already
+        self._index_waited = False
 
     async def tools(self, *, code_mode: bool = True) -> list[Tool]:
         """The tools: with Code Mode where it fits (``code_mode=False``: the Code Mode
@@ -184,12 +194,42 @@ class Toolbox:
                 self._tools[code_mode] = self._built(listing, rules, code_mode=code_mode)
             return list(self._tools[code_mode])
 
+    def hidden(self, *, code_mode: bool = True) -> list[str]:
+        """The tools behind Code Mode's meta-tools, as :meth:`tools` last built them: the hints
+        may name them, and a run reaches them through the meta-tools."""
+        return list(self._hidden.get(code_mode, ()))
+
+    async def indexed(self, *, within: float = INDEX_WAIT_SECONDS) -> None:
+        """Wait - the first time only, at most ``within`` seconds - until tool search finds the
+        tools this toolbox published (``Governance.indexed``): hints asked before it are all
+        zeros, and a narrowing on them offers the toolbox's first names in alphabetical order.
+        A catalog that cannot be asked is not waited for."""
+        if self._index_waited or self._listing is None:
+            return
+        self._index_waited = True
+        names = _published(self._listing)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + within
+        while True:
+            try:
+                if await self._governance.indexed(names):
+                    return
+            except Exception as exc:
+                log.info("whether the tools are indexed could not be read: %s", exc)
+                return
+            if loop.time() >= deadline:
+                log.info("the tools were not indexed in %.1f s: hints may miss them", within)
+                return
+            await asyncio.sleep(INDEX_POLL_SECONDS)
+
     def _built(
         self, listing: Listing, rules: dict[str, Rule | None], *, code_mode: bool
     ) -> list[Tool]:
         tools = list(listing.local)
         if self._gateway is not None:
             tools.extend(_mcp(self._gateway, listing, rules, code_mode=code_mode))
+        offered = {t.name for t in tools}
+        self._hidden[code_mode] = [d.name for d in listing.defs if d.name not in offered]
         return tools
 
 
@@ -251,6 +291,13 @@ def _linted(listing: Listing) -> None:
     specs = [t.spec for t in listing.local if t.spec.source != "memory"]
     for finding in lint([*specs, *(_spec(d) for d in listing.defs)]):
         log.warning("tool choice: %s", finding)
+
+
+def _published(listing: Listing) -> list[str]:
+    """The names :func:`_publish` sends: every tool but the memory service's own."""
+    return [t.name for t in listing.local if t.spec.source != "memory"] + [
+        d.name for d in listing.defs
+    ]
 
 
 async def _publish(governance: Governance, listing: Listing) -> None:

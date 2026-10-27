@@ -367,3 +367,58 @@ async def test_an_mcp_tool_its_server_says_is_idempotent_is_idempotent() -> None
         "erp-post": False,
     }
     await writes.aclose()
+
+
+# --------------------------------------------------------------------------- hints' readiness
+
+
+async def test_the_tools_behind_code_mode_are_named_for_the_hints() -> None:
+    """B17: under Code Mode the servers' tools are reached through the meta-tools; the hints
+    are asked about them too, so a learned procedure of them can be offered."""
+    defs = [Def(f"wiki-t{i}", "wiki") for i in range(20)] + [Def("erp-a", "e", annotations=None)]
+    made, _, writes = box(defs)
+    assert made.hidden() == [], "nothing built yet"
+    await made.tools()
+    assert made.hidden() == [f"wiki-t{i}" for i in range(20)]
+    await made.tools(code_mode=False)
+    assert made.hidden(code_mode=False) == []
+    await writes.aclose()
+
+
+async def test_the_first_hints_wait_until_the_published_tools_are_indexed(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B13: a tenant's first run asked for hints before its tools were indexed (all zeros,
+    the alphabet offered). The first time only, and at most a few seconds, the toolbox waits."""
+    monkeypatch.setattr(toolbox, "INDEX_POLL_SECONDS", 0.0)
+    catalog = FakeCatalog()
+    catalog.unindexed = 2
+    made, _, writes = box([Def("erp-get", "erp")], catalog)
+    await made.indexed()  # never listed: nothing published to wait for
+    assert catalog.index_asked == []
+    await made.tools()
+    await writes.drain()
+    await made.indexed()
+    assert catalog.index_asked == [["erp-get"]] * 3
+    await made.indexed()  # the first time only
+    assert len(catalog.index_asked) == 3
+
+    late = FakeCatalog()
+    late.unindexed = 10**6
+    slow, _, slow_writes = box([Def("erp-get", "erp")], late)
+    await slow.tools()
+    await slow_writes.drain()
+    with caplog.at_level("INFO", logger="trellis.tools"):
+        await slow.indexed(within=0.0)
+    assert "not indexed" in caplog.text
+
+    down = FakeCatalog()
+    down.index_fails = True
+    failing, _, down_writes = box([Def("erp-get", "erp")], down)
+    await failing.tools()
+    await down_writes.drain()
+    with caplog.at_level("INFO", logger="trellis.tools"):
+        await failing.indexed()
+    assert "could not be read" in caplog.text
+    for w in (writes, slow_writes, down_writes):
+        await w.aclose()

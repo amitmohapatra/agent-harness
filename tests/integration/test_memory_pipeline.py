@@ -5,9 +5,11 @@ grounding check and people's feedback."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -20,9 +22,12 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
+from tests.unit.test_toolbox import Def
+from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import telemetry
+from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.governance import catalog
 from trellis.memory.models import ToolHints
 
@@ -176,6 +181,44 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     # tool_search found t5 among the run's own tools: offered from the next call on, after
     # the others (the order they were first offered: a prompt cache keeps the prefix)
     assert offered[2] == [*sorted(["t1", "t3", *memory_tools]), "t5"]
+
+
+async def test_hints_below_the_floor_narrow_nothing(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """B13: hints that match nothing (an index not built yet: confidence about 0) narrowed the
+    offer to the toolbox's first names. Below ``NARROW_FLOOR`` every tool is offered, with
+    ``tool_search`` among the memory tools."""
+    memory_service.candidates = ["t3"]
+    memory_service.top_confidence = 0.1
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
+    assert offered == sorted([f"t{i}" for i in range(6)] + list(MEMORY_TOOLS))
+    assert "tool_search" in offered
+
+
+async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
+    memory_service: FakeMemoryService,
+) -> None:
+    """B16/B17: the hints are asked about the tools behind Code Mode too; when one is hinted,
+    the narrowing keeps the meta-tools, the only way to reach it (they were dropped)."""
+    stub = StubGateway([Def(f"wiki-t{i}", "wiki") for i in range(20)])
+    memory_service.candidates = ["wiki-t4", "t3"]
+    model = ScriptedChat(["done"])
+    async with Harness(
+        config=Settings(), memory=memory_service.client(), gateway=cast("Gateway", stub)
+    ) as h:
+        agent = arm(h.wrap(ReAct(system_prompt="s", model=model), id="cm"), many(6))
+        result = await agent.run("what do the docs say", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    [context] = memory_service.named("context")
+    assert "wiki-t4" in context.body["tools"]["available"]
+    offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
+    assert {s.name for s in CODE_MODE_TOOLS} | {"t3"} <= offered
+    assert "t1" not in offered, "still narrowed"
 
 
 async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
@@ -733,6 +776,19 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     assert loaded.data["evidence_status"] == status
 
 
+async def test_no_abstain_note_when_a_hinted_tool_answers_the_question(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """S4: "Memory holds nothing ... do not guess" on a question a hinted tool answers drove a
+    weak model into memory_search loops; a confident hint means a tool answers it."""
+    memory_service.evidence_status = "INSUFFICIENT"
+    memory_service.candidates = ["t3"]
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    await agent.run("what is the daily meal allowance", user="u")
+    assert "## Memory" not in model.requests[0]["messages"][1]["content"]
+
+
 async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -854,3 +910,55 @@ async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
     # the re-run hands off again; the approved call runs once
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
     assert done.status is RunStatus.SUCCESS and done.answer == "paid" and paid == [500]
+
+
+# --------------------------------------------------------------------------- publish at start
+async def test_a_worker_publishes_the_agents_tools_before_its_first_claim(
+    memory_service: FakeMemoryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """B13: the catalog was written on the first run's ``tools()`` call, and the index landed
+    seconds later: the first runs' hints were zeros. A worker publishes each agent's tools to
+    the key's tenant before it claims anything; a failure is a warning."""
+
+    @tool(side_effects="read")
+    def stock(sku: str) -> str:
+        """Units in stock."""
+        return sku
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return input
+
+    async with harness_with(memory_service) as h:
+        agent = arm(h.wrap(fn, id="pub"), [stock])
+        task = asyncio.create_task(h.worker([agent]).run())
+        for _ in range(200):
+            if memory_service.named("put_catalog"):
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        published = json.dumps([c.body for c in memory_service.named("put_catalog")])
+        assert "stock" in published
+
+        broken = h.wrap(fn, id="broken")
+
+        class Failing:
+            async def tools(self) -> list[Any]:
+                raise ConnectionError("the gateway is down")
+
+        broken._toolbox = lambda tenant: Failing()  # type: ignore[method-assign]
+        with caplog.at_level("WARNING", logger="trellis.harness"):
+            await h._published([broken])
+        assert "broken: its tools were not published at start" in caplog.text
+
+    platform = FakeMemoryService(tenant=None)  # a platform key knows no tenant
+    async with harness_with(platform) as h:
+        await h._published([arm(h.wrap(fn, id="p"), [stock])])
+        assert platform.named("put_catalog") == []
+
+    down = FakeMemoryService(fail={"key"})
+    async with harness_with(down) as h:
+        with caplog.at_level("WARNING", logger="trellis.harness"):
+            await h._published([h.wrap(fn, id="d")])
+        assert "the tools were not published at start" in caplog.text
