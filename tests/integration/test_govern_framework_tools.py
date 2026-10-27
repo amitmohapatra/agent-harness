@@ -1,5 +1,5 @@
-"""The framework's own tools governed: a ``create_agent`` graph's tools through
-``h.governance_middleware()`` (``ReAct`` has it), an OpenAI Agents agent's ``FunctionTool``\\ s
+"""The framework's own tools governed: a ``create_agent`` graph's tools through its tool nodes
+(and ``GovernTools``, which ``middleware()`` and ``ReAct`` have), an OpenAI Agents agent's ``FunctionTool``\\ s
 through ``h.wrap`` on a copy — each call decided by governance (a read runs, a change is
 announced, an irreversible one asks), journaled (a resume does not run it again) and seen on
 the run's events; the harness's own tools and the graph's state tools are let through."""
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from agents import Agent, function_tool
 from langchain.agents import create_agent
 from langchain_core.tools import tool as lc_tool
@@ -77,7 +78,17 @@ async def test_a_graphs_own_read_runs_and_is_on_the_runs_events(harness: Harness
     agent = harness.wrap(graph(model, lookup), id="g")
     events = [e async for e in agent.stream("a?", user="u", thread="t")]
     assert results(events) == {"lookup": "ok"} and ran == ["lookup a"]
-    assert harness.governance_middleware().__class__ is GovernTools
+
+
+def test_the_removed_governance_middleware_says_what_governs_instead(harness: Harness) -> None:
+    with pytest.raises(
+        AttributeError,
+        match=r"h.governance_middleware\(\) was removed: .*"
+        r"governed already, middleware\(\) includes the same governance",
+    ):
+        harness.governance_middleware  # noqa: B018  # pyright: ignore[reportAttributeAccessIssue]
+    with pytest.raises(AttributeError, match="'Harness' object has no attribute 'nothing'"):
+        harness.nothing  # noqa: B018  # pyright: ignore[reportAttributeAccessIssue]
 
 
 async def test_an_irreversible_own_tool_asks_and_a_resume_runs_nothing_twice(

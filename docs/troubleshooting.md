@@ -34,7 +34,7 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | a schedule fires with no worker running | in process (no `RUNS_URL`) a schedule fires only when a worker of this process asks for work | run a worker, or `h.runs.schedules.fire(id)` ([runs.md](runs.md#schedules)) |
 | `ConfigurationError: a queued run's input must be JSON` | `start` and `schedule` keep the input in agent-runs | send JSON, or use `run`/`stream` |
 | a graph's own `interrupt()` fails the run on resume elsewhere | its checkpointer (`InMemorySaver`) holds the pause only in the process that paused | give the graph a shared, durable checkpointer ([interrupts.md](interrupts.md#how-a-run-continues)) |
-| a tool ran twice after a crash | only calls through the harness are journaled | make the side effect a harness tool (`tools=` or `h.tools`); code outside a tool and the model calls run again on a re-run |
+| a tool ran twice after a crash | only calls through the harness are journaled | make the side effect a harness tool (`ReAct(tools=)`, or `agent.tools.call` in a function); code outside a tool and the model calls run again on a re-run |
 | `LeaseLostError` in a worker's log | another worker took the run (the lease lapsed) | nothing: the run is continued there; give heavy runs more heartbeat room ([runs.md](runs.md#workers)) |
 
 ## Tools, governance and the gateway
@@ -59,7 +59,7 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | `ConfigurationError: memory is off for this run` | `trellis.current().memory` with memory off | set `MEMORY_URL`, or check `agent.uses("memory_pull")` (the `memory` part) first |
 | `warning` events about writes, `trellis.writes.undelivered`, `trellis doctor` "records failing" | memory writes given up after retries | check the memory service; set `TRELLIS_SPOOL_DIR` on a volume that outlives the process ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | a run ended `MODEL_TIMEOUT` ("the step stalled") | a model call got no answer within its bound | the provider is slow or down; a `ReAct`'s `call_timeout` or the run's `timeout` ([reliability.md](reliability.md#stalled-model-calls)) |
-| a person's feedback does not change memory | human feedback waits for the tenant administrator's review | approve it in the memory service; the trace score is there already |
+| a person's feedback does not change memory | human feedback waits for the tenant administrator's review | accept it in review in the memory service (`POST /v1/feedback/{id}/approve`); the trace score is there already |
 | no judge scores | the judge alias `trellis-judge` is not routed in Bifrost (the log says so once), or no `BIFROST_URL` | route the alias in Bifrost, or give `llm_judge(model=)` ([evaluation.md](evaluation.md#the-judges-model)) |
 | few runs judged | an online judge scores a sample (`llm_judge(sample=)`, 0.1 by default) | raise its sample |
 | no traces | no `OTEL_EXPORTER_OTLP_ENDPOINT`, no Langfuse keys and no provider of your own | set it ([observability.md](observability.md#export)) |

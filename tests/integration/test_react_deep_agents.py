@@ -16,7 +16,6 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend, StateBackend
 from langchain.agents import create_agent
 from langchain_core.tools import tool as lc_tool
-from langgraph.store.memory import InMemoryStore
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
@@ -83,8 +82,10 @@ def test_middleware_is_the_harness_part_in_its_order() -> None:
     assert {"ToolGuidance", "AnswerCheck"}.isdisjoint(m.name for m in middleware())
     off = [m.name for m in middleware(tool_guidance=False, answer_check=False)]
     assert "ToolGuidance" not in off and "AnswerCheck" not in off
-    told = [m.name for m in middleware(tool_guidance=False, capabilities={"upload": False})]
-    assert "ToolGuidance" in told  # the capabilities alone
+    with pytest.raises(
+        TypeError, match=r"middleware\(capabilities=\) was removed: .*system_prompt"
+    ):
+        middleware(capabilities={"upload": False})  # pyright: ignore[reportCallIssue]
 
 
 def test_middleware_settings_mean_what_reacts_do() -> None:
@@ -267,16 +268,6 @@ def test_a_compiled_graph_is_a_sub_agent_with_its_name_and_description() -> None
     )
     task = next(t for t in bound_tools(graph) if t.name == "task")
     assert not (task.metadata or {}).get(MACHINERY)  # an agent of its own: not machinery
-
-
-# --------------------------------------------------------------------------- what wrap refuses
-def test_a_react_with_its_own_store_runs_on_its_own_and_is_not_wrapped(
-    harness: Harness,
-) -> None:
-    own = ReAct("s", ScriptedChatModel(turns=[]), store=InMemoryStore())
-    assert own.store is not None
-    with pytest.raises(ConfigurationError, match=r"ReAct\(store=\) is for the graph run"):
-        harness.wrap(own, id="own")
 
 
 # --------------------------------------------------------------------------- backends

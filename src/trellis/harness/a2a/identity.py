@@ -9,14 +9,13 @@ user``).
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from a2a.server.context import ServerCallContext
 
-from trellis.harness.identity import IDENTITY_HEADER
+from trellis.harness.identity import IDENTITY_HEADER, trusted_user
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
@@ -28,16 +27,10 @@ EXTENSION_DESCRIPTION: Final = (
     "The caller's tenant and user as trusted platform context, set by the deployment's "
     "authenticated edge and never read from the message."
 )
-#: A header longer than this is refused rather than parsed.
-HEADER_MAX_CHARS: Final = 4096
 #: The user a call without any identity runs as (with a warning, once per server).
 ANONYMOUS: Final = "anonymous"
 
 UserResolver = Callable[[ServerCallContext], str]
-
-
-class IdentityRefused(PermissionError):
-    """The call carries an identity this deployment will not act on."""
 
 
 class HeaderIdentity:
@@ -60,22 +53,7 @@ class HeaderIdentity:
                     ANONYMOUS,
                 )
             return ANONYMOUS
-        if len(raw) > HEADER_MAX_CHARS:
-            raise IdentityRefused("the platform identity header is too long")
-        try:
-            claimed = json.loads(raw)
-        except ValueError as exc:
-            raise IdentityRefused("the platform identity header is not JSON") from exc
-        if not isinstance(claimed, Mapping):
-            raise IdentityRefused("the platform identity header must be a JSON object")
-        tenant = claimed.get("tenant_id")
-        served = self.harness._known_tenant
-        if tenant and tenant != served:
-            raise IdentityRefused(f"tenant {tenant!r} is not served here")
-        user = claimed.get("user_id")
-        if not user:
-            raise IdentityRefused("the platform identity header names no user")
-        return str(user)
+        return trusted_user(raw, self.harness._known_tenant)
 
 
 def header(context: ServerCallContext, name: str) -> str:

@@ -432,10 +432,19 @@ class FakeMemoryService:
             "job_ids": [self._id("job")],
         }
 
-    def _document(self, call: Call) -> dict[str, Any]:
+    def _document(self, call: Call) -> dict[str, Any] | httpx.Response:
         """A document's life: STAGED (its parse job queued or running) for the first reads,
-        then READY — or FAILED, with the parse error."""
+        then READY — or FAILED, with the parse error. Read as the service does
+        (``IngestionService.get_document``): ``404`` for one it does not hold, ``403`` for one
+        the caller may not read (here: another user's, uploaded with no wider visibility)."""
         document_id = call.path["document_id"]
+        uploaded = self.documents.get(document_id)
+        path = f"/v1/documents/{document_id}"
+        if uploaded is None:
+            return problem(404, path, detail="Document not found")
+        owner = uploaded.get("user_id")
+        if owner and call.scope.get("user_id") not in (None, owner):
+            return problem(403, path, detail="Access denied")
         reads = self._reads[document_id] = self._reads.get(document_id, 0) + 1
         staged = reads <= self.document_reads_staged
         status = "STAGED" if staged else self.document_outcome

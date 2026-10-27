@@ -187,13 +187,13 @@ Such gates are LangChain's `HumanInTheLoopMiddleware`, Deep Agents' `interrupt_o
 Agents' `needs_approval`. A tool both gate is asked once: governance counts the framework's
 approval ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)).
 
-**A framework's own tools** — those not built with `h.tools` — are governed too, with nothing
+**A framework's own tools** — those the framework runs itself, not the harness — are governed too, with nothing
 added to the agent:
 * every LangGraph tool node's calls inside a run — a `create_agent` or Deep Agents graph's, a
   Deep Agent's `task` sub-agents' (their own graphs), a hand-built graph's `ToolNode` — through
   the tool node's execution of a call, after the graph's own wrappers (installed once per
-  process; outside a harness run nothing changes; `h.governance_middleware()` and `ReAct`'s own
-  govern the same call once);
+  process; outside a harness run nothing changes; `middleware()`'s `GovernTools` and `ReAct`'s
+  own govern the same call once);
 * an OpenAI Agents agent's `FunctionTool`s and its MCP servers' calls, on a copy of the agent and
   of every agent it hands off to or runs as a tool (`Agent.as_tool`: the tool runs the governed
   copy of its agent) — yours are not changed. Its hosted tools (file search, web search, code

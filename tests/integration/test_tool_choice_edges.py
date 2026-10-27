@@ -398,23 +398,22 @@ async def test_memory_holding_nothing_is_said_plainly(
     assert f"Nothing {source}" in str(model.seen[-1][-1].content)
 
 
-# --------------------------------------------------------------------------- capabilities
-async def test_capabilities_are_said_with_or_without_the_guidance(harness: Harness) -> None:
-    can = {"accept an image upload": False, "read a PDF": True}
-    alone = ScriptedChatModel(turns=["No."])
-    agent = harness.wrap(ReAct("s", alone, capabilities=can), id="cap")
+# --------------------------------------------------------------------------- what it can do
+async def test_what_the_agent_can_do_is_said_in_its_instructions_on_every_call(
+    harness: Harness,
+) -> None:
+    said = "You cannot accept an image upload. You can read a PDF."
+    model = ScriptedChatModel(turns=[("look", {"item": "x"}), "No."])
+    target = ReAct(f"s\n{said}", model, tool_guidance=True)
+    agent = arm(harness.wrap(target, id="cap"), [look])
     assert (await agent.run("Can you accept an image upload?", user="u")).answer == "No."
-    system = str(alone.seen[0][0].content)
-    assert "- accept an image upload: no\n- read a PDF: yes" in system
-    assert GUIDED not in system  # the guidance is not switched on by the capabilities
-    both = ScriptedChatModel(turns=["No."])
-    target = ReAct("s", both, tool_guidance=True, capabilities=can)
-    await arm(harness.wrap(target, id="cap2"), [look]).run("x", user="u")
-    assert GUIDED in str(both.seen[0][0].content) and "read a PDF: yes" in str(
-        both.seen[0][0].content
-    )
+    assert len(model.seen) == 2
+    assert all(said in str(seen[0].content) for seen in model.seen)
+    assert GUIDED in str(model.seen[0][0].content)  # the guidance after it, as before
     with pytest.raises(ConfigurationError):
         ToolGuidance("")
+    with pytest.raises(TypeError, match=r"ToolGuidance\(capabilities=\) was removed"):
+        ToolGuidance(capabilities={"read a PDF": True})  # pyright: ignore[reportCallIssue]
 
 
 def test_only_the_requests_own_results_count_as_nothing_found() -> None:

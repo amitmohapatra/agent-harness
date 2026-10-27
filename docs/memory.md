@@ -172,14 +172,18 @@ precedence **human > judge > system**:
   harness puts the same score — the share of the answer's claims the evidence supports — on
   the run's trace (`grounding`). An answer with no checkable claim, or a context that held no
   evidence (every claim would be "unsupported" against nothing), is no verdict and no score.
-* **human** — `h.feedback(run_id, verdict, correction=None)`, citing the memories the answer
+* **human** — `h.feedback(run_id, verdict, correction=None)`, a person's `confirm`, `reject` or
+  `correct` (`approve` and `edit` are refused: they record a decision on a paused action, which
+  `agent.resume` makes), citing the memories the answer
   rests on (`evidence_refs`), whose confidence it moves: the ones the judge's verdict found on a
   run the sample verified, and on any other run the memories its context showed (the `system`
   record's `pushed`); none when no context was pushed. The memory service stores a
-  person's verdict as a vote that waits for the tenant administrator (`review.state ==
+  person's verdict as a vote that waits for the tenant administrator's review (`review.state ==
   "pending"`, its ADR 0028): it changes the run's outcome, and the confidence of what the run
-  cited, only once approved (`GET /v1/feedback/pending`, `POST /v1/feedback/{id}/approve`
-  with the tenant's admin key). The stored record is returned so a surface can show that.
+  cited, only once the administrator accepts it in review (`GET /v1/feedback/pending`, then
+  `POST /v1/feedback/{id}/approve` to accept or `.../dismiss` to dismiss, with the tenant's admin
+  key — the service's route names). In these docs "approve" is an end user allowing a paused
+  action ([interrupts.md](interrupts.md)); the administrator's step is "review". The stored record is returned so a surface can show that.
   The `system` outcome and the judge's verdict are applied as they arrive.
 
 ## The memory model key

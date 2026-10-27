@@ -6,7 +6,7 @@ annotation queues live there. Trellis fills it two ways:
 | | Offline | Online |
 |---|---|---|
 | What | an agent run over a dataset, every answer scored | live runs scored as they happen |
-| Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, evaluators)` | automatic: `h.wrap(judges=[...])`, and the sampled grounding check |
+| Way 1, wrapped (`h.wrap`) | `report = await h.evaluate(agent, dataset, judges)` | automatic: `h.wrap(judges=[...])`, and the sampled grounding check |
 | Which runs | every item of the dataset (or the first `limit=`) | a sampled share of successful runs with an answer — a structured one (a pydantic model, a dict) graded as its JSON (each judge's `sample`, a tenth by default) |
 | When | now: the call returns an `EvalReport` | after the run — in the background writes queue, never on the request path, when wrapped |
 | Where the scores go | each run's trace (Langfuse scores, and a `score` span); a Langfuse dataset's runs are linked to the dataset run | each run's trace (or the trace a case names) |
@@ -46,6 +46,8 @@ async with Harness() as h:
 * **Automatic.** With memory on, a fixed tenth of the successful runs is checked against the
   context it was given ([memory.md](memory.md)), and with `judges=` each judge scores its
   share of runs (`llm_judge(sample=)`, [Online](#online-judges) below). Nothing to call.
+  `grounding()` is therefore not one of `h.wrap`'s judges (refused, saying so: it would check
+  the same runs twice); it is for `h.evaluate` and `judge()`.
 * **`h.evaluate`** runs each item through the normal pipeline — memory, tools, governance and
   approvals, the agent's time limit (`h.wrap(run_timeout=)`: a hung item ends `TIMEOUT`, an
   `error` item) — and scores it ([Offline](#offline-evaluate-and-hevaluate) below).
@@ -209,11 +211,12 @@ evaluator where one will do.
 ## Offline: `evaluate` and `h.evaluate`
 
 ```text
-await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None,
+await h.evaluate(agent, dataset, judges, *, run_name=None, description=None, metadata=None,
                  concurrency=4, limit=None, user=None)
 ```
 
-`h.evaluate(agent, ...)` is `evaluate(agent, ...)` (`trellis.harness.evals`) with the agent's
+`judges` are the evaluators that score each item — the same kind `h.wrap(judges=)` takes (one
+word for both; the type a judge implements is `Evaluator`). `h.evaluate(agent, ...)` is `evaluate(agent, ...)` (`trellis.harness.evals`) with the agent's
 own services (`agent.evals`). `evaluate` also takes any `async (input) -> answer` as its
 target, for code you do not wrap ([blocks/evaluation.md](blocks/evaluation.md#offline-evaluate));
 the dataset, the report and the experiment below are the same for both.

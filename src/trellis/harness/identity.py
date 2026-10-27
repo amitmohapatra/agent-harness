@@ -3,12 +3,15 @@
 What leaves the process for a run says who it is for in one trusted header,
 :data:`IDENTITY_HEADER` (:func:`identity_headers`): the calls a run makes to other agents
 (A2A), and its MCP tool calls through the gateway, which forwards it to the MCP servers whose
-``allowed_extra_headers`` name it.
+``allowed_extra_headers`` name it. What arrives with it — set (and overwritten) by the
+platform's authenticating edge — is read the same way on both surfaces (:func:`trusted_user`:
+``serve_a2a``, ``serve_chat``).
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
@@ -17,6 +20,8 @@ from trellis.contracts import AgentExecutionContext, RunRecord
 
 #: The trusted identity header (lower case: the A2A SDK hands a server lower-cased headers).
 IDENTITY_HEADER: Final = "x-trellis-identity"
+#: A trusted identity header longer than this is refused rather than parsed.
+HEADER_MAX_CHARS: Final = 4096
 #: The ``RunStart.metadata`` key a sub-agent's run keeps its agent group under.
 AGENT_GROUP: Final = "agent_group"
 
@@ -107,3 +112,28 @@ def identity_headers(tenant: str, user: str) -> dict[str, str]:
     """The outbound trusted identity, for a call this process makes for a run."""
     fields = {"tenant_id": tenant, "user_id": user}
     return {IDENTITY_HEADER: json.dumps(fields, separators=(",", ":"), sort_keys=True)}
+
+
+class IdentityRefused(PermissionError):
+    """The call carries an identity this deployment will not act on."""
+
+
+def trusted_user(raw: str, served: str | None) -> str:
+    """The user a trusted identity header names: ``{"tenant_id": ..., "user_id": ...}``, its
+    tenant (when it names one) the one ``TRELLIS_API_KEY`` speaks for (``served``). Anything
+    else is :class:`IdentityRefused`."""
+    if len(raw) > HEADER_MAX_CHARS:
+        raise IdentityRefused("the platform identity header is too long")
+    try:
+        claimed = json.loads(raw)
+    except ValueError as exc:
+        raise IdentityRefused("the platform identity header is not JSON") from exc
+    if not isinstance(claimed, Mapping):
+        raise IdentityRefused("the platform identity header must be a JSON object")
+    tenant = claimed.get("tenant_id")
+    if tenant and tenant != served:
+        raise IdentityRefused(f"tenant {tenant!r} is not served here")
+    user = claimed.get("user_id")
+    if not user:
+        raise IdentityRefused("the platform identity header names no user")
+    return str(user)

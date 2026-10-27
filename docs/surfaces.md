@@ -30,8 +30,15 @@ this: `a2a(url)(message, tenant=, user=)` works from any code ([blocks/a2a.md](b
 | `POST {path}/runs/{run_id}/cancel` | Stop the run, whatever it is doing (`agent.cancel`): `200 {"runId", "status": "CANCELLED"}`, and its stream ends with `RUN_FINISHED` and a `cancelled` outcome. Only the run's own user (`404` for anyone else's); `409` once the run ended. |
 | `GET {path}/runs/{run_id}/artifacts/{artifact_id}` | Data the interrupt the run waits on carries by reference (`payload_ref`: a large `ask` table or diff), read from agent-runs. |
 
-What the agent is asked: the latest `user` message's text, or the input's `state` when there is
-none. The run keeps going when the client disconnects. Each run's events are buffered (its last 2048; past 256
+What the agent is asked: the latest `user` message's text (its text parts, when its content is
+a list of AG-UI content parts), or the input's `state` when there is none. Its file parts are
+attachments: a media part (`document`, `image`, `audio`, `video`) whose `source` is
+`{"type": "file", "value": "<document id>"}` names a document already uploaded to the memory
+service (`POST /v1/documents`, or `h.add_document`), and the run draws its context from those
+documents (`agent.run(document_ids=)`). Each must be one the memory service lets the caller read
+— it decides, as for any read of the document; one it refuses or does not know is a `404` and
+nothing runs. A part whose bytes are inline (`data`) or at a URL (`url`) is a `422`: the
+surface uploads and fetches nothing. A2A file parts are not attachments yet. The run keeps going when the client disconnects. Each run's events are buffered (its last 2048; past 256
 runs the least recently used finished run is dropped, never a live one), and a resumed run keeps
 counting where its first attempt stopped, so warnings from background writes after the finish
 are still there on replay. A pause arrives as `RUN_FINISHED` with an `interrupt` outcome
@@ -57,11 +64,11 @@ application's key unless every person's runs are assigned to that person.
 
 | Response | When |
 |---|---|
-| `401` `AUTHENTICATION` | `identity(request)` named nobody |
-| `404` `NOT_FOUND` | a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
+| `401` `AUTHENTICATION` | no `x-trellis-identity` header, or one that is refused (above); with `identity=`, it named nobody |
+| `404` `NOT_FOUND` | an attached document the memory service does not let the caller read, or does not know; a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
 | `409` `CONFLICT` (`detail` `BAD_RESUME: …`) | a resume that cannot be read as a decision (an approval answered with neither `true`, `false` nor arguments), or that the run refuses (it waits on another interrupt, it is not paused), or an answer that does not fit the question or the tool ([interrupts.md](interrupts.md#answering)) |
 | `429` `RATE_LIMIT` (`Retry-After`, `retryable: true`) | agent-runs refused the run's start for the tenant's rate limit, after its SDK's retries ([runs.md](runs.md#admission-agent-runs-rate-limit)) |
-| `422` `VALIDATION` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here) |
+| `422` `VALIDATION` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here); a file part not attached by its document id; an attachment with no memory service (`MEMORY_URL`) |
 | `422` (FastAPI's validation error) | a body that is not a `RunAgentInput`: a `decision` outside `answer`/`approve`/`reject`/`edit`/`cancel` (any case), a message `role` outside AG-UI's (`developer`, `system`, `assistant`, `user`, `tool`, `activity`, `reasoning`) |
 | `RUN_ERROR` `RUN_ABORTED` | the run ended without telling its client (the harness itself failed, e.g. agent-runs refused a write) |
 
@@ -91,9 +98,13 @@ their name and carry the rest as `value`, `INTERRUPT` and `RUN_ERROR` are folded
 finishing event, and an `ERROR`/`REJECTED`/`TIMEOUT` ending is `RUN_ERROR` with the error's
 code and message.
 
-`identity(request)` (sync or async) returns the user; the tenant is the one `TRELLIS_API_KEY`
-speaks for. Nothing the client sends (`forwardedProps`, the thread...) decides who is calling.
-Without `identity`, every request runs as `anonymous` (a warning is logged at mount).
+Identity is read as A2A reads it: by default the trusted `x-trellis-identity` header — JSON
+`{"tenant_id": ..., "user_id": ...}`, set by the deployment's authenticating edge, at most 4096
+characters, its tenant (when it names one) the key's. A request without it is `401`, never
+anonymous, and one whose header is too long, not a JSON object, names another tenant or no user
+is `401` too. `identity(request)` (sync or async) returns the user instead, for a deployment
+that authenticates another way. The tenant is always the one `TRELLIS_API_KEY` speaks for.
+Nothing the client sends in the body (`forwardedProps`, the thread...) decides who is calling.
 
 ## A2A: `agent.serve_a2a(app, url, *, identity=None)`
 

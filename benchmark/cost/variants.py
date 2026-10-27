@@ -135,7 +135,6 @@ def pieces(setup: Setup) -> tuple[Any, dict[str, Any]]:
         context_window=setup.window,
         tool_guidance=None,
         answer_check=None,
-        capabilities=None,
         system_prompt=None,
         held=automatic.SCRATCH,
         files=False,

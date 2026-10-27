@@ -32,7 +32,7 @@ from trellis.contracts import (
     RunEvent,
 )
 from trellis.harness import pipeline
-from trellis.harness.a2a.identity import IdentityRefused, UserResolver
+from trellis.harness.a2a.identity import UserResolver
 from trellis.harness.a2a.tasks import RunTaskStore
 from trellis.harness.a2a.translate import (
     RESULT_ARTIFACT,
@@ -42,6 +42,7 @@ from trellis.harness.a2a.translate import (
     update_for,
     value_part,
 )
+from trellis.harness.identity import IdentityRefused
 from trellis.runs import ConflictError, NotFoundError
 
 if TYPE_CHECKING:

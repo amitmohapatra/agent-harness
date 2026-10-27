@@ -953,7 +953,7 @@ FEATURES: Final[list[Feature]] = [
         "opt-in (ReAct(subagents=[agent]))",
         subagent_parent,
         way2=NA(
-            "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
+            "by design: your code calls another agent with a2a(url)(...) (A2A), or runs it as plain code"
         ),
     ),
     Feature(
@@ -963,7 +963,7 @@ FEATURES: Final[list[Feature]] = [
         "opt-in (ReAct(subagents=[agent]))",
         subagent_child,
         way2=NA(
-            "by design: your code calls another agent with remote() (A2A), or runs it as plain code"
+            "by design: your code calls another agent with a2a(url)(...) (A2A), or runs it as plain code"
         ),
     ),
     Feature(

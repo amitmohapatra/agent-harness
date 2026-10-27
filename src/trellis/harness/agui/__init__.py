@@ -2,7 +2,10 @@
 
 * ``POST {path}/run`` — run the agent for a thread (or answer the interrupt a paused run of
   it waits on, with a ``resume`` entry) and stream its AG-UI events as SSE. The run executes
-  in the background: a client that goes away does not stop it.
+  in the background: a client that goes away does not stop it. The user message's file parts
+  (AG-UI 1.0 media parts whose ``source`` is ``{"type": "file", "value": <document id>}``, a
+  document uploaded to the memory service) are the run's ``document_ids``: each must be one
+  the memory service lets the caller read.
 * ``GET {path}/runs/{run_id}/events`` — reconnect: the run's events after ``Last-Event-ID``
   (or ``?after=``), then live until it finishes. A run this process did not serve is read
   from agent-runs' event log when ``RUNS_URL`` is set (its ids are then the log's positions):
@@ -13,9 +16,12 @@
   waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
   agent-runs.
 
-Identity is the deployment's: ``identity(request)`` returns the user, and the tenant is the
-one ``TRELLIS_API_KEY`` speaks for. Nothing the client sends (``forwardedProps``...) decides
-who is calling.
+Identity is the deployment's, read as ``serve_a2a`` reads it: the trusted header the platform's
+authenticating edge sets, ``X-Trellis-Identity: {"tenant_id": ..., "user_id": ...}`` (its
+tenant, when it names one, the one ``TRELLIS_API_KEY`` speaks for); a request without it is
+``401``. A deployment that authenticates some other way passes ``identity(request) -> user``.
+The tenant is always the one ``TRELLIS_API_KEY`` speaks for. Nothing the client sends in the
+body (``forwardedProps``...) decides who is calling.
 
 The routes are in the app's OpenAPI document (tag ``agui``): the streams as
 ``text/event-stream``, every refusal as an RFC 9457 problem document (``code``, ``detail``).
@@ -67,9 +73,11 @@ from trellis.harness.agui.events import (
 from trellis.harness.agui.hub import Hub, RunBuffer
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
 from trellis.harness.agui.translate import translate
+from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_user
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import run_of
+from trellis.memory.errors import AuthorizationError, NotFoundError
 from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
@@ -78,8 +86,6 @@ if TYPE_CHECKING:
 log = logging.getLogger("trellis.agui")
 
 Identity = Callable[[Request], str | Awaitable[str]]
-#: The user every request runs as when the deployment named no ``identity``.
-ANONYMOUS: Final = "anonymous"
 #: ``RUN_ERROR`` codes the surface itself emits.
 BAD_RESUME: Final = "BAD_RESUME"
 RUN_ABORTED: Final = "RUN_ABORTED"
@@ -133,11 +139,13 @@ _SSE_DOC: Final = {
 
 def _refusals(*statuses: int) -> dict[int | str, dict[str, Any]]:
     why = {
-        401: "the deployment's identity(request) named nobody",
-        404: "no such run, interrupt or artifact for this caller",
+        401: f"no trusted identity: the {IDENTITY_HEADER} header is missing or refused (or "
+        "the deployment's identity(request) named nobody)",
+        404: "no such run, interrupt, artifact or attached document for this caller",
         409: "a resume that cannot be read as a decision, or that the run refuses (BAD_RESUME)",
-        422: "a runId that is not a fresh identifier (a problem document), or a body that is "
-        "not a RunAgentInput (FastAPI's validation error)",
+        422: "a runId that is not a fresh identifier, or a file part not attached by its "
+        "document id (a problem document), or a body that is not a RunAgentInput (FastAPI's "
+        "validation error)",
         429: "agent-runs is rate limiting the tenant: try again after Retry-After seconds",
     }
     problem = {PROBLEM_MEDIA_TYPE: {"schema": Problem.model_json_schema()}}
@@ -154,12 +162,6 @@ def _refusals(*statuses: int) -> dict[int | str, dict[str, Any]]:
 
 
 def mount(app: FastAPI, agent: Agent, *, path: str, identity: Identity | None) -> None:
-    if identity is None:
-        log.warning(
-            "serve_chat for %s has no identity=: every request runs as user %r",
-            agent.id,
-            ANONYMOUS,
-        )
     app.include_router(_router(_Surface(agent, identity), path))
     _describe(app, agent)
 
@@ -188,8 +190,19 @@ class _Surface:
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def user(self, request: Request) -> str:
+        """The caller: ``identity(request)``, else the trusted header (``401`` without one)."""
         if self.identity is None:
-            return ANONYMOUS
+            raw = request.headers.get(IDENTITY_HEADER)
+            if not raw:
+                raise HTTPException(
+                    401,
+                    f"no {IDENTITY_HEADER} header: the platform's authenticating edge sets it, "
+                    "or the deployment names the user with serve_chat(identity=...)",
+                )
+            try:
+                return trusted_user(raw, await self.agent.harness._tenant())
+            except IdentityRefused as exc:
+                raise HTTPException(401, str(exc)) from exc
         found = self.identity(request)
         user = await found if inspect.isawaitable(found) else found
         if not user:
@@ -206,8 +219,14 @@ class _Surface:
         if body.run_id and (safe_id(body.run_id) != body.run_id or self.hub.get(body.run_id)):
             raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
         payload = body.latest_user_text() or body.state
+        attached = await self._attached(body, user, tenant)
         record = await agent._opened(
-            payload, user=user, thread=body.thread_id, tenant=tenant, run_id=body.run_id
+            payload,
+            user=user,
+            thread=body.thread_id,
+            tenant=tenant,
+            run_id=body.run_id,
+            document_ids=attached or None,
         )
         buffer = self.hub.open(record.run_id, user)
         self._launch(
@@ -217,6 +236,30 @@ class _Surface:
             lambda listen: pipeline.attempt(agent, record, payload, listener=listen),
         )
         return buffer, -1
+
+    async def _attached(self, body: RunAgentInput, user: str, tenant: str) -> list[str]:
+        """The documents the latest user message attaches (``run(document_ids=)``), each one the
+        memory service lets the caller read — it decides, as for any read of a document: one
+        it refuses or does not know is ``404``."""
+        latest = body.latest_user()
+        try:
+            ids = latest.attached() if latest is not None else []
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not ids:
+            return []
+        memory = self.agent.harness.memory
+        if memory is None:
+            raise HTTPException(
+                422, "attachments are documents of the memory service: set MEMORY_URL"
+            )
+        scope = memory.for_user(tenant, user, body.thread_id)
+        for document_id in dict.fromkeys(ids):
+            try:
+                await scope.document(document_id)
+            except (NotFoundError, AuthorizationError) as exc:
+                raise HTTPException(404, f"no document {document_id} for this caller") from exc
+        return ids
 
     async def _resume(
         self, body: RunAgentInput, answer: Resume, user: str, tenant: str

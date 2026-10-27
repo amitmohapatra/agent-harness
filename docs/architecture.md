@@ -537,9 +537,10 @@ loop shuts down it cancels the workers, and a cancelled worker finishes the queu
 `async (EvalCase) -> EvalScore | None`; the built-ins are `grounding()`, `exact_match()`,
 `contains()`, `called()`, `tool_sequence()`, `tool_coverage()` (each item's `needed_tools`,
 a run paused for approval scored too) and `llm_judge(criteria)`. What they reach is an
-`EvalServices`: Langfuse, and the judge's gateway and model — the deployment's
-(the gateway's judge alias, `TRELLIS_JUDGE_VIRTUAL_KEY`), never the code's. `evaluate(target,
-...)` runs a wrapped `Agent` through the pipeline (`h.evaluate` delegates to it) or calls any
+`EvalServices`: Langfuse, and the judge's gateway and model — the deployment's (the
+gateway's judge alias, through `TRELLIS_JUDGE_VIRTUAL_KEY`), unless a judge names its own model
+(`llm_judge(model=)`); the virtual key is always the deployment's. `evaluate(target,
+dataset, judges, ...)` runs a wrapped `Agent` through the pipeline (`h.evaluate` delegates to it) or calls any
 `async (input) -> answer`; `judge(case, judges, services=)` scores one case on-line, and is what
 a wrapped agent's online judges run ([evaluation.md](evaluation.md),
 [flows.md](flows.md#evaluation-offline-and-online)).

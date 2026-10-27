@@ -65,7 +65,7 @@ VARIANTS: Final[dict[str, dict[str, bool | None]]] = {
     "guidance+check": {"tool_guidance": True, "answer_check": True},
     "auto": {"tool_guidance": None, "answer_check": None},  # ReAct's defaults
 }
-#: The tool sets — tools, items, instructions, capabilities, the variants run — the store's
+#: The tool sets — tools, items, instructions, what it can do, the variants run — the store's
 #: (the reproduction set), the same among 51 tools, and the held-out ones (``heldout.py``),
 #: reported apart.
 Set = tuple[list[Any], list[dict[str, Any]], str, dict[str, bool], tuple[str, ...]]
@@ -243,13 +243,12 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
             switches = VARIANTS[variant]
             sent = Sent()
             target = ReAct(
-                system,
+                # what the assistant can do: in its instructions, with the guidance
+                system if switches.get("tool_guidance") is False else scenario.told(system, can),
                 MODEL,
                 max_steps=MAX_STEPS,
                 tool_guidance=switches.get("tool_guidance", False),
                 answer_check=switches.get("answer_check", False),
-                # what the assistant can do: told with the guidance
-                capabilities=can if switches.get("tool_guidance") is not False else None,
             )
             agent = arm(
                 h.wrap(

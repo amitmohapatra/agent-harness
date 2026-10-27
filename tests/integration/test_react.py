@@ -18,13 +18,14 @@ from langchain.agents.middleware import (
     AgentMiddleware,
     ContextEditingMiddleware,
     SummarizationMiddleware,
+    TodoListMiddleware,
 )
 from langgraph.pregel import Pregel
 from pydantic import BaseModel
 
 from tests.support.arm import arm
 from tests.support.models import ScriptedChat
-from trellis import Harness, ReAct, Settings, tool
+from trellis import Harness, ReAct, Settings, middleware, tool
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.adapters.base import context_window
@@ -184,15 +185,26 @@ def test_what_react_refuses() -> None:
         ReAct(system_prompt="s", model=model, context_window=0)
 
 
-def test_a_react_with_its_own_checkpointer_runs_on_its_own_and_is_not_wrapped(
+@pytest.mark.parametrize(
+    ("name", "said"),
+    [
+        ("checkpointer", r"keeps its checkpoint in the run; .*create_agent\(.*checkpointer="),
+        ("store", r"store is the memory service; .*create_agent\(.*store="),
+        ("capabilities", r"can and cannot do in system_prompt"),
+    ],
+)
+def test_reacts_removed_arguments_are_refused_naming_what_to_use(name: str, said: str) -> None:
+    given: dict[str, Any] = {name: object()}
+    with pytest.raises(TypeError, match=rf"ReAct\({name}=\) was removed: .*{said}"):
+        ReAct(system_prompt="s", model=ScriptedChat([]), **given)
+
+
+def test_a_react_graph_checkpoints_into_the_run_and_has_no_store_of_its_own(
     harness: Harness,
 ) -> None:
-    from langgraph.checkpoint.memory import InMemorySaver
-
-    own = ReAct(system_prompt="s", model=ScriptedChat([]), checkpointer=InMemorySaver())
-    with pytest.raises(ConfigurationError, match=r"ReAct\(checkpointer=\) is for the graph run"):
-        harness.wrap(own, id="own")
-    harness.wrap(ReAct(system_prompt="s", model=ScriptedChat([])), id="run")  # the run's
+    graph = ReAct(system_prompt="s", model=ScriptedChat([]))
+    assert isinstance(graph.checkpointer, ours.RunCheckpointer) and graph.store is None
+    harness.wrap(graph, id="run")
 
 
 def test_subagents_are_deep_agents_own_wrapped_agents_and_a2a(harness: Harness) -> None:
@@ -227,10 +239,20 @@ def test_given_middleware_is_added_before_model_hooks_and_replaces_nothing() -> 
     stack = stacked(defaults, [extra, more])
     assert [m.name for m in stack] == ["A", "StepLimit", "C", "D", "ModelHooks"]
     assert stacked(defaults, []) == defaults
-    with pytest.raises(ConfigurationError, match=r"StepLimit is ReAct's own \(max_steps=\)"):
+    with pytest.raises(ConfigurationError, match=r"StepLimit is the harness's \(max_steps=\)"):
         stacked(defaults, [Named("StepLimit")])
-    with pytest.raises(ConfigurationError, match=r"A is ReAct's own \(always on\)"):
+    with pytest.raises(ConfigurationError, match=r"A is the harness's \(always on\)"):
         stacked(defaults, [Named("A")])
+
+
+def test_reacts_middleware_refuses_the_harness_part_saying_react_has_it() -> None:
+    model = ScriptedChat(["hi"])
+    with pytest.raises(ConfigurationError, match=r"got middleware\(\): .*ReAct already has it"):
+        ReAct(system_prompt="s", model=model, middleware=middleware())
+    # planning is LangChain's TodoListMiddleware, by its name: a team's own is refused, not
+    # put in its place (ADR 0003)
+    with pytest.raises(ConfigurationError, match=r"TodoListMiddleware is the harness's"):
+        ReAct(system_prompt="s", model=model, middleware=[TodoListMiddleware()])
 
 
 async def test_a_deep_agents_middleware_given_replaces_its_own_by_name() -> None:
@@ -238,7 +260,7 @@ async def test_a_deep_agents_middleware_given_replaces_its_own_by_name() -> None
     mine = SummarizationMiddleware(model, trigger=("messages", 100))
     graph = ReAct(system_prompt="s", model=model, middleware=[mine])
     assert "SummarizationMiddleware.before_model" in graph.nodes  # LangChain's, in its place
-    with pytest.raises(ConfigurationError, match=r"StepLimit is ReAct's own \(max_steps=\)"):
+    with pytest.raises(ConfigurationError, match=r"StepLimit is the harness's \(max_steps=\)"):
         ReAct(system_prompt="s", model=model, middleware=[ours.StepLimit(3)])
 
 

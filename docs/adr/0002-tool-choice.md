@@ -41,7 +41,8 @@ of a write request.
    context before it runs or governance asks anyone (the rules stay text the model reads: no
    rule language is parsed); when every tool result of the request is empty or not found, or
    memory is `INSUFFICIENT`, it asks for a plain "no record". What the assistant can do beyond
-   its tools is declared in code (`capabilities=`), since the harness cannot know it.
+   its tools is said in its instructions (`system_prompt`), since the harness cannot know it
+   (a `capabilities=` parameter that only added those lines was removed, 2026-10-27).
 4. **The check widens a narrowed run.** When tool hints narrowed what the run offers, the
    check offers every tool (only the writes past 128), so a part the hints did not foresee can
    be served; for that `AnswerCheck` sits outside `HarnessTools`.

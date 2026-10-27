@@ -23,11 +23,15 @@ long tasks; a short task must keep sending exactly that.
    room for it (32,000 tokens or more); an unknown window: off. Until then the model is sent neither its tools nor its
    instructions — the request is unchanged, so a prompt cache holds and a short task costs what
    it did (a golden snapshot of the requests proves it, `tests/integration/test_react_golden.py`).
-3. **Off with `without=`, by one name each** (`planning`, `files`): not
-   offered, and a call of it answers that it is not available. No new setting: the thresholds
-   are constants, tuned on the benchmark.
-4. **A user's own middleware wins.** Each automatic piece is named as the framework's class, so
-   the same class given to `ReAct(middleware=)` replaces it (always on, as the team set it).
+3. **No switch of their own.** `without=` names none of them (`trellis.harness.features`): a
+   short task never sees them, and a measurement turns one off with `react.defaults_off`. No
+   new setting: the thresholds are constants, tuned on the benchmark.
+4. **A user's own middleware is added, never in place of the harness's.** `ReAct(middleware=)`
+   adds the team's middleware to the harness's; one named as the harness's is refused, naming
+   the parameter that sets it (each automatic piece is named as the framework's class:
+   planning is `TodoListMiddleware`, so a team's own `TodoListMiddleware` is refused too), and
+   `middleware()` itself is refused saying `ReAct` already has it. A Deep Agents middleware
+   given replaces Deep Agents' own of that name, as Deep Agents does.
 5. **The journal holds what a feature keeps.** Files live in a plain state channel the run's
    checkpoint keeps whole (Deep Agents' `DeltaChannel` needs every earlier checkpoint, and the
    run keeps only the latest), so they survive a pause, a crash and another worker.
@@ -78,4 +82,5 @@ long tasks; a short task must keep sending exactly that.
   with a window of 32k or more (none of it has been measured yet).
 * Each feature is measured on the benchmark as one variant on and one off before its default
   changes; a feature that measures worse stays off and is documented as such.
-* A team that wants a feature always on adds the framework's middleware itself, as before.
+* A team that wants a feature always on adds the framework's middleware to a graph of its own;
+  `ReAct` refuses one named as a piece of its own (point 4).

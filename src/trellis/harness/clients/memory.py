@@ -325,6 +325,11 @@ class RunMemory:
             return await self.ctx.advanced.documents.document(handle.document_id)
         return await self.ctx.advanced.documents.wait_ready(handle.document_id, max_wait=wait)
 
+    async def document(self, document_id: str) -> DocumentInfo:
+        """A document as this scope's user may read it: the memory service refuses one they
+        may not (``AuthorizationError``) and one that does not exist (``NotFoundError``)."""
+        return await self.ctx.advanced.documents.document(document_id)
+
     async def register_model_key(self, key: str) -> None:
         """The agent-level LLM key the service uses for this agent's memory, in an agent
         scope (the same request from every process and run, so the idempotent PUT repeats

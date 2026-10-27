@@ -48,8 +48,6 @@ from trellis.harness import compat, history, pipeline, sandbox, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
-    OWN_CHECKPOINTER,
-    OWN_STORE,
     context_window,
     declared_tools,
     merged,
@@ -73,6 +71,7 @@ from trellis.harness.evals import (
     EvalCase,
     EvalServices,
     Evaluator,
+    grounding,
     grounding_score,
     judge,
     name_of,
@@ -162,15 +161,11 @@ class Agent:
     ):
         if run_timeout is not None and run_timeout <= 0:
             raise ConfigurationError(f"{id}: run_timeout is a number of seconds over 0")
-        if getattr(target, OWN_CHECKPOINTER, False):
+        if any(isinstance(j, grounding) for j in judges):
             raise ConfigurationError(
-                f"{id}: ReAct(checkpointer=) is for the graph run on its own: a wrapped agent's "
-                "runs checkpoint into the run (leave checkpointer= out)"
-            )
-        if getattr(target, OWN_STORE, False):
-            raise ConfigurationError(
-                f"{id}: ReAct(store=) is for the graph run on its own: a wrapped agent's store "
-                "is the memory service (leave store= out)"
+                f"{id}: grounding() is not one of h.wrap's judges: every wrapped run's answer is "
+                "already checked against its memory context, on a sampled share of runs "
+                '(without={"grounding"} turns it off); grounding() is for h.evaluate and judge()'
             )
         self.harness = harness
         self.target = target
@@ -505,7 +500,9 @@ class Agent:
 
     # ------------------------------------------------------------------ surfaces
     def serve_chat(self, app: Any, *, path: str = "/agui", identity: Any = None) -> None:
-        """Mount the AG-UI routes for this agent on a FastAPI ``app``."""
+        """Mount the AG-UI routes for this agent on a FastAPI ``app``. The caller is the user
+        the trusted ``X-Trellis-Identity`` header names (as ``serve_a2a`` reads it; a request
+        without it is ``401``), else ``identity(request) -> user`` when given."""
         from trellis.harness.agui import mount  # noqa: PLC0415 - optional extra
 
         mount(app, self, path=path, identity=identity)

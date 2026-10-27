@@ -17,7 +17,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
-from typing import Any, Final, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar
 
 from trellis.contracts import (
     ConfigurationError,
@@ -43,6 +43,7 @@ from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity
 from trellis.harness.prompts import Prompts, Rendered, Stored
+from trellis.harness.removed import removed
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
 from trellis.harness.settings import Settings
@@ -75,8 +76,16 @@ KEY_RETRY_SECONDS: Final = 30.0
 #: What the memory service says when it takes no model keys (``ProviderNotConfigured``: its
 #: credential encryption is not configured), answered as DEPENDENCY_UNAVAILABLE.
 NOT_CONFIGURED: Final = "not configured"
-#: How a person's verdict reads as a Langfuse score.
-VERDICT_SCORES: Final = {"confirm": 1.0, "approve": 1.0, "edit": 0.5, "correct": 0.0, "reject": 0.0}
+#: A person's verdict on a run (``h.feedback``), and how it reads as a Langfuse score. ``approve``
+#: and ``edit`` are not among them: they are the system's record of an approval decision
+#: (``agent.resume``), written by governance.
+VERDICT_SCORES: Final = {"confirm": 1.0, "correct": 0.0, "reject": 0.0}
+#: Methods ``Harness`` no longer has, and what to use instead (said when one is called).
+REMOVED_METHODS: Final = {
+    "governance_middleware": "a wrapped create_agent or Deep Agents graph's own tools are "
+    "governed already, middleware() includes the same governance, and outside a harness run "
+    "there is nothing to govern",
+}
 #: Paused runs one inbox page asks for (agent-runs' page limit), and the pages one inbox read
 #: follows at most: past that the newest are returned and a warning is logged.
 INBOX_LIMIT: Final = 500
@@ -268,11 +277,20 @@ class Harness:
         """What a person said about a run: a score on its trace (Langfuse, when the OTLP
         settings reach it; a ``score`` span otherwise) and — memory on — the run's ``human``
         feedback, citing the memories the run's answer rested on (``RunMemory.cited``), whose
-        confidence it moves once it is applied. The memory service stores it pending
-        (``review.state``) until the tenant administrator approves it, and only then does it
-        outrank the judge's and the run's own; the stored record is returned (None with
-        memory off). ``tenant`` is the run's, named by a platform key only."""
+        confidence it moves once it is applied. ``verdict`` is ``confirm``, ``reject`` or
+        ``correct`` (with the ``correction``); ``approve`` and ``edit`` are refused: they record
+        a decision on a paused action, which ``agent.resume`` makes. The memory service stores it
+        pending (``review.state``) until the tenant administrator reviews it (accepts or
+        dismisses it), and only once accepted does it outrank the judge's and the run's own; the
+        stored record is returned (None with memory off). ``tenant`` is the run's, named by a
+        platform key only."""
         chosen = FeedbackVerdict(verdict)
+        if chosen.value not in VERDICT_SCORES:
+            raise ConfigurationError(
+                f"h.feedback takes a person's verdict on a run: confirm, reject or correct, not "
+                f"{chosen.value!r} — approve and edit record a decision on a paused action "
+                "(agent.resume(..., decision=...))"
+            )
         record = await self.runs.get(run_id, tenant=await self._tenant(tenant))
         if record is None:
             raise ConfigurationError(f"no run {run_id}")
@@ -318,11 +336,12 @@ class Harness:
         scope = self.memory.for_user(await self._tenant(tenant), user, thread)
         return await scope.add_document(file, title=title, visibility=visibility, wait=wait)
 
+    @removed(evaluators="it is judges= now (h.evaluate(agent, dataset, judges))")
     async def evaluate(
         self,
         agent: Agent,
         dataset: str | Sequence[Any],
-        evaluators: Sequence[Evaluator],
+        judges: Sequence[Evaluator],
         *,
         run_name: str | None = None,
         description: str | None = None,
@@ -331,8 +350,8 @@ class Harness:
         limit: int | None = None,
         user: str | None = None,
     ) -> EvalReport:
-        """Run ``agent`` on every item of ``dataset`` and score its answers with
-        ``evaluators`` (from ``trellis.harness.evals``: ``grounding()``, ``exact_match()``,
+        """Run ``agent`` on every item of ``dataset`` and score its answers with ``judges``
+        (from ``trellis.harness.evals``: ``grounding()``, ``exact_match()``,
         ``contains()``, ``llm_judge(criteria)``, or any ``async (EvalCase) -> EvalScore |
         None``) — ``evaluate(agent, ...)``, with the agent's own services.
 
@@ -349,7 +368,7 @@ class Harness:
         return await run_evaluation(
             agent,
             dataset,
-            evaluators,
+            judges,
             run_name=run_name,
             description=description,
             metadata=metadata,
@@ -366,15 +385,12 @@ class Harness:
         the same version."""
         return await self.prompts.rendered(ref, **values)
 
-    def governance_middleware(self) -> Any:
-        """A LangChain middleware that runs a ``create_agent`` or Deep Agents graph's own tools
-        as the harness's are — governed, approved when governance asks, journaled, timed and
-        traced (``middleware.GovernTools``) — for code that does not wrap the graph (a wrapped
-        graph's tool nodes are governed already): ``create_agent(...,
-        middleware=[h.governance_middleware()])``."""
-        from trellis.harness.middleware import GovernTools  # noqa: PLC0415 - the react extra
+    if not TYPE_CHECKING:  # pragma: no branch - a type checker refuses a removed method itself
 
-        return GovernTools()
+        def __getattr__(self, name: str) -> Any:
+            if name in REMOVED_METHODS:
+                raise AttributeError(f"h.{name}() was removed: {REMOVED_METHODS[name]}")
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     async def aclose(self) -> None:
         """Finish the queued writes, export the queued spans and close the clients built here

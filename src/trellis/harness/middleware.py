@@ -121,6 +121,7 @@ from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.hooks import Hooks, ModelCall, running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
+from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
@@ -214,7 +215,8 @@ MACHINERY: Final = "trellis_machinery"
 
 class GovernTools(AgentMiddleware):
     """The framework's own tools of a ``create_agent`` or Deep Agents graph run as the
-    harness's are (``h.governance_middleware()``; ``ReAct`` has it): :func:`governed_call`.
+    harness's are (:func:`~trellis.harness.react.middleware` and ``ReAct`` have it):
+    :func:`governed_call`.
     Inside a harness run every tool node is governed so already (:func:`govern_tool_nodes`);
     a call is governed once, whichever comes first."""
 
@@ -1116,17 +1118,12 @@ TOOL_GUIDANCE: Final = (
     "not found), say plainly that there is no record of it: no hedging, no estimates, no "
     "figures that are not in the results.\n"
     "- Base each conclusion on the tool results. If no tool can answer a part, say so.\n"
-    "- Asked whether you can do something, answer plainly yes or no, from your tools and the "
-    "capabilities you are told of; do not hedge."
+    "- Asked whether you can do something, answer plainly yes or no, from your tools and your "
+    "instructions; do not hedge."
 )
 #: What the model is told about the tools that change data (:class:`ToolGuidance`,
 #: :class:`AnswerCheck`): their names.
 WRITE_TOOLS: Final = "These tools change data: {tools}."
-#: What the model is told of what the assistant can and cannot do (``ToolGuidance``'s
-#: ``capabilities``), before one line per capability.
-CAPABILITIES: Final = (
-    "What you can and cannot do here (asked about one of these, answer plainly yes or no):"
-)
 #: What :class:`AnswerCheck` asks the model, after its draft answer.
 ANSWER_CHECK: Final = (
     "Before this answer goes to the user, check it against the user's request. Do not mention "
@@ -1182,41 +1179,28 @@ class ToolGuidance(AgentMiddleware):
     rules still apply), an action done by calling its tool (never claimed without it, never
     against a rule), "no record" said plainly, conclusions from the results, a plain yes or no
     to what it can do. Inside a run it also names the offered harness tools that change data
-    (their declared side effects). ``text`` replaces the guidance (``None``: none, the
-    capabilities only). ``capabilities`` says what
-    the assistant can and cannot do beyond its tools (``{"accept an image upload": False}``),
-    one line each, on every call (:data:`CAPABILITIES`). No extra model call."""
+    (their declared side effects). ``text`` replaces the guidance. What the assistant can and
+    cannot do beyond its tools belongs in the instructions (the system prompt). No extra model
+    call."""
 
-    def __init__(
-        self,
-        text: str | None = TOOL_GUIDANCE,
-        *,
-        capabilities: Mapping[str, bool] | None = None,
-    ) -> None:
+    @removed(capabilities="say what the agent can and cannot do in the system prompt")
+    def __init__(self, text: str = TOOL_GUIDANCE) -> None:
         super().__init__()
-        if text is not None and not text.strip():
-            raise ConfigurationError("ToolGuidance needs a text (None: the capabilities only)")
+        if not text.strip():
+            raise ConfigurationError("ToolGuidance needs a text")
         self.text = text
-        self.capabilities = dict(capabilities or {})
 
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        parts = []
-        if self.text is not None and _counted(request.tools):
-            writes = _writes_offered(request)
-            parts.append(self.text)
-            if writes:
-                parts.append(WRITE_TOOLS.format(tools=", ".join(writes)))
-        if self.capabilities:
-            lines = [
-                f"- {name}: {'yes' if can else 'no'}" for name, can in self.capabilities.items()
-            ]
-            parts.append("\n".join([CAPABILITIES, *lines]))
-        if not parts:
+        if not _counted(request.tools):
             return await handler(request)
+        parts = [self.text]
+        writes = _writes_offered(request)
+        if writes:
+            parts.append(WRITE_TOOLS.format(tools=", ".join(writes)))
         return await handler(request.override(system_message=_appended(request, "\n".join(parts))))
 
 

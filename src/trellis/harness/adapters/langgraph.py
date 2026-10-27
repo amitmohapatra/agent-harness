@@ -20,14 +20,15 @@
   Agents' ``interrupt_on``) pauses with its own request: it is an approval of the calls it
   holds, and the harness's decision is turned into the ``{"decisions": [...]}`` it resumes
   with (:func:`hitl_response`);
-* tools: fixed when the graph is compiled, so harness tools come from ``h.tools(...)`` at
-  build time — unless the graph takes them per model call (``middleware.HarnessTools``, as
-  ``ReAct(...)`` does): then ``h.wrap(tools=)`` gives them, every model call is offered the
-  tools the run offers at that moment (``narrows="turn"``), and the memory tools come with them.
-  A ``create_agent`` graph (Deep Agents' too) built with ``h.tools`` narrows per model call
-  as well: the harness runs a copy of it whose model calls go through one more
-  ``awrap_model_call`` handler (``middleware.narrowing``), so the tool hints and a part turned
-  off reach the model; a hand-written graph binds its model's tools in its own code, which
+* tools: fixed when the graph is compiled — unless the graph takes them per model call
+  (``middleware.HarnessTools``, as ``ReAct(...)`` and ``middleware()`` do): then the run's
+  tools (``ReAct(tools=)``, the gateway's MCP tools, the memory tools) are offered on every
+  model call as the run offers them at that moment (``narrows="turn"``). A hand-built graph
+  takes the memory tools from ``h.memory_tools()`` at build time. A ``create_agent`` graph
+  (Deep Agents' too) without ``HarnessTools`` narrows per model call as well: the harness
+  runs a copy of it whose model calls go through one more ``awrap_model_call`` handler
+  (``middleware.narrowing``), so the tool hints and a part turned off reach the model; a
+  hand-written graph binds its model's tools in its own code, which
   the harness cannot reach (``narrows="none"``: every tool it bound is offered);
 * a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
