@@ -38,6 +38,25 @@ NAMES: Final = {
 }
 
 
+#: What a framework's column cannot show, said under the tables: the limits its tests pin.
+LIMITS: Final = {
+    "kimi": [
+        "ACP shows no hook before a tool runs: a call Kimi does not ask permission for (its "
+        "reads, in its default mode) runs under Kimi's own policy, and is recorded after.",
+        "A sub-agent's (and a swarm member's) own calls are not shown over ACP, only those it "
+        "asks permission for, which are governed; its child run holds its task and answer.",
+        "Spending: tokens from Kimi's usage log (every agent's), toward the budget; dollars only "
+        "with the follow-up that reads the gateway's log (a `max_cost` budget does not see "
+        "them yet).",
+        "Sandbox (F73 runs the harness's sandbox tools; `kimi(sandbox=sandbox())` is Kimi's "
+        "own): its commands and writes run in the sandbox, its reads (`Read`, `Glob`, `Grep`) "
+        "read the host: reads are not isolated.",
+        "Swarms run their members concurrently, as Kimi does "
+        "(`KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` in `env` caps it).",
+    ],
+}
+
+
 class Reasons:
     """Why a cell does not apply, numbered in the order the page first gives each."""
 
@@ -117,6 +136,9 @@ def render() -> str:
         if not cells:
             continue
         out.append(_row([f"{feature} {title}", _cell(cells, reasons)]))
+    for adapter, said in LIMITS.items():
+        out += ["", f"### What the {NAMES[adapter][0]} column does not show", ""]
+        out += [f"- {line}" for line in said]
     out += ["", "## Reasons", ""]
     out += [f"{n}. {reason}" for reason, n in reasons.numbers.items()]
     out.append("")

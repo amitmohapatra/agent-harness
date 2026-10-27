@@ -63,7 +63,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar, Final, cast
 
 from trellis.contracts import (
     ConfigurationError,
@@ -533,7 +533,7 @@ class ACPAdapter:
                 servers.append(await stack.enter_async_context(_harness_server(run.native_tools)))
             conn, process = await stack.enter_async_context(
                 spawn_agent_process(
-                    attempt,
+                    cast("Any", attempt),  # an ACP ``Client``: the methods the agent calls
                     *target.command,
                     env=env,
                     cwd=cwd,
@@ -550,8 +550,8 @@ class ACPAdapter:
                 compat.require_binary(profile.name, found, command=target.command[0])
             session = await attempt.session(init, cwd, servers, native_input)
             if profile is not None and profile.usage is not None:
-                attempt.usage = profile.usage(env, session)
-                attempt.usage.start()
+                usage = attempt.usage = profile.usage(env, session)
+                usage.start()
             async with contextlib.aclosing(attempt.turns(native_input)) as items:
                 async for item in items:
                     yield item
@@ -811,6 +811,7 @@ class Attempt:
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(CANCEL_SECONDS):
                 await self.process.wait()
+                assert self.drain is not None  # bound with the process
                 await asyncio.shield(self.drain)  # what it said last
         return ACPRunError(self.why_ended())
 
@@ -1253,9 +1254,9 @@ class Sandboxed:
         if not task.done():
             return TerminalOutputResponse(output="", truncated=False)
         text, code, signal = _ran(task)
-        cut = limit is not None and len(text.encode()) > limit
-        if cut:
-            text = text.encode()[-limit:].decode("utf-8", errors="ignore")
+        cut = False
+        if limit is not None and len(text.encode()) > limit:
+            cut, text = True, text.encode()[-limit:].decode("utf-8", errors="ignore")
         status = TerminalExitStatus(exit_code=code, signal=signal)
         return TerminalOutputResponse(output=text, truncated=cut, exit_status=status)
 

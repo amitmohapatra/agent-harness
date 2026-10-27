@@ -36,7 +36,7 @@ PATH: Final = "/mcp"
 #: How long the server waits for its socket at the start of an attempt, at most.
 START_SECONDS: Final = 10.0
 #: How long, at the attempt's end, a call still under way has before it is cancelled.
-STOP_SECONDS: Final = 0.1
+STOP_SECONDS: Final = 1
 
 
 def convert(tools: Sequence[Tool]) -> Server[Any]:

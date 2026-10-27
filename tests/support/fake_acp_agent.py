@@ -41,13 +41,14 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from acp import PROTOCOL_VERSION, RequestError, run_agent, text_block
 from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
     AgentPlanUpdate,
+    ContentToolCallContent,
     EnvVariable,
     Implementation,
     InitializeResponse,
@@ -335,7 +336,7 @@ class FakeAgent:
             tool_call=ToolCallUpdate(
                 tool_call_id=call_id,
                 title=title,
-                content=[{"type": "content", "content": text_block(text)}],
+                content=[ContentToolCallContent(type="content", content=text_block(text))],
             ),
         )
         chosen = answer.outcome.option_id if answer.outcome.outcome == "selected" else "cancelled"
@@ -353,7 +354,9 @@ class FakeAgent:
                 title=title,
                 kind="other",
                 status="pending",
-                content=[{"type": "content", "content": text_block(json.dumps(args))}],
+                content=[
+                    ContentToolCallContent(type="content", content=text_block(json.dumps(args)))
+                ],
             ),
         )
 
@@ -532,4 +535,4 @@ class FakeAgent:
 
 
 if __name__ == "__main__":
-    asyncio.run(run_agent(FakeAgent(), use_unstable_protocol=True))
+    asyncio.run(run_agent(cast(Any, FakeAgent()), use_unstable_protocol=True))

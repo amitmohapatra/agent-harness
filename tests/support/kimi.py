@@ -86,13 +86,14 @@ class PlannedEndpoint:
 
     def __init__(
         self,
-        plan: Sequence[Call | list[Call]] = (),
+        plan: Sequence[Any] = (),
         *,
         final: str = FINAL,
         turns: Callable[[dict[str, Any]], Turn] | None = None,
         stall: float = 0.0,
     ) -> None:
-        self.plan = list(plan)
+        #: each step a call, or the calls made in one message
+        self.plan: list[Any] = list(plan)
         self.final = final
         self.turns = turns
         self.stall = stall

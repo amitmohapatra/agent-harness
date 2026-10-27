@@ -43,7 +43,7 @@ def test_pyproject_pins_exactly_the_tested_ranges() -> None:
 def test_every_framework_an_adapter_runs_on_has_a_tested_range() -> None:
     named = {d for distributions in compat.FRAMEWORKS.values() for d in distributions}
     assert named <= set(compat.TESTED)
-    assert set(compat.FRAMEWORKS) == {"langgraph", "openai_agents", "claude_agent_sdk", "function"}
+    assert set(compat.FRAMEWORKS) == {"langgraph", "openai_agents", "claude_agent_sdk", "acp", "function"}
 
 
 def test_versions_compare_by_their_release_numbers() -> None:
