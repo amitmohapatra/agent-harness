@@ -110,7 +110,8 @@ said:
   then queued like the rest), so the next turn's window holds it wherever that turn runs;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
   Mode's nested calls from Bifrost's log — their arguments and outputs as they are
-  ([observability.md](observability.md#redaction));
+  ([observability.md](observability.md#redaction)), in the order the log has them, each at
+  the step of the script that made it, so a learned procedure keeps the script's order;
 * approve/reject/edit decisions as `TOOL_CALL` feedback.
 
 ## Background writes: what is guaranteed

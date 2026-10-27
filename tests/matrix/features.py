@@ -640,11 +640,18 @@ async def code_mode(w: World) -> None:
     asked: list[str] = []
 
     async def logged(run_id: str, since: Any) -> list[Any]:
+        from datetime import UTC, datetime
         from types import SimpleNamespace
 
         asked.append(run_id)
         nested = SimpleNamespace(
-            name="wiki-search", arguments={"q": "x"}, result="found", error=None, latency_ms=4
+            id="l1",
+            timestamp=datetime.now(UTC),
+            name="wiki-search",
+            arguments={"q": "x"},
+            result="found",
+            error=None,
+            latency_ms=4,
         )
         return [nested]
 

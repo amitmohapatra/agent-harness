@@ -178,8 +178,9 @@ class Runtime:
     suspend: Suspend | None = None
     #: the pause this attempt ended on
     pending: Pending | None = None
-    #: a Code Mode script ran: its nested calls are read back from the gateway's log
-    used_code_mode: bool = False
+    #: the Code Mode scripts this attempt ran, each as (when it started, its step): their
+    #: nested calls are read back from the gateway's log and recorded at their script's step
+    code_mode_scripts: list[tuple[datetime, int | None]] = field(default_factory=list)
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)

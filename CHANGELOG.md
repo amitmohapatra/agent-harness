@@ -121,6 +121,12 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   nothing (every tool offered, with `tool_search`).
 - Under Code Mode the narrowing dropped the meta-tools, cutting a run off from every tool behind
   them. The hints are asked about those tools too, and when one is hinted the meta-tools stay.
+- A Code Mode script's nested calls were recorded after the run's own calls, numbered by the
+  memory service in the order the log was read: a tool the run called after the script came
+  before them in a learned procedure. They are now recorded in the order the gateway logged
+  them, each at the step of the script that made it (the last one started by then). A script
+  calling one tool twice with the same arguments is recorded once, as any call repeated at one
+  step is.
 
 ## 0.5.0 — one breaking release (unreleased)
 

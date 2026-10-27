@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from opentelemetry.trace import StatusCode
@@ -228,7 +229,8 @@ async def _ran(
     read), executed (``idem``: the key the tool hands its service), and its outcome as the
     ``after_tool`` hooks leave it. A pause (it asked a person) or a cancellation propagates."""
     args = tool_call.args
-    runtime.used_code_mode |= tool.feature == "code_mode"
+    if tool.feature == "code_mode":
+        runtime.code_mode_scripts.append((datetime.now(UTC), tool_call.step))
     runtime.used.add(tool.name)
     reads = decision.risk == "read"
     if not reads:
