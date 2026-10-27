@@ -11,13 +11,15 @@ import pytest
 from fastapi import FastAPI, Request
 
 from tests.support.arm import arm
+from tests.support.memory import FakeMemoryService
 from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import AgentError, RunEvent, RunEventType, RunOutcome, new_id
 from trellis.harness.agui.events import AGUIEvent, AGUIEventType
 from trellis.harness.agui.hub import MAX_EVENTS_PER_RUN, Hub
 from trellis.harness.agui.sse import decode
 from trellis.harness.agui.translate import translate
-from trellis.harness.identity import Identity
+from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.identity import IDENTITY_HEADER, Identity, identity_headers
 
 PATH = "/agui"
 RELEASE = asyncio.Event()
@@ -376,18 +378,66 @@ def serve(identity: Any = user_of, **wrap: Any) -> tuple[Harness, httpx.AsyncCli
     return harness, http
 
 
-async def test_without_an_identity_every_caller_is_anonymous(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level("WARNING", logger="trellis.agui"):
-        harness, http = serve(identity=None)
-    assert "every request runs as user 'anonymous'" in caplog.text
+async def test_without_an_identity_the_trusted_header_names_the_caller() -> None:
+    harness, http = serve(identity=None)  # as serve_a2a: the platform's trusted header
     async with http:
-        events = await post(http, body("hello", runId="run-anon"))
-        assert finished(events)["result"] == "echo hello"
-        record = await harness.runs.get("run-anon")
-        assert record is not None and record.user_id == "anonymous"
+        missing = await http.post(f"{PATH}/run", json=body("hello"))
+        assert missing.status_code == 401 and IDENTITY_HEADER in missing.json()["detail"]
+        elsewhere = identity_headers("another-tenant", "ada")
+        refused = await http.post(f"{PATH}/run", json=body("hello"), headers=elsewhere)
+        assert refused.status_code == 401 and "not served here" in refused.json()["detail"]
+        ada = identity_headers(LOCAL_TENANT, "ada")
+        sent = await http.post(f"{PATH}/run", json=body("hello", runId="run-ada"), headers=ada)
+        assert finished(decode(sent.text))["result"] == "echo hello"
+        record = await harness.runs.get("run-ada")
+        assert record is not None and record.user_id == "ada"
     await harness.aclose()
+
+
+# --------------------------------------------------------------------------- attachments
+def attaching(document_id: str, source: str = "file") -> dict[str, Any]:
+    """A user message that asks with a document attached (AG-UI 1.0 content parts)."""
+    given = {"type": source, "value": document_id}
+    if source == "data":
+        given["mimeType"] = "text/plain"
+    content = [{"type": "text", "text": "sum it up"}, {"type": "document", "source": given}]
+    return {"threadId": "t1", "messages": [{"id": "m1", "role": "user", "content": content}]}
+
+
+async def test_an_attached_document_the_caller_may_read_is_the_runs_document_ids(
+    memory_service: FakeMemoryService,
+) -> None:
+    async with Harness(config=Settings(), memory=memory_service.client()) as harness:
+        app = FastAPI()
+        harness.wrap(agent_fn, id="chat").serve_chat(app, identity=user_of)
+        mine = await harness.add_document(b"Returns: 30 days.", user="u1", wait=None)
+        theirs = await harness.add_document(b"Salaries.", user="u2", wait=None)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://agui", headers={"x-user": "u1"}
+        ) as http:
+            events = await post(http, {**attaching(mine.document_id), "runId": "run-doc"})
+            assert finished(events)["result"] == "echo sum it up"  # the text parts are the input
+            record = await harness.runs.get("run-doc", tenant="acme")
+            assert record is not None
+            assert record.metadata["document_ids"] == [mine.document_id]
+            for foreign in (theirs.document_id, "doc_unknown"):
+                refused = await http.post(f"{PATH}/run", json=attaching(foreign))
+                assert refused.status_code == 404, refused.text
+                assert f"no document {foreign}" in refused.json()["detail"]
+            inline = await http.post(f"{PATH}/run", json=attaching("UmV0dXJucw==", "data"))
+            assert inline.status_code == 422 and "upload the file" in inline.json()["detail"]
+            plain = await post(http, body("hello", runId="run-plain"))
+            assert finished(plain)["result"] == "echo hello"
+            record = await harness.runs.get("run-plain", tenant="acme")
+            assert record is not None and "document_ids" not in record.metadata
+
+
+async def test_an_attachment_without_a_memory_service_is_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    refused = await client.post(f"{PATH}/run", json=attaching("doc_1"))
+    assert refused.status_code == 422 and "MEMORY_URL" in refused.json()["detail"]
 
 
 async def test_an_identity_may_be_async_and_must_name_someone() -> None:

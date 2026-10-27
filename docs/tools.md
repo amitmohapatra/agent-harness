@@ -49,7 +49,7 @@ format. What helps it choose, whatever the source:
 | **How to choose** — every part of a request addressed, the most specific tool over a general one, current figures from tools rather than the remembered context, a change made by calling its tool (never claimed without it) | `ReAct(tool_guidance=True)` (`ToolGuidance`) |
 | **A check before the answer** — the draft answer checked against the request once; a part left open, or a change only claimed, makes the model call the tools still needed — the write tool's call reaches governance, and its approval; nothing found said plainly as "no record" | `ReAct(answer_check=True)` (`AnswerCheck`) |
 | **A check before a change** — the first call of a tool that changes data checked against the rules in the instructions and the memory context, before it runs or anyone is asked to approve it | `ReAct(answer_check=True)` (`AnswerCheck(writes=False)` turns it off) |
-| **What it can do** — capabilities beyond the tools, said plainly | `ReAct(capabilities={"accept an image upload": False})` |
+| **What it can do** — capabilities beyond the tools, said plainly | the instructions: `ReAct("... You cannot accept an image upload.", ...)` |
 | **Measured** — `tool_coverage()` scores each evaluation item by the share of its `needed_tools` the run called | [evaluation.md](evaluation.md#trajectories) |
 
 [frameworks/react.md](frameworks/react.md#tool-choice) has the switches;

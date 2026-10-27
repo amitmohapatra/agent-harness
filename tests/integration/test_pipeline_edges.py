@@ -302,10 +302,25 @@ async def test_feedback_with_memory_off_is_only_a_score(
     scored: list[tuple[Any, ...]] = []
     monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append((*args, kw)))
     result = await harness.wrap(echo, id="echo").run("q", user="u")
-    assert await harness.feedback(result.run_id, "edit", correction={"fixed": True}) is None
+    assert await harness.feedback(result.run_id, "correct", correction={"fixed": True}) is None
     trace = telemetry.trace_hex(result.run_id)
     run = {"run_id": result.run_id, "model": None}
-    assert scored == [(trace, "feedback", 0.5, "{'fixed': True}", run)]
+    assert scored == [(trace, "feedback", 0.0, "{'fixed': True}", run)]
+
+
+@pytest.mark.parametrize("verdict", ["approve", "edit"])
+async def test_feedback_refuses_the_verdicts_of_an_approval_decision(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, verdict: str
+) -> None:
+    async def echo(input: str, agent: Runtime) -> str:
+        return input
+
+    scored: list[Any] = []
+    monkeypatch.setattr(telemetry, "score_span", lambda *args, **kw: scored.append(args))
+    result = await harness.wrap(echo, id="echo").run("q", user="u")
+    with pytest.raises(ConfigurationError, match=rf"confirm, reject or correct, not '{verdict}'"):
+        await harness.feedback(result.run_id, verdict)
+    assert scored == []  # nothing recorded
 
 
 async def test_a_sampled_answer_with_no_checkable_claim_gets_no_score(

@@ -53,7 +53,7 @@ exports the queued spans and closes the clients it built; a client you give is y
 | Argument | Default | What it is |
 |---|---|---|
 | `config` | `Settings.from_env()` | the deployment as fields, instead of the environment ([Settings](#settings)) |
-| `memory` | a `MemoryClient` with `MEMORY_URL`, else none | `trellis.memory.MemoryClient`; `False`: no memory whatever `MEMORY_URL` says ([memory.md](memory.md)) |
+| `memory` | a `MemoryClient` with `MEMORY_URL`, else none | `trellis.memory.MemoryClient`; `False`: no memory whatever `MEMORY_URL` says — for the whole deployment: no client, the local tenant, no `h.add_document` (and `RUNS_URL` refused, agent-runs needing the key's tenant). To leave memory out for one agent or one run while the rest keep it, use `without={"memory"}` ([memory.md](memory.md)) |
 | `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns(keep_finished=1000, keep_finished_seconds=3600)` (the finished runs it keeps, and how long), or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
 | `gateway` | a `Gateway` with `BIFROST_URL`, else none | `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`; `False`: no gateway ([gateway.md](gateway.md)) |
 
@@ -80,15 +80,14 @@ them ([tools.md](tools.md)).
 | `version` | `service.version` of `OTEL_RESOURCE_ATTRIBUTES` | the agent's code version, recorded with each run it starts ([reliability.md](reliability.md#agent-version)) |
 | `description` | a function's docstring | what the agent does, as another agent (a sub-agent's tool) and the A2A card read it |
 | `hooks` | `()` | `Hooks` around its runs, model calls and tool calls, in order ([hooks.md](hooks.md)) |
-| `judges` | `()` | online evaluators, each on the share of successful runs it samples (`llm_judge(sample=)`; else a tenth) ([evaluation.md](evaluation.md#online-judges)) |
+| `judges` | `()` | online judges, each on the share of successful runs it samples (`llm_judge(sample=)`; else a tenth) ([evaluation.md](evaluation.md#online-judges)); not `grounding()`, which every wrapped run already gets on a sampled share (refused, saying so) |
 | `budget` | none: no cap | the most each run may spend, a sub-agent's run counted toward its parent's ([`Budget`](#budget)) |
 | `run_timeout` | no limit | the most working time of each run, in seconds, however it starts ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
 | `without` | `()` | what the harness does not do for any of its runs: `memory`, `tool_search`, `mcp`, `code_mode`, `grounding`, `judges` ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | none | the framework's own options for every run's call, passed through ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 
 A framework installed outside the range this release was tested with is said once in the log
-when its first target is wrapped ([versioning.md](versioning.md)). A `ReAct` built with a
-`checkpointer=` of its own is for running on its own: `h.wrap` refuses it.
+when its first target is wrapped ([versioning.md](versioning.md)).
 
 ### h.prompt
 
@@ -101,19 +100,15 @@ The gateway's stored prompt `ref` (`"name"`, `"name@3"`, or `stored(...)`), its
 framework. Inside a run it is pinned and journaled: a resumed run reads the same version
 ([prompts.md](prompts.md)).
 
-### h.memory_tools, h.governance_middleware
+### h.memory_tools
 
 ```text
 await h.memory_tools(*, tenant=None) -> list
-h.governance_middleware() -> AgentMiddleware
 ```
 
 `memory_tools` are the memory service's agent tools as LangChain tools, for a graph built by
-hand: each call in the scope of the run that makes it ([memory.md](memory.md)).
-`governance_middleware` is a LangChain middleware that runs a `create_agent` or Deep Agents
-graph's own tools as the harness runs its own — governed, asked when governance asks,
-journaled, timed and traced — for code that does not wrap the graph
-([governance.md](governance.md)).
+hand: each call in the scope of the run that makes it ([memory.md](memory.md)). A wrapped
+graph's own tools are governed with no middleware of yours ([governance.md](governance.md)).
 
 ### h.worker
 
@@ -137,16 +132,16 @@ await h.inbox(assignee=None, *, tenant=None) -> list[RunSummary]
 await h.feedback(run_id, verdict, correction=None, *, tenant=None) -> Feedback | None
 await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None,
                      wait=60) -> DocumentInfo
-await h.evaluate(agent, dataset, evaluators, *, run_name=None, description=None, metadata=None,
+await h.evaluate(agent, dataset, judges, *, run_name=None, description=None, metadata=None,
                  concurrency=4, limit=None, user=None) -> EvalReport
 ```
 
 | Call | What it does | Page |
 |---|---|---|
 | `inbox` | the paused runs waiting on `assignee` (`user:…`, `role:…`) or anyone, newest first; answer one with `agent.resume` | [interrupts.md](interrupts.md#an-inbox-of-your-own) |
-| `feedback` | a person's verdict on a run (`confirm`, `approve`, `reject`, `correct`, `edit`): a score on its trace, and with memory the run's `human` feedback citing the memories its answer rested on (the judge's), pending the tenant administrator | [memory.md](memory.md) |
+| `feedback` | a person's verdict on a run (`confirm`, `reject`, `correct`): a score on its trace, and with memory the run's `human` feedback citing the memories its answer rested on (the judge's), pending the tenant administrator's review (accepted or dismissed). `approve` and `edit` are refused: they record a decision on a paused action, which `agent.resume` makes | [memory.md](memory.md) |
 | `add_document` | a file into a user's (or a thread's) document memory, waiting until it is indexed (`wait=None`: at once); needs `MEMORY_URL`; a run scoped to it: `agent.run(..., document_ids=[doc.document_id])` | [memory.md](memory.md) |
-| `evaluate` | the agent over a dataset (a Langfuse dataset's name, or a list), each answer scored onto its run's trace | [evaluation.md](evaluation.md) |
+| `evaluate` | the agent over a dataset (a Langfuse dataset's name, or a list), each answer scored by `judges` (the same kind as `h.wrap(judges=)`) onto its run's trace | [evaluation.md](evaluation.md) |
 
 `tenant=` is only for a platform key (one with no tenant of its own).
 
@@ -170,13 +165,18 @@ await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 | `thread` | none (the run is its own) | the conversation: memory's thread, LangGraph's `thread_id`, the default `concurrency_key` |
 | `tenant` | the key's tenant | only for a platform key |
 | `run_timeout` | the agent's (`h.wrap(run_timeout=)`) | the most working time in seconds, across attempts, pauses not counted → `TIMEOUT` ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
-| `deadline` | none | when the run must have ended → `TIMEOUT` |
+| `deadline` | none | the clock time (a `datetime`) the run must have ended by, time queued and paused for a person counted (agent-runs ends it even while it is queued or paused) → `TIMEOUT`; a child run keeps the earlier of its own and its parent's |
 | `budget` | the agent's (`h.wrap(budget=)`) | the most this run may spend; kept with the run ([`Budget`](#budget)) |
 | `without` | `()` | parts off for this run, on top of the agent's; kept with the run ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | the agent's | the framework's own options for this run, over the agent's ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 | `document_ids` | none (every document the person's scope reads) | the documents (`h.add_document(...).document_id`) the run's memory context draws its passages from, none else; kept with the run and its sub-agents' runs ([memory.md](memory.md#push)) |
 | `priority` (`start`) | `0` | -1000 to 1000: a higher one is claimed first ([runs.md](runs.md#queue-order-and-busy-conversations)) |
 | `concurrency_key` (`start`) | `thread:<thread>` | runs sharing one run one at a time |
+
+`run_timeout` is working time and `deadline` is clock time: a run that waits a day for an
+approver is not past a `run_timeout` of an hour, and is past a `deadline` an hour away. The
+`deadline` of `ask(...)` is a third thing, the time one question must be answered by
+([interrupts.md](interrupts.md)).
 
 `run` runs to the end or the first pause. `stream` yields the run's contracts `RunEvent`s up to
 `RUN_FINISHED`; closing it early cancels the run. `start` queues the run for a worker and
@@ -231,7 +231,9 @@ agent.serve_a2a(app, url, *, identity=None)
 ```
 
 `serve_chat` mounts AG-UI routes on a FastAPI app; `serve_a2a` the agent card and A2A JSON-RPC
-at `url` ([surfaces.md](surfaces.md)). A wrapped agent in a `ReAct`'s `subagents=[...]` is its
+at `url` ([surfaces.md](surfaces.md)). Both take the caller from the trusted
+`X-Trellis-Identity` header the platform's edge sets, unless `identity=` names it another way;
+a call without either is `401` on both surfaces. A wrapped agent in a `ReAct`'s `subagents=[...]` is its
 sub-agent: each call a child run ([subagents.md](subagents.md)).
 
 ## RunHandle
@@ -268,10 +270,9 @@ a function target.
 
 ```text
 ReAct(system_prompt, model, *, tools=(), subagents=(), skills=None, memory_files=None,
-      permissions=None, backend=None, store=None, response_format=None, state_schema=None,
+      permissions=None, backend=None, response_format=None, state_schema=None,
       context_schema=None, cache=None, max_steps=12, max_repeats=3, call_timeout=None,
-      context_window=None, effort=None, tool_guidance=None, answer_check=None,
-      capabilities=None, middleware=(), checkpointer=None)
+      context_window=None, effort=None, tool_guidance=None, answer_check=None, middleware=())
 ```
 
 A tool-calling agent for teams with no framework: LangChain's `create_agent` with the harness's
@@ -279,7 +280,11 @@ A tool-calling agent for teams with no framework: LangChain's `create_agent` wit
 a Deep Agents capability is asked for (`backend`, a sub-agent of its own, `skills`,
 `memory_files`, `permissions`)
 ([frameworks/react.md](frameworks/react.md)). The parameter names are Deep Agents' where both have
-one.
+one. Its checkpoint is kept in the run (`RunCheckpointer`) and its store is the memory service:
+for a graph with a checkpointer or a store of your own, build it with
+`create_agent(..., middleware=middleware(), checkpointer=..., store=...)`. What the assistant
+can and cannot do beyond its tools ("you cannot accept an image upload") goes in
+`system_prompt`.
 
 **Must**
 
@@ -304,23 +309,21 @@ one.
 | `memory_files` | none | Deep Agents' `memory`: `AGENTS.md`-style files loaded into the instructions (named so it is not taken for the memory service) |
 | `backend` | the graph's state, kept in the run's journal | where Deep Agents' file tools work: a `StateBackend`, `StoreBackend` (the memory service when wrapped), `FilesystemBackend`, `CompositeBackend`, or the run's sandbox: [`docker_sandbox()`](#docker_sandbox) (`execute` runs code there). Files outside the graph's state are the agent's from the start and governed as any tool |
 | `permissions` | none | Deep Agents' `FilesystemPermission` rules for its file tools |
-| `max_steps` | 12 | model calls with tools, then one more without (1 or more) |
-| `call_timeout` | none | the most one model call may take, in seconds |
+| `max_steps` | 12 | model calls with tools in one invocation, then one more without (1 or more): a loop guard, counted again each invocation. For a spending cap over the whole run (its attempts and sub-agents included) use [`Budget(max_tool_calls=)`](#budget) |
+| `call_timeout` | none | the most one model call may take, in seconds (a tool's own `call_timeout` bounds a tool call) |
 | `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
-| `capabilities` | none | what the assistant can and cannot do beyond its tools, `{name: bool}`, told on every call |
 
 **Advanced**
 
 | Argument | Default | What it is |
 |---|---|---|
-| `middleware` | `()` | more LangChain or Deep Agents middleware, added before `ModelHooks`; one named as the harness's is refused, one named as Deep Agents' replaces it |
+| `middleware` | `()` | your LangChain or Deep Agents middleware, added before `ModelHooks`; one named as the harness's is refused, naming the parameter that sets it (`middleware()` itself: ReAct already has it), one named as Deep Agents' replaces it |
 | `state_schema`, `context_schema` | none | Deep Agents' graph state (a `DeepAgentState` subclass) and run context schemas |
 | `cache` | none | LangGraph's node cache |
 | `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `max_repeats` | 3 | identical calls in a row that stop the run (2 or more) |
 | `tool_guidance` | `None`: automatic | how to choose among tools, added to the instructions (`ToolGuidance`); `None`: off, as measured ([tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
 | `answer_check` | `None`: automatic | the draft answer checked against the request once, and the first change against the rules (`AnswerCheck`: one more model call each); `None`: off, as measured ([tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
-| `store`, `checkpointer` | the memory service; the run's (`RunCheckpointer()`) | for the graph run on its own, outside the harness: `h.wrap` refuses a `ReAct` given either |
 
 Not exposed: Deep Agents' `interrupt_on` (approvals are the [catalog](governance.md)'s), `name`
 (the wrap's `id`), `debug`.
@@ -329,7 +332,7 @@ Not exposed: Deep Agents' `interrupt_on` (approvals are the [catalog](governance
 
 ```text
 middleware(*, max_steps=12, max_repeats=3, call_timeout=None, context_window=None,
-           tool_guidance=None, answer_check=None, capabilities=None, system_prompt=None)
+           tool_guidance=None, answer_check=None, system_prompt=None)
 ```
 
 The harness's part of `ReAct` for a LangChain `create_agent` or a Deep Agents

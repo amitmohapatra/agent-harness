@@ -182,7 +182,7 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 34. Way 2 keeps your framework's checkpoint (the artifacts API by hand)
 35. by design: outside a harness run your code names the key of its own write; the runs SDK and the memory SDK take idempotency_key=
 36. a block runs inline in your code: no surface or queue of its own here
-37. by design: your code calls another agent with remote() (A2A), or runs it as plain code
+37. by design: your code calls another agent with a2a(url)(...) (A2A), or runs it as plain code
 38. your framework runs its calls
 39. by design: a Way 2 caller's own code receives the whole result and decides what its model reads
 40. native middleware: a graph is built with it

@@ -4,7 +4,7 @@ schemas are ``ag-ui-protocol/ag-ui`` ``sdks/typescript/packages/core/src/generat
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
@@ -112,10 +112,65 @@ class AGUIEvent(_Wire):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
+class TextPart(_Wire):
+    """``TextPart``: text of a message."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class PartSource(_Wire):
+    """``PartSource``: where a media part's bytes are — inline (``data``), at a URL (``url``),
+    or already with the provider, named by the handle it issued (``file``: here, a document id
+    of the memory service)."""
+
+    type: Literal["data", "url", "file"]
+    value: str
+    mime_type: str | None = None
+    provider: str | None = None
+
+
+class MediaPart(_Wire):
+    """``ImagePart``, ``AudioPart``, ``VideoPart``, ``DocumentPart``: a file of a message."""
+
+    type: Literal["image", "audio", "video", "document"]
+    id: str | None = None
+    source: PartSource
+
+
+ContentPart = Annotated[TextPart | MediaPart, Field(discriminator="type")]
+
+
 class InputMessage(_Wire):
+    """A message of the thread: its content a text, or parts (AG-UI 1.0 ``ContentPart`` items)."""
+
     id: str | None = None
     role: Role
-    content: str | None = None
+    content: str | list[ContentPart] | None = None
+
+    def text(self) -> str | None:
+        """The message's text: the content, or its text parts joined (``None``: none)."""
+        if not isinstance(self.content, list):
+            return self.content or None
+        return "\n".join(p.text for p in self.content if isinstance(p, TextPart)) or None
+
+    def attached(self) -> list[str]:
+        """The document ids its file parts name (a ``file`` source: a document of the memory
+        service, uploaded before). A part with its bytes inline or at a URL is refused
+        (``ValueError``): the surface uploads nothing and fetches nothing."""
+        parts = self.content if isinstance(self.content, list) else []
+        ids: list[str] = []
+        for part in parts:
+            if not isinstance(part, MediaPart):
+                continue
+            if part.source.type != "file":
+                raise ValueError(
+                    f"a {part.type} part is attached by its document id (source type file): "
+                    "upload the file to the memory service first (POST /v1/documents, or "
+                    f"h.add_document), not as a {part.source.type} source"
+                )
+            ids.append(part.source.value)
+        return ids
 
 
 class Resume(_Wire):
@@ -162,8 +217,13 @@ class RunAgentInput(_Wire):
     forwarded_props: Any = None
     resume: list[Resume] = Field(default_factory=list)
 
-    def latest_user_text(self) -> str | None:
+    def latest_user(self) -> InputMessage | None:
+        """The latest user message that says or attaches something."""
         for message in reversed(self.messages):
             if message.role is Role.USER and message.content:
-                return message.content
+                return message
         return None
+
+    def latest_user_text(self) -> str | None:
+        latest = self.latest_user()
+        return latest.text() if latest is not None else None

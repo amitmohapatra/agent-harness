@@ -58,7 +58,7 @@ from trellis.harness.a2a import executor as executor_module
 from trellis.harness.a2a import push
 from trellis.harness.a2a import tasks as tasks_module
 from trellis.harness.a2a.executor import RunExecutor
-from trellis.harness.a2a.identity import ANONYMOUS, HeaderIdentity, IdentityRefused, header
+from trellis.harness.a2a.identity import HeaderIdentity, header
 from trellis.harness.a2a.push import (
     PushNotifier,
     TargetRefused,
@@ -75,7 +75,7 @@ from trellis.harness.a2a.translate import (
     values,
 )
 from trellis.harness.agent import Agent
-from trellis.harness.identity import IDENTITY_HEADER, identity_headers
+from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, identity_headers
 from trellis.harness.runs import LocalRuns
 from trellis.runs.webhooks import verify_signature
 
@@ -97,19 +97,16 @@ def call_context(user: str | None = "u1", raw: str | None = None) -> ServerCallC
 # --------------------------------------------------------------------------- identity
 
 
-async def test_the_identity_header_names_the_user_of_the_keys_tenant(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_the_identity_header_names_the_user_of_the_keys_tenant() -> None:
     harness = Harness(config=Settings())
     resolve = HeaderIdentity(harness)
     with pytest.raises(IdentityRefused, match="not served here"):
         resolve(call_context("u1"))  # the key not asked yet: no tenant is served
     await harness._key_info()
     assert resolve(call_context("u1")) == "u1"
-    with caplog.at_level(logging.WARNING, logger="trellis.a2a"):
-        assert resolve(call_context(None)) == ANONYMOUS
-        assert resolve(call_context(None)) == ANONYMOUS
-    assert caplog.text.count("run as user 'anonymous'") == 1  # warned once per server
+    # nobody is anonymous: no header is refused, as on the chat surface
+    with pytest.raises(IdentityRefused, match=f"no {IDENTITY_HEADER} header"):
+        resolve(call_context(None))
     await harness.aclose()
 
 
@@ -130,6 +127,16 @@ async def test_an_identity_header_it_cannot_act_on_is_refused(raw: str, reason: 
     with pytest.raises(IdentityRefused, match=reason):
         HeaderIdentity(harness)(call_context(raw=raw))
     await harness.aclose()
+
+
+def test_a_caller_whose_identity_is_refused_owns_no_task() -> None:
+    # the SDK's owner scope (task listing, push configs) of a refused caller is nobody's: the
+    # serving route refuses such a call first, and a resolver of the deployment's may refuse too
+    def refusing(context: ServerCallContext) -> str:
+        raise IdentityRefused("no such caller")
+
+    assert tasks_module.owner(refusing)(call_context()) == tasks_module.REFUSED_OWNER
+    assert tasks_module.owner(lambda context: "u1")(call_context()) == "u1"
 
 
 def test_a_context_without_headers_has_no_identity_header() -> None:

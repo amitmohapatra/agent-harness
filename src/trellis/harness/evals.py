@@ -15,8 +15,9 @@ score, or ``None`` when it has nothing to say about this case. Built in:
   (``metadata["needed_tools"]``), and also scores an item whose run paused for approval —
   the call that paused counts as made;
 * :func:`llm_judge` — a judge model scores the answer against plain-language criteria (strict
-  JSON ``{score, reasoning}`` at temperature 0). Which model, and through which virtual key,
-  is the deployment's (the gateway's judge alias, ``TRELLIS_JUDGE_VIRTUAL_KEY``), never the code's.
+  JSON ``{score, reasoning}`` at temperature 0). Its model is the deployment's (the gateway's
+  judge alias) unless the code names one (``llm_judge(model=)``); the virtual key its calls go
+  through is always the deployment's (``TRELLIS_JUDGE_VIRTUAL_KEY``).
 
 What evaluation reaches — Langfuse, the judge's gateway and model — is an
 :class:`EvalServices`: ``EvalServices.from_env()``, or a wrapped agent's own (``agent.evals``).
@@ -70,6 +71,7 @@ from trellis.harness.clients.bifrost import Gateway, PromptPin
 from trellis.harness.gateways import ModelGateway, ProviderKey, model_gateway
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
+from trellis.harness.removed import removed
 from trellis.harness.settings import Settings
 
 if TYPE_CHECKING:
@@ -904,10 +906,11 @@ class _Run:
         return self.langfuse.dataset_run_url(project, dataset_id, self.dataset_run_id)
 
 
+@removed(evaluators="it is judges= now (evaluate(target, dataset, judges))")
 async def evaluate(
     target: Agent | Target,
     dataset: str | Sequence[Any],
-    evaluators: Sequence[Evaluator],
+    judges: Sequence[Evaluator],
     *,
     services: EvalServices | None = None,
     user: str | None = None,
@@ -917,7 +920,7 @@ async def evaluate(
     concurrency: int = CONCURRENCY,
     limit: int | None = None,
 ) -> EvalReport:
-    """Run ``target`` on every item of ``dataset`` and score its answers with ``evaluators``.
+    """Run ``target`` on every item of ``dataset`` and score its answers with ``judges``.
 
     ``target`` is a wrapped ``Agent`` — each item runs through the normal pipeline, as
     ``h.evaluate`` (see there) — or any ``async (input) -> answer`` (the answer, or an
@@ -942,7 +945,7 @@ async def evaluate(
             target,
             agent,
             dataset,
-            evaluators,
+            judges,
             services=services,
             user=user or EVAL_USER,
             run_name=run_name,

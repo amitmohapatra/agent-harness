@@ -211,7 +211,10 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 | `grounding` | `MEMORY_URL`, a fixed tenth of the runs given a context | the grounding check (`/v1/verify`) and its score on the run's trace | not checked |
 
 These six, and only these, are names: any other is refused (`ConfigurationError`, naming
-them). A `ReAct`'s long-task tools (`write_todos`, scratch files) are its own, offered on a
+them). `without={"memory"}` is per agent or per run: the rest of the deployment keeps memory,
+and the tenant, `h.add_document` and `h.feedback` keep working. `Harness(memory=False)` is the
+whole deployment with no memory service: no client even with `MEMORY_URL` set, the local
+tenant, no `h.add_document`, and `RUNS_URL` refused ([api.md](api.md#harness)). A `ReAct`'s long-task tools (`write_todos`, scratch files) are its own, offered on a
 long task with room in the window ([react.md](frameworks/react.md#the-middleware)). Not switchable, because they are correctness or have an owner elsewhere:
 governance and approvals, the journal and replay, tool retries and time limits, tracing and
 redaction, the run record, a budget (opt-in: give one), structured output, model retries,
@@ -257,7 +260,7 @@ The arguments, each linked to its reference: what they are, their defaults, what
 | Where | Arguments |
 |---|---|
 | [`Harness(...)`](api.md#harness) | `config`, `memory`, `runs`, `gateway` (a client given is used as it is; `False` turns the service off whatever the environment says: [docs/README.md](README.md#composition-a-harness-is-the-blocks-you-give-it)) |
-| [`ReAct(...)`](api.md#react) | must: `system_prompt`, `model`; usual: `tools`, `response_format`; optional: `subagents`, `skills`, `memory_files`, `backend`, `permissions`, `max_steps`, `call_timeout`, `effort`, `capabilities`; advanced: `middleware`, `state_schema`, `context_schema`, `cache`, `context_window`, `max_repeats`, `tool_guidance`, `answer_check` (tool choice, automatic by default: [frameworks/react.md](frameworks/react.md#tool-choice)), `store`, `checkpointer` |
+| [`ReAct(...)`](api.md#react) | must: `system_prompt`, `model`; usual: `tools`, `response_format`; optional: `subagents`, `skills`, `memory_files`, `backend`, `permissions`, `max_steps`, `call_timeout`, `effort`; advanced: `middleware`, `state_schema`, `context_schema`, `cache`, `context_window`, `max_repeats`, `tool_guidance`, `answer_check` (tool choice, automatic by default: [frameworks/react.md](frameworks/react.md#tool-choice)) |
 | [`h.wrap(...)`](api.md#hwrap) | `id`, `version`, `description`, `hooks`, `judges`, `budget`, `run_timeout`, `without`, `framework_options` |
 | [`agent.run` / `stream` / `start`](api.md#agentrun-agentstream-agentstart) | `user`, `thread`, `tenant`, `run_timeout`, `deadline`, `budget`, `without`, `framework_options`, `document_ids`; `start`: `priority`, `concurrency_key` |
 | [`agent.schedule(...)`](api.md#agentschedule) | `cron`, `user`, `input`, `tz`, `tenant`, `run_timeout`, `budget`, `without`, `framework_options`, `document_ids`, `priority`, `concurrency_key` |
@@ -288,7 +291,9 @@ be asked about (the first ask failed), raises `ConfigurationError` with what wen
 Limits, retries, the tool-hint threshold, lease length and the like are named constants next to
 the code that uses it (`MAX_STEPS`, `TOOLS_TTL_SECONDS`, `GOVERNANCE_TTL_SECONDS`,
 `WRITE_ATTEMPTS`...). The timeouts only the agent's author knows are arguments where the thing
-is defined: `@tool(call_timeout=)`, `openapi(call_timeout=)`, `a2a(call_timeout=)`,
-`ReAct(call_timeout=)`, `h.wrap(run_timeout=)`, `agent.run(run_timeout=, deadline=)`
+is defined: a tool call's `@tool(call_timeout=)`, `openapi(call_timeout=)`,
+`a2a(call_timeout=)`; a model call's `ReAct(call_timeout=)` (each model call, not its tools);
+a run's `h.wrap(run_timeout=)` and `agent.run(run_timeout=, deadline=)` — `run_timeout` working
+time (a pause for a person and time queued not counted), `deadline` clock time (both counted)
 ([reliability.md](reliability.md)). Which framework versions a release supports is a release's
 too ([versioning.md](versioning.md)).

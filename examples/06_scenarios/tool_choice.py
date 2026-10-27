@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Mapping
 from typing import Annotated, Any, Final
 
 from examples._support.offline import react_model
@@ -338,8 +339,18 @@ MORE: Final = [
         ["create_stock_rule"],
     ),
 ]
-#: What the assistant can and cannot do beyond its tools: ``ReAct(capabilities=...)``.
+#: What the assistant can and cannot do beyond its tools, said in its instructions (:func:`told`).
 CAN: Final = {"accept an image upload": False, "accept a voice message": False}
+
+
+def told(system: str, can: Mapping[str, bool]) -> str:
+    """``system`` with what the assistant can and cannot do beyond its tools, one line each:
+    the instructions are where it is said (``ReAct(system_prompt=)``)."""
+    lines = [f"- {name}: {'yes' if able else 'no'}" for name, able in can.items()]
+    asked = "What you can and cannot do here (asked about one of these, answer plainly yes or no):"
+    return "\n".join([system, "", asked, *lines])
+
+
 #: The customer's harder cases: an unknown item, a change a remembered rule forbids, and a
 #: question about what the assistant can do.
 HARDER: Final = [

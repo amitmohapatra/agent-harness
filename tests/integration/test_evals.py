@@ -175,6 +175,25 @@ async def test_an_item_the_harness_cannot_even_start_is_an_error(
     assert item.error == "DependencyUnavailableError: agent-runs is down"
 
 
+async def test_evaluate_takes_its_judges_as_judges_and_names_them_for_the_old_word(
+    harness: Harness,
+) -> None:
+    agent = harness.wrap(capital, id="capitals")
+    item = {"input": "France", "expected": "Paris"}
+    report = await harness.evaluate(agent, [item], judges=[exact_match()])
+    assert report.items[0].scores == [EvalScore("exact_match", True)]
+    with pytest.raises(TypeError, match=r"h.evaluate\(evaluators=\) was removed: it is judges="):
+        await harness.evaluate(agent, [item], evaluators=[exact_match()])  # pyright: ignore[reportCallIssue]
+    with pytest.raises(TypeError, match=r"^evaluate\(evaluators=\) was removed: it is judges="):
+        await evaluate(agent, [item], evaluators=[exact_match()])  # pyright: ignore[reportCallIssue]
+
+
+def test_grounding_is_not_a_judge_of_wrap_it_runs_on_its_own(harness: Harness) -> None:
+    with pytest.raises(ConfigurationError, match=r"grounding\(\) is not one of h.wrap's judges"):
+        harness.wrap(capital, id="g", judges=[llm_judge("ok?"), grounding()])
+    harness.wrap(capital, id="judged", judges=[llm_judge("ok?")])
+
+
 async def test_a_cancelled_run_is_reported_cancelled(harness: Harness) -> None:
     async def cancelled(input: str, agent: Runtime) -> str:
         from trellis.harness.asking import RunCancelled

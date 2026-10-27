@@ -34,6 +34,7 @@ from trellis.contracts import (
 from trellis.harness import pipeline
 from trellis.harness.a2a import RemoteAgent
 from trellis.harness.events import RunEvents
+from trellis.harness.identity import identity_headers
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.bridge import CUT
 from trellis.runs import ConflictError, Job, NotFoundError
@@ -101,7 +102,8 @@ async def test_the_agents_time_limit_holds_on_every_entry(harness: Harness) -> N
         transport=httpx.ASGITransport(app=app), base_url="http://limits.test"
     ) as http:
         chat = {"threadId": "t1", "messages": [{"id": "m1", "role": "user", "content": "5"}]}
-        response = await http.post("/agui/run", json=chat)
+        trusted = identity_headers("default", "u")  # the edge's identity, as A2A's
+        response = await http.post("/agui/run", json=chat, headers=trusted)
         assert limit in response.text
         async with RemoteAgent(
             "http://limits.test/a2a", tenant="default", user="u", client=http

@@ -33,6 +33,9 @@ from a2a.utils.constants import (
     TransportProtocol,
 )
 from fastapi import FastAPI, HTTPException
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.routing import Route
 
 from trellis.harness.a2a.executor import RunExecutor
 from trellis.harness.a2a.identity import (
@@ -43,6 +46,8 @@ from trellis.harness.a2a.identity import (
 )
 from trellis.harness.a2a.push import PushNotifier
 from trellis.harness.a2a.tasks import RunTaskStore, owner
+from trellis.harness.agui import _problem
+from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_user
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -87,14 +92,31 @@ def mount(app: Any, agent: Agent, *, url: str, identity: UserResolver | None = N
     )
     path = urlsplit(url).path.rstrip("/")
     card_path = path + AGENT_CARD_WELL_KNOWN_PATH
+    rpc = create_jsonrpc_routes(handler, path or "/")
     app.router.routes.extend(
         [
             *create_agent_card_routes(card, card_url=card_path),
-            *create_jsonrpc_routes(handler, path or "/"),
+            *(rpc if identity is not None else [_trusted_only(r, agent) for r in rpc]),
         ]
     )
     if isinstance(app, FastAPI):
         _describe(app, agent, rpc_path=path or "/", card_path=card_path)
+
+
+def _trusted_only(route: Any, agent: Agent) -> Route:
+    """The JSON-RPC route answering only a call with the trusted identity header (the rule
+    ``serve_chat`` keeps): without it, or with one refused, ``401`` and a problem document,
+    before the SDK reads the request. The card stays public."""
+    endpoint = route.endpoint
+
+    async def guarded(request: Request) -> Response:
+        try:
+            trusted_user(request.headers.get(IDENTITY_HEADER), await agent.harness._tenant())
+        except IdentityRefused as exc:
+            return _problem(HTTPException(401, str(exc)), request)
+        return await endpoint(request)
+
+    return Route(route.path, guarded, methods=sorted(route.methods or ()))
 
 
 def _describe(app: FastAPI, agent: Agent, *, rpc_path: str, card_path: str) -> None:
@@ -126,7 +148,8 @@ def _describe(app: FastAPI, agent: Agent, *, rpc_path: str, card_path: str) -> N
         description="One JSON-RPC 2.0 request per call. SendStreamingMessage and "
         "SubscribeToTask answer server-sent events (task status updates, the `result` "
         "artifact); the others answer one JSON-RPC response. The caller's identity is the "
-        "trusted `x-trellis-identity` header (or the deployment's `identity`).",
+        "trusted `x-trellis-identity` header (or the deployment's `identity`): without it, "
+        "`401`.",
         openapi_extra={
             "requestBody": {
                 "required": True,
@@ -140,7 +163,12 @@ def _describe(app: FastAPI, agent: Agent, *, rpc_path: str, card_path: str) -> N
                     "application/json": {"schema": {"type": "object"}},
                     "text/event-stream": {"schema": {"type": "string"}},
                 },
-            }
+            },
+            401: {
+                "description": "no trusted identity: the x-trellis-identity header is missing "
+                "or refused (a problem document)",
+                "content": {"application/problem+json": {"schema": {"type": "object"}}},
+            },
         },
     )
     app.openapi_schema = None

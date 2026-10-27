@@ -33,7 +33,7 @@ from trellis.contracts import RunStatus
 from trellis.harness.a2a.identity import EXTENSION_URI
 from trellis.harness.a2a.push import PushNotifier, TargetRefused, validate_url
 from trellis.harness.agent import Agent
-from trellis.harness.identity import identity_headers
+from trellis.harness.identity import IDENTITY_HEADER, identity_headers
 from trellis.harness.runtime import Runtime
 from trellis.runs.webhooks import SIGNATURE_HEADER, verify_signature
 
@@ -179,6 +179,34 @@ async def test_identity_comes_from_the_header_and_the_thread_is_the_context(
     seen = artifacts(responses)[0]
     assert seen["user"] == "u7" and seen["run"] == task_id_of(responses)
     assert seen["thread"] == responses[0].task.context_id
+
+
+async def test_a_call_without_the_trusted_header_is_401_unless_identity_is_given() -> None:
+    """The rule ``serve_chat`` keeps: nobody is anonymous; the card stays public."""
+    app, harness, _ = serve()
+    send_message = {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {}}
+    async with asgi(app) as http:
+        card = await http.get("/agents/greeter/.well-known/agent-card.json")
+        assert card.status_code == 200
+        missing = await http.post("/agents/greeter", json=send_message)
+        assert missing.status_code == 401
+        assert missing.headers["content-type"] == "application/problem+json"
+        assert f"no {IDENTITY_HEADER} header" in missing.json()["detail"]
+        elsewhere = identity_headers("another-tenant", "u1")
+        refused = await http.post("/agents/greeter", json=send_message, headers=elsewhere)
+        assert refused.status_code == 401 and "not served here" in refused.json()["detail"]
+        trusted = await http.post(
+            "/agents/greeter", json=send_message, headers=identity_headers(TENANT, "u1")
+        )
+        assert trusted.status_code == 200  # past the gate: the SDK answers (a JSON-RPC error)
+    await harness.aclose()
+    overridden = FastAPI()
+    other = Harness(config=Settings())
+    other.wrap(greeter, id="greeter").serve_a2a(overridden, URL, identity=lambda context: "u9")
+    async with asgi(overridden) as http:
+        answered = await http.post("/agents/greeter", json=send_message)
+        assert answered.status_code == 200  # the deployment names its callers itself
+    await other.aclose()
 
 
 async def test_a_failing_run_fails_the_task(served: tuple[Client, Harness]) -> None:

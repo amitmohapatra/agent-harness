@@ -34,9 +34,9 @@ existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.
 | A Python function in this process | `tools=[fn]` or `@tool(side_effects=...)` | Schema from the signature, description from the docstring. Declare `side_effects`: `read` runs, `write` (default) runs and is announced, `irreversible` asks a person. |
 | An HTTP API with an OpenAPI 3 document | `openapi(spec, only=[...])` | One tool per `operationId`; the method decides the side effects (GET read, POST/PUT/PATCH write, DELETE irreversible). |
 | Another agent | `a2a(url)` | One `write` tool; its questions become this run's questions. |
-| Another agent this harness wraps (a specialist the model delegates to) | the agent itself in `tools=[...]` | Each call is a child run: its questions pause this run, its crash is continued, it is cancelled with this run; read-only children run at once ([subagents.md](subagents.md)). |
+| Another agent this harness wraps (a specialist the model delegates to) | the agent itself in a `ReAct`'s `subagents=[...]` (any code inside a run: `await specialist.run(...)`) | Each call is a child run: its questions pause this run, its crash is continued, it is cancelled with this run; read-only children run at once ([subagents.md](subagents.md)). |
 | Shared by many agents, owned by a platform team, budgeted | an MCP server registered in Bifrost, allowed on the agent's virtual key | Nothing in code: the toolbox is what the key allows, governed by the server's annotations and the catalog. Many read-only Code Mode servers become Code Mode meta-tools. |
-| Code the model writes and runs, away from the host | `sandbox()` in a `ReAct`'s `tools=[...]`, Docker by default ([sandbox.md](sandbox.md)) | `sandbox_exec` and `sandbox_write` write, `sandbox_read` reads; and the catalog. |
+| Code the model writes and runs, away from the host | a `ReAct`'s `backend=docker_sandbox()` (Deep Agents' `execute` and file tools); a function's `agent.tools.use(sandbox())` (`sandbox_exec`, `sandbox_read`, `sandbox_write`); Docker by default ([sandbox.md](sandbox.md)) | `execute`, `sandbox_exec` and the writes write, the reads read; and the catalog. |
 | The agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write. |
 | A framework's own tool (`function_tool`, Deep Agents' file tools) | as the framework does | The framework's permissions, not the harness's. |
 | Claude Code's built-in tools (`Bash`, `Write`, `Read`...) | as the CLI does | Governance by risk (`Bash` asks, writes announced, reads run) and your hooks, through the SDK's permission callback; then your own `can_use_tool`. |
@@ -59,7 +59,7 @@ decides ([governance.md](governance.md)).
 | The model to search or change memory itself | nothing: the memory pull tools (`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`, `tool_search`) are in its toolbox |
 | Your own code to read or write memory (a node, a tool, a function target) | `trellis.current().memory` — the memory SDK's verbs, already scoped to the run's tenant, user, agent, run and thread |
 | A file the user's runs should cite | `await h.add_document(file, user=..., thread=None)` |
-| A person's verdict on a run (thumbs up/down, a correction) | `await h.feedback(run_id, verdict, correction=None)` — a Langfuse score now, memory's `human` feedback once the tenant administrator approves it |
+| A person's verdict on a run (thumbs up/down, a correction) | `await h.feedback(run_id, verdict, correction=None)` (`confirm`, `reject`, `correct`) — a Langfuse score now, memory's `human` feedback once the tenant administrator accepts it in review |
 | The run's outcome to teach memory | nothing: `SUCCESS`/`ERROR` are the run's `system` feedback; a sampled tenth is checked for grounding |
 | No memory at all (tests, a stateless tool agent) | leave `MEMORY_URL` unset |
 
@@ -143,8 +143,9 @@ Both surfaces can be mounted on one FastAPI app
 ([examples/05_features/serve_agui_and_a2a.py](../examples/05_features/serve_agui_and_a2a.py)).
 Code that is not wrapped (any framework) calls another agent with `a2a(url)(message, tenant=, user=)`
 ([blocks/a2a.md](blocks/a2a.md)). Identity is always
-the deployment's: pass `identity=` (or put an authenticating edge in front for A2A's trusted
-header); without it every caller is `anonymous`.
+the deployment's: both surfaces read the trusted `X-Trellis-Identity` header an authenticating
+edge in front sets, or `identity=` names the caller another way. Without either, a call is
+`401` on both.
 
 Both show up in the app's OpenAPI document (tags `agui`, `a2a`). With several replicas, keep a
 chat thread on one (sticky sessions): its events are buffered in the process that serves it

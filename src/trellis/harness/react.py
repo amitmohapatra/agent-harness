@@ -27,8 +27,9 @@ loop is the harness's. What it is built with:
   (``trellis.harness.automatic``); optional tool guidance and an answer check; and the graph's
   checkpoint in the run (:class:`~.middleware.RunCheckpointer`: a resume continues in place);
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware, added before
-  ``ModelHooks``; one named as the harness's is refused (naming the parameter that sets it),
-  one named as Deep Agents' replaces it, as Deep Agents does.
+  ``ModelHooks``; one named as the harness's is refused (naming the parameter that sets it;
+  ``middleware()`` itself, saying ReAct already has it), one named as Deep Agents' replaces
+  it, as Deep Agents does.
 
 ``middleware(...)`` is the harness's part on its own: ``create_agent(...,
 middleware=middleware(...))`` or ``create_deep_agent(..., middleware=middleware(...))``.
@@ -54,8 +55,6 @@ from pydantic import BaseModel
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import (
     MODEL_METADATA,
-    OWN_CHECKPOINTER,
-    OWN_STORE,
     TOOLS_ATTRIBUTE,
     WINDOW_METADATA,
     context_window,
@@ -63,6 +62,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.gateways import routed_chat_model
 from trellis.harness.prompts import Stored
+from trellis.harness.removed import removed
 
 log = logging.getLogger("trellis.models")
 
@@ -105,6 +105,7 @@ def _checked(
         )
 
 
+@removed(capabilities="say what the agent can and cannot do in the graph's own system_prompt")
 def middleware(
     *,
     max_steps: int = 12,
@@ -113,7 +114,6 @@ def middleware(
     context_window: int | None = None,
     tool_guidance: bool | None = None,
     answer_check: bool | None = None,
-    capabilities: Mapping[str, bool] | None = None,
     system_prompt: Stored | None = None,
 ) -> list[Any]:
     """The harness's middleware for a ``create_agent`` or ``create_deep_agent`` graph — what
@@ -133,8 +133,7 @@ def middleware(
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
     cleared past half of it and ``read_result`` to read them back; the tool guidance
     (``tool_guidance``: ``True`` on every call that offers tools; ``None``, automatic, and
-    ``False`` never — and ``capabilities``, what the agent can and cannot do, on every
-    call); the request made to fit the window, never failing for its size
+    ``False`` never); the request made to fit the window, never failing for its size
     (:class:`~.middleware.FitWindow`: the guidance dropped, the tools narrowed and compacted,
     older results cleared, older turns left out — only as far as needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
@@ -147,7 +146,6 @@ def middleware(
         context_window=context_window,
         tool_guidance=tool_guidance,
         answer_check=answer_check,
-        capabilities=capabilities,
         system_prompt=system_prompt,
     )
 
@@ -160,7 +158,6 @@ def _middleware(
     context_window: int | None,
     tool_guidance: bool | None,
     answer_check: bool | None,
-    capabilities: Mapping[str, bool] | None,
     system_prompt: Stored | None,
     held: frozenset[str] = frozenset(),
     files: bool = True,
@@ -210,15 +207,7 @@ def _middleware(
     # ``None`` (automatic) is off for both, as measured on a small model (docs/frameworks/
     # react.md#tool-choice): the guidance made it call changes nobody asked for, the check
     # cost a model call per answer and broke a rule it was meant to keep
-    guidance = (
-        [
-            ours.ToolGuidance(
-                ours.TOOL_GUIDANCE if tool_guidance else None, capabilities=capabilities
-            )
-        ]
-        if tool_guidance or capabilities
-        else []
-    )
+    guidance = [ours.ToolGuidance()] if tool_guidance else []
     check = [ours.AnswerCheck()] if answer_check else []
     return [
         # what a long task is offered, decided before anything reads the request's tools
@@ -242,6 +231,13 @@ def _middleware(
     ]
 
 
+@removed(
+    checkpointer="a ReAct graph keeps its checkpoint in the run; for a graph with a "
+    "checkpointer of your own, create_agent(..., middleware=middleware(), checkpointer=...)",
+    store="a wrapped ReAct's store is the memory service; for a graph with a store of your own, "
+    "create_agent(..., middleware=middleware(), store=...)",
+    capabilities="say what the agent can and cannot do in system_prompt",
+)
 def ReAct(
     system_prompt: str | Stored,
     model: str | Any,
@@ -252,7 +248,6 @@ def ReAct(
     memory_files: list[str] | None = None,
     permissions: list[Any] | None = None,
     backend: Any = None,
-    store: Any = None,
     response_format: type[BaseModel] | dict[str, Any] | None = None,
     state_schema: type[Any] | None = None,
     context_schema: type[Any] | None = None,
@@ -264,9 +259,7 @@ def ReAct(
     effort: str | None = None,
     tool_guidance: bool | None = None,
     answer_check: bool | None = None,
-    capabilities: Mapping[str, bool] | None = None,
     middleware: Sequence[Any] = (),
-    checkpointer: Any = None,
 ) -> Any:
     """A LangChain agent graph (``create_agent``; ``create_deep_agent`` when a Deep Agents
     capability is asked for: ``backend``, a sub-agent of its own, ``skills``, ``memory_files``,
@@ -291,15 +284,14 @@ def ReAct(
     Deep Agents' own, passed as they are, any of them making it Deep Agents' graph: ``skills``,
     ``memory_files`` (its ``memory``: ``AGENTS.md``-style files loaded into the instructions),
     ``permissions``, ``backend`` (``JournalBackend()``: the graph's state, kept in the run's
-    journal); LangChain's: ``state_schema``, ``context_schema``, ``cache``; ``store`` and
-    ``checkpointer`` are for the graph run on its own (``h.wrap``
-    refuses them: a wrapped agent's runs keep their checkpoint in the run, and its store is the
-    memory service).
+    journal); LangChain's: ``state_schema``, ``context_schema``, ``cache``. Its checkpoint is
+    kept in the run (:class:`~.middleware.RunCheckpointer`) and its store is the memory
+    service.
 
     The loop's settings are :func:`middleware`'s: ``max_steps``, ``max_repeats``,
-    ``call_timeout``, ``context_window`` (else the model's profile), ``tool_guidance``,
-    ``answer_check``, ``capabilities``; ``effort`` is the reasoning effort sent with every call
-    of a model name. ``middleware`` adds middleware."""
+    ``call_timeout`` (each model call's), ``context_window`` (else the model's profile),
+    ``tool_guidance``, ``answer_check``; ``effort`` is the reasoning effort sent with every call
+    of a model name. ``middleware`` adds yours; one named as the harness's is refused."""
     try:
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
@@ -361,7 +353,6 @@ def ReAct(
                         context_window=window,
                         tool_guidance=tool_guidance,
                         answer_check=answer_check,
-                        capabilities=capabilities,
                         system_prompt=stored_prompt,
                     ),
                     middleware,
@@ -370,14 +361,11 @@ def ReAct(
             response_format=cast(Any, response_format),  # a JSON schema too, at run time
             state_schema=state_schema,
             context_schema=context_schema,
-            checkpointer=checkpointer or ours.RunCheckpointer(),
-            store=store,
+            checkpointer=ours.RunCheckpointer(),
             cache=cache,
             name="react",
         )
-        return _described(
-            graph, named, window, [*run, *helpers], checkpointer=checkpointer, store=store
-        )
+        return _described(graph, named, window, [*run, *helpers])
     files_backend = backend if backend is not None else automatic.JournalBackend()
     # files outside the graph's state (a disk, a store, a sandbox) are the agent's from the
     # start, and governed; in its state, a long task is offered the scratch tools — and the
@@ -393,7 +381,6 @@ def ReAct(
         context_window=window,
         tool_guidance=tool_guidance,
         answer_check=answer_check,
-        capabilities=capabilities,
         system_prompt=stored_prompt,
         held=held,
         files=outside or bool(skills) or bool(memory_files),
@@ -413,15 +400,12 @@ def ReAct(
         response_format=response_format,
         state_schema=state_schema,
         context_schema=context_schema,
-        checkpointer=checkpointer or ours.RunCheckpointer(),
-        store=store,
+        checkpointer=ours.RunCheckpointer(),
         cache=cache,
         name="react",
     )
     _declared(graph, backend=files_backend, outside=outside, helper_only=not native)
-    return _described(
-        graph, named, window, [*run, *helpers], checkpointer=checkpointer, store=store
-    )
+    return _described(graph, named, window, [*run, *helpers])
 
 
 def _deep(
@@ -437,22 +421,11 @@ def _deep(
     return backend is not None or bool(native or skills or memory_files or permissions)
 
 
-def _described(
-    graph: Any,
-    named: str | None,
-    window: int | None,
-    run: list[Any],
-    *,
-    checkpointer: Any,
-    store: Any,
-) -> Any:
+def _described(graph: Any, named: str | None, window: int | None, run: list[Any]) -> Any:
     """What the harness reads of the graph: the model's name, the window when known (the
-    pushed memory context's budget is a share of it), the tools it runs for the agent, and
-    whether its checkpointer and store are its own."""
+    pushed memory context's budget is a share of it), and the tools it runs for the agent."""
     graph = graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
     setattr(graph, TOOLS_ATTRIBUTE, run)
-    setattr(graph, OWN_CHECKPOINTER, checkpointer is not None)
-    setattr(graph, OWN_STORE, store is not None)
     return graph
 
 
@@ -600,10 +573,15 @@ SET_BY: Final = {
     "StepLimit": "max_steps=",
     "StallGuard": "max_repeats=",
     "ModelHooks": "call_timeout= and system_prompt=stored(...) (and h.wrap(hooks=) for the hooks)",
-    "ToolGuidance": "tool_guidance= and capabilities=",
+    "ToolGuidance": "tool_guidance=",
     "AnswerCheck": "answer_check=",
     "ContextEditingMiddleware": "context_window=",
 }
+
+
+#: The harness's middleware that runs the run's tools: given to ``ReAct(middleware=)``, it is
+#: :func:`middleware`'s whole part given again.
+HARNESS_TOOLS: Final = "HarnessTools"
 
 
 #: The default middleware a measurement turns off (:func:`defaults_off`), by name, and the
@@ -643,11 +621,19 @@ def stacked(defaults: Sequence[Any], given: Sequence[Any]) -> list[Any]:
     named as a default is refused, naming what sets that default: it never replaces it."""
     names = {m.name for m in defaults}
     taken = [m.name for m in given if m.name in names]
+    if HARNESS_TOOLS in taken:  # only middleware() gives it: the harness's part, again
+        raise ConfigurationError(
+            "ReAct(middleware=) got middleware(): middleware() is the harness's part for your "
+            "own create_agent or create_deep_agent graph, and ReAct already has it (its "
+            "settings are ReAct's own parameters)"
+        )
     if taken:
         said = "; ".join(
-            f"{name} is ReAct's own ({SET_BY.get(name, 'always on')})" for name in taken
+            f"{name} is the harness's ({SET_BY.get(name, 'always on')})" for name in taken
         )
-        raise ConfigurationError(f"ReAct(middleware=) adds middleware, it replaces none: {said}")
+        raise ConfigurationError(
+            f"ReAct(middleware=) adds your middleware and replaces none of the harness's: {said}"
+        )
     off = _OFF.get()
     kept = [m for m in defaults[:-1] if m.name not in off]
     stand_ins = [_nothing(name) for name in sorted(off - names)]

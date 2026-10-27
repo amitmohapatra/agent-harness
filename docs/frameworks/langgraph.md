@@ -207,7 +207,8 @@ a2a(url)(message)`, as the run inside one.
 ## Native or ours: skills, prompts, sandbox
 
 A `StateGraph` of your own has no prompt store or sandbox: `await h.prompt(...)` reads the
-gateway's stored prompts; a `ReAct` takes `sandbox()`, which governs and journals every command
+gateway's stored prompts; a `ReAct` takes the run's sandbox as its `backend=docker_sandbox()`,
+which governs and journals every command
 ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). A LangChain `create_agent` can
 take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders ([skills.md](../skills.md#native-or-ours)).
 

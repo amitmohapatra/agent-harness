@@ -13,7 +13,7 @@ the `react` extra (`pip install 'trellis-harness[react]'`: LangGraph, LangChain,
 `langchain-openai` and Deep Agents).
 
 `ReAct` runs wrapped, with the blocks of the harness that wraps it — the deployment's
-(`Harness()`), or your own: `Harness(runs=..., governance=..., memory=False).wrap(ReAct(...))`,
+(`Harness()`), or your own: `Harness(runs=..., memory=False).wrap(ReAct(...))`,
 its queued runs continued by your own scheduler with `agent.execute(job)`
 ([composition](../README.md#composition-a-harness-is-the-blocks-you-give-it),
 [`examples/05_features/own_scheduler.py`](../../examples/05_features/own_scheduler.py)). A team with a loop of
@@ -52,10 +52,9 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 
 ```text
 ReAct(system_prompt, model, *, tools=(), subagents=(), skills=None, memory_files=None,
-      permissions=None, backend=None, store=None, response_format=None, state_schema=None,
+      permissions=None, backend=None, response_format=None, state_schema=None,
       context_schema=None, cache=None, max_steps=12, max_repeats=3, call_timeout=None,
-      context_window=None, effort=None, tool_guidance=None, answer_check=None,
-      capabilities=None, middleware=(), checkpointer=None)
+      context_window=None, effort=None, tool_guidance=None, answer_check=None, middleware=())
 ```
 
 The names are Deep Agents' where both have one. In four tiers:
@@ -64,14 +63,15 @@ The names are Deep Agents' where both have one. In four tiers:
 |---|---|---|
 | **must** | `system_prompt`, `model` | every agent |
 | **usual** | `tools`, `response_format` | most agents |
-| **optional** | `subagents`, `skills`, `memory_files`, `backend`, `permissions`, `max_steps`, `call_timeout`, `effort`, `capabilities` | when the agent needs them |
-| **advanced** | `middleware`, `state_schema`, `context_schema`, `cache`, `context_window`, `max_repeats`, `tool_guidance`, `answer_check`, `store`, `checkpointer` | rarely: the defaults are measured |
+| **optional** | `subagents`, `skills`, `memory_files`, `backend`, `permissions`, `max_steps`, `call_timeout`, `effort` | when the agent needs them |
+| **advanced** | `middleware`, `state_schema`, `context_schema`, `cache`, `context_window`, `max_repeats`, `tool_guidance`, `answer_check` | rarely: the defaults are measured |
 
 * `system_prompt` — the instructions: a string, or `stored("triage", team="EU")`, the
   gateway's stored prompt looked up at the run's start and pinned for it (a resume reads the
   same one): with no variables to fill and a model name routed through Bifrost, every model
   call selects it (the gateway prepends it); any other is rendered into the system message
-  ([prompts.md](../prompts.md)).
+  ([prompts.md](../prompts.md)). What the assistant can and cannot do beyond its tools ("You
+  cannot accept an image upload.") is said here, in the instructions.
 * `model` — a model name, routed per call as the harness running the agent says — its
   `Harness(config=)` settings over the environment's: through Bifrost (the agent's virtual key,
   the gateway's deny-all MCP scope — the harness gives the tools — and no retries of its own:
@@ -104,27 +104,31 @@ The names are Deep Agents' where both have one. In four tiers:
   ([sandbox.md](../sandbox.md)). Files outside the graph's state are the agent's from the start
   and governed as any tool (the reads read, the others write; the catalog may say more).
 * `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds: model
-  calls with tools then one without, identical calls in a row that stop the run, the most one
-  model call may take (within what is left of the run's `run_timeout=`/`deadline=`).
+  calls with tools in one invocation then one without, identical calls in a row that stop the
+  run, the most one model call may take (within what is left of the run's
+  `run_timeout=`/`deadline=`; a tool's own `call_timeout` bounds a tool call). `max_steps` is a
+  loop guard counted again each invocation; a cap on the whole run's tool calls, across its
+  attempts and sub-agents, is `Budget(max_tool_calls=)` ([runs.md](../runs.md)).
 * `context_window` — the model's window in tokens; given, it wins. Unset, the model's
   LangChain profile (`model.profile["max_input_tokens"]`). When neither says, the window-scaled
   parts are off — clearing old tool results and the long-task tools — said once in the log, and
   Deep Agents' summarization uses its own thresholds: give it for a local model (a llama.cpp
   server's `-c`) or a prefixed vendor name.
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
-* `tool_guidance`, `answer_check`, `capabilities` — how to choose among tools, a check of the
-  answer before it is final and of a change before it is made, and what the assistant can do
-  beyond its tools; `None` (the default) is automatic: by the measurement
-  ([below](#tool-choice)) both stay off; `True` turns either on.
-* `middleware` — more middleware, LangChain's, Deep Agents' or yours, added before `ModelHooks`
-  (so its span shows what the model is sent): one named as the harness's is refused, naming the
-  parameter that sets it (`StepLimit`: `max_steps`, `StallGuard`: `max_repeats`, `ModelHooks`:
-  `call_timeout` and `system_prompt`...); one named as Deep Agents' replaces it, as Deep Agents
-  does.
+* `tool_guidance`, `answer_check` — how to choose among tools, and a check of the answer
+  before it is final and of a change before it is made; `None` (the default) is automatic: by
+  the measurement ([below](#tool-choice)) both stay off; `True` turns either on.
+* `middleware` — your middleware, LangChain's, Deep Agents' or your own, added to the harness's
+  before `ModelHooks` (so its span shows what the model is sent): one named as the harness's is
+  refused, naming the parameter that sets it (`StepLimit`: `max_steps`, `StallGuard`:
+  `max_repeats`, `ModelHooks`: `call_timeout` and `system_prompt`, `TodoListMiddleware`: the
+  planning a long task gets...), and `middleware()` itself is refused: ReAct already has it.
+  One named as Deep Agents' replaces it, as Deep Agents does.
 * `state_schema`, `context_schema`, `cache` — Deep Agents' and LangGraph's, as they are.
-* `store`, `checkpointer` — for the graph run on its own, outside the harness; wrapped, its runs
-  keep their checkpoint in the run itself (`RunCheckpointer()`) and its store is the memory
-  service, and `h.wrap` refuses a `ReAct` given either.
+
+Its runs keep their checkpoint in the run itself (`RunCheckpointer()`) and its store is the
+memory service. A graph with a checkpointer or a store of your own is a `create_agent(...,
+middleware=middleware(), checkpointer=..., store=...)` ([below](#middleware-on-your-own-graph)).
 
 Not exposed: Deep Agents' `interrupt_on` — approvals are the [catalog](../governance.md)'s (a
 sub-agent's `interrupt_on` becomes its tools' declared risk: a tool named there asks a person) —
@@ -218,7 +222,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `Budgeted` | with a budget (`h.wrap(budget=)`): once it — the run's or its parent's — is spent, one more call without tools; the run ends `PARTIAL` |
 | `ContextEditingMiddleware` (LangChain) + `read_result` | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a prompt cache breaks rarely |
 | `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
-| `ToolGuidance` (`tool_guidance`, `capabilities`) | how to choose among tools, added to the instructions ([below](#tool-choice)) |
+| `ToolGuidance` (`tool_guidance`) | how to choose among tools, added to the instructions ([below](#tool-choice)) |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `before_model`/`after_model`/`on_error` hooks around every model call, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
 
@@ -227,8 +231,9 @@ resume after a pause, a crash or a requeue continues the graph where it stopped.
 sub-agent is given `StallGuard`, `StepLimit` and `ModelHooks` too (its own of those names kept),
 and a model name of its own is routed as `ReAct`'s.
 
-**Yours, opt-in** — `ReAct(..., middleware=[...])`. Each works the same in any `create_agent`
-or Deep Agents graph:
+**Yours, opt-in** — `ReAct(..., middleware=[...])`, added to the harness's (one named as the
+harness's is refused, `middleware()` itself among them). Each works the same in any
+`create_agent` or Deep Agents graph:
 
 | Add | For |
 |---|---|
@@ -246,8 +251,9 @@ or Deep Agents graph:
 per turn, its own tools governed, the step limit and the stall guard, the hooks and spans,
 `call_timeout`, the budget's stop, the checkpoint in the run. The settings are `ReAct`'s, meaning
 the same: `max_steps`, `max_repeats`, `call_timeout`, `context_window`, `tool_guidance`,
-`answer_check`, `capabilities`, and `system_prompt=stored(...)` (a text goes to the graph's own
-`system_prompt`).
+`answer_check`, and `system_prompt=stored(...)` (a text goes to the graph's own
+`system_prompt`). A graph built so may have a checkpointer or a store of its own (a `ReAct`
+cannot): give it `checkpointer=`/`store=` as LangChain takes them.
 
 ```python
 from deepagents import create_deep_agent
@@ -283,7 +289,6 @@ which by the measurement below is off — `True` always, `False` never.
 | | What it does | Costs | `None` (automatic) |
 |---|---|---|---|
 | `tool_guidance` — `ToolGuidance()` | adds to the instructions of a call that offers tools (`TOOL_GUIDANCE`): address every part of the request, each with the tool made for it; the most specific tool over a general one; current figures from a tool, not the remembered context, which gives background and rules; a change made by calling its tool — the system asks for approval itself — never claimed without its success; conclusions from the results, and a plain "cannot" for a part no tool answers. Inside a run it names the offered tools that change data | a few hundred tokens of instructions, the same on every call (a prompt cache holds) | off (measured: more tools called, and changes nobody asked for) |
-| `capabilities={...}` — `ToolGuidance(capabilities=)` | what the assistant can and cannot do beyond its tools (`{"accept an image upload": False}`), one line each in every call's instructions, so "can you ...?" gets a plain yes or no | a line per capability | always, when given |
 | `answer_check` — `AnswerCheck()` | when the model answers without calling a tool, its draft is not final (nor streamed): the model is shown it and asked once to check it against the request (`ANSWER_CHECK`), and either calls the tools still needed or gives the final answer in its place; when nothing found is about what was asked it asks for a plain "no record". **A change, before it is made**: the first step calling a tool that changes data is checked against the rules in the instructions and context (`WRITE_CHECK`) before governance asks anyone to approve it | one more model call per invocation for the answer, one for the first change | off (measured: no better, a model call more per answer, a rule broken) |
 
 Measured on Granite 3.3 2B (CPU, llama.cpp behind Bifrost), the store set of the live
@@ -315,7 +320,6 @@ target = ReAct(
     "provider/model",
     tool_guidance=True,  # always (None, the default: off, as measured)
     answer_check=False,  # never (None, the default: off, as measured)
-    capabilities={"accept an image upload": False},
 )
 ```
 
@@ -323,7 +327,9 @@ Native pieces used rather than rebuilt: LangChain's `TodoListMiddleware` for a p
 keeps on a long request, `LLMToolSelectorMiddleware` for many tools, `tool_choice` (the step
 limit's last call is `"none"`), Deep Agents' file tools and sub-agents. A first call forced to
 `"required"` is not offered: a request that needs no tool (a greeting, a rule the context
-holds) would be made to call one.
+holds) would be made to call one. What the assistant can and cannot do beyond its tools
+("You cannot accept an image upload.") goes in `system_prompt`, so a "can you ...?" gets a
+plain yes or no (the live tool-choice test says it so, with the guidance on).
 
 ## When a request does not fit
 
@@ -438,8 +444,8 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
-* `store=` and `checkpointer=` are for the graph run on its own: wrapped, the memory service and
-  the run keep them, and `h.wrap` refuses a `ReAct` given either.
+* No `store=` or `checkpointer=`: the memory service and the run keep them; a graph with its
+  own is `create_agent(..., middleware=middleware())`.
 * `tools=` takes no sandbox (`backend=docker_sandbox()`) and no agent (`subagents=`); a graph is
   a sub-agent with its name and description (`{"name", "description", "runnable"}`).
 * Building a `ReAct` costs what `create_deep_agent` costs (it compiles its general-purpose helper

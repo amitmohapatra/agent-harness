@@ -18,10 +18,9 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   caching, its long-task scratch files and helper); otherwise `create_agent` with
   `middleware()` and dangling-call repair — the base measured as good or better on every class
   of task (see Changed). The new signature, names following Deep Agents': `ReAct(system_prompt,
-  model, *, tools, subagents, skills, memory_files, permissions, backend, store,
-  response_format, state_schema, context_schema, cache, max_steps=12, max_repeats=3,
-  call_timeout, context_window, effort, tool_guidance=None, answer_check=None, capabilities,
-  middleware, checkpointer)`
+  model, *, tools, subagents, skills, memory_files, permissions, backend, response_format,
+  state_schema, context_schema, cache, max_steps=12, max_repeats=3, call_timeout,
+  context_window, effort, tool_guidance=None, answer_check=None, middleware)`
   (`memory_files` is Deep Agents' `memory`; its `interrupt_on`, `name` and `debug` are not
   exposed).
 - `ReAct(tools=)` refuses `sandbox()` (code runs in `backend=docker_sandbox()`) and agents
@@ -29,7 +28,35 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   `StallGuard` always required.
 - `tool_guidance` and `answer_check` default to `None`, automatic — which, measured on a small
   model, keeps both off (see Changed); `True` turns either on, `False` keeps it off.
-- `ReAct(store=)`, like `checkpointer=`, is for the graph run on its own: `h.wrap` refuses it.
+- One name per concern (the API audit of 2026-10-27). No alias is kept: each old usage fails
+  with a `TypeError` (`AttributeError` for a method) naming what to use instead.
+  - `h.evaluate(agent, dataset, judges, ...)` and `evaluate(target, dataset, judges, ...)`: the
+    third argument is `judges` (was `evaluators`), the word of `h.wrap(judges=)`,
+    `without={"judges"}` and `judge()`. Positional calls are unchanged.
+  - `h.wrap(judges=[grounding()])` is refused: every wrapped run already gets the grounding
+    check on a sampled share, so it would check the same runs twice.
+  - `ReAct(checkpointer=, store=)` removed: a `ReAct` checkpoints into its run and its store is
+    the memory service; a graph with its own is `create_agent(..., middleware=middleware())`.
+  - `ReAct(capabilities=)`, `middleware(capabilities=)` and `ToolGuidance(capabilities=)`
+    removed (and `middleware.CAPABILITIES`): what the assistant can and cannot do goes in
+    `system_prompt`. `ToolGuidance(text)` takes a text only.
+  - `h.governance_middleware()` removed: a wrapped graph's own tools are governed already, and
+    `middleware()` has the same `GovernTools`.
+  - `ReAct(middleware=middleware())` is refused saying that `ReAct` already has it; the refusal
+    of a middleware named as the harness's says "is the harness's" (ADR 0003 point 4 says so:
+    your middleware is added, one named as the harness's — `TodoListMiddleware` among them — is
+    refused).
+  - `serve_chat` without `identity=` reads the trusted `X-Trellis-Identity` header, as
+    `serve_a2a` does (its tenant, when named, the key's): a request without it is `401`, never
+    `anonymous`. `identity=` stays the override. `IdentityRefused` and the header's parsing
+    (`trusted_user`) moved to `trellis.harness.identity`, shared by both surfaces.
+  - `serve_a2a` keeps the same rule: a JSON-RPC call without the trusted header, or with one
+    refused, is `401` (a problem document) before the SDK reads it, never run as `anonymous`
+    (`trellis.harness.a2a.identity.ANONYMOUS` removed); the card stays public, and
+    `identity=` stays the override. The harness's own `a2a(url)` calls send the header.
+  - `h.feedback` takes a person's verdict only — `confirm`, `reject`, `correct` — and refuses
+    `approve` and `edit`, the system's record of a decision on a paused action
+    (`agent.resume`). `VERDICT_SCORES` lost their entries.
 - `ReAct(middleware=)` with a Deep Agents middleware's name replaces Deep Agents' own (as
   `create_deep_agent` does); one named as the harness's is still refused.
 - Removed, Deep Agents now owning them: `automatic.JournalFiles`, `automatic.FilesState`,
@@ -38,8 +65,16 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 
 ### Added
 
+- Chat attachments: on `serve_chat`, the user message's file parts — AG-UI 1.0 media parts
+  (`document`, `image`, `audio`, `video`) whose `source` is `{"type": "file", "value":
+  "<document id>"}`, a document already uploaded to the memory service — are the run's
+  `document_ids`, as `agent.run(document_ids=)` takes them. Each is read first as the caller
+  (`RunMemory.document`, `GET /v1/documents/{id}`), so the memory service's own read check
+  decides: one it refuses or does not know is a `404` and nothing runs. Inline (`data`) and URL
+  sources are a `422`: the surface uploads and fetches nothing. A text-only message runs as
+  before. A2A file parts are not attachments yet.
 - `trellis.middleware(*, max_steps, max_repeats, call_timeout, context_window, tool_guidance,
-  answer_check, capabilities, system_prompt)`: the harness's part of `ReAct` — the run's tools
+  answer_check, system_prompt)`: the harness's part of `ReAct` — the run's tools
   per model call narrowed per turn (the memory and gateway MCP tools among them), the graph's
   own tools governed, the stall guard, the step limit then a final answer, the budget's stop,
   planning on a long task, older results cleared and read back, the tool guidance and answer

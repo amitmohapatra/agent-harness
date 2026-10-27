@@ -4,7 +4,7 @@ Evaluation scores what an agent answered, and puts every score on the run's trac
 As a block it evaluates an agent you do not wrap: a LangGraph graph, an OpenAI Agents
 `Runner`, a Claude Agent SDK `query`, plain functions. Two calls:
 
-* **offline**, `evaluate(my_agent, dataset, evaluators)`: every item of a dataset run and
+* **offline**, `evaluate(my_agent, dataset, judges)`: every item of a dataset run and
   scored, as an item of a Langfuse experiment;
 * **online**, `judge(case, judges, services=...)`: one run of yours judged, on its trace.
 
@@ -56,7 +56,7 @@ async with EvalServices.from_env() as services:
 print(report)  # items by status, then each evaluator's mean, count and failures
 ```
 
-`evaluate(target, dataset, evaluators, *, services=None, user=None, run_name=None,
+`evaluate(target, dataset, judges, *, services=None, user=None, run_name=None,
 description=None, metadata=None, concurrency=4, limit=None) -> EvalReport`:
 
 * `target` is any `async (input) -> answer`. Each item is one call, inside a root span of its
