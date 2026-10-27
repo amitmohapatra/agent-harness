@@ -456,3 +456,29 @@ def test_a_process_is_measured_from_proc() -> None:
     assert procstat.percentile([], 50) is None and procstat.percentile([3.0], 95) == 3.0
     assert procstat.percentile([1.0, 2.0, 3.0, 4.0, 5.0], 50) == 3.0
     assert run._used({"me": None}, {"me": None}) == {"me": None}
+
+
+@pytest.mark.parametrize(
+    ("answer", "store"),
+    [
+        # the fragile case: the right conclusion after the other store's figures
+        ("S12 has 3 weeks of cover, S40 0.2: S40 first.", "S40"),
+        ("Store S12 should get stock of ST-101 first, as it has a lower ratio than S40.", "S12"),
+        ("S40 runs out sooner than S12, so it should get stock first.", "S40"),
+        ("First, the figures: S12 has 3 weeks and S40 0.2, so S40 should get it.", "S40"),
+        ("S12: 3 weeks of cover. S40: 0.2 weeks.", "S40"),  # no conclusion: the last named
+        ("No store data.", None),
+    ],
+)
+def test_picks_scores_the_store_the_answer_concludes_on(answer: str, store: str | None) -> None:
+    """S6: ``picks`` scored the first store an answer named, so a right answer giving the other
+    store's figures first failed it."""
+    assert run.scenario.concluded(answer) == store
+
+
+async def test_picks_passes_a_right_answer_that_names_the_other_store_first() -> None:
+    from trellis.harness.evals import EvalCase
+
+    answer = "S12 has 3 weeks of cover, S40 0.2: S40 first."
+    scored = await run.scenario.picks(EvalCase(input="which first?", output=answer, expected="S40"))
+    assert scored is not None and scored.value is True
