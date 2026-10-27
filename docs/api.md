@@ -23,6 +23,7 @@ from trellis import (
     Settings,
     a2a,
     current,
+    deep_agent,
     llm_judge,
     mcp,
     openapi,
@@ -304,7 +305,7 @@ can and cannot do beyond its tools ("you cannot accept an image upload") goes in
 | Argument | Default | What it is |
 |---|---|---|
 | `subagents` | `()` | what it hands tasks to, each a child run: Deep Agents' own — a `SubAgent` dict (`name`, `description`, `system_prompt`, `mode` isolated or fork, `tools`, `model`, `middleware`, `skills`, `permissions`, `response_format`; its `interrupt_on` is the catalog's: a tool of its own named there asks a person) or a `CompiledSubAgent` `{"name", "description", "runnable"}` (another `ReAct` among them), called through Deep Agents' `task` tool — and wrapped agents (`h.wrap(...)`) and [`a2a(url)`](#a2a), each a tool ([subagents.md](subagents.md)) |
-| `skills` | none | Deep Agents' skill sources (`["/skills/"]`), read through `backend` |
+| `skills` | none | a skill source ([`trellis.skills`](#skills): a store's skills, pinned per run, read by Deep Agents' own skills middleware through a `/skills/` route of `backend`), or Deep Agents' own skill source paths (`["/skills/"]`), read through `backend` |
 | `memory_files` | none | Deep Agents' `memory`: `AGENTS.md`-style files loaded into the instructions (named so it is not taken for the memory service) |
 | `backend` | the graph's state, kept in the run's journal | where Deep Agents' file tools work: a `StateBackend`, `StoreBackend` (the memory service when wrapped), `FilesystemBackend`, `CompositeBackend`, or the run's sandbox: [`sandbox()`](#sandbox) (`execute` runs code there). Files outside the graph's state are the agent's from the start and governed as any tool |
 | `permissions` | none | Deep Agents' `FilesystemPermission` rules for its file tools |
@@ -422,6 +423,31 @@ deleted at its end ([sandbox.md](sandbox.md)). One entry, given where each engin
 | `ReAct(backend=sandbox())` | `ReAct`'s backend: Deep Agents' file tools and `execute` work in it |
 | `sandbox().deep_agent()` | `create_deep_agent`'s arguments, `{"backend": ...}`: `create_deep_agent(model, **sandbox().deep_agent())` |
 | `sandbox().tools()` | `sandbox_exec`, `sandbox_read`, `sandbox_write`, a tool source, for an engine with no sandbox of its own (`agent.tools.use(...)`) |
+
+### deep_agent
+
+`deep_agent(sandbox=None, skills=None) -> dict` — `create_deep_agent`'s arguments for a sandbox
+and skills in its one `backend=`: `create_deep_agent(model, **deep_agent(sandbox(), src))`. The
+sandbox (or any Deep Agents backend) is a `CompositeBackend`'s default, the skills its
+`/skills/` route (and `skills=["/skills/"]`); either alone is given as it is
+([skills.md](skills.md#where-it-goes-per-engine)).
+
+### skills
+
+`from trellis import skills` — skill sources ([skills.md](skills.md)):
+`skills.directory(path, *, level="platform")`, `skills.bifrost(admin=None)`,
+`skills.langfuse(client=None, *, tag="skill", label="production")`, `skills.combine(*sources)`,
+each a `SkillSet`; the protocol `SkillSource` (`label`, `list(scope)`, `load(name, version,
+scope)`, `read_file(name, version, path, scope)`, optional `changed_since(scope, cursor)`) and
+`SkillInfo`, `SkillDoc`, `Scope`. A set goes in each framework's own slot:
+
+| | |
+|---|---|
+| `ReAct(skills=src)` | Deep Agents' skills middleware, the skills a route of the backend |
+| `src.deep_agent(backend=None, *, scope=None)` | `create_deep_agent`'s `backend` and `skills` |
+| `src.claude()` | `ClaudeAgentOptions`' `plugins` (a local plugin written per run) and `skills="all"`; `await src.claude_dir(path, scope=None)` writes one for code that runs the SDK itself |
+| `src.openai(scope=None)` | the OpenAI Agents SDK's `Skills` capability for a `SandboxAgent` |
+| `src.tools(scope=None)` | `list_skills` and `load_skill`, a tool source, for an engine with no skills slot |
 
 ### stored
 

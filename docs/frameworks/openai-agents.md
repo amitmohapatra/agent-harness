@@ -123,7 +123,7 @@ record).
 | | Where |
 |---|---|
 | Sandbox | its own: a `SandboxAgent`, its sandbox given as `framework_options={"run_config": RunConfig(sandbox=...)}` ([above](#using-an-existing-openai-agents-project)) |
-| Skills | its own: the `SandboxAgent`'s `Skills` capability ([skills.md](../skills.md#native-or-ours)) |
+| Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[..., src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`). A plain `Agent` has no skills slot (openai-agents 0.22): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`) |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}` |
 

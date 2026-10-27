@@ -85,6 +85,9 @@ LANGFUSE_SCORES_PATH: Final = "/api/public/scores"
 LANGFUSE_DATASET_PATH: Final = "/api/public/v2/datasets/{name}"
 LANGFUSE_ITEMS_PATH: Final = "/api/public/dataset-items"
 LANGFUSE_RUN_ITEMS_PATH: Final = "/api/public/dataset-run-items"
+#: Langfuse's prompt management: the prompts (a page of names), and one prompt's version.
+LANGFUSE_PROMPTS_PATH: Final = "/api/public/v2/prompts"
+LANGFUSE_PROMPT_PATH: Final = "/api/public/v2/prompts/{name}"
 #: Dataset items one page asks for (Langfuse's default page size).
 LANGFUSE_PAGE: Final = 50
 SCORES_TIMEOUT_SECONDS: Final = 10.0
@@ -638,6 +641,37 @@ class Langfuse:
             pages = int((body.get("meta") or {}).get("totalPages") or 0)
             page += 1
         return found.json(), items
+
+    async def prompts(self, *, tag: str) -> list[dict[str, Any]]:
+        """The prompts tagged ``tag`` (each its ``name``, ``versions``, ``labels``, ``tags``,
+        ``lastUpdatedAt``), every page of them."""
+        found: list[dict[str, Any]] = []
+        page, pages = 1, 1
+        while page <= pages:
+            response = await self._client.get(
+                LANGFUSE_PROMPTS_PATH, params={"tag": tag, "page": page, "limit": LANGFUSE_PAGE}
+            )
+            response.raise_for_status()
+            body = response.json()
+            found.extend(body["data"])
+            pages = int((body.get("meta") or {}).get("totalPages") or 0)
+            page += 1
+        return found
+
+    async def prompt(
+        self, name: str, *, version: int | None = None, label: str | None = None
+    ) -> dict[str, Any] | None:
+        """The prompt ``name`` as Langfuse serves it (``version``, else ``label``): its
+        ``type`` (``text``, ``chat``), ``prompt``, ``version``, ``config``. ``None`` when
+        Langfuse has no such prompt, version or label."""
+        params: dict[str, Any] = {"version": version} if version is not None else {"label": label}
+        response = await self._client.get(
+            LANGFUSE_PROMPT_PATH.format(name=quote(name, safe="")), params=params
+        )
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        response.raise_for_status()
+        return response.json()  # type: ignore[no-any-return]
 
     async def link(
         self,
