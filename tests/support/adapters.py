@@ -1,7 +1,8 @@
 """Every adapter, built to follow one plan of tool calls: the table the behaviour tests run over
 (``BUILDERS``) — the function target, ``ReAct``, LangChain's ``create_agent`` (on its own, and
 with ``trellis.middleware()``), a graph built by hand (``StateGraph`` with a ``ToolNode``), Deep
-Agents, the OpenAI Agents SDK and the Claude Agent SDK (the real SDK driving the scripted CLI). Each model
+Agents, the OpenAI Agents SDK, the Claude Agent SDK (the real SDK driving the scripted CLI) and
+Kimi Code (``kimi acp`` itself, its model a planned endpoint). Each model
 makes the plan's calls in order and answers ``FINAL`` with the last result it read
 (``tests.support.planned``), so a test sees what reached the model. ``system`` is the
 instructions the framework's agent is built with (a function has none), and ``seen`` gets the
@@ -16,6 +17,8 @@ import uuid
 from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any, Final, Protocol
+
+import pytest
 
 from agents import Agent as OpenAIAgent
 from claude_agent_sdk import ClaudeAgentOptions
@@ -208,6 +211,27 @@ async def _claude(
     return options, tools
 
 
+async def _kimi(
+    h: Harness,
+    tools: list[Any],
+    tmp: Path,
+    plan: list[Call],
+    *,
+    system: str = SYSTEM,
+    seen: list[Any] | None = None,
+    stall: float = 0.0,
+) -> Built:
+    """Kimi Code itself (``kimi acp``), its model a planned endpoint (``tests.support.kimi``).
+    Kimi keeps its own system prompt: ``system`` is not Kimi's to take."""
+    from tests.support.kimi import KIMI_BIN, PlannedEndpoint, kimi_target, needs_kimi
+
+    if KIMI_BIN is None and needs_kimi.args[0]:
+        pytest.skip(needs_kimi.kwargs["reason"])
+    endpoint = await PlannedEndpoint(plan, stall=stall).attached()
+    _saw(seen, endpoint)
+    return kimi_target(endpoint, tmp / f"kimi-{uuid.uuid4().hex[:6]}"), tools
+
+
 def _saw(seen: list[Any] | None, model: Any) -> None:
     if seen is not None:
         seen.append(model)
@@ -222,4 +246,5 @@ BUILDERS: Final[dict[str, Builder]] = {
     "deepagents": _deepagents,
     "openai_agents": _openai_agents,
     "claude_agent_sdk": _claude,
+    "kimi": _kimi,
 }

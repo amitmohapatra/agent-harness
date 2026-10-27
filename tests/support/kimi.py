@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import weakref
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any, Final
@@ -83,7 +84,7 @@ class PlannedEndpoint:
 
     def __init__(
         self,
-        plan: Sequence[Call] = (),
+        plan: Sequence[Call | list[Call]] = (),
         *,
         final: str = FINAL,
         turns: Callable[[dict[str, Any]], Turn] | None = None,
@@ -126,11 +127,15 @@ class PlannedEndpoint:
                     edited = (matched["tool"], json.loads(matched["args"]))
                 elif users > 1 and (_REJECTED.match(said) or _DENIED in said):
                     results.append(said)
-        if edited is not None and len(results) < len(self.plan):
-            return edited
-        if len(results) < len(self.plan):
-            name, args = self.plan[len(results)]
-            return (kimi_name(name), args)
+        done = 0
+        for step in self.plan:  # a step is a call, or several made in one message
+            if len(results) <= done:
+                if edited is not None:
+                    return edited
+                if isinstance(step, list):
+                    return [(kimi_name(n), a) for n, a in step]
+                return (kimi_name(step[0]), step[1])
+            done += len(step) if isinstance(step, list) else 1
         return self.final.replace("{last}", results[-1] if results else "")
 
     def reply(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -174,6 +179,17 @@ class PlannedEndpoint:
             return JSONResponse({**reply, "object": "chat.completion"})
         return StreamingResponse(_chunks(reply), media_type="text/event-stream")
 
+    async def attached(self) -> PlannedEndpoint:
+        """This endpoint on the event loop's shared server (made the first time, ended with
+        the loop): for a target built where nothing can close a server of its own."""
+        loop = asyncio.get_running_loop()
+        shared = _SHARED.get(loop)
+        if shared is None:
+            shared = _SHARED[loop] = _Shared()
+            await shared.start()
+        self.url = shared.add(self)
+        return self
+
     @contextlib.asynccontextmanager
     async def serving(self) -> AsyncIterator[PlannedEndpoint]:
         app = Starlette(routes=[Route("/v1/chat/completions", self._chat, methods=["POST"])])
@@ -188,6 +204,45 @@ class PlannedEndpoint:
         finally:
             server.should_exit = True
             await task
+
+
+class _Shared:
+    """One server per event loop, each endpoint under a path of its own."""
+
+    def __init__(self) -> None:
+        self.endpoints: dict[str, PlannedEndpoint] = {}
+        self.origin = ""
+
+    async def _chat(self, request: Request) -> Any:
+        return await self.endpoints[request.path_params["name"]]._chat(request)
+
+    async def start(self) -> None:
+        app = Starlette(
+            routes=[Route("/{name}/v1/chat/completions", self._chat, methods=["POST"])]
+        )
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
+        server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
+        self.task = asyncio.create_task(server.serve())
+        while not server.started:  # noqa: ASYNC110 - uvicorn says so with a flag only
+            await asyncio.sleep(0.01)
+        self.origin = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+
+    def add(self, endpoint: PlannedEndpoint) -> str:
+        name = f"e{len(self.endpoints)}"
+        self.endpoints[name] = endpoint
+        return f"{self.origin}/{name}/v1"
+
+
+#: The shared servers, by event loop (each test has its own loop).
+_SHARED: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Shared] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def attached_endpoints() -> list[PlannedEndpoint]:
+    """The endpoints on this loop's shared server: what every Kimi of the test was sent."""
+    shared = _SHARED.get(asyncio.get_running_loop())
+    return list(shared.endpoints.values()) if shared is not None else []
 
 
 def _system_reminders(text: str) -> str:

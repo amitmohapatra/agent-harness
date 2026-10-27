@@ -35,6 +35,8 @@ WAITING: Final = "Waiting for a person's approval."
 PATH: Final = "/mcp"
 #: How long the server waits for its socket at the start of an attempt, at most.
 START_SECONDS: Final = 10.0
+#: How long, at the attempt's end, a call still under way has before it is cancelled.
+STOP_SECONDS: Final = 0.1
 
 
 def convert(tools: Sequence[Tool]) -> Server[Any]:
@@ -129,7 +131,16 @@ async def served(server: Server[Any]) -> AsyncIterator[Served]:
             return
         await app(scope, receive, send)
 
-    config = uvicorn.Config(guarded, host="127.0.0.1", port=0, log_level="warning", lifespan="on")
+    config = uvicorn.Config(
+        guarded,
+        host="127.0.0.1",
+        port=0,
+        log_level="warning",
+        lifespan="on",
+        # the attempt is over: a call still under way is cut short now (the run's end says
+        # why), not waited for
+        timeout_graceful_shutdown=STOP_SECONDS,
+    )
     web = _Server(config)
     task = asyncio.create_task(web.serve())
     try:
