@@ -567,6 +567,7 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
     script = [
         {"builtin": "Write", "args": {"path": "/w/notes.txt", "content": "a\nb\nc\n"}},
         {"builtin": "Read", "args": {"path": "/w/notes.txt", "line": 2, "limit": 1}},
+        {"builtin": "Read", "args": {"path": "/w/notes.txt"}},
         {"builtin": "Bash", "args": {"command": "echo hello"}, "ask": True, "limit": 3},
         {"builtin": "Bash", "args": {"command": "sleep 9"}, "kill": True},
         {"text": "{last}"},
@@ -603,3 +604,94 @@ async def test_without_a_sandbox_the_agents_file_requests_are_refused(tmp_path: 
     attempt = acp.Attempt(acp.ACPAdapter(), None, fake(tmp_path, []))  # type: ignore[arg-type]
     with pytest.raises(RequestError):
         await attempt.read_text_file("s", "/etc/passwd")
+
+
+async def test_a_process_that_ends_before_it_answers_fails_the_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    target = fake(tmp_path, [], env={"FAKE_ACP_CRASH": "initialize"})
+    result = await harness.wrap(target, id="dead").run("x", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "cannot start" in result.error.message and "exit 4" in result.error.message
+
+
+async def test_an_error_the_agent_answers_the_prompt_with_fails_the_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    result = await harness.wrap(fake(tmp_path, [{"error": "bad state"}]), id="err").run(
+        "x", user="u1"
+    )
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "Internal error" in result.error.message
+
+
+async def test_calls_made_together_and_updates_of_unknown_calls(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Reads made together are each recorded (their structured output as JSON); an update of a
+    call the agent never started is passed over; the team's own MCP tool joins the tool set."""
+    script = [
+        {"orphan": True},
+        {"parallel": ["Read", "Glob"]},
+        {"builtin": "mcp__crm__find", "args": {"q": "ada"}},
+        {"text": "{last}"},
+    ]
+    agent = memory_harness.wrap(fake(tmp_path, script), id="together")
+    result = await agent.run("x", user="u1")
+    assert result.status is RunStatus.SUCCESS
+    await memory_harness.writes.drain()
+    outputs = {
+        c.body["tool"]: c.body["output"] for c in memory_service.calls if c.name == "record_tool"
+    }
+    assert outputs["Read"] == '{"read": "Read"}' and "Glob" in outputs
+    assert "mcp__crm__find" in {s.name for s in await agent.adapter.native(agent.target)}
+
+
+async def test_a_kept_result_is_read_through_the_harness_server(
+    harness: Harness, tmp_path: Path
+) -> None:
+    script = [
+        {"tool": "gone", "args": {}},
+        {"tool": "read_file", "args": {"file_path": "/large_tool_results/x"}},
+        {"text": "{last}"},
+    ]
+    result = await arm(harness.wrap(fake(tmp_path, script), id="pager"), [lookup]).run(
+        "x", user="u1"
+    )
+    assert result.status is RunStatus.SUCCESS and "/large_tool_results/x" in str(result.answer)
+
+
+async def test_an_acp_agent_harness_knows_nothing_of_runs_its_sub_agent_unmapped(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Without a profile the harness knows no sub-agent tool: the call is the agent's own."""
+    script = [{"agent": {"prompt": "go"}, "result": "went"}, {"text": "{last}"}]
+    target = fake(tmp_path, script, profile=None)
+    done = await harness.wrap(target, id="generic").run("x", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "went"
+    assert await children(harness, done.run_id) == []
+
+
+async def test_a_sandboxed_command_that_fails_or_outlives_the_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    from trellis.contracts import ToolError
+
+    sandboxes = FakeSandboxes()
+    sandboxes.crash = ToolError("the sandbox is gone", source="tools")
+    script = [
+        {"builtin": "Read", "args": {"path": "/w/none.txt"}},
+        {"builtin": "Bash", "args": {"command": "crash"}},
+        {"builtin": "Bash", "args": {"command": "sleep 30"}},
+        {"text": "never"},
+    ]
+    target = fake(
+        tmp_path, script, sandbox=sandbox(sandboxes), profile=None, env={"FAKE_ACP_RAW": "1"}
+    )
+    result = await harness.wrap(target, id="boxed2", run_timeout=3.0).run("x", user="u1")
+    assert result.status is RunStatus.TIMEOUT
+    record = recorded(tmp_path)
+    [crashed] = [t for t in record["terminal"] if "exit" in t]
+    assert crashed["signal"] == "SIGKILL" and "the sandbox is gone" in crashed["output"]
+    assert "HOME" in record["started"][0]["env"] and "KIMI_CODE_HOME" in record["started"][0]["env"]
+    assert "sleep 30" in sandboxes.killed  # the command still running when the run ended

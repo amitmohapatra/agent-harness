@@ -129,6 +129,10 @@ class FakeAgent:
         self, protocol_version: int, client_capabilities: Any = None, **kw: Any
     ) -> Any:
         self.client = client_capabilities
+        if os.environ.get("FAKE_ACP_CRASH") == "initialize":
+            sys.stderr.write("cannot start\n")
+            sys.stderr.flush()
+            os._exit(4)
         record(
             "initialize",
             client_capabilities.model_dump(by_alias=True) if client_capabilities else None,
@@ -239,6 +243,11 @@ class FakeAgent:
             return PromptResponse(stop_reason="cancelled")
         except asyncio.CancelledError:
             raise
+        except Exception:
+            import traceback
+
+            record("errors", traceback.format_exc())
+            raise
         save(session_id, data)
         return PromptResponse(stop_reason="end_turn", usage=usage)
 
@@ -248,7 +257,7 @@ class FakeAgent:
             AgentMessageChunk(session_update="agent_message_chunk", content=text_block(text)),
         )
 
-    async def step(  # noqa: PLR0911 - a return a kind of step
+    async def step(  # noqa: PLR0911, PLR0912 - a branch and a return a kind of step
         self, session_id: str, step: dict[str, Any], data: dict[str, Any], override: Any
     ) -> str | None:
         if "text" in step:
@@ -268,6 +277,13 @@ class FakeAgent:
             sys.stderr.write(step["crash"] + "\n")
             sys.stderr.flush()
             os._exit(3)
+        if "error" in step:
+            raise RequestError.internal_error({"why": step["error"]})
+        if "orphan" in step:  # an update of a call it never said it started
+            await self.progress(session_id, "0:unknown", status="completed", raw_input={"x": 1})
+            return None
+        if "parallel" in step:
+            return await self.parallel(session_id, step["parallel"])
         if "plan" in step:
             await self.conn.session_update(
                 session_id,
@@ -376,18 +392,32 @@ class FakeAgent:
             )
             output = f"Wrote {len(args['content'])} bytes to {args['path']}"
         if self.client is not None and self.client.fs.read_text_file and name == "Read":
-            read = await self.conn.read_text_file(
-                session_id=session_id,
-                path=args["path"],
-                line=args.get("line"),
-                limit=args.get("limit"),
-            )
-            output = read.content
+            try:
+                read = await self.conn.read_text_file(
+                    session_id=session_id,
+                    path=args["path"],
+                    line=args.get("line"),
+                    limit=args.get("limit"),
+                )
+            except RequestError as exc:  # no such file: the call fails, as Kimi's does
+                step = {**step, "fails": f"{args['path']} does not exist ({exc})"}
+            else:
+                output = read.content
         if "fails" in step:
             await self.progress(session_id, call_id, status="failed", raw_output=step["fails"])
             return step["fails"]
         await self.progress(session_id, call_id, status="completed", raw_output=output)
         return output
+
+    async def parallel(self, session_id: str, names: list[str]) -> str:
+        """Its own read calls made together: each starts and runs, then each ends."""
+        ids = [self.call_id() for _ in names]
+        for call_id, name in zip(ids, names, strict=True):
+            await self.started(session_id, call_id, name, {"path": name})
+            await self.progress(session_id, call_id, status="in_progress", raw_input={"path": name})
+        for call_id, name in zip(ids, names, strict=True):
+            await self.progress(session_id, call_id, status="completed", raw_output={"read": name})
+        return ", ".join(names)
 
     async def terminal(
         self, session_id: str, call_id: str, command: str, step: dict[str, Any]

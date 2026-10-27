@@ -70,6 +70,7 @@ from trellis.contracts import (
     InterruptDecision,
     InterruptResolution,
     ToolCall,
+    ToolError,
     ToolOutcome,
     ToolSpec,
     ToolStatus,
@@ -389,12 +390,6 @@ class _Ended:
     error: BaseException | None = None
 
 
-#: The agent's process ended, on the attempt's queue.
-@dataclass(frozen=True, slots=True)
-class _Exited:
-    pass
-
-
 # --------------------------------------------------------------------------- the adapter
 class ACPAdapter:
     name: ClassVar[str] = "acp"
@@ -530,6 +525,7 @@ class ACPAdapter:
                 )
             )
             attempt.bind(conn, process)
+            stack.push_async_callback(attempt.stopped)  # before the connection closes
             init = await attempt.answered(
                 conn.initialize(protocol_version=PROTOCOL_VERSION, client_capabilities=capabilities)
             )
@@ -655,12 +651,13 @@ class Attempt:
         self.loading = False
         self.stderr = bytearray()
         self.drain: asyncio.Task[None] | None = None
+        #: the agent's requests being answered now (each in a task of the connection's)
+        self.handling: set[asyncio.Task[Any]] = set()
 
     def bind(self, conn: Any, process: Any) -> None:
         self.conn = conn
         self.process = process
-        if process.stderr is not None:
-            self.drain = asyncio.create_task(self._drained(process.stderr))
+        self.drain = asyncio.create_task(self._drained(process.stderr))
 
     async def _drained(self, stream: asyncio.StreamReader) -> None:
         while chunk := await stream.read(STDERR_TAIL):
@@ -668,17 +665,12 @@ class Attempt:
             del self.stderr[:-STDERR_TAIL]
 
     async def answered(self, request: Any) -> Any:
-        """The agent's answer to ``request``, or why its process ended first."""
-        asked = asyncio.ensure_future(request)
-        ended = asyncio.ensure_future(self.process.wait())
+        """The agent's answer to ``request``; when its process ended instead (the connection
+        closed with it), why it ended."""
         try:
-            await asyncio.wait({asked, ended}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            ended.cancel()
-        if not asked.done():
-            asked.cancel()
-            raise ACPRunError(self.why_ended())
-        return asked.result()
+            return await request
+        except Exception as exc:
+            raise await self._failed(exc) from exc
 
     def why_ended(self) -> str:
         tail = self.stderr.decode(errors="replace").strip()
@@ -768,8 +760,6 @@ class Attempt:
         runtime = self.runtime
         asking = asyncio.ensure_future(self.conn.prompt(session_id=self.session_id, prompt=prompt))
         asking.add_done_callback(self._ended)
-        ended = asyncio.ensure_future(self.process.wait())
-        ended.add_done_callback(self._exited)
         runtime.model_started(STEP)
         try:
             while True:
@@ -779,10 +769,6 @@ class Attempt:
                 except TimeoutError:
                     await self._spent()
                     continue
-                if isinstance(item, _Exited):
-                    if asking.done():
-                        continue  # the process ended after the answer: it is on its way
-                    raise ACPRunError(self.why_ended())
                 if isinstance(item, _Ended):
                     await self._spent()
                     if item.error is not None:
@@ -795,24 +781,20 @@ class Attempt:
                 if runtime.pending is not None:
                     await self.cancel()  # the run paused: the agent stops here
         finally:
-            ended.cancel()
             runtime.model_ended(STEP)
             if not asking.done():
                 asking.cancel()
 
-    def _exited(self, waiting: asyncio.Future[Any]) -> None:
-        if not waiting.cancelled():  # the process ended (not this turn's watch)
-            self.queue.put_nowait(_Exited())
-
     async def _failed(self, error: BaseException) -> BaseException:
-        """The prompt's error — or, when the agent's process ended (the connection closed
-        with it), why the process ended."""
+        """The agent's error — or, when the connection closed (its process ended), why the
+        process ended."""
+        if not isinstance(error, ConnectionError):
+            return error
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(CANCEL_SECONDS):
                 await self.process.wait()
-        if self.process.returncode is not None:
-            return ACPRunError(self.why_ended())
-        return error
+                await asyncio.shield(self.drain)  # what it said last
+        return ACPRunError(self.why_ended())
 
     def _ended(self, asking: asyncio.Future[Any]) -> None:
         if asking.cancelled():
@@ -899,8 +881,9 @@ class Attempt:
         """A sub-agent the agent starts (its profile's ``helpers``), or each member of a swarm
         (``swarms``: one per item, its task the template with the item in it), a helper."""
         helpers, profile = self.runtime.helpers, self.profile
-        if helpers is None or profile is None:
+        if profile is None:  # an agent the harness knows no sub-agent tool of
             return
+        assert helpers is not None  # the turn runs with the attempt's helpers (``_turns``)
         args = call.args
         if call.name in profile.helpers:
             task = str(args.get("prompt") or args.get("description") or "")
@@ -916,8 +899,9 @@ class Attempt:
 
     async def _helpers_ended(self, call_id: str, call: _Call, text: str, *, failed: bool) -> None:
         helpers, profile = self.runtime.helpers, self.profile
-        if helpers is None or profile is None:
+        if profile is None:
             return
+        assert helpers is not None
         if call.name in profile.helpers:
             if failed:
                 await helpers.end(call_id, error=text or SUBAGENT_FAILED)
@@ -951,6 +935,24 @@ class Attempt:
                 known.args = _args(update.raw_input, None)
         self.queue.put_nowait(update)
 
+    async def stopped(self) -> None:
+        """The attempt is ending, before the connection closes: its sandbox's commands stopped,
+        and the agent's requests still being answered (a decision, a command it waits on)
+        given up — the connection closes no answer can go out on."""
+        if self.boxed is not None:
+            await self.boxed.stopped()
+        waiting = [t for t in self.handling if not t.done()]
+        for task in waiting:
+            task.cancel()
+        await asyncio.gather(*waiting, return_exceptions=True)
+
+    def _handles(self) -> None:
+        """The request being answered now: given up if the attempt ends first."""
+        task = asyncio.current_task()
+        assert task is not None  # the connection answers each request in a task
+        self.handling.add(task)
+        task.add_done_callback(self.handling.discard)
+
     async def request_permission(
         self, options: list[Any], session_id: str, tool_call: Any, **kwargs: Any
     ) -> Any:
@@ -958,6 +960,7 @@ class Attempt:
         decides it as it runs); the agent's question asked as the run's; any other decided as
         the run decides a call — let through, or the turn stopped (a pause, a rejection, an
         edit) and the agent told why in the next prompt."""
+        self._handles()
         name = tool_call.title or ""
         if name.startswith(HARNESS_PREFIX):
             return _chosen(options, "allow_once")
@@ -1010,10 +1013,8 @@ class Attempt:
         except Paused:
             await self._stop()
             return RequestPermissionResponse(outcome=_cancelled())
-        chosen = next((o for o in options if o.name == answer), None)
-        if chosen is None:
-            return _chosen(options, "reject_once")
-        return RequestPermissionResponse(outcome=_selected(chosen.option_id))
+        chosen = {o.name: o.option_id for o in options}[answer]  # one of the labels asked
+        return RequestPermissionResponse(outcome=_selected(chosen))
 
     # the agent's files and terminals, in the run's sandbox (``Sandboxed``)
     async def read_text_file(
@@ -1057,6 +1058,8 @@ class Attempt:
 
     def _boxed(self) -> Sandboxed:
         from acp import RequestError
+
+        self._handles()
 
         if self.boxed is None:  # the capability was not given: the agent asks out of turn
             raise RequestError.method_not_found("fs/terminal (this run has no sandbox)")
@@ -1114,8 +1117,7 @@ class Sandboxed:
         Path(self.work).mkdir(parents=True, exist_ok=True)
         self.terminals: dict[str, tuple[asyncio.Task[Any], int | None]] = {}
         self._made = False
-        if self.source not in runtime.added:  # its end (and its pause) find it
-            runtime.added.append(self.source)
+        runtime.added.append(self.source)  # its end (and its pause) find it
         _said_reads(runtime.agent_id)
         runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
 
@@ -1143,9 +1145,14 @@ class Sandboxed:
         return box
 
     async def read(self, path: str, line: int | None, limit: int | None) -> Any:
+        from acp import RequestError
         from acp.schema import ReadTextFileResponse
 
-        text = (await (await self.box()).read(path)).decode("utf-8", errors="replace")
+        try:
+            data = await (await self.box()).read(path)
+        except ToolError as exc:  # no such file: what the agent reads of a missing one
+            raise RequestError.resource_not_found(path) from exc
+        text = data.decode("utf-8", errors="replace")
         if line is not None or limit is not None:
             first = max((line or 1) - 1, 0)
             lines = text.splitlines(keepends=True)
@@ -1196,12 +1203,17 @@ class Sandboxed:
         task, _ = self.terminals.pop(ident)
         task.cancel()
 
-    async def closed(self) -> None:
-        """The attempt ended: its commands still running stopped; the agent's home and working
-        directory removed with the run (kept while it waits on a person: the next attempt
-        resumes the agent's session from them)."""
-        for task, _ in self.terminals.values():
+    async def stopped(self) -> None:
+        """The attempt is ending: its commands still running are stopped."""
+        running = [task for task, _ in self.terminals.values()]
+        for task in running:
             task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+
+    async def closed(self) -> None:
+        """The attempt ended: the agent's home and working directory removed with the run
+        (kept while it waits on a person: the next attempt resumes the agent's session from
+        them)."""
         if self.runtime.pending is None:
             shutil.rmtree(self.root, ignore_errors=True)
 
