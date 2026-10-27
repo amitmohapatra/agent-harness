@@ -285,8 +285,9 @@ async def cancel(w: World) -> None:
 #: (the run then timed out with no model called): 2 s leaves that margin five times over, and
 #: ``hold`` holds far longer, so the limit still ends the run.
 RUN_LIMIT: Final = 2.0
-#: Kimi Code takes a second or two to start (a Node program): its limit leaves it that room.
-KIMI_RUN_LIMIT: Final = 6.0
+#: Kimi Code takes a second or two to start (a Node program), once per attempt: its limit
+#: leaves that room for two attempts (``elsewhere`` pauses first), and still runs out in ``hold``.
+KIMI_RUN_LIMIT: Final = 8.0
 
 
 def run_limit(w: World) -> float:

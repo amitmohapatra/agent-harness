@@ -10,6 +10,28 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 for — and that part is exported: `trellis.middleware()` gives a `create_agent` or
 `create_deep_agent` graph of your own what `ReAct` adds.
 
+### Added
+
+- Kimi Code as a target: `kimi(model=..., cwd=..., env=..., mcp_servers=..., mode=...,
+  sandbox=..., skills=...)` drives Kimi Code's own agent (`kimi acp`, `@moonshot-ai/kimi-code`
+  2.1.x) over the Agent Client Protocol, through the official SDK (`pip install
+  'trellis-harness[kimi]'`). Moonshot archived the Python Kimi CLI and its Python agent SDK,
+  which is why Kimi is driven through ACP. The adapter is a generic ACP client
+  (`trellis.harness.adapters.acp`, `ACPAgent`); Kimi is the one agent configured, pinned and
+  tested. Everything Kimi does on its own (its tools, sub-agents and swarms, plan mode,
+  compaction) passes through: the harness's tools reach it as an MCP server, every call it asks
+  permission for is governed (a person's approval a durable pause, resumed in Kimi's session),
+  each sub-agent and swarm member is a child run, its usage log counts toward the budget
+  (tokens; dollars are a follow-up), its model goes through Bifrost with the run's headers. The
+  `kimi` program's tested range is checked at each run (`compat.BINARIES`); a version outside it
+  fails the run. See [docs/frameworks/kimi.md](docs/frameworks/kimi.md), including what ACP
+  does not show (calls Kimi does not ask about, a sub-agent's own calls) and the sandbox's
+  limit (Kimi's reads stay on the host).
+- `src.kimi()`: a skill set in Kimi Code's own skills folder, written per run.
+- `tools.convert.mcp`: the harness's tools as an MCP server (the official SDK), served per
+  attempt on the loopback interface with a bearer token.
+- Requires `trellis-contracts>=0.6.2` (its `acp` error source).
+
 ### Breaking
 
 - `ReAct` takes Deep Agents' capabilities: given `backend=` (file tools, large-result eviction,

@@ -10,6 +10,7 @@ sandbox behind every way:
 | Deep Agents (your own graph) | `create_deep_agent(model, **sandbox().deep_agent())`: the same, as its `backend=` |
 | plain function, LangGraph | `sandbox().tools()`: three tools — run a shell command, read a file, write a file — `await agent.tools.use(sandbox().tools())` |
 | OpenAI Agents SDK, Claude Agent SDK | their own sandbox ([below](#native-sandboxes-theirs-or-ours)); `sandbox().tools()` only where every command must be the harness's (governed by the catalog, journaled) |
+| Kimi Code | `kimi(sandbox=sandbox())`: Kimi's `Bash` and file writes go to the run's sandbox through ACP's terminal and file capabilities. Its reads are **not** isolated: Kimi's `Read`, `Glob` and `Grep` read the host ([frameworks/kimi.md](frameworks/kimi.md#native-or-ours-sandbox-skills-hooks)) |
 
 Every call is a harness tool call, so it is governed, journaled, recorded, redacted and bounded
 like any other. You choose only where sandboxes come from (Docker, or a provider object) and, if

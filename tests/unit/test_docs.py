@@ -23,6 +23,7 @@ FRAMEWORK_PAGES = (
     "deepagents.md",
     "openai-agents.md",
     "claude-agent-sdk.md",
+    "kimi.md",
     "react.md",
     "functions.md",
 )

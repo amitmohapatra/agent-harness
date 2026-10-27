@@ -24,6 +24,7 @@ from trellis import (
     a2a,
     current,
     deep_agent,
+    kimi,
     llm_judge,
     mcp,
     openapi,
@@ -70,7 +71,8 @@ h.wrap(agent, *, id, version=None, description=None, hooks=(), judges=(), budget
 ```
 
 Attach the harness to `agent`: a `ReAct`, a compiled LangGraph graph (Deep Agents included),
-an OpenAI Agents `Agent`, `ClaudeAgentOptions`, or an async function `(input, agent)`. The
+an OpenAI Agents `Agent`, `ClaudeAgentOptions`, Kimi Code (`kimi(...)`, an ACP agent), or an
+async function `(input, agent)`. The
 framework is detected from its type and not modified; its own tools are governed as it runs
 them ([tools.md](tools.md)).
 
@@ -423,6 +425,16 @@ deleted at its end ([sandbox.md](sandbox.md)). One entry, given where each engin
 | `ReAct(backend=sandbox())` | `ReAct`'s backend: Deep Agents' file tools and `execute` work in it |
 | `sandbox().deep_agent()` | `create_deep_agent`'s arguments, `{"backend": ...}`: `create_deep_agent(model, **sandbox().deep_agent())` |
 | `sandbox().tools()` | `sandbox_exec`, `sandbox_read`, `sandbox_write`, a tool source, for an engine with no sandbox of its own (`agent.tools.use(...)`) |
+| `kimi(sandbox=sandbox())` | Kimi Code's `Bash` and file writes, through ACP's terminal and file capabilities (its reads stay on the host: [frameworks/kimi.md](frameworks/kimi.md#native-or-ours-sandbox-skills-hooks)) |
+
+### kimi
+
+`kimi(*, model=None, cwd=None, env=None, mcp_servers=(), mode=None, sandbox=None, skills=None,
+command="kimi")` — Kimi Code (`kimi acp`, `@moonshot-ai/kimi-code` 2.1.x) as a target, driven
+over the Agent Client Protocol: `model` the gateway's model name, `mode` `"default"` or
+`"plan"`, `sandbox=sandbox()` its commands and writes in the run's sandbox (reads not
+isolated), `skills=` a skill set (`**src.kimi()`) — an `ACPAgent`
+([frameworks/kimi.md](frameworks/kimi.md)).
 
 ### deep_agent
 
@@ -446,6 +458,7 @@ scope)`, `read_file(name, version, path, scope)`, optional `changed_since(scope,
 | `ReAct(skills=src)` | Deep Agents' skills middleware, the skills a route of the backend |
 | `src.deep_agent(backend=None, *, scope=None)` | `create_deep_agent`'s `backend` and `skills` |
 | `src.claude()` | `ClaudeAgentOptions`' `plugins` (a local plugin written per run) and `skills="all"`; `await src.claude_dir(path, scope=None)` writes one for code that runs the SDK itself |
+| `src.kimi()` | `kimi()`'s `skills`: the run's pinned skills in Kimi Code's own skills folder, in a home of the run's own (`kimi(**src.kimi())`) |
 | `src.openai(scope=None)` | the OpenAI Agents SDK's `Skills` capability for a `SandboxAgent` |
 | `src.tools(scope=None)` | `list_skills` and `load_skill`, a tool source, for an engine with no skills slot |
 
