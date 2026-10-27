@@ -119,3 +119,15 @@ def test_a_run_home_of_an_agent_with_no_profile_keeps_the_environment(
     import shutil
 
     shutil.rmtree(home.root)
+
+
+async def test_the_usage_log_is_read_until_it_stops_growing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(acp, "SETTLE_STEP", 0.0)
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    attempt.usage = SimpleNamespace()  # type: ignore[assignment]
+    reads = iter([2, 1, 1, 0, 5])
+    monkeypatch.setattr(attempt, "_accounted", lambda: next(reads))
+    await attempt._settled()
+    assert next(reads) == 5  # read until a read found nothing new

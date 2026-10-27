@@ -113,20 +113,18 @@ async def test_a_rejected_bash_call_is_not_run_and_kimi_reads_why(
 
 
 async def test_kimis_usage_log_is_the_contract_the_budget_reads(
-    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+    harness: Harness, tmp_path: Path
 ) -> None:
     """Kimi writes each model request's usage as a ``usage.record`` line in its session's
-    ``agents/<agent>/wire.jsonl``: the shape the adapter reads (a change fails here)."""
-    endpoint.plan = [("lookup", {"topic": "a"}), ("lookup", {"topic": "b"})]
-    agent = arm(
-        harness.wrap(
-            kimi_target(endpoint, tmp_path), id="kimi-spend", budget=Budget(max_tokens=40)
-        ),
-        [lookup],
-    )
-    result = await agent.run("look twice", user="u1")
-    logs = list((tmp_path / "kimi-home").glob("sessions/*/*/agents/main/wire.jsonl"))
-    [log] = logs
+    ``agents/<agent>/wire.jsonl``: the shape the adapter reads (a change fails here). Every
+    request counts; past the budget the turn stops and the run ends ``PARTIAL``."""
+    plan = [("lookup", {"topic": "a"}), ("lookup", {"topic": "b"}), ("lookup", {"topic": "c"})]
+    # each reply takes a moment: the log of one request is read before the next call
+    async with PlannedEndpoint(plan, stall=1.0).serving() as endpoint:
+        target = kimi_target(endpoint, tmp_path)
+        agent = arm(harness.wrap(target, id="kimi-spend", budget=Budget(max_tokens=20)), [lookup])
+        result = await agent.run("look three times", user="u1")
+    [log] = list((tmp_path / "kimi-home").glob("sessions/*/*/agents/main/wire.jsonl"))
     records = [json.loads(line) for line in log.read_text().splitlines() if "usage.record" in line]
     assert records, "Kimi logs a usage.record per model request"
     for record in records:
@@ -138,9 +136,31 @@ async def test_kimis_usage_log_is_the_contract_the_budget_reads(
             "inputCacheCreation",
         }
         assert record["usage"]["inputOther"] == 10 and record["usage"]["output"] == 5
-    # 15 tokens a request: the third request passes 40, and the run stops there
+    # 15 tokens a request: past 20 after the second, and the run stops there
     assert result.status is RunStatus.PARTIAL and result.error is not None
     assert result.error.code == "BUDGET_EXCEEDED"
+    assert len(endpoint.requests) < 4  # never the answer after the third call
+
+
+async def test_the_usage_kimi_logs_last_is_counted(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kimi writes its log a moment behind: the last request's usage (the answer's) counts."""
+    from trellis.harness import budget
+
+    counted: list[int] = []
+    account = budget.account
+
+    def counting(runtime: Any, **usage: Any) -> None:
+        counted.append(usage["input_tokens"] + usage["output_tokens"])
+        account(runtime, **usage)
+
+    monkeypatch.setattr(budget, "account", counting)
+    endpoint.plan = [("lookup", {"topic": "a"})]
+    agent = arm(harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-count"), [lookup])
+    result = await agent.run("look", user="u1")
+    assert result.status is RunStatus.SUCCESS
+    assert counted == [15] * len(endpoint.requests)
 
 
 def _swarm_turns(body: dict[str, Any]) -> Any:

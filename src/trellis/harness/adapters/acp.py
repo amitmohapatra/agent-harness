@@ -105,6 +105,10 @@ HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
 STEP: Final = "acp"
 #: How often the agent's usage log is read while a turn runs (and the budget checked).
 USAGE_SECONDS: Final = 0.5
+#: How long, after a turn, the agent's usage log is read until it stops growing (at most), and
+#: how often.
+SETTLE_SECONDS: Final = 2.0
+SETTLE_STEP: Final = 0.1
 #: The most a cancelled turn waits for the agent to say it stopped.
 CANCEL_SECONDS: Final = 5.0
 #: The last of the agent's stderr kept, for the error of a process that ended mid-turn.
@@ -788,7 +792,7 @@ class Attempt:
                     await self._spent()
                     continue
                 if isinstance(item, _Ended):
-                    await self._spent()
+                    await self._settled()
                     if item.error is not None:
                         raise await self._failed(item.error)
                     yield item.answer
@@ -833,26 +837,43 @@ class Attempt:
             async with asyncio.timeout(CANCEL_SECONDS):
                 await self.conn.cancel(session_id=self.session_id)
 
+    async def _settled(self) -> None:
+        """The turn ended: the usage the agent logs last (it writes its log as it goes, a
+        moment behind) read until a read finds nothing new — accounted, the turn being over."""
+        if self.usage is None:
+            return
+        ends = asyncio.get_running_loop().time() + SETTLE_SECONDS  # a log that keeps growing
+        self._accounted()
+        await asyncio.sleep(SETTLE_STEP)
+        while self._accounted() and asyncio.get_running_loop().time() < ends:  # noqa: ASYNC110 - a file, polled
+            await asyncio.sleep(SETTLE_STEP)
+
     async def _spent(self) -> None:
         """The usage the agent logged since the last read, on the run's budget; the turn
         cancelled once the budget is spent."""
         runtime = self.runtime
-        if self.usage is not None:
-            for record in self.usage.records():
-                usage = record["usage"]
-                cached = int(usage.get("inputCacheRead") or 0)
-                written = int(usage.get("inputCacheCreation") or 0)
-                budget.account(
-                    runtime,
-                    model=self.target.model or str(record.get("model") or "kimi"),
-                    input_tokens=int(usage.get("inputOther") or 0) + cached + written,
-                    output_tokens=int(usage.get("output") or 0),
-                    cached=cached,
-                )
+        self._accounted()
         spent = budget.reached(runtime)
         if spent is not None and runtime.budget_spent is None:
             budget.stopped(runtime, spent)
             await self.cancel()
+
+    def _accounted(self) -> int:
+        """The usage records the agent logged since the last read, on the run's budget: how
+        many."""
+        found = self.usage.records() if self.usage is not None else []
+        for record in found:
+            usage = record["usage"]
+            cached = int(usage.get("inputCacheRead") or 0)
+            written = int(usage.get("inputCacheCreation") or 0)
+            budget.account(
+                self.runtime,
+                model=self.target.model or str(record.get("model") or "kimi"),
+                input_tokens=int(usage.get("inputOther") or 0) + cached + written,
+                output_tokens=int(usage.get("output") or 0),
+                cached=cached,
+            )
+        return len(found)
 
     # ------------------------------------------------------------------ what the agent did
     async def _seen(self, update: Any) -> bool:
