@@ -196,6 +196,68 @@ async def test_a_scripts_calls_are_recorded_in_the_order_they_ran_at_the_scripts
     assert recorded == [(1, "wiki-list"), (1, "wiki-search"), (1, "wiki-read"), (4, "wiki-read")]
 
 
+async def test_identical_calls_of_one_script_are_each_sent_at_the_scripts_step() -> None:
+    """Code Mode: a script that called one tool twice with the same arguments sends both, in
+    log order (time, then id), at the script's step; the memory service records the pair as
+    one call (idempotent on run, step, tool and arguments), so one call backs one approval."""
+    from trellis.harness.agent import Agent
+
+    t0 = datetime(2026, 9, 30, tzinfo=UTC)
+    at = t0 + timedelta(seconds=5)
+
+    def logged(id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=id,
+            timestamp=at,
+            name="erp-get_stock",
+            arguments={"sku": "ST-101"},
+            result="7",
+            error=None,
+            latency_ms=1,
+        )
+
+    class Log:
+        async def code_mode_calls(self, run_id: str, since: datetime) -> list[SimpleNamespace]:
+            return [logged("l2"), logged("l1")]
+
+    recorded: list[tuple[int | None, str, dict[str, Any]]] = []
+
+    class Records:
+        async def record_tool(self, call: ToolCall, outcome: ToolOutcome) -> None:
+            recorded.append((call.step, call.tool, call.args))
+
+    class Writes:
+        async def submit(self, name: str, work: Any, events: Any = None) -> None:
+            await work()
+
+    agent = SimpleNamespace(harness=SimpleNamespace(gateway=Log(), writes=Writes()))
+    runtime = SimpleNamespace(
+        run_memory=Records(),
+        uses=lambda feature: True,
+        run_id="run_1",
+        started_at=t0,
+        task="t",
+        events=None,
+        code_mode_scripts=[(t0, 2)],
+    )
+    await Agent.imported_code_mode_calls(cast("Agent", agent), cast("Any", runtime))
+    assert recorded == [(2, "erp-get_stock", {"sku": "ST-101"})] * 2
+
+
+def test_a_call_logged_as_a_script_starts_is_that_scripts_and_one_before_any_the_firsts() -> None:
+    """``script_step`` at its edges: a call logged at the instant a script started is that
+    script's; one logged before every script (the gateway's clock behind) is the first's."""
+    from trellis.harness.agent import script_step
+
+    t0 = datetime(2026, 9, 30, tzinfo=UTC)
+    scripts = [(t0, 1), (t0 + timedelta(seconds=10), 4)]
+    assert script_step(scripts, t0 - timedelta(seconds=1)) == 1
+    assert script_step(scripts, t0) == 1
+    assert script_step(scripts, t0 + timedelta(seconds=9.999)) == 1
+    assert script_step(scripts, t0 + timedelta(seconds=10)) == 4
+    assert script_step([(t0, None)], t0) is None
+
+
 # --------------------------------------------------------------------------- memory
 def identity() -> Identity:
     return Identity(tenant="t", user="u", agent_id="a", run_id="run_1", thread="th")

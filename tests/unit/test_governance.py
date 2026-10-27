@@ -18,13 +18,14 @@ from typing_extensions import TypedDict
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
-from trellis.contracts import ConfigurationError, HarnessError, ToolSpec
+from trellis.contracts import ConfigurationError, HarnessError, ToolCall, ToolSpec
 from trellis.harness import writes as writes_module
 from trellis.harness.clients.memory import Memory
 from trellis.harness.governance import (
     Action,
     ApprovalRuleError,
     Decision,
+    Denied,
     Governance,
     Rejected,
     governed,
@@ -40,6 +41,7 @@ from trellis.harness.governance.catalog import (
     entry,
 )
 from trellis.harness.governance.decision import decide
+from trellis.harness.hooks import Deny, Hooks
 from trellis.harness.writes import SPOOL_FILE, Writes
 from trellis.memory.errors import NotFoundError
 
@@ -344,6 +346,30 @@ async def test_a_top_risk_tool_is_not_relaxed_automatically(clock: Clock) -> Non
     governance = Governance(catalog)
     assert (await governance.check("wire", {"amount": 5}, agent_id="buyer")).asks
     assert catalog.accepted == []  # a person accepts it, or not
+
+
+async def test_a_learned_rule_that_stops_asking_never_lifts_a_hooks_deny(clock: Clock) -> None:
+    """A learned rule only changes when governance asks (``approve_when``); a ``before_tool``
+    hook's ``Deny`` still stops the call, unrun, whatever the rule learned."""
+    catalog = FakeCatalog({"po": Rule(risk="write", approve_when="amount > 10")})
+    catalog.suggest("po", "amount > 1000", agent="buyer")
+    governance = Governance(catalog, tenant="acme", agent_id="buyer")
+    assert (await governance.check("po", {"amount": 50})).announces, "the learned rule holds"
+
+    class Frozen(Hooks):
+        async def before_tool(self, call: ToolCall) -> Deny:
+            return Deny("purchase orders are frozen")
+
+    ran: list[int] = []
+
+    def po(amount: int) -> str:
+        ran.append(amount)
+        return "ordered"
+
+    call = governed(po, governance, on_ask=lambda decision: True, hooks=[Frozen()])
+    with pytest.raises(Denied, match="frozen"):
+        await call(amount=50)
+    assert ran == []
 
 
 async def test_suggestions_that_cannot_be_read_or_accepted_wait_for_the_next_refresh(

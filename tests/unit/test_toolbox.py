@@ -422,3 +422,53 @@ async def test_the_first_hints_wait_until_the_published_tools_are_indexed(
     assert "could not be read" in caplog.text
     for w in (writes, slow_writes, down_writes):
         await w.aclose()
+
+
+async def test_the_first_hints_wait_five_seconds_at_most_for_an_index_never_ready(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B13: an index that never comes ready holds the first run for ``INDEX_WAIT_SECONDS``
+    (5 s) and no longer, polling every ``INDEX_POLL_SECONDS``; one ready at the last poll is
+    found ready. Timed on a fake clock: no test waits five seconds."""
+    assert toolbox.INDEX_WAIT_SECONDS == 5.0
+
+    class Loop:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def time(self) -> float:
+            return self.now
+
+    async def run(catalog: FakeCatalog) -> float:
+        made, _, writes = box([Def("erp-get", "erp")], catalog)
+        await made.tools()
+        await writes.drain()
+        loop = Loop()
+
+        async def sleep(seconds: float) -> None:
+            loop.now += seconds
+
+        monkeypatch.setattr(
+            toolbox, "asyncio", SimpleNamespace(get_running_loop=lambda: loop, sleep=sleep)
+        )
+        try:
+            await made.indexed()
+        finally:
+            monkeypatch.setattr(toolbox, "asyncio", asyncio)
+        await writes.aclose()
+        return loop.now
+
+    polls = int(toolbox.INDEX_WAIT_SECONDS / toolbox.INDEX_POLL_SECONDS) + 1
+    never = FakeCatalog()
+    never.unindexed = 10**6
+    with caplog.at_level("INFO", logger="trellis.tools"):
+        waited = await run(never)
+    assert waited == toolbox.INDEX_WAIT_SECONDS and len(never.index_asked) == polls
+    assert "not indexed in 5.0 s" in caplog.text
+
+    caplog.clear()
+    last = FakeCatalog()
+    last.unindexed = polls - 1  # ready when asked the last time
+    with caplog.at_level("INFO", logger="trellis.tools"):
+        assert await run(last) == toolbox.INDEX_WAIT_SECONDS
+    assert len(last.index_asked) == polls and "not indexed" not in caplog.text
