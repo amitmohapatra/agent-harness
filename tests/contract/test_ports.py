@@ -57,6 +57,7 @@ def test_the_public_api_is_the_documented_one() -> None:
         "Settings",
         "a2a",
         "current",
+        "deep_agent",
         "llm_judge",
         "mcp",
         "middleware",

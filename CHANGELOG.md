@@ -88,6 +88,27 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 
 ### Added
 
+- Skill sources (`trellis.skills`): skills kept in a store and edited at any time, per tenant,
+  workspace, user and agent, fed to each framework's own skills slot.
+  - Sources: `skills.directory(path)` (`SKILL.md` folders; an allow-list `tenants:`/`users:`),
+    `skills.bifrost()` (the gateway's skills repository), `skills.langfuse()` (prompts tagged
+    `skill`), a store of your own (the `SkillSource` protocol: `list`, `load`, `read_file`,
+    optional `changed_since`), `skills.combine(...)`. A name kept at a more specific level wins
+    (agent, user, workspace, tenant, the platform-wide sources), then the source given first; a
+    disabled winner hides it.
+  - Slots: `ReAct(skills=src)` and `create_deep_agent(**src.deep_agent())` (Deep Agents' own
+    `SkillsMiddleware`, the skills a `/skills/` route of the backend); `trellis.deep_agent(
+    sandbox(), src)` merges a sandbox and skills into its one `backend=` (a `CompositeBackend`);
+    `ClaudeAgentOptions(**src.claude())` (a local plugin written per run, removed after;
+    `await src.claude_dir(...)` without a harness); `src.openai()` (the OpenAI Agents SDK's
+    `Skills` capability of a `SandboxAgent`); `src.tools()` (`list_skills`, `load_skill`) where
+    an engine has no slot — a function, LangGraph, a plain OpenAI `Agent`.
+  - Per run: the run's scope; the versions pinned in its journal (`repository.journaled`, the
+    stored prompts' pin), so a resume uses them and an edit applies from the next run; a deleted
+    skill and a source that is down fail soft (`skills_unavailable`; the last listing stands);
+    a description, a body and a file capped, a bad name or a path out of its skill skipped.
+  - `repository` has again what every versioned source shares (`Kept`, `front_matter`,
+    `digest`, `inside`), and `telemetry.Langfuse` reads prompts (`prompts`, `prompt`).
 - Each framework page says where the sandbox, skills and hooks go on that engine, and that
   `budget=` is the one cross-engine token, dollar and tool-call cap while a framework's own
   turn limit (`recursion_limit`, `max_turns`) goes in `framework_options`.

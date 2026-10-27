@@ -446,7 +446,7 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
 | | Where |
 |---|---|
 | Sandbox | `ReAct(backend=sandbox())`: Deep Agents' file tools and `execute` in the run's own sandbox ([sandbox.md](../sandbox.md)) |
-| Skills | `ReAct(skills=[...])`: Deep Agents' skill sources, read through `backend` ([skills.md](../skills.md#native-or-ours)) |
+| Skills | `ReAct(skills=src)`: a skill source (`trellis.skills`), pinned per run, read by Deep Agents' own skills middleware through a `/skills/` route of the backend — with `backend=sandbox()` too; or Deep Agents' own source paths ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `ReAct(middleware=[...])` |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); the loop's own turn limit is `max_steps`, and LangGraph's `recursion_limit` goes in `framework_options` |
 

@@ -11,7 +11,8 @@ one of Claude Code's own (run here: a line in the ``FAKE_CLAUDE_BUILTINS`` file)
 "..."}`` answers (``{last}`` in it is the text of the last tool result, so an answer shows what
 the "model" read). ``FAKE_CLAUDE_RECORD`` names a file the CLI writes what it was started with
 (system prompt, allowed tools, the session it resumes, prompt, its
-``ANTHROPIC_CUSTOM_HEADERS``, the context its ``UserPromptSubmit`` hooks added) to.
+``ANTHROPIC_CUSTOM_HEADERS``, the context its ``UserPromptSubmit`` hooks added, the files of
+each ``--plugin-dir``) to.
 
 Hooks: the ``UserPromptSubmit`` hooks the SDK registered (its ``initialize`` request) are called
 before a turn, as the real CLI calls them, and the ``additionalContext`` they answer is recorded
@@ -74,6 +75,19 @@ def argument(name: str) -> str | None:
     args = sys.argv[1:]
     joined = [a.split("=", 1)[1] for a in args if a.startswith(f"{name}=")]
     return joined[0] if joined else args[args.index(name) + 1] if name in args else None
+
+
+def plugins() -> dict[str, dict[str, str]]:
+    """Each ``--plugin-dir`` the CLI was given, its files by relative path (as it found them
+    at the start: the harness removes a run's plugin when the query ends)."""
+    args = sys.argv[1:]
+    found: dict[str, dict[str, str]] = {}
+    for at, arg in enumerate(args):
+        if arg == "--plugin-dir":
+            root = Path(args[at + 1])
+            files = sorted(p for p in root.rglob("*") if p.is_file()) if root.is_dir() else []
+            found[str(root)] = {str(p.relative_to(root)): p.read_text() for p in files}
+    return found
 
 
 class Cli:
@@ -275,6 +289,7 @@ class Cli:
                         "context": context,
                         "materialised": mirrored(session) is not None,
                         "disallowed_tools": argument("--disallowedTools"),
+                        "plugins": plugins(),
                     },
                     handle,
                 )

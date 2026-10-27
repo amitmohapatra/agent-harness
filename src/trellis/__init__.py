@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime, current
     from trellis.harness.sandbox import sandbox
     from trellis.harness.settings import Settings
+    from trellis.harness.skills import deep_agent
     from trellis.harness.tools.mcp import mcp, stdio
     from trellis.harness.tools.sources import a2a, openapi, tool
 
@@ -60,6 +61,7 @@ _EXPORTS = {
     "Runtime": "trellis.harness.runtime",
     "Settings": "trellis.harness.settings",
     "Budget": "trellis.harness.budget",
+    "deep_agent": "trellis.harness.skills",
 }
 
 #: Names ``trellis`` no longer has, and what to use instead (said when one is read).
@@ -87,6 +89,7 @@ __all__ = [
     "Settings",
     "a2a",
     "current",
+    "deep_agent",
     "llm_judge",
     "mcp",
     "middleware",
