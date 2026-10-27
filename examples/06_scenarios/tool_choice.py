@@ -419,6 +419,18 @@ async def says_cannot(case: EvalCase) -> EvalScore | None:
     return EvalScore("says_cannot", said)
 
 
+#: Words an answer says a record is not there with.
+NO_RECORD: Final = (
+    "no record",
+    "not found",
+    "does not exist",
+    "doesn't exist",
+    "no data",
+    "not have data",
+    "not have any data",
+    "no information",
+)
+
 #: Words that hedge.
 HEDGES: Final = ("might", "may ", "possibly", "perhaps", "not sure", "depends", "i think")
 
@@ -430,7 +442,7 @@ async def says_no_record(case: EvalCase) -> EvalScore | None:
     if not unknown or not isinstance(case.output, str):
         return None
     text = case.output.casefold()
-    plain = any(w in text for w in ("no record", "not found", "does not exist", "no data"))
+    plain = any(w in text for w in NO_RECORD)
     figures = re.search(r"\d", text.replace(str(unknown).casefold(), ""))
     return EvalScore("says_no_record", plain and not figures and not _hedged(text))
 
@@ -457,7 +469,7 @@ async def plain_answer(case: EvalCase) -> EvalScore | None:
     if not expected or not isinstance(case.output, str):
         return None
     text = case.output.casefold().strip()
-    said_no = text.startswith("no") or any(w in text for w in ("cannot", "can't", "not able"))
+    said_no = text.startswith("no") or any(w in text for w in CANNOT)
     said = said_no if expected == "no" else not said_no
     return EvalScore("plain_answer", said and not _hedged(text))
 

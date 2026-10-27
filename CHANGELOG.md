@@ -139,6 +139,10 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   ([docs/frameworks/react.md](docs/frameworks/react.md#tool-choice)).
 
 ### Fixed
+- The tool-choice scenario's answer checks (`examples/06_scenarios/tool_choice.py`) no longer
+  fail a right answer on its wording: `plain_answer` reads "no" from the same `CANNOT` words
+  as `says_cannot` ("I don't have the capability to …"), and `says_no_record` also reads
+  "does not have data", "doesn't exist" and "no information".
 
 - AG-UI: a resume sent right after its pause could end with `RUN_ERROR` ("the run ended
   without a result"): the paused attempt, still finishing (its end hooks, its records) after
