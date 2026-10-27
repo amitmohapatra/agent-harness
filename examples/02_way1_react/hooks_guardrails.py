@@ -5,8 +5,9 @@
   100 asks. Rules live there and only there, and apply to every framework and process;
 * **what a rule cannot say** is a hook — ``Refunds``: no refund over 1000 at all (``Deny``:
   the model reads why), amounts rounded to cents (``Rewrite``); ``Cards``: card numbers masked
-  in every tool result (``after_tool``: what the model reads, the journal and memory keep) and
-  in every message sent to the model (``before_model``).
+  in every tool result (``after_tool``: what the model reads, the journal and memory keep);
+* **a model call** is the framework's own: ``MaskCards``, a LangChain middleware given to
+  ``ReAct(middleware=[...])``, masks card numbers in every message sent to the model.
 
     python -m examples.02_way1_react.hooks_guardrails
 """
@@ -14,14 +15,15 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import re
 from typing import Any
 
 from examples._support.memory import ScriptedMemory
 from examples._support.offline import offline_blocks, react_model
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import BaseMessage
 
-from trellis import Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, tool
+from trellis import Deny, Harness, Hooks, ReAct, Rewrite, tool
 from trellis.contracts import ToolCall, ToolOutcome
 
 CARD = re.compile(r"\b(\d{4})\d{8}(\d{4})\b")
@@ -56,8 +58,18 @@ class Cards(Hooks):
     async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
         return outcome.model_copy(update={"output": mask(outcome.output)})
 
-    async def before_model(self, call: ModelCall) -> ModelCall:
-        return dataclasses.replace(call, messages=[mask(m) for m in call.messages])
+
+class MaskCards(AgentMiddleware):
+    """LangChain's own slot for a model call: no card number in what the model is sent."""
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        return await handler(request.override(messages=[_masked(m) for m in request.messages]))
+
+
+def _masked(message: BaseMessage) -> BaseMessage:
+    if isinstance(message.content, str):
+        return message.model_copy(update={"content": mask(message.content)})
+    return message
 
 
 @tool(side_effects="read")
@@ -86,8 +98,9 @@ async def main() -> None:
             system_prompt="You handle refunds. Look the order up first.",
             model=model,
             tools=[order, refund],
+            middleware=[MaskCards()],  # no card number reaches the model
         )
-        # in order: no card number reaches a model, then the refund rules
+        # in order: no card number in a tool result, then the refund rules
         agent = h.wrap(target, id="refunds", hooks=[Cards(), Refunds()])
         paused = await agent.run("Refund order o1, card 4111111111111111.", user="ada")
         assert paused.interrupt is not None  # over 100: the catalog's rule asks

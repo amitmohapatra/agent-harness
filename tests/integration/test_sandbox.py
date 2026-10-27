@@ -81,7 +81,7 @@ async def test_every_adapter_works_in_its_runs_sandbox_governed_and_deleted_at_t
     harness: Harness, framework: str, tmp_path: Path
 ) -> None:
     provider = FakeSandboxes()
-    target, tools = await BUILDERS[framework](harness, [sandbox(provider)], tmp_path, PLAN)
+    target, tools = await BUILDERS[framework](harness, [sandbox(provider).tools()], tmp_path, PLAN)
     agent = arm(harness.wrap(target, id=f"coder-{framework}"), tools)
     events = [e async for e in agent.stream("take notes", user="u")]
     finished = events[-1]
@@ -109,8 +109,16 @@ async def test_a_function_targets_own_sandbox_is_its_runs_and_deleted_at_the_end
     box = sandbox(provider)
 
     async def work(input: str, agent: Runtime) -> Any:
-        assert await agent.tools.use(box) == ["sandbox_exec", "sandbox_read", "sandbox_write"]
-        assert await agent.tools.use(box) == ["sandbox_exec", "sandbox_read", "sandbox_write"]
+        assert await agent.tools.use(box.tools()) == [
+            "sandbox_exec",
+            "sandbox_read",
+            "sandbox_write",
+        ]
+        assert await agent.tools.use(box.tools()) == [
+            "sandbox_exec",
+            "sandbox_read",
+            "sandbox_write",
+        ]
         current = trellis.current()
         assert current is not None and len(current.added) == 1  # joined once, however often
         await agent.tools.call("sandbox_write", path="a.txt", content="hi")
@@ -126,6 +134,19 @@ async def test_a_function_targets_own_sandbox_is_its_runs_and_deleted_at_the_end
     assert done.answer == "hi" and provider.calls[-1] == ("delete", name)
 
 
+async def test_a_sandbox_is_given_as_its_tools_the_same_source_every_time(
+    harness: Harness,
+) -> None:
+    box = sandbox(FakeSandboxes())
+    assert box.tools() is box.tools() and box.tools().source is box
+
+    async def work(input: str, agent: Runtime) -> Any:
+        return await agent.tools.use(box)
+
+    result = await harness.wrap(work, id="bare").run("x", user="u")
+    assert result.error is not None and "sandbox().tools()" in result.error.message
+
+
 async def test_the_first_calls_made_at_once_make_one_sandbox_named_and_labelled_after_the_run(
     harness: Harness,
 ) -> None:
@@ -135,7 +156,7 @@ async def test_the_first_calls_made_at_once_make_one_sandbox_named_and_labelled_
     model = ScriptedChat([reads, "read both"])
     agent = arm(
         harness.wrap(ReAct(system_prompt="s", model=model), id="reader"),
-        [sandbox(provider, spec=spec)],
+        [sandbox(provider, spec=spec).tools()],
     )
     result = await agent.run("read", user="u")
     assert result.answer == "read both"
@@ -156,7 +177,7 @@ async def test_a_pause_snapshots_and_pauses_the_sandbox_and_the_resume_attaches_
         second = await agent.tools.call("sandbox_exec", command="echo two")
         return [first["stdout"], second["stdout"]]
 
-    agent = arm(harness.wrap(work, id="worker"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="worker"), [sandbox(provider).tools()])
     waiting = await agent.run("go", user="u")
     assert waiting.status is RunStatus.PAUSED and waiting.interrupt is not None
     name = f"trellis-{waiting.run_id}"
@@ -192,7 +213,7 @@ async def test_a_sandbox_lost_while_its_run_waited_is_made_again_from_its_snapsh
         await agent.ask("Go on?")
         return await agent.tools.call("sandbox_read", path="a.txt")
 
-    agent = arm(harness.wrap(work, id="restorer"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="restorer"), [sandbox(provider).tools()])
     waiting = await agent.run("go", user="u")
     assert waiting.interrupt is not None
     provider.boxes.clear()  # the provider lost it (expired, a host restarted)
@@ -226,7 +247,7 @@ async def test_a_sandbox_lost_after_a_call_changed_it_is_lost_never_replaced(
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = arm(harness.wrap(work, id="careful"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="careful"), [sandbox(provider).tools()])
     handle = await agent.start("go", user="u")
     assert await harness.worker([agent]).run_once()
     paused_record = await handle.status()
@@ -253,7 +274,7 @@ async def test_a_crash_right_after_the_sandbox_was_made_adopts_it_in_the_next_at
     store = harness.runs
     assert isinstance(store, LocalRuns)
     seeded = sandbox(provider, spec=SandboxSpec(files={"seed.txt": "seeded"}))
-    agent = arm(harness.wrap(work, id="adopter"), [seeded])
+    agent = arm(harness.wrap(work, id="adopter"), [seeded.tools()])
     handle = await agent.start("go", user="u")
     await crash_once(store, agent, handle)  # made, but not yet recorded
     assert (await handle.status()).checkpoint is None
@@ -279,7 +300,7 @@ async def test_a_crash_replays_the_commands_that_ran_and_attaches_for_the_next(
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = arm(harness.wrap(work, id="replayer"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="replayer"), [sandbox(provider).tools()])
     handle = await agent.start("go", user="u")
     await crash_once(store, agent, handle)
     record = await handle.status()
@@ -303,7 +324,7 @@ async def test_a_command_running_when_its_worker_died_is_of_unknown_effect_never
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = arm(harness.wrap(work, id="crasher"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="crasher"), [sandbox(provider).tools()])
     handle = await agent.start("go", user="u")
     await crash_once(store, agent, handle)
     assert await harness.worker([agent]).run_once()
@@ -320,7 +341,7 @@ async def test_a_command_out_of_time_is_killed_and_its_effect_is_unknown(
     async def work(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("sandbox_exec", command="sleep 5")
 
-    agent = arm(harness.wrap(work, id="slow"), [sandbox(provider, call_timeout=0.05)])
+    agent = arm(harness.wrap(work, id="slow"), [sandbox(provider, call_timeout=0.05).tools()])
     result = await agent.run("go", user="u")
     assert result.answer == f"sandbox_exec timed out after 0.05s; {UNKNOWN}"
     assert provider.killed == ["sleep 5"]
@@ -334,7 +355,7 @@ async def test_the_catalog_governs_the_sandbox_tools_like_any_other() -> None:
         return (await agent.tools.call("sandbox_exec", command="echo approved"))["stdout"]
 
     async with with_governance(Harness(config=Settings()), governance) as h:
-        agent = arm(h.wrap(work, id="governed"), [sandbox(provider)])
+        agent = arm(h.wrap(work, id="governed"), [sandbox(provider).tools()])
         waiting = await agent.run("go", user="u")
         assert waiting.interrupt is not None and waiting.interrupt.tool_call is not None
         assert waiting.interrupt.tool_call.tool == "sandbox_exec" and provider.calls == []
@@ -352,7 +373,7 @@ async def test_what_a_command_prints_reaches_the_stream_and_memory_as_it_is(
     async def work(input: str, agent: Runtime) -> Any:
         return (await agent.tools.call("sandbox_exec", command="cat key.txt"))["stdout"]
 
-    agent = arm(memory_harness.wrap(work, id="leaky"), [keyed])
+    agent = arm(memory_harness.wrap(work, id="leaky"), [keyed.tools()])
     events = [e async for e in agent.stream("go", user="u")]
     assert events[-1].data["result"] == secret  # the model and the tool had it as it is
     [(_, shown)] = results(events)
@@ -375,7 +396,7 @@ async def test_a_run_that_fails_times_out_or_is_cancelled_deletes_its_sandbox(
         started.set()
         await asyncio.sleep(5)
 
-    agent = arm(harness.wrap(work, id="ender"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="ender"), [sandbox(provider).tools()])
     failed = await agent.run("fail", user="u")
     late = await agent.run("wait", user="u", run_timeout=0.2)
     assert (failed.status, late.status) == (RunStatus.ERROR, RunStatus.TIMEOUT)
@@ -391,7 +412,7 @@ async def test_a_run_that_fails_times_out_or_is_cancelled_deletes_its_sandbox(
             break
     await stream.aclose()  # the caller went away: the run ends CANCELLED
     await asyncio.sleep(0.05)
-    asked = arm(harness.wrap(_asking, id="asker"), [sandbox(provider)])
+    asked = arm(harness.wrap(_asking, id="asker"), [sandbox(provider).tools()])
     for decided in ("cancel", "resume"):
         waiting = await asked.run("x", user="u")  # paused: no attempt ends it when cancelled
         assert waiting.interrupt is not None
@@ -419,7 +440,7 @@ async def test_a_queued_run_agent_runs_again_goes_on_in_its_sandbox() -> None:
         return said
 
     async with Harness(config=Settings(), runs=Retrying()) as h:
-        agent = arm(h.wrap(work, id="retried"), [sandbox(provider)])
+        agent = arm(h.wrap(work, id="retried"), [sandbox(provider).tools()])
         handle = await agent.start("go", user="u")
         assert await h.worker([agent]).run_once()
         await h.writes.drain()  # the reaper too: the run is queued again, not ended
@@ -454,11 +475,13 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
     async def work(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("sandbox_exec", command="echo hi")
 
-    finished = await arm(harness.wrap(work, id="done"), [sandbox(FakeSandboxes())]).run(
+    finished = await arm(harness.wrap(work, id="done"), [sandbox(FakeSandboxes()).tools()]).run(
         "x", user="u"
     )
     provider = FakeSandboxes()
-    waiting = await arm(harness.wrap(_asking, id="asking"), [sandbox(provider)]).run("x", user="u")
+    waiting = await arm(harness.wrap(_asking, id="asking"), [sandbox(provider).tools()]).run(
+        "x", user="u"
+    )
     left = SandboxRef(provider="fake", id="left", labels={RUN: finished.run_id, TENANT: "default"})
     unknown = SandboxRef(provider="fake", id="unknown", labels={RUN: "run_gone", TENANT: "default"})
     other = SandboxRef(provider="fake", id="other", labels={RUN: finished.run_id, TENANT: "t2"})
@@ -470,7 +493,7 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
     # a process reaps in the background when it makes a sandbox: once, then every REAP_SECONDS
     again = FakeSandboxes()
     source = sandbox(again)
-    late = arm(harness.wrap(work, id="late"), [source])
+    late = arm(harness.wrap(work, id="late"), [source.tools()])
     for _ in range(2):
         await again.create(left, SandboxSpec())
         await late.run("x", user="u")
@@ -506,12 +529,12 @@ async def test_a_large_file_is_read_in_parts_and_a_sandbox_of_another_provider_i
     async def reads(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("sandbox_read", path="big.txt")
 
-    big = await arm(harness.wrap(reads, id="big"), [source]).run("x", user="u")
+    big = await arm(harness.wrap(reads, id="big"), [source.tools()]).run("x", user="u")
     assert big.answer == (
         f"sandbox_read failed: big.txt is {READ_BYTES + 1} bytes, more than the {READ_BYTES} "
         "read at once: read a part of it with sandbox_exec (head -c, tail -c, sed -n)"
     )
-    agent = arm(harness.wrap(_asking, id="moved"), [source])
+    agent = arm(harness.wrap(_asking, id="moved"), [source.tools()])
     waiting = await agent.run("x", user="u")
     assert waiting.interrupt is not None
     source.provider = Renamed()  # the deployment changed its provider while the run waited
@@ -543,7 +566,7 @@ async def test_a_sandbox_that_cannot_be_paused_is_a_warning_and_one_no_source_ho
         await ended(plain, agent.replay.journal.sandbox, agent.run_id)
         return await agent.ask("Go on?")
 
-    agent = arm(harness.wrap(work, id="stubborn"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="stubborn"), [sandbox(provider).tools()])
     with caplog.at_level(logging.INFO, logger="trellis.sandbox"):
         events = [e async for e in agent.stream("x", user="u")]
         run_id = events[-1].run_id
@@ -573,7 +596,7 @@ async def test_a_sandbox_whose_delete_fails_is_left_to_the_reaper(
     async def work(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("sandbox_exec", command="echo hi")
 
-    agent = arm(harness.wrap(work, id="sticky"), [sandbox(provider)])
+    agent = arm(harness.wrap(work, id="sticky"), [sandbox(provider).tools()])
     with caplog.at_level(logging.WARNING, logger="trellis.sandbox"):
         result = await agent.run("x", user="u")
     assert result.status is RunStatus.SUCCESS

@@ -1,20 +1,20 @@
 """Hooks against the running gateway: a ``before_tool`` hook denies one MCP call (it never
-reaches the gateway) and rewrites another (the gateway runs it with the hook's arguments); the
-model hooks see every model call a ``ReAct`` agent makes through the gateway to the live model,
-and what ``before_model`` returns is what the model is sent. The local model's answers are not
+reaches the gateway) and rewrites another (the gateway runs it with the hook's arguments); a
+``ReAct``'s own middleware sees every model call it makes through the gateway to the live model,
+and the request it hands on is what the model is sent. The local model's answers are not
 what is checked: the harness's behaviour is."""
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from typing import Any
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 
 from tests.live.conftest import MODEL, WIKI_TOOL, live_harness, needs_gateway
-from trellis import Deny, Hooks, ModelCall, ReAct, Rewrite, Runtime
+from trellis import Deny, Hooks, ReAct, Rewrite, Runtime
 from trellis.contracts import RunStatus, ToolCall
 
 pytestmark = [pytest.mark.live, needs_gateway]
@@ -62,36 +62,35 @@ async def test_a_hook_denies_and_rewrites_mcp_calls_through_the_gateway(
     assert guard.decided == ["deny", "rewrite"]
 
 
-class Steering(Hooks):
+class Steering(AgentMiddleware):
     """Every model call: the question replaced (what the model is sent), the reply kept."""
 
     def __init__(self) -> None:
-        self.calls: list[ModelCall] = []
-        self.replies: list[Any] = []
+        super().__init__()
+        self.replies: list[tuple[Any, Any]] = []
 
-    async def before_model(self, call: ModelCall) -> ModelCall:
-        self.calls.append(call)
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
         messages = [
             m.model_copy(update={"content": PROMPT}) if isinstance(m, HumanMessage) else m
-            for m in call.messages
+            for m in request.messages
         ]
-        return dataclasses.replace(call, messages=messages)
-
-    async def after_model(self, call: ModelCall, reply: Any) -> None:
-        self.replies.append((call, reply))
+        reply = await handler(request.override(messages=messages))
+        self.replies.append((messages, reply))
+        return reply
 
 
 @pytest.mark.timeout(180)
-async def test_react_model_calls_through_the_gateway_go_through_the_hooks() -> None:
+async def test_react_model_calls_through_the_gateway_go_through_its_middleware() -> None:
     steering = Steering()
     async with live_harness() as h:
-        target = ReAct(system_prompt="You reply in one word.", model=MODEL, max_steps=2)
-        agent = h.wrap(target, id=f"live-steer-{uuid.uuid4().hex[:8]}", hooks=[steering])
+        target = ReAct(
+            system_prompt="You reply in one word.", model=MODEL, max_steps=2, middleware=[steering]
+        )
+        agent = h.wrap(target, id=f"live-steer-{uuid.uuid4().hex[:8]}")
         result = await agent.run("Tell me a long story about dragons.", user="live-user")
     assert result.status is RunStatus.SUCCESS, result.error
-    assert steering.calls and len(steering.replies) == len(steering.calls)
-    assert all(c.framework == "langgraph" and c.model == MODEL for c in steering.calls)
+    assert steering.replies
     for sent, reply in steering.replies:  # what the model was sent, and what came back
-        assert all(m.content == PROMPT for m in sent.messages if isinstance(m, HumanMessage))
+        assert all(m.content == PROMPT for m in sent if isinstance(m, HumanMessage))
         assert isinstance(reply.result[-1], AIMessage)
     assert isinstance(result.answer, str) and result.answer

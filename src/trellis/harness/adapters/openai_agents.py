@@ -714,8 +714,8 @@ def _thread_store(options: Mapping[str, Any]) -> Any:
 
 
 def _hooks() -> Any:
-    """The harness's ``RunHooks``, always: the run's model hooks around every model call, and
-    every reply's usage counted toward the run's budget (``budget.py``)."""
+    """The harness's ``RunHooks``, always: every model call watched for a stall, its hosted
+    tool calls recorded, and its usage counted toward the run's budget (``budget.py``)."""
     from trellis.harness.hooks.openai_agents import ModelHooks
 
     return ModelHooks()

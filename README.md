@@ -135,7 +135,7 @@ models only — the MCP tools, Code Mode, stored prompts and dollar budgets are 
 | a score for a test set | `await h.evaluate(agent, dataset, [exact_match(), called("lookup")])` | [evaluation.md](docs/evaluation.md) |
 | quality on live traffic | `h.wrap(target, id="a", judges=[llm_judge("Polite and correct.")])` | [evaluation.md](docs/evaluation.md) |
 | traces in Langfuse | `export LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=...` (`LANGFUSE_HOST=...` unless on Langfuse Cloud) | [observability.md](docs/observability.md) |
-| code run away from the host | `ReAct(..., backend=docker_sandbox())` (Docker) | [sandbox.md](docs/sandbox.md) |
+| code run away from the host | `ReAct(..., backend=sandbox())` (Docker) | [sandbox.md](docs/sandbox.md) |
 | only one piece, in my own loop | `from trellis.memory import MemoryClient` (or runs, governance, evals) | [Way 2](#two-ways-to-use-trellis) |
 
 Every line has a runnable example: [examples/](examples/README.md).

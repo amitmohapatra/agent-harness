@@ -162,7 +162,7 @@ src/trellis/
                        checkpoint (or an artifact reference past 1 MiB); sub-agents' journals
     features.py        without=: the features a run or an agent turns off (Feature)
     compat.py          the framework versions this release was tested with; the wrap-time warning
-    hooks/             Hooks and how they chain; openai_agents: model hooks through RunHooks
+    hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
     middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, StepLimit,
                        StallGuard, ReadTools, read_result, ToolGuidance, AnswerCheck;
                        RunCheckpointer (the latest checkpoint, delta channels' history beside it)
@@ -468,7 +468,7 @@ flowchart TB
     rt["ReadTools · harness<br/>read_file / read_result offered once needed"]
     tg["ToolGuidance · harness, tool_guidance<br/>how to choose among tools, in the instructions"]
     yours["yours: middleware=[...]<br/>(HumanInTheLoopMiddleware, PII, a tool selector...)"]
-    mh["ModelHooks · harness<br/>before/after_model hooks, chat span, call_timeout,<br/>pinned prompt, unparsable calls answered"]
+    mh["ModelHooks · harness<br/>chat span, call_timeout, on_error,<br/>pinned prompt, unparsable calls answered"]
     tail["Deep Agents' tail<br/>prompt caching, memory files, unsupported content"]
   end
   fs --> sa --> pt --> pl --> ac --> ht --> sg --> ce --> su --> rt --> tg --> yours --> mh --> tail --> model(["the model"])

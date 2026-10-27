@@ -1,14 +1,15 @@
-"""Sandboxes for any framework: ``sandbox()``, a place where the model runs commands and changes
-files away from the host (``ReAct`` and Deep Agents work in the same sandbox as their backend:
-``docker_sandbox()``, ``trellis.harness.sandbox.backend``).
+"""Sandboxes: ``sandbox()``, a place where the model runs commands and changes files away from
+the host — one entry, given where each engine takes it:
 
-    async def analyst(input: str, agent: Runtime) -> str:
-        await agent.tools.use(sandbox(image="python:3.12"))
-        ...
+    ReAct("You analyse data.", model, backend=sandbox())        # ReAct: its backend
+    create_deep_agent(model, **sandbox().deep_agent())          # Deep Agents: backend=
+    await agent.tools.use(sandbox().tools())                    # a function, a LangGraph graph
 
-The source gives the model three harness tools: :data:`EXEC` (a shell command: its exit code,
-stdout and stderr), :data:`READ` (a file, as text) and :data:`WRITE` (a file). Each call goes
-through the bridge like any tool's: governed (``sandbox_exec`` and ``sandbox_write`` write,
+As a backend (``ReAct``, Deep Agents: ``trellis.harness.sandbox.backend``) Deep Agents' file
+tools and its ``execute`` work in the run's sandbox. As tools (:meth:`SandboxSource.tools`) the
+model gets three harness tools: :data:`EXEC` (a shell command: its exit code, stdout and
+stderr), :data:`READ` (a file, as text) and :data:`WRITE` (a file). Each call goes through the
+bridge like any tool's: governed (``sandbox_exec`` and ``sandbox_write`` write,
 ``sandbox_read`` reads; the catalog may say more), journaled (a resumed run reads the same
 output and runs nothing again), recorded and redacted, and bounded by its ``call_timeout`` — a
 command out of time is killed, and its effect is unknown to the model, as any write's.
@@ -85,14 +86,18 @@ REAP_SECONDS: Final = 600.0
 
 
 class SandboxSource:
-    """A sandbox's tools, as a tool source (``agent.tools.use(...)``, a framework's own tools):
-    what :func:`sandbox` returns, and what ``docker_sandbox()``'s backend works through."""
+    """A sandbox of the run's own (what :func:`sandbox` returns), given where each engine takes
+    it: ``ReAct(backend=...)`` as it is, :meth:`deep_agent` for a ``create_deep_agent`` of your
+    own, :meth:`tools` for an engine with no sandbox of its own (a function, a LangGraph
+    graph). Every way works in the same per-run sandbox."""
 
     def __init__(self, provider: SandboxProvider | None, spec: SandboxSpec, timeout: float) -> None:
         self.provider = provider
         self.spec = spec
+        #: the most one call (a command) may take, in seconds
+        self.call_timeout = timeout
         path = {"path": "the file's path"}
-        self.tools = [
+        self._tools = [
             Tool(
                 _spec(
                     EXEC,
@@ -121,11 +126,23 @@ class SandboxSource:
                 timeout=timeout,
             ),
         ]
+        self._as_tools = SandboxTools(self)
         #: when this process last reaped each tenant's sandboxes (``time.monotonic``)
         self._reaped: LRU[str, float] = LRU()
 
-    async def resolve(self) -> list[Tool]:
-        return list(self.tools)
+    def tools(self) -> SandboxTools:
+        """The sandbox as three harness tools (:data:`EXEC`, :data:`READ`, :data:`WRITE`), a
+        tool source: ``agent.tools.use(sandbox().tools())``, for an engine with no sandbox of
+        its own. The same object every time."""
+        return self._as_tools
+
+    def deep_agent(self) -> dict[str, Any]:
+        """``create_deep_agent``'s arguments for this sandbox: its ``backend`` (Deep Agents'
+        ``BaseSandbox`` on the run's sandbox: its file tools and ``execute`` work in it) —
+        ``create_deep_agent(model, **sandbox().deep_agent())``."""
+        from trellis.harness.sandbox.backend import SandboxBackend  # noqa: PLC0415 - Deep Agents
+
+        return {"backend": SandboxBackend(self, call_timeout=self.call_timeout)}
 
     def provider_for(self) -> SandboxProvider:
         """The provider given: a ``sandbox()`` without one makes Docker containers (the daemon
@@ -212,6 +229,16 @@ class SandboxSource:
         return f"wrote {len(data)} bytes to {path}"
 
 
+class SandboxTools:
+    """A sandbox's three tools, as a tool source (:meth:`SandboxSource.tools`)."""
+
+    def __init__(self, source: SandboxSource) -> None:
+        self.source = source
+
+    async def resolve(self) -> list[Tool]:
+        return list(self.source._tools)
+
+
 def sandbox(
     provider: SandboxProvider | None = None,
     *,
@@ -219,12 +246,12 @@ def sandbox(
     spec: SandboxSpec | None = None,
     call_timeout: float = REMOTE_TIMEOUT_SECONDS,
 ) -> SandboxSource:
-    """A sandbox's tools for an agent: ``sandbox_exec``, ``sandbox_read``, ``sandbox_write``,
-    in the sandbox of the run that calls them — granting code execution is this explicit
-    entry. ``provider`` makes the sandboxes (else Docker: the daemon ``DOCKER_HOST`` names);
-    ``image`` is what each is made of (else the provider's), and ``spec`` the rest — limits,
-    network (none by default), files; ``call_timeout`` is the most one call may take, in
-    seconds (a command past it is killed)."""
+    """A sandbox of the run's own for an agent — granting code execution is this explicit entry:
+    ``ReAct(backend=sandbox())``, ``create_deep_agent(**sandbox().deep_agent())``,
+    ``agent.tools.use(sandbox().tools())``. ``provider`` makes the sandboxes (else Docker: the
+    daemon ``DOCKER_HOST`` names); ``image`` is what each is made of (else the provider's), and
+    ``spec`` the rest — limits, network (none by default), files; ``call_timeout`` is the most one
+    call may take, in seconds (a command past it is killed)."""
     given = spec or SandboxSpec()
     if image is not None:
         given = given.model_copy(update={"image": image})
@@ -321,9 +348,10 @@ def _spec(
 
 
 def _source(agent: Agent, added: Sequence[Any] = ()) -> SandboxSource | None:
-    """The agent's sandbox source, else one the run's code added (one at most: two would give
-    it two tools of one name)."""
-    return next((s for s in [*agent.sources, *added] if isinstance(s, SandboxSource)), None)
+    """The agent's sandbox, else one the run's code (or its backend) added (one at most: two
+    would give it two tools of one name)."""
+    given = (s.source if isinstance(s, SandboxTools) else s for s in [*agent.sources, *added])
+    return next((s for s in given if isinstance(s, SandboxSource)), None)
 
 
 def _running() -> Runtime:
@@ -345,6 +373,7 @@ __all__ = [
     "SandboxRef",
     "SandboxSource",
     "SandboxSpec",
+    "SandboxTools",
     "SupportsPause",
     "SupportsSnapshot",
     "reap",

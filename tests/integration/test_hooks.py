@@ -1,29 +1,30 @@
-"""Hooks around runs, model calls and tool calls: the tool hooks in the bridge on every adapter
-(deny, rewrite, ask — journaled — and the outcome changed), the run hooks in the pipeline, the
-model hooks through each framework's own mechanism (``ReAct``'s loop, LangChain middleware, the
-OpenAI Agents SDK's ``RunHooks``), and the same hooks in Way 2 (``governed``, the middleware
-and ``RunHooks`` outside a harness run)."""
+"""Hooks around runs and tool calls: the tool hooks in the bridge on every adapter (deny,
+rewrite, ask — journaled — and the outcome changed), the run hooks in the pipeline, a failed
+model call reaching ``on_error``, model calls left to each framework's own callbacks (LangChain
+middleware, the OpenAI Agents SDK's ``AgentHooks``) — a hook class with the removed model hooks
+refused — and the same hooks in Way 2 (``governed``; the middleware and ``RunHooks`` outside a
+harness run)."""
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 from pathlib import Path
 from typing import Any
 
 import pytest
 from agents import Agent as OpenAIAgent
-from agents import Runner
+from agents import AgentHooks, Runner
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call, PlannedChat, PlannedChatModel, PlannedModel
-from trellis import Ask, Deny, Harness, Hooks, ModelCall, ReAct, Rewrite, Runtime, Settings, tool
-from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolOutcome
+from trellis import Ask, Deny, Harness, Hooks, ReAct, Rewrite, Runtime, Settings, tool
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolCall, ToolOutcome
 from trellis.harness.governance import Decision, Denied, Governance, governed
 from trellis.harness.hooks.openai_agents import ModelHooks as RunHooks
 from trellis.harness.middleware import ModelHooks as Middleware
@@ -217,44 +218,46 @@ async def test_a_hook_that_raises_before_a_run_starts_fails_it(harness: Harness)
     assert "not today" in result.error.message
 
 
-# --------------------------------------------------------------------------- model hooks
+# --------------------------------------------------------------------------- model calls
 
 
-class Redacting(Hooks):
-    """Every model call: the user's card number out of what is sent; the replies kept."""
+class ModelErrors(Hooks):
+    """The errors a run meets, by stage."""
 
     def __init__(self) -> None:
-        self.calls: list[ModelCall] = []
-        self.replies: list[Any] = []
         self.errors: list[tuple[str, str]] = []
-
-    async def before_model(self, call: ModelCall) -> ModelCall:
-        self.calls.append(call)
-        return dataclasses.replace(call, messages=[_redacted(m) for m in call.messages])
-
-    async def after_model(self, call: ModelCall, reply: Any) -> None:
-        self.replies.append(reply)
 
     async def on_error(self, stage: str, error: Exception) -> None:
         self.errors.append((stage, type(error).__name__))
 
 
-def _redacted(message: Any) -> Any:
-    if isinstance(message, dict) and isinstance(message.get("content"), str):
-        return {**message, "content": message["content"].replace("4111", "****")}
-    if isinstance(message, BaseMessage) and isinstance(message.content, str):
+class Redact(AgentMiddleware):
+    """LangChain's own slot for a model call: the user's card number out of what is sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        self.calls += 1
+        return await handler(request.override(messages=[_redacted(m) for m in request.messages]))
+
+
+def _redacted(message: BaseMessage) -> BaseMessage:
+    if isinstance(message.content, str):
         return message.model_copy(update={"content": message.content.replace("4111", "****")})
     return message
 
 
-async def test_react_model_calls_go_through_the_hooks(harness: Harness) -> None:
-    hooks = Redacting()
+async def test_a_react_model_call_is_its_own_middleware_s_and_a_failed_one_reaches_on_error(
+    harness: Harness,
+) -> None:
+    redact = Redact()
     model = PlannedChat([("quote", {"sku": "A"})])
-    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="r", hooks=[hooks]), [quote])
+    target = ReAct(system_prompt="s", model=model, middleware=[redact])
+    agent = arm(harness.wrap(target, id="r"), [quote])
     result = await agent.run("card 4111: quote A", user="u")
-    assert result.answer == "Done. A costs 7"
-    assert [c.framework for c in hooks.calls] == ["langgraph", "langgraph"]
-    assert hooks.calls[0].model == "scripted" and len(hooks.replies) == 2
+    assert result.answer == "Done. A costs 7" and redact.calls == 2
     sent = model.said()
     assert "****" in sent and "4111" not in sent  # the model never read the card
 
@@ -262,17 +265,18 @@ async def test_react_model_calls_go_through_the_hooks(harness: Harness) -> None:
         async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
             raise ConnectionError("the model is down")
 
+    hooks = ModelErrors()
     failing = harness.wrap(
         ReAct(system_prompt="s", model=Failing(turns=[])), id="down", hooks=[hooks]
     )
     assert (await failing.run("q", user="u")).status is RunStatus.ERROR
-    assert hooks.errors[-2:] == [("model", "ConnectionError"), ("run", "ConnectionError")]
+    assert hooks.errors == [("model", "ConnectionError"), ("run", "ConnectionError")]
 
 
 async def test_a_react_model_call_out_of_time_is_a_model_error_the_hooks_see(
     harness: Harness,
 ) -> None:
-    hooks = Redacting()
+    hooks = ModelErrors()
     target = ReAct(system_prompt="s", model=ScriptedChatModel(turns=[], stall=5), call_timeout=0.01)
     result = await harness.wrap(target, id="slow", hooks=[hooks]).run("q", user="u")
     assert result.status is RunStatus.ERROR
@@ -280,21 +284,19 @@ async def test_a_react_model_call_out_of_time_is_a_model_error_the_hooks_see(
 
 
 @pytest.mark.parametrize("deep", [False, True], ids=["create_agent", "deepagents"])
-async def test_langchain_model_calls_go_through_the_middleware(
+async def test_a_graph_s_model_calls_are_its_own_middleware_s_beside_the_harness_s(
     harness: Harness, deep: bool
 ) -> None:
-    hooks = Redacting()
+    redact = Redact()
     model = PlannedChatModel(plan=[("quote", {"sku": "A"})])
     tools = await native_tools(harness, quote, framework="deepagents" if deep else "langgraph")
     graph = (
-        create_deep_agent(model=model, tools=tools, middleware=[Middleware()])
+        create_deep_agent(model=model, tools=tools, middleware=[redact, Middleware()])
         if deep
-        else create_agent(model, tools=tools, middleware=[Middleware()])
+        else create_agent(model, tools=tools, middleware=[redact, Middleware()])
     )
-    agent = harness.wrap(graph, id="graph", hooks=[hooks])
-    result = await agent.run("card 4111: quote A", user="u")
-    assert result.answer == "Done. A costs 7"
-    assert {c.framework for c in hooks.calls} == {"langgraph"} and len(hooks.replies) == 2
+    result = await harness.wrap(graph, id="graph").run("card 4111: quote A", user="u")
+    assert result.answer == "Done. A costs 7" and redact.calls == 2
     sent = model.said()
     assert "****" in sent and "4111" not in sent
 
@@ -304,7 +306,7 @@ async def test_a_failed_langchain_model_call_reaches_on_error(harness: Harness) 
         def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
             raise ConnectionError("the model is down")
 
-    hooks = Redacting()
+    hooks = ModelErrors()
     graph = create_agent(Down(plan=[]), tools=[], middleware=[Middleware()])
     result = await harness.wrap(graph, id="down", hooks=[hooks]).run("q", user="u")
     assert result.status is RunStatus.ERROR
@@ -319,14 +321,45 @@ async def test_without_hooks_the_middleware_and_the_sdk_run_as_they_are(
     assert (await harness.wrap(graph, id="plain").run("q", user="u")).answer == "Done. "
 
 
-async def test_openai_agents_model_calls_are_reported_to_the_hooks(harness: Harness) -> None:
-    hooks = Redacting()
-    target = OpenAIAgent(name="quoter", instructions="You quote.", model=PlannedModel([]))
-    result = await harness.wrap(target, id="oai", hooks=[hooks]).run("quote A", user="u")
-    assert result.answer == "Done. "
-    [call] = hooks.calls
-    assert call.framework == "openai_agents" and call.system == "You quote."
-    assert len(hooks.replies) == 1
+async def test_openai_agents_model_calls_are_its_own_agent_hooks_s(harness: Harness) -> None:
+    seen: list[str | None] = []
+
+    class Watching(AgentHooks[Any]):
+        async def on_llm_start(
+            self, context: Any, agent: Any, system_prompt: Any, input_items: Any
+        ) -> None:
+            seen.append(system_prompt)
+
+        async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
+            seen.append("replied")
+
+    model = PlannedModel([])
+    target = OpenAIAgent(name="quoter", instructions="You quote.", model=model, hooks=Watching())
+    result = await harness.wrap(target, id="oai").run("quote A", user="u")
+    assert result.answer == "Done. " and seen == ["You quote.", "replied"]
+
+
+class Legacy(Hooks):
+    async def before_model(self, call: Any) -> None:
+        return None
+
+
+class LegacyReply(Hooks):
+    async def after_model(self, call: Any, reply: Any) -> None:
+        return None
+
+
+@pytest.mark.parametrize(("hook", "name"), [(Legacy, "before_model"), (LegacyReply, "after_model")])
+async def test_a_hook_with_a_removed_model_hook_is_refused_where_it_is_given(
+    harness: Harness, hook: type[Hooks], name: str
+) -> None:
+    async def fn(input: str, agent: Runtime) -> str:
+        return input
+
+    with pytest.raises(ConfigurationError, match=rf"{hook.__name__}\.{name} was removed: .*own"):
+        harness.wrap(fn, id="legacy", hooks=[hook()])
+    with pytest.raises(ConfigurationError, match=rf"{name} was removed"):
+        governed(fn, Governance(), side_effects="read", on_ask=print, hooks=[hook()])
 
 
 # --------------------------------------------------------------------------- Way 2
@@ -370,19 +403,12 @@ async def test_governed_code_gets_the_same_tool_hooks() -> None:
     assert [d.question for d in asked] == ["Approve charge? Charge it?"]
 
 
-async def test_the_model_hooks_outside_a_harness_run() -> None:
-    """Code that runs LangChain or the OpenAI Agents SDK itself passes its hooks to the
-    framework's own mechanism."""
-    hooks = Redacting()
+async def test_the_middleware_and_the_run_hooks_step_aside_outside_a_harness_run() -> None:
+    """Code that runs LangChain or the OpenAI Agents SDK itself may keep the harness's model-call
+    pieces: outside a harness run they let every call through as it is."""
     model = PlannedChatModel(plan=[])
-    graph = create_agent(model, tools=[], middleware=[Middleware(hooks)])
+    graph = create_agent(model, tools=[], middleware=[Middleware()])
     await graph.ainvoke({"messages": [HumanMessage("card 4111")]})
-    assert "4111" not in model.said() and len(hooks.calls) == 1
-    unchanged = PlannedChatModel(plan=[])  # hooks that leave the call as it is
-    await create_agent(unchanged, tools=[], middleware=[Middleware(Hooks())]).ainvoke(
-        {"messages": [HumanMessage("card 4111")]}
-    )
-    assert "4111" in unchanged.said()
+    assert "4111" in model.said()
     agent = OpenAIAgent(name="a", instructions="i", model=PlannedModel([]))
-    await Runner.run(agent, "hello", hooks=RunHooks(hooks))
-    assert [c.framework for c in hooks.calls] == ["langgraph", "openai_agents"]
+    assert (await Runner.run(agent, "hello", hooks=RunHooks())).final_output == "Done. "

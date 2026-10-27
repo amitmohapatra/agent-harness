@@ -47,7 +47,6 @@ def test_the_public_api_is_the_documented_one() -> None:
         "Deny",
         "Harness",
         "Hooks",
-        "ModelCall",
         "Output",
         "OutputKind",
         "ReAct",
@@ -58,7 +57,6 @@ def test_the_public_api_is_the_documented_one() -> None:
         "Settings",
         "a2a",
         "current",
-        "docker_sandbox",
         "llm_judge",
         "mcp",
         "middleware",
@@ -73,6 +71,16 @@ def test_the_public_api_is_the_documented_one() -> None:
     assert dir(trellis) == trellis.__all__
     with pytest.raises(AttributeError, match="no attribute 'Missing'"):
         trellis.Missing  # noqa: B018
+
+
+@pytest.mark.parametrize(
+    ("name", "instead"),
+    [("docker_sandbox", r"ReAct\(backend=sandbox\(\)\)"), ("ModelCall", "AgentHooks")],
+)
+def test_a_removed_name_says_what_to_use_instead(name: str, instead: str) -> None:
+    assert name not in trellis.__all__
+    with pytest.raises(AttributeError, match=rf"trellis\.{name} was removed: .*{instead}"):
+        getattr(trellis, name)
 
 
 def test_importing_trellis_loads_no_framework_and_contracts_stay_cheap() -> None:
