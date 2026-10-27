@@ -45,8 +45,8 @@ def detect(target: Any) -> Adapter:
         return FunctionAdapter()
     raise ConfigurationError(
         f"cannot wrap {type(target).__name__}: pass a compiled LangGraph graph (Deep Agents "
-        "included, ReAct(...) among them), an OpenAI Agents Agent, ClaudeAgentOptions, an ACP agent "
-        "(kimi()), or an async function (input, agent) -> answer"
+        "included, ReAct(...) among them), an OpenAI Agents Agent, ClaudeAgentOptions, an ACP "
+        "agent (kimi()), or an async function (input, agent) -> answer"
     )
 
 

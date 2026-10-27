@@ -134,7 +134,7 @@ async def served(server: Server[Any]) -> AsyncIterator[Served]:
     task = asyncio.create_task(web.serve())
     try:
         async with asyncio.timeout(START_SECONDS):
-            while not web.started:
+            while not web.started:  # noqa: ASYNC110 - uvicorn says so with a flag only
                 await asyncio.sleep(0.01)
         port = web.servers[0].sockets[0].getsockname()[1]
         yield Served(f"http://127.0.0.1:{port}{PATH}", token)

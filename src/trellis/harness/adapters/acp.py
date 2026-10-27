@@ -56,6 +56,9 @@ import json
 import logging
 import os
 import re
+import shlex
+import shutil
+import tempfile
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -190,6 +193,9 @@ class Profile:
     questions: frozenset[str] = frozenset()
     routed: Callable[[dict[str, str], Runtime, str | None], None] | None = None
     usage: Callable[[Mapping[str, str], str], UsageLog] | None = None
+    #: the variable that names where the agent keeps its state (sessions, config, skills), set
+    #: to a home of the run's own when the run gives it one (a sandboxed run)
+    home: str | None = None
 
 
 def _kimi_routed(env: dict[str, str], runtime: Runtime, model: str | None) -> None:
@@ -284,6 +290,7 @@ KIMI: Final = Profile(
     questions=frozenset({"AskUserQuestion"}),
     routed=_kimi_routed,
     usage=_kimi_usage,
+    home="KIMI_CODE_HOME",
 )
 
 
@@ -295,8 +302,9 @@ class ACPAgent:
     ``mcp_servers`` of its own (ACP's ``McpServer`` objects, as dicts: ``{"name", "command",
     "args", "env"}`` for stdio, ``{"type": "http", "name", "url", "headers"}``), ``mode`` (a
     session mode it lists that asks before acting: :data:`GOVERNED_MODES`), ``model`` (a model
-    name the gateway serves, where the agent's profile routes it) and ``profile`` (what the
-    harness knows of it: :data:`KIMI`)."""
+    name the gateway serves, where the agent's profile routes it), ``sandbox`` (``sandbox()``:
+    the agent's shell commands and file writes go to the run's sandbox, :class:`Sandboxed`)
+    and ``profile`` (what the harness knows of it: :data:`KIMI`)."""
 
     command: tuple[str, ...]
     env: Mapping[str, str] = field(default_factory=dict)
@@ -304,6 +312,7 @@ class ACPAgent:
     mcp_servers: tuple[Mapping[str, Any], ...] = ()
     mode: str | None = None
     model: str | None = None
+    sandbox: Any = None
     profile: Profile | None = None
 
     def __post_init__(self) -> None:
@@ -320,13 +329,15 @@ def kimi(
     env: Mapping[str, str] | None = None,
     mcp_servers: Sequence[Mapping[str, Any]] = (),
     mode: str | None = None,
+    sandbox: Any = None,
     command: str = "kimi",
 ) -> ACPAgent:
     """Kimi Code (``@moonshot-ai/kimi-code``, its ``kimi acp`` server) as a target: ``model``
     the gateway's model name (with Bifrost; without, Kimi's own configuration — its login, or
     ``KIMI_MODEL_*`` in ``env``), ``cwd`` where it works, ``env`` over this process's,
     ``mcp_servers`` of its own beside the harness's, ``mode`` its session mode (``"default"``
-    or ``"plan"``), ``command`` the ``kimi`` executable."""
+    or ``"plan"``), ``sandbox`` a ``sandbox()`` its ``Bash`` commands and file writes go to
+    (its reads do not: :class:`Sandboxed`), ``command`` the ``kimi`` executable."""
     return ACPAgent(
         command=(command, "acp"),
         env=dict(env or {}),
@@ -334,6 +345,7 @@ def kimi(
         mcp_servers=tuple(mcp_servers),
         mode=mode,
         model=model,
+        sandbox=sandbox,
         profile=KIMI,
     )
 
@@ -415,9 +427,9 @@ class ACPAdapter:
         items: list[Any] = []
         async for item in self._turns(target, native_input, run):
             items.append(item)
-            if isinstance(item, AgentMessageChunk) and isinstance(item.content, TextContentBlock):
-                if item.content.text:
-                    yield item.content.text
+            content = item.content if isinstance(item, AgentMessageChunk) else None
+            if isinstance(content, TextContentBlock) and content.text:
+                yield content.text
         yield Output(items)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -494,13 +506,17 @@ class ACPAdapter:
 
         runtime = run.runtime
         target = given(target, runtime.framework_options)
-        env = {**os.environ, **target.env}
         profile = target.profile
+        boxed = Sandboxed(target, runtime) if target.sandbox is not None else None
+        env = boxed.env() if boxed is not None else {**os.environ, **target.env}
         if profile is not None and profile.routed is not None:
             profile.routed(env, runtime, target.model)
-        cwd = target.cwd or os.getcwd()
-        attempt = Attempt(self, runtime, target)
+        cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
+        attempt = Attempt(self, runtime, target, boxed)
+        capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()
         async with contextlib.AsyncExitStack() as stack:
+            if boxed is not None:
+                stack.push_async_callback(boxed.closed)
             servers = [_server(s) for s in target.mcp_servers]
             if run.native_tools is not None:
                 servers.append(await stack.enter_async_context(_harness_server(run.native_tools)))
@@ -515,9 +531,7 @@ class ACPAdapter:
             )
             attempt.bind(conn, process)
             init = await attempt.answered(
-                conn.initialize(
-                    protocol_version=PROTOCOL_VERSION, client_capabilities=ClientCapabilities()
-                )
+                conn.initialize(protocol_version=PROTOCOL_VERSION, client_capabilities=capabilities)
             )
             if profile is not None:
                 found = init.agent_info.version if init.agent_info is not None else ""
@@ -610,8 +624,16 @@ class Attempt:
     """One attempt's ACP client: the agent's session updates, queued for the turn, and its
     permission requests, decided as the run's."""
 
-    def __init__(self, adapter: ACPAdapter, runtime: Runtime, target: ACPAgent) -> None:
+    def __init__(
+        self,
+        adapter: ACPAdapter,
+        runtime: Runtime,
+        target: ACPAgent,
+        boxed: Sandboxed | None = None,
+    ) -> None:
         self.adapter = adapter
+        #: the run's sandbox, when the agent works in one: its file and terminal requests
+        self.boxed = boxed
         self.runtime = runtime
         self.target = target
         self.profile = target.profile
@@ -666,9 +688,7 @@ class Attempt:
         )
 
     # ------------------------------------------------------------------ the session
-    async def session(
-        self, init: Any, cwd: str, servers: list[Any], native_input: ACPInput
-    ) -> str:
+    async def session(self, init: Any, cwd: str, servers: list[Any], native_input: ACPInput) -> str:
         """The session the turn runs in: the one an earlier attempt kept, resumed (else loaded),
         when the agent still holds it; else a new one (in ``mode``, when one is given)."""
         from acp import RequestError
@@ -746,12 +766,10 @@ class Attempt:
 
             prompt = [text_block(prompt)]
         runtime = self.runtime
-        asking = asyncio.ensure_future(
-            self.conn.prompt(session_id=self.session_id, prompt=prompt)
-        )
+        asking = asyncio.ensure_future(self.conn.prompt(session_id=self.session_id, prompt=prompt))
         asking.add_done_callback(self._ended)
         ended = asyncio.ensure_future(self.process.wait())
-        ended.add_done_callback(lambda _: self.queue.put_nowait(_Exited()))
+        ended.add_done_callback(self._exited)
         runtime.model_started(STEP)
         try:
             while True:
@@ -768,7 +786,7 @@ class Attempt:
                 if isinstance(item, _Ended):
                     await self._spent()
                     if item.error is not None:
-                        raise item.error
+                        raise await self._failed(item.error)
                     yield item.answer
                     return
                 if await self._seen(item):
@@ -781,6 +799,20 @@ class Attempt:
             runtime.model_ended(STEP)
             if not asking.done():
                 asking.cancel()
+
+    def _exited(self, waiting: asyncio.Future[Any]) -> None:
+        if not waiting.cancelled():  # the process ended (not this turn's watch)
+            self.queue.put_nowait(_Exited())
+
+    async def _failed(self, error: BaseException) -> BaseException:
+        """The prompt's error — or, when the agent's process ended (the connection closed
+        with it), why the process ended."""
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(CANCEL_SECONDS):
+                await self.process.wait()
+        if self.process.returncode is not None:
+            return ACPRunError(self.why_ended())
+        return error
 
     def _ended(self, asking: asyncio.Future[Any]) -> None:
         if asking.cancelled():
@@ -926,14 +958,18 @@ class Attempt:
         decides it as it runs); the agent's question asked as the run's; any other decided as
         the run decides a call — let through, or the turn stopped (a pause, a rejection, an
         edit) and the agent told why in the next prompt."""
-        from acp.schema import RequestPermissionResponse
-
         name = tool_call.title or ""
-        runtime = self.runtime
         if name.startswith(HARNESS_PREFIX):
             return _chosen(options, "allow_once")
         if self.profile is not None and name in self.profile.questions:
             return await self._question(options, tool_call)
+        return await self._decided(options, name, tool_call)
+
+    async def _decided(self, options: list[Any], name: str, tool_call: Any) -> Any:
+        """A call of the agent's own, decided as the run decides a call."""
+        from acp.schema import RequestPermissionResponse
+
+        runtime = self.runtime
         known = self.calls.get(tool_call.tool_call_id)
         args = known.args if known is not None else _args(tool_call.raw_input, tool_call.content)
         if self.edited == (name, args):
@@ -979,6 +1015,53 @@ class Attempt:
             return _chosen(options, "reject_once")
         return RequestPermissionResponse(outcome=_selected(chosen.option_id))
 
+    # the agent's files and terminals, in the run's sandbox (``Sandboxed``)
+    async def read_text_file(
+        self,
+        session_id: str,
+        path: str,
+        line: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        return await self._boxed().read(path, line, limit)
+
+    async def write_text_file(self, session_id: str, path: str, content: str, **kwargs: Any) -> Any:
+        return await self._boxed().write(path, content)
+
+    async def create_terminal(
+        self,
+        session_id: str,
+        command: str,
+        *,
+        args: list[str] | None = None,
+        env: list[Any] | None = None,
+        cwd: str | None = None,
+        output_byte_limit: int | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        given = {e.name: e.value for e in env or ()}
+        return await self._boxed().create(command, args or [], given, output_byte_limit)
+
+    async def terminal_output(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        return self._boxed().output(terminal_id)
+
+    async def wait_for_terminal_exit(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        return await self._boxed().wait(terminal_id)
+
+    async def kill_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        return self._boxed().kill(terminal_id)
+
+    async def release_terminal(self, session_id: str, terminal_id: str, **kwargs: Any) -> Any:
+        return self._boxed().release(terminal_id)
+
+    def _boxed(self) -> Sandboxed:
+        from acp import RequestError
+
+        if self.boxed is None:  # the capability was not given: the agent asks out of turn
+            raise RequestError.method_not_found("fs/terminal (this run has no sandbox)")
+        return self.boxed
+
     def _refused(self, call: _Call | None) -> None:
         if call is not None:
             call.refused = True
@@ -986,6 +1069,158 @@ class Attempt:
     async def _stop(self) -> None:
         """Stop the turn once the agent has its answer (``session/cancel`` sent next)."""
         asyncio.get_running_loop().call_soon(lambda: asyncio.ensure_future(self.cancel()))
+
+
+# --------------------------------------------------------------------------- a sandboxed run
+#: Where a sandboxed run's agent keeps its state and works, on this machine (per run).
+SANDBOXED_ROOT: Final = "trellis-acp"
+#: The variables a sandboxed agent's process gets from this one's environment (no other: no
+#: credential of the host's reaches it; the model's and the gateway's come from the profile).
+SANDBOXED_ENV: Final = ("PATH", "LANG", "LC_ALL", "TZ")
+#: What every sandboxed run of an agent is told, once per agent in the log and on each run's
+#: stream: its reads are not in the sandbox.
+READS_NOT_ISOLATED: Final = (
+    "the agent's shell commands and file writes run in the run's sandbox, but its own file "
+    "reads and searches (Kimi's Read, Glob, Grep) read this machine's files: reads are not "
+    "isolated (run the harness itself in a container to isolate them)"
+)
+
+
+class Sandboxed:
+    """A run's agent working with the run's sandbox (``ACPAgent(sandbox=sandbox())``): it is
+    given ACP's file and terminal capabilities, served here — ``fs/write_text_file`` and
+    ``fs/read_text_file`` the sandbox's files, ``terminal/*`` a command run in it (Kimi's
+    ``Bash``) — so its commands and writes happen in the sandbox (``SandboxSource.opened``: the
+    run's own, kept across attempts, deleted at the run's end).
+
+    Its reads are not isolated: Kimi Code 2.1.1 reads and searches the host's files itself
+    (``Read`` looks a file up on the host first; ``Glob`` and ``Grep`` never ask the client).
+    What the harness can do it does: the agent's process gets a home and a working directory of
+    the run's own, both empty, and an environment of :data:`SANDBOXED_ENV` and the agent's own
+    ``env`` only — and each run says that its reads are not isolated
+    (:data:`READS_NOT_ISOLATED`)."""
+
+    def __init__(self, target: ACPAgent, runtime: Runtime) -> None:
+        from trellis.contracts import stable_id
+
+        self.target = target
+        self.runtime = runtime
+        self.source = target.sandbox
+        root = Path(tempfile.gettempdir()) / SANDBOXED_ROOT / stable_id(runtime.run_id)
+        self.root = root
+        self.home = root / "home"
+        self.work = str(root / "work")
+        self.home.mkdir(parents=True, exist_ok=True)
+        Path(self.work).mkdir(parents=True, exist_ok=True)
+        self.terminals: dict[str, tuple[asyncio.Task[Any], int | None]] = {}
+        self._made = False
+        if self.source not in runtime.added:  # its end (and its pause) find it
+            runtime.added.append(self.source)
+        _said_reads(runtime.agent_id)
+        runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
+
+    def env(self) -> dict[str, str]:
+        env = {k: os.environ[k] for k in SANDBOXED_ENV if k in os.environ}
+        env = {**env, **self.target.env, "HOME": str(self.home)}
+        profile = self.target.profile
+        if profile is not None and profile.home is not None:  # the run's, whatever env says
+            env[profile.home] = str(self.home / ".agent")
+        return env
+
+    def capabilities(self) -> Any:
+        from acp.schema import ClientCapabilities, FileSystemCapabilities
+
+        files = FileSystemCapabilities(read_text_file=True, write_text_file=True)
+        return ClientCapabilities(fs=files, terminal=True)
+
+    async def box(self, *, changes: bool = False) -> Any:
+        """The run's sandbox, its copy of the agent's working directory made the first time
+        (the agent names its files by that path)."""
+        box = await self.source.opened(self.runtime, changes=changes)
+        if not self._made:
+            await box.exec(f"mkdir -p {shlex.quote(self.work)}")
+            self._made = True
+        return box
+
+    async def read(self, path: str, line: int | None, limit: int | None) -> Any:
+        from acp.schema import ReadTextFileResponse
+
+        text = (await (await self.box()).read(path)).decode("utf-8", errors="replace")
+        if line is not None or limit is not None:
+            first = max((line or 1) - 1, 0)
+            lines = text.splitlines(keepends=True)
+            text = "".join(lines[first : first + limit if limit is not None else None])
+        return ReadTextFileResponse(content=text)
+
+    async def write(self, path: str, content: str) -> None:
+        await (await self.box(changes=True)).write(path, content.encode())
+
+    async def create(
+        self, command: str, args: list[str], env: dict[str, str], limit: int | None
+    ) -> Any:
+        from acp.schema import CreateTerminalResponse
+
+        box = await self.box(changes=True)
+        line = shlex.join([command, *args]) if args else command
+        task = asyncio.ensure_future(box.exec(line, timeout=self.runtime.remaining(), env=env))
+        ident = f"terminal-{len(self.terminals) + 1}"
+        self.terminals[ident] = (task, limit)
+        return CreateTerminalResponse(terminal_id=ident)
+
+    def output(self, ident: str) -> Any:
+        from acp.schema import TerminalExitStatus, TerminalOutputResponse
+
+        task, limit = self.terminals[ident]
+        if not task.done():
+            return TerminalOutputResponse(output="", truncated=False)
+        text, code, signal = _ran(task)
+        cut = limit is not None and len(text.encode()) > limit
+        if cut:
+            text = text.encode()[-limit:].decode("utf-8", errors="ignore")
+        status = TerminalExitStatus(exit_code=code, signal=signal)
+        return TerminalOutputResponse(output=text, truncated=cut, exit_status=status)
+
+    async def wait(self, ident: str) -> Any:
+        from acp.schema import WaitForTerminalExitResponse
+
+        task, _ = self.terminals[ident]
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.shield(task)
+        _, code, signal = _ran(task)
+        return WaitForTerminalExitResponse(exit_code=code, signal=signal)
+
+    def kill(self, ident: str) -> None:
+        self.terminals[ident][0].cancel()
+
+    def release(self, ident: str) -> None:
+        task, _ = self.terminals.pop(ident)
+        task.cancel()
+
+    async def closed(self) -> None:
+        """The attempt ended: its commands still running stopped; the agent's home and working
+        directory removed with the run (kept while it waits on a person: the next attempt
+        resumes the agent's session from them)."""
+        for task, _ in self.terminals.values():
+            task.cancel()
+        if self.runtime.pending is None:
+            shutil.rmtree(self.root, ignore_errors=True)
+
+
+def _ran(task: asyncio.Task[Any]) -> tuple[str, int | None, str | None]:
+    """A finished command's output (stdout, then stderr), its exit code and the signal that
+    ended it (a command out of time, or killed)."""
+    if task.cancelled():
+        return "", None, "SIGKILL"
+    error = task.exception()
+    if error is not None:
+        return f"{type(error).__name__}: {error}", None, "SIGKILL"
+    result = task.result()
+    return result.stdout + result.stderr, result.exit_code, None
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent, of the most recent
+def _said_reads(agent_id: str) -> None:
+    log.warning("%s: %s", agent_id, READS_NOT_ISOLATED, extra={"agent_id": agent_id})
 
 
 def _chosen(options: list[Any], kind: str) -> Any:
@@ -1049,11 +1284,13 @@ def _output(update: Any) -> str:
 __all__ = [
     "KIMI",
     "KIMI_BUILTINS",
+    "READS_NOT_ISOLATED",
     "ACPAdapter",
     "ACPAgent",
     "ACPInput",
     "ACPRunError",
     "Profile",
+    "Sandboxed",
     "UsageLog",
     "kimi",
 ]

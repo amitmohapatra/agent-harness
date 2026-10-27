@@ -21,7 +21,7 @@ classifiers = [
 # src/trellis/harness/compat.py (tests/unit/test_compat.py checks they agree); a newer
 # framework arrives with a newer trellis-harness.
 dependencies = [
-  "trellis-contracts>=0.6.1,<0.7",
+  "trellis-contracts>=0.6.2,<0.7",
   "trellis-memory>=0.5",
   "trellis-runs>=0.4.0",
   "bifrost-sdk>=0.3",

@@ -54,7 +54,9 @@ NOT_RUN: Final = ("approval request was cancelled", "Waiting for a person's appr
 #: The harness's prompts after a rejection and an edit (``adapters.acp``) and a denied resume.
 _REJECTED = re.compile(r"^Your call to \S+ was not run: ")
 _DENIED = "the person denied it"
-_EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
+_EDITED = re.compile(
+    r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$"
+)
 
 Turn = str | Call | list[Call] | dict[str, Any]
 
@@ -178,7 +180,7 @@ class PlannedEndpoint:
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
         server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
         task = asyncio.create_task(server.serve())
-        while not server.started:
+        while not server.started:  # noqa: ASYNC110 - uvicorn says so with a flag only
             await asyncio.sleep(0.01)
         self.url = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}/v1"
         try:
