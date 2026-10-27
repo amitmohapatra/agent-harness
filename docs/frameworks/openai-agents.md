@@ -113,10 +113,19 @@ agent = h.wrap(
 | Tool hints | from 5 tools, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used — your own function tools as the harness's (their own `is_enabled` asked first); handoffs and agent tools are never narrowed away |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with `read_file`, enabled once there is something to read ([tools.md](../tools.md#large-results)) |
 | Grounding, judges, tracing | as for every target ([evaluation.md](../evaluation.md), [observability.md](../observability.md)) |
-| Hooks | the tool and run hooks as for every target; the model hooks through the SDK's own `RunHooks`, which the harness passes to `Runner.run`: each call reported to `before_model`/`after_model`, none rewritten (the SDK takes nothing back) ([hooks.md](../hooks.md)) |
+| Hooks | the tool and run hooks as for every target; a model call is the SDK's own: the agent's `AgentHooks` (`Agent(hooks=...)`: `on_llm_start`, `on_llm_end`), which run under `h.wrap` as they do without it ([hooks.md](../hooks.md)) |
 
 The answer is the run's `final_output` (a pydantic `output_type` is kept as JSON in the run
 record).
+
+## Where sandbox, skills and hooks go
+
+| | Where |
+|---|---|
+| Sandbox | its own: a `SandboxAgent`, its sandbox given as `framework_options={"run_config": RunConfig(sandbox=...)}` ([above](#using-an-existing-openai-agents-project)) |
+| Skills | its own: the `SandboxAgent`'s `Skills` capability ([skills.md](../skills.md#native-or-ours)) |
+| Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`) |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}` |
 
 ## Native or ours: skills, prompts, sandbox
 

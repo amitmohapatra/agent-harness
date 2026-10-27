@@ -553,10 +553,10 @@ sequenceDiagram
   CE->>SU: over half the window: older tool results cleared (placeholder → read_result)
   SU->>RT: near the window's end: older turns summarized (one model call), history to a file
   RT->>MH: read_file / read_result offered only once there is something to read
-  MH->>MH: before_model hooks, the pinned prompt, the task kept ahead of a summary
+  MH->>MH: the pinned prompt, the task kept ahead of a summary
   MH->>M: the request (chat span, call_timeout and the run's time left)
   M-->>MH: AIMessage with tool_calls [lookup, refund]
-  MH->>MH: after_model hooks, usage on the span, a model error → ModelError (retryable?)
+  MH->>MH: usage on the span, a model error → ModelError (retryable?), on_error hooks
   MH-->>G: the response, back out through every layer
   G->>MH: after_model: calls whose arguments are not JSON answered with what was wrong
   G->>T: the calls of the step (at once)

@@ -25,13 +25,12 @@ if TYPE_CHECKING:
     from trellis.harness.budget import Budget
     from trellis.harness.evals import llm_judge
     from trellis.harness.harness import Harness
-    from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Output, OutputKind, Rewrite
+    from trellis.harness.hooks import Ask, Deny, Hooks, Output, OutputKind, Rewrite
     from trellis.harness.prompts import stored
     from trellis.harness.react import ReAct, middleware
     from trellis.harness.result import Result
     from trellis.harness.runtime import Runtime, current
     from trellis.harness.sandbox import sandbox
-    from trellis.harness.sandbox.backend import docker_sandbox
     from trellis.harness.settings import Settings
     from trellis.harness.tools.mcp import mcp, stdio
     from trellis.harness.tools.sources import a2a, openapi, tool
@@ -42,7 +41,6 @@ _EXPORTS = {
     "Deny": "trellis.harness.hooks",
     "Ask": "trellis.harness.hooks",
     "Rewrite": "trellis.harness.hooks",
-    "ModelCall": "trellis.harness.hooks",
     "Output": "trellis.harness.hooks",
     "OutputKind": "trellis.harness.hooks",
     "tool": "trellis.harness.tools.sources",
@@ -55,7 +53,6 @@ _EXPORTS = {
     "sandbox": "trellis.harness.sandbox",
     "ReAct": "trellis.harness.react",
     "middleware": "trellis.harness.react",
-    "docker_sandbox": "trellis.harness.sandbox.backend",
     "current": "trellis.harness.runtime",
     "Agent": "trellis.harness.agent",
     "RunHandle": "trellis.harness.agent",
@@ -65,6 +62,14 @@ _EXPORTS = {
     "Budget": "trellis.harness.budget",
 }
 
+#: Names ``trellis`` no longer has, and what to use instead (said when one is read).
+REMOVED: dict[str, str] = {
+    "docker_sandbox": "sandbox() is the one entry: ReAct(backend=sandbox()), "
+    "create_deep_agent(**sandbox().deep_agent()), agent.tools.use(sandbox().tools())",
+    "ModelCall": "the model hooks were removed: a model call is each framework's own "
+    "(LangChain middleware, the OpenAI Agents SDK's AgentHooks, the Claude Agent SDK's hooks)",
+}
+
 __all__ = [
     "Agent",
     "Ask",
@@ -72,7 +77,6 @@ __all__ = [
     "Deny",
     "Harness",
     "Hooks",
-    "ModelCall",
     "Output",
     "OutputKind",
     "ReAct",
@@ -83,7 +87,6 @@ __all__ = [
     "Settings",
     "a2a",
     "current",
-    "docker_sandbox",
     "llm_judge",
     "mcp",
     "middleware",
@@ -97,6 +100,8 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     module = _EXPORTS.get(name)
+    if name in REMOVED:
+        raise AttributeError(f"trellis.{name} was removed: {REMOVED[name]}")
     if module is None:
         raise AttributeError(f"module 'trellis' has no attribute {name!r}")
     return getattr(importlib.import_module(module), name)

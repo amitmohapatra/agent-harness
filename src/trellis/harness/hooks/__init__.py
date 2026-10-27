@@ -1,5 +1,4 @@
-"""Hooks: your code around a run, its model calls and its tool calls — every adapter, wrapped
-or not.
+"""Hooks: your code around a run and its tool calls — every adapter, wrapped or not.
 
     class Guard(Hooks):
         async def before_tool(self, call: ToolCall) -> Deny | Ask | Rewrite | None:
@@ -9,6 +8,11 @@ or not.
 
     h = Harness(hooks=[Guard()])                      # every agent of this harness
     agent = h.wrap(target, id="support", hooks=[Audit()])  # this agent, after the harness's
+
+Model calls have no hook here: each framework has its own callbacks for them (LangChain and
+Deep Agents middleware — ``ReAct(middleware=[...])`` —, the OpenAI Agents SDK's ``AgentHooks``,
+the Claude Agent SDK's hooks), and a hook class that still defines ``before_model`` or
+``after_model`` is refused where it is given (:class:`Chain`), never silently skipped.
 
 Hooks are for custom logic a rule cannot express — a refusal, a rewrite, a decision on data
 outside the call, who reviews and on which screen. When a call needs a person is a rule, and
@@ -26,13 +30,6 @@ hooks run in order — the harness's, then the agent's. Where they fire:
   governance's approvals) or :class:`Rewrite` (run with these arguments; the next hook sees
   them). The decision is journaled: a resumed run replays it instead of asking the hooks again.
   ``after_tool`` may return another outcome (what the model reads, journaled and recorded);
-* ``before_model(call)`` / ``after_model(call, reply)`` — every model call: ``ReAct``'s,
-  LangChain's and Deep Agents' through their middleware (``middleware.ModelHooks``, given
-  to ``create_agent(middleware=[...])``); the OpenAI Agents SDK's through its ``RunHooks``
-  (``hooks.openai_agents.ModelHooks``, which the harness passes to ``Runner.run`` itself). A
-  ``before_model`` that returns a call rewrites it where the framework lets it (LangChain,
-  ``ReAct`` included); the OpenAI Agents SDK reports its calls only. The Claude Agent SDK's
-  model calls are the CLI's, and a plain function makes none: no model hooks there;
 * ``on_error(stage, error)`` — a run that failed or ran out of time (``"run"``), a model call
   that failed (``"model"``), a tool call that failed or timed out (``"tool"``);
 * ``on_output(item)`` — what leaves for the user, and only that: the answer ``agent.run``,
@@ -59,7 +56,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Literal
 
-from trellis.contracts import RunEvent, RunEventType, ToolCall, ToolOutcome, ToolStatus
+from trellis.contracts import (
+    ConfigurationError,
+    RunEvent,
+    RunEventType,
+    ToolCall,
+    ToolOutcome,
+    ToolStatus,
+)
 from trellis.harness.runtime import current
 
 if TYPE_CHECKING:
@@ -68,6 +72,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.hooks")
 
+#: Hook methods ``Hooks`` no longer has, and what to use instead (said when a hook defines one).
+REMOVED_HOOKS: Final = dict.fromkeys(
+    ("before_model", "after_model"),
+    "a model call is each framework's own: ReAct(middleware=[...]) or create_agent's "
+    "LangChain middleware, the OpenAI Agents SDK's AgentHooks (Agent(hooks=...)), the Claude "
+    "Agent SDK's hooks",
+)
 #: Where an error was met: the run, a model call, a tool call.
 Stage = Literal["run", "model", "tool"]
 
@@ -101,20 +112,6 @@ class Rewrite:
 
 #: What ``before_tool`` decides.
 Verdict = Deny | Ask | Rewrite | None
-
-
-@dataclass(frozen=True, slots=True)
-class ModelCall:
-    """One model call as its framework makes it: ``framework`` (the adapter's name),
-    ``messages`` in that framework's own form (LangChain messages for ``langgraph``, a ``ReAct``
-    included, Responses input items for ``openai_agents``), the ``model`` when
-    it is named, and the ``system`` prompt where the framework keeps it apart (LangChain's
-    ``SystemMessage``, the OpenAI Agents SDK's text)."""
-
-    framework: str
-    messages: list[Any]
-    model: str | None = None
-    system: Any = None
 
 
 class OutputKind(StrEnum):
@@ -164,12 +161,6 @@ class Hooks:
     async def on_run_end(self, run: Runtime, result: Result) -> None:
         return None
 
-    async def before_model(self, call: ModelCall) -> ModelCall | None:
-        return None
-
-    async def after_model(self, call: ModelCall, reply: Any) -> None:
-        return None
-
     async def before_tool(self, call: ToolCall) -> Verdict:
         return None
 
@@ -189,6 +180,12 @@ class Chain:
 
     def __init__(self, hooks: Sequence[Hooks]) -> None:
         self.hooks = list(hooks)
+        for hook in self.hooks:
+            for name in REMOVED_HOOKS:
+                if hasattr(hook, name):
+                    raise ConfigurationError(
+                        f"{type(hook).__name__}.{name} was removed: {REMOVED_HOOKS[name]}"
+                    )
         #: the hooks that override ``on_output``: none, and nothing sent is wrapped
         self.shows = [h for h in self.hooks if type(h).on_output is not Hooks.on_output]
 
@@ -205,16 +202,6 @@ class Chain:
                 await hook.on_run_end(run, result)
             except Exception:
                 log.exception("on_run_end of %s failed", type(hook).__name__)
-
-    async def model(self, call: ModelCall) -> ModelCall:
-        """The call as the hooks leave it: each one's rewrite is the next one's call."""
-        for hook in self.hooks:
-            call = await hook.before_model(call) or call
-        return call
-
-    async def answered(self, call: ModelCall, reply: Any) -> None:
-        for hook in self.hooks:
-            await hook.after_model(call, reply)
 
     async def tool(self, call: ToolCall) -> tuple[ToolCall, Deny | Ask | None]:
         """The call as the hooks leave it (a :class:`Rewrite` is the next hook's call), and the
@@ -298,7 +285,6 @@ __all__ = [
     "Ask",
     "Deny",
     "Hooks",
-    "ModelCall",
     "Output",
     "OutputKind",
     "Rewrite",

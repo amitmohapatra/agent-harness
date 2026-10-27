@@ -81,6 +81,15 @@ after any of yours:
 * **Not recorded.** A built-in call is not journaled or recorded in memory (the CLI keeps its
   result in its session, below).
 
+## Where sandbox, skills and hooks go
+
+| | Where |
+|---|---|
+| Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))` ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)) |
+| Skills | its own: `ClaudeAgentOptions(skills=[...])` ([skills.md](../skills.md#native-or-ours)) |
+| Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}` |
+
 ## Native or ours: skills, prompts, sandbox
 
 * **Skills:** for `SKILL.md` folders the CLI discovers, use Claude's own:
@@ -174,7 +183,8 @@ the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (
 ## Limits
 
 * A built-in that ran is not journaled or recorded (above).
-* No model hooks: the CLI makes the model calls ([hooks.md](../hooks.md)).
+* A model call is the CLI's: its own hooks (`ClaudeAgentOptions(hooks=...)`) have no model-call
+  event ([hooks.md](../hooks.md)).
 * A session resumes on the machine whose CLI holds it (or a shared `session_store`);
   elsewhere the query runs again from its prompt (above).
 * Large results: a tool's result comes back from the CLI in one message (as the model reads it),

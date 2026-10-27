@@ -16,21 +16,24 @@ import asyncio
 from typing import Any
 
 from examples._support.offline import react_model
+from langchain.agents.middleware import AgentMiddleware
 
-from trellis import Harness, Hooks, ModelCall, ReAct, tool
+from trellis import Harness, ReAct, tool
 from trellis.contracts import RunEventType
 
 
-class ShowPlan(Hooks):
-    """A model hook: each plan the model writes, as it writes it."""
+class ShowPlan(AgentMiddleware):
+    """LangChain's own slot for a model call: each plan the model writes, as it writes it."""
 
-    async def after_model(self, call: ModelCall, reply: Any) -> None:
-        # a LangChain graph's reply: the middleware's ModelResponse, its messages in .result
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        reply = await handler(request)
+        # the middleware's ModelResponse: its messages in .result
         for message in getattr(reply, "result", []):
             for planned in getattr(message, "tool_calls", None) or []:
                 if planned["name"] == "write_todos":
                     todos = planned["args"]["todos"]
                     print("plan:", ", ".join(f"{t['content']} [{t['status']}]" for t in todos))
+        return reply
 
 
 @tool(side_effects="read")
@@ -69,8 +72,9 @@ async def main() -> None:
             model=model,
             tools=[inventory, draft_order],
             context_window=128_000,  # room for the long-task tools
+            middleware=[ShowPlan()],
         )
-        agent = h.wrap(target, id="planner", hooks=[ShowPlan()])
+        agent = h.wrap(target, id="planner")
         task = "Replenish the north warehouse, step by step."
         async for event in agent.stream(task, user="ada"):
             if event.type is RunEventType.TOOL_CALL_RESULT:

@@ -457,7 +457,7 @@ def _sub_agent(item: Any) -> Source:
 
 #: The kinds of tool entry, registered here and only here, tried in this order: a wrapped
 #: agent (a sub-agent), anything that resolves to tools itself (``tool``, ``mcp``, ``a2a``,
-#: ``openapi``, ``sandbox``, a source of yours), a bare function.
+#: ``openapi``, ``sandbox().tools()``, a source of yours), a bare function.
 ENTRY_KINDS: Final[tuple[EntryKind, ...]] = (
     EntryKind("agent", _is_agent, _sub_agent),
     EntryKind("source", lambda item: hasattr(item, "resolve"), lambda item: item),
@@ -472,5 +472,5 @@ def as_source(item: Source | Callable[..., Any] | Any) -> Source:
             return kind.source(item)
     raise ConfigurationError(
         f"not a tool: {item!r} — give a function, tool(...), mcp(...), a2a(...), openapi(...), "
-        "sandbox() or a wrapped agent"
+        "sandbox().tools() or a wrapped agent"
     )

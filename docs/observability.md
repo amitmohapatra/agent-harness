@@ -150,7 +150,7 @@ memory search and recall see the real data. Masking of your own is a hook:
   AG-UI — `on_output` ([hooks.md](hooks.md#mask-what-the-ui-sees)); A2A, memory and the
   journal are not touched by it;
 * what the model reads, and so what the journal and memory keep — `after_tool` returns the
-  outcome masked, `before_model` the messages ([hooks.md](hooks.md),
+  outcome masked, the framework's own model-call middleware the messages ([hooks.md](hooks.md),
   [`examples/02_way1_react/hooks_guardrails.py`](../examples/02_way1_react/hooks_guardrails.py)).
 
 ## Events

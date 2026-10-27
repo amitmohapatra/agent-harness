@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware
 
 from tests.live import heldout
 from tests.live.conftest import MODEL, OPS, _virtual_key, live_harness, needs_gateway, settings
@@ -46,7 +47,7 @@ from tests.live.support import Sent as Wire
 from tests.live.support import gateway_model
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
-from trellis import Harness, Hooks, ModelCall, ReAct, current
+from trellis import Harness, ReAct, current
 from trellis.contracts import ToolSpec
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.evals import EvalReport, tool_coverage
@@ -104,27 +105,30 @@ RUNS: Final = max(len(v[4]) * len(v[1]) for v in SETS.values()) * REPEATS + 10
 pytestmark = [pytest.mark.live, needs_gateway]
 
 
-class Sent(Hooks):
-    """What each run's model calls were sent: the calls offering tools whose instructions
-    lacked the guidance, the runs asked the check, and the model calls per run."""
+class Sent(AgentMiddleware):
+    """What each run's model calls were sent (the agent's own middleware, before the harness's
+    ``ModelHooks``): the calls offering tools whose instructions lacked the guidance, the runs
+    asked the check, and the model calls per run."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.unguided: dict[str, int] = {}
         self.checked: set[str] = set()
         self.write_checked: set[str] = set()
         self.calls: dict[str, int] = {}
 
-    async def before_model(self, call: ModelCall) -> None:
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
         run = current()
         assert run is not None
         self.calls[run.run_id] = self.calls.get(run.run_id, 0) + 1
-        system = call.system.text if call.system is not None else ""
+        system = request.system_message.text if request.system_message is not None else ""
         if GUIDANCE not in system:
             self.unguided[run.run_id] = self.unguided.get(run.run_id, 0) + 1
-        if any(CHECK in str(m.content) for m in call.messages):
+        if any(CHECK in str(m.content) for m in request.messages):
             self.checked.add(run.run_id)
-        if any(WRITE_FIRST in str(m.content) for m in call.messages):
+        if any(WRITE_FIRST in str(m.content) for m in request.messages):
             self.write_checked.add(run.run_id)
+        return await handler(request)
 
 
 def rows_of(
@@ -249,13 +253,13 @@ async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
                 max_steps=MAX_STEPS,
                 tool_guidance=switches.get("tool_guidance", False),
                 answer_check=switches.get("answer_check", False),
+                middleware=[sent],
             )
             agent = arm(
                 h.wrap(
                     target,
                     id=f"tool-choice-{variant}",
                     without={"mcp"},
-                    hooks=[sent],
                     run_timeout=RUN_SECONDS,
                 ),
                 tools,
@@ -356,8 +360,9 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
             max_steps=4,
             tool_guidance=True,
             answer_check=True,
+            middleware=[sent],
         )
-        agent = h.wrap(target, id="tool-choice-mcp", hooks=[sent], without={"code_mode"})
+        agent = h.wrap(target, id="tool-choice-mcp", without={"code_mode"})
         report = await h.evaluate(
             agent, MCP_ITEMS, [tool_coverage()], run_name="tool-choice-mcp", concurrency=1
         )
@@ -397,8 +402,9 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
                 max_steps=6,
                 tool_guidance=True,
                 answer_check=True,
+                middleware=[sent],
             )
-            agent = coded.wrap(target, id="tool-choice-code-mode", hooks=[sent])
+            agent = coded.wrap(target, id="tool-choice-code-mode")
             item = {
                 "input": "What does the facebook/react wiki say about hooks?",
                 "metadata": {"needed_tools": ["execute_tool_code"]},

@@ -631,9 +631,9 @@ class Tools:
 
     async def use(self, *sources: Any) -> list[str]:
         """Add the tools of ``sources`` — ``tool(fn)`` (a function is one), ``mcp(...)``,
-        ``openapi(...)``, ``sandbox()``, ``a2a(url)``, a wrapped agent (a sub-agent) — to this
-        run's toolbox, for :meth:`call`: the names they add, in order (a function target's own
-        tools; a builder's are declared on it)."""
+        ``openapi(...)``, ``sandbox().tools()``, ``a2a(url)``, a wrapped agent (a sub-agent) —
+        to this run's toolbox, for :meth:`call`: the names they add, in order (a function
+        target's own tools; a builder's are declared on it)."""
         from trellis.harness.tools.sources import as_source  # noqa: PLC0415 - imports runtime
 
         names: list[str] = []

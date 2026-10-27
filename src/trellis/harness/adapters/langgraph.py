@@ -344,7 +344,7 @@ def _without_middleware(name: str) -> None:
     log.warning(
         "the graph %s is wrapped without the harness's middleware: its tools are governed and "
         "narrowed, but it has no memory or gateway MCP tools, no step limit or stall guard, no "
-        "model hooks, call_timeout or budget stop, and no checkpoint in the run — build it with "
+        "model spans, call_timeout or budget stop, and no checkpoint in the run — build it with "
         "middleware=trellis.middleware() (and checkpointer=RunCheckpointer())",
         name,
     )

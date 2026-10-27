@@ -1,7 +1,7 @@
-"""The run's sandbox as a Deep Agents backend: ``docker_sandbox()``, where ``ReAct``'s (or any
-Deep Agent's) file tools and its ``execute`` tool work.
+"""The run's sandbox as a Deep Agents backend — ``ReAct(backend=sandbox())``, or
+``create_deep_agent(**sandbox().deep_agent())`` — where the file tools and ``execute`` work.
 
-    agent = h.wrap(ReAct("You analyse data.", "gpt-4o", backend=docker_sandbox()), id="analyst")
+    agent = h.wrap(ReAct("You analyse data.", "gpt-4o", backend=sandbox()), id="analyst")
 
 Deep Agents' ``BaseSandbox`` gives the tools — ``ls``, ``read_file``, ``write_file``,
 ``edit_file``, ``delete``, ``glob``, ``grep`` as commands it runs, and ``execute`` — from three
@@ -31,7 +31,6 @@ from deepagents.backends.sandbox import BaseSandbox
 
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
-from trellis.harness.sandbox.base import SandboxProvider, SandboxSpec
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 
 #: Said by a synchronous operation (a graph run with ``invoke``): the harness runs ``ainvoke``.
@@ -130,25 +129,4 @@ def _error_of(exc: ToolError) -> FileOperationError:
     return "invalid_path"
 
 
-def docker_sandbox(
-    provider: SandboxProvider | None = None,
-    *,
-    image: str | None = None,
-    spec: SandboxSpec | None = None,
-    call_timeout: float = REMOTE_TIMEOUT_SECONDS,
-) -> SandboxBackend:
-    """The run's sandbox as a Deep Agents backend (``ReAct(backend=docker_sandbox())``, or
-    ``create_deep_agent(backend=...)``): its file tools and ``execute`` work in it — granting
-    code execution is this explicit entry. ``provider`` makes the sandboxes (else Docker: the
-    daemon ``DOCKER_HOST`` names); ``image`` is what each is made of (else the provider's), and
-    ``spec`` the rest — limits, network (none by default), files; ``call_timeout`` is the most
-    one command may take, in seconds (past it, it is killed)."""
-    from trellis.harness.sandbox import sandbox  # noqa: PLC0415 - the package imports this module
-
-    return SandboxBackend(
-        sandbox(provider, image=image, spec=spec, call_timeout=call_timeout),
-        call_timeout=call_timeout,
-    )
-
-
-__all__ = ["SandboxBackend", "docker_sandbox"]
+__all__ = ["SandboxBackend"]
