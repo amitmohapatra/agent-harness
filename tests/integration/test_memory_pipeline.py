@@ -200,6 +200,26 @@ async def test_hints_below_the_floor_narrow_nothing(
     assert "tool_search" in offered
 
 
+@pytest.mark.parametrize(("top", "narrows"), [(0.5, True), (0.49, False)])
+async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
+    memory_harness: Harness, memory_service: FakeMemoryService, top: float, narrows: bool
+) -> None:
+    """B13 at ``NARROW_FLOOR``: a best hint of exactly 0.5 narrows the offer (and drops the
+    abstain note: a tool answers); 0.49 narrows nothing and the note stays."""
+    memory_service.candidates = ["t3"]
+    memory_service.top_confidence = top
+    memory_service.evidence_status = "INSUFFICIENT"
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
+    everything = sorted([f"t{i}" for i in range(6)] + list(MEMORY_TOOLS))
+    assert offered == (sorted(["t3", *MEMORY_TOOLS]) if narrows else everything)
+    noted = "## Memory" in model.requests[0]["messages"][1]["content"]
+    assert noted is not narrows
+
+
 async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
     memory_service: FakeMemoryService,
 ) -> None:
