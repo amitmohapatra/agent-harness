@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{ name = "Agent Platform Team" }]
-keywords = ["agents", "harness", "langgraph", "openai-agents", "claude-agent-sdk", "memory"]
+keywords = ["agents", "harness", "langgraph", "openai-agents", "claude-agent-sdk", "kimi", "acp", "memory"]
 classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -53,6 +53,10 @@ react = [
 ]
 openai-agents = ["openai-agents>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
+# ``kimi()``: Kimi Code over the Agent Client Protocol (``adapters.acp``): the ACP SDK, and the MCP
+# SDK that serves the harness's tools to it. The agent itself is the ``kimi`` program
+# (``npm install -g @moonshot-ai/kimi-code@2.1.1``), its tested range in compat.BINARIES.
+kimi = ["agent-client-protocol>=0.12.1,<0.13", "mcp>=2.2,<3"]
 agui = ["fastapi>=0.115"]
 a2a = ["a2a-sdk[http-server]>=1.1,<1.2", "fastapi>=0.115"]
 # ``mcp(...)`` entries for MCP servers the harness reaches itself (HTTP, stdio): the official SDK.
@@ -60,7 +64,7 @@ mcp = ["mcp>=2.2,<3"]
 # OTLP export (Langfuse is reached through the same exporter; no Langfuse SDK).
 otel = ["opentelemetry-sdk>=1.44", "opentelemetry-exporter-otlp-proto-http>=1.44"]
 all = [
-  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,agui,a2a,otel,mcp]",
+  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,kimi,agui,a2a,otel,mcp]",
 ]
 
 [dependency-groups]

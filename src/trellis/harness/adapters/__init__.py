@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from trellis.contracts import ConfigurationError
+from trellis.harness.adapters.acp import ACPAdapter, ACPAgent
 from trellis.harness.adapters.base import Adapter, ToolFormat
 from trellis.harness.adapters.claude import ClaudeAdapter
 from trellis.harness.adapters.function import FunctionAdapter
@@ -36,14 +37,16 @@ def detect(target: Any) -> Adapter:
 
         if isinstance(target, ClaudeAgentOptions):
             return ClaudeAdapter()
+    if isinstance(target, ACPAgent):
+        return ACPAdapter()
     if inspect.iscoroutinefunction(target) or inspect.iscoroutinefunction(
         getattr(target, "__call__", None)  # noqa: B004 - an object with an async __call__
     ):
         return FunctionAdapter()
     raise ConfigurationError(
         f"cannot wrap {type(target).__name__}: pass a compiled LangGraph graph (Deep Agents "
-        "included, ReAct(...) among them), an OpenAI Agents Agent, ClaudeAgentOptions, or an async "
-        "function (input, agent) -> answer"
+        "included, ReAct(...) among them), an OpenAI Agents Agent, ClaudeAgentOptions, an ACP agent "
+        "(kimi()), or an async function (input, agent) -> answer"
     )
 
 
@@ -55,6 +58,8 @@ def convert(tool_format: ToolFormat, tools: Sequence[Tool]) -> Any:
         from trellis.harness.tools.convert import langchain as module
     elif tool_format == "openai_agents":
         from trellis.harness.tools.convert import openai_agents as module  # type: ignore[no-redef]
+    elif tool_format == "mcp":
+        from trellis.harness.tools.convert import mcp as module  # type: ignore[no-redef]
     else:
         from trellis.harness.tools.convert import claude as module  # type: ignore[no-redef]
     return module.convert(tools)
