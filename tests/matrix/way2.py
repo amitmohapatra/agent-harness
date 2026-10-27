@@ -35,7 +35,7 @@ from trellis.harness.evals import EvalCase, EvalServices, judge
 from trellis.harness.evals import grounding as grounding_block
 from trellis.harness.governance import Decision, Denied, Governance, Rejected, governed
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
+from trellis.harness.hooks import Ask, Deny, Hooks, Rewrite, Verdict
 from trellis.harness.redaction import DEFAULT as REDACTOR
 from trellis.harness.tools.base import ToolTimeout
 from trellis.runs import Job
@@ -462,32 +462,3 @@ async def hook_after(w: World) -> None:
         hooks=[_Hooked(output="replaced by a hook")],
     )
     assert await lookup(topic="x") == "replaced by a hook"
-
-
-async def model_hooks(w: World) -> None:
-    """A LangChain graph your code runs, its model calls hooked by ``ModelHooks(hooks)``."""
-    from langchain.agents import create_agent
-    from langchain_core.messages import HumanMessage
-    from langchain_core.tools import tool as langchain_tool
-
-    from tests.support.planned import PlannedChatModel
-    from trellis.harness.middleware import ModelHooks
-
-    seen: list[str] = []
-
-    class Noting(Hooks):
-        async def before_model(self, call: ModelCall) -> None:
-            seen.append("before")
-
-        async def after_model(self, call: ModelCall, reply: Any) -> None:
-            seen.append("after")
-
-    @langchain_tool
-    def lookup(topic: str) -> str:
-        """Look a topic up."""
-        return f"facts about {topic}"
-
-    model = PlannedChatModel(plan=[("lookup", {"topic": "x"})])
-    graph = create_agent(model, tools=[lookup], middleware=[ModelHooks(Noting())])
-    await graph.ainvoke({"messages": [HumanMessage("x")]})
-    assert seen == ["before", "after", "before", "after"], seen

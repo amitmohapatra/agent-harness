@@ -13,7 +13,7 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 ### Breaking
 
 - `ReAct` takes Deep Agents' capabilities: given `backend=` (file tools, large-result eviction,
-  summarization; `docker_sandbox()` for `execute`), a `SubAgent`/`CompiledSubAgent` sub-agent
+  summarization; `sandbox()` for `execute`), a `SubAgent`/`CompiledSubAgent` sub-agent
   (`task`), `skills=`, `memory_files=` or `permissions=`, it is `create_deep_agent` (prompt
   caching, its long-task scratch files and helper); otherwise `create_agent` with
   `middleware()` and dangling-call repair — the base measured as good or better on every class
@@ -23,7 +23,7 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   context_window, effort, tool_guidance=None, answer_check=None, middleware)`
   (`memory_files` is Deep Agents' `memory`; its `interrupt_on`, `name` and `debug` are not
   exposed).
-- `ReAct(tools=)` refuses `sandbox()` (code runs in `backend=docker_sandbox()`) and agents
+- `ReAct(tools=)` refuses `sandbox()` (code runs in `backend=sandbox()`) and agents
   (`a2a(url)` and wrapped agents go in `subagents=`); `max_repeats` is 2 or more, as
   `StallGuard` always required.
 - `tool_guidance` and `answer_check` default to `None`, automatic — which, measured on a small
@@ -59,12 +59,38 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
     (`agent.resume`). `VERDICT_SCORES` lost their entries.
 - `ReAct(middleware=)` with a Deep Agents middleware's name replaces Deep Agents' own (as
   `create_deep_agent` does); one named as the harness's is still refused.
+- One sandbox entry: `sandbox()`, given where each engine takes it. No alias is kept.
+  - `docker_sandbox()` removed (from `trellis`, where reading the name says what to use, and
+    from `trellis.harness.sandbox.backend`):
+    `ReAct(backend=sandbox())` takes the sandbox itself, and a `create_deep_agent` of your own
+    takes `**sandbox().deep_agent()` (`{"backend": SandboxBackend(...)}`).
+  - `sandbox()` is no longer a tool source itself: its three tools are `sandbox().tools()`
+    (`agent.tools.use(sandbox().tools())`, the same object every time), for an engine with no
+    sandbox of its own (a function, a LangGraph graph). A bare `sandbox()` given as a tool is
+    refused, naming `.tools()`. Same per-run sandbox as before: made at the first call,
+    journaled, paused, deleted at the run's end, reaped.
+- The model hooks are removed: a model call is each framework's own (LangChain and Deep Agents
+  middleware — `ReAct(middleware=[...])` —, the OpenAI Agents SDK's `AgentHooks`, the Claude
+  Agent SDK's hooks), which run under `h.wrap` as without it.
+  - `Hooks.before_model` and `Hooks.after_model` removed, with `ModelCall` (`trellis.ModelCall`
+    says what to use). A hook class that still defines either is refused where it is given
+    (`h.wrap(hooks=)`, `governed(hooks=)`): `ConfigurationError` naming the framework's own
+    slot, never silently skipped. `Hooks` keeps `on_run_start`, `on_run_end`, `on_error`,
+    `before_tool` (`Deny`/`Ask`/`Rewrite`), `after_tool` and `on_output`.
+  - `middleware.ModelHooks(*hooks)` and `hooks.openai_agents.ModelHooks(*hooks)` take no hooks
+    of yours: what they do for the harness stays — the `chat` span, `call_timeout`, the pinned
+    stored prompt and a failed call's `on_error("model", ...)`; the OpenAI run's stall watch,
+    hosted tool calls and budget accounting (nothing internal relied on the public hooks).
+  - The feature matrix's `F71m` row (model hooks) is gone.
 - Removed, Deep Agents now owning them: `automatic.JournalFiles`, `automatic.FilesState`,
   `automatic.ScratchFiles` (`automatic.LongTaskTools` offers Deep Agents' own scratch tools and
   general-purpose helper on a long task); `ModelHooks(routed=)` (it sees a routed model itself).
 
 ### Added
 
+- Each framework page says where the sandbox, skills and hooks go on that engine, and that
+  `budget=` is the one cross-engine token, dollar and tool-call cap while a framework's own
+  turn limit (`recursion_limit`, `max_turns`) goes in `framework_options`.
 - Chat attachments: on `serve_chat`, the user message's file parts — AG-UI 1.0 media parts
   (`document`, `image`, `audio`, `video`) whose `source` is `{"type": "file", "value":
   "<document id>"}`, a document already uploaded to the memory service — are the run's

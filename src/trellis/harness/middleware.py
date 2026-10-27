@@ -12,8 +12,8 @@ any ``create_agent`` or Deep Agents graph may take any of them:
   holds; every call goes through the bridge (``tools.bridge``: governance, journal, record),
   numbered in the model's order, and a call that does more than read waits for the earlier
   ones of the same model step (the model's order) — ``ReAct``'s ``tools=``;
-* :class:`ModelHooks` — around every model call: the run's ``before_model`` / ``after_model`` /
-  ``on_error`` hooks, a ``chat`` span with the usage (redacted, as every span), the most the
+* :class:`ModelHooks` — around every model call: the run's ``on_error`` hooks for a call that
+  failed, a ``chat`` span with the usage (redacted, as every span), the most the
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
   pinned for the run (``prompt``: journaled, sent as headers, on the span), and the model
   client's errors as a :class:`~trellis.contracts.ModelError` saying whether it may pass;
@@ -37,8 +37,8 @@ any ``create_agent`` or Deep Agents graph may take any of them:
   offers (the tool hints, the parts it is without), as :class:`ModelHooks` does.
 
 The harness's middleware run inside a harness run (``trellis.current()``); outside one they
-step aside (:class:`ModelHooks` runs the hooks it was given, :class:`RunCheckpointer` keeps the
-checkpoint in memory). They are asynchronous: a graph is run with ``ainvoke``/``astream``.
+step aside (:class:`RunCheckpointer` keeps the checkpoint in memory). They are asynchronous: a
+graph is run with ``ainvoke``/``astream``.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.gateways import Capability, route_now, routed
-from trellis.harness.hooks import Hooks, ModelCall, running
+from trellis.harness.hooks import running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
@@ -631,24 +631,18 @@ def _named(tool: BaseTool | dict[str, Any]) -> str:
 
 # --------------------------------------------------------------------------- the model call
 class ModelHooks(AgentMiddleware):
-    """Around every model call: the task kept ahead of a summary (the conversation's leading
-    system messages, the pushed memory context among them, and its first user message), the
-    run's model hooks (then ``hooks``), a ``chat`` span with the usage, at most ``timeout``
+    """Around every model call: the task kept ahead of a summary (the conversation's leading system
+    messages, the pushed memory context among them, and its first user message), the run's
+    ``on_error`` hooks for a call that failed, a ``chat`` span with the usage, at most ``timeout``
     seconds (and what is left of the run's time), and the stored ``prompt`` of the gateway
     (``stored("name", **vars)``), pinned for the run: with no variables to fill, on a routed
     model through Bifrost, selected by every call (headers the gateway reads: it prepends it);
     otherwise rendered into the instructions, its other messages before the conversation."""
 
-    def __init__(
-        self,
-        *hooks: Hooks,
-        timeout: float | None = None,
-        prompt: Stored | None = None,
-    ) -> None:
+    def __init__(self, *, timeout: float | None = None, prompt: Stored | None = None) -> None:
         super().__init__()
         if timeout is not None and timeout <= 0:
             raise ConfigurationError("a model timeout is a number of seconds over 0")
-        self.given = list(hooks)
         self.timeout = timeout
         self.prompt = prompt
         #: each run's tools in the order they were first offered (:meth:`_in_order`)
@@ -682,18 +676,11 @@ class ModelHooks(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         runtime = current()
-        hooks = running(*self.given)
         request = self._in_order(_with_task(_unbroken(_offered(request, runtime))), runtime)
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
         name = _model_name(request.model)
-        asked = ModelCall(
-            "langgraph", list(request.messages), model=name, system=request.system_message
-        )
-        call = await hooks.model(asked) if hooks else asked
-        if call is not asked:
-            request = request.override(messages=call.messages, system_message=call.system)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
             # in the model's span: the gateway's span of the call joins it. A model name the
@@ -710,11 +697,10 @@ class ModelHooks(AgentMiddleware):
                     reply = await handler(request)
             except Exception as exc:
                 error = model_error(exc, self.timeout)
-                await hooks.failed("model", error)
+                await running().failed("model", error)
                 if error is exc:
                     raise
                 raise error from exc
-            await hooks.answered(call, reply)
             _replied(span, reply)
         return reply
 

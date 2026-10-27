@@ -100,7 +100,7 @@ The names are Deep Agents' where both have one. In four tiers:
   run's journal keeps it across a pause, a crash and a move to another worker, a file at most
   100,000 characters and a run's files at most 1,000,000); or a Deep Agents backend of yours —
   `StoreBackend` (the memory service's store when wrapped), `FilesystemBackend`,
-  `CompositeBackend` — or the run's sandbox, `docker_sandbox()`, where `execute` runs code
+  `CompositeBackend` — or the run's sandbox, `sandbox()`, where `execute` runs code
   ([sandbox.md](../sandbox.md)). Files outside the graph's state are the agent's from the start
   and governed as any tool (the reads read, the others write; the catalog may say more).
 * `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds: model
@@ -180,7 +180,7 @@ result as a file and the model went looking. Deep Agents' capabilities stay a pa
 |---|---|
 | planning (`write_todos`) | a long task: the model's third call, or a request asking for steps, on a window of 32,000 tokens or more |
 | `read_result` | once an older result was cleared past half the window |
-| file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `docker_sandbox()` (with `execute`) |
+| file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `sandbox()` (with `execute`) |
 | `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict; on a long task, Deep Agents' general-purpose helper too |
 | skills, memory files, permissions | `skills=`, `memory_files=`, `permissions=` |
 
@@ -224,7 +224,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
 | `ToolGuidance` (`tool_guidance`) | how to choose among tools, added to the instructions ([below](#tool-choice)) |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
-| `ModelHooks` | the run's `before_model`/`after_model`/`on_error` hooks around every model call, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
+| `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
 
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped. A declarative
@@ -441,12 +441,21 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
 [examples/05_features/subagents.py](../../examples/05_features/subagents.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
 
+## Where sandbox, skills and hooks go
+
+| | Where |
+|---|---|
+| Sandbox | `ReAct(backend=sandbox())`: Deep Agents' file tools and `execute` in the run's own sandbox ([sandbox.md](../sandbox.md)) |
+| Skills | `ReAct(skills=[...])`: Deep Agents' skill sources, read through `backend` ([skills.md](../skills.md#native-or-ours)) |
+| Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `ReAct(middleware=[...])` |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); the loop's own turn limit is `max_steps`, and LangGraph's `recursion_limit` goes in `framework_options` |
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
 * No `store=` or `checkpointer=`: the memory service and the run keep them; a graph with its
   own is `create_agent(..., middleware=middleware())`.
-* `tools=` takes no sandbox (`backend=docker_sandbox()`) and no agent (`subagents=`); a graph is
+* `tools=` takes no sandbox (`backend=sandbox()`) and no agent (`subagents=`); a graph is
   a sub-agent with its name and description (`{"name", "description", "runnable"}`).
 * Building a `ReAct` costs what `create_deep_agent` costs (it compiles its general-purpose helper
   as well): about 26 ms against 13 ms for `create_agent` — once per agent, not per run.
@@ -454,7 +463,7 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
   tool results and the long-task tools are off, said once.
 * Skills and memory files on the default backend must be in the graph's state; give a
   `FilesystemBackend` (or a store) that holds them.
-* The harness runs the graph asynchronously (`ainvoke`): `docker_sandbox()` has no synchronous
+* The harness runs the graph asynchronously (`ainvoke`): the sandbox backend has no synchronous
   operations.
 * A model name needs Bifrost or a provider prefix (`openai/...`) whose key the provider's SDK
   reads ([configuration.md](../configuration.md#where-a-model-name-goes)).
@@ -466,7 +475,7 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
   tools, an approval resumed in place, a hook, `run_timeout`, `framework_options`, `without=`.
 * [`examples/02_way1_react/subagents.py`](../../examples/02_way1_react/subagents.py) — a Deep Agents
   sub-agent, a wrapped agent and an A2A agent, each a child run.
-* [`examples/05_features/sandbox.py`](../../examples/05_features/sandbox.py) — `backend=docker_sandbox()`:
+* [`examples/05_features/sandbox.py`](../../examples/05_features/sandbox.py) — `backend=sandbox()`:
   a script written and run in the run's sandbox.
 * [`examples/02_way1_deepagents/middleware.py`](../../examples/02_way1_deepagents/middleware.py) —
   `middleware()` on a `create_deep_agent` and a `create_agent` graph of your own.

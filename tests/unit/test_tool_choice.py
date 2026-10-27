@@ -213,7 +213,7 @@ def test_too_many_tools_at_once() -> None:
 
 
 async def test_the_harness_own_tools_pass_the_check() -> None:
-    sandboxed = await sandbox().resolve()
+    sandboxed = await sandbox().tools().resolve()
     assert lint([*CODE_MODE_TOOLS, *(t.spec for t in sandboxed)]) == []
 
 

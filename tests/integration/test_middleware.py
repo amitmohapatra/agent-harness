@@ -12,12 +12,13 @@ import httpx2
 import openai
 import pytest
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
-from trellis import Harness, Hooks, ModelCall, Settings, current, tool
+from trellis import Harness, Hooks, Settings, current, tool
 from trellis.contracts import ConfigurationError, ModelError, RunEventType, RunStatus
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
@@ -243,22 +244,27 @@ async def test_without_a_checkpointer_a_pause_stops_the_later_writes_and_replays
 # --------------------------------------------------------------------------- ModelHooks
 class Recording(Hooks):
     def __init__(self) -> None:
-        self.calls: list[ModelCall] = []
-        self.replies: list[Any] = []
         self.errors: list[Exception] = []
-
-    async def before_model(self, call: ModelCall) -> ModelCall | None:
-        self.calls.append(call)
-        return ModelCall(call.framework, [*call.messages, HumanMessage("be brief")], call.model)
-
-    async def after_model(self, call: ModelCall, reply: Any) -> None:
-        self.replies.append(reply)
 
     async def on_error(self, stage: str, error: Exception) -> None:  # type: ignore[override]
         self.errors.append(error)
 
 
-async def test_model_hooks_rewrite_the_call_and_the_span_carries_it_redacted(
+class Brief(AgentMiddleware):
+    """A model call changed in LangChain's own slot, before the harness's ``ModelHooks``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        self.calls += 1
+        return await handler(
+            request.override(messages=[*request.messages, HumanMessage("be brief")])
+        )
+
+
+async def test_a_call_changed_before_model_hooks_is_the_one_made_and_the_span_carries_it_redacted(
     harness: Harness, spans: InMemorySpanExporter
 ) -> None:
     @tool(side_effects="read")
@@ -266,17 +272,16 @@ async def test_model_hooks_rewrite_the_call_and_the_span_carries_it_redacted(
         """Say it back."""
         return text
 
-    hooks = Recording()
+    brief = Brief()
     secret = "sk-abcdefghijklmnopqrstu"
     model = ScriptedChatModel(
         turns=[("echo", {"text": "hi", "api_key": "k1"}), ("echo", {"text": secret}), "done"]
     )
-    target = graph(model, HarnessTools(), ModelHooks(), checkpointer=RunCheckpointer())
-    agent = arm(harness.wrap(target, id="hooked", hooks=[hooks]), [echo])
+    target = graph(model, HarnessTools(), brief, ModelHooks(), checkpointer=RunCheckpointer())
+    agent = arm(harness.wrap(target, id="hooked"), [echo])
     await agent.run({"messages": [{"role": "user", "content": "go"}], "password": "pw"}, user="u")
-    assert [c.framework for c in hooks.calls] == ["langgraph"] * 3
-    assert model.seen[0][-1].content == "be brief"  # the rewritten call was the one made
-    assert len(hooks.replies) == 3
+    assert brief.calls == 3
+    assert model.seen[0][-1].content == "be brief"  # the changed call was the one made
     chats = [s for s in spans.get_finished_spans() if s.name.startswith("chat ")]
     assert [s.name for s in chats] == ["chat model"] * 3
     text = str([dict(s.attributes or {}) for s in chats])
@@ -317,8 +322,8 @@ class Slow(ScriptedChatModel):
 
 async def test_a_model_call_past_its_time_is_a_retryable_model_error(harness: Harness) -> None:
     hooks = Recording()
-    target = graph(Slow(turns=[]), ModelHooks(hooks, timeout=0.05))
-    agent = harness.wrap(target, id="slow")
+    target = graph(Slow(turns=[]), ModelHooks(timeout=0.05))
+    agent = harness.wrap(target, id="slow", hooks=[hooks])
     result = await agent.run("x", user="u")
     assert result.error is not None
     assert result.error.message == "the model did not answer within 0.05s: the step stalled"

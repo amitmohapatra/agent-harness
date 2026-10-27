@@ -78,7 +78,7 @@ async def test_a_run_works_in_its_own_limited_offline_container_deleted_at_its_e
         return [total["exit_code"], await agent.tools.call("sandbox_read", path="out.txt")]
 
     spec = SandboxSpec(files={"data.csv": "n\n1\n2\n39\n"}, cpu=0.5, memory=128)
-    agent = arm(harness.wrap(analyse, id="analyst"), [sandbox(PROVIDER, spec=spec)])
+    agent = arm(harness.wrap(analyse, id="analyst"), [sandbox(PROVIDER, spec=spec).tools()])
     result = await agent.run("add them up", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     assert result.answer == [0, "42\n"]
@@ -107,7 +107,7 @@ async def test_an_open_network_has_an_interface_and_a_command_out_of_time_is_kil
         return [net["stdout"].split(), late, left["stdout"]]
 
     source = sandbox(PROVIDER, spec=SandboxSpec(network="open"), call_timeout=10)
-    agent = arm(harness.wrap(work, id="opener"), [source])
+    agent = arm(harness.wrap(work, id="opener"), [source.tools()])
     result = await agent.run("go", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     interfaces, late, left = result.answer
@@ -124,7 +124,7 @@ async def test_a_paused_run_keeps_its_container_snapshotted_and_paused_and_resum
         await agent.ask("Publish the draft?")
         return await agent.tools.call("sandbox_exec", command="cat report.md")
 
-    agent = arm(harness.wrap(work, id="publisher"), [sandbox(PROVIDER)])
+    agent = arm(harness.wrap(work, id="publisher"), [sandbox(PROVIDER).tools()])
     waiting = await agent.run("write it", user="u")
     assert waiting.interrupt is not None
     name = f"trellis-{waiting.run_id}"
@@ -151,7 +151,7 @@ async def test_a_worker_that_dies_leaves_the_container_to_the_next_attempt(
 
     store = harness.runs
     assert isinstance(store, LocalRuns)
-    agent = arm(harness.wrap(work, id="survivor"), [sandbox(PROVIDER)])
+    agent = arm(harness.wrap(work, id="survivor"), [sandbox(PROVIDER).tools()])
     handle = await agent.start("go", user="u")
     await crash_once(store, agent, handle)
     name = f"trellis-{handle.id}"

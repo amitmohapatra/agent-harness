@@ -57,7 +57,7 @@ from trellis.harness.automatic import JournalBackend
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.hooks import Ask, Deny, Hooks, ModelCall, Rewrite, Verdict
+from trellis.harness.hooks import Ask, Deny, Hooks, Rewrite, Verdict
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.sandbox import sandbox
@@ -1258,7 +1258,6 @@ class _Guard(Hooks):
     ) -> None:
         self.deny, self.rewrite, self.ask, self.replace = deny, rewrite, ask, replace
         self.runs: list[tuple[str, str, str | None]] = []
-        self.models: list[str] = []
         self.errors: list[str] = []
 
     async def on_run_start(self, run: Runtime) -> None:
@@ -1266,12 +1265,6 @@ class _Guard(Hooks):
 
     async def on_run_end(self, run: Runtime, result: Any) -> None:
         self.runs.append(("end", run.run_id, result.status.value))
-
-    async def before_model(self, call: ModelCall) -> None:
-        self.models.append(f"before {call.framework}")
-
-    async def after_model(self, call: ModelCall, reply: Any) -> None:
-        self.models.append(f"after {call.framework}")
 
     async def before_tool(self, call: ToolCall) -> Verdict:
         if self.deny and call.tool == "refund":
@@ -1328,28 +1321,6 @@ async def hook_runs(w: World) -> None:
     ends = [r for r in guard.runs if r[:2] == ("end", o.run_id)]
     assert len(starts) == len(ends) == len(attempts), (guard.runs, attempts)
     assert ends[-1][2] == "SUCCESS"
-
-
-async def hook_models(w: World) -> None:
-    d, guard = Desk(), _Guard()
-
-    async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
-        from trellis.harness.middleware import ModelHooks
-
-        native = await native_tools(h, *tools, framework=w.adapter)
-        model = PlannedChatModel(plan=plan)
-        if w.adapter == "deepagents":
-            from deepagents import create_deep_agent
-
-            return create_deep_agent(model=model, tools=native, middleware=[ModelHooks()]), tools
-        return create_agent(model, tools=native, middleware=[ModelHooks()]), tools
-
-    built = target if w.adapter in ("langgraph", "deepagents") else None
-    plan: list[Call] = [("lookup", {"topic": "x"})]
-    (await w.go([d.lookup()], plan, hooks=[guard], target=built)).succeeded()
-    assert guard.models, "no model call was hooked"
-    assert len([m for m in guard.models if m.startswith("before")]) >= 2, guard.models
-    assert len([m for m in guard.models if m.startswith("after")]) >= 2, guard.models
 
 
 # --------------------------------------------------------------------------- a run's own options
@@ -1426,7 +1397,7 @@ async def sandboxed(w: World) -> None:
         ("sandbox_exec", {"command": "cat a.txt"}),
     ]
     d = Desk()
-    o = (await w.go([sandbox(provider), d.refund()], plan)).succeeded()
+    o = (await w.go([sandbox(provider).tools(), d.refund()], plan)).succeeded()
     assert "hello" in o.text, o.answer
     assert len(provider.made()) == 1, provider.calls  # one sandbox, kept across the pause
     assert provider.calls[-1][0] == "delete" and not provider.boxes, provider.calls
@@ -1496,9 +1467,6 @@ QUEUED: Final = only_modes(
     "schedule",
     reason="a queue order is a queued run's: start and schedule take it",
 )
-NO_MODEL_HOOKS: Final = NA(
-    "no model call the harness can hook (a function makes none; the CLI's are its own)"
-)
 TOOL_HOOK_ROWS: Final = (
     (
         "F71d",
@@ -1530,15 +1498,6 @@ FEATURES.extend(
             "h.wrap(hooks=[...])",
             hook_runs,
             way2=NA("no run of the harness's in Way 2: your code has its own"),
-        ),
-        Feature(
-            "F71m",
-            "hooks: before_model / after_model around every model call",
-            "F71 (W6)",
-            "hooks=; LangChain: middleware=[ModelHooks()] (ReAct's own); OpenAI: automatic",
-            hook_models,
-            adapters={"function": NO_MODEL_HOOKS, "claude": NO_MODEL_HOOKS},
-            way2=way2.model_hooks,
         ),
         Feature(
             "F09r",
@@ -1581,7 +1540,7 @@ FEATURES.extend(
             "F73",
             "sandbox: write, exec across a pause, one sandbox per run, deleted at its end",
             "F73 (W7)",
-            "ReAct(tools=[sandbox(provider)]); sandbox() alone: Docker",
+            "sandbox(provider).tools() (ReAct: backend=sandbox()); sandbox() alone: Docker",
             sandboxed,
             way2=NA(
                 "sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)"

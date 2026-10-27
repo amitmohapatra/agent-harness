@@ -167,8 +167,9 @@ async def test_a_graph_wrapped_without_the_middleware_is_said_once(
 # --------------------------------------------------------------------------- tools, sub-agents
 def test_a_sandbox_is_a_backend_and_an_agent_a_sub_agent(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[])
-    with pytest.raises(ConfigurationError, match=r"backend=docker_sandbox\(\)"):
-        ReAct("s", model, tools=[sandbox(FakeSandboxes())])
+    for given in (sandbox(FakeSandboxes()), sandbox(FakeSandboxes()).tools()):
+        with pytest.raises(ConfigurationError, match=r"ReAct\(backend=sandbox\(\)\), not tools="):
+            ReAct("s", model, tools=[given])
     with pytest.raises(ConfigurationError, match="an agent is a sub-agent"):
         ReAct("s", model, tools=[a2a("http://agent.test")])
     helper = harness.wrap(ReAct("s", model), id="helper")

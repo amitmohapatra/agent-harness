@@ -30,7 +30,7 @@ local and MCP tools, governance and a person, a hook, `without=`, `run_timeout=`
 | [02_way1_react/agent.py](02_way1_react/agent.py) | `ReAct`: memory, a local and two MCP tools, a destructive call approved and resumed in place, a `Rewrite` hook, `run_timeout`, `framework_options`, a run `without={"memory"}` |
 | [02_way1_react/subagents.py](02_way1_react/subagents.py) | `ReAct(subagents=[...])` on Deep Agents: a `SubAgent` dict whose `interrupt_on` asks a person (resumed in place), a wrapped agent, and an A2A agent served on a real port — each call a child run |
 | [02_way1_react/structured_output.py](02_way1_react/structured_output.py) | `ReAct(response_format=Forecast)`: a pydantic answer |
-| [02_way1_react/hooks_guardrails.py](02_way1_react/hooks_guardrails.py) | a guardrail (`Deny`, `Ask` on a role, `Rewrite`) and card numbers masked in tool results and before the model reads them |
+| [02_way1_react/hooks_guardrails.py](02_way1_react/hooks_guardrails.py) | a guardrail (`Deny`, `Ask` on a role, `Rewrite`), card numbers masked in tool results (`after_tool`) and, by a LangChain middleware (`ReAct(middleware=)`), before the model reads them |
 | [02_way1_function/agent.py](02_way1_function/agent.py) | an async function: `agent.context`, `agent.memory`, an MCP tool and a local one through `agent.tools.call`, `agent.ask` with options, a `Deny` hook, `without=`, `cancel` (`framework_options` does not apply) |
 | [02_way1_function/memory_documents_feedback.py](02_way1_function/memory_documents_feedback.py) | `h.add_document` (the next context cites it), `agent.memory.search`, `h.feedback` (pending the tenant administrator) |
 | [02_way1_function/queue_worker_inbox.py](02_way1_function/queue_worker_inbox.py) | `agent.start` → a worker → `ask` with a diff → `h.inbox("role:legal")` → `resume` → the worker again |
@@ -79,7 +79,7 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | [langgraph_interrupt_fields.py](05_features/langgraph_interrupt_fields.py) | a graph's own `interrupt({...})` with options, `multiple`, `component`, `props`, `assignee`; the inbox; resumed in place |
 | [subagents.py](05_features/subagents.py) | `ReAct(subagents=[...])`: a planner calling two agents, one asking a person through the planner |
 | [stored_prompts.py](05_features/stored_prompts.py) | a stored prompt of the gateway as a `ReAct`'s instructions (`stored(...)`, pinned per run) and for any framework (`h.prompt`) |
-| [sandbox.py](05_features/sandbox.py) | `ReAct(backend=docker_sandbox())`: a script written and run with Deep Agents' `execute` in the run's own sandbox (Docker when `DOCKER_HOST` is set, else a provider of the example's own); then the provider governed with no harness |
+| [sandbox.py](05_features/sandbox.py) | `ReAct(backend=sandbox())`: a script written and run with Deep Agents' `execute` in the run's own sandbox (Docker when `DOCKER_HOST` is set, else a provider of the example's own); then the provider governed with no harness |
 | [serve_agui_and_a2a.py](05_features/serve_agui_and_a2a.py) | `serve_chat` (AG-UI) and `serve_a2a` on one FastAPI app; another agent calling it with `a2a(url)`, its question asked through the caller |
 | [trajectory_evals.py](05_features/trajectory_evals.py) | `h.evaluate`: `exact_match`, `contains`, `llm_judge`, `called`, `tool_sequence` and an evaluator of your own reading the trajectory |
 | [online_judges.py](05_features/online_judges.py) | `h.wrap(judges=[llm_judge(..., sample=)])`: judges on a share of live runs, in the background |
@@ -101,7 +101,7 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | [tool_choice.py](06_scenarios/tool_choice.py) | reliable tool choice, measured: a broad tool beside specific ones, multi-part requests, a change behind approval; `ReAct(tool_guidance=True, answer_check=True)` and `tool_coverage()` per item |
 | [child_runs_every_framework.py](06_scenarios/child_runs_every_framework.py) | each framework's own way of handing work to another agent is a child run: `ReAct(subagents=)`, a nested `run()` in a function and in a LangGraph tool, a Deep Agents `task`, `Agent.as_tool`, a Claude subagent; `h.runs.iterate(parent_run_id=)` |
 | [runs_every_framework.py](06_scenarios/runs_every_framework.py) | an agent of every framework queued with `start` (`RunHandle`, `priority=`), one worker for all; a schedule fired; a queued run cancelled |
-| [planning_todolist.py](06_scenarios/planning_todolist.py) | planning on a long task: `ReAct`'s own `write_todos` (on with `context_window=`), the plan shown by an `after_model` hook |
+| [planning_todolist.py](06_scenarios/planning_todolist.py) | planning on a long task: `ReAct`'s own `write_todos` (on with `context_window=`), the plan shown by a LangChain middleware (`ReAct(middleware=)`) |
 
 ## What the examples share
 

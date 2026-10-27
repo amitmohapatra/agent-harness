@@ -1,10 +1,11 @@
-"""Code run away from the host: ``ReAct(backend=docker_sandbox())`` — Deep Agents' ``execute``
-and file tools work in the run's own sandbox (``sandbox()`` gives any other framework the same
-sandbox as tools) — then the same provider without a harness (Way 2): ``governed`` around a
-sandbox's ``exec``.
+"""Code run away from the host: ``ReAct(backend=sandbox())`` — Deep Agents' ``execute`` and
+file tools work in the run's own sandbox (``create_deep_agent(**sandbox().deep_agent())`` the
+same for a Deep Agent of your own, ``sandbox().tools()`` the same sandbox as tools for an engine
+with none) — then the same provider without a harness (Way 2): ``governed`` around a sandbox's
+``exec``.
 
-``docker_sandbox()`` alone is a Docker container with no network (the daemon ``DOCKER_HOST``
-names), of ``docker_sandbox(image=)`` (else ``python:3.12-slim``). Without ``DOCKER_HOST`` this
+``sandbox()`` alone is a Docker container with no network (the daemon ``DOCKER_HOST`` names), of
+``sandbox(image=)`` (else ``python:3.12-slim``). Without ``DOCKER_HOST`` this
 example plugs in a provider of its own — temporary directories of this machine (no isolation: an
 example of the interface only). Either way the sandbox lives as its run does: made at the first
 command, named in the run's journal, deleted at its end; ``execute`` is governed and recorded as
@@ -28,7 +29,7 @@ from typing import Any
 
 from examples._support.offline import react_model
 
-from trellis import Harness, ReAct, docker_sandbox
+from trellis import Harness, ReAct, sandbox
 from trellis.contracts import RunEventType, ToolError
 from trellis.harness.governance import Governance, governed
 from trellis.harness.sandbox import (
@@ -135,7 +136,7 @@ async def main() -> None:
         analyst = ReAct(
             system_prompt="You analyse data: write a Python script in your sandbox, run it.",
             model=model,
-            backend=docker_sandbox(provider, spec=spec, call_timeout=60),
+            backend=sandbox(provider, spec=spec, call_timeout=60),
         )
         agent = h.wrap(analyst, id="analyst")
         async for event in agent.stream("How many units did we sell?", user="ada"):

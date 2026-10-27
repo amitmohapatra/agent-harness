@@ -85,7 +85,7 @@ is still narrowed and governed, said once at `h.wrap`.
 | Governance and approvals | every tool call — the graph's own and the harness's — is governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
 | Tool hints | the context is asked for with the toolbox's names (5 or more); a `create_agent` graph is then offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`), but its `ToolNode`'s calls are governed, journaled and recorded as the run's |
 | Grounding, judges | sampled successful runs with an answer ([evaluation.md](../evaluation.md)) |
-| Hooks | the tool and run hooks as for every target; the model hooks through LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[ModelHooks()])` (`from trellis.harness.middleware import ModelHooks`; a `before_model` call is the request made; the other harness middleware — the run's tools per model call, a step limit, stall detection, the checkpoint in the run — is in [react.md](react.md#the-middleware)) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
+| Hooks | the tool and run hooks as for every target; a model call is LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[yours, ModelHooks()])` (`from trellis.harness.middleware import ModelHooks`: the span, `call_timeout`, a failed call's `on_error`; the other harness middleware — the run's tools per model call, a step limit, stall detection, the checkpoint in the run — is in [react.md](react.md#the-middleware)) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per tool call, `retrieve memory`; LangChain's own instrumentation nests under it |
 
 The answer is the state's `structured_response` (a `response_format`) or the last AI message's
@@ -204,11 +204,20 @@ a2a(url)(message)`, as the run inside one.
 `trellis.harness.evals`); `llm_judge` asks the gateway's judge alias, or its own
 `llm_judge(model=)`, never the graph's model.
 
+## Where sandbox, skills and hooks go
+
+| | Where |
+|---|---|
+| Sandbox | `sandbox().tools()`, from a node through the run: `await trellis.current().tools.use(box.tools())`, then `tools.call("sandbox_exec", command=...)` ([sandbox.md](../sandbox.md)); a `ReAct` or Deep Agent of yours takes it as its backend |
+| Skills | a `create_agent` graph: Deep Agents' `SkillsMiddleware` ([skills.md](../skills.md#native-or-ours)) |
+| Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `create_agent(..., middleware=[...])` |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); its native turn limit is `framework_options={"recursion_limit": n}` |
+
 ## Native or ours: skills, prompts, sandbox
 
 A `StateGraph` of your own has no prompt store or sandbox: `await h.prompt(...)` reads the
-gateway's stored prompts; a `ReAct` takes the run's sandbox as its `backend=docker_sandbox()`,
-which governs and journals every command
+gateway's stored prompts; a `ReAct` takes the run's sandbox as its `backend=sandbox()`,
+and a graph of yours its tools, `sandbox().tools()`, which govern and journal every command
 ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). A LangChain `create_agent` can
 take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders ([skills.md](../skills.md#native-or-ours)).
 

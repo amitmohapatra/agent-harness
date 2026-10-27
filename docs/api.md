@@ -13,7 +13,6 @@ from trellis import (
     Deny,
     Harness,
     Hooks,
-    ModelCall,
     Output,
     OutputKind,
     ReAct,
@@ -261,7 +260,7 @@ a function target.
 | `remaining()` | the seconds the code may still take, or `None` |
 | `uses(feature)` | whether the run has that part on (`without=`) |
 | `await tools.call(tool, **args)` | a tool call through the harness: a tool of the run by name, or a tool itself (`tool(fn)`, `mcp(...)`, `a2a(url)`...: it joins the run first) |
-| `await tools.use(*sources)` | a function target's own tools added to the run (`sandbox()`, `mcp(...)`...): the names they add |
+| `await tools.use(*sources)` | a function target's own tools added to the run (`sandbox().tools()`, `mcp(...)`...): the names they add |
 | `await tools.hints(task)` | the memory service's tool hints for `task` |
 | `await ask(question, *, expects, form, table, diff, options, multiple, ui_schema, component, props, assignee, deadline, escalate_to)` | pause the run and return the answer on resume ([interrupts.md](interrupts.md#asking)) |
 | `log(message, **fields)` | a log line and a `log` event |
@@ -307,7 +306,7 @@ can and cannot do beyond its tools ("you cannot accept an image upload") goes in
 | `subagents` | `()` | what it hands tasks to, each a child run: Deep Agents' own — a `SubAgent` dict (`name`, `description`, `system_prompt`, `mode` isolated or fork, `tools`, `model`, `middleware`, `skills`, `permissions`, `response_format`; its `interrupt_on` is the catalog's: a tool of its own named there asks a person) or a `CompiledSubAgent` `{"name", "description", "runnable"}` (another `ReAct` among them), called through Deep Agents' `task` tool — and wrapped agents (`h.wrap(...)`) and [`a2a(url)`](#a2a), each a tool ([subagents.md](subagents.md)) |
 | `skills` | none | Deep Agents' skill sources (`["/skills/"]`), read through `backend` |
 | `memory_files` | none | Deep Agents' `memory`: `AGENTS.md`-style files loaded into the instructions (named so it is not taken for the memory service) |
-| `backend` | the graph's state, kept in the run's journal | where Deep Agents' file tools work: a `StateBackend`, `StoreBackend` (the memory service when wrapped), `FilesystemBackend`, `CompositeBackend`, or the run's sandbox: [`docker_sandbox()`](#docker_sandbox) (`execute` runs code there). Files outside the graph's state are the agent's from the start and governed as any tool |
+| `backend` | the graph's state, kept in the run's journal | where Deep Agents' file tools work: a `StateBackend`, `StoreBackend` (the memory service when wrapped), `FilesystemBackend`, `CompositeBackend`, or the run's sandbox: [`sandbox()`](#sandbox) (`execute` runs code there). Files outside the graph's state are the agent's from the start and governed as any tool |
 | `permissions` | none | Deep Agents' `FilesystemPermission` rules for its file tools |
 | `max_steps` | 12 | model calls with tools in one invocation, then one more without (1 or more): a loop guard, counted again each invocation. For a spending cap over the whole run (its attempts and sub-agents included) use [`Budget(max_tool_calls=)`](#budget) |
 | `call_timeout` | none | the most one model call may take, in seconds (a tool's own `call_timeout` bounds a tool call) |
@@ -341,8 +340,8 @@ middleware=middleware(), checkpointer=RunCheckpointer())` — the settings meani
 [`ReAct`](#react)'s do: the run's tools per model call (narrowed per turn; the memory and gateway
 MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` then a final answer, the
 run's budget, planning on a long task, older results cleared and read back (with a
-`context_window`), the tool guidance and the answer check, and `ModelHooks` (the hooks, the span,
-`call_timeout`, a `stored(...)` `system_prompt` pinned per run). Give the graph
+`context_window`), the tool guidance and the answer check, and `ModelHooks` (the span, a failed
+call's `on_error`, `call_timeout`, a `stored(...)` `system_prompt` pinned per run). Give the graph
 `checkpointer=RunCheckpointer()` (`trellis.harness.middleware`) for its checkpoint to live in the
 run. A `create_agent` or Deep Agents graph wrapped without it still runs governed and narrowed,
 said once ([frameworks/react.md](frameworks/react.md#middleware-on-your-own-graph)).
@@ -409,23 +408,20 @@ document's operations as tools, one per `operationId` ([tools.md](tools.md)).
 
 ### sandbox
 
-`sandbox(provider=None, *, image=None, spec=None, call_timeout=120)` — `sandbox_exec`,
-`sandbox_read`, `sandbox_write` in a sandbox of the run's own: Docker (the daemon
-`DOCKER_HOST` names; `image`, else `python:3.12-slim`), or a provider of yours
-([sandbox.md](sandbox.md)) — for a function, OpenAI Agents or Claude target (`agent.tools.use`,
-the framework's own tools); `ReAct` works in [`docker_sandbox()`](#docker_sandbox), its backend.
-
-### docker_sandbox
-
 ```text
-docker_sandbox(provider=None, *, image=None, spec=None, call_timeout=120)
+sandbox(provider=None, *, image=None, spec=None, call_timeout=120)
 ```
 
-The run's sandbox as a Deep Agents backend — `ReAct(backend=docker_sandbox())` or
-`create_deep_agent(backend=...)` — where the file tools and `execute` work: made at the run's
-first call and named in its journal, attached again by a resume, snapshotted and paused while it
-waits for a person, deleted at its end (the same lifecycle as [`sandbox`](#sandbox), Docker unless a
-`provider` is given) ([sandbox.md](sandbox.md)).
+A sandbox of the run's own — Docker (the daemon `DOCKER_HOST` names; `image`, else
+`python:3.12-slim`), or a provider of yours — made at the run's first call and named in its
+journal, attached again by a resume, snapshotted and paused while it waits for a person,
+deleted at its end ([sandbox.md](sandbox.md)). One entry, given where each engine takes it:
+
+| | |
+|---|---|
+| `ReAct(backend=sandbox())` | `ReAct`'s backend: Deep Agents' file tools and `execute` work in it |
+| `sandbox().deep_agent()` | `create_deep_agent`'s arguments, `{"backend": ...}`: `create_deep_agent(model, **sandbox().deep_agent())` |
+| `sandbox().tools()` | `sandbox_exec`, `sandbox_read`, `sandbox_write`, a tool source, for an engine with no sandbox of its own (`agent.tools.use(...)`) |
 
 ### stored
 
@@ -443,11 +439,12 @@ answer against `criteria`: offline in `h.evaluate`, online in `h.wrap(judges=[..
 ## Hooks
 
 `Hooks` — subclass and override `on_run_start(run)`, `on_run_end(run, result)`,
-`before_model(call) -> ModelCall | None`, `after_model(call, reply)`, `before_tool(call) ->
-None | Deny | Ask | Rewrite`, `after_tool(call, outcome) -> outcome`, `on_error(stage, error)`,
-`on_output(item) -> item` (synchronous: what a user is shown).
+`before_tool(call) -> None | Deny | Ask | Rewrite`, `after_tool(call, outcome) -> outcome`,
+`on_error(stage, error)`, `on_output(item) -> item` (synchronous: what a user is shown). A model
+call is each framework's own (its middleware or callbacks: [hooks.md](hooks.md)); a hook class
+defining `before_model` or `after_model` is refused.
 `Deny(reason)`, `Ask(question, assignee=None, component=None, props=None)`, `Rewrite(args)`,
-`ModelCall(framework, messages, model=None, system=None)`, `Output(kind, value)` with
+`Output(kind, value)` with
 `replace(value)`, `OutputKind` (`ANSWER`, `EVENT`) ([hooks.md](hooks.md#mask-what-the-ui-sees)).
 
 ## current

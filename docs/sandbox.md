@@ -1,44 +1,44 @@
 # Sandboxes: where the model runs code
 
 A sandbox is a container (or a hosted microVM) of its run's own, made at the run's first command
-and deleted when the run ends. Two ways in, one sandbox behind them:
+and deleted when the run ends. One entry, `sandbox()`, given where each engine takes it — one
+sandbox behind every way:
 
-* **`ReAct(backend=docker_sandbox())`** — the run's sandbox as a Deep Agents backend: Deep
-  Agents' `execute` runs a command there, and its file tools (`ls`, `read_file`, `write_file`,
-  `edit_file`, `delete`, `glob`, `grep`) work on its files. Any `create_deep_agent(backend=...)`
-  of your own takes it too.
-* **`sandbox()`** — the same sandbox as three tools — run a shell command, read a file, write a
-  file — for any other framework: a function target's `agent.tools.use(sandbox())`, an OpenAI
-  Agents or Claude agent's own tools.
+| Engine | Where `sandbox()` goes |
+|---|---|
+| `ReAct` | `ReAct(backend=sandbox())`: Deep Agents' `execute` runs a command there, and its file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`) work on its files |
+| Deep Agents (your own graph) | `create_deep_agent(model, **sandbox().deep_agent())`: the same, as its `backend=` |
+| plain function, LangGraph | `sandbox().tools()`: three tools — run a shell command, read a file, write a file — `await agent.tools.use(sandbox().tools())` |
+| OpenAI Agents SDK, Claude Agent SDK | their own sandbox ([below](#native-sandboxes-theirs-or-ours)); `sandbox().tools()` only where every command must be the harness's (governed by the catalog, journaled) |
 
 Every call is a harness tool call, so it is governed, journaled, recorded, redacted and bounded
 like any other. You choose only where sandboxes come from (Docker, or a provider object) and, if
 you like, what each is made of; the rest is automatic.
 
 ```python
-from trellis import Harness, ReAct, docker_sandbox
+from trellis import Harness, ReAct, sandbox
 
-h = Harness()  # docker_sandbox(): Docker, the daemon DOCKER_HOST names
+h = Harness()  # sandbox(): Docker, the daemon DOCKER_HOST names
 agent = h.wrap(
-    ReAct(system_prompt="You analyse data.", model=model, backend=docker_sandbox()), id="analyst"
+    ReAct(system_prompt="You analyse data.", model=model, backend=sandbox()), id="analyst"
 )
 result = await agent.run("How many units did we sell?", user="ada")
 ```
 
 | You write | Automatic |
 |---|---|
-| `ReAct(backend=docker_sandbox())`, or a function target's `agent.tools.use(sandbox())` | one sandbox per run: made at its first call, named and labelled after the run, recorded in its journal before any call uses it, attached again after a pause or a crash, snapshotted and paused while a person answers, deleted at the end; orphans reaped |
-| optionally `docker_sandbox(provider, image=, spec=SandboxSpec(...), call_timeout=)` (or `sandbox(...)`, the same) | the provider (else Docker), the image, CPU, memory, network and starting files (else the provider's image, its limits, no network), the most one call may take (else 120 s) |
+| `ReAct(backend=sandbox())`, `create_deep_agent(**sandbox().deep_agent())`, or a function target's `agent.tools.use(sandbox().tools())` | one sandbox per run: made at its first call, named and labelled after the run, recorded in its journal before any call uses it, attached again after a pause or a crash, snapshotted and paused while a person answers, deleted at the end; orphans reaped |
+| optionally `sandbox(provider, image=, spec=SandboxSpec(...), call_timeout=)` | the provider (else Docker), the image, CPU, memory, network and starting files (else the provider's image, its limits, no network), the most one call may take (else 120 s) |
 
 ## What
 
-As a backend (`docker_sandbox()`), Deep Agents' `BaseSandbox` builds every file tool on three
+As a backend (`backend=sandbox()`, `sandbox().deep_agent()`), Deep Agents' `BaseSandbox` builds every file tool on three
 operations the run's sandbox does — a command, a file written, a file read — and `execute` is a
 command: governed as a write (the file tools that change files write, the others read; the
 catalog may say more), its output read by the model. The harness runs the graph
 asynchronously: the backend has no synchronous operations.
 
-As tools (`sandbox()`), all three taking and returning text:
+As tools (`sandbox().tools()`), all three taking and returning text:
 
 | Tool | Arguments | Returns | Side effects |
 |---|---|---|---|
@@ -66,10 +66,11 @@ can reach (no network) and, when needed, approve it ([governance](#automatic)).
 
 ## Where
 
-Way 1: `ReAct(backend=docker_sandbox())` (or a `create_deep_agent(backend=docker_sandbox())` of
-your own), and a function target's `agent.tools.call(sandbox(), ...)` (or
-`agent.tools.use(sandbox())`). `ReAct(tools=[sandbox()])` is refused, naming the backend. A
-framework's own agent uses its own sandbox (below). Every
+Way 1: `ReAct(backend=sandbox())` (or a `create_deep_agent(**sandbox().deep_agent())` of your
+own), and a function target's `agent.tools.call(sandbox().tools(), ...)` (or
+`agent.tools.use(sandbox().tools())`). `ReAct(tools=[sandbox()])` is refused, naming the backend,
+and so is a bare `sandbox()` given as a tool (`agent.tools.use(sandbox())`), naming `.tools()`.
+A framework's own agent uses its own sandbox (below). Every
 mode: `run`, `stream`, `start` + workers, a resume in another
 process, `serve_chat`, `serve_a2a`, `h.evaluate` — a resume elsewhere reaches the same sandbox
 when its provider is reachable from there (a hosted provider; for Docker, the same daemon).
@@ -87,12 +88,13 @@ from trellis.harness.sandbox import DockerSandbox, SandboxSpec
 spec = SandboxSpec(
     image="python:3.12-slim", cpu=1, memory=512, network="none", files={"sales.csv": csv_text}
 )
-tools = [sandbox(DockerSandbox(), spec=spec, call_timeout=300)]
+box = sandbox(DockerSandbox(), spec=spec, call_timeout=300)
+# ReAct(..., backend=box) · create_deep_agent(..., **box.deep_agent()) · agent.tools.use(box.tools())
 ```
 
 | Name | |
 |---|---|
-| `sandbox(provider=None, *, image=None, spec=None, call_timeout=120)` | the tool source. `provider`: where sandboxes come from (else `DockerSandbox(image)`); `image`: what each is made of (else the spec's, else the provider's); `spec`: the rest of what each is made of; `call_timeout`: the most one call may take, in seconds (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool) |
+| `sandbox(provider=None, *, image=None, spec=None, call_timeout=120)` | the run's sandbox (`SandboxSource`): `ReAct(backend=)` takes it as it is; `.deep_agent()` is `create_deep_agent`'s `{"backend": ...}`; `.tools()` the three tools, a tool source (the same object every time). `provider`: where sandboxes come from (else `DockerSandbox(image)`); `image`: what each is made of (else the spec's, else the provider's); `spec`: the rest of what each is made of; `call_timeout`: the most one call may take, in seconds (`REMOTE_TIMEOUT_SECONDS`, the one default of a remote tool) |
 | `SandboxSpec(image=None, cpu=None, memory=None, network="none", files={})` | frozen; `cpu` and `memory` over 0 |
 | `DockerSandbox(image=None, *, host=None, socket=None)` | the Docker provider: `image` for a spec that names none (else `python:3.12-slim`); the daemon at `host` (`unix:///path` or `tcp://host:port`) or `socket`, else where docker-py would find it: `DOCKER_HOST`, else the current docker context's endpoint, else `/var/run/docker.sock` |
 | `await reap(provider, runs, *, tenant)` | deletes the tenant's sandboxes whose runs have ended (and returns them): what runs it automatically does by hand, for a cron |

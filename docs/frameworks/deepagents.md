@@ -60,7 +60,7 @@ included — so a resume on another worker continues it. Runnable:
 | Planning (`TodoListMiddleware`, `write_todos`) | the plan lives in the graph's state (`state["todos"]`, read with `graph.aget_state(...)` on the thread); `write_todos` is Deep Agents' own tool, not a harness tool |
 | Built-in tools | Deep Agents' own. Those that only change the graph's state — `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` on its default backend — run as they are (the run's checkpoint keeps them); any other, `execute` among them, is governed as the graph's own tools are (the catalog's risk, else a write); `task` is a child run. Gate more with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
 | `interrupt_on={tool: True \| InterruptOnConfig}` | LangChain's `HumanInTheLoopMiddleware`: an approval of the calls it holds, answered with `approve`, `edit`, `reject` (with a reason the model reads), `answer` ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)); needs a checkpointer |
-| Hooks | the tool and run hooks as for every target; the model hooks through the same LangChain middleware as `create_agent`: `create_deep_agent(..., middleware=[ModelHooks()])` ([hooks.md](../hooks.md)) |
+| Hooks | the tool and run hooks as for every target; a model call is LangChain middleware, as for `create_agent`: `create_deep_agent(..., middleware=[yours, ModelHooks()])` ([hooks.md](../hooks.md)) |
 | A stored prompt of the gateway (`middleware=[ModelHooks(prompt=stored("triage"))]`) | pinned at each run's start, journaled and said (a `prompt` event, the span's `trellis.prompt.*`); each model call gets the version the run pinned ([prompts.md](../prompts.md)) |
 | Tool hints | as for a `create_agent` graph ([langgraph.md](langgraph.md#what-is-automatic)): from 5 tools, each model call of the main agent is offered only the harness tools the run offers (the hinted ones, the memory tools, those already used); Deep Agents' state tools (`ls`, `read_file`...) and `task` are always offered, its other own tools as the run offers them; a sub-agent's model is offered the tools it was built with, and their calls are governed and recorded as the run's |
 | Memory | the context as a leading system message of the main agent; a sub-agent, a child run, gets the context for its task before the task description (`## Your task`); the memory tools come with `HarnessTools` (or `await h.memory_tools()` for a sub-agent you give them to) |
@@ -84,6 +84,15 @@ budget, and a sub-agent cut by a crash is ended by the worker that continues the
 A Deep Agent compiled without a `store` gets the memory service as its store, so a `StoreBackend` writes the user's memories
 ([langgraph.md](langgraph.md#what-is-automatic)).
 
+## Where sandbox, skills and hooks go
+
+| | Where |
+|---|---|
+| Sandbox | `create_deep_agent(model, **sandbox().deep_agent())`: its `backend=`, the run's own sandbox; or a backend of Deep Agents' own (below) |
+| Skills | `create_deep_agent(skills=[...])`: its `SkillsMiddleware`, read through the backend ([skills.md](../skills.md#native-or-ours)) |
+| Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `create_deep_agent(..., middleware=[...])` |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); its native turn limit is LangGraph's: `framework_options={"recursion_limit": n}` |
+
 ## Native or ours: skills, prompts, sandbox
 
 * **Skills:** for `SKILL.md` folders, use Deep Agents' own: `create_deep_agent(skills=[...])`
@@ -91,7 +100,7 @@ A Deep Agent compiled without a `store` gets the memory service as its store, so
 * **Prompts:** Deep Agents takes text: `system_prompt=(await h.prompt("triage")).text` for a
   stored prompt of the gateway ([prompts.md](../prompts.md#native-or-ours)).
 * **Sandbox:** prefer its own backend for `execute` (`BaseSandbox`, `LangSmithSandbox`;
-  `LocalShellBackend` is the host's shell, unisolated), gated with `interrupt_on`; `sandbox()`
+  `LocalShellBackend` is the host's shell, unisolated), gated with `interrupt_on`; `**sandbox().deep_agent()`
   when every command must be governed by the catalog and journaled
   ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 

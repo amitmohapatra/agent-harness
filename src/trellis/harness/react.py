@@ -14,14 +14,14 @@ loop is the harness's. What it is built with:
   ``PatchToolCallsMiddleware``), ``response_format``, parallel tool calls: the base measured
   best on a small model (``docs/frameworks/react.md#the-base``);
 * **Deep Agents, on demand** — given ``backend=`` (its file tools on the graph's state, a disk, a
-  store, a composite, or the run's sandbox: ``docker_sandbox()``), a sub-agent of its own
+  store, a composite, or the run's sandbox: ``sandbox()``), a sub-agent of its own
   (``subagents=``: the ``task`` tool), ``skills=``, ``memory_files=`` (its ``AGENTS.md``-style
   memory) or ``permissions=``, it is ``create_deep_agent``: a large tool result saved as a file
   with a preview in its place, summarization near the window's end, prompt caching, and, on a
   long task, its scratch tools and general-purpose helper;
 * **the harness's** — :func:`middleware`, what neither has a piece for: the run's tools per
   model call (narrowed per turn: the tool hints, the memory and gateway MCP tools), governed
-  with full parity; the model hooks, ``call_timeout`` and model routing; ``max_steps`` then a
+  with full parity; the model call's span, ``call_timeout`` and model routing; ``max_steps`` then a
   final answer; ``max_repeats``; older results cleared past half the window and read back; the
   request fitted to the window; the run's budget; planning on a long task
   (``trellis.harness.automatic``); optional tool guidance and an answer check; and the graph's
@@ -278,8 +278,8 @@ def ReAct(
     ``CompiledSubAgent`` ``{"name", "description", "runnable"}``, a ``ReAct`` graph among them),
     each called through Deep Agents' ``task`` tool, and wrapped agents (``h.wrap(...)``) and
     ``a2a(url)``, each a tool of its own; every one a child run. Code runs in
-    ``backend=docker_sandbox()``. Every run also has the MCP tools the virtual key allows and the
-    memory tools.
+    ``backend=sandbox()``, the run's own sandbox. Every run also has the MCP tools the virtual
+    key allows and the memory tools.
 
     Deep Agents' own, passed as they are, any of them making it Deep Agents' graph: ``skills``,
     ``memory_files`` (its ``memory``: ``AGENTS.md``-style files loaded into the instructions),
@@ -312,6 +312,7 @@ def ReAct(
         context_window=context_window,
         system_prompt=None,
     )
+    backend = _backend(backend)
     if effort is not None and not isinstance(model, str):
         raise ConfigurationError("effort is for a model name: set it on your own chat model")
     named = model if isinstance(model, str) else None
@@ -421,6 +422,14 @@ def _deep(
     return backend is not None or bool(native or skills or memory_files or permissions)
 
 
+def _backend(given: Any) -> Any:
+    """``backend=`` as Deep Agents takes it: ``sandbox()`` is the run's sandbox as its backend
+    (``sandbox().deep_agent()``'s), any other as it is."""
+    from trellis.harness.sandbox import SandboxSource
+
+    return given.deep_agent()["backend"] if isinstance(given, SandboxSource) else given
+
+
 def _described(graph: Any, named: str | None, window: int | None, run: list[Any]) -> Any:
     """What the harness reads of the graph: the model's name, the window when known (the
     pushed memory context's budget is a share of it), and the tools it runs for the agent."""
@@ -436,14 +445,13 @@ def _split(tools: Sequence[Any]) -> tuple[list[Any], list[Any]]:
     from langchain_core.tools import BaseTool
 
     from trellis.harness.agent import Agent
-    from trellis.harness.sandbox import SandboxSource
+    from trellis.harness.sandbox import SandboxSource, SandboxTools
     from trellis.harness.tools.sources import A2ASource
 
     for given in tools:
-        if isinstance(given, SandboxSource):
+        if isinstance(given, SandboxSource | SandboxTools):
             raise ConfigurationError(
-                "ReAct runs code in its backend: ReAct(backend=docker_sandbox()), not "
-                "tools=[sandbox()]"
+                "ReAct runs code in its backend: ReAct(backend=sandbox()), not tools="
             )
         if isinstance(given, Agent | A2ASource):
             raise ConfigurationError(
