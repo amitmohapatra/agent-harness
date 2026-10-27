@@ -129,6 +129,16 @@ async def test_an_identity_header_it_cannot_act_on_is_refused(raw: str, reason: 
     await harness.aclose()
 
 
+def test_a_caller_whose_identity_is_refused_owns_no_task() -> None:
+    # the SDK's owner scope (task listing, push configs) of a refused caller is nobody's: the
+    # serving route refuses such a call first, and a resolver of the deployment's may refuse too
+    def refusing(context: ServerCallContext) -> str:
+        raise IdentityRefused("no such caller")
+
+    assert tasks_module.owner(refusing)(call_context()) == tasks_module.REFUSED_OWNER
+    assert tasks_module.owner(lambda context: "u1")(call_context()) == "u1"
+
+
 def test_a_context_without_headers_has_no_identity_header() -> None:
     assert header(ServerCallContext(state={}), IDENTITY_HEADER) == ""
     assert header(ServerCallContext(state={"headers": "garbage"}), IDENTITY_HEADER) == ""
