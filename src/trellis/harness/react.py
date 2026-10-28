@@ -24,8 +24,8 @@ loop is the harness's. What it is built with:
   with full parity; the model call's span, ``call_timeout`` and model routing; ``max_steps`` then a
   final answer; ``max_repeats``; older results cleared past half the window and read back; the
   request fitted to the window; the run's budget; planning on a long task
-  (``trellis.harness.automatic``); optional tool guidance and an answer check; and the graph's
-  checkpoint in the run (:class:`~.middleware.RunCheckpointer`: a resume continues in place);
+  (``trellis.harness.automatic``); and the graph's checkpoint in the run
+  (:class:`~.middleware.RunCheckpointer`: a resume continues in place);
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware, added before
   ``ModelHooks``; one named as the harness's is refused (naming the parameter that sets it;
   ``middleware()`` itself, saying ReAct already has it), one named as Deep Agents' replaces
@@ -81,6 +81,15 @@ CLEARED: Final = (
 #: graph's state they are governed as any tool, with these risks.
 FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
 FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
+#: What ``ReAct`` and :func:`middleware` say of a switch they no longer take (``removed``).
+_NO_GUIDANCE: Final = (
+    "the tool guidance was removed, measured as no better and slower: say how to choose among "
+    "the tools in system_prompt and in each tool's description"
+)
+_NO_CHECK: Final = (
+    "the answer check was removed, measured as lowering tool coverage at a model call more "
+    "per answer: measure answers with h.evaluate (tool_coverage) instead"
+)
 
 
 def _checked(
@@ -106,15 +115,17 @@ def _checked(
         )
 
 
-@removed(capabilities="say what the agent can and cannot do in the graph's own system_prompt")
+@removed(
+    capabilities="say what the agent can and cannot do in the graph's own system_prompt",
+    tool_guidance=_NO_GUIDANCE,
+    answer_check=_NO_CHECK,
+)
 def middleware(
     *,
     max_steps: int = 12,
     max_repeats: int = 3,
     call_timeout: float | None = None,
     context_window: int | None = None,
-    tool_guidance: bool | None = None,
-    answer_check: bool | None = None,
     system_prompt: Stored | None = None,
 ) -> list[Any]:
     """The harness's middleware for a ``create_agent`` or ``create_deep_agent`` graph — what
@@ -124,19 +135,16 @@ def middleware(
                                   checkpointer=RunCheckpointer())
         agent = h.wrap(graph, id="stock")
 
-    In order: planning on a long task (:class:`~.automatic.Planning`); the answer check
-    (``answer_check``: ``True`` every invocation; ``None``, automatic, and ``False`` none —
-    :class:`~.middleware.AnswerCheck`); the run's tools per model call, narrowed per turn,
-    the memory and gateway MCP tools among them
+    In order: planning on a long task (:class:`~.automatic.Planning`); the run's tools per
+    model call, narrowed per turn, the memory and gateway MCP tools among them
     (:class:`~.middleware.HarnessTools`); the graph's own tools governed with full parity
     (:class:`~.middleware.GovernTools`); ``max_repeats`` (:class:`~.middleware.StallGuard`);
     ``max_steps`` then one answer without tools (:class:`~.middleware.StepLimit`); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
-    cleared past half of it and ``read_result`` to read them back; the tool guidance
-    (``tool_guidance``: ``True`` on every call that offers tools; ``None``, automatic, and
-    ``False`` never); the request made to fit the window, never failing for its size
-    (:class:`~.middleware.FitWindow`: the guidance dropped, the tools narrowed and compacted,
-    older results cleared, older turns left out — only as far as needed); and
+    cleared past half of it and ``read_result`` to read them back; the request made to fit
+    the window, never failing for its size (:class:`~.middleware.FitWindow`: the tools
+    narrowed and compacted, older results cleared, older turns left out — only as far as
+    needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
     headers on a routed model). Outside a harness run each steps aside."""
@@ -145,8 +153,6 @@ def middleware(
         max_repeats=max_repeats,
         call_timeout=call_timeout,
         context_window=context_window,
-        tool_guidance=tool_guidance,
-        answer_check=answer_check,
         system_prompt=system_prompt,
     )
 
@@ -157,8 +163,6 @@ def _middleware(
     max_repeats: int,
     call_timeout: float | None,
     context_window: int | None,
-    tool_guidance: bool | None,
-    answer_check: bool | None,
     system_prompt: Stored | None,
     held: frozenset[str] = frozenset(),
     files: bool = True,
@@ -205,16 +209,10 @@ def _middleware(
         if window is not None or not files
         else []
     )
-    # ``None`` (automatic) is off for both, as measured on a small model (docs/frameworks/
-    # react.md#tool-choice): the guidance made it call changes nobody asked for, the check
-    # cost a model call per answer and broke a rule it was meant to keep
-    guidance = [ours.ToolGuidance()] if tool_guidance else []
-    check = [ours.AnswerCheck()] if answer_check else []
     return [
         # what a long task is offered, decided before anything reads the request's tools
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
-        *check,
         ours.HarnessTools(),
         *([automatic.ToolSelection()] if "ToolSelection" in _ON.get() else []),
         ours.GovernTools(),
@@ -223,7 +221,6 @@ def _middleware(
         automatic.Budgeted(),
         *clearing,
         *reads,
-        *guidance,
         # the request made to fit the window, after everything that adds to it; a
         # summarization after it summarizes the older turns, else it leaves them out
         ours.FitWindow(window, turns=summarization is None),
@@ -238,6 +235,8 @@ def _middleware(
     store="a wrapped ReAct's store is the memory service; for a graph with a store of your own, "
     "create_agent(..., middleware=middleware(), store=...)",
     capabilities="say what the agent can and cannot do in system_prompt",
+    tool_guidance=_NO_GUIDANCE,
+    answer_check=_NO_CHECK,
 )
 def ReAct(
     system_prompt: str | Stored,
@@ -258,8 +257,6 @@ def ReAct(
     call_timeout: float | None = None,
     context_window: int | None = None,
     effort: str | None = None,
-    tool_guidance: bool | None = None,
-    answer_check: bool | None = None,
     middleware: Sequence[Any] = (),
 ) -> Any:
     """A LangChain agent graph (``create_agent``; ``create_deep_agent`` when a Deep Agents
@@ -291,9 +288,9 @@ def ReAct(
     in the run (:class:`~.middleware.RunCheckpointer`) and its store is the memory service.
 
     The loop's settings are :func:`middleware`'s: ``max_steps``, ``max_repeats``,
-    ``call_timeout`` (each model call's), ``context_window`` (else the model's profile),
-    ``tool_guidance``, ``answer_check``; ``effort`` is the reasoning effort sent with every call
-    of a model name. ``middleware`` adds yours; one named as the harness's is refused."""
+    ``call_timeout`` (each model call's), ``context_window`` (else the model's profile);
+    ``effort`` is the reasoning effort sent with every call of a model name. ``middleware``
+    adds yours; one named as the harness's is refused."""
     try:
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
@@ -355,8 +352,6 @@ def ReAct(
                         max_repeats=max_repeats,
                         call_timeout=call_timeout,
                         context_window=window,
-                        tool_guidance=tool_guidance,
-                        answer_check=answer_check,
                         system_prompt=stored_prompt,
                     ),
                     middleware,
@@ -387,8 +382,6 @@ def ReAct(
         max_repeats=max_repeats,
         call_timeout=call_timeout,
         context_window=window,
-        tool_guidance=tool_guidance,
-        answer_check=answer_check,
         system_prompt=stored_prompt,
         held=held,
         files=outside or bool(skills) or bool(memory_files),
@@ -588,8 +581,6 @@ SET_BY: Final = {
     "StepLimit": "max_steps=",
     "StallGuard": "max_repeats=",
     "ModelHooks": "call_timeout= and system_prompt=stored(...) (and h.wrap(hooks=) for the hooks)",
-    "ToolGuidance": "tool_guidance=",
-    "AnswerCheck": "answer_check=",
     "ContextEditingMiddleware": "context_window=",
 }
 

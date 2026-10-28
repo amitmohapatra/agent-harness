@@ -21,12 +21,6 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
   pinned for the run (``prompt``: journaled, sent as headers, on the span), and the model
   client's errors as a :class:`~trellis.contracts.ModelError` saying whether it may pass;
-* :class:`ToolGuidance` — how to choose among tools added to the instructions (every part of
-  the request, the specific tool over a general one, current figures from tools, a change made
-  by calling its tool, conclusions from the results), the run's tools that change data named;
-* :class:`AnswerCheck` — the model's draft answer checked against the request once before it
-  is final (not streamed): it calls the tools still needed, or answers in its place; a run
-  whose tool hints narrowed its tools is offered every one from the check on;
 * :class:`StepLimit` — at ``max_steps`` model calls one more, without tools, for the best
   answer (and a ``max_steps`` warning event), instead of LangChain's canned limit message;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
@@ -55,7 +49,6 @@ import contextlib
 import copy
 import functools
 import itertools
-import json
 import logging
 import re
 import types
@@ -96,7 +89,6 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
-from langchain_core.runnables.config import var_child_runnable_config
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
@@ -142,7 +134,6 @@ from trellis.harness.tools import bridge
 from trellis.harness.tools.base import SideEffects, Tool, arguments_of, not_run
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
-from trellis.harness.tools.lint import MOST_TOOLS
 from trellis.harness.tools.mcp import side_effects_of as annotated
 
 log = logging.getLogger("trellis.run")
@@ -1133,334 +1124,6 @@ class ReadTools(AgentMiddleware):
         )
 
 
-# --------------------------------------------------------------------------- tool choice
-#: What :class:`ToolGuidance` adds to the instructions: how to choose among tools, the same for
-#: any tool set (the tools' own descriptions say what each is for).
-TOOL_GUIDANCE: Final = (
-    "How to use your tools:\n"
-    "- A request may have several parts (questions, actions). Address every part, each with "
-    "the tool made for it.\n"
-    "- When several tools could answer a part, use the most specific one whose description "
-    "matches it; use a general or overview tool only when no specific tool fits.\n"
-    "- Current figures come from a tool call, even when the context remembers older values; "
-    "the context gives background, preferences and rules, and its rules still apply.\n"
-    "- To create, change or delete something, call the tool that does it: the system asks for "
-    "any approval itself. Never say an action was done unless its tool returned success.\n"
-    "- Before calling a tool that changes data, check the call against the rules in your "
-    "instructions and context: if one forbids it, do not call it; say which rule and why.\n"
-    "- When the tools and the context have nothing about what was asked (an empty result, "
-    "not found), say plainly that there is no record of it: no hedging, no estimates, no "
-    "figures that are not in the results.\n"
-    "- Base each conclusion on the tool results. If no tool can answer a part, say so.\n"
-    "- Asked whether you can do something, answer plainly yes or no, from your tools and your "
-    "instructions; do not hedge."
-)
-#: What the model is told about the tools that change data (:class:`ToolGuidance`,
-#: :class:`AnswerCheck`): their names.
-WRITE_TOOLS: Final = "These tools change data: {tools}."
-#: What :class:`AnswerCheck` asks the model, after its draft answer.
-ANSWER_CHECK: Final = (
-    "Before this answer goes to the user, check it against the user's request. Do not mention "
-    "this check.\n"
-    "1. List the parts of the request: each question asked and each action requested.\n"
-    "2. For each part, find what answers it: a tool result in this conversation, the context "
-    "you were given, or a plain statement that it cannot be done. A part with none of these "
-    "needs a tool call: make it now, with the most specific tool for it.\n"
-    "3. A part that asks to create, change or delete something needs the call of the tool "
-    "that does it{writes}; the system asks for approval itself. Do not say it was done unless "
-    "that tool returned success. If a rule in your instructions or context forbids the "
-    "change, do not call the tool: say which rule forbids it.\n"
-    "4. Make sure each conclusion follows from the tool results.\n"
-    "5. If there is no record of what was asked, say so plainly: no hedging, no estimates.\n"
-    "If a part is still open, call the tools it needs now. Otherwise reply with the final "
-    "answer for the user, and only that."
-)
-#: What :class:`AnswerCheck` adds when nothing found is about what was asked: every tool result
-#: of the request empty or not found, or no tool called and memory holding nothing.
-NO_RECORD: Final = (
-    "\nNothing {source} is about what was asked. Unless a tool you have not called yet "
-    "would find it, say plainly that there is no record of it, in those words: no hedging, no "
-    "estimates, no figures."
-)
-#: What :class:`AnswerCheck` asks before the first change of an invocation is made (and before
-#: anyone is asked to approve it).
-WRITE_CHECK: Final = (
-    "You were about to call {calls}, which changes data. Before it is made, and before anyone "
-    "is asked to approve it, check it against every rule in your instructions and in the "
-    "context you were given (a standing rule, a limit, a preference). If a rule forbids it, do "
-    "not call it: tell the user plainly which rule forbids it and why. Otherwise make the same "
-    "call again. Do not mention this check."
-)
-#: A tool result that holds nothing: empty, or saying it found nothing.
-_NOTHING: Final = frozenset({"", "[]", "{}", "null", "none", '""', "''"})
-_NOT_FOUND: Final = re.compile(
-    r"\bnot found\b|\bno (?:such|records?|results?|data|matches?)\b|\bdoes not exist\b|\b404\b",
-    re.IGNORECASE,
-)
-#: The state keys of :class:`AnswerCheck`: the checks made in this invocation, and whether its
-#: first change was checked.
-CHECKED: Final = "trellis_checked"
-WRITE_CHECKED: Final = "trellis_write_checked"
-#: The tag that keeps a model call's tokens off the graph's ``messages`` stream (LangGraph's
-#: ``TAG_NOSTREAM``): a draft answer the user is not shown.
-NO_STREAM: Final = "nostream"
-
-
-class ToolGuidance(AgentMiddleware):
-    """How to choose among tools, added to the instructions of every model call that offers
-    tools (:data:`TOOL_GUIDANCE`): every part of a request addressed, the most specific tool
-    over a general one, current figures from tools rather than the remembered context (whose
-    rules still apply), an action done by calling its tool (never claimed without it, never
-    against a rule), "no record" said plainly, conclusions from the results, a plain yes or no
-    to what it can do. Inside a run it also names the offered harness tools that change data
-    (their declared side effects). ``text`` replaces the guidance. What the assistant can and
-    cannot do beyond its tools belongs in the instructions (the system prompt). No extra model
-    call."""
-
-    @removed(capabilities="say what the agent can and cannot do in the system prompt")
-    def __init__(self, text: str = TOOL_GUIDANCE) -> None:
-        super().__init__()
-        if not text.strip():
-            raise ConfigurationError("ToolGuidance needs a text")
-        self.text = text
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        if not _counted(request.tools):
-            return await handler(request)
-        parts = [self.text]
-        writes = _writes_offered(request)
-        if writes:
-            parts.append(WRITE_TOOLS.format(tools=", ".join(writes)))
-        return await handler(request.override(system_message=_appended(request, "\n".join(parts))))
-
-
-def _counted(tools: Sequence[BaseTool | dict[str, Any]]) -> int:
-    """The tools of a call that are not the graph's own state tools (:data:`STATE_TOOLS`)."""
-    return sum(_named(t) not in STATE_TOOLS for t in tools)
-
-
-#: What says a line of the memory context states a rule (``FitWindow`` never trims it): a rule,
-#: a policy, a "never", an "always", a "must", something forbidden or not allowed.
-_RULE: Final = re.compile(
-    r"\b(?:rules?|polic(?:y|ies)|never|always|must|forbid\w*|prohibit\w*|not allowed)\b",
-    re.IGNORECASE,
-)
-
-
-class _CheckedState(AgentState[Any]):
-    trellis_checked: NotRequired[Annotated[int, PrivateStateAttr]]
-    trellis_write_checked: NotRequired[Annotated[bool, PrivateStateAttr]]
-
-
-class AnswerCheck(AgentMiddleware):
-    """An answer is checked before it is final, and a change before it is made.
-
-    **The answer**: when the model answers without calling a tool (its draft, not streamed), it
-    is asked once more, with the draft, to check it against the request (:data:`ANSWER_CHECK`)
-    — every part answered by a tool result, the context or a plain "cannot"; a requested change
-    made by calling its tool (inside a run, the tools that change data are named), never
-    claimed without it, never against a rule; the conclusions following from the results;
-    "no record" said plainly — and either calls the tools still needed (the loop goes on) or
-    gives the final answer, which replaces the draft. When nothing found is about what was
-    asked — every tool result of the request empty or not found, or no tool called and memory
-    holding nothing (``INSUFFICIENT``) — it is told so (:data:`NO_RECORD`). At most ``checks``
-    checks per invocation of the graph: one more model call each.
-
-    **A change** (``writes``, on by default): the first step of an invocation that calls a
-    harness tool changing data is drafted (not streamed) and the model asked to check the
-    call against the rules in its instructions and context (:data:`WRITE_CHECK`) before it
-    runs — before governance asks anyone to approve it: it makes the call again, or tells the
-    user which rule forbids it. One more model call, once per invocation.
-
-    Neither on a call offered no tools, or told to call none (behind :class:`StepLimit`, as in
-    ``ReAct``, its last call is checked with no tool offered: only the text can be corrected).
-    Inside a run whose tool hints narrowed what the model is offered, the answer check is
-    offered every tool (only those that change data past :data:`~.lint.MOST_TOOLS`): a part
-    the hints did not foresee can still be served. For that it goes before
-    :class:`HarnessTools` (as in ``ReAct``), which then offers them."""
-
-    state_schema = _CheckedState
-
-    def __init__(
-        self,
-        checks: int = 1,
-        *,
-        writes: bool = True,
-        text: str = ANSWER_CHECK,
-    ) -> None:
-        super().__init__()
-        if checks < 1:
-            raise ConfigurationError("AnswerCheck makes at least 1 check (or leave it out)")
-        if "{writes}" not in text:
-            raise ConfigurationError("an AnswerCheck text has a {writes} placeholder")
-        self.checks = checks
-        self.writes = writes
-        self.text = text
-
-    async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        return {CHECKED: 0, WRITE_CHECKED: False}
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any] | ExtendedModelResponse[Any]:
-        runtime = current()
-        done = request.state.get(CHECKED, 0)
-        write_checked = not self.writes or request.state.get(WRITE_CHECKED, False)
-        if (
-            (done >= self.checks and write_checked)
-            or not _tools(request, runtime)
-            or request.tool_choice == "none"
-        ):
-            return await handler(request)
-        with _quiet():
-            draft = await handler(request)
-        said = _drafted(draft)
-        if said is None:  # a step that calls tools: no answer yet
-            calls = [] if write_checked else _write_calls(draft, runtime)
-            if not calls:
-                return draft
-            told = [
-                *request.messages,
-                AIMessage(content=f"(about to call {'; '.join(calls)})"),
-                HumanMessage(content=WRITE_CHECK.format(calls="; ".join(calls))),
-            ]
-            checked = await handler(request.override(messages=told))
-            return ExtendedModelResponse(
-                model_response=draft if _drafted(checked) == "" else checked,
-                command=Command(update={WRITE_CHECKED: True}),
-            )
-        if done >= self.checks:
-            return draft
-        writes = _changing(runtime)
-        if runtime is not None:
-            _widened(runtime, writes)
-        text = self.text.format(writes=f" ({', '.join(writes)})" if writes else "")
-        told = [
-            *request.messages,
-            AIMessage(content=said),
-            HumanMessage(content=text + _no_record(request.messages, runtime)),
-        ]
-        checked = await handler(request.override(messages=told))
-        if _drafted(checked) == "":  # nothing said, nothing called: the draft stands
-            checked = draft
-        return ExtendedModelResponse(
-            model_response=checked, command=Command(update={CHECKED: done + 1})
-        )
-
-
-def _write_calls(reply: ModelResponse[Any], runtime: Runtime | None) -> list[str]:
-    """The calls of a reply whose tool changes data, as the model is shown them."""
-    message = _ai(reply)
-    changing = set(_changing(runtime))
-    return [
-        f"{c['name']}({json.dumps(c['args'], default=str)})"
-        for c in (message.tool_calls if message is not None else [])
-        if c["name"] in changing
-    ]
-
-
-def _no_record(messages: Sequence[BaseMessage], runtime: Runtime | None) -> str:
-    """:data:`NO_RECORD` when nothing found is about what was asked: every tool result since
-    the request empty or not found, or none and memory holding nothing; else nothing."""
-    turn: list[BaseMessage] = []
-    for message in reversed(messages):
-        if isinstance(message, HumanMessage):
-            break
-        turn.append(message)
-    results = [m for m in turn if isinstance(m, ToolMessage)]
-    insufficient = runtime is not None and runtime.evidence == "INSUFFICIENT"
-    if results and all(_empty(m) for m in results):
-        source = "in memory or the tool results" if insufficient else "the tools returned"
-        return NO_RECORD.format(source=source)
-    if not results and insufficient:
-        return NO_RECORD.format(source="in memory")
-    return ""
-
-
-def _empty(message: ToolMessage) -> bool:
-    """A tool result that holds nothing: empty, or saying nothing was found."""
-    text = message.text.strip()
-    return text.casefold() in _NOTHING or bool(_NOT_FOUND.search(text))
-
-
-def _tools(request: ModelRequest[Any], runtime: Runtime | None) -> bool:
-    """Whether the model has tools to call beyond the graph's state tools (the readers of
-    earlier results among them): the run's own, or the graph's."""
-    return _counted(request.tools) > 0 or bool(runtime is not None and runtime.tool_names())
-
-
-def _changing(runtime: Runtime | None) -> list[str]:
-    """The run's own tools that change data (their side effects, as declared), sorted; none
-    outside a run (a graph's own tools say nothing of theirs)."""
-    if runtime is None:
-        return []
-    return sorted(
-        name for name in runtime.tool_names() if runtime.toolbox[name].spec.side_effects != "read"
-    )
-
-
-def _widened(runtime: Runtime, writes: list[str]) -> None:
-    """A run whose tool hints narrowed its tools offers every one of them from now on (only
-    those that change data, past :data:`~.lint.MOST_TOOLS`)."""
-    if runtime.offered is None:
-        return
-    names = runtime.tool_names()
-    runtime.offer(names if len(names) <= MOST_TOOLS else writes)
-
-
-@contextlib.contextmanager
-def _quiet() -> Iterator[None]:
-    """The model calls made inside, tagged :data:`NO_STREAM`: their tokens are not streamed
-    (a reply the graph keeps still reaches the stream whole, as its node's output)."""
-    config = var_child_runnable_config.get() or {}
-    tags = [*(config.get("tags") or []), NO_STREAM]
-    token = var_child_runnable_config.set(cast(RunnableConfig, {**config, "tags": tags}))
-    try:
-        yield
-    finally:
-        var_child_runnable_config.reset(token)
-
-
-def _drafted(reply: ModelResponse[Any]) -> str | None:
-    """What a model reply answers — its structured answer as JSON, else its text — or ``None``
-    when it calls tools (not an answer yet)."""
-    if reply.structured_response is not None:
-        return _json(reply.structured_response)
-    message = _ai(reply)
-    if message is None or message.tool_calls or message.invalid_tool_calls:
-        return None
-    return message.text
-
-
-def _json(value: Any) -> str:
-    dumped = value.model_dump(mode="json") if hasattr(value, "model_dump") else value
-    return json.dumps(dumped, default=str)
-
-
-def _writes_offered(request: ModelRequest[Any]) -> list[str]:
-    """Of the run's tools that change data (:func:`_changing`), those the call offers."""
-    offered = {_named(t) for t in request.tools}
-    return [name for name in _changing(current()) if name in offered]
-
-
-def _appended(request: ModelRequest[Any], text: str) -> SystemMessage:
-    """The request's instructions with ``text`` after them (a system message of content
-    blocks gets one more block)."""
-    system = request.system_message
-    if system is None:
-        return SystemMessage(content=text)
-    if isinstance(system.content, str):
-        joined = f"{system.content}\n\n{text}" if system.content else text
-        return SystemMessage(content=joined)
-    return SystemMessage(content=[*system.content, {"type": "text", "text": text}])
-
-
 # --------------------------------------------------------------------------- the window
 #: What one model call's request may hold, as a share of the window: what Deep Agents'
 #: summarization budgets (its ``_input_budget``: 95%, less the reply's tokens), so a request
@@ -1475,7 +1138,7 @@ FIT_DESCRIPTION: Final = 120
 FIT_CLEARED: Final = "[result cleared to fit the model's window: read_result(id=<this call's id>)]"
 #: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
 #: how often each fired in this process (a bounded counter: these keys only).
-FIT_STEPS: Final = ("guidance", "tools", "descriptions", "results", "turns", "memory")
+FIT_STEPS: Final = ("tools", "descriptions", "results", "turns", "memory")
 #: ``refit``: a request the model's server refused as over its window, fitted again with the
 #: server's own count (:data:`_RATIOS`) and sent once more.
 FITTED: Final[collections.Counter[str]] = collections.Counter()
@@ -1492,8 +1155,15 @@ _OVERFLOW: Final = re.compile(
     re.IGNORECASE,
 )
 _OVERFLOW_SIZE: Final = re.compile(r"(?:request \(|resulted in |too long: )(\d+) tokens")
-_WRITES_LINE: Final = re.compile(r"\n?These tools change data: [^\n]*")
 _WORD: Final = re.compile(r"[a-z0-9]+")
+
+
+#: What says a line of the memory context states a rule (``FitWindow`` never trims it): a rule,
+#: a policy, a "never", an "always", a "must", something forbidden or not allowed.
+_RULE: Final = re.compile(
+    r"\b(?:rules?|polic(?:y|ies)|never|always|must|forbid\w*|prohibit\w*|not allowed)\b",
+    re.IGNORECASE,
+)
 
 
 class ContextTooLarge(ModelError):
@@ -1509,18 +1179,17 @@ class FitWindow(AgentMiddleware):
     by step, only as far as it must, each step said on the run (a ``context_fit`` warning and a
     log line) and counted (:data:`FITTED`):
 
-    1. ``guidance`` — the optional guidance in the instructions (``optional``: ``ToolGuidance``'s);
-    2. ``tools`` — the offered tools narrowed to the most relevant: those the run already used
+    1. ``tools`` — the offered tools narrowed to the most relevant: those the run already used
        always kept, then those the tool hints chose, then by the words they share with the
        request, at least :data:`FIT_KEEP`;
-    3. ``descriptions`` — the kept tools' descriptions compacted (the first sentence, no
+    2. ``descriptions`` — the kept tools' descriptions compacted (the first sentence, no
        parameter descriptions);
-    4. ``results`` — older tool results cleared (``read_result`` reads them back), then the
+    3. ``results`` — older tool results cleared (``read_result`` reads them back), then the
        tools narrowed past :data:`FIT_KEEP`, then the longest results cut to their head and
        tail;
-    5. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
+    4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
        to a summarization after it: ``ReAct``'s summarizes them);
-    6. ``memory`` — last, only when the latest turn would still not fit: the memory context's
+    5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
        lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
        last first), never a line that states a rule, nor one of the standing instructions (the
        profile), the summary, the recent turns or the learned plan (its skills and tools).
@@ -1537,18 +1206,12 @@ class FitWindow(AgentMiddleware):
     is, the same object. ``window``: the model's input window in tokens, else its LangChain
     profile's; neither known, it steps aside."""
 
-    def __init__(
-        self,
-        window: int | None = None,
-        *,
-        optional: Sequence[str] = (TOOL_GUIDANCE,),
-        turns: bool = True,
-    ) -> None:
+    @removed(optional="it dropped the tool guidance, which is gone: nothing else is optional")
+    def __init__(self, window: int | None = None, *, turns: bool = True) -> None:
         super().__init__()
         if window is not None and window <= 0:
             raise ConfigurationError("a window is a number of tokens over 0")
         self.window = window
-        self.optional = tuple(optional)
         self.turns = turns
         #: each run's tools its last narrowed call kept (:func:`_narrowed`'s ``before``)
         self._kept: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = weakref.WeakKeyDictionary()
@@ -1610,7 +1273,6 @@ class FitWindow(AgentMiddleware):
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
         taken: list[str] = []
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
-            self._without_guidance,
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
             lambda r, b: _cut(_narrowed(_cleared(r), b, runtime, least=0, before=before), b),
@@ -1645,20 +1307,6 @@ class FitWindow(AgentMiddleware):
         if runtime is not None and taken:
             runtime.events.warning("context_fit", said)
         return request
-
-    def _without_guidance(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
-        system = request.system_message
-        if system is None:
-            return request
-        text = system.text
-        kept = text
-        for optional in self.optional:
-            kept = kept.replace(f"\n\n{optional}", "").replace(optional, "")
-        if kept != text:
-            kept = _WRITES_LINE.sub("", kept)
-        if kept == text:
-            return request
-        return request.override(system_message=SystemMessage(content=kept))
 
 
 def _calibrated(name: str, counted: int, reply: Any) -> None:
@@ -2157,7 +1805,6 @@ def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfi
 
 
 __all__ = [
-    "AnswerCheck",
     "CheckpointUnreadable",
     "ContextTooLarge",
     "FitWindow",
@@ -2167,7 +1814,6 @@ __all__ = [
     "RunCheckpointer",
     "StallGuard",
     "StepLimit",
-    "ToolGuidance",
     "model_error",
     "read_result",
 ]

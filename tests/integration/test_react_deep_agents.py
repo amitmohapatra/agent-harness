@@ -61,12 +61,9 @@ def marked(graph: Any, key: str) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- middleware()
 def test_middleware_is_the_harness_part_in_its_order() -> None:
-    found = [
-        m.name for m in middleware(context_window=64_000, tool_guidance=True, answer_check=True)
-    ]
+    found = [m.name for m in middleware(context_window=64_000)]
     assert found == [
         "TodoListMiddleware",
-        "AnswerCheck",
         "HarnessTools",
         "GovernTools",
         "StallGuard",
@@ -74,18 +71,17 @@ def test_middleware_is_the_harness_part_in_its_order() -> None:
         "Budgeted",
         "ContextEditingMiddleware",
         "ReadTools",
-        "ToolGuidance",
         "FitWindow",
         "ModelHooks",
     ]
-    # automatic (None): neither, as measured; forced, they are there
-    assert {"ToolGuidance", "AnswerCheck"}.isdisjoint(m.name for m in middleware())
-    off = [m.name for m in middleware(tool_guidance=False, answer_check=False)]
-    assert "ToolGuidance" not in off and "AnswerCheck" not in off
     with pytest.raises(
         TypeError, match=r"middleware\(capabilities=\) was removed: .*system_prompt"
     ):
         middleware(capabilities={"upload": False})  # pyright: ignore[reportCallIssue]
+    for name, said in (("tool_guidance", "tool guidance"), ("answer_check", "answer check")):
+        given: dict[str, Any] = {name: True}
+        with pytest.raises(TypeError, match=rf"middleware\({name}=\) was removed: the {said}"):
+            middleware(**given)
 
 
 def test_middleware_settings_mean_what_reacts_do() -> None:
@@ -95,9 +91,6 @@ def test_middleware_settings_mean_what_reacts_do() -> None:
     }
     assert stack["StepLimit"].max_steps == 4 and stack["StallGuard"].max_repeats == 5
     assert stack["ModelHooks"].timeout == 2.0
-    assert "ToolGuidance" not in stack and "AnswerCheck" not in stack  # None: off, measured
-    forced = {m.name: m for m in middleware(tool_guidance=True, answer_check=True)}
-    assert forced["ToolGuidance"].text is not None and forced["AnswerCheck"].checks == 1
     pinned = {m.name: m for m in middleware(system_prompt=stored("triage"))}
     assert pinned["ModelHooks"].prompt == stored("triage")
 

@@ -54,7 +54,7 @@ result = await agent.run("Do I need a coat in Oslo?", user="ada")  # result.answ
 ReAct(system_prompt, model, *, tools=(), subagents=(), skills=None, memory_files=None,
       permissions=None, backend=None, response_format=None, state_schema=None,
       context_schema=None, cache=None, max_steps=12, max_repeats=3, call_timeout=None,
-      context_window=None, effort=None, tool_guidance=None, answer_check=None, middleware=())
+      context_window=None, effort=None, middleware=())
 ```
 
 The names are Deep Agents' where both have one. In four tiers:
@@ -64,7 +64,7 @@ The names are Deep Agents' where both have one. In four tiers:
 | **must** | `system_prompt`, `model` | every agent |
 | **usual** | `tools`, `response_format` | most agents |
 | **optional** | `subagents`, `skills`, `memory_files`, `backend`, `permissions`, `max_steps`, `call_timeout`, `effort` | when the agent needs them |
-| **advanced** | `middleware`, `state_schema`, `context_schema`, `cache`, `context_window`, `max_repeats`, `tool_guidance`, `answer_check` | rarely: the defaults are measured |
+| **advanced** | `middleware`, `state_schema`, `context_schema`, `cache`, `context_window`, `max_repeats` | rarely: the defaults are measured |
 
 * `system_prompt` — the instructions: a string, or `stored("triage", team="EU")`, the
   gateway's stored prompt looked up at the run's start and pinned for it (a resume reads the
@@ -115,9 +115,6 @@ The names are Deep Agents' where both have one. In four tiers:
   Deep Agents' summarization uses its own thresholds: give it for a local model (a llama.cpp
   server's `-c`) or a prefixed vendor name.
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
-* `tool_guidance`, `answer_check` — how to choose among tools, and a check of the answer
-  before it is final and of a change before it is made; `None` (the default) is automatic: by
-  the measurement ([below](#tool-choice)) both stay off; `True` turns either on.
 * `middleware` — your middleware, LangChain's, Deep Agents' or your own, added to the harness's
   before `ModelHooks` (so its span shows what the model is sent): one named as the harness's is
   refused, naming the parameter that sets it (`StepLimit`: `max_steps`, `StallGuard`:
@@ -214,15 +211,13 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | Middleware | What it does |
 |---|---|
 | `TodoListMiddleware` (LangChain), `LongTaskTools` | a long task — from the model's third call of an invocation, or at once when the request asks for steps (a list of three items or more, "step by step", "a plan"), on a known window of at least 32,000 tokens — is offered planning (`write_todos`) and, on the default backend, Deep Agents' scratch file tools and its general-purpose helper; a shorter task is sent none of them (together about 2,600 tokens a call) |
-| `AnswerCheck` (`answer_check`) | the draft answer checked against the request once, the tools still needed called; the first change checked against the rules ([below](#tool-choice)) |
-| `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a write's widening, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order |
+| `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order |
 | `GovernTools` | the graph's own tools — your LangChain tools, Deep Agents' `task`, its file tools on a backend outside the state, a sub-agent's tools — governed as the harness's are (catalog, approval, journal, records) |
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed, stop the run with a `ModelError` |
 | `StepLimit` | after `max_steps` model calls one more, with `tool_choice: "none"`, for the best answer with what it has; a `warning` event (`max_steps`) says so |
 | `Budgeted` | with a budget (`h.wrap(budget=)`): once it — the run's or its parent's — is spent, one more call without tools; the run ends `PARTIAL` |
 | `ContextEditingMiddleware` (LangChain) + `read_result` | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a prompt cache breaks rarely |
 | `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
-| `ToolGuidance` (`tool_guidance`) | how to choose among tools, added to the instructions ([below](#tool-choice)) |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
 
@@ -251,8 +246,8 @@ harness's is refused, `middleware()` itself among them). Each works the same in 
 `ReAct` — the run's tools per model call (the memory and gateway MCP tools among them), narrowed
 per turn, its own tools governed, the step limit and the stall guard, the hooks and spans,
 `call_timeout`, the budget's stop, the checkpoint in the run. The settings are `ReAct`'s, meaning
-the same: `max_steps`, `max_repeats`, `call_timeout`, `context_window`, `tool_guidance`,
-`answer_check`, and `system_prompt=stored(...)` (a text goes to the graph's own
+the same: `max_steps`, `max_repeats`, `call_timeout`, `context_window`, and
+`system_prompt=stored(...)` (a text goes to the graph's own
 `system_prompt`). A graph built so may have a checkpointer or a store of its own (a `ReAct`
 cannot): give it `checkpointer=`/`store=` as LangChain takes them.
 
@@ -283,46 +278,12 @@ A model given several tools goes wrong in typical ways, whatever the tools: it r
 broad tool (a dashboard) when a specific one answers; it answers one part of a several-part
 request and drops another; it answers a request to change something in text, never calling the
 tool — so the change is not made and its approval never asked; it draws a conclusion the
-results do not support. Two switches guard against them — both LangChain middleware, in
-[`middleware()`](#middleware-on-your-own-graph) too. Each is `None` by default — automatic,
-which by the measurement below is off — `True` always, `False` never.
-
-| | What it does | Costs | `None` (automatic) |
-|---|---|---|---|
-| `tool_guidance` — `ToolGuidance()` | adds to the instructions of a call that offers tools (`TOOL_GUIDANCE`): address every part of the request, each with the tool made for it; the most specific tool over a general one; current figures from a tool, not the remembered context, which gives background and rules; a change made by calling its tool — the system asks for approval itself — never claimed without its success; conclusions from the results, and a plain "cannot" for a part no tool answers. Inside a run it names the offered tools that change data | a few hundred tokens of instructions, the same on every call (a prompt cache holds) | off (measured: more tools called, and changes nobody asked for) |
-| `answer_check` — `AnswerCheck()` | when the model answers without calling a tool, its draft is not final (nor streamed): the model is shown it and asked once to check it against the request (`ANSWER_CHECK`), and either calls the tools still needed or gives the final answer in its place; when nothing found is about what was asked it asks for a plain "no record". **A change, before it is made**: the first step calling a tool that changes data is checked against the rules in the instructions and context (`WRITE_CHECK`) before governance asks anyone to approve it | one more model call per invocation for the answer, one for the first change | off (measured: no better, a model call more per answer, a rule broken) |
-
-Measured on Granite 3.3 2B (CPU, llama.cpp behind Bifrost), the store set of the live
-tool-choice test — 16 items: several-part requests, a change behind approval, a rule in the
-context, a capability question, a record that does not exist (`tests/live/test_live_tool_choice.py`):
-
-| Tools, window | Variant | Tool coverage | Items fully covered | Model calls / item | Changes called unasked (paused for approval) | Rule kept |
-|---|---|---|---|---|---|---|
-| 51 tools, 16,384 | off | 0.89 | 12/16 | 1.69 | 0 | yes |
-| 51 tools, 16,384 | `tool_guidance=True` | 1.00 | 14/16 | 1.63 | 4 | no |
-| 11 tools, 16,384 | off | 0.93 | 13/16 | 1.75 | 1 | yes |
-| 11 tools, 16,384 | `answer_check=True` | 0.93 | 13/16 | 2.75 | 2 | no |
-
-The guidance raised coverage, but the small model then called a change on four items that asked
-for none (a "where in the app" question, a comparison, a capability question) — each paused for
-an approval nobody wanted — and broke the context's rule; the check cost a model call per answer
-for no gain and broke the rule too. So `None` keeps both off; turn one on (`True`) for a model
-that measures better with it. One run per item: a measurement to repeat on the model you ship.
-
-Both are generic: they name no tool, and read only what the run already knows (the request,
-the results, which tools change data). What they cannot do is tell two tools apart that are
-described alike: that is the tools' descriptions ([tools.md](../tools.md#tool-choice-what-helps-the-model-pick-the-right-tool),
-where the toolbox's check of the tool set, and the native tool selector for many tools, are).
-`tool_coverage()` measures the result per item ([evaluation.md](../evaluation.md#trajectories)).
-
-```python
-target = ReAct(
-    system,
-    "provider/model",
-    tool_guidance=True,  # always (None, the default: off, as measured)
-    answer_check=False,  # never (None, the default: off, as measured)
-)
-```
+results do not support. `ReAct` adds no rule of its own to the loop against them: what guides
+the choice is the tools' own descriptions and the instructions, and what helps is the
+harness's tool set check, the tool hints and, for many tools, the native tool selector
+([tools.md](../tools.md#tool-choice-what-helps-the-model-pick-the-right-tool)).
+`tool_coverage()` measures the result per item ([evaluation.md](../evaluation.md#trajectories));
+why the loop has no such rule is [ADR 0002](../adr/0002-tool-choice.md).
 
 Native pieces used rather than rebuilt: LangChain's `TodoListMiddleware` for a plan the model
 keeps on a long request, `LLMToolSelectorMiddleware` for many tools, `tool_choice` (the step
@@ -330,7 +291,7 @@ limit's last call is `"none"`), Deep Agents' file tools and sub-agents. A first 
 `"required"` is not offered: a request that needs no tool (a greeting, a rule the context
 holds) would be made to call one. What the assistant can and cannot do beyond its tools
 ("You cannot accept an image upload.") goes in `system_prompt`, so a "can you ...?" gets a
-plain yes or no (the live tool-choice test says it so, with the guidance on).
+plain yes or no (the live tool-choice test says it so).
 
 ## When a request does not fit
 
@@ -341,7 +302,6 @@ smaller, step by step, only as far as it must, in this order:
 
 | Step | What goes | Kept |
 |---|---|---|
-| `guidance` | the optional tool guidance in the instructions | your instructions |
 | `tools` | the offered tools narrowed to the most relevant | those the run used; then the hinted ones; then by the words they share with the request; at least 8 |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
 | `results` | older tool results cleared (`read_result` reads them back), the longest cut to head and tail | the latest |
@@ -482,7 +442,7 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
   `middleware()` on a `create_deep_agent` and a `create_agent` graph of your own.
 * [`examples/02_way1_react/structured_output.py`](../../examples/02_way1_react/structured_output.py) — a tool, then a structured answer.
 * [`examples/06_scenarios/tool_choice.py`](../../examples/06_scenarios/tool_choice.py) — the four
-  ways tool choice goes wrong, the two switches, `tool_coverage` per item.
+  ways tool choice goes wrong, `tool_coverage` per item.
 * [`examples/05_features/own_scheduler.py`](../../examples/05_features/own_scheduler.py) — your run store, your
   scheduler loop, your governance, memory off.
 * Tests: `tests/integration/test_react.py`, `test_react_deep_agents.py`, `test_react_parallel.py`,

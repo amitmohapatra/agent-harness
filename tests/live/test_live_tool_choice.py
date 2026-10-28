@@ -7,9 +7,9 @@ hangs, a five-part request, a part no tool answers, a change asked for indirectl
 that sounds like a change, an unknown record, a change a remembered rule forbids, a question
 about what the assistant can do — among its 11 tools, and again among 51 (40 unrelated ones
 added). Then the same kinds of item on two **held-out** sets (``heldout.py``: an IT help desk,
-travel expenses), written after the guards and never used to change them, reported apart. Each item is scored
-by ``tool_coverage`` (and, with an expected answer, ``contains`` and ``picks``), ``ReAct`` as it
-is and with ``tool_guidance`` and ``answer_check``.
+travel expenses), written apart and never used to tune the harness, reported apart. Each item
+is scored by ``tool_coverage`` (and, with an expected answer, ``contains`` and ``picks``),
+``ReAct`` as it is built.
 
 **MCP through Bifrost** — the local MCP servers (``mcp_fixture.py``, declared in the gateway):
 the definitions the model is sent are the servers' own (descriptions and schemas), the same
@@ -20,10 +20,9 @@ harness, no memory service), become the meta-tools: the model is sent them as th
 describes them, and a question is scored by whether its script ran.
 
 What is asserted is the harness's part (``tests/live/proof.py``): every item that ran is scored
-from its trajectory, a change that reached its approval counts as made, the guidance is in every
-call that offers tools, the check is asked before every answer when it is on, a failing or
-hanging tool's outcome reaches the model as a failure. How well the model chooses is reported,
-not asserted: per variant and per item, printed and written to ``build/tool_choice_live.json``
+from its trajectory, a change that reached its approval counts as made, a failing or hanging
+tool's outcome reaches the model as a failure. How well the model chooses is reported, not
+asserted: per set and per item, printed and written to ``build/tool_choice_live.json``
 (``TRELLIS_LIVE_REPEATS`` runs each set that many times). Memory and agent-runs are not used:
 the model's tool choice alone is measured, and no service's data is touched."""
 
@@ -53,81 +52,49 @@ from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.evals import EvalReport, tool_coverage
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.middleware import ANSWER_CHECK, TOOL_GUIDANCE, WRITE_CHECK
 from trellis.harness.tools.lint import lint
 
 scenario = importlib.import_module("examples.06_scenarios.tool_choice")
 
 REPEATS: Final = int(os.environ.get("TRELLIS_LIVE_REPEATS", "").strip() or 1)
-VARIANTS: Final[dict[str, dict[str, bool | None]]] = {
-    "baseline": {"tool_guidance": False, "answer_check": False},
-    "guidance": {"tool_guidance": True, "answer_check": False},
-    "check": {"tool_guidance": False, "answer_check": True},
-    "guidance+check": {"tool_guidance": True, "answer_check": True},
-    "auto": {"tool_guidance": None, "answer_check": None},  # ReAct's defaults
-}
-#: The tool sets — tools, items, instructions, what it can do, the variants run — the store's
-#: (the reproduction set), the same among 51 tools, and the held-out ones (``heldout.py``),
-#: reported apart.
-Set = tuple[list[Any], list[dict[str, Any]], str, dict[str, bool], tuple[str, ...]]
-#: The variants each set runs: ``TRELLIS_LIVE_VARIANTS`` (comma-separated), else these two.
-BOTH: Final = tuple(
-    v.strip()
-    for v in (os.environ.get("TRELLIS_LIVE_VARIANTS") or "baseline,guidance+check").split(",")
-    if v.strip() in VARIANTS
-)
+#: The tool sets — tools, items, instructions, what it can do — the store's (the reproduction
+#: set), the same among 51 tools, and the held-out ones (``heldout.py``), reported apart.
+Set = tuple[list[Any], list[dict[str, Any]], str, dict[str, bool]]
 SETS: Final[dict[str, Set]] = {
     "reproduction: store, 11 tools": (
         scenario.TOOLS,
         scenario.SCENARIOS,
         scenario.SYSTEM,
         scenario.CAN,
-        BOTH,
     ),
     "reproduction: store, 51 tools": (
         [*scenario.TOOLS, *scenario.UNRELATED],
         scenario.SCENARIOS,
         scenario.SYSTEM,
         scenario.CAN,
-        BOTH,
     ),
-    **{name: (*found, BOTH) for name, found in heldout.SETS.items()},
+    **heldout.SETS,
 }
-#: The first line of the check the model is asked, and of the guidance.
-CHECK: Final = ANSWER_CHECK.splitlines()[0]
-GUIDANCE: Final = TOOL_GUIDANCE.splitlines()[0]
-WRITE_FIRST: Final = WRITE_CHECK.split(".")[1].strip()
 REPORT: Final = Path("build/tool_choice_live.json")
 MAX_STEPS: Final = 8
 #: The tools whose every call fails (an error; a timeout after 2 s).
 FAILING: Final = {"supplier_eta", "transfer_status"}
-RUNS: Final = max(len(v[4]) * len(v[1]) for v in SETS.values()) * REPEATS + 10
+RUNS: Final = max(len(v[1]) for v in SETS.values()) * REPEATS + 10
 pytestmark = [pytest.mark.live, needs_gateway]
 
 
 class Sent(AgentMiddleware):
-    """What each run's model calls were sent (the agent's own middleware, before the harness's
-    ``ModelHooks``): the calls offering tools whose instructions lacked the guidance, the runs
-    asked the check, and the model calls per run."""
+    """The model calls each run made (the agent's own middleware, before the harness's
+    ``ModelHooks``)."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.unguided: dict[str, int] = {}
-        self.checked: set[str] = set()
-        self.write_checked: set[str] = set()
         self.calls: dict[str, int] = {}
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
         run = current()
         assert run is not None
         self.calls[run.run_id] = self.calls.get(run.run_id, 0) + 1
-        system = request.system_message.text if request.system_message is not None else ""
-        if GUIDANCE not in system:
-            self.unguided[run.run_id] = self.unguided.get(run.run_id, 0) + 1
-        if any(CHECK in str(m.content) for m in request.messages):
-            self.checked.add(run.run_id)
-        if any(WRITE_FIRST in str(m.content) for m in request.messages):
-            self.write_checked.add(run.run_id)
         return await handler(request)
 
 
@@ -205,9 +172,7 @@ def saved(section: str, found: dict[str, Any]) -> None:
     REPORT.write_text(json.dumps(report, indent=2, default=str))
 
 
-def harness_part(
-    rows: list[dict[str, Any]], sent: Sent, switches: dict[str, bool | None], writes: set[str]
-) -> None:
+def harness_part(rows: list[dict[str, Any]], writes: set[str]) -> None:
     """What the harness must have done, whatever the model chose."""
     for row in rows:
         if row["status"] == "error":  # the model's own failures only
@@ -223,77 +188,49 @@ def harness_part(
         for tool in FAILING & set(row["needed"]):  # a failing tool's failure was recorded
             if row["coverage"] == 1.0:
                 assert f"every call failed: {tool}" in (row["comment"] or ""), row
-    ids = {r["run_id"] for r in ran}
-    if switches.get("tool_guidance"):
-        assert not (ids & set(sent.unguided)), sent.unguided
-    if switches.get("answer_check") is False:
-        assert not sent.checked and not sent.write_checked
-    elif switches.get("answer_check"):
-        # every answer was checked, or followed the check of a change (a rule refused it)
-        answered = {r["run_id"] for r in ran if r["status"] == "success"}
-        assert answered <= sent.checked | sent.write_checked, answered - sent.checked
 
 
 @pytest.mark.parametrize("toolset", list(SETS))
 @pytest.mark.timeout(int(RUNS * RUN_SECONDS))
-async def test_tool_coverage_of_function_tools_with_and_without_the_switches(
-    toolset: str,
-) -> None:
-    tools, items, system, can, variants = SETS[toolset]
+async def test_tool_coverage_of_function_tools(toolset: str) -> None:
+    tools, items, system, can = SETS[toolset]
     writes = {t.spec.name for t in tools if t.spec.side_effects != "read"}
-    found: dict[str, Any] = {}
     async with live_harness(memory_url=None, runs_url=None) as h:
-        for variant in variants:
-            switches = VARIANTS[variant]
-            sent = Sent()
-            target = ReAct(
-                # what the assistant can do: in its instructions, with the guidance
-                system if switches.get("tool_guidance") is False else scenario.told(system, can),
-                MODEL,
-                max_steps=MAX_STEPS,
-                tool_guidance=switches.get("tool_guidance", False),
-                answer_check=switches.get("answer_check", False),
-                middleware=[sent],
-            )
-            agent = arm(
-                h.wrap(
-                    target,
-                    id=f"tool-choice-{variant}",
-                    without={"mcp"},
-                    run_timeout=RUN_SECONDS,
-                ),
-                tools,
-            )
-            rows: list[dict[str, Any]] = []
-            for _ in range(REPEATS):
-                began = time.monotonic()
-                report = await h.evaluate(
-                    agent,
-                    items,
-                    scenario.EVALUATORS,
-                    run_name=f"tool-choice-live-{variant}",
-                    concurrency=1,
-                )
-                rows.extend(rows_of(report, sent, time.monotonic() - began, items))
-            found[variant] = summarized(rows, writes)
-            saved(toolset, found)  # kept whatever the checks below say
-            harness_part(rows, sent, switches, writes)
-    for variant, summary in found.items():
-        print(
-            f"\n{toolset} / {variant}: coverage {summary['mean_coverage']}, "
-            f"full {summary['full_coverage_items']}/{len(summary['items'])}, "
-            f"unneeded tool called {summary['avoided_called']}, picks {summary['picks']}, "
-            f"contains {summary['contains']}, says cannot {summary['says_cannot']}, "
-            f"no record {summary['says_no_record']}, rule kept {summary['respects_rule']}, "
-            f"plain capability answer {summary['plain_answer']}, "
-            f"writes not called {summary['writes_not_called']}, "
-            f"writes called unasked {summary['writes_called_unasked']}, "
-            f"model calls {summary['model_calls']}"
+        sent = Sent()
+        target = ReAct(
+            # what the assistant can do: in its instructions
+            scenario.told(system, can),
+            MODEL,
+            max_steps=MAX_STEPS,
+            middleware=[sent],
         )
-        for row in summary["items"]:
-            print(
-                f"  {row['status']:<12} {row['coverage']} {row['comment']} <- {row['input'][:60]}"
+        agent = arm(
+            h.wrap(target, id="tool-choice", without={"mcp"}, run_timeout=RUN_SECONDS),
+            tools,
+        )
+        rows: list[dict[str, Any]] = []
+        for _ in range(REPEATS):
+            began = time.monotonic()
+            report = await h.evaluate(
+                agent, items, scenario.EVALUATORS, run_name="tool-choice-live", concurrency=1
             )
+            rows.extend(rows_of(report, sent, time.monotonic() - began, items))
+        summary = summarized(rows, writes)
+        saved(toolset, summary)  # kept whatever the checks below say
+        harness_part(rows, writes)
+    print(
+        f"\n{toolset}: coverage {summary['mean_coverage']}, "
+        f"full {summary['full_coverage_items']}/{len(summary['items'])}, "
+        f"unneeded tool called {summary['avoided_called']}, picks {summary['picks']}, "
+        f"contains {summary['contains']}, says cannot {summary['says_cannot']}, "
+        f"no record {summary['says_no_record']}, rule kept {summary['respects_rule']}, "
+        f"plain capability answer {summary['plain_answer']}, "
+        f"writes not called {summary['writes_not_called']}, "
+        f"writes called unasked {summary['writes_called_unasked']}, "
+        f"model calls {summary['model_calls']}"
+    )
+    for row in summary["items"]:
+        print(f"  {row['status']:<12} {row['coverage']} {row['comment']} <- {row['input'][:60]}")
 
 
 # --------------------------------------------------------------------------- MCP
@@ -358,8 +295,6 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
             "You run store operations. Be brief.",
             model,
             max_steps=4,
-            tool_guidance=True,
-            answer_check=True,
             middleware=[sent],
         )
         agent = h.wrap(target, id="tool-choice-mcp", without={"code_mode"})
@@ -367,7 +302,7 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
             agent, MCP_ITEMS, [tool_coverage()], run_name="tool-choice-mcp", concurrency=1
         )
         rows = rows_of(report, sent, 0.0, MCP_ITEMS)
-        harness_part(rows, sent, {"tool_guidance": True, "answer_check": True}, MCP_WRITES)
+        harness_part(rows, MCP_WRITES)
         sent_defs = definitions(wire)
         # the same tool on three servers is three names; each as its server lists it
         assert own and set(own) <= set(sent_defs), set(own) - set(sent_defs)
@@ -400,8 +335,6 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
                 "You answer questions about code repositories from their wikis, by code.",
                 gateway_model(coded, wire),
                 max_steps=6,
-                tool_guidance=True,
-                answer_check=True,
                 middleware=[sent],
             )
             agent = coded.wrap(target, id="tool-choice-code-mode")
@@ -413,7 +346,7 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
                 agent, [item], [tool_coverage()], run_name="tool-choice-code-mode"
             )
             rows = rows_of(report, sent, 0.0, [item])
-            harness_part(rows, sent, {"tool_guidance": True, "answer_check": True}, set())
+            harness_part(rows, set())
             sent_defs = definitions(wire)
             for spec in CODE_MODE_TOOLS:  # the meta-tools, as the harness describes them
                 assert sent_defs[spec.name]["description"] == spec.description

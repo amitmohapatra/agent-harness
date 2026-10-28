@@ -274,7 +274,7 @@ a function target.
 ReAct(system_prompt, model, *, tools=(), subagents=(), skills=None, memory_files=None,
       permissions=None, backend=None, response_format=None, state_schema=None,
       context_schema=None, cache=None, max_steps=12, max_repeats=3, call_timeout=None,
-      context_window=None, effort=None, tool_guidance=None, answer_check=None, middleware=())
+      context_window=None, effort=None, middleware=())
 ```
 
 A tool-calling agent for teams with no framework: LangChain's `create_agent` with the harness's
@@ -324,8 +324,6 @@ can and cannot do beyond its tools ("you cannot accept an image upload") goes in
 | `cache` | none | LangGraph's node cache |
 | `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `max_repeats` | 3 | identical calls in a row that stop the run (2 or more) |
-| `tool_guidance` | `None`: automatic | how to choose among tools, added to the instructions (`ToolGuidance`); `None`: off, as measured ([tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
-| `answer_check` | `None`: automatic | the draft answer checked against the request once, and the first change against the rules (`AnswerCheck`: one more model call each); `None`: off, as measured ([tool choice](frameworks/react.md#tool-choice)), `True` always, `False` never |
 
 Not exposed: Deep Agents' `interrupt_on` (approvals are the [catalog](governance.md)'s), `name`
 (the wrap's `id`), `debug`.
@@ -334,7 +332,7 @@ Not exposed: Deep Agents' `interrupt_on` (approvals are the [catalog](governance
 
 ```text
 middleware(*, max_steps=12, max_repeats=3, call_timeout=None, context_window=None,
-           tool_guidance=None, answer_check=None, system_prompt=None)
+           system_prompt=None)
 ```
 
 The harness's part of `ReAct` for a LangChain `create_agent` or a Deep Agents
@@ -343,7 +341,7 @@ middleware=middleware())` — the settings meaning what
 [`ReAct`](#react)'s do: the run's tools per model call (narrowed per turn; the memory and gateway
 MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` then a final answer, the
 run's budget, planning on a long task, older results cleared and read back (with a
-`context_window`), the tool guidance and the answer check, and `ModelHooks` (the span, a failed
+`context_window`), the request fitted to the window, and `ModelHooks` (the span, a failed
 call's `on_error`, `call_timeout`, a `stored(...)` `system_prompt` pinned per run). A graph
 compiled without a checkpointer is run with `RunCheckpointer()` (`trellis.harness.middleware`):
 its checkpoint lives in the run; one of its own (or `checkpointer=False`) stays
