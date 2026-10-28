@@ -67,6 +67,12 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="with --suite classes: the classes run (default: all), 'mix' the mixed ten",
     )
     parser.add_argument(
+        "--split",
+        choices=("dev", "test"),
+        default=None,
+        help="only the tasks of this split (the reasoning class's; other tasks have none)",
+    )
+    parser.add_argument(
         "--memory",
         action="store_true",
         help="memory on: the environment's MEMORY_URL (its context and tool hints)",
@@ -128,7 +134,14 @@ async def bench(args: argparse.Namespace) -> dict:
     wanted = set(_list(args.classes))
     if wanted:
         sets = [dataclasses.replace(s, tasks=[t for t in s.tasks if _in(t, wanted)]) for s in sets]
-        sets = [s for s in sets if s.tasks]
+    if args.split:  # a task of no split (every other class's) is kept
+        sets = [
+            dataclasses.replace(
+                s, tasks=[t for t in s.tasks if t["metadata"].get("split") in (None, args.split)]
+            )
+            for s in sets
+        ]
+    sets = [s for s in sets if s.tasks]
     window, source = window_of(None, args.window)
     setup = {
         "model": args.model,
