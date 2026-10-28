@@ -39,8 +39,8 @@ the library's limits (``react.limits``; refused on one without them):
   ``ModelRetryMiddleware``): the errors change measured on the base without the repeat check
   (``all`` is it on ``limitsB``);
 * ``context-native`` — prepared, not measured yet: LangChain's ``ContextEditingMiddleware``
-  (its own placeholder) and ``SummarizationMiddleware`` in place of ``FitWindow`` and
-  ``read_result``.
+  (its own placeholder) and Deep Agents' summarization in place of ``FitWindow`` and
+  ``read_result`` — replaced, never both.
 
 Helpers (:data:`HELPERS`):
 
@@ -259,46 +259,46 @@ class AdmittedTasks(AgentMiddleware):
 
 
 def context_native(setup: Setup) -> tuple[Any, dict[str, Any]]:
-    """``create_agent`` with the branch's stack, ``FitWindow``, ``ReadTools`` and the clearing
-    of ``read_result`` left out, and LangChain's own in their place: ``ContextEditingMiddleware``
-    (``ClearToolUsesEdit``, its own placeholder, at half the window) and
-    ``SummarizationMiddleware`` (at 85% of it, the last 20 messages kept). Prepared: measured
-    once the loop's arms are decided."""
+    """``main``'s context handling replaced, not added to: ``FitWindow``, ``ReadTools`` and the
+    clearing that points at ``read_result`` left out, and in their place LangChain's
+    ``ContextEditingMiddleware`` (``ClearToolUsesEdit`` at today's thresholds, its own
+    placeholder) and Deep Agents' summarization (the one ``ReAct`` already has on Deep Agents,
+    placed as it places it). Prepared: measured once the loop's arms are decided."""
     from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
+    from deepagents.middleware.summarization import create_summarization_middleware
     from langchain.agents import create_agent
-    from langchain.agents.middleware import (
-        ClearToolUsesEdit,
-        ContextEditingMiddleware,
-        SummarizationMiddleware,
-    )
+    from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
 
+    from trellis.harness import automatic, react
     from trellis.harness import middleware as ours
-    from trellis.harness import react
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
     from trellis.harness.gateways import routed_chat_model
 
-    if setup.window is None:
+    window = setup.window
+    if window is None:
         raise RuntimeError("context-native needs the model's window (--window)")
     chat = routed_chat_model(setup.model) if isinstance(setup.model, str) else setup.model
+    model = react._profiled(chat, window)  # Deep Agents' thresholds are shares of it
     stack = react._middleware(
         max_steps=setup.max_steps,
         max_repeats=ours.MAX_REPEATS,
         call_timeout=None,
-        context_window=setup.window,
+        context_window=window,
         system_prompt=None,
         scoped=True,
         retry=isinstance(setup.model, str),
     )
     replaced = {"FitWindow", "ReadTools", "ContextEditingMiddleware"}
     kept = [m for m in stack if m.name not in replaced]
-    native = [
-        ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=int(0.5 * setup.window))]),
-        SummarizationMiddleware(
-            chat, trigger=("tokens", int(0.85 * setup.window)), keep=("messages", 20)
-        ),
-    ]
+    clearing = ClearToolUsesEdit(
+        trigger=int(react.CLEAR_AT * window),
+        clear_at_least=int(react.MIN_FREED * window),
+        keep=react.KEEP_RESULTS,
+    )
+    summary = create_summarization_middleware(model, automatic.JournalBackend())
+    native = [ContextEditingMiddleware(edits=[clearing]), react._placed(summary, react.PLACED)]
     graph = create_agent(
-        chat,
+        model,
         tools=[],
         system_prompt=setup.system,
         middleware=cast(list[Any], [PatchToolCallsMiddleware(), *kept[:-1], *native, kept[-1]]),
@@ -447,7 +447,8 @@ VARIANTS: Final[dict[str, Variant]] = {
     ),
     "context-native": Variant(
         "context-native",
-        "LangChain's context editing and summarization in place of FitWindow and read_result",
+        "LangChain's context editing and Deep Agents' summarization in place of FitWindow and "
+        "read_result (replaced, never both)",
         context_native,
     ),
     "task-only": Variant(

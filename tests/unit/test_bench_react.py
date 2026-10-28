@@ -181,11 +181,23 @@ def test_task_only_holds_delegate_back_by_its_middlewares_name() -> None:
     assert graph is not None
 
 
-def test_the_native_context_arm_replaces_fit_window_and_read_result() -> None:
+def test_the_native_context_arm_replaces_fit_window_and_read_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deepagents.middleware import summarization
+
+    made: list[Any] = []
+    real = summarization.create_summarization_middleware
+
+    def spy(model: Any, backend: Any) -> Any:
+        made.append(model)
+        return real(model, backend)
+
+    monkeypatch.setattr(summarization, "create_summarization_middleware", spy)
     graph, _ = VARIANTS["context-native"].build(_setup())
-    nodes = set(graph.nodes)
-    assert "SummarizationMiddleware.before_model" in nodes
-    assert not any(n.startswith(("FitWindow", "ReadTools")) for n in nodes)
+    [model] = made  # Deep Agents' summarization, ReAct's own: not LangChain's
+    assert model.profile["max_input_tokens"] == 16_384
+    assert not any(n.startswith(("FitWindow", "ReadTools")) for n in graph.nodes)
     with pytest.raises(RuntimeError, match="window"):
         VARIANTS["context-native"].build(
             Setup(system="s", model=ScriptedChatModel(turns=[]), window=None, max_steps=4)
