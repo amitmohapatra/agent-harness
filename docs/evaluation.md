@@ -372,7 +372,10 @@ tool, or a question in its answer), how many questions, and whether the question
 missing value — from which `analyze` gives ask recall, ask precision and targeting. The ask
 arms (`ask-off`, `ask`, `ask-large`) answer each question from the task's gold data
 (`run.answered`, a person resuming the run), and a vague change made after the answer is right
-only with the value given; the report names the
+only with the value given; `hitl` and `ask+hitl` also give each approval as a careful reviewer
+would, a wrong argument edited to the gold one and the run going on, and every run of the
+ambiguous class says whether its change was made with every gold argument (`correct_change`),
+how many approvals it waited for and how many calls were edited; the report names the
 `trellis` source it measured (`environment.trellis`: path, commit, changes), so today's `main`
 is run from a worktree of origin/main with the same runner.
 

@@ -97,6 +97,18 @@ def _targeted(row: dict[str, Any]) -> float | None:
     return None if row.get("targeted") is None else float(row["targeted"])
 
 
+def _correct(row: dict[str, Any]) -> float | None:
+    """Of an ambiguous task's run: whether its change was made with every gold argument."""
+    return None if row.get("correct_change") is None else float(row["correct_change"])
+
+
+def _pauses(row: dict[str, Any]) -> float | None:
+    """The times a run waited for its person: its questions and its approvals."""
+    if row.get("questions") is None:
+        return None
+    return float(row["questions"]) + float(row.get("approvals") or 0)
+
+
 def _tokens(row: dict[str, Any]) -> float:
     return float(row.get("input_tokens") or 0) + float(row.get("output_tokens") or 0)
 
@@ -118,6 +130,9 @@ METRICS: Final = (
     Metric("ask_precision", _precision, True, relative=False),
     Metric("ask_targeted", _targeted, True, relative=False),
     Metric("questions", _key("questions"), None, relative=False),
+    Metric("correct_change", _correct, True, relative=False),
+    Metric("pauses", _pauses, None, relative=False),
+    Metric("edits", _key("edits"), None, relative=False),
 )
 #: The latency metrics, each a percentile of a class's run seconds.
 LATENCY: Final = (("p50", 50), ("p95", 95))

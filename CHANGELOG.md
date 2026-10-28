@@ -255,7 +255,8 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   thinking, code in the run's sandbox, worked examples from memory, llama.cpp slot reuse,
   temperature 0, serial tool calls, Anthropic's and OpenAI's prompt caching), asking the user
   (`ask_user` over the run's own `ask`: not offered, offered to every model, to a large one only;
-  the questions answered from gold data), `task-only`
+  the questions answered from gold data; against a reviewer who edits a wrong argument at the
+  approval, and both), `task-only`
   against `delegate`, helpers with and without the admission gate, and a prepared
   `context-native`; `python -m benchmark.cost.analyze` gives each change's verdict per class
   with 95% bootstrap intervals. See

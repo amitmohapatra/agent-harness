@@ -526,7 +526,8 @@ reasoning questions with exact answers (half `dev`, half `test`) — each arm a 
 `openai-cache-key`); asking the user a question — `ask_user`, a read tool over the run's own
 `ask` (it pauses; the answer is its result on resume), not offered (`ask-off`), offered to every
 model (`ask`) or to a large one only (`ask-large`), each run's questions answered from the
-task's gold data; `task-only` against `delegate`; native
+task's gold data — against a careful reviewer at each change's approval who edits a wrong
+argument to the gold value (`hitl`), and both (`ask+hitl`); `task-only` against `delegate`; native
 `task` helpers with the admission gate and without (`helpers-admitted`, `helpers`); and,
 prepared, `context-native`. `python -m benchmark.cost.analyze` gives each change's verdict per
 class, every metric's difference with its 95% bootstrap interval, and applies the rules set

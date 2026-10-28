@@ -365,7 +365,7 @@ def test_ask_user_is_offered_as_the_arm_says(variant: str, offered: bool) -> Non
 
     graph, options = VARIANTS[variant].build(_setup())  # a small model: no window of 32k+
     names = [getattr(t, "name", None) or t.spec.name for t in getattr(graph, TOOLS_ATTRIBUTE)]
-    assert ("ask_user" in names) is offered and options == {"answers": True}
+    assert ("ask_user" in names) is offered and options == {"answers": True, "review": False}
 
 
 async def test_an_asked_question_is_answered_and_the_change_made_with_its_value(
@@ -390,3 +390,74 @@ async def test_an_asked_question_is_answered_and_the_change_made_with_its_value(
     assert row["success"] and row["checks"]["asks_back"] is True, row
     told = [m for m in model.seen[1] if m.type == "tool"]
     assert told[-1].content == "min 2 and max 6"  # the gold answer, as the tool's result
+
+
+# --------------------------------------------------------------------------- human in the loop
+def test_every_ambiguous_change_has_gold_arguments_its_tool_takes() -> None:
+    for taskset in classes.react_sets():
+        schemas = {t.spec.name: t.spec.input_schema for t in taskset.tools}
+        for task in taskset.tasks:
+            meta = task["metadata"]
+            if meta.get("length") != "ambiguous":
+                continue
+            properties = schemas[meta["change"]]["properties"]
+            assert set(meta["gold_args"]) <= set(properties), meta["task"]
+            if not meta.get("ambiguous"):  # the full control says every gold value
+                said = task["input"].casefold()
+                assert all(
+                    str(v).casefold().rstrip("s") in said for v in meta["gold_args"].values()
+                )
+
+
+def test_a_wrong_argument_is_named_with_its_gold_value() -> None:
+    meta = {
+        "length": "ambiguous",
+        "change": "submit_expense",
+        "gold_args": {"employee": "e-512", "amount": 18, "category": "taxi"},
+    }
+    assert (
+        classes.wrong_args(meta, {"employee": "e-512", "amount": "18.0", "category": "Taxis"}) == {}
+    )
+    assert classes.wrong_args(meta, {"employee": "e-512", "amount": 20}) == {
+        "amount": 18,
+        "category": "taxi",
+    }
+    right = SimpleNamespace(
+        tool="submit_expense", args={"employee": "e-512", "amount": 18, "category": "taxi"}
+    )
+    wrong = SimpleNamespace(
+        tool="submit_expense", args={"employee": "e-1", "amount": 18, "category": "taxi"}
+    )
+    assert classes.right_change(meta, [wrong, right]) is True
+    assert classes.right_change(meta, [wrong]) is False
+    assert classes.right_change({"length": "simple"}, [right]) is None
+
+
+@pytest.mark.parametrize(("variant", "offered"), [("hitl", False), ("ask+hitl", True)])
+def test_the_hitl_arms_review_and_ask_as_named(variant: str, offered: bool) -> None:
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    graph, options = VARIANTS[variant].build(_setup())
+    names = [getattr(t, "name", None) or t.spec.name for t in getattr(graph, TOOLS_ATTRIBUTE)]
+    assert ("ask_user" in names) is offered and options == {"answers": True, "review": True}
+
+
+async def test_a_reviewer_edits_a_wrong_argument_and_the_change_is_made_right(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis import Settings
+
+    monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: Settings()))
+    store = next(s for s in classes.react_sets() if s.name == "store")
+    vague = next(t for t in store.tasks if t["metadata"].get("ambiguous"))
+    only = catalog.TaskSet(store.name, store.system, store.tools, [vague])
+    guessed = {"store": "S12", "style": "ST-101", "min_units": 1, "max_units": 5}
+    model = ScriptedChatModel(turns=[("create_stock_rule", guessed), "Done."])
+    setup = {"model": model, "window": 16_384, "max_steps": 6}
+    async with run.harness() as h:
+        [row] = await run.run_cell(
+            h, "hitl", 10, setup=setup, repeats=1, sets=[only], run_seconds=30, progress=str
+        )
+    assert (row["approvals"], row["edits"], row["questions"]) == (1, 1, 0)
+    assert row["correct_change"] is True and row["status"] == "success", row
+    assert not row["success"]  # it guessed, and did not ask: the reviewer put it right

@@ -61,7 +61,9 @@ Reasoning techniques (``benchmark.cost.techniques``), each ``main`` and one cand
   sandbox) as well as ``main``;
 * ``ask-off``, ``ask``, ``ask-large`` — ``main`` without, with and (a large model only) with the
   ``ask_user`` tool (``techniques.ask_user``: the run's own ``ask``), each run's questions
-  answered from the task's gold data (``run.answered``), the same for all three;
+  answered from the task's gold data (``run.answered``), the same for all three; ``hitl`` and
+  ``ask+hitl`` — ``ask-off`` and ``ask`` with every approval given by a careful reviewer who
+  edits a wrong argument to the gold value, the run going on;
 * ``examples`` — ``main`` run for a user of its own whose documents are the reasoning class's
   dev items as solved examples (``techniques.seed_examples``, with ``--memory``): the memory
   service's own retrieval brings the similar ones into each run's context.
@@ -175,10 +177,12 @@ def technique(setup: Setup, *, name: str) -> tuple[Any, dict[str, Any]]:
     return main(setup, middleware=(techniques.TECHNIQUES[name](),))
 
 
-def ask(setup: Setup, *, offered: str) -> tuple[Any, dict[str, Any]]:
+def ask(setup: Setup, *, offered: str, review: bool = False) -> tuple[Any, dict[str, Any]]:
     """``main`` with the ``ask_user`` tool (``techniques.ask_user``): ``offered`` to every
     model (``all``), to a large one only (``large``: ``automatic.model_tier``), or not at all
-    (``none``); every arm's questions answered from the task's gold data (``run.answered``)."""
+    (``none``); every arm's questions answered from the task's gold data (``run.answered``)
+    and, with ``review``, its approvals given by a careful reviewer (a wrong argument edited to
+    the gold one, the run going on: human in the loop)."""
     from benchmark.cost import techniques
     from trellis.harness.automatic import model_tier
 
@@ -186,7 +190,9 @@ def ask(setup: Setup, *, offered: str) -> tuple[Any, dict[str, Any]]:
     tier = model_tier(name if isinstance(name, str) else None, setup.window)
     given = offered == "all" or (offered == "large" and tier == "large")
     tools = (*setup.tools, techniques.ask_user()) if given else setup.tools
-    return main(dataclasses.replace(setup, tools=tools), options={"answers": True})
+    return main(
+        dataclasses.replace(setup, tools=tools), options={"answers": True, "review": review}
+    )
 
 
 def code(setup: Setup) -> tuple[Any, dict[str, Any]]:
@@ -483,6 +489,16 @@ VARIANTS: Final[dict[str, Variant]] = {
         "ask-large",
         "main with ask_user, offered to a large model only",
         functools.partial(ask, offered="large"),
+    ),
+    "hitl": Variant(
+        "hitl",
+        "main, its changes approved by a careful reviewer who edits a wrong argument",
+        functools.partial(ask, offered="none", review=True),
+    ),
+    "ask+hitl": Variant(
+        "ask+hitl",
+        "ask and hitl together",
+        functools.partial(ask, offered="all", review=True),
     ),
     "examples": Variant(
         "examples", "main with the reasoning dev items as solved examples in memory", examples

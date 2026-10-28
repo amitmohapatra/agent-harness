@@ -226,6 +226,47 @@ MISSING: Final = (
     ("employee e-618", ("employee", "who", "whose", "which"), ("e-618",)),
     ("120 EUR", ("amount", "how much", "cost"), ("120",)),
 )  # fmt: skip
+#: Each ambiguous change's arguments in full, by its place in :data:`AMBIGUOUS`: what a careful
+#: reviewer edits a call to (``run.answered``), and what a right change holds
+#: (:func:`right_change`).
+GOLD_ARGS: Final = (
+    {"store": "S12", "style": "ST-101", "min_units": 2, "max_units": 6},
+    {"store": "S40", "style": "ST-205", "min_units": 2, "max_units": 6},
+    {"store": "S7", "style": "ST-205", "min_units": 1, "max_units": 4},
+    {"store": "S7", "style": "ST-310", "min_units": 3, "max_units": 8},
+    {"user_id": "u-2041"},
+    {"user_id": "u-3307"},
+    {"employee": "e-401", "amount": 42, "category": "meals"},
+    {"employee": "e-512", "amount": 18, "category": "taxi"},
+    {"employee": "e-618", "amount": 30, "category": "meal"},
+    {"employee": "e-618", "amount": 120, "category": "hotel"},
+)
+
+
+def _same(given: Any, gold: Any) -> bool:
+    if isinstance(gold, int | float) and not isinstance(gold, bool):
+        try:
+            return float(given) == float(gold)
+        except (TypeError, ValueError):
+            return False
+    said, wanted = str(given).casefold().strip(), str(gold).casefold()
+    return said == wanted or said.rstrip("s") == wanted.rstrip("s")
+
+
+def wrong_args(meta: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    """The arguments of a call of the task's change that differ from its gold ones (by name,
+    the gold value): what a careful reviewer corrects."""
+    gold = meta.get("gold_args") or {}
+    return {k: v for k, v in gold.items() if not _same(args.get(k), v)}
+
+
+def right_change(meta: dict[str, Any], calls: list[Any]) -> bool | None:
+    """Of an ambiguous task, whether its change was made (or reached its approval) with every
+    gold argument (``None`` for any other task)."""
+    if meta.get("length") != "ambiguous" or not meta.get("gold_args"):
+        return None
+    change = meta["change"]
+    return any(c.tool == change and not wrong_args(meta, dict(c.args)) for c in calls)
 
 
 def _ambiguous(domain: str) -> list[dict[str, Any]]:
@@ -239,9 +280,12 @@ def _ambiguous(domain: str) -> list[dict[str, Any]]:
         asked["metadata"].update(
             ambiguous=True, answer_given=answer, about=list(about), gold=list(gold)
         )
+        given = item(full, [change])
+        for task in (asked, given):
+            task["metadata"].update(change=change, gold_args=dict(GOLD_ARGS[n]))
         found += [
             _classed(asked, f"{domain}: ambiguous {n}, a value missing", "ambiguous"),
-            _classed(item(full, [change]), f"{domain}: ambiguous {n}, in full", "ambiguous"),
+            _classed(given, f"{domain}: ambiguous {n}, in full", "ambiguous"),
         ]
     return found
 

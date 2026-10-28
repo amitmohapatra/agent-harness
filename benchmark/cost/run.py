@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -134,9 +134,10 @@ class Called(Hooks):
         return outcome
 
 
-#: Who answers a measured run's questions, and how many questions a run is answered at most.
+#: Who answers a measured run's questions and approvals, and how many pauses a run is
+#: answered at most.
 REVIEWER: Final = "trellis:bench"
-MOST_QUESTIONS: Final = 3
+MOST_PAUSES: Final = 4
 #: What a question is answered with when the task left nothing out.
 GO_AHEAD: Final = "Go ahead with what I asked."
 
@@ -151,43 +152,73 @@ def reply_to(task: dict[str, Any], options: Sequence[Any]) -> str:
     return picked[0] if picked else gold
 
 
+@dataclass
+class Dialogue:
+    """What a run's person did (:func:`answered`): the questions answered, the approvals given
+    and, of them, the calls edited to their gold arguments; and the calls the run made or
+    stopped at (``None``: not followed — an ``h.evaluate`` run)."""
+
+    questions: list[str] = field(default_factory=list)
+    approvals: int = 0
+    edits: int = 0
+    calls: list[Any] | None = None
+
+
 async def answered(
-    agent: Any, task: dict[str, Any], *, user: str, called: Called
-) -> tuple[Any, list[str]]:
-    """``task`` run with its questions answered (:func:`reply_to`, as a person resuming it), an
-    approval ending it as ``h.evaluate`` ends one — and scored by the same evaluators, on the
-    same terms: the item's result, and the questions asked."""
+    agent: Any, task: dict[str, Any], *, user: str, called: Called, review: bool = False
+) -> tuple[Any, Dialogue]:
+    """``task`` run with its questions answered (:func:`reply_to`, as a person resuming it) and,
+    with ``review``, its approvals given by a careful reviewer — a call of the task's change
+    edited to its gold arguments where they are wrong (``classes.wrong_args``), the run going
+    on; without it, an approval ends the run as ``h.evaluate`` ends one. Scored by the same
+    evaluators, on the same terms."""
     from types import SimpleNamespace
 
     from trellis.contracts import RunStatus
     from trellis.harness.evals import EvalResult, EvalScore, tool_coverage
 
-    questions: list[str] = []
+    said = Dialogue()
+    meta = task["metadata"]
     result = await agent.run(task["input"], user=user)
     while (
         result.status is RunStatus.PAUSED
-        and result.interrupt is not None
-        and result.interrupt.tool_call is None
-        and len(questions) < MOST_QUESTIONS
+        and (asked := result.interrupt) is not None
+        and len(said.questions) + said.approvals < MOST_PAUSES
     ):
-        asked = result.interrupt
-        questions.append(asked.question)
-        reply = reply_to(task, asked.options)
-        result = await agent.resume(asked.interrupt_id, "answer", answer=reply, reviewer=REVIEWER)
+        call = asked.tool_call
+        if call is None:
+            said.questions.append(asked.question)
+            reply = reply_to(task, asked.options)
+            result = await agent.resume(
+                asked.interrupt_id, "answer", answer=reply, reviewer=REVIEWER
+            )
+            continue
+        if not review:
+            break
+        said.approvals += 1
+        mine = call.tool == meta.get("change")
+        wrong = classes.wrong_args(meta, dict(call.args)) if mine else {}
+        if wrong:
+            said.edits += 1
+            fixed = {**call.args, **wrong}
+            result = await agent.resume(asked.interrupt_id, "edit", answer=fixed, reviewer=REVIEWER)
+        else:
+            result = await agent.resume(asked.interrupt_id, "approve", reviewer=REVIEWER)
     paused = result.interrupt if result.status is RunStatus.PAUSED else None
     if paused is not None:
         await agent.resume(paused.interrupt_id, "cancel", reviewer=REVIEWER)
     steps: list[Any] = [(c, None) for c in called.calls]
     if paused is not None and paused.tool_call is not None:
         steps.append((paused.tool_call, None))
+    said.calls = [c for c, _ in steps]
     error = result.error.message if result.error is not None else None
     if result.status is not RunStatus.SUCCESS and (paused is None or paused.tool_call is None):
         status = "interrupted" if paused is not None else "error"
         return EvalResult(
             task["input"], task.get("expected"), None, status, None, error=error
-        ), questions
+        ), said
     case = SimpleNamespace(
-        metadata=task["metadata"],
+        metadata=meta,
         output=result.answer if paused is None else None,
         expected=task.get("expected"),
         trajectory=steps,
@@ -199,19 +230,17 @@ async def answered(
         and (paused is None or getattr(j, "scores_paused", False))
     ]
     scores = [s for j in judges if (s := await j(case)) is not None]
-    meta = task["metadata"]
     made = [c.tool for c, _ in steps]
-    if meta["needed_tools"]:
+    coverage = coverage_of(meta["needed_tools"], made)
+    if coverage is not None:  # none when the task needs no tool: no score, as h.evaluate gives
         avoided = [t for t in made if t in (meta.get("avoid_tools") or [])]
-        said = f"called though not needed: {', '.join(avoided)}" if avoided else None
-        scores.append(EvalScore("tool_coverage", coverage_of(meta["needed_tools"], made), said))
+        comment = f"called though not needed: {', '.join(avoided)}" if avoided else None
+        scores.append(EvalScore("tool_coverage", coverage, comment))
     status = "success" if paused is None else "interrupted"
-    return (
-        EvalResult(
-            task["input"], task.get("expected"), case.output, status, None, scores, error=error
-        ),
-        questions,
+    item = EvalResult(
+        task["input"], task.get("expected"), case.output, status, None, scores, error=error
     )
+    return item, said
 
 
 class Faults(Hooks):
@@ -407,6 +436,7 @@ async def run_cell(
         # an arm of its own user (its documents its own), prepared once per cell
         user, prepare = options.pop("user", USER), options.pop("prepare", None)
         answers = options.pop("answers", False)  # questions answered: run.answered
+        review = options.pop("review", False)  # approvals given by a careful reviewer
         if prepare is not None:
             await prepare(h, user)
         called, faults = Called(), Faults()
@@ -426,7 +456,9 @@ async def run_cell(
             began = time.monotonic()
             with metered() as meter:
                 if answers:
-                    item, questions = await answered(agent, task, user=user, called=called)
+                    item, said = await answered(
+                        agent, task, user=user, called=called, review=review
+                    )
                 else:
                     report = await h.evaluate(
                         agent,
@@ -436,7 +468,7 @@ async def run_cell(
                         concurrency=1,
                         user=user,
                     )
-                    item, questions = report.items[0], []
+                    item, said = report.items[0], Dialogue()
             row = row_of(
                 item,
                 task,
@@ -448,8 +480,15 @@ async def run_cell(
                 approval=bool(changes & set(task["metadata"]["needed_tools"]))
                 or bool(task["metadata"].get("ambiguous")),
                 cpu=_used(cpu_before, pids),
-                questions=questions,
+                questions=said.questions,
             )
+            row |= {
+                "approvals": said.approvals,
+                "edits": said.edits,
+                "correct_change": None
+                if said.calls is None
+                else classes.right_change(task["metadata"], said.calls),
+            }
             row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
             row["fitted"] = dict(collections.Counter(FITTED) - fitted_before)  # FitWindow's steps
             rows.append(row)
