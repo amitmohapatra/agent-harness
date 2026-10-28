@@ -339,14 +339,15 @@ middleware(*, max_steps=12, max_repeats=3, call_timeout=None, context_window=Non
 
 The harness's part of `ReAct` for a LangChain `create_agent` or a Deep Agents
 `create_deep_agent` graph of your own — `create_deep_agent(model, tools,
-middleware=middleware(), checkpointer=RunCheckpointer())` — the settings meaning what
+middleware=middleware())` — the settings meaning what
 [`ReAct`](#react)'s do: the run's tools per model call (narrowed per turn; the memory and gateway
 MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` then a final answer, the
 run's budget, planning on a long task, older results cleared and read back (with a
 `context_window`), the tool guidance and the answer check, and `ModelHooks` (the span, a failed
-call's `on_error`, `call_timeout`, a `stored(...)` `system_prompt` pinned per run). Give the graph
-`checkpointer=RunCheckpointer()` (`trellis.harness.middleware`) for its checkpoint to live in the
-run. A `create_agent` or Deep Agents graph wrapped without it still runs governed and narrowed,
+call's `on_error`, `call_timeout`, a `stored(...)` `system_prompt` pinned per run). A graph
+compiled without a checkpointer is run with `RunCheckpointer()` (`trellis.harness.middleware`):
+its checkpoint lives in the run; one of its own (or `checkpointer=False`) stays
+([runs.md](runs.md#continuing-where-a-run-stopped)). A `create_agent` or Deep Agents graph wrapped without it still runs governed and narrowed,
 said once ([frameworks/react.md](frameworks/react.md#middleware-on-your-own-graph)).
 
 ## Budget

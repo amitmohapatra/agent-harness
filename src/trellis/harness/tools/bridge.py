@@ -343,7 +343,7 @@ async def _record(
     """A call that ran (and ended on the stream): journaled (or, failed, run again by a later
     attempt), saved, counted and recorded."""
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
-        runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
+        runtime.replay.record_call(key, _journaled(outcome), tool=call.tool, stepped=True)
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
     runtime.replay.record_step(call, outcome)
@@ -365,7 +365,7 @@ async def _hooked(runtime: Runtime, call: ToolCall, key: str) -> tuple[ToolCall,
     if not replayed:
         hooked, verdict = await hooks.tool(call)
         kept = {"args": hooked.args, "verdict": noted(verdict)}
-        runtime.replay.record_call(journaled, kept)
+        runtime.replay.record_call(journaled, kept, stepped=True)
     return call.model_copy(update={"args": kept["args"]}), read(kept["verdict"])
 
 
@@ -436,7 +436,7 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
         error_class=OUTCOME_UNKNOWN,
         metadata={UNKNOWN: True},
     )
-    runtime.replay.record_call(key, _journaled(outcome), tool=call.tool)
+    runtime.replay.record_call(key, _journaled(outcome), tool=call.tool, stepped=True)
     runtime.replay.record_step(call, outcome)
     await runtime.progress(now=True)
     _events(runtime, ref, call, outcome)

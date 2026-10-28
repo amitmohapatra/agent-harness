@@ -246,7 +246,8 @@ harness's is refused, `middleware()` itself among them). Each works the same in 
 ## middleware() on your own graph
 
 `trellis.middleware()` is the harness's part on its own: give it to a `create_agent` or a
-`create_deep_agent` graph of yours, with the run's checkpointer, and `h.wrap` runs it as it runs
+`create_deep_agent` graph of yours (compiled without a checkpointer, it is run with the run's,
+`RunCheckpointer()`), and `h.wrap` runs it as it runs
 `ReAct` — the run's tools per model call (the memory and gateway MCP tools among them), narrowed
 per turn, its own tools governed, the step limit and the stall guard, the hooks and spans,
 `call_timeout`, the budget's stop, the checkpoint in the run. The settings are `ReAct`'s, meaning

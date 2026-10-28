@@ -305,7 +305,7 @@ A worker holds a run under a 60 s lease, renewed every 20 s. When it dies the le
 agent-runs queues the run again (after 5 s, doubling per lapse; the fifth lapse ends it
 `ERROR`). The next attempt claims it with the last checkpoint — the journal — and replays it:
 questions answered are not asked again, tool calls completed return their recorded output,
-a `ReAct`'s model steps are not asked again (its graph continues from the checkpoint the journal holds), a write that was in flight is [unknown](#unknown-outcomes)
+the model steps of a `ReAct` or `middleware()` graph are not asked again (the graph continues from the checkpoint the journal holds; a graph's own durable checkpointer from the run's latest checkpoint — [runs.md](runs.md#continuing-where-a-run-stopped)), a write that was in flight is [unknown](#unknown-outcomes)
 (or re-run with its key when idempotent), the run's [sandbox](sandbox.md#automatic) is the one it
 had (attached, never replaced blindly), and the working time already spent still counts against
 `timeout`. Runs kept in process (`run`, `stream`) save no progress: nobody resumes them

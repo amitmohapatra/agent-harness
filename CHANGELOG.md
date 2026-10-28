@@ -208,6 +208,29 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   ([docs/frameworks/react.md](docs/frameworks/react.md#tool-choice)).
 
 ### Fixed
+- Saving and resuming runs, for long runs and runs whose worker crashed
+  ([docs/runs.md](docs/runs.md#continuing-where-a-run-stopped)):
+  - A `create_agent` or `create_deep_agent` graph built with `middleware()` and compiled
+    without a checkpointer kept no checkpoint: a resume or a crash ran it again from its input,
+    the model asked again for every step, and a write the model planned anew (other arguments)
+    ran again — seen with a worker process killed after a write. `h.wrap` now runs it as a copy
+    with `RunCheckpointer()`: it continues where it stopped. A checkpointer of its own, or
+    `checkpointer=False`, stays the graph's.
+  - After a pause or a crash, a checkpointed graph's later call identical to an earlier step's
+    (the same tool, the same arguments) replayed the earlier step's record: it was not run, and
+    an approval it needed was taken from the earlier call's. The journal now keeps each call's
+    record, and each answer a call read, with the step it was made in (`Journal.steps`); an
+    attempt continuing from a checkpoint passes over the steps before it.
+  - A long run's journal grew with every call: a `ReAct` or `middleware()` run drops a step's
+    records once its checkpoint moves past it, and every run's trajectory keeps each output as
+    the event stream previews it (2000 characters).
+  - A graph with a durable checkpointer of its own, after a crash, started the run's turn again
+    on top of the unfinished one (the question twice, a tool call left unanswered): the run's
+    checkpoints are marked with its id (`trellis_run_id` metadata) and the next attempt
+    continues from the latest.
+  - A graph checkpoint in the journal that cannot be read back ends the run `ERROR` with
+    `CHECKPOINT_UNREADABLE`, not retried and nothing run again
+    (`middleware.CheckpointUnreadable`).
 - A tool call a model step repeats — the same tool with the same arguments, in any key order
   (seen live: a small model on `ReAct` emitting `style_stock(style='ZZ999999')` 14 times in one
   message) — ran every time: 14 calls, 14 results back to the model, and for a write 14 side
