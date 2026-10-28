@@ -133,3 +133,27 @@ async def seed_examples(h: Any, user: str) -> None:
             user=user,
             title=f"Solved example: {item['metadata']['task']}",
         )
+
+
+# --------------------------------------------------------------------------- asking the user
+async def _ask(question: str, options: list[str] | None = None) -> str:
+    """Ask the person you work for one short question and wait for the answer: only when a
+    change they asked for needs a value they did not give, and no tool can find it. Give
+    options when there are a few likely answers.
+
+    Args:
+        question: The question, naming what is missing.
+        options: The likely answers to choose from, when there are a few.
+    """
+    runtime = current()
+    if runtime is None:
+        raise RuntimeError("ask_user asks a person: it runs inside a harness run")
+    return str(await runtime.ask(question, options=options or None))
+
+
+def ask_user() -> Any:
+    """The ``ask_user`` tool: the run's own question (``trellis.current().ask``) — it pauses,
+    and its answer, on resume, is the tool's result — governed as a read."""
+    from trellis import tool
+
+    return tool(_ask, name="ask_user", side_effects="read")

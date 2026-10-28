@@ -64,7 +64,7 @@ def test_the_memory_and_ambiguous_classes_are_scored_as_they_say() -> None:
 
 
 async def test_a_change_missing_a_value_is_asked_for_not_made() -> None:
-    meta = {"ambiguous": True, "avoid_tools": ["reset_password"]}
+    meta = {"ambiguous": True, "avoid_tools": ["reset_password"], "gold": ["u-2041"]}
 
     def case(output: str, made: list[str]) -> Any:
         trajectory = [(SimpleNamespace(tool=t), None) for t in made]
@@ -299,3 +299,94 @@ def test_the_command_writes_the_verdicts(tmp_path: Path) -> None:
         analyze.main(["--arm", f"main={report}", "--compare", "x:main:error"])
     with pytest.raises(SystemExit):
         analyze.arguments(["--arm", "nolabel", "--compare", "a:b"])
+
+
+# --------------------------------------------------------------------------- asking the user
+def test_every_change_missing_a_value_has_its_gold_answer() -> None:
+    tasks = [t for s in classes.react_sets() for t in s.tasks]
+    vague = [t for t in tasks if t["metadata"].get("ambiguous")]
+    assert len(vague) == len(classes.MISSING) == 10
+    for task in vague:
+        meta = task["metadata"]
+        assert meta["answer_given"] and meta["about"] and meta["gold"]
+        # the full control holds the gold value the vague one left out
+        assert all(token.casefold() in meta["answer_given"].casefold() for token in meta["gold"])
+
+
+async def test_asking_then_changing_with_the_given_value_is_right() -> None:
+    meta = {"ambiguous": True, "avoid_tools": ["reset_password"], "gold": ["u-2041"]}
+
+    def case(output: Any, *steps: tuple[str, dict[str, Any]]) -> Any:
+        trajectory = [(SimpleNamespace(tool=t, args=a), None) for t, a in steps]
+        return SimpleNamespace(metadata=meta, output=output, trajectory=trajectory)
+
+    for given, right in (
+        (
+            case(
+                None,
+                ("ask_user", {"question": "Whose?"}),
+                ("reset_password", {"user_id": "u-2041"}),
+            ),
+            True,
+        ),
+        (
+            case(
+                None, ("ask_user", {"question": "Whose?"}), ("reset_password", {"user_id": "u-1"})
+            ),
+            False,
+        ),
+        (case(None, ("reset_password", {"user_id": "u-2041"})), False),  # guessed: not asked
+    ):
+        score = await classes.asks_back(given)
+        assert score is not None and score.value is right
+
+
+def test_a_question_is_answered_from_the_gold_data() -> None:
+    vague = {"metadata": {"answer_given": "user u-2041", "gold": ["u-2041"]}}
+    assert run.reply_to(vague, []) == "user u-2041"
+    assert run.reply_to(vague, ["u-1", "u-2041"]) == "u-2041"  # the option holding it
+    assert run.reply_to({"metadata": {}}, []) == run.GO_AHEAD
+
+
+def test_a_run_of_an_asking_class_says_whether_and_what_it_asked() -> None:
+    vague = {"metadata": {"length": "ambiguous", "ambiguous": True, "about": ["whose", "user"]}}
+    found = run.asking(vague, None, ["ask_user"], ["Whose password should I reset?"])
+    assert found == {"vague": True, "asked": True, "questions": 1, "targeted": True}
+    plain = {"metadata": {"length": "simple"}}
+    assert run.asking(plain, "Done.", [], [])["asked"] is False
+    assert run.asking({"metadata": {"length": "wide"}}, "x?", [], [])["vague"] is None
+
+
+@pytest.mark.parametrize(
+    ("variant", "offered"), [("ask", True), ("ask-off", False), ("ask-large", False)]
+)
+def test_ask_user_is_offered_as_the_arm_says(variant: str, offered: bool) -> None:
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    graph, options = VARIANTS[variant].build(_setup())  # a small model: no window of 32k+
+    names = [getattr(t, "name", None) or t.spec.name for t in getattr(graph, TOOLS_ATTRIBUTE)]
+    assert ("ask_user" in names) is offered and options == {"answers": True}
+
+
+async def test_an_asked_question_is_answered_and_the_change_made_with_its_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis import Settings
+
+    monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: Settings()))
+    store = next(s for s in classes.react_sets() if s.name == "store")
+    vague = next(t for t in store.tasks if t["metadata"].get("ambiguous"))
+    only = catalog.TaskSet(store.name, store.system, store.tools, [vague])
+    rule = {"store": "S12", "style": "ST-101", "min_units": 2, "max_units": 6}
+    model = ScriptedChatModel(
+        turns=[("ask_user", {"question": "What min and max units?"}), ("create_stock_rule", rule)]
+    )
+    setup = {"model": model, "window": 16_384, "max_steps": 6}
+    async with run.harness() as h:
+        [row] = await run.run_cell(
+            h, "ask", 10, setup=setup, repeats=1, sets=[only], run_seconds=30, progress=str
+        )
+    assert row["asked"] and row["targeted"] and row["questions"] == 1 and row["vague"]
+    assert row["success"] and row["checks"]["asks_back"] is True, row
+    told = [m for m in model.seen[1] if m.type == "tool"]
+    assert told[-1].content == "min 2 and max 6"  # the gold answer, as the tool's result

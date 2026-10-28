@@ -59,6 +59,9 @@ Reasoning techniques (``benchmark.cost.techniques``), each ``main`` and one cand
 * ``code`` — ``ReAct(backend=sandbox())``: code run in the run's own sandbox (Deep Agents'
   ``execute``; Docker unless ``DOCKER_HOST`` says), against ``deep`` (the same graph, no
   sandbox) as well as ``main``;
+* ``ask-off``, ``ask``, ``ask-large`` — ``main`` without, with and (a large model only) with the
+  ``ask_user`` tool (``techniques.ask_user``: the run's own ``ask``), each run's questions
+  answered from the task's gold data (``run.answered``), the same for all three;
 * ``examples`` — ``main`` run for a user of its own whose documents are the reasoning class's
   dev items as solved examples (``techniques.seed_examples``, with ``--memory``): the memory
   service's own retrieval brings the similar ones into each run's context.
@@ -68,6 +71,7 @@ Reasoning techniques (``benchmark.cost.techniques``), each ``main`` and one cand
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -169,6 +173,20 @@ def technique(setup: Setup, *, name: str) -> tuple[Any, dict[str, Any]]:
     from benchmark.cost import techniques
 
     return main(setup, middleware=(techniques.TECHNIQUES[name](),))
+
+
+def ask(setup: Setup, *, offered: str) -> tuple[Any, dict[str, Any]]:
+    """``main`` with the ``ask_user`` tool (``techniques.ask_user``): ``offered`` to every
+    model (``all``), to a large one only (``large``: ``automatic.model_tier``), or not at all
+    (``none``); every arm's questions answered from the task's gold data (``run.answered``)."""
+    from benchmark.cost import techniques
+    from trellis.harness.automatic import model_tier
+
+    name = setup.model if isinstance(setup.model, str) else getattr(setup.model, "model_name", None)
+    tier = model_tier(name if isinstance(name, str) else None, setup.window)
+    given = offered == "all" or (offered == "large" and tier == "large")
+    tools = (*setup.tools, techniques.ask_user()) if given else setup.tools
+    return main(dataclasses.replace(setup, tools=tools), options={"answers": True})
 
 
 def code(setup: Setup) -> tuple[Any, dict[str, Any]]:
@@ -453,6 +471,19 @@ VARIANTS: Final[dict[str, Variant]] = {
         }.items()
     },
     "code": Variant("code", "ReAct with code run in the run's own sandbox", code),
+    "ask-off": Variant(
+        "ask-off",
+        "main, its questions answered as the ask arms' are (no ask_user)",
+        functools.partial(ask, offered="none"),
+    ),
+    "ask": Variant(
+        "ask", "main with ask_user, offered to every model", functools.partial(ask, offered="all")
+    ),
+    "ask-large": Variant(
+        "ask-large",
+        "main with ask_user, offered to a large model only",
+        functools.partial(ask, offered="large"),
+    ),
     "examples": Variant(
         "examples", "main with the reasoning dev items as solved examples in memory", examples
     ),

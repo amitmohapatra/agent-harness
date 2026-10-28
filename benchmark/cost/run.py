@@ -122,14 +122,96 @@ def metered(meter: Meter | None = None) -> Iterator[Meter]:
 
 
 class Called(Hooks):
-    """The tools the current run called (reset before each run)."""
+    """The tools the current run called, and the calls (reset before each run)."""
 
     def __init__(self) -> None:
         self.tools: list[str] = []
+        self.calls: list[ToolCall] = []
 
     async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
         self.tools.append(call.tool)
+        self.calls.append(call)
         return outcome
+
+
+#: Who answers a measured run's questions, and how many questions a run is answered at most.
+REVIEWER: Final = "trellis:bench"
+MOST_QUESTIONS: Final = 3
+#: What a question is answered with when the task left nothing out.
+GO_AHEAD: Final = "Go ahead with what I asked."
+
+
+def reply_to(task: dict[str, Any], options: Sequence[Any]) -> str:
+    """A question's answer from the task's gold data (``answer_given``): an option holding it,
+    when the question offers options."""
+    gold = task["metadata"].get("answer_given") or GO_AHEAD
+    values = [str(getattr(o, "value", o)) for o in options]
+    tokens = task["metadata"].get("gold") or []
+    picked = [v for v in values if tokens and all(t.casefold() in v.casefold() for t in tokens)]
+    return picked[0] if picked else gold
+
+
+async def answered(
+    agent: Any, task: dict[str, Any], *, user: str, called: Called
+) -> tuple[Any, list[str]]:
+    """``task`` run with its questions answered (:func:`reply_to`, as a person resuming it), an
+    approval ending it as ``h.evaluate`` ends one — and scored by the same evaluators, on the
+    same terms: the item's result, and the questions asked."""
+    from types import SimpleNamespace
+
+    from trellis.contracts import RunStatus
+    from trellis.harness.evals import EvalResult, EvalScore, tool_coverage
+
+    questions: list[str] = []
+    result = await agent.run(task["input"], user=user)
+    while (
+        result.status is RunStatus.PAUSED
+        and result.interrupt is not None
+        and result.interrupt.tool_call is None
+        and len(questions) < MOST_QUESTIONS
+    ):
+        asked = result.interrupt
+        questions.append(asked.question)
+        reply = reply_to(task, asked.options)
+        result = await agent.resume(asked.interrupt_id, "answer", answer=reply, reviewer=REVIEWER)
+    paused = result.interrupt if result.status is RunStatus.PAUSED else None
+    if paused is not None:
+        await agent.resume(paused.interrupt_id, "cancel", reviewer=REVIEWER)
+    steps: list[Any] = [(c, None) for c in called.calls]
+    if paused is not None and paused.tool_call is not None:
+        steps.append((paused.tool_call, None))
+    error = result.error.message if result.error is not None else None
+    if result.status is not RunStatus.SUCCESS and (paused is None or paused.tool_call is None):
+        status = "interrupted" if paused is not None else "error"
+        return EvalResult(
+            task["input"], task.get("expected"), None, status, None, error=error
+        ), questions
+    case = SimpleNamespace(
+        metadata=task["metadata"],
+        output=result.answer if paused is None else None,
+        expected=task.get("expected"),
+        trajectory=steps,
+    )
+    judges = [
+        j
+        for j in classes.EVALUATORS
+        if not isinstance(j, tool_coverage)
+        and (paused is None or getattr(j, "scores_paused", False))
+    ]
+    scores = [s for j in judges if (s := await j(case)) is not None]
+    meta = task["metadata"]
+    made = [c.tool for c, _ in steps]
+    if meta["needed_tools"]:
+        avoided = [t for t in made if t in (meta.get("avoid_tools") or [])]
+        said = f"called though not needed: {', '.join(avoided)}" if avoided else None
+        scores.append(EvalScore("tool_coverage", coverage_of(meta["needed_tools"], made), said))
+    status = "success" if paused is None else "interrupted"
+    return (
+        EvalResult(
+            task["input"], task.get("expected"), case.output, status, None, scores, error=error
+        ),
+        questions,
+    )
 
 
 class Faults(Hooks):
@@ -157,7 +239,16 @@ class Faults(Hooks):
 #: Tools a run calls for itself, never a wrong call: the memory service's, reading back a
 #: cleared result or a file, planning, a helper.
 OWN_TOOLS: Final = frozenset(
-    {"memory_search", "tool_search", "read_result", "read_file", "write_todos", "task", "delegate"}
+    {
+        "memory_search",
+        "tool_search",
+        "read_result",
+        "read_file",
+        "write_todos",
+        "task",
+        "delegate",
+        "ask_user",  # asking when nothing was missing is ask precision's
+    }
 )
 #: What an error of a run that ran out of time says.
 TIMED_OUT: Final = re.compile(r"time ?out|timed out|out of time|deadline", re.IGNORECASE)
@@ -206,6 +297,32 @@ def succeeded(row: dict[str, Any], *, approval: bool) -> bool:
     )
 
 
+#: The classes whose runs say whether they asked their user (``vague``: a value was missing).
+ASKING: Final = frozenset({"ambiguous", "simple"})
+
+
+def asking(
+    task: dict[str, Any], output: Any, called: Sequence[str], questions: Sequence[str]
+) -> dict[str, Any]:
+    """Of a run of an :data:`ASKING` class: whether its task left a value out (``vague``),
+    whether it asked (the question tool, or a question in its answer), how many questions it
+    asked, and — when it asked about a missing value — whether the question named it
+    (``targeted``: one of ``metadata["about"]``)."""
+    meta = task["metadata"]
+    if meta.get("length") not in ASKING:
+        return {"vague": None, "asked": None, "questions": len(questions), "targeted": None}
+    vague = bool(meta.get("ambiguous"))
+    asked = bool(questions) or classes.asked_in(output, list(called))
+    said = " ".join(questions) or (output if isinstance(output, str) else "")
+    named = any(word in said.casefold() for word in meta.get("about") or [])
+    return {
+        "vague": vague,
+        "asked": asked,
+        "questions": len(questions),
+        "targeted": (asked and named) if vague else None,
+    }
+
+
 def row_of(
     result: Any,
     task: dict[str, Any],
@@ -215,6 +332,7 @@ def row_of(
     *,
     approval: bool = False,
     cpu: Mapping[str, float | None] | None = None,
+    questions: Sequence[str] = (),
 ) -> dict[str, Any]:
     """One run, as the report keeps it (``approval``: its task asks for a change; ``cpu``: the
     CPU seconds each process used during it)."""
@@ -237,6 +355,7 @@ def row_of(
         "wrong_calls": wrong_calls(task, called),
         "injected": task["metadata"].get(classes.INJECT),
         "split": task["metadata"].get("split"),
+        **asking(task, result.output, called, questions),
         "called": called,
         "input_tokens": meter.input_tokens,
         "output_tokens": meter.output_tokens,
@@ -287,6 +406,7 @@ async def run_cell(
         target, options = VARIANTS[variant].build(built)
         # an arm of its own user (its documents its own), prepared once per cell
         user, prepare = options.pop("user", USER), options.pop("prepare", None)
+        answers = options.pop("answers", False)  # questions answered: run.answered
         if prepare is not None:
             await prepare(h, user)
         called, faults = Called(), Faults()
@@ -299,28 +419,36 @@ async def run_cell(
             **options,
         )
         for repeat, task in todo:
-            called.tools = []
+            called.tools, called.calls = [], []
             faults.arm(task)
             cpu_before = {name: procstat.cpu_seconds(pid) for name, pid in pids.items()}
             fitted_before = collections.Counter(FITTED)
             began = time.monotonic()
             with metered() as meter:
-                report = await h.evaluate(
-                    agent,
-                    [task],
-                    classes.EVALUATORS,
-                    run_name=f"bench-cost-{variant}-{size}",
-                    concurrency=1,
-                    user=user,
-                )
+                if answers:
+                    item, questions = await answered(agent, task, user=user, called=called)
+                else:
+                    report = await h.evaluate(
+                        agent,
+                        [task],
+                        classes.EVALUATORS,
+                        run_name=f"bench-cost-{variant}-{size}",
+                        concurrency=1,
+                        user=user,
+                    )
+                    item, questions = report.items[0], []
             row = row_of(
-                report.items[0],
+                item,
                 task,
                 meter,
                 list(called.tools),
                 time.monotonic() - began,
-                approval=bool(changes & set(task["metadata"]["needed_tools"])),
+                # a task that asks for a change, or leaves a value out (its change, made with the
+                # value the user gave, ends at its approval: classes.asks_back decides)
+                approval=bool(changes & set(task["metadata"]["needed_tools"]))
+                or bool(task["metadata"].get("ambiguous")),
                 cpu=_used(cpu_before, pids),
+                questions=questions,
             )
             row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
             row["fitted"] = dict(collections.Counter(FITTED) - fitted_before)  # FitWindow's steps
@@ -373,6 +501,8 @@ FIGURES: Final = (
     "timed_out",
     "wrong_calls",
     "failed_model_calls",
+    "asked",
+    "questions",
 )
 
 

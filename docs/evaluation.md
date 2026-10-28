@@ -367,7 +367,12 @@ fully given controls), `helpers` (10: eight to twelve items, for the helper arms
 OpenAI, `benchmark/cost/data/GSM8K_LICENSE` — and generated dates, multi-hop and logic
 questions with exact answers; half `dev`, where a technique is tuned and the worked examples
 come from, half `test`). Each run also records its wrong tool calls, whether it ran out of
-time and its split; the report names the
+time and its split; a run of the simple or ambiguous class whether it asked (the `ask_user`
+tool, or a question in its answer), how many questions, and whether the question named the
+missing value — from which `analyze` gives ask recall, ask precision and targeting. The ask
+arms (`ask-off`, `ask`, `ask-large`) answer each question from the task's gold data
+(`run.answered`, a person resuming the run), and a vague change made after the answer is right
+only with the value given; the report names the
 `trellis` source it measured (`environment.trellis`: path, commit, changes), so today's `main`
 is run from a worktree of origin/main with the same runner.
 

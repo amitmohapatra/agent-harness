@@ -83,6 +83,20 @@ def _cached_share(row: dict[str, Any]) -> float | None:
     return None if cached is None or not sent else float(cached) / float(sent)
 
 
+def _recall(row: dict[str, Any]) -> float | None:
+    """Of a run whose task left a value out: whether it asked."""
+    return float(row["asked"]) if row.get("vague") is True else None
+
+
+def _precision(row: dict[str, Any]) -> float | None:
+    """Of a run whose task left nothing out (an asking class's): whether it did not ask."""
+    return float(not row["asked"]) if row.get("vague") is False else None
+
+
+def _targeted(row: dict[str, Any]) -> float | None:
+    return None if row.get("targeted") is None else float(row["targeted"])
+
+
 def _tokens(row: dict[str, Any]) -> float:
     return float(row.get("input_tokens") or 0) + float(row.get("output_tokens") or 0)
 
@@ -100,6 +114,10 @@ METRICS: Final = (
     Metric("output_tokens", _key("output_tokens"), False, relative=True),
     Metric("cached_tokens", _key("cached_tokens"), None, relative=True),
     Metric("cached_share", _cached_share, None, relative=False),
+    Metric("ask_recall", _recall, True, relative=False),
+    Metric("ask_precision", _precision, True, relative=False),
+    Metric("ask_targeted", _targeted, True, relative=False),
+    Metric("questions", _key("questions"), None, relative=False),
 )
 #: The latency metrics, each a percentile of a class's run seconds.
 LATENCY: Final = (("p50", 50), ("p95", 95))

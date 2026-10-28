@@ -523,7 +523,10 @@ reasoning questions with exact answers (half `dev`, half `test`) — each arm a 
 (LangChain's limits only), `limitsB` (and the repeat check), `errorsA` (and the errors' pieces),
 `all`; the reasoning and caching techniques, each a native switch or a library's piece
 (`think`, `code`, `examples`, `slot-reuse`, `temp0`, `serial-tools`, `anthropic-cache`,
-`openai-cache-key`); `task-only` against `delegate`; native
+`openai-cache-key`); asking the user a question — `ask_user`, a read tool over the run's own
+`ask` (it pauses; the answer is its result on resume), not offered (`ask-off`), offered to every
+model (`ask`) or to a large one only (`ask-large`), each run's questions answered from the
+task's gold data; `task-only` against `delegate`; native
 `task` helpers with the admission gate and without (`helpers-admitted`, `helpers`); and,
 prepared, `context-native`. `python -m benchmark.cost.analyze` gives each change's verdict per
 class, every metric's difference with its 95% bootstrap interval, and applies the rules set
