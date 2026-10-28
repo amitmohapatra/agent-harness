@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from trellis.contracts import AgentError, Interrupt, RunRecord, RunStatus
+from trellis.harness.tools.base import Citation
 
 
 class Result(BaseModel):
     """``SUCCESS`` with the ``answer``; ``PAUSED`` with the ``interrupt`` a person answers
     (``agent.resume``); ``ERROR`` with the ``error``; ``QUEUED`` when a worker continues it;
-    ``CANCELLED``."""
+    ``CANCELLED``. An answer given in process carries its ``sources``: those its tools returned
+    (``tool(response_format="content_and_artifact")``), each once — never one the model named
+    itself."""
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -21,6 +24,7 @@ class Result(BaseModel):
     answer: Any = None
     interrupt: Interrupt | None = None
     error: AgentError | None = None
+    sources: list[Citation] = Field(default_factory=list)
 
     @classmethod
     def of(cls, record: RunRecord) -> Result:

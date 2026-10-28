@@ -305,7 +305,7 @@ smaller, step by step, only as far as it must, in this order:
 | `tools` | the offered tools narrowed to the most relevant | those the run used; then the hinted ones; then by the words they share with the request; at least 8 |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
 | `results` | older tool results cleared (`read_result` reads them back), the longest cut to head and tail | the latest |
-| `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`) | the latest turn whole |
+| `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`); in the measured `sized` arm only those that do not fit, by LangChain's `trim_messages` ([explanations.md](../explanations.md#the-two-arms)) | the latest turn whole |
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
 
 Each step taken is said on the run (a `warning` event, code `context_fit`, naming the steps) and
@@ -352,6 +352,16 @@ default (`automatic.ToolSelection`, for a measurement).
 | Learned skills | the ones the agent learned, with its memory context ([skills.md](../skills.md#learned-skills)); Deep Agents' `skills=` beside them |
 | Store | a `StoreBackend` (and `runtime.store`) is the memory service's, wrapped |
 | Records, grounding, judges, tracing, trajectory | as for every target |
+
+## Questions about an earlier answer
+
+"Where did that come from?", "what did you do?", "how long did it take?": a `ReAct` run keeps
+its record — each step, the sources its tools returned (`tool(...,
+response_format="content_and_artifact")`, or a LangChain tool's artifact), the approvals, the
+memories it was shown — and its answer carries its sources (`result.sources`). A follow-up reads
+it in a wider window (the `sized` arm) or with a read-only lookup (the `lookup` arm), each
+measured and neither on by default; what the end user and an administrator are shown of it is
+rendered by the harness, never by the model. See [explanations.md](../explanations.md).
 
 ## Approvals, streaming, durable runs, surfaces, evaluation
 

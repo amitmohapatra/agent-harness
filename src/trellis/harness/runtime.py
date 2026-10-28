@@ -65,6 +65,9 @@ INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 #: The tag of a framework's own tool that hands the work to another agent
 #: (``adapters.base.HELPER``, kept here: the runtime imports no adapter).
 HELPER: Final = "helper"
+#: The harness's tool that reads the record of an earlier answer of the run's conversation
+#: (``trellis.harness.explain``, its ``lookup`` arm): never narrowed away.
+EARLIER: Final = "earlier_answers"
 #: The ``RunStart.metadata`` key of a ``delegate`` job's run (``trellis.harness.delegate``):
 #: how deep in delegation it is. Such a run only reads.
 DELEGATED: Final = "delegated"
@@ -309,8 +312,13 @@ class Runtime:
         self.events.custom(LOG, message=message, **fields)
 
     def tool_names(self) -> list[str]:
-        """The run's own harness tools (the memory service's pull tools are not candidates)."""
-        return [name for name, found in self.toolbox.items() if found.spec.source != "memory"]
+        """The run's own harness tools (the memory service's pull tools and :data:`EARLIER`,
+        always offered, are not candidates)."""
+        return [
+            name
+            for name, found in self.toolbox.items()
+            if found.spec.source != "memory" and name != EARLIER
+        ]
 
     def tool_set(self) -> list[str]:
         """The run's tool set: its harness tools (:meth:`tool_names`) and the framework's own
@@ -321,8 +329,9 @@ class Runtime:
     def offers(self, name: str) -> bool:
         """Whether the model is offered ``name`` now (per turn where the framework allows): a
         tool of the run's tool set the narrowing left out is not; a memory tool always is, and
-        so is a tool outside the set (a graph's own state tools, ``read_file``)."""
-        if self.offered is None or name in self.offered or name in self.used:
+        so are :data:`EARLIER` and a tool outside the set (a graph's own state tools,
+        ``read_file``)."""
+        if self.offered is None or name in self.offered or name in self.used or name == EARLIER:
             return True
         found = self.toolbox.get(name)
         if found is not None:

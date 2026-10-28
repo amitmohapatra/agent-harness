@@ -116,6 +116,11 @@ class Journal(BaseModel):
     #: <assignee>"`` when the approval was asked of someone): their later calls asked of the
     #: same are not asked about again in this run
     remembered: list[str] = Field(default_factory=list)
+    #: every person's decision on a tool call of the run, in order: the pause's
+    #: ``interrupt_id``, the tool, the ``decision``, whom it was asked of (``assignee``), who
+    #: decided (``reviewer``), their ``comment`` and when (``resolved_at``) — what the run's
+    #: record says of its approvals (``trellis.harness.explain``)
+    approvals: list[dict[str, Any]] = Field(default_factory=list)
     #: the calls a framework's own approval gate approved (LangChain's
     #: ``HumanInTheLoopMiddleware``, Deep Agents' ``interrupt_on``, an OpenAI Agents
     #: ``needs_approval`` tool), by content: governance counts that approval, once each, and
@@ -209,6 +214,24 @@ class Journal(BaseModel):
         if isinstance(edited, dict) and calls:
             calls[0] = (calls[0][0], edited)
         self.approved += [content_key("approved", name, args) for name, args in calls]
+
+    def decided(self, resolution: InterruptResolution) -> None:
+        """A person's ``resolution`` of the open pause, filed in :attr:`approvals` when the pause
+        is a tool call's (an approval: the harness's, or a framework's own gate)."""
+        interrupt = self.pending.interrupt if self.pending is not None else None
+        if interrupt is None or interrupt.tool_call is None:
+            return
+        self.approvals.append(
+            {
+                "interrupt_id": resolution.interrupt_id,
+                "tool": interrupt.tool_call.tool,
+                "decision": resolution.decision.value,
+                "assignee": interrupt.assignee,
+                "reviewer": resolution.reviewer,
+                "comment": resolution.comment,
+                "resolved_at": resolution.resolved_at.isoformat(),
+            }
+        )
 
     def answered(self, resolution: InterruptResolution) -> None:
         """File the answer to the open pause, and close it."""

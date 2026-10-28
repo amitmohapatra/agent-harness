@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-from benchmark.cost import catalog, prices, run, stats
+from benchmark.cost import catalog, explain, prices, run, stats
 from benchmark.cost.variants import DEFAULT, VARIANTS
 from trellis.harness.react import window_of
 
@@ -56,9 +56,10 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sets", default="", help="task sets by name (default: all)")
     parser.add_argument(
         "--suite",
-        choices=("default", "classes"),
+        choices=("default", "classes", "explain"),
         default="default",
-        help="the ten tasks (default), or ten tasks per class (catalog.CLASSES)",
+        help="the ten tasks (default), ten tasks per class (catalog.CLASSES), or follow-ups "
+        "about an earlier answer in each arm (benchmark.cost.explain)",
     )
     parser.add_argument(
         "--classes",
@@ -71,6 +72,16 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="memory on: the environment's MEMORY_URL (its context and tool hints)",
     )
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--arms", default=",".join(explain.ARMS), help="with --suite explain: the arms run"
+    )
+    parser.add_argument("--share", type=float, default=explain.SHARE, help="the sized arm's share")
+    parser.add_argument("--cap", type=int, default=explain.CAP, help="the sized arm's cap")
+    parser.add_argument(
+        "--admin",
+        action="store_true",
+        help="with --suite explain: act with TRELLIS_ADMIN_API_KEY (the administrator's view)",
+    )
     parser.add_argument("--window", type=int, default=None, help="the model's context window")
     parser.add_argument("--max-steps", type=int, default=6)
     parser.add_argument("--timeout", type=float, default=600.0, help="seconds per run")
@@ -182,6 +193,25 @@ async def bench(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     args = arguments(argv)
+    if args.suite == "explain":
+        window, _ = window_of(None, args.window)
+        found = asyncio.run(
+            explain.bench(
+                model=args.model,
+                model_name=args.model,
+                window=window,
+                arms=_list(args.arms),
+                repeats=args.repeats,
+                share=args.share,
+                cap=args.cap,
+                max_steps=args.max_steps,
+                memory=args.memory,
+                admin=args.admin,
+            )
+        )
+        explain.written(found, args.out)
+        sys.stdout.write(explain.markdown(found))
+        return 0
     report = asyncio.run(bench(args))
     sys.stdout.write(stats.markdown(report))
     return 0

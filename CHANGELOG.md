@@ -12,6 +12,33 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 
 ### Added
 
+- Explanations: a run keeps its record — each step (its tool's description in plain words, its
+  arguments, how it ended, a preview of what it returned, its time), the sources its tools
+  returned, every person's decision on its calls, the memories its context showed and how far
+  they covered the question, what it spent — in its journal while it runs (a pause and a crash
+  keep it) and, when it ends, in agent-runs' event log (a `record` event) or, in process, in
+  the agent. A follow-up about an earlier answer is answered from it, rendered by the harness
+  for the key's audience: the end user (a service key) sees the steps in plain words, the
+  sources, their freshness, the limits, their own notes, the time and the approvals by role —
+  never a tool's name or arguments, a raw output, another person's data, an id, a model,
+  tokens, cost, an error trace or a score; an administrator (an admin or platform key) sees
+  everything. See [docs/explanations.md](docs/explanations.md).
+- Sources: `tool(response_format="content_and_artifact")` (LangChain's) — the function returns
+  `(content, artifact)`, the artifact a `trellis.Citation(name, date, link)` or a list; a
+  LangChain tool's `content_and_artifact` artifact is read the same way. `Result.sources`: the
+  sources a run's tools returned, each once, never one the model named.
+- Two ways a follow-up gets the earlier answer's calls and results, each measured and neither on
+  until the data decides — the release keeps one and removes the other
+  (`trellis.harness.explain.measured`): `sized` — the conversation window
+  asked of the memory service at a share of the model's window, capped
+  (`conversation_token_budget`, trellis-memory 0.6; an older service is asked as before), and
+  `FitWindow` keeping the newer older turns that fit (LangChain's `trim_messages`); `lookup` —
+  the service's own window and a read-only `earlier_answers` tool, scoped to the run's
+  conversation (tenant, user, agent, thread). The cost benchmark's `--suite explain` measures
+  both against neither: accuracy against the earlier run's record per question kind, lookups
+  made (and wrongly made on ordinary follow-ups), never-see items, and every turn's tokens,
+  cached share and seconds, as the end user and (`--admin`) as an administrator.
+
 - `ReAct` hands wide tasks to helpers at once: the `delegate` tool, offered by itself to a
   request of several independent items of one kind on a large model (never to steps in order,
   a request to change something, a small model or a helper). Its jobs take Deep Agents' `task`
@@ -50,6 +77,18 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 - `tools.convert.mcp`: the harness's tools as an MCP server (the official SDK), served per
   attempt on the loopback interface with a bearer token.
 - Requires `trellis-contracts>=0.6.2` (its `acp` error source).
+
+### Fixed
+
+- A follow-up asking where the last answer came from was answered "I do not know" with the
+  call and its result in the window: the note added when long-term memory holds nothing
+  (`evidence_status` `INSUFFICIENT`, `INCOMPLETE`) now says it is about long-term memory only,
+  and that the conversation — the model's own earlier tool calls and their results included —
+  is the model's to use; what depends on something the user said that is not there is still
+  "I do not know".
+- The tests' memory service cuts the conversation window as the service does (whole turns
+  within the budget, at most 20, the newest whole with `over_budget`), so a large earlier turn
+  no longer passes a test it fails against the service.
 
 ### Removed
 

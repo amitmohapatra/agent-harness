@@ -10,6 +10,8 @@ what tools and nodes get as ``trellis.current().memory``.
 from __future__ import annotations
 
 import hashlib
+import inspect
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Final
@@ -28,7 +30,7 @@ from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.history import Said, Speaker, recorded, said_of
 from trellis.harness.identity import Identity
 from trellis.memory import MemoryClient, MemoryContext
-from trellis.memory.errors import NotFoundError
+from trellis.memory.errors import NotFoundError, ValidationError
 from trellis.memory.models import (
     AgentTool,
     DocumentInfo,
@@ -37,6 +39,8 @@ from trellis.memory.models import (
     KeyInfo,
     PromptContext,
 )
+
+log = logging.getLogger("trellis.memory")
 
 #: Prompt budget for the pushed context, in tokens, when the model's context window is not
 #: known; with it known, :data:`CONTEXT_SHARE` of the window, between that and
@@ -66,6 +70,14 @@ CITED_MAX: Final = 50
 #: cannot be reached, the last listing is kept and asked for again after the retry interval.
 AGENT_TOOLS_TTL_SECONDS: Final = 600.0
 AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
+#: The field that sizes the conversation window to the caller's own budget (trellis-memory
+#: 0.6 on): the newest turns whole, newest first, the newest one whole even past it
+#: (``conversation.over_budget``). Without it the service cuts the window to its default
+#: (2000 tokens), and a turn with a large tool result lost its question, its call and its
+#: result to the next turn.
+CONVERSATION_BUDGET: Final = "conversation_token_budget"
+#: The least window budget the service takes.
+CONVERSATION_MIN: Final = 100
 
 
 class Window(StrEnum):
@@ -84,6 +96,11 @@ class Memory:
 
     def __init__(self, client: MemoryClient) -> None:
         self.client = client
+        #: whether a messages-form window is asked for at the caller's budget: the SDK sends
+        #: the field, until a service too old for it refuses it (then the service's default)
+        self.sized_windows = (
+            CONVERSATION_BUDGET in inspect.signature(MemoryContext.context).parameters
+        )
         self._lister = self.client.bind()
         self._agent_tools = Fresh(
             self._list_agent_tools,
@@ -183,14 +200,59 @@ class RunMemory:
         hints: bool,
         budget: int = CONTEXT_TOKEN_BUDGET,
         document_ids: Sequence[str] | None = None,
+        conversation: int | None = None,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
         skills it learned for the task and - unless ``hints`` is off - the tools that fit.
         ``window``: the thread's recent messages left out (``Window.NONE``: the framework
         keeps them itself), in the rendered text (``RENDERED``), or verbatim as
-        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own.
-        ``document_ids`` narrows the documents its passages come from to those (``None``:
-        every one the scope may read)."""
+        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own — at
+        most ``conversation`` tokens of whole turns when given (:data:`CONVERSATION_BUDGET`,
+        where the service takes it; a service too old for it is asked as before, from then
+        on). ``document_ids`` narrows the documents its passages come from to those
+        (``None``: every one the scope may read)."""
+        sized = conversation is not None and window is Window.MESSAGES and self.memory.sized_windows
+        if sized:
+            try:
+                return await self._context(
+                    query,
+                    tools=tools,
+                    window=window,
+                    hints=hints,
+                    budget=budget,
+                    document_ids=document_ids,
+                    sized={CONVERSATION_BUDGET: max(CONVERSATION_MIN, conversation or 0)},
+                )
+            except ValidationError as exc:
+                if not _refused(exc, CONVERSATION_BUDGET):
+                    raise
+            self.memory.sized_windows = False
+            log.warning(
+                "the memory service does not take %s (older than trellis-memory 0.6): its "
+                "window is cut to its own default",
+                CONVERSATION_BUDGET,
+            )
+        return await self._context(
+            query,
+            tools=tools,
+            window=window,
+            hints=hints,
+            budget=budget,
+            document_ids=document_ids,
+            sized={},
+        )
+
+    async def _context(
+        self,
+        query: str,
+        *,
+        tools: Sequence[str] | None,
+        window: Window,
+        hints: bool,
+        budget: int,
+        document_ids: Sequence[str] | None,
+        sized: dict[str, Any],
+    ) -> PromptContext:
         return await self.ctx.context(
             query,
             token_budget=budget,
@@ -199,6 +261,7 @@ class RunMemory:
             window=window is not Window.NONE,
             window_format="messages" if window is Window.MESSAGES else "rendered",
             document_ids=document_ids,
+            **sized,
         )
 
     # ------------------------------------------------------------------ pull
@@ -337,6 +400,15 @@ class RunMemory:
         agent = self.ctx.scope.agent_id
         digest = hashlib.blake2b(key.encode(), digest_size=8).hexdigest()
         await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent}:{digest}")
+
+
+def _refused(exc: ValidationError, field: str) -> bool:
+    """Whether the service refused a request for ``field`` (its problem's ``details.errors``
+    name the field: an older service, which forbids what it does not know)."""
+    errors = exc.details.get("errors")
+    return isinstance(errors, list) and any(
+        isinstance(e, dict) and field in (e.get("loc") or ()) for e in errors
+    )
 
 
 def documents(document_ids: Sequence[str]) -> list[str]:

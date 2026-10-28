@@ -45,7 +45,7 @@ from trellis.contracts import (
     RunStatus,
     ToolCall,
 )
-from trellis.harness import budget, sandbox
+from trellis.harness import budget, explain, sandbox
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -423,6 +423,7 @@ async def _concluded(
     if paused is not None:
         await sandbox.paused(runtime)
         return await _paused(agent, runtime, journal, paused, extracted)
+    sources = explain.keep(agent, runtime).sources  # the run's record, kept as it ends
     if runtime.cancelled is not None:
         await _settle_cancelled(
             agent, runtime.identity, runtime.events, runtime.worker_id, reason=runtime.cancelled
@@ -441,6 +442,7 @@ async def _concluded(
     else:
         assert extracted is not None
         result = await _succeeded(agent, runtime, extracted, pushed)
+        result = result.model_copy(update={"sources": sources})
     if not _again(runtime, result):
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
@@ -555,6 +557,7 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     re-run will ask for it (or left to the framework, when it resumes from its own state)."""
     pending = journal.pending
     if resolution is not None and pending is not None:
+        journal.decided(resolution)  # an approval, for the run's record
         journal.approved_in_framework(resolution)
         if pending.native_state:
             journal.pending = None

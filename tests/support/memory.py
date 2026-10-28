@@ -31,6 +31,12 @@ NOW: Final = "2026-10-01T00:00:00Z"
 #: The toolbox the service hints tools for (the memory service's ``TOOL_HINTS_MIN``); the
 #: learned skills come back for any toolbox.
 HINTS_MIN_TOOLS: Final = 5
+#: The messages-form window's cut, as the service makes it (``ContextSettings``,
+#: ``modules/context/window.py``): its token budget when the request names none
+#: (``conversation_token_budget``), the most turns, and what a message costs beyond its text.
+WINDOW_TOKEN_BUDGET: Final = 2000
+WINDOW_MAX_TURNS: Final = 20
+MESSAGE_OVERHEAD_TOKENS: Final = 4
 #: The memory service's committed OpenAPI document: every request the harness sends and every
 #: answer this fake gives is checked against it (``FakeMemoryService.violations``).
 CONTRACT: Final = OpenAPI.load(MEMORY_OPENAPI)
@@ -74,6 +80,7 @@ ROUTES: Final = [
     ("GET", r"/v1/documents/(?P<document_id>[^/]+)", "document"),
     ("POST", r"/v1/memories", "remember"),
     ("GET", r"/v1/memories", "list_memories"),
+    ("GET", r"/v1/memories/(?P<memory_id>[^/]+)", "memory"),
     ("DELETE", r"/v1/memories/(?P<memory_id>[^/]+)", "forget"),
     ("POST", r"/v1/memories/(?P<memory_id>[^/]+)/supersede", "supersede"),
     ("POST", r"/v1/recall", "recall"),
@@ -102,6 +109,9 @@ class FakeMemoryService:
     #: what ``GET /v1/keys/self`` says about the key
     tenant: str | None = "acme"
     role: str = "service"
+    #: whether the service takes a caller's window budget (``conversation_token_budget``: 0.6
+    #: on); an older one refuses the field as unknown (``422``)
+    sized_windows: bool = True
     #: the catalog by tool name: risk / approve_when / annotations / side_effects
     catalog: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: the approval suggestions learned (as the service answers them, plus the ``rule`` an
@@ -251,7 +261,10 @@ class FakeMemoryService:
             "may_act_as": ["*"],
         }
 
-    def _context(self, call: Call) -> dict[str, Any]:
+    def _context(self, call: Call) -> dict[str, Any] | httpx.Response:
+        refused = self._refused_field(call)
+        if refused is not None:
+            return refused
         rendered = self.context_text
         requested = call.body.get("tools") or {}
         available = requested.get("available")
@@ -285,15 +298,21 @@ class FakeMemoryService:
             answer["rendered"] = rendered
         answer["token_estimate"] = len(rendered) // 4
         if call.body.get("window", True) and call.body.get("window_format") == "messages":
-            window = self._window(call.scope.get("thread_id"))
+            budget = call.body.get("conversation_token_budget") or WINDOW_TOKEN_BUDGET
+            window, over = self._window(call.scope.get("thread_id"), budget)
             if window:
                 answer["conversation"] = {"thread_id": call.scope["thread_id"], "messages": window}
+                if over:
+                    answer["conversation"]["over_budget"] = True
         return answer
 
-    def _window(self, thread: str | None) -> list[dict[str, Any]]:
+    def _window(self, thread: str | None, budget: int) -> tuple[list[dict[str, Any]], bool]:
         """The thread's replayable messages - the chat and the results of its tool calls -
-        oldest first, as the service gives them back."""
-        out = []
+        oldest first, as the service cuts them: whole turns (a user's message and every call,
+        result and answer after it), the newest that fit ``budget`` tokens back to the first
+        that does not, at most :data:`WINDOW_MAX_TURNS`, the newest always — and whether it
+        alone is over the budget (``over_budget``)."""
+        found: list[list[dict[str, Any]]] = []
         for m in self.threads.get(thread or "", []):
             if m.get("kind", "VISIBLE") != "VISIBLE" and "tool_call_id" not in m:
                 continue
@@ -301,8 +320,48 @@ class FakeMemoryService:
             for key in ("tool_calls", "tool_call_id"):
                 if key in m:
                     message[key] = m[key]
-            out.append(message)
-        return out
+            if not found or m["role"] == "USER":
+                found.append([message])
+            else:
+                found[-1].append(message)
+        if len(found) > 1 and found[0][0]["role"] != "USER":
+            found = found[1:]  # a turn whose question is older than the read
+        chosen: list[list[dict[str, Any]]] = []
+        used = 0
+        for turn in reversed(found[-WINDOW_MAX_TURNS:]):
+            cost = sum(map(_message_tokens, turn))
+            if chosen and used + cost > budget:
+                break
+            chosen.insert(0, turn)
+            used += cost
+        over = bool(chosen) and sum(map(_message_tokens, chosen[-1])) > budget
+        return [m for turn in chosen for m in turn], over
+
+    def _refused_field(self, call: Call) -> httpx.Response | None:
+        """An older service refuses a field it does not know, as FastAPI does (``422``)."""
+        if self.sized_windows or "conversation_token_budget" not in (call.body or {}):
+            return None
+        body = {
+            "type": "urn:trellis:problem:validation",
+            "title": "Invalid request",
+            "status": 422,
+            "detail": "Request validation failed",
+            "instance": "/v1/context",
+            "code": "VALIDATION",
+            "retryable": False,
+            "request_id": "req_fake",
+            "details": {
+                "errors": [
+                    {
+                        "loc": ["body", "conversation_token_budget"],
+                        "msg": "Extra inputs are not permitted",
+                        "type": "extra_forbidden",
+                    }
+                ]
+            },
+        }
+        headers = {"content-type": "application/problem+json"}
+        return httpx.Response(422, content=json.dumps(body).encode(), headers=headers)
 
     def _agent_tools(self, call: Call) -> dict[str, Any]:
         return {"tools": self.agent_tools}
@@ -610,6 +669,17 @@ class FakeMemoryService:
             "updated_at": kept["created_at"],
         }
 
+    def _memory(self, call: Call) -> dict[str, Any] | httpx.Response:
+        """One memory as the service gives it to a scope that may read it — its user's own, or
+        one shared with the workspace — else ``404``, as for one that does not exist."""
+        memory_id = call.path["memory_id"]
+        kept = self.memories.get(memory_id)
+        if kept is None or (
+            kept["user"] != call.scope.get("user_id") and kept["visibility"] != "WORKSPACE"
+        ):
+            return problem(404, f"/v1/memories/{memory_id}", detail="Memory not found")
+        return self._memory_response(memory_id)
+
     def _visible(self, call: Call) -> list[str]:
         """The current memories of the caller's user, newest first."""
         user = call.scope.get("user_id")
@@ -691,6 +761,24 @@ class FakeMemoryService:
 
     def _id(self, prefix: str) -> str:
         return f"{prefix}_{next(self._ids)}"
+
+
+def _message_tokens(message: dict[str, Any]) -> int:
+    """What a window message costs, as the service estimates it (its ``message_tokens``)."""
+    calls = sum(
+        _tokens(c["name"]) + _tokens(json.dumps(c.get("arguments") or {}, separators=(",", ":")))
+        for c in message.get("tool_calls") or ()
+    )
+    return _tokens(message["text"]) + calls + MESSAGE_OVERHEAD_TOKENS
+
+
+def _tokens(text: str) -> int:
+    """The service's packing estimate (``estimate_tokens``): four characters a token in
+    ASCII, a line break five quarters; outside it, each character's UTF-8 bytes."""
+    if text.isascii():
+        return max(1, len(text) // 4 + text.count("\n"))
+    units = sum(5 if c == "\n" else 1 if c.isascii() else 4 * len(c.encode()) for c in text)
+    return max(1, units // 4)
 
 
 def _catalog_tool(name: str, fields: dict[str, Any]) -> dict[str, Any]:

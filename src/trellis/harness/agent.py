@@ -78,6 +78,7 @@ from trellis.harness.evals import (
     sample_of,
     sampled,
 )
+from trellis.harness.explain import Record, conversation_budget, earlier_tool, measuring
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
@@ -85,6 +86,7 @@ from trellis.harness.identity import AGENT_GROUP, Identity
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
+from trellis.harness.runs import KEEP_FINISHED
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
@@ -124,19 +126,26 @@ UNREACHED_FIX: Final = {
 #: How long a turn's transcript may take to write before the run returns, where memory keeps
 #: the conversation; past it the write is queued (``writes``) and the run returns.
 TURN_WRITE_SECONDS: Final = 5.0
-#: What the model is told when memory has nothing for the question (``evidence_status``
-#: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
-#: the user's history, instead of a confident guess the memory never held. Not when a hinted
-#: tool answers the question (its confidence at least :data:`NARROW_FLOOR`): told "do not
-#: guess", a weak model searched memory in loops instead of calling it.
+#: What the model is told when long-term memory has nothing for the question
+#: (``evidence_status`` INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know"
+#: for what depends on something the user said that is not here, instead of a confident guess
+#: the memory never held. The status is long-term memory's only: this conversation — the
+#: model's own earlier tool calls and their results included — is for the model to use (told
+#: otherwise, a follow-up asking where the last answer came from was answered "I do not
+#: know" with the call and its result in the window). Not when a hinted tool answers the
+#: question (its confidence at least :data:`NARROW_FLOOR`): told "do not guess", a weak model
+#: searched memory in loops instead of calling it.
 ABSTAIN_NOTES: Final = {
     "INSUFFICIENT": (
-        "## Memory\nMemory holds nothing about this question. If the answer depends on "
-        "something the user told you before, say you do not know it; do not guess."
+        "## Memory\nLong-term memory holds nothing about this question. That is about "
+        "long-term memory only: use this conversation, your own earlier tool calls and their "
+        "results included. If the answer depends on something the user said that is not "
+        "here, say you do not know it; do not guess."
     ),
     "INCOMPLETE": (
-        "## Memory\nMemory covers only part of this question, or someone else. Say what "
-        "you do not know rather than fill the gap."
+        "## Memory\nLong-term memory covers only part of this question, or someone else. "
+        "That is about long-term memory only: use this conversation, your own earlier tool "
+        "calls and their results included. Say what you do not know rather than fill the gap."
     ),
 }
 
@@ -209,8 +218,17 @@ class Agent:
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
+        window = context_window(target)
         #: the pushed context's token budget: a share of the model's window when it is known
-        self.context_budget = context_budget(context_window(target))
+        self.context_budget = context_budget(window)
+        #: the conversation window's budget, where memory keeps the conversation and the
+        #: framework replays it (``Window.MESSAGES``): the memory service's default (``None``),
+        #: or — the ``sized`` arm measured (``explain.measured``) — a share of the model's window,
+        #: capped
+        self.conversation_budget = conversation_budget(window)
+        #: whether its runs of a conversation read their earlier answers' records on demand
+        #: (``explain.EARLIER``: the ``lookup`` arm measured)
+        self.looks_up = measuring() == "lookup"
         #: the tools the harness runs for the agent: what its builder declares
         #: (``ReAct(tools=, subagents=)``); besides them every run has the MCP tools the
         #: virtual key allows and the memory tools (``tools_for``)
@@ -227,6 +245,9 @@ class Agent:
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
         self._unreached_said = False
+        #: the records of its runs that ended in this process, by run id, where the run store
+        #: keeps no event log (``explain.keep``): as many as the in-process store keeps runs
+        self.records: LRU[str, Record] = LRU(KEEP_FINISHED)
 
     @property
     def evals(self) -> EvalServices:
@@ -762,7 +783,9 @@ class Agent:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them — less the
         tools of what the run is without (``without=``: its MCP tools...); a ``delegate`` job's
-        run (``Runtime.delegated``) has only those that read."""
+        run (``Runtime.delegated``) has only those that read. A run of a conversation (its own
+        thread, not a child run's) of an agent in the ``lookup`` arm also has the record of its
+        earlier answers (``explain.EARLIER``)."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -774,6 +797,10 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
+        conversation = runtime.thread not in (None, runtime.run_id)
+        top = runtime.identity.parent_run is None and not self.adapter.fixed_tools
+        if self.looks_up and conversation and top:
+            tools.append(earlier_tool())
         return [
             t
             for t in tools
@@ -844,6 +871,7 @@ class Agent:
                     hints=hints,
                     budget=self.context_budget,
                     document_ids=runtime.document_ids,
+                    conversation=self.conversation_budget,
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")

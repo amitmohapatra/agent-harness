@@ -409,6 +409,21 @@ configured (the repository variable `BENCH_BIFROST_URL` and the secret
 `BENCH_BIFROST_VIRTUAL_KEY`; without them the job is skipped): the smoke set (10 tools, one
 repeat) on a pull request, the 10- and 50-tool catalogues nightly.
 
+### Follow-ups about an earlier answer: `--suite explain`
+
+`python -m benchmark.cost --suite explain --model <name> --window <tokens> [--memory]
+[--arms main,sized,lookup] [--share 0.25 --cap 16000] [--admin]` runs two-turn conversations in
+each [arm of the explanations](explanations.md#the-two-arms) and in neither (`main`): a first
+turn whose tools name distinctive sources (a short result, a long one, twelve calls), then a
+question about its answer — each kind: the steps, the citation, how it is known, the reasoning,
+how sure, what is known of the user, the approvals, the time, the number of calls, the tools,
+and one the record cannot answer — scored against the first run's actual record, or an ordinary
+follow-up (a control). It reports per arm the accuracy (by kind), how often the record was
+looked up (on a question about an answer, and wrongly on a control), the never-see items found
+in the end user's view and answer, and every turn's tokens, cached share, model calls and
+seconds, with the model's tier. `--admin` acts with `TRELLIS_ADMIN_API_KEY` (memory on): the
+administrator's view, not checked for never-see items. Its report is `<out>.json` and `<out>.md`.
+
 ## Thread-history benchmark
 
 `python -m benchmark.thread --model <name>` (with `MEMORY_URL` and a gateway serving the name)

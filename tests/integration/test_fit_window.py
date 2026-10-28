@@ -20,6 +20,7 @@ from trellis import Harness, ReAct, middleware, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.events import WARNING
+from trellis.harness.explain import measured
 from trellis.harness.middleware import (
     FIT_CLEARED,
     FITTED,
@@ -113,6 +114,46 @@ async def test_older_results_are_cleared_cut_and_older_turns_left_out() -> None:
     assert _size(out) <= int(6000 * 0.95)
     kept = await sent(FitWindow(6000, turns=False), request(messages, [lc("a")]))
     assert kept.messages[1].text == "first"  # a summarization after it has the older turns
+
+
+def _turn(n: int, question: str) -> list[Any]:
+    return [
+        HumanMessage(f"question {n}: {question}"),
+        AIMessage(content="", tool_calls=[{"id": f"c{n}", "name": "a", "args": {}}]),
+        ToolMessage(f"result {n}", tool_call_id=f"c{n}"),
+        AIMessage(content=f"answer {n}"),
+    ]
+
+
+async def test_the_newer_older_turns_that_fit_are_kept_whole_by_trim_messages() -> None:
+    """Over the window, only the older turns that do not fit are left out (LangChain's
+    ``trim_messages``, from a user's message on): the newer ones stay, each call with its
+    result, the oldest kept question cut to fit at most."""
+    long = "q" * 4000
+    turns = [_turn(n, long) for n in (1, 2, 3)]
+    messages = [SystemMessage("remembered"), *[m for t in turns for m in t], HumanMessage("now?")]
+    before = FITTED["turns"]
+    with measured("sized", share=0.5, cap=4000):  # the arm that keeps the older turns that fit
+        fit = FitWindow(3000)
+    out = await sent(fit, request(messages, [lc("a")]))
+    assert FITTED["turns"] == before + 1
+    kept = out.messages
+    assert kept[0] is messages[0] and kept[-1] is messages[-1]
+    said = [m for m in kept if not isinstance(m, ToolMessage)]  # (older results are cleared)
+    assert all(any(m is k for k in said) for m in [*turns[1], *turns[2]] if m.type != "tool")
+    results = [m.tool_call_id for m in kept if isinstance(m, ToolMessage)]
+    assert results == ["c2", "c3"]  # each call with its result; the first turn's left out
+    assert not any(any(m is k for k in kept) for m in turns[0][1:])
+    assert _size(out) <= int(3000 * 0.95)
+
+
+def test_the_latest_turn_alone_over_the_budget_is_kept_whole() -> None:
+    messages = [SystemMessage("remembered"), *_turn(1, "a"), HumanMessage("y" * 8000)]
+    given = request(messages, [])
+    assert ours._recent(given, 100).messages == [messages[0], messages[-1]]  # as _latest
+    no_question = request([SystemMessage("remembered"), AIMessage("hello")], [])
+    assert ours._recent(no_question, 10) is no_question
+    assert ours._recent(given, 1_000_000) is given  # every turn fits: nothing to leave out
 
 
 async def test_a_user_message_that_cannot_fit_fails_naming_the_window() -> None:
