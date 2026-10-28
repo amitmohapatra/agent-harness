@@ -322,23 +322,28 @@ def verdict(
 ) -> Verdict:
     """Both rules applied (the module's doc). Each part of the keep rule is met (its whole
     interval past the threshold), failed (its whole interval short of it) or unresolved (the
-    interval across it: more repeats decide). Measurably worse on any metric, or a part
-    failed: ``REVERT``; a part unresolved, or nothing measurably better: ``TIE`` (the
-    classes to repeat listed); else ``KEEP``."""
-    failed, open_ = _keep_rule(classes, flat)
+    interval across it: more repeats decide). Measurably worse on any metric (the harness's
+    overhead up past :data:`OVERHEAD_FLAT` among them): ``REVERT``; nothing clear of 0 either
+    way, anywhere: ``TIE`` (never broken by the keep rule); a part failed: ``REVERT``; a part
+    unresolved: ``TIE`` (the classes to repeat listed); else ``KEEP``."""
+    failed, open_ = _keep_rule(classes)
     worse = [f"{r.name}: {d.metric} worse" for r in classes for d in r.deltas.values() if d.worse]
+    worse += [f"harness {name} up {f['change']:+.1%}" for name, f in flat.items() if not f["flat"]]
     better = [
         f"{r.name}: {d.metric} better" for r in classes for d in r.deltas.values() if d.better
     ]
-    if worse or failed:
-        decision, reasons = "REVERT", [*worse, *failed]
-    elif open_ or not better:
+    if worse:
+        decision, reasons = "REVERT", worse
+    elif not better:
+        # nothing clear of 0 either way, anywhere: a tie, never broken by the keep rule
         decision = "TIE"
-        reasons = [f"{name}: {why}" for name, why in open_.items()] or [
-            "no metric of any class is clear of 0"
-        ]
-        if not open_:
-            open_ = {r.name: "" for r in classes}
+        reasons = ["no metric of any class is clear of 0", *failed]
+        open_ = {r.name: "" for r in classes}
+    elif failed:
+        decision, reasons = "REVERT", failed
+    elif open_:
+        decision = "TIE"
+        reasons = [f"{name}: {why}" for name, why in open_.items()]
     else:
         decision, reasons = "KEEP", better
     return Verdict(
@@ -346,10 +351,9 @@ def verdict(
     )
 
 
-def _keep_rule(
-    classes: Sequence[ClassResult], flat: Mapping[str, Any]
-) -> tuple[list[str], dict[str, str]]:
-    """The keep rule's parts that failed, and the classes whose part is still open (why)."""
+def _keep_rule(classes: Sequence[ClassResult]) -> tuple[list[str], dict[str, str]]:
+    """The keep rule's parts that failed, and the classes whose part is still open (why); the
+    harness's overhead is judged as a metric (:func:`verdict`)."""
     failed: list[str] = []
     open_: dict[str, str] = {}
     for result in classes:
@@ -372,9 +376,6 @@ def _keep_rule(
             elif part == "open":
                 open_[result.name] = f"its success interval reaches below {SUCCESS_FLOOR:+.0%}"
     # the simple class's calls, tokens and p50 not up: measurably up is worse (rule 2)
-    for name, found in flat.items():
-        if not found["flat"]:
-            failed.append(f"harness {name} up {found['change']:+.1%}")
     return failed, open_
 
 

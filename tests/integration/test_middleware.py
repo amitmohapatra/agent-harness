@@ -501,9 +501,10 @@ async def test_a_search_tool_past_its_limit_is_not_run_and_the_model_answers(
     result = await arm(harness.wrap(target, id="search"), [memory_search]).run("x", user="u")
     assert result.answer == "what I have", result.error
     assert searched == ["q0", "q1", "q2"]  # the fourth was not run
-    assert tool_messages(model, 4) == [
-        ("call_4_0", "Tool call limit exceeded. Do not call 'memory_search' again.")
-    ]
+    assert tool_messages(model, 4)[-1] == (
+        "call_4_0",
+        "Tool call limit exceeded. Do not call 'memory_search' again.",
+    )
 
 
 @pytest.mark.parametrize(("scoped", "answer"), [(True, LIMIT_REACHED), (False, "done")])

@@ -195,7 +195,9 @@ def helpers(setup: Setup, *, admitted: bool = False) -> tuple[Any, dict[str, Any
     from trellis.harness.tools.base import Tool
     from trellis.harness.tools.convert import langchain as converted
 
-    own = [t for t in setup.tools if isinstance(t, Tool)]
+    # the set's own tools (a function tool's ``Tool``), not the distractors' source
+    found = [getattr(t, "tool", t) for t in setup.tools]
+    own = [t for t in found if isinstance(t, Tool)]
     researcher = {
         "name": "researcher",
         "description": "Looks one item up with the tools and answers in one sentence: give it "

@@ -119,6 +119,8 @@ def test_the_stall_look_back_reads_only_the_latest_turn() -> None:
     messages = conversation(500)
     ahead = Ahead(messages, start=len(messages) - 3)
     assert [len(s) for s in mw._steps(ahead)] == [1]
+    alone = [m for m in messages if not isinstance(m, HumanMessage)]
+    assert len(list(mw._steps(alone))) == 501  # no user message: read to the start
 
 
 def test_a_call_is_found_from_the_end() -> None:

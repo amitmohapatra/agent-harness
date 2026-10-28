@@ -477,7 +477,7 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
     assert offered == [["dump"], ["dump", "read_file"], ["dump", "read_file"]]  # once saved
 
 
-async def test_the_same_call_over_and_over_is_a_stall(harness: Harness) -> None:
+async def test_the_same_call_over_and_over_is_not_run_again(harness: Harness) -> None:
     calls: list[str] = []
 
     @tool(side_effects="read")
@@ -486,12 +486,15 @@ async def test_the_same_call_over_and_over_is_a_stall(harness: Harness) -> None:
         calls.append(job)
         return "pending"
 
-    model = ScriptedChat([("poll", {"job": "j"})] * 5)
+    model = ScriptedChat([*[("poll", {"job": "j"})] * 5, "still pending"])
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="stall"), [poll])
     result = await agent.run("x", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "called 'poll' with the same arguments 3 times in a row" in result.error.message
-    assert calls == ["j", "j"]  # the third was not run
+    # the repeat is not run, the model told so each time; it answers with what it has
+    assert result.status is RunStatus.SUCCESS and result.answer == "still pending", result.error
+    assert calls == ["j", "j"]  # the third, fourth and fifth were not run
+    told = [m["content"] for m in model.requests[-1]["messages"] if m["role"] == "tool"]
+    # the streak is read back max_repeats steps at most (a bounded look-back)
+    assert told[2:] == [ours.REPEATED.format(tool="poll", steps=3)] * 3
 
 
 async def test_a_call_that_changes_resets_the_stall_count(harness: Harness) -> None:
