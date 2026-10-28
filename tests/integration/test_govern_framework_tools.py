@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from agents import Agent, function_tool
 from langchain.agents import create_agent
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -20,6 +21,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.middleware import GovernTools, side_effects_of
+from trellis.harness.tools.bridge import SAME_CALL
 
 ran: list[str] = []
 
@@ -133,6 +135,51 @@ async def test_the_harness_tools_and_state_tools_go_through_as_they_are(
     assert paused.interrupt is not None  # asked once, by the harness tool's own governance
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.answer == "wired" and ran == ["wire ada"]
+
+
+def told(model: ScriptedChatModel) -> list[tuple[str, Any]]:
+    """The tool messages the model's last call read: (call id, content)."""
+    return [(m.tool_call_id, m.content) for m in model.seen[-1] if isinstance(m, ToolMessage)]
+
+
+async def test_an_own_tool_call_repeated_in_one_step_is_asked_about_and_run_once(
+    harness: Harness,
+) -> None:
+    model = ScriptedChatModel(turns=[[("refund", {"order": "o1"})] * 3, "refunded"])
+    agent = harness.wrap(graph(model, refund), id="g")
+    paused = await agent.run("refund o1", user="u", thread="t")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.status is RunStatus.SUCCESS and done.answer == "refunded", done.error
+    assert ran == ["refund o1"]
+    repeat = SAME_CALL.format(first="call_1_0")
+    assert told(model) == [
+        ("call_1_0", "refunded o1"),
+        ("call_1_1", repeat),
+        ("call_1_2", repeat),
+    ]
+
+
+async def test_the_harness_tools_repeated_in_one_step_of_a_plain_graph_run_once(
+    harness: Harness,
+) -> None:
+    """A graph given the harness's tools as its own (no ``HarnessTools``): their calls go
+    through the bridge themselves, and a repeat in one step does not run."""
+    model = ScriptedChatModel(turns=[[("wire", {"to": "ada"})] * 2, "wired"])
+    target = create_agent(
+        model,
+        tools=await native_tools(harness, wire, framework="langgraph"),
+        checkpointer=InMemorySaver(),
+    )
+    agent = harness.wrap(target, id="plain")
+    paused = await agent.run("wire ada", user="u", thread="t")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.answer == "wired" and ran == ["wire ada"]
+    assert told(model) == [
+        ("call_1_0", "wired ada"),
+        ("call_1_1", SAME_CALL.format(first="call_1_0")),
+    ]
 
 
 async def test_react_governs_a_tool_its_given_middleware_brings(harness: Harness) -> None:

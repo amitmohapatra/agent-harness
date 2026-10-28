@@ -32,12 +32,19 @@ continues where it was: a sub-agent's run).
 Calls may come at once (a ``ReAct`` step's, the frameworks that run tools concurrently): their
 steps are numbered as they arrive (or as the caller numbered them, ``step=``), identical calls
 take their turn (``Replay.exclusive``), and the journal's progress saves go one at a time.
+
+A model step that makes the same call more than once (the same tool, the same arguments: a
+small model repeating itself) runs it once: where the harness reads the step's calls
+(:func:`firsts`), each repeat is :func:`same` — nothing runs, nothing is asked, charged,
+hooked or journaled — and the model reads, under the repeat's own call id, that the result is
+the first call's.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -84,6 +91,8 @@ CUT: Final = {
     CANCELLED: "{tool} was cut short: the run was cancelled",
     ToolStatus.TIMEOUT.value: "{tool} was cut short: the run ran out of time",
 }
+#: What the model reads for a call that repeats an earlier one of its model step (:func:`same`).
+SAME_CALL: Final = "Same call as {first} above (the same tool, the same arguments): see its result."
 
 
 async def call(
@@ -102,6 +111,34 @@ async def call(
     step = runtime.next_step() if step is None else step
     async with runtime.replay.exclusive(key):
         return await _called(runtime, tool, args, key=key, step=step, call_id=call_id)
+
+
+def firsts(calls: Iterable[tuple[str, str, Any]]) -> dict[str, str]:
+    """The calls of one model step — ``(call id, tool, arguments)``, in the model's order —
+    that repeat an earlier one of it (the same tool, the same arguments in any key order), by
+    id: the id of the first, the one that runs."""
+    first: dict[str, str] = {}
+    repeats: dict[str, str] = {}
+    for call_id, tool, args in calls:
+        earlier = first.setdefault(content_key("call", tool, args), call_id)
+        if earlier != call_id:
+            repeats[call_id] = earlier
+    return repeats
+
+
+def same(
+    runtime: Runtime, tool: str, args: dict[str, Any], *, call_id: str, first: str
+) -> ToolOutcome:
+    """A call that repeats ``first``, an earlier call of its model step (:func:`firsts`): not
+    run — no hooks, governance, budget, journal or record: ``first`` is the call that runs —
+    and what the model reads says whose result it is. On the run's stream as every call is,
+    its result naming the call it repeats (``same_as``)."""
+    outcome = ToolOutcome(tool=tool, output=SAME_CALL.format(first=first))
+    _started(runtime, call_id, tool, args)
+    _ended(
+        runtime, call_id, tool, status=outcome.status.value, output=outcome.output, same_as=first
+    )
+    return outcome
 
 
 async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutcome:

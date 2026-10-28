@@ -171,7 +171,9 @@ count — never silent, never raised into the run. A model call that stalled is 
 
 Every tool call that starts on the stream (`TOOL_CALL_START`, `TOOL_CALL_ARGS`) ends there,
 before the attempt's `RUN_FINISHED`: `TOOL_CALL_END`, then `TOOL_CALL_RESULT` with the call's
-`status` (`ok`, `error`, `timeout`, `rejected`, `cancelled`) and `output`. A call the attempt
+`status` (`ok`, `error`, `timeout`, `rejected`, `cancelled`) and `output` — and, for a call its
+model step repeats, which did not run, `same_as`: the id of the call it repeats
+([reliability.md](reliability.md#calls-made-at-once)). A call the attempt
 ends inside, on every adapter, ends the same way, with no output of its own — the result says
 why:
 

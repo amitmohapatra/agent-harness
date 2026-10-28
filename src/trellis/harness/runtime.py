@@ -184,6 +184,12 @@ class Runtime:
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
+    #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
+    #: arguments), where its framework runs the reply's calls and the harness reads the reply
+    #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,
+    #: its tool, its arguments as the model wrote them: the earlier call's id, taken once by
+    #: the repeat, which does not run (``tools.bridge.same``)
+    repeats: dict[tuple[str, str, str], str] = field(default_factory=dict)
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None

@@ -388,6 +388,15 @@ async def parallel_writes(w: World) -> None:
     assert not d.overlapped, "two writes of one turn ran at the same time"
 
 
+async def repeated_calls(w: World) -> None:
+    d = Desk()
+    step: list[Call] = [("pw", {"key": "1"}), ("pw", {"key": "2"})] + [("pw", {"key": "1"})] * 2
+    o = await w.go([d.parallel("pw", "write")], [step], target=_parallel_target(w))  # type: ignore[list-item]
+    o.succeeded()
+    assert sorted(a["key"] for a in d.ran("pw")) == ["1", "2"]  # the repeats did not run
+    assert o.answer.startswith("Done. Same call as "), o.answer  # what the model read last
+
+
 # --------------------------------------------------------------------------- context
 async def large_result(w: World) -> None:
     d = Desk()
@@ -1022,6 +1031,26 @@ FEATURES: Final[list[Feature]] = [
                 "the writes (ReAct has it)"
             ),
             "openai_agents": NA("native: the framework runs a turn's calls its own way (N3)"),
+        },
+        way2=NA("your framework runs its calls"),
+    ),
+    Feature(
+        "F25d",
+        "repeated calls: a call a turn repeats (same tool, same arguments) runs once",
+        "F25",
+        "automatic where the harness reads the turn's calls (the tool node's state, the "
+        "OpenAI Agents reply)",
+        repeated_calls,
+        adapters={
+            "function": NA("a function target runs its own calls"),
+            "claude": NA(
+                "native: the CLI runs a turn's calls itself, and its MCP calls carry no call id "
+                "to read the turn by"
+            ),
+            "kimi": NA(
+                "native: Kimi runs a turn's calls itself, and its MCP calls carry no call id "
+                "to read the turn by"
+            ),
         },
         way2=NA("your framework runs its calls"),
     ),

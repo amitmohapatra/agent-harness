@@ -23,7 +23,7 @@ rules where it has the same pieces: `governed` for your own tools, `trellis.runs
 | [Retries](#retries) | — | reads retried, writes run once |
 | [Idempotency keys](#idempotency-keys) | the tool hands `trellis.current().idempotency_key` to its service | OpenAPI, A2A and MCP calls carry it |
 | [Unknown outcomes](#unknown-outcomes) | — | a write that timed out or was cut by a crash is told to the model, never re-run blind |
-| [Calls made at once](#calls-made-at-once) | — | numbered in order, identical ones in turn, replayed call by call, saved one save at a time |
+| [Calls made at once](#calls-made-at-once) | — | numbered in order, a step's repeats run once, identical ones in turn, replayed call by call, saved one save at a time |
 | [Cancel](#cancel) | `agent.cancel(run_id, reason=)` | wherever the run is: queued, paused, here, on a worker; its sub-agents' runs with it |
 | [Releasing on shutdown](#releasing-on-shutdown) | — | a stopping worker hands its runs back at once |
 | [The last good tool list](#the-last-good-tool-list) | — | a gateway that is down does not empty the toolbox |
@@ -328,7 +328,19 @@ one step: the reads at once, the writes one at a time in the model's order —
 
 * Each call's step is numbered as it arrives — `ReAct` numbers a step's calls in the model's
   order — and is the call's `ToolCall.step` (an approval shows it).
-* Identical calls (the same tool with the same arguments) made at once take their turn: one
+* A call one model step repeats (the same tool with the same arguments, in any key order — a
+  small model emitting one call many times) runs once: each repeat runs nothing — no hooks,
+  governance, approval, budget charge or journal entry — and the model reads, under the
+  repeat's own call id, `Same call as <first call's id> above (the same tool, the same
+  arguments): see its result.`; its `TOOL_CALL_RESULT` names the call it repeats (`same_as`).
+  This holds where the harness reads the step's calls: a LangGraph tool node's (`ReAct`,
+  `middleware()`, any `create_agent` or Deep Agents graph, a graph's own `ToolNode`) and an
+  OpenAI Agents reply's function calls (the harness's tools and the agent's own, governed).
+  Claude and Kimi run a step's calls themselves and call the harness's tools over MCP, whose
+  calls carry no call id: a repeat there runs as any call does. The same call in the next
+  step runs again (a stall is [`max_repeats`](frameworks/react.md)'s to stop).
+* Identical calls made at once that are not one step's repeats (a function's
+  `asyncio.gather`, a framework's step the harness does not read) take their turn: one
   runs, then the next, in the order they were made, so each has its own occurrence in the
   journal and its own idempotency key; different calls run together.
 * The journal records each call where it belongs, so a resumed run hands each call the output
