@@ -27,7 +27,7 @@ One place for each thing, decided by who owns it and how often it changes — ne
 | [`h.wrap(...)`](api.md#hwrap) | the agent's author | every run of the agent: `hooks`, `judges`, `budget`, `run_timeout`, `without`, `framework_options`, `version`, `description` | `h.wrap(graph, id="triage", judges=[llm_judge("Polite.")], run_timeout=600)` |
 | [`agent.run(...)`](api.md#agentrun-agentstream-agentstart) (`stream`, `start`, `schedule`) | the caller | this run: `user`, `thread`, `tenant`, `run_timeout`, `deadline`, `budget`, `without`, `framework_options`, `document_ids`; queued: `priority`, `concurrency_key` | `agent.run(q, user="ada", without={"memory"})` |
 | [`h.worker(...)`](api.md#hworker) | the operator | how many runs a worker process takes at once | `h.worker(concurrency=8)` |
-| constants | the harness | thresholds, limits, cache lengths ([below](#what-is-not-a-setting)) | `MAX_STEPS` |
+| constants | the harness | thresholds, limits, cache lengths ([below](#what-is-not-a-setting)) | `MAX_REPEATS` |
 
 When two places could say the same, the narrower wins: a run's over its agent's (`without=` is
 added to, `framework_options=` merged key by key, `run_timeout`/`budget` replaced), code over
@@ -289,7 +289,7 @@ be asked about (the first ask failed), raises `ConfigurationError` with what wen
 ## What is not a setting
 
 Limits, retries, the tool-hint threshold, lease length and the like are named constants next to
-the code that uses it (`MAX_STEPS`, `TOOLS_TTL_SECONDS`, `GOVERNANCE_TTL_SECONDS`,
+the code that uses it (`MAX_REPEATS`, `TOOLS_TTL_SECONDS`, `GOVERNANCE_TTL_SECONDS`,
 `WRITE_ATTEMPTS`...). The timeouts only the agent's author knows are arguments where the thing
 is defined: a tool call's `@tool(call_timeout=)`, `openapi(call_timeout=)`,
 `a2a(call_timeout=)`; a model call's `ReAct(call_timeout=)` (each model call, not its tools);
