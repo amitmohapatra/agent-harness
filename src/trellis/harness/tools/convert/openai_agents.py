@@ -8,7 +8,11 @@ is not a JSON object is what the model reads back (:func:`arguments_of`), as the
 exception, which ends a run (the SDK raises everything a ``FunctionTool`` raises).
 
 A result longer than ``tools.results.MAX_CHARS`` is kept in the run and the model reads a
-preview naming where; ``read_file`` (with them, enabled once the run keeps one) pages it."""
+preview naming where; ``read_file`` (with them, enabled once the run keeps one) pages it.
+
+A call repeating an earlier one of its model reply (the same tool, the same arguments:
+``Runtime.repeats``) does not run: the model reads that its result is the earlier call's
+(``tools.bridge.same``)."""
 
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from typing import Any, Final
 from agents import FunctionTool
 from agents.tool_context import ToolContext
 
-from trellis.contracts import ToolSpec
+from trellis.contracts import ToolOutcome, ToolSpec
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.runtime import Paused, current
@@ -66,6 +70,9 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         runtime = current()
         if isinstance(args, str) or runtime is None:
             return await original(context, arguments)
+        repeat = _repeat(context, arguments, args)
+        if repeat is not None:
+            return results.readable(repeat.output)
 
         async def run(given: dict[str, Any]) -> Any:
             return await original(context, json.dumps(given))
@@ -158,7 +165,9 @@ def _one(tool: Tool) -> FunctionTool:
         args = arguments_of(arguments)
         if isinstance(args, str):
             return not_run(tool.name, args)
-        outcome = await bridge.call(tool, args, call_id=context.tool_call_id)
+        outcome = _repeat(context, arguments, args)
+        if outcome is None:
+            outcome = await bridge.call(tool, args, call_id=context.tool_call_id)
         return results.readable(outcome.output)
 
     return FunctionTool(
@@ -170,6 +179,17 @@ def _one(tool: Tool) -> FunctionTool:
         strict_json_schema=False,
         is_enabled=lambda _context, _agent: _offered(tool.name),
     )
+
+
+def _repeat(context: ToolContext[Any], arguments: str, args: dict[str, Any]) -> ToolOutcome | None:
+    """The outcome of a call repeating an earlier one of its model reply (``Runtime.repeats``):
+    not run (``bridge.same``); ``None`` for any other call."""
+    runtime = current()
+    key = (context.tool_call_id, context.tool_name, arguments)
+    first = runtime.repeats.pop(key, None) if runtime is not None else None
+    if runtime is None or first is None:
+        return None
+    return bridge.same(runtime, context.tool_name, args, call_id=context.tool_call_id, first=first)
 
 
 def _read_file() -> FunctionTool:

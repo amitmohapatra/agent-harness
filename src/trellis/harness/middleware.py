@@ -11,7 +11,8 @@ any ``create_agent`` or Deep Agents graph may take any of them:
   narrowing, the memory tools, what ``tool_search`` found), sorted by name so the cached prompt
   holds; every call goes through the bridge (``tools.bridge``: governance, journal, record),
   numbered in the model's order, and a call that does more than read waits for the earlier
-  ones of the same model step (the model's order) — ``ReAct``'s ``tools=``;
+  ones of the same model step (the model's order); a call repeating an earlier one of its step
+  (the same tool, the same arguments) runs once (``bridge.same``) — ``ReAct``'s ``tools=``;
 * :class:`ModelHooks` — around every model call: the run's ``on_error`` hooks for a call that
   failed, a ``chat`` span with the usage (redacted, as every span), the most the
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
@@ -26,7 +27,8 @@ any ``create_agent`` or Deep Agents graph may take any of them:
 * :class:`StepLimit` — at ``max_steps`` model calls one more, without tools, for the best
   answer (and a ``max_steps`` warning event), instead of LangChain's canned limit message;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
-  steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run;
+  steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
+  within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
 * :func:`read_result` — the tool that reads an earlier result back by its call's id: what a
   ``ContextEditingMiddleware`` placeholder points to (the state keeps the result whole);
 * :class:`RunCheckpointer` — a LangGraph checkpointer that keeps only the latest checkpoint,
@@ -109,7 +111,14 @@ from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
 
-from trellis.contracts import ConfigurationError, ModelError, ToolError, ToolSpec, ToolStatus
+from trellis.contracts import (
+    ConfigurationError,
+    ModelError,
+    ToolError,
+    ToolOutcome,
+    ToolSpec,
+    ToolStatus,
+)
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
@@ -172,10 +181,11 @@ class _HarnessToolsState(AgentState[Any]):
 @dataclass(eq=False)
 class _Step:
     """One model step's calls as they run: which step (its place in the conversation), the
-    number of its first call, its harness calls that do more than read in the model's order,
-    the ones that finished (in this attempt, or in an earlier one: a resume runs only the calls
-    that had not), and the exception one of
-    them stopped on (a pause: the later ones wait for the resume)."""
+    number of its first call, its harness calls that do more than read in the model's order
+    (a repeat left out: it does not run), the ones that finished (in this attempt, or in an
+    earlier one: a resume runs only the calls that had not), the exception one of them stopped
+    on (a pause: the later ones wait for the resume), and the calls repeating an earlier one of
+    the step (``bridge.firsts``)."""
 
     key: str
     first: int
@@ -183,6 +193,7 @@ class _Step:
     finished: set[str]
     stopped: BaseException | None = None
     turn: asyncio.Condition = field(default_factory=asyncio.Condition)
+    repeats: dict[str, str] = field(default_factory=dict)
 
 
 #: The tool sets whose LangChain tools a :class:`HarnessTools` keeps converted, at most.
@@ -248,19 +259,28 @@ async def governed_call(
     from the journal, as the message the model read. The harness's tools, the graph's state
     tools (:data:`STATE_TOOLS`), a call already governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
-    (:data:`OUTSIDE_STATE`) is governed."""
+    (:data:`OUTSIDE_STATE`) is governed. A call repeating an earlier one of its model step
+    (the same tool, the same arguments) does not run — the harness's tools' included — and
+    points the model to the earlier one's result (``bridge.same``)."""
     runtime = current()
     call = request.tool_call
     own = request.tool
     if (
         runtime is None
         or own is None
-        or converted.made(own)  # the harness's own: its call goes through the bridge itself
-        or call["name"] in runtime.toolbox
         or (call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE))
         or _GOVERNING.get() == (call["name"], str(call["id"]))
     ):
         return await handler(request)
+    found = _calling(_messages(request), call["id"])
+    first = _repeats(found[1]).get(str(call["id"])) if found is not None else None
+    if first is not None:
+        repeat = bridge.same(
+            runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
+        )
+        return _message(repeat, str(call["id"]), call["name"])
+    if converted.made(own) or call["name"] in runtime.toolbox:
+        return await handler(request)  # the harness's own: its call goes through the bridge
     produced: list[ToolMessage | Command[Any]] = []
 
     async def run(args: dict[str, Any]) -> Any:
@@ -281,10 +301,15 @@ async def governed_call(
     outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
     if produced and outcome.ok and isinstance(produced[-1], Command):
         return produced[-1]  # the graph's state update, as the tool made it
+    return _message(outcome, str(call["id"]), call["name"])
+
+
+def _message(outcome: ToolOutcome, call_id: str, name: str) -> ToolMessage:
+    """A harness call's outcome as the tool message the model reads."""
     return ToolMessage(
         content=text_of(outcome.output),
-        tool_call_id=str(call["id"]),
-        name=call["name"],
+        tool_call_id=call_id,
+        name=name,
         status="error" if outcome.status in FAILED else "success",
     )
 
@@ -448,25 +473,23 @@ class HarnessTools(AgentMiddleware):
             return await handler(request)
         step, n = self._step(runtime, request)
         call_id = str(call["id"])
-        if call_id in step.writes:
+        first = step.repeats.get(call_id)
+        if first is not None:
+            outcome = bridge.same(runtime, tool.name, call["args"], call_id=call_id, first=first)
+        elif call_id in step.writes:
             async with _turn(runtime, step, call_id):
                 outcome = await bridge.call(
                     tool, call["args"], call_id=call_id, step=step.first + n
                 )
         else:
             outcome = await bridge.call(tool, call["args"], call_id=call_id, step=step.first + n)
-        return ToolMessage(
-            content=text_of(outcome.output),
-            tool_call_id=call_id,
-            name=tool.name,
-            status="error" if outcome.status in FAILED else "success",
-        )
+        return _message(outcome, call_id, tool.name)
 
     def _step(self, runtime: Runtime, request: ToolCallRequest) -> tuple[_Step, int]:
         """The model step the call is one of (numbered on its first call's arrival), and the
         call's place in it."""
         call_id = request.tool_call["id"]
-        messages = request.state.get("messages", []) if isinstance(request.state, dict) else []
+        messages = _messages(request)
         at, message = _calling(messages, call_id) or (
             len(messages),
             AIMessage(content="", tool_calls=[request.tool_call]),
@@ -477,10 +500,28 @@ class HarnessTools(AgentMiddleware):
         steps = self._steps.setdefault(runtime, {})
         step = steps.get(key)
         if step is None:
-            writes = [str(c["id"]) for c in calls if _writes(runtime.toolbox.get(c["name"]))]
+            repeats = _repeats(message)
+            writes = [
+                str(c["id"])
+                for c in calls
+                if _writes(runtime.toolbox.get(c["name"])) and str(c["id"]) not in repeats
+            ]
             ran = {w for w in writes if runtime.replay.journal.calls.get(_ran(key, w))}
-            step = steps[key] = _Step(key, runtime.next_step(len(calls)), writes, ran)
+            step = steps[key] = _Step(
+                key, runtime.next_step(len(calls)), writes, ran, repeats=repeats
+            )
         return step, next(n for n, c in enumerate(calls) if c["id"] == call_id)
+
+
+def _messages(request: ToolCallRequest) -> Sequence[AnyMessage]:
+    """The conversation a tool call's request carries (its graph's state)."""
+    return request.state.get("messages", []) if isinstance(request.state, dict) else []
+
+
+def _repeats(message: AIMessage) -> dict[str, str]:
+    """The calls of a model step repeating an earlier one of it, by id: the earlier one's
+    (``bridge.firsts``)."""
+    return bridge.firsts((str(c["id"]), c["name"], c["args"]) for c in message.tool_calls)
 
 
 def _calling(messages: Sequence[AnyMessage], call_id: str | None) -> tuple[int, AIMessage] | None:
@@ -1008,7 +1049,8 @@ def _failing(history: Sequence[AnyMessage]) -> int:
             continue
         if not isinstance(message, AIMessage):
             continue
-        made = [statuses.get(c["id"] or "") for c in message.tool_calls]
+        repeats = _repeats(message)  # a repeat did not run: its first call's status counts
+        made = [statuses.get(c["id"] or "") for c in message.tool_calls if c["id"] not in repeats]
         if not made or any(s != "error" for s in made):
             break
         streak += 1
