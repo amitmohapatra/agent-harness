@@ -523,7 +523,9 @@ reasoning questions with exact answers (half `dev`, half `test`) — each arm a 
 (LangChain's limits only), `limitsB` (and the repeat check), `errorsA` (and the errors' pieces),
 `all`; the reasoning and caching techniques, each a native switch or a library's piece
 (`think`, `code`, `examples`, `slot-reuse`, `temp0`, `serial-tools`, `anthropic-cache`,
-`openai-cache-key`); asking the user a question — `ask_user`, a read tool over the run's own
+`openai-cache-key`); the thinking the harness can supply around a plain model —
+Anthropic's think tool (`think-tool`), planning from the first call (`plan`), and `plan+code`,
+`plan+code+helpers`, `plan+think-tool+code`; asking the user a question — `ask_user`, a read tool over the run's own
 `ask` (it pauses; the answer is its result on resume), not offered (`ask-off`), offered to every
 model (`ask`) or to a large one only (`ask-large`), each run's questions answered from the
 task's gold data — against a careful reviewer at each change's approval who edits a wrong

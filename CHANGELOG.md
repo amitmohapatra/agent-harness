@@ -253,7 +253,9 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   generated dates, multi-hop and logic), the loop's arms (`limitsA`, `limitsB`, `errorsA`,
   `all`), techniques that are a native switch or a library's piece (the chat template's
   thinking, code in the run's sandbox, worked examples from memory, llama.cpp slot reuse,
-  temperature 0, serial tool calls, Anthropic's and OpenAI's prompt caching), asking the user
+  temperature 0, serial tool calls, Anthropic's and OpenAI's prompt caching), the thinking a
+  harness supplies around a plain model (Anthropic's think tool, planning from the first call,
+  and their mixes with code and a helper), asking the user
   (`ask_user` over the run's own `ask`: not offered, offered to every model, to a large one only;
   the questions answered from gold data; against a reviewer who edits a wrong argument at the
   approval, and both), `task-only`

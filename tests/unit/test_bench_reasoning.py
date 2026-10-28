@@ -194,3 +194,56 @@ def test_the_code_and_examples_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "execute" in {t.name for t in graph_tools(graph)}
     _, options = VARIANTS["examples"].build(_setup())
     assert options == {"user": techniques.EXAMPLES_USER, "prepare": techniques.seed_examples}
+
+
+# --------------------------------------------------------------------------- thinking around it
+async def test_the_think_tool_does_nothing_and_says_what_it_is_for() -> None:
+    think = techniques.think_tool()
+    assert think.spec.name == "think" and think.spec.side_effects == "read"
+    assert "think about something" in think.spec.description
+    assert await techniques._think("a thought") == ""
+
+
+@pytest.mark.parametrize(("variant", "planned"), [("plan", True), ("main", False)])
+async def test_planning_is_offered_from_the_first_call_in_the_plan_arm(
+    variant: str, planned: bool
+) -> None:
+    model = ScriptedChatModel(turns=["ok"])
+    graph, _ = VARIANTS[variant].build(Setup(system="s", model=model, window=16_384, max_steps=4))
+    await graph.ainvoke({"messages": [HumanMessage("q")]}, {"configurable": {"thread_id": variant}})
+    assert ("write_todos" in model.requests[0].get("tools", [])) is planned
+
+
+@pytest.mark.parametrize(
+    ("variant", "tools"),
+    [
+        ("think-tool", {"think"}),
+        ("plan+code", {"execute", "write_todos"}),
+        ("plan+code+helpers", {"execute", "write_todos", "task"}),
+        ("plan+think-tool+code", {"execute", "write_todos", "think"}),
+    ],
+)
+def test_a_combination_has_each_of_its_pieces(
+    monkeypatch: pytest.MonkeyPatch, variant: str, tools: set[str]
+) -> None:
+    import trellis
+    from tests.support.sandbox import FakeSandboxes
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    real = trellis.sandbox
+    monkeypatch.setattr(trellis, "sandbox", lambda: real(FakeSandboxes()))
+    built = catalog_tools()
+    graph, _ = VARIANTS[variant].build(
+        Setup(
+            system="s", model=ScriptedChatModel(turns=[]), window=16_384, max_steps=4, tools=built
+        )
+    )
+    found = {t.name for t in graph_tools(graph)}
+    found |= {getattr(t, "name", None) or t.spec.name for t in getattr(graph, TOOLS_ATTRIBUTE)}
+    assert tools <= found, found
+
+
+def catalog_tools() -> tuple[Any, ...]:
+    from benchmark.cost import catalog
+
+    return tuple(catalog.task_sets()[0].tools)

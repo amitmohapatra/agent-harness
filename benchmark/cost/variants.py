@@ -64,6 +64,9 @@ Reasoning techniques (``benchmark.cost.techniques``), each ``main`` and one cand
   answered from the task's gold data (``run.answered``), the same for all three; ``hitl`` and
   ``ask+hitl`` — ``ask-off`` and ``ask`` with every approval given by a careful reviewer who
   edits a wrong argument to the gold value, the run going on;
+* ``think-tool``, ``plan``, ``plan+code``, ``plan+code+helpers``, ``plan+think-tool+code`` —
+  the thinking a harness supplies around a plain model (:func:`around`): Anthropic's think
+  tool, planning from the first call, code in the run's sandbox, a helper;
 * ``examples`` — ``main`` run for a user of its own whose documents are the reasoning class's
   dev items as solved examples (``techniques.seed_examples``, with ``--memory``): the memory
   service's own retrieval brings the similar ones into each run's context.
@@ -195,6 +198,33 @@ def ask(setup: Setup, *, offered: str, review: bool = False) -> tuple[Any, dict[
     )
 
 
+def around(
+    setup: Setup,
+    *,
+    plan: bool = False,
+    code: bool = False,
+    helpers_too: bool = False,
+    think: bool = False,
+) -> tuple[Any, dict[str, Any]]:
+    """``main`` with the thinking a harness can supply around a plain model, in any mix:
+    ``plan`` (``techniques.plan_from_start``: planning from the first call, the default
+    planning off), ``code`` (the run's own sandbox: ``backend=sandbox()``), ``helpers_too``
+    (a Deep Agents sub-agent with the set's tools, :func:`helpers`'), ``think``
+    (``techniques.think_tool``)."""
+    from benchmark.cost import techniques
+    from trellis import sandbox
+
+    tools = (*setup.tools, techniques.think_tool()) if think else setup.tools
+    subagents = (_researcher(setup),) if helpers_too else ()
+    return main(
+        dataclasses.replace(setup, tools=tools),
+        off=("planning",) if plan else (),
+        middleware=(techniques.plan_from_start(setup.window),) if plan else (),
+        subagents=subagents,
+        backend=sandbox() if code else None,
+    )
+
+
 def code(setup: Setup) -> tuple[Any, dict[str, Any]]:
     """``ReAct`` whose code runs in the run's own sandbox (``backend=sandbox()``)."""
     from trellis import sandbox
@@ -216,24 +246,28 @@ def helpers(setup: Setup, *, admitted: bool = False) -> tuple[Any, dict[str, Any
     """``ReAct`` with a Deep Agents sub-agent of its own, ``researcher``, given the set's own
     tools (each call through the bridge, in the helper's child run) — ``admitted``: each of its
     ``task`` calls admitted by the run's gate first (:class:`AdmittedTasks`)."""
+    return main(
+        setup,
+        subagents=(_researcher(setup),),
+        middleware=(AdmittedTasks(),) if admitted else (),
+    )
+
+
+def _researcher(setup: Setup) -> dict[str, Any]:
+    """The helper arms' Deep Agents sub-agent: the set's own tools, one item a call."""
     from trellis.harness.tools.base import Tool
     from trellis.harness.tools.convert import langchain as converted
 
     # the set's own tools (a function tool's ``Tool``), not the distractors' source
     found = [getattr(t, "tool", t) for t in setup.tools]
     own = [t for t in found if isinstance(t, Tool)]
-    researcher = {
+    return {
         "name": "researcher",
         "description": "Looks one item up with the tools and answers in one sentence: give it "
         "one item per call, and call it once per item, all at once.",
         "system_prompt": setup.system,
         "tools": converted.convert(own),
     }
-    return main(
-        setup,
-        subagents=(researcher,),
-        middleware=(AdmittedTasks(),) if admitted else (),
-    )
 
 
 class AdmittedTasks(AgentMiddleware):
@@ -478,6 +512,29 @@ VARIANTS: Final[dict[str, Variant]] = {
         }.items()
     },
     "code": Variant("code", "ReAct with code run in the run's own sandbox", code),
+    "think-tool": Variant(
+        "think-tool",
+        "main with Anthropic's think tool (a tool that does nothing: the model reasons in it)",
+        functools.partial(around, think=True),
+    ),
+    "plan": Variant(
+        "plan",
+        "main with planning offered from the first call",
+        functools.partial(around, plan=True),
+    ),
+    "plan+code": Variant(
+        "plan+code", "plan and code", functools.partial(around, plan=True, code=True)
+    ),
+    "plan+code+helpers": Variant(
+        "plan+code+helpers",
+        "plan, code and a Deep Agents helper",
+        functools.partial(around, plan=True, code=True, helpers_too=True),
+    ),
+    "plan+think-tool+code": Variant(
+        "plan+think-tool+code",
+        "plan, the think tool and code",
+        functools.partial(around, plan=True, think=True, code=True),
+    ),
     "ask-off": Variant(
         "ask-off",
         "main, its questions answered as the ask arms' are (no ask_user)",

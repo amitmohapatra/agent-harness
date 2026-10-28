@@ -157,3 +157,42 @@ def ask_user() -> Any:
     from trellis import tool
 
     return tool(_ask, name="ask_user", side_effects="read")
+
+
+# --------------------------------------------------------------------------- thinking around it
+async def _think(thought: str) -> str:
+    """Use the tool to think about something. It will not obtain new information or change
+    anything, but just append the thought to the log. Use it when complex reasoning or some
+    cache memory is needed.
+
+    Args:
+        thought: A thought to think about.
+    """
+    return ""
+
+
+def think_tool() -> Any:
+    """Anthropic's "think" tool (https://www.anthropic.com/engineering/claude-think-tool): it
+    does nothing, its description as Anthropic documents it — the model reasons in its
+    argument between steps. Neither LangChain nor Deep Agents ships one."""
+    from trellis import tool
+
+    return tool(_think, name="think", side_effects="read")
+
+
+def plan_from_start(window: int | None) -> AgentMiddleware:
+    """The harness's own planning (``automatic.Planning``: LangChain's ``TodoListMiddleware``)
+    with only its trigger changed: ``write_todos`` offered from the first call, whatever the
+    task or the window (today: a long task on a window of 32k or more). Named apart, so the
+    default one is turned off for it, not stacked (``variants``: ``off=("planning",)``)."""
+    from trellis.harness.automatic import Planning
+
+    class PlanFromStart(Planning):
+        @property
+        def name(self) -> str:
+            return "PlanFromStart"
+
+        def wanted(self, request: Any) -> bool:
+            return True
+
+    return PlanFromStart(window=window)

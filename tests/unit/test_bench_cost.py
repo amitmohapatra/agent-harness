@@ -220,7 +220,14 @@ TRAVEL_SCRIPT: list[Any] = [
 
 #: The arms that need a service a unit test has not: a sandbox, the memory service, Anthropic's
 #: client (``test_bench_reasoning`` covers them).
-UNSCRIPTED = {"code", "examples", "anthropic-cache"}
+UNSCRIPTED = {
+    "code",
+    "examples",
+    "anthropic-cache",
+    "plan+code",
+    "plan+code+helpers",
+    "plan+think-tool+code",
+}
 
 
 @pytest.mark.parametrize("variant", [v for v in VARIANTS if v not in UNSCRIPTED])
