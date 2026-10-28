@@ -139,7 +139,7 @@ worker — repeats no question and no tool call made before the pause.
 
 **Progress checkpoints: a worker that dies repeats no side effect.** While a worker runs it,
 the run also saves its journal — the tool calls completed and their outputs, the answers it
-was given, and a `ReAct`'s graph checkpoint — as the run's checkpoint on a heartbeat
+was given, and the graph checkpoint of a `ReAct` or `middleware()` graph — as the run's checkpoint on a heartbeat
 (`POST /v1/runs/{id}/heartbeat {worker_id, lease_seconds, checkpoint}`, which only the lease
 holder may send): at once after every completed call that does more than read (a `write` or
 `irreversible` tool, or one under a catalog rule), and after reads and model steps at most every
@@ -167,6 +167,56 @@ configure. Each such save is one more artifact of the run, kept with its others 
 after the run ends). A resume reads the journal before it answers the run, so a journal that
 cannot be read leaves the run waiting. With no `RUNS_URL` the store is this process's memory:
 it bounds nothing, and the same reference is kept there with the run.
+
+## Continuing where a run stopped
+
+A run continues after a pause (`agent.resume`) or after its worker died (the lease lapses)
+from what its journal and its framework kept — never from scratch where something kept more:
+
+| Target | After a pause | After its worker died | What a long run keeps |
+|---|---|---|---|
+| `ReAct`; a `create_agent` or Deep Agents graph built with `middleware()` | in place, from its checkpoint in the run | from the latest step saved: the model is not asked again for the steps it holds | the latest checkpoint and the step under way's records |
+| a graph with a checkpointer of its own | in place where the checkpointer holds the pause, else a harness pause from its input | a durable checkpointer: from the run's latest checkpoint; one the new process does not have (`InMemorySaver`): from its input | every call's record, and the checkpointer's own |
+| a graph with none (no `middleware()`, a hand-built `StateGraph`, `checkpointer=False`), a function | from its input, the journal answering | from its input, the journal replaying | every call's record |
+| OpenAI Agents | its own `RunState` (a `needs_approval` tool), else from its input | from its input, the journal replaying | every call's record |
+| Claude Agent SDK, Kimi (ACP) | its own session resumed (Claude's transcript is in the journal; Kimi's on its machine) | the same, from the session as saved | the session's transcript (Claude), every call's record |
+
+Wherever it continues from, every harness and framework tool call that finished replays from
+the journal instead of running again, one that does more than read and was under way is not
+run blind ([unknown](reliability.md#unknown-outcomes)), and nothing asked is asked again.
+
+**A graph's checkpoint, in the run.** A `create_agent` or `create_deep_agent` graph built with
+`middleware()` keeps its checkpoint in the run as `ReAct` does: compiled without a checkpointer,
+`h.wrap` runs a copy that has `RunCheckpointer()` (the graph object is left as it is); there is
+nothing to give. A checkpointer of its own (`InMemorySaver`, `AsyncPostgresSaver`) stays the
+graph's, and so does `checkpointer=False` (no checkpoint: every attempt runs from its input).
+With a checkpointer of its own, the run's checkpoints carry its id in their metadata
+(`trellis_run_id`), and the attempt after a crash continues from the run's latest one — not a
+new turn with the question again — when the checkpointer has it.
+
+**A later step's call is a new call.** A graph continuing from a checkpoint does not make its
+earlier steps' calls again, so the journal keeps each call's record with the step it was made in
+(the checkpoint the step started from): after a pause or a crash, a later step's call identical
+to an earlier one (`add_item("apple")` again, the same refund asked once more) runs, and is
+approved, as a new call — only a call of the step under way replays. As the graph's checkpoint
+in the run moves past a step, that step's records are dropped: the journal of a `ReAct` or
+`middleware()` run is its latest checkpoint and one step's records, however many steps it takes.
+Each output on the run's [trajectory](evaluation.md) is kept as the event stream previews it
+(2000 characters). The graph's state itself is the framework's: it grows with the conversation
+unless the graph summarizes it (Deep Agents' summarization).
+
+**A damaged checkpoint.** A graph checkpoint the journal holds that cannot be read back
+(damaged, or written with types this release cannot load), or one missing the graph's own,
+ends the run `ERROR` with `CHECKPOINT_UNREADABLE`, not retried: starting the graph over would
+make again the calls its checkpoint had moved past. Nothing is run again; start a new run.
+
+**A new version between the crash and the resume.** The run continues on the version that
+claims it, with a warning naming both (`agent_version`): another prompt, model, tool or step
+limit applies from the next step, the checkpoint as it was saved. A run started where its graph
+kept no checkpoint (a release before this one, `checkpointer=False`) continues from its input on
+one that keeps it, the journal replaying its calls. A change the saved checkpoint no longer fits
+(a renamed state field the graph reads) is the graph's to migrate: let the runs under way finish
+on the old version before you deploy it.
 
 ## Queue order and busy conversations
 

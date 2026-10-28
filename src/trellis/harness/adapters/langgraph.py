@@ -33,7 +33,15 @@
 * a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
-  stopped, and it holds no conversation of its own (the memory service gives the recent turns);
+  stopped, and it holds no conversation of its own (the memory service gives the recent turns).
+  A graph built with ``middleware()`` and compiled without a checkpointer is run as a copy
+  that has one (:func:`checkpointing`); one compiled with a checkpointer of its own keeps it,
+  its checkpoints marked with the run (:data:`RUN_METADATA`), and the attempt after a crash
+  continues from the run's latest one, as a resume does, rather than starting the turn again;
+* steps: a checkpointed graph's harness calls are journaled with the step they are made in
+  (the checkpoint the step started from: ``Replay.where``), and an attempt that continues from
+  a checkpoint passes over the records of the steps before it (``Replay.resumed``): a later
+  step's identical call runs, and is asked about, again;
 * store: a graph compiled without a store of its own is run, while memory is on, with the
   memory service as its long-term store (``bridges.store.MemoryStore``: ``runtime.store``,
   ``get_store()``, Deep Agents' ``StoreBackend``); a graph's own store is kept (said once);
@@ -56,7 +64,7 @@ import asyncio
 import functools
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Final
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
@@ -94,6 +102,12 @@ MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
 RUN_ARGUMENTS: Final = ("context", "durability")
 #: Deep Agents' tool that runs a sub-agent.
 TASK_TOOL: Final = "task"
+#: The checkpoint metadata key a graph with a checkpointer of its own has its run's checkpoints
+#: marked with (the run's id, from the run's config ``metadata``).
+RUN_METADATA: Final = "trellis_run_id"
+#: The ``configurable`` key under which LangGraph hands a task, by namespace, the checkpoint
+#: its step started from (``CONFIG_KEY_CHECKPOINT_MAP``; the root graph's under ``""``).
+CHECKPOINT_MAP: Final = "checkpoint_map"
 
 
 class LangGraphAdapter:
@@ -150,8 +164,9 @@ class LangGraphAdapter:
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
         try:
+            given = await _continued(target, native_input, run)
             return await self._graph(target, run.runtime).ainvoke(
-                _continued(target, native_input, run),
+                given,
                 self._config(target, run),
                 version="v2",
                 **_run_arguments(run.runtime),
@@ -171,8 +186,9 @@ class LangGraphAdapter:
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
         try:
+            given = await _continued(target, native_input, run)
             async for part in self._graph(target, run.runtime).astream(
-                _continued(target, native_input, run),
+                given,
                 self._config(target, run),
                 stream_mode=["messages", "values"],
                 version="v2",
@@ -309,10 +325,13 @@ class LangGraphAdapter:
             runtime.suspend = interrupt
         options = {k: v for k, v in runtime.framework_options.items() if k not in RUN_ARGUMENTS}
         thread = thread_of(target, runtime)
-        return {
+        config = {
             **options,
             "configurable": {**options.get("configurable", {}), "thread_id": thread},
         }
+        if _checkpointed(target) and not run_scoped(target):  # its checkpoints: the run's
+            config["metadata"] = {**options.get("metadata", {}), RUN_METADATA: runtime.run_id}
+        return config
 
 
 def _run_arguments(runtime: Runtime) -> dict[str, Any]:
@@ -345,7 +364,7 @@ def _without_middleware(name: str) -> None:
         "the graph %s is wrapped without the harness's middleware: its tools are governed and "
         "narrowed, but it has no memory or gateway MCP tools, no step limit or stall guard, no "
         "model spans, call_timeout or budget stop, and no checkpoint in the run — build it with "
-        "middleware=trellis.middleware() (and checkpointer=RunCheckpointer())",
+        "middleware=trellis.middleware() (its checkpoint is then kept in the run)",
         name,
     )
 
@@ -397,19 +416,86 @@ def run_scoped(target: Any) -> bool:
     return isinstance(target.checkpointer, RunCheckpointer)
 
 
-def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
-    """What the graph is run with: a graph whose checkpoint the run's journal holds, run again
-    without a decision to resume with (after a crash, or an error that may pass), continues
-    from it (``None``) rather than starting a new turn."""
+def checkpointing(target: Any) -> Any:
+    """``target`` as the harness runs it: a graph built with ``middleware()`` (it takes the
+    run's tools per model call) and compiled without a checkpointer, as a copy checkpointing
+    into its run (``middleware.RunCheckpointer``: a resume continues where it stopped) — the
+    graph itself left as it is; any other as it is (a checkpointer of its own, or
+    ``checkpointer=False``, stays the graph's)."""
+    if HARNESS_TOOLS not in (getattr(target, "channels", None) or {}):
+        return target
+    if getattr(target, "checkpointer", False) is not None:
+        return target
+    from trellis.harness.middleware import RunCheckpointer
+
+    return target.copy({"checkpointer": RunCheckpointer()})
+
+
+async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
+    """What the graph is run with — and, a checkpointed graph, where the attempt's calls are
+    made (``Replay.where``: the step's checkpoint) and the checkpoint it continues from
+    (``Replay.resumed``). A graph run again without a decision to resume with (after a crash,
+    or an error that may pass) continues from the run's latest checkpoint (``None``) rather
+    than starting a new turn: one its journal holds (``RunCheckpointer``), or one its own
+    checkpointer holds for this run (:data:`RUN_METADATA`); a graph whose checkpointer holds
+    none of the run's starts from its input."""
     from langgraph.types import Command
 
-    if (
-        not isinstance(native_input, Command)
-        and run_scoped(target)
-        and run.runtime.replay.journal.graph
-    ):
-        return None
-    return native_input
+    if not _checkpointed(target):
+        return native_input
+    runtime = run.runtime
+    replay = runtime.replay
+    thread = thread_of(target, runtime)
+    replay.where = _stepping(thread)
+    resumed = isinstance(native_input, Command)
+    if run_scoped(target):
+        if not replay.journal.graph:
+            return native_input
+        replay.resumed = _latest(replay.journal.graph)
+        return native_input if resumed else None
+    if runtime.attempt == 1:
+        return native_input
+    state = await target.aget_state({"configurable": {"thread_id": thread}})
+    marked: Mapping[str, object] = state.metadata or {}
+    if marked.get(RUN_METADATA) != runtime.run_id:
+        return native_input
+    configurable: Mapping[str, object] = state.config.get("configurable") or {}
+    latest = configurable.get("checkpoint_id")
+    replay.resumed = latest if isinstance(latest, str) else None
+    return native_input if resumed else None
+
+
+def _latest(graph: Mapping[str, Any]) -> str:
+    """The id of the root graph's checkpoint the run's journal holds; one that holds a
+    sub-graph's and not the root's is damaged (``CheckpointUnreadable``)."""
+    from trellis.harness.middleware import CheckpointUnreadable
+
+    latest = (graph.get("") or {}).get("id")
+    if not isinstance(latest, str):
+        raise CheckpointUnreadable(
+            "the run's journal holds a graph checkpoint without the graph's own: the run stops "
+            "rather than start the graph over, which would make its calls again; start a new run"
+        )
+    return latest
+
+
+def _stepping(thread: str) -> Callable[[], str | None]:
+    """Where a call is made now: the checkpoint the graph's step started from, read from the
+    config LangGraph gives the step's task on ``thread`` (:data:`CHECKPOINT_MAP`); ``None``
+    outside one of its steps."""
+    from langgraph.config import get_config
+
+    def where() -> str | None:
+        try:
+            configurable = get_config().get("configurable") or {}
+        except RuntimeError:  # not inside a step of a graph
+            return None
+        if configurable.get("thread_id") != thread:
+            return None
+        step = (configurable.get(CHECKPOINT_MAP) or {}).get("")
+        return step if isinstance(step, str) else None
+
+    return where
 
 
 def is_hitl(value: Any) -> bool:
