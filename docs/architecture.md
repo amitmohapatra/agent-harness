@@ -164,7 +164,7 @@ src/trellis/
     compat.py          the framework versions this release was tested with; the wrap-time warning
     hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
     middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, StepLimit,
-                       StallGuard, ReadTools, read_result, ToolGuidance, AnswerCheck;
+                       StallGuard, ReadTools, read_result, FitWindow;
                        RunCheckpointer (the latest checkpoint, delta channels' history beside it)
     react.py           ReAct(...): create_agent (create_deep_agent on demand) with middleware()
     automatic.py       what a long task is offered (planning, scratch tools), the budget's stop
@@ -460,26 +460,22 @@ flowchart TB
     sa["SubAgentMiddleware · Deep Agents<br/>the task tool: sub-agents, the general-purpose helper"]
     pt["PatchToolCallsMiddleware · Deep Agents<br/>(before the agent) unanswered calls answered"]
     pl["TodoListMiddleware, LongTaskTools · harness<br/>planning and the scratch tools on a long task"]
-    ac["AnswerCheck · harness, answer_check<br/>the draft answer checked once against the request"]
     ht["HarnessTools, GovernTools · harness<br/>the run's tools per call; every call governed"]
     sg["StallGuard, StepLimit, Budgeted · harness<br/>max_repeats, max_steps, the budget's stop"]
     ce["ContextEditingMiddleware · LangChain<br/>older results cleared past half the window"]
     su["summarization · Deep Agents<br/>older turns summarized near the window's end"]
     rt["ReadTools · harness<br/>read_file / read_result offered once needed"]
-    tg["ToolGuidance · harness, tool_guidance<br/>how to choose among tools, in the instructions"]
     yours["yours: middleware=[...]<br/>(HumanInTheLoopMiddleware, PII, a tool selector...)"]
     mh["ModelHooks · harness<br/>chat span, call_timeout, on_error,<br/>pinned prompt, unparsable calls answered"]
     tail["Deep Agents' tail<br/>prompt caching, memory files, unsupported content"]
   end
-  fs --> sa --> pt --> pl --> ac --> ht --> sg --> ce --> su --> rt --> tg --> yours --> mh --> tail --> model(["the model"])
+  fs --> sa --> pt --> pl --> ht --> sg --> ce --> su --> rt --> yours --> mh --> tail --> model(["the model"])
 ```
 
 One model step through it, and the tool calls it makes, is in
 [flows.md](flows.md#react-one-model-step-through-the-middleware); what each piece does and how
-to add or replace one is [frameworks/react.md](frameworks/react.md#the-middleware). The two
-switches are off unless turned on (`None`, automatic, is off by the measurement); `AnswerCheck`
-sits outside `HarnessTools` so
-that, in a run its tool hints narrowed, the check can be offered every tool
+to add or replace one is [frameworks/react.md](frameworks/react.md#the-middleware). The loop
+has no tool-choice rule of its own
 ([frameworks/react.md](frameworks/react.md#tool-choice), [ADR 0002](adr/0002-tool-choice.md)).
 
 ## Run states

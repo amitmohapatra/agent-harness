@@ -1,6 +1,6 @@
 # 0002. Tool choice is guarded by opt-in middleware, a warning-only check of the tool set, and per-item coverage
 
-**Status:** Accepted (2026-10-19)
+**Status:** Accepted (2026-10-19); amended 2026-10-28 — decisions 2 to 4 withdrawn ([below](#amendment-2026-10-28-the-guards-removed))
 
 ## Context
 
@@ -63,3 +63,25 @@ of a write request.
   the hints, not the middleware.
 * `examples/06_scenarios/tool_choice.py` and `tests/live/test_live_tool_choice.py` reproduce
   the four failures with generic tools and measure coverage with and without the guards.
+
+## Amendment (2026-10-28): the guards removed
+
+Decisions 2, 3 and 4 are withdrawn; 1, 5 and 6 stand. `ToolGuidance` and `AnswerCheck` are
+removed, with `ReAct(tool_guidance=, answer_check=)` and `middleware(tool_guidance=,
+answer_check=)`: each is refused by name (`trellis.harness.removed`), saying what to do instead.
+`FitWindow` loses its first step, which only dropped the guidance (`FitWindow(optional=)` is
+refused the same way).
+
+Measured on a small local model (Granite) with memory off, fresh and learned: the check lowered
+tool coverage by about 11 points — past the confidence interval — and added about two minutes a
+run, with no significant gain; the guidance added about 50 seconds a run, past the interval,
+with no significant gain, and without memory dropped correct answers from 0.73 to 0.25. Both
+were loop rules of the harness's own; the direction is to use the frameworks' features and keep
+a custom rule only when it clearly earns its place.
+
+What follows: a run's tool choice rests on the tools' descriptions and the instructions, the
+check of the tool set, the tool hints (and `tool_search`), and, for many tools without hints,
+LangChain's tool selector; `tool_coverage()` measures it. A run its hints narrowed is no longer
+widened to every tool before its answer — only `tool_search` adds tools. The "no record" and
+"check a change against the rules" prompts went with the check: a rule in the instructions or
+the memory context is still text the model reads, and governance still asks before a change.

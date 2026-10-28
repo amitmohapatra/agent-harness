@@ -51,6 +51,23 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   attempt on the loopback interface with a bearer token.
 - Requires `trellis-contracts>=0.6.2` (its `acp` error source).
 
+### Removed
+
+- `ReAct(tool_guidance=, answer_check=)` and `middleware(tool_guidance=, answer_check=)`, with
+  the middleware they turned on, `ToolGuidance` and `AnswerCheck` (`TOOL_GUIDANCE`,
+  `ANSWER_CHECK`, `WRITE_CHECK`, `NO_RECORD` among them), the benchmark's `main+guidance`
+  and `main+check` variants, and the live tool-choice test's variants (it runs `ReAct` as
+  built; `TRELLIS_LIVE_VARIANTS` is gone). Measured on Granite with memory off, fresh and learned, the
+  answer check lowered tool coverage by about 11 points and added about two minutes a run; the
+  tool guidance added about 50 seconds a run and, without memory, dropped correct answers from
+  0.73 to 0.25 — neither with a significant gain. Each old argument is refused by name with a
+  `TypeError` saying what to do instead: how to choose among tools goes in `system_prompt` and
+  the tools' descriptions; answers are measured with `h.evaluate` (`tool_coverage`). A run its
+  tool hints narrowed is no longer widened to every tool before its answer (only `tool_search`
+  adds tools). `FitWindow(optional=)` and its `guidance` step, which only dropped the tool
+  guidance, go too (refused the same way). See
+  [docs/adr/0002-tool-choice.md](docs/adr/0002-tool-choice.md#amendment-2026-10-28-the-guards-removed).
+
 ### Breaking
 
 - `ReAct` takes Deep Agents' capabilities: given `backend=` (file tools, large-result eviction,

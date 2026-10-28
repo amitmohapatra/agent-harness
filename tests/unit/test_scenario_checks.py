@@ -1,4 +1,4 @@
-"""The answer checks of ``examples/06_scenarios/tool_choice.py``: what reads as a plain
+"""The scoring checks of ``examples/06_scenarios/tool_choice.py``: what reads as a plain
 "cannot" and as "there is no such record"."""
 
 from __future__ import annotations

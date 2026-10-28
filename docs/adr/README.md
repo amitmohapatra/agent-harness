@@ -7,7 +7,7 @@ and says so in both.
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-version-policy.md) | The harness pins the framework versions it tested and moves only by a release | Accepted |
-| [0002](0002-tool-choice.md) | Tool choice is guarded by opt-in middleware, a warning-only check of the tool set, and per-item coverage | Accepted |
+| [0002](0002-tool-choice.md) | Tool choice is guarded by opt-in middleware, a warning-only check of the tool set, and per-item coverage | Accepted; amended 2026-10-28 (the middleware removed) |
 | [0003](0003-automatic-features.md) | ReAct turns native features on from signals, never from new settings | Accepted |
 
 The sibling repositories keep their own: the memory service's

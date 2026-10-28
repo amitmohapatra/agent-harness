@@ -191,6 +191,8 @@ def test_what_react_refuses() -> None:
         ("checkpointer", r"keeps its checkpoint in the run; .*create_agent\(.*checkpointer="),
         ("store", r"store is the memory service; .*create_agent\(.*store="),
         ("capabilities", r"can and cannot do in system_prompt"),
+        ("tool_guidance", r"tool guidance was removed.*in system_prompt and in each tool"),
+        ("answer_check", r"answer check was removed.*h\.evaluate \(tool_coverage\)"),
     ],
 )
 def test_reacts_removed_arguments_are_refused_naming_what_to_use(name: str, said: str) -> None:

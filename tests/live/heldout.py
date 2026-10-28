@@ -1,6 +1,6 @@
 """Held-out tool sets for the tool-choice live test: two domains with their own tool names and
-requests — an IT help desk and travel expenses — written after the guards and the store set,
-and never used to change them. They have the same kinds of item as the store set (a broad tool
+requests — an IT help desk and travel expenses — written after the store set, and never used
+to tune the harness. They have the same kinds of item as the store set (a broad tool
 beside specific ones, several parts, a change behind approval, a change asked for indirectly, a
 read that sounds like a change, an unknown record, a change a remembered rule forbids, a
 question about what the assistant can do), with the same item metadata, so the same generic
