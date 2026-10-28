@@ -180,7 +180,7 @@ def think_tool() -> Any:
     return tool(_think, name="think", side_effects="read")
 
 
-def plan_from_start(window: int | None) -> AgentMiddleware:
+def plan_from_start(window: int | None) -> Any:
     """The harness's own planning (``automatic.Planning``: LangChain's ``TodoListMiddleware``)
     with only its trigger changed: ``write_todos`` offered from the first call, whatever the
     task or the window (today: a long task on a window of 32k or more). Named apart, so the
