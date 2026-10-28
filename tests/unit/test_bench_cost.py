@@ -208,7 +208,12 @@ TRAVEL_SCRIPT: list[Any] = [
 ]
 
 
-@pytest.mark.parametrize("variant", list(VARIANTS))
+#: The arms that need a service a unit test has not: a sandbox, the memory service, Anthropic's
+#: client (``test_bench_reasoning`` covers them).
+UNSCRIPTED = {"code", "examples", "anthropic-cache"}
+
+
+@pytest.mark.parametrize("variant", [v for v in VARIANTS if v not in UNSCRIPTED])
 async def test_a_cell_runs_every_task_and_records_each_run(
     variant: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

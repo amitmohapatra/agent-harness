@@ -14,10 +14,13 @@ from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Budget, Harness, Hooks, ReAct, Runtime, current, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolOutcome
-from trellis.harness.middleware import LAST_STEP
+from trellis.harness.middleware import REPEATED
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.bridge import SAME_CALL
 from trellis.runs import Lease
+
+#: What LangChain's ``ModelCallLimitMiddleware`` ends a run with (``exit_behavior="end"``).
+LIMIT_REACHED = "Model call limits exceeded"
 
 
 def told(model: ScriptedChat, request: int) -> list[tuple[str, str]]:
@@ -377,7 +380,7 @@ async def test_calls_with_other_arguments_all_run_and_a_repeat_in_a_later_step_r
     assert len(notices) == 3  # each write that ran announced once
 
 
-async def test_a_failing_call_repeated_in_one_step_still_counts_toward_the_error_streak(
+async def test_steps_in_which_every_call_failed_go_on_to_the_limit_not_to_an_error(
     harness: Harness,
 ) -> None:
     @tool(side_effects="read")
@@ -385,57 +388,44 @@ async def test_a_failing_call_repeated_in_one_step_still_counts_toward_the_error
         """Fails."""
         raise ValueError("down")
 
-    model = ScriptedChat([[("broken", {"n": n}), ("broken", {"n": n})] for n in range(3)])
-    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="broken"), [broken])
+    model = ScriptedChat([[("broken", {"n": n}), ("broken", {"n": n})] for n in range(4)])
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model, max_steps=3), id="broken"), [broken]
+    )
     result = await agent.run("x", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert isinstance(result.answer, str) and result.answer.startswith(LIMIT_REACHED)
+    assert len(model.requests) == 3
 
 
 # --------------------------------------------------------------------------- stopping
-async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harness) -> None:
+async def test_at_the_step_limit_the_run_ends_with_langchains_message(harness: Harness) -> None:
     @tool(side_effects="read")
     def search(query: str) -> str:
         """Search."""
         return f"found {query}"
 
-    model = ScriptedChat([("search", {"query": "a"}), ("search", {"query": "b"}), "partial"])
+    model = ScriptedChat([("search", {"query": "a"}), ("search", {"query": "b"}), "never"])
     agent = arm(
         harness.wrap(ReAct(system_prompt="s", model=model, max_steps=2), id="limit"), [search]
     )
-    events = [e async for e in agent.stream("x", user="u")]
-    finished = events[-1]
-    assert finished.data["result"] == "partial"
-    last = model.requests[-1]
-    assert last["tool_choice"] == "none" and last["tools"]  # the same tools, none to be called
-    assert last["messages"][-1] == {"role": "user", "content": LAST_STEP}
-    warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]
-    stopped = [w for w in warnings if w.get("code") == "max_steps"]
-    assert "stopped at its 2 steps" in stopped[0]["message"]
-
-
-async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -> None:
-    @tool(side_effects="read")
-    def flaky(n: int) -> str:
-        """Fails for odd numbers."""
-        if n % 2:
-            raise ValueError("odd")
-        return "even"
-
-    model = ScriptedChat(
-        [
-            ("flaky", {"n": 1}),
-            ("flaky", {"n": 2}),  # one success resets the streak
-            [("flaky", {"n": 3}), ("nope", {})],
-            ("flaky", {"n": 5}),
-            ("flaky", {"x": "bad"}),
-        ]
-    )
-    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="flaky"), [flaky])
     result = await agent.run("x", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
-    assert model.turns == []
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "Model call limits exceeded: thread limit (2/2)"
+    assert len(model.requests) == 2  # no third call
+
+
+async def test_a_stuck_react_answers_with_what_it_has(harness: Harness) -> None:
+    @tool(side_effects="read")
+    def search(query: str) -> str:
+        """Search."""
+        return f"found {query}"
+
+    model = ScriptedChat([("search", {"query": "a"})] * 3 + ["found a"])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="stuck"), [search])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "found a", result.error
+    assert told(model, 3)[-1] == ("call_3", REPEATED.format(tool="search", steps=3))
 
 
 async def test_the_tools_are_offered_in_a_stable_order(harness: Harness) -> None:

@@ -84,7 +84,7 @@ agent was built:
 | Set | Model calls go | What else it can do |
 |---|---|---|
 | `BIFROST_URL` | through Bifrost, with `BIFROST_VIRTUAL_KEY` — it wins over a provider key also set (said once at start, and by `trellis doctor`) | everything: the MCP tools, Code Mode, the cost of each call (dollar budgets), fallbacks and retries, stored prompts, the judge alias, each call's run as its dimensions |
-| no `BIFROST_URL` | to the model's provider, through the provider's own SDK and key (`OPENAI_API_KEY` and `OPENAI_BASE_URL` for any OpenAI-compatible endpoint — LiteLLM's proxy, vLLM, Ollama —, `ANTHROPIC_API_KEY`...) | models only: the client's own retries; a judge by name is an OpenAI model (`llm_judge(model="openai:...")`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
+| no `BIFROST_URL` | to the model's provider, through the provider's own SDK and key (`OPENAI_API_KEY` and `OPENAI_BASE_URL` for any OpenAI-compatible endpoint — LiteLLM's proxy, vLLM, Ollama —, `ANTHROPIC_API_KEY`...) | models only: a `ReAct`'s model calls retried by LangChain's `ModelRetryMiddleware` (an OpenAI-compatible client retries none; another provider's client retries itself); a judge by name is an OpenAI model (`llm_judge(model="openai:...")`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
 
 A name says its provider — `openai/gpt-4o` or `openai:gpt-4o` — or starts the way its
 provider's do (`gpt-`, `o3`, `claude-`, `gemini-`, `mistral-`): it is mapped to the route's

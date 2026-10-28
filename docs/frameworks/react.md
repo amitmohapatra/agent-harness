@@ -103,11 +103,14 @@ The names are Deep Agents' where both have one. In four tiers:
   `CompositeBackend` — or the run's sandbox, `sandbox()`, where `execute` runs code
   ([sandbox.md](../sandbox.md)). Files outside the graph's state are the agent's from the start
   and governed as any tool (the reads read, the others write; the catalog may say more).
-* `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds: model
-  calls with tools in one invocation then one without, identical calls in a row that stop the
-  run, the most one model call may take (within what is left of the run's
-  `run_timeout=`/`deadline=`; a tool's own `call_timeout` bounds a tool call). `max_steps` is a
-  loop guard counted again each invocation; a cap on the whole run's tool calls, across its
+* `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds
+  ([the limits](#the-loops-limits)): the most model calls a run makes (LangChain's
+  `ModelCallLimitMiddleware`; past them the run ends with LangChain's message that the limit
+  was reached, not an error), the same call in `max_repeats` steps in a row not run again and
+  the memory service's search tools called at most `max_repeats` times (the model told so, it
+  answers with what it has), the most one model call may take (within what is left of the run's
+  `run_timeout=`/`deadline=`; a tool's own `call_timeout` bounds a tool call). The counts are
+  the run's, kept across a pause and a resume; a cap on the whole run's tool calls, across its
   attempts and sub-agents, is `Budget(max_tool_calls=)` ([runs.md](../runs.md)).
 * `context_window` — the model's window in tokens; given, it wins. Unset, the model's
   LangChain profile (`model.profile["max_input_tokens"]`). When neither says, the window-scaled
@@ -117,8 +120,9 @@ The names are Deep Agents' where both have one. In four tiers:
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
 * `middleware` — your middleware, LangChain's, Deep Agents' or your own, added to the harness's
   before `ModelHooks` (so its span shows what the model is sent): one named as the harness's is
-  refused, naming the parameter that sets it (`StepLimit`: `max_steps`, `StallGuard`:
-  `max_repeats`, `ModelHooks`: `call_timeout` and `system_prompt`, `TodoListMiddleware`: the
+  refused, naming the parameter that sets it (`ModelCallLimitMiddleware`: `max_steps`,
+  `StallGuard` and `ToolCallLimitMiddleware[memory_search]`: `max_repeats`, `ModelHooks`:
+  `call_timeout` and `system_prompt`, `TodoListMiddleware`: the
   planning a long task gets...), and `middleware()` itself is refused: ReAct already has it.
   One named as Deep Agents' replaces it, as Deep Agents does.
 * `state_schema`, `context_schema`, `cache` — Deep Agents' and LangGraph's, as they are.
@@ -210,21 +214,40 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 
 | Middleware | What it does |
 |---|---|
+| `ToolErrorMiddleware` (LangChain) | a tool that raised — one the bridge does not run: the graph's state tools (`write_todos`, `read_result`, Deep Agents' files in its state) — read by the model as an error result (`"<tool> failed: <error>"`, as a harness tool's failure reads), not a failed run; a pause or a cancellation is raised on. The harness's tools' failures are results already (the bridge classifies, retries and records them) |
 | `TodoListMiddleware` (LangChain), `LongTaskTools` | a long task — from the model's third call of an invocation, or at once when the request asks for steps (a list of three items or more, "step by step", "a plan"), on a known window of at least 32,000 tokens — is offered planning (`write_todos`) and, on the default backend, Deep Agents' scratch file tools and its general-purpose helper; a shorter task is sent none of them (together about 2,600 tokens a call) |
 | `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order |
 | `GovernTools` | the graph's own tools — your LangChain tools, Deep Agents' `task`, its file tools on a backend outside the state, a sub-agent's tools — governed as the harness's are (catalog, approval, journal, records) |
-| `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed, stop the run with a `ModelError` |
-| `StepLimit` | after `max_steps` model calls one more, with `tool_choice: "none"`, for the best answer with what it has; a `warning` event (`max_steps`) says so |
+| `StallGuard` | the same call with the same arguments in `max_repeats` consecutive steps is not run again: the model reads that it repeats itself (an error result of that call) and goes on — it answers with what it has, or changes the call |
+| `ToolCallLimitMiddleware` (LangChain), one per memory search tool | `memory_search` and `tool_search` called at most `max_repeats` times a run (`exit_behavior="continue"`): a call past it is not run, the model told not to call that tool again |
+| `ModelCallLimitMiddleware` (LangChain) | at most `max_steps` model calls a run (`exit_behavior="end"`): past them the run ends with LangChain's own message that the limit was reached. LangChain has no exit that asks the model for an answer: its other one (`error`) fails the run |
 | `Budgeted` | with a budget (`h.wrap(budget=)`): once it — the run's or its parent's — is spent, one more call without tools; the run ends `PARTIAL` |
 | `ContextEditingMiddleware` (LangChain) + `read_result` | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a prompt cache breaks rarely |
 | `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
+| `ModelRetryMiddleware` (LangChain) | a model name only, where no gateway retries (no `BIFROST_URL`: an OpenAI-compatible endpoint, `OPENAI_BASE_URL`): a call that may pass — a timeout, a lost connection, a 408, 409, 429 or 5xx — tried twice more, after a jittered 1 s then 2 s; the client then retries none, so one layer retries. Through Bifrost, Bifrost's retries and fallbacks; a chat model of yours, its own client's |
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
 
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped. A declarative
-sub-agent is given `StallGuard`, `StepLimit` and `ModelHooks` too (its own of those names kept),
-and a model name of its own is routed as `ReAct`'s.
+sub-agent is given the loop's limits (counted per task it is given), `ModelRetryMiddleware` on a
+model name and `ModelHooks` too (its own of those names kept), and a model name of its own is
+routed as `ReAct`'s.
+
+### The loop's limits
+
+LangChain's own limits bound the loop; the harness keeps one check of its own beside them, which
+LangChain has no piece for (it counts calls per tool, not the same call repeated):
+
+| Stuck how | What happens | Before (the harness's `StallGuard`, `StepLimit`) |
+|---|---|---|
+| the same call, same arguments, `max_repeats` steps in a row | not run; the model told it repeats itself; the run goes on | the run failed (`ModelError`) |
+| `memory_search` or `tool_search` again and again, the wording changed | past `max_repeats` calls, not run; the model told not to call it again | ran until the step limit or the run's time |
+| every call failing, step after step | the run goes on to its limits (the failures are results the model reads) | 3 such steps failed the run |
+| `max_steps` model calls | the run ends with LangChain's message that the limit was reached (`SUCCESS`, not an error) | one more call without tools for an answer, and a `max_steps` warning event |
+
+Whether these beat the harness's own on accuracy, speed and tokens is measured, not assumed
+([measuring the loop](#measuring-the-loop)).
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, added to the harness's (one named as the
 harness's is refused, `middleware()` itself among them). Each works the same in any
@@ -244,9 +267,11 @@ harness's is refused, `middleware()` itself among them). Each works the same in 
 `create_deep_agent` graph of yours (compiled without a checkpointer, it is run with the run's,
 `RunCheckpointer()`), and `h.wrap` runs it as it runs
 `ReAct` — the run's tools per model call (the memory and gateway MCP tools among them), narrowed
-per turn, its own tools governed, the step limit and the stall guard, the hooks and spans,
+per turn, its own tools governed, the loop's limits, the hooks and spans,
 `call_timeout`, the budget's stop, the checkpoint in the run. The settings are `ReAct`'s, meaning
-the same: `max_steps`, `max_repeats`, `call_timeout`, `context_window`, and
+the same — but the limits count per invocation (LangChain's run counts: a graph of yours may
+keep a conversation on its thread, which a run's thread is not), so a resume counts again; your
+model's own client retries its calls: `max_steps`, `max_repeats`, `call_timeout`, `context_window`, and
 `system_prompt=stored(...)` (a text goes to the graph's own
 `system_prompt`). A graph built so may have a checkpointer or a store of its own (a `ReAct`
 cannot): give it `checkpointer=`/`store=` as LangChain takes them.
@@ -268,7 +293,7 @@ agent = h.wrap(deep, id="quotes")
 
 A `create_agent` or Deep Agents graph wrapped without it still runs governed and narrowed (the
 harness runs a copy of its model node that offers only the run's tools), said once: without the
-memory and gateway MCP tools, the step limit, the stall guard, the hooks, `call_timeout` and the
+memory and gateway MCP tools, the loop's limits, the hooks, `call_timeout` and the
 checkpoint in the run. Runnable:
 [`examples/02_way1_deepagents/middleware.py`](../../examples/02_way1_deepagents/middleware.py).
 
@@ -485,6 +510,26 @@ or more than 16, is an error the model reads.
   operations.
 * A model name needs Bifrost or a provider prefix (`openai/...`) whose key the provider's SDK
   reads ([configuration.md](../configuration.md#where-a-model-name-goes)).
+
+## Measuring the loop
+
+Every change to the loop is measured against today's `main` before it stays: the cost
+benchmark's `react` suite ([evaluation.md](../evaluation.md#cost-benchmark)) — 20 tasks in each
+of the classes simple, multi-step, wide, error-injected (a needed tool's first call fails), needs
+memory (seeded notes, records they do not hold, general-knowledge controls), ambiguous (a change
+missing a value, and its fully given control), 10 helper tasks of eight to twelve items, and 40
+reasoning questions with exact answers (half `dev`, half `test`) — each arm a variant
+(`benchmark/cost/variants.py`): `main` run from a worktree of today's main, then `limitsA`
+(LangChain's limits only), `limitsB` (and the repeat check), `errorsA` (and the errors' pieces),
+`all`; the reasoning and caching techniques, each a native switch or a library's piece
+(`think`, `code`, `examples`, `slot-reuse`, `temp0`, `serial-tools`, `anthropic-cache`,
+`openai-cache-key`); `task-only` against `delegate`; native
+`task` helpers with the admission gate and without (`helpers-admitted`, `helpers`); and,
+prepared, `context-native`. `python -m benchmark.cost.analyze` gives each change's verdict per
+class, every metric's difference with its 95% bootstrap interval, and applies the rules set
+before the runs: `KEEP` only when it is measurably better on one metric and measurably worse on
+none, on every class, and past the keep rule's threshold on its target; a tie is reported as a
+tie, with its numbers.
 
 ## Run it
 

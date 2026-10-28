@@ -17,8 +17,10 @@ from deepagents.middleware.summarization import _DeepAgentsSummarizationMiddlewa
 from langchain.agents.middleware import (
     AgentMiddleware,
     ContextEditingMiddleware,
+    ModelCallLimitMiddleware,
     SummarizationMiddleware,
     TodoListMiddleware,
+    ToolCallLimitMiddleware,
 )
 from langgraph.pregel import Pregel
 from pydantic import BaseModel
@@ -236,13 +238,15 @@ class Named(AgentMiddleware):
 
 
 def test_given_middleware_is_added_before_model_hooks_and_replaces_nothing() -> None:
-    defaults = [Named("A"), Named("StepLimit"), Named("ModelHooks")]
+    defaults = [Named("A"), Named("ModelCallLimitMiddleware"), Named("ModelHooks")]
     extra, more = Named("C"), Named("D")
     stack = stacked(defaults, [extra, more])
-    assert [m.name for m in stack] == ["A", "StepLimit", "C", "D", "ModelHooks"]
+    assert [m.name for m in stack] == ["A", "ModelCallLimitMiddleware", "C", "D", "ModelHooks"]
     assert stacked(defaults, []) == defaults
-    with pytest.raises(ConfigurationError, match=r"StepLimit is the harness's \(max_steps=\)"):
-        stacked(defaults, [Named("StepLimit")])
+    with pytest.raises(
+        ConfigurationError, match=r"ModelCallLimitMiddleware is the harness's \(max_steps=\)"
+    ):
+        stacked(defaults, [Named("ModelCallLimitMiddleware")])
     with pytest.raises(ConfigurationError, match=r"A is the harness's \(always on\)"):
         stacked(defaults, [Named("A")])
 
@@ -262,8 +266,38 @@ async def test_a_deep_agents_middleware_given_replaces_its_own_by_name() -> None
     mine = SummarizationMiddleware(model, trigger=("messages", 100))
     graph = ReAct(system_prompt="s", model=model, middleware=[mine])
     assert "SummarizationMiddleware.before_model" in graph.nodes  # LangChain's, in its place
-    with pytest.raises(ConfigurationError, match=r"StepLimit is the harness's \(max_steps=\)"):
-        ReAct(system_prompt="s", model=model, middleware=[ours.StepLimit(3)])
+    with pytest.raises(
+        ConfigurationError, match=r"ModelCallLimitMiddleware is the harness's \(max_steps=\)"
+    ):
+        ReAct(system_prompt="s", model=model, middleware=[ModelCallLimitMiddleware(run_limit=3)])
+    with pytest.raises(ConfigurationError, match=r"\[memory_search\] is the harness's"):
+        ReAct(
+            system_prompt="s",
+            model=model,
+            middleware=[ToolCallLimitMiddleware(tool_name="memory_search", run_limit=1)],
+        )
+    # a limit of yours on another tool is yours
+    ReAct(
+        system_prompt="s",
+        model=model,
+        middleware=[ToolCallLimitMiddleware(tool_name="stock", run_limit=1)],
+    )
+
+
+def test_a_model_name_is_retried_by_react_and_a_chat_model_by_its_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis.harness import react
+
+    made: list[Any] = []
+    real = react._retrying
+    monkeypatch.setattr(react, "_retrying", lambda: made.append(real()) or made[-1])
+    ReAct(system_prompt="s", model="openai:gpt-4o")
+    assert [m.name for m in made] == ["ModelRetryMiddleware"]
+    assert made[0].on_failure == "error" and made[0].retry_on is ours.retried
+    ReAct(system_prompt="s", model=ScriptedChat(["hi"]))  # yours: its own client retries
+    ReAct(system_prompt="s", model="openai:gpt-4o", backend=JournalBackend())  # Deep Agents
+    assert len(made) == 2
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 2.5, "3", None])
@@ -302,8 +336,6 @@ async def test_the_middleware_run_in_their_order(
     for cls, label in [
         (FilesystemMiddleware, "files"),
         (ours.HarnessTools, "tools"),
-        (ours.StallGuard, "stall"),
-        (ours.StepLimit, "steps"),
         (ContextEditingMiddleware, "clear"),
         (_DeepAgentsSummarizationMiddleware, "summary"),
         (Mine, "mine"),
@@ -321,7 +353,7 @@ async def test_the_middleware_run_in_their_order(
     await arm(harness.wrap(graph, id="order"), [stock]).run("x", user="u")
     # Deep Agents' files first, the harness's next; Deep Agents' summarization after what
     # narrows the tools, so it counts what is sent
-    model_order = ["files", "tools", "stall", "steps", "clear", "summary", "mine", "hooks"]
+    model_order = ["files", "tools", "clear", "summary", "mine", "hooks"]
     first_call = [s.split()[1] for s in seen[: len(model_order)]]
     assert first_call == model_order  # outermost first: ModelHooks sees what is sent
     tool_calls = [s for s in seen if s.startswith("tool ")]

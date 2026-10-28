@@ -67,6 +67,21 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   adds tools). `FitWindow(optional=)` and its `guidance` step, which only dropped the tool
   guidance, go too (refused the same way). See
   [docs/adr/0002-tool-choice.md](docs/adr/0002-tool-choice.md#amendment-2026-10-28-the-guards-removed).
+- The ReAct loop's own limits give way to LangChain's (kept only as far as the `react` suite
+  measures them better than before). `StepLimit`, its `LAST_STEP` and `max_steps` warning
+  event, `StallGuard`'s error streak (`ERROR_STREAK`: three steps of failed calls failed the
+  run) and `middleware.MAX_STEPS` are gone. `max_steps` is now LangChain's
+  `ModelCallLimitMiddleware` (`exit_behavior="end"`): at most `max_steps` model calls a run —
+  one fewer than before, which added a call without tools — after which the run ends `SUCCESS`
+  with LangChain's message that the limit was reached, not a forced answer (LangChain has no
+  exit that asks for one). `max_repeats` also caps `memory_search` and `tool_search` per run
+  (`ToolCallLimitMiddleware`, `exit_behavior="continue"`: the model told not to call it again),
+  and `StallGuard` no longer stops the run: the same call repeated `max_repeats` steps in a row
+  is not run and the model is told so. In `ReAct` the counts are the run's (its thread), kept
+  across a pause; in `middleware()` they are per invocation (a graph of yours may keep a
+  conversation on its thread). A middleware named `ModelCallLimitMiddleware`,
+  `ToolCallLimitMiddleware[memory_search]` or `[tool_search]` given to `ReAct(middleware=)` is
+  refused, naming `max_steps=` or `max_repeats=`.
 
 ### Breaking
 
@@ -226,6 +241,23 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 
 ### Changed
 
+- One layer retries a model call, chosen per call: through Bifrost the gateway; without it, a
+  `ReAct` on a model name retries with LangChain's `ModelRetryMiddleware` (twice, jittered 1 s
+  then 2 s, a call that may pass only) and its OpenAI-compatible client retries none
+  (`gateways.PROVIDER_CLIENT_RETRIES`); another provider's client, and a chat model of yours,
+  retry themselves. A tool that raises outside the bridge (the graph's state tools) is an error
+  result the model reads (LangChain's `ToolErrorMiddleware`), not a failed run. See
+  [docs/reliability.md](docs/reliability.md#every-retry-layer).
+- The cost benchmark measures the ReAct loop (`--suite react`): simple, multi-step, wide,
+  error-injected, needs-memory, ambiguous, helper and reasoning classes (GSM8K test items, MIT;
+  generated dates, multi-hop and logic), the loop's arms (`limitsA`, `limitsB`, `errorsA`,
+  `all`), techniques that are a native switch or a library's piece (the chat template's
+  thinking, code in the run's sandbox, worked examples from memory, llama.cpp slot reuse,
+  temperature 0, serial tool calls, Anthropic's and OpenAI's prompt caching), `task-only`
+  against `delegate`, helpers with and without the admission gate, and a prepared
+  `context-native`; `python -m benchmark.cost.analyze` gives each change's verdict per class
+  with 95% bootstrap intervals. See
+  [docs/evaluation.md](docs/evaluation.md#the-react-loop-the-react-suite-and-its-verdicts).
 - A run's tools are offered in the order first offered (the first call's by name, those offered
   later after them, a tool offered again in its old place), not re-sorted by name each call: the
   set only grows at its end, so a provider's prompt cache (whose prefix the tools open) is broken

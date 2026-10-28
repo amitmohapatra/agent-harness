@@ -8,8 +8,10 @@ and the model calls, counted from every chat model call the run made (a LangChai
 so a summarization call counts too, not only the loop's) and each call's seconds — the wall
 time, the CPU seconds of this process and of each watched one (``--watch``: the model server,
 the gateway), ``tool_coverage`` (the share of the task's needed tools called: the
-evaluator's score, or, for a run that ended in an error, from the calls it made before) and
-task success.
+evaluator's score, or, for a run that ended in an error, from the calls it made before),
+the wrong tool calls (:func:`wrong_calls`), whether it ran out of time, and task success. A
+task that injects a fault (``classes.INJECT``) has its needed tool's first call fail
+(:class:`Faults`).
 """
 
 from __future__ import annotations
@@ -19,19 +21,21 @@ import importlib
 import os
 import platform
 import re
+import subprocess
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.tracers.context import register_configure_hook
 
 from benchmark import procstat
-from benchmark.cost import catalog, prices, stats
+from benchmark.cost import catalog, classes, prices, stats
 from benchmark.cost.variants import VARIANTS, Setup
 from trellis import Harness, Hooks, Settings
 from trellis.contracts import ToolCall, ToolOutcome
@@ -128,6 +132,48 @@ class Called(Hooks):
         return outcome
 
 
+class Faults(Hooks):
+    """The current run's fault (``classes.Fault``, set before each run): the first call of its
+    tool fails as it says, every later call passes — the bridge's own retries done, as the
+    model would see a service's failure."""
+
+    def __init__(self) -> None:
+        self.fault: classes.Fault | None = None
+        self.fired = False
+
+    def arm(self, task: dict[str, Any]) -> None:
+        self.fault, self.fired = classes.fault_of(task), False
+
+    async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
+        if self.fault is None or self.fired or call.tool != self.fault.tool:
+            return outcome
+        self.fired = True
+        status, said = self.fault.outcome(call.args)
+        return outcome.model_copy(
+            update={"status": status, "output": said, "error_class": self.fault.kind}
+        )
+
+
+#: Tools a run calls for itself, never a wrong call: the memory service's, reading back a
+#: cleared result or a file, planning, a helper.
+OWN_TOOLS: Final = frozenset(
+    {"memory_search", "tool_search", "read_result", "read_file", "write_todos", "task", "delegate"}
+)
+#: What an error of a run that ran out of time says.
+TIMED_OUT: Final = re.compile(r"time ?out|timed out|out of time|deadline", re.IGNORECASE)
+
+
+def wrong_calls(task: dict[str, Any], called: Sequence[str]) -> int:
+    """The run's calls of tools its task does not need: of a task that needs tools, any other
+    (the run's own aside, :data:`OWN_TOOLS`); of one that needs none, the ones it should not
+    call (``avoid_tools``: a change it was not asked for)."""
+    meta = task["metadata"]
+    needed, avoid = set(meta["needed_tools"]), set(meta.get("avoid_tools") or [])
+    if needed:
+        return sum(1 for t in called if t not in needed and t not in OWN_TOOLS)
+    return sum(1 for t in called if t in avoid)
+
+
 def harness(*, memory: bool = False) -> Harness:
     """The environment's harness with nothing but the model: memory, the run store, tracing
     and the gateway's MCP tools off, so no service's data is read or written — ``memory``:
@@ -187,6 +233,10 @@ def row_of(
         # contains, picks...: what else the task expects
         "checks": {n: s.value for n, s in scores.items() if n != "tool_coverage"},
         "errored": result.status == "error",
+        "timed_out": result.status == "error" and bool(TIMED_OUT.search(result.error or "")),
+        "wrong_calls": wrong_calls(task, called),
+        "injected": task["metadata"].get(classes.INJECT),
+        "split": task["metadata"].get("split"),
         "called": called,
         "input_tokens": meter.input_tokens,
         "output_tokens": meter.output_tokens,
@@ -235,17 +285,22 @@ async def run_cell(
         tools = catalog.catalogue(taskset.tools, size)
         built = Setup(system=taskset.system, **setup, tools=tuple(tools))
         target, options = VARIANTS[variant].build(built)
-        called = Called()
+        # an arm of its own user (its documents its own), prepared once per cell
+        user, prepare = options.pop("user", USER), options.pop("prepare", None)
+        if prepare is not None:
+            await prepare(h, user)
+        called, faults = Called(), Faults()
         changes = {t.spec.name for t in taskset.tools if t.spec.side_effects != "read"}
         agent = h.wrap(
             target,
             id=f"bench-{variant}-{taskset.name.replace(' ', '-')}-{size}",
-            hooks=[called],
+            hooks=[faults, called],  # the fault first: the record is the model's
             run_timeout=run_seconds,
             **options,
         )
         for repeat, task in todo:
             called.tools = []
+            faults.arm(task)
             cpu_before = {name: procstat.cpu_seconds(pid) for name, pid in pids.items()}
             fitted_before = collections.Counter(FITTED)
             began = time.monotonic()
@@ -253,10 +308,10 @@ async def run_cell(
                 report = await h.evaluate(
                     agent,
                     [task],
-                    scenario.EVALUATORS,
+                    classes.EVALUATORS,
                     run_name=f"bench-cost-{variant}-{size}",
                     concurrency=1,
-                    user=USER,
+                    user=user,
                 )
             row = row_of(
                 report.items[0],
@@ -315,6 +370,9 @@ FIGURES: Final = (
     "tool_coverage",
     "success",
     "errored",
+    "timed_out",
+    "wrong_calls",
+    "failed_model_calls",
 )
 
 
@@ -365,6 +423,31 @@ def environment() -> dict[str, Any]:
             for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
         },
         "bifrost": bool(os.environ.get("BIFROST_URL", "").strip()),
+        "trellis": source(),
+    }
+
+
+def source() -> dict[str, Any]:
+    """The ``trellis`` the run measured: where it was imported from, its commit and whether
+    its tree had changes — what tells today's ``main`` from a branch's arm."""
+    import trellis.harness as measured
+
+    where = Path(measured.__file__).resolve().parent
+
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(
+                ["git", *args], cwd=where, capture_output=True, text=True, timeout=10, check=True
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip()
+
+    status = git("status", "--porcelain", "--", ".")
+    return {
+        "path": str(where),
+        "commit": git("rev-parse", "HEAD"),
+        "dirty": None if status is None else bool(status),
     }
 
 

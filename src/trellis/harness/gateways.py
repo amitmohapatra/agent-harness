@@ -91,6 +91,9 @@ NO_KEY: Final = "no-key"
 #: Retries of a model call Bifrost's client makes itself: none — the gateway retries (a
 #: provider's ``network_config.max_retries``) and falls back, the one place that does.
 BIFROST_CLIENT_RETRIES: Final = 0
+#: Retries of a model call the OpenAI-compatible client makes itself without a gateway: none —
+#: ``ReAct``'s ``ModelRetryMiddleware`` retries (``middleware.retried``), the one place that does.
+PROVIDER_CLIENT_RETRIES: Final = 0
 #: How many chat models made of routed names are kept (per route, name, effort, event loop).
 ROUTED_KEPT: Final = 64
 
@@ -209,7 +212,9 @@ class ProviderKey(ModelGateway):
     """No gateway: a model name goes to its provider, through the provider's own SDK, which
     reads its own key and endpoint from the environment (``OPENAI_API_KEY``,
     ``OPENAI_BASE_URL`` for any OpenAI-compatible endpoint, ``ANTHROPIC_API_KEY``...): models
-    only, the client's own retries (nothing else retries there)."""
+    only. An OpenAI-compatible model's calls are retried by ``ReAct``'s
+    ``ModelRetryMiddleware`` (its client retries none); another provider's client retries
+    itself."""
 
     kind = GatewayKind.PROVIDER_KEY
     title = "provider key"
@@ -239,7 +244,9 @@ class ProviderKey(ModelGateway):
     def chat_model(self, model: str, *, effort: str | None) -> Any:
         provider, _, name = self.routed(model).partition(":")
         if provider == "openai":  # the client the harness tunes (usage on streams, effort)
-            return _chat(name, effort)
+            # its retries are ReAct's ``ModelRetryMiddleware``'s (``middleware.retried``): one
+            # layer; another provider's SDK client retries itself
+            return _chat(name, effort, max_retries=PROVIDER_CLIENT_RETRIES)
         from langchain.chat_models import init_chat_model  # noqa: PLC0415
 
         return init_chat_model(name, model_provider=provider)

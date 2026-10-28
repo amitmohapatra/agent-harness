@@ -534,8 +534,7 @@ sequenceDiagram
   participant G as create_agent graph (model node)
   participant FS as FilesystemMiddleware
   participant HT as HarnessTools
-  participant SG as StallGuard
-  participant SL as StepLimit
+  participant SL as ModelCallLimit
   participant CE as ContextEditing
   participant SU as Summarization
   participant RT as ReadTools
@@ -544,12 +543,11 @@ sequenceDiagram
   participant T as tools node
   participant Br as tools.bridge
 
-  Note over G: once per invocation (before the agent): PatchToolCalls answers calls left unanswered, StepLimit counts from 0
+  Note over G: once per invocation (before the agent): PatchToolCalls answers calls left unanswered
+  G->>SL: before_model: max_steps model calls made this run? → the end, LangChain's message
   G->>FS: wrap_model_call(request)
   FS->>HT: + the read_file tool's guidance
-  HT->>SG: tools = the run's offered tools (hints, memory, used), sorted
-  SG->>SL: the last steps repeat a call max_repeats times, or 3 failed? → ModelError
-  SL->>CE: step n of max_steps (past it: tool_choice none, one last answer)
+  HT->>CE: tools = the run's offered tools (hints, memory, used), sorted
   CE->>SU: over half the window: older tool results cleared (placeholder → read_result)
   SU->>RT: near the window's end: older turns summarized (one model call), history to a file
   RT->>MH: read_file / read_result offered only once there is something to read
@@ -557,8 +555,9 @@ sequenceDiagram
   MH->>M: the request (chat span, call_timeout and the run's time left)
   M-->>MH: AIMessage with tool_calls [lookup, refund]
   MH->>MH: usage on the span, a model error → ModelError (retryable?), on_error hooks
-  MH-->>G: the response, back out through every layer
+  MH-->>G: the response, back out through every layer (ModelRetryMiddleware, without a gateway: a retryable error tried again)
   G->>MH: after_model: calls whose arguments are not JSON answered with what was wrong
+  G->>SL: after_model: the model calls counted; ToolCallLimit: a memory search past max_repeats answered "do not call it again"; StallGuard: the same call max_repeats steps in a row answered "not run", not run
   G->>T: the calls of the step (at once)
   T->>FS: wrap_tool_call(lookup)
   FS->>HT: wrap_tool_call(lookup)

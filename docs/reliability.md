@@ -97,12 +97,16 @@ run's own limit still bounds them.
 
 **How.** `ReAct(system_prompt=..., model="provider/model", call_timeout=30)`.
 
-**Automatic.** The model client of a `ReAct` built with a model name makes one attempt: the
-gateway is the one place that retries a model call (a provider's `network_config.max_retries`
-in Bifrost, 0 by default: set it) and falls back (the virtual key's fallbacks), so
-attempts never multiply. All of it happens *inside* `call_timeout`, and what is left of the
-run bounds it. A model error left is a `ModelError`, retryable for those causes (a queued run
-is queued again, its graph continuing from its checkpoint).
+**Automatic.** One layer retries a model call of a `ReAct` built with a model name, chosen by
+the route each call takes, so attempts never multiply. Through Bifrost (`BIFROST_URL`), the
+gateway: a provider's `network_config.max_retries` (0 by default: set it) and the virtual key's
+fallbacks; the model client makes one attempt. Without it (an OpenAI-compatible endpoint,
+`OPENAI_BASE_URL`), LangChain's `ModelRetryMiddleware` in the `ReAct` graph: a call that may pass
+(a timeout, a lost connection, 408, 409, 429, 5xx) tried twice more, after a jittered 1 s then
+2 s; the OpenAI client retries none. Another provider's client (`ChatAnthropic`...) and a chat
+model of your own retry themselves. Each attempt is bounded by `call_timeout` and what is left
+of the run. A model error left is a `ModelError`, retryable for those causes (a queued run is
+queued again, its graph continuing from its checkpoint).
 
 **On failure.** The run fails `ERROR` with a `ModelTimeout` (code `MODEL_TIMEOUT`, category
 `TIMEOUT`) that says `"the model did not answer within 30s: the step stalled"`, `retryable`
@@ -220,7 +224,9 @@ them bounds them.
 | Layer | What it retries | How often, how long | Bounded by |
 |---|---|---|---|
 | Bifrost SDK (the judge's models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | the run's time |
-| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | nothing: the gateway retries | 1 attempt | `call_timeout`, the run's time |
+| `ReAct`'s model client (`ChatOpenAI`) | nothing: the gateway, or `ModelRetryMiddleware`, retries | 1 attempt | `call_timeout`, the run's time |
+| `ModelRetryMiddleware` (LangChain), in a `ReAct` graph on a model name without a gateway | a model call that may pass: a timeout, a lost connection, `408/409/429/5xx` | 3 attempts, 1 s then 2 s, jittered | `call_timeout` per attempt, the run's time |
+| another provider's client (`ChatAnthropic`...) without a gateway | its SDK's own rule | its SDK's (2 retries) | `call_timeout`, the run's time |
 | Bifrost (the gateway) | a model call, per a provider's `network_config.max_retries` (default 0), then the virtual key's fallbacks | its configuration | `call_timeout`, the run's time |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |

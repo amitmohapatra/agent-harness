@@ -1,6 +1,6 @@
 """The harness's LangChain middleware, each on a plain ``create_agent`` graph and a scripted
 chat model: the run's tools per model call and their order, the model call's hooks, span,
-limit and errors, the step limit, the stall guard, the bounded results, the summary that keeps
+limit and errors, the loop's limits, the stall guard, tool errors, model retries, the bounded results, the summary that keeps
 the task, and the checkpoint kept in the run."""
 
 from __future__ import annotations
@@ -12,28 +12,35 @@ import httpx2
 import openai
 import pytest
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelRetryMiddleware,
+    ToolErrorMiddleware,
+)
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic import Field
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, Hooks, Settings, current, tool
-from trellis.contracts import ConfigurationError, ModelError, RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, ModelError, RunStatus
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
-    LAST_STEP,
     READ_RESULT,
+    REPEATED,
     HarnessTools,
     ModelHooks,
     RunCheckpointer,
     StallGuard,
-    StepLimit,
     _HarnessToolsState,
     model_error,
     read_result,
+    retried,
+    tool_error,
 )
 from trellis.harness.prompts import ResolvedPrompt, stored
+from trellis.harness.react import limits
 
 
 @tool(side_effects="read")
@@ -453,72 +460,203 @@ async def test_a_prompt_needs_a_run_and_the_gateway(harness: Harness) -> None:
         ModelHooks(timeout=0)
 
 
-# --------------------------------------------------------------------------- StepLimit
-async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=[("look", {"item": "a"}), ("look", {"item": "b"}), "partial"])
-    target = graph(model, HarnessTools(), StepLimit(2), checkpointer=RunCheckpointer())
-    agent = arm(harness.wrap(target, id="limit"), [look])
-    events = [e async for e in agent.stream("x", user="u")]
-    assert events[-1].data["result"] == "partial"
-    last = model.requests[-1]
-    assert last["tool_choice"] == "none" and last["tools"] == ["look"]
-    assert model.seen[-1][-1].content == LAST_STEP
-    warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]
-    assert warnings[0]["code"] == "max_steps"
-    assert "stopped at its 2 steps" in warnings[0]["message"]
+# --------------------------------------------------------------------------- the limits
+#: What LangChain's ``ModelCallLimitMiddleware`` ends a run with (``exit_behavior="end"``).
+LIMIT_REACHED = "Model call limits exceeded"
 
 
-async def test_a_step_limit_with_no_tools_and_a_last_call_without_an_answer() -> None:
-    model = ScriptedChatModel(turns=[("nothing", {}), "the end"])
-    target = graph(model, HarnessTools(), StepLimit(1))
-    state = await target.ainvoke({"messages": [HumanMessage("x")]})
-    assert state["messages"][-1].content == "the end"
-    assert "tool_choice" not in model.requests[-1] or model.requests[-1]["tool_choice"] is None
-    stubborn = ScriptedChatModel(turns=[("nothing", {}), ("nothing", {})])
-    with pytest.raises(ModelError, match="stopped after 1 model calls without an answer"):
-        await graph(stubborn, HarnessTools(), StepLimit(1)).ainvoke(
-            {"messages": [HumanMessage("x")]}
-        )
-    with pytest.raises(ConfigurationError):
-        StepLimit(0)
+async def test_at_the_model_call_limit_the_run_ends_with_an_answer_not_an_error(
+    harness: Harness,
+) -> None:
+    @tool(side_effects="read")
+    def flaky(n: int) -> str:
+        """Fails every time."""
+        raise ValueError("down")
+
+    model = ScriptedChatModel(turns=[("flaky", {"n": n}) for n in range(5)])
+    stack = limits(max_steps=3, max_repeats=3, scoped=True)
+    target = graph(model, HarnessTools(), *stack, checkpointer=RunCheckpointer())
+    result = await arm(harness.wrap(target, id="limit"), [flaky]).run("x", user="u")
+    # every call failed, three steps in a row: the run goes on to its limit and ends there
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert isinstance(result.answer, str) and result.answer.startswith(LIMIT_REACHED)
+    assert len(model.seen) == 3 and len(model.turns) == 2
+
+
+async def test_a_search_tool_past_its_limit_is_not_run_and_the_model_answers(
+    harness: Harness,
+) -> None:
+    searched: list[str] = []
+
+    def search(query: str) -> str:
+        searched.append(query)
+        return "nothing"
+
+    memory_search = tool(search, name="memory_search", side_effects="read")
+    model = ScriptedChatModel(
+        turns=[*[("memory_search", {"query": f"q{n}"}) for n in range(4)], "what I have"]
+    )
+    stack = limits(max_steps=12, max_repeats=3, scoped=True)
+    target = graph(model, HarnessTools(), *stack, checkpointer=RunCheckpointer())
+    result = await arm(harness.wrap(target, id="search"), [memory_search]).run("x", user="u")
+    assert result.answer == "what I have", result.error
+    assert searched == ["q0", "q1", "q2"]  # the fourth was not run
+    assert tool_messages(model, 4) == [
+        ("call_4_0", "Tool call limit exceeded. Do not call 'memory_search' again.")
+    ]
+
+
+@pytest.mark.parametrize(("scoped", "answer"), [(True, LIMIT_REACHED), (False, "done")])
+async def test_a_resume_keeps_the_runs_counts_when_its_thread_is_the_run(
+    harness: Harness, scoped: bool, answer: str
+) -> None:
+    @tool(side_effects="irreversible")
+    def ship(item: str) -> str:
+        """Ship an item."""
+        return f"shipped {item}"
+
+    model = ScriptedChatModel(
+        turns=[("look", {"item": "a"}), ("ship", {"item": "b"}), ("look", {"item": "c"}), "done"]
+    )
+    stack = limits(max_steps=3, max_repeats=3, scoped=scoped)
+    target = graph(model, HarnessTools(), *stack, checkpointer=RunCheckpointer())
+    agent = arm(harness.wrap(target, id=f"resume-{scoped}"), [look, ship])
+    paused = await agent.run("x", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert isinstance(done.answer, str) and done.answer.startswith(answer), done.error
+    # per run (its thread): the 2 calls before the pause count, the limit ends the 4th;
+    # per invocation (LangChain's run count), the resume counts from 0
+    assert len(model.seen) == (3 if scoped else 4)
 
 
 # --------------------------------------------------------------------------- StallGuard
-async def test_the_same_call_repeated_stops_the_run(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=[("look", {"item": "a"})] * 3)
+async def test_the_same_call_repeated_is_not_run_and_the_model_goes_on(harness: Harness) -> None:
+    looked: list[str] = []
+
+    @tool(side_effects="read")
+    def lookup(item: str) -> str:
+        """Look an item up."""
+        looked.append(item)
+        return f"{item} found"
+
+    model = ScriptedChatModel(turns=[("lookup", {"item": "a"})] * 3 + ["a is found"])
     target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
-    result = await arm(harness.wrap(target, id="stall"), [look]).run("x", user="u")
-    assert result.error is not None
-    assert result.error.message == (
-        "stopped: the model called 'look' with the same arguments 3 times in a row (a stall)"
-    )
+    result = await arm(harness.wrap(target, id="stall"), [lookup]).run("x", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "a is found", result.error
+    assert looked == ["a", "a"]  # the third was not run
+    told = REPEATED.format(tool="lookup", steps=3)
+    assert tool_messages(model, 3) == [
+        ("call_1_0", "a found"),
+        ("call_2_0", "a found"),
+        ("call_3_0", told),
+    ]
     with pytest.raises(ConfigurationError):
         StallGuard(1)
 
 
-async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -> None:
-    @tool(side_effects="read")
-    def flaky(n: int) -> str:
-        """Fails for odd numbers."""
-        if n % 2:
-            raise ValueError("odd")
-        return "even"
+async def test_a_call_the_tool_limit_answered_is_answered_once(harness: Harness) -> None:
+    memory_search = tool(lambda query: "nothing", name="memory_search", side_effects="read")
+    model = ScriptedChatModel(turns=[("memory_search", {"query": "q"})] * 3 + ["none"])
+    stack = limits(max_steps=12, max_repeats=2, scoped=True)
+    target = graph(model, HarnessTools(), *stack, checkpointer=RunCheckpointer())
+    result = await arm(harness.wrap(target, id="once"), [memory_search]).run("x", user="u")
+    assert result.answer == "none", result.error
+    answers = tool_messages(model, 3)
+    assert [call for call, _ in answers] == ["call_1_0", "call_2_0", "call_3_0"]  # one each
+    assert answers[1][1] == REPEATED.format(tool="memory_search", steps=2)
+    assert answers[2][1] == "Tool call limit exceeded. Do not call 'memory_search' again."
 
-    model = ScriptedChatModel(
-        turns=[
-            ("flaky", {"n": 1}),
-            ("flaky", {"n": 2}),  # one success resets the streak
-            [("flaky", {"n": 3}), ("nope", {})],
-            ("flaky", {"n": 5}),
-            ("flaky", {"x": "bad"}),
-            "never",
-        ]
+
+# --------------------------------------------------------------------------- tool errors
+async def test_a_tool_that_raised_is_an_error_result_the_model_reads() -> None:
+    from langchain_core.tools import tool as lc_tool
+
+    @lc_tool
+    def broken(x: str) -> str:
+        """Always raises."""
+        raise ValueError(f"no {x}")
+
+    model = ScriptedChatModel(turns=[("broken", {"x": "a"}), "told"])
+    target = graph(model, ToolErrorMiddleware(aon_error=tool_error), tools=[broken])
+    state = await target.ainvoke({"messages": [HumanMessage("x")]})
+    assert state["messages"][-1].content == "told"
+    said = [m for m in state["messages"] if isinstance(m, ToolMessage)]
+    assert [(m.content, m.status) for m in said] == [("broken failed: no a", "error")]
+    with pytest.raises(ValueError, match="no a"):  # without it, LangChain raises it
+        await graph(ScriptedChatModel(turns=[("broken", {"x": "a"})]), tools=[broken]).ainvoke(
+            {"messages": [HumanMessage("x")]}
+        )
+
+
+async def test_a_pause_or_a_cancellation_is_raised_on_not_told() -> None:
+    from langgraph.errors import GraphInterrupt
+
+    from trellis.harness.asking import RunCancelled
+
+    request = cast(Any, type("Request", (), {"tool": None, "tool_call": {"name": "t"}})())
+    assert await tool_error(GraphInterrupt(), request) is None
+    assert await tool_error(RunCancelled("stop"), request) is None
+    assert await tool_error(RuntimeError("x"), request) == "t failed: x"
+
+
+# --------------------------------------------------------------------------- model retries
+class Failing(ScriptedChatModel):
+    """A scripted model whose first calls raise what ``failures`` holds."""
+
+    failures: list[Any] = Field(default_factory=list)
+
+    async def _agenerate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any
+    ) -> Any:
+        if self.failures:
+            raise self.failures.pop(0)
+        return await super()._agenerate(messages, stop, run_manager, **kw)
+
+
+def _status(code: int) -> openai.APIStatusError:
+    request = httpx2.Request("POST", "http://gateway/v1/chat/completions")
+    response = httpx2.Response(code, request=request, json={"error": {"message": "no"}})
+    return openai.APIStatusError("no", response=response, body=None)
+
+
+class _Gateway:
+    """A route with its own retries and fallbacks (Bifrost's)."""
+
+    def has(self, capability: Any) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("gateway", "failures", "calls", "ok"),
+    [
+        (False, [503, 429], 3, True),  # no gateway: retried, twice at most
+        (False, [503, 503, 503], 3, False),
+        (False, [400], 1, False),  # one that cannot pass: not retried
+        (True, [503], 1, False),  # a gateway: its retries, not ReAct's
+    ],
+)
+async def test_a_model_call_is_retried_once_layer_deep(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    gateway: bool,
+    failures: list[int],
+    calls: int,
+    ok: bool,
+) -> None:
+    monkeypatch.setattr(
+        "langchain.agents.middleware.model_retry.calculate_delay", lambda *a, **k: 0
     )
-    target = graph(model, HarnessTools(), StallGuard(), checkpointer=RunCheckpointer())
-    result = await arm(harness.wrap(target, id="flaky"), [flaky]).run("x", user="u")
-    assert result.error is not None
-    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
-    assert model.turns == ["never"]
+    if gateway:
+        monkeypatch.setattr("trellis.harness.middleware.route_now", _Gateway)
+    model = Failing(turns=["answered"], failures=[_status(code) for code in failures])
+    retrying = ModelRetryMiddleware(retry_on=retried, on_failure="error")
+    target = graph(model, HarnessTools(), retrying, ModelHooks(), checkpointer=RunCheckpointer())
+    result = await harness.wrap(target, id=f"retry-{gateway}-{len(failures)}").run("x", user="u")
+    assert (result.answer == "answered") is ok, result.error
+    assert len(failures) - len(model.failures) + (1 if ok else 0) == calls
+    assert not retried(ValueError("not a model error"))
 
 
 # --------------------------------------------------------------------------- read_result
@@ -658,7 +796,8 @@ async def test_a_pause_resumes_in_place_in_another_process(harness: Harness) -> 
 
 
 def test_a_middleware_state_never_reaches_the_graphs_input_or_output() -> None:
-    target = graph(ScriptedChatModel(turns=[]), HarnessTools(), StepLimit())
+    stack = limits(max_steps=3, max_repeats=3, scoped=True)
+    target = graph(ScriptedChatModel(turns=[]), HarnessTools(), *stack)
     schema = target.get_input_jsonschema()
     assert set(schema["properties"]) == {"messages"}
 

@@ -354,6 +354,43 @@ make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
 Memory is off (the tool hints, which narrow a run from five tools, need the memory service),
 and so are the run store and tracing: the benchmark reads and writes no service's data.
 
+### The ReAct loop: the `react` suite and its verdicts
+
+`--suite react` (`benchmark/cost/classes.py`) runs the loop's task classes, each task
+different: `simple`, `multi`, `wide` (20 each: the class suite's ten and ten more), `error`
+(20: a needed tool's first call fails — ten a refused request, five a timeout, five a changed
+schema — through an `after_tool` hook, its next call passing), `memory` (20, with `--memory`:
+questions only seeded notes answer, records they do not hold, general-knowledge controls),
+`ambiguous` (20: ten changes missing a value they need — asking back is right — and their ten
+fully given controls), `helpers` (10: eight to twelve items, for the helper arms) and
+`reasoning` (40, `benchmark/cost/reasoning.py`: 16 GSM8K test items — MIT, copyright 2021
+OpenAI, `benchmark/cost/data/GSM8K_LICENSE` — and generated dates, multi-hop and logic
+questions with exact answers; half `dev`, where a technique is tuned and the worked examples
+come from, half `test`). Each run also records its wrong tool calls, whether it ran out of
+time and its split; the report names the
+`trellis` source it measured (`environment.trellis`: path, commit, changes), so today's `main`
+is run from a worktree of origin/main with the same runner.
+
+```bash
+python -m benchmark.cost --suite react --variants main --window 16384 --repeats 3 --out build/main
+python -m benchmark.cost --suite react --classes error,simple --variants limitsA,limitsB --out build/limits
+python -m benchmark.cost.analyze --arm main=build/main.json \
+    --arm limitsA=build/limits.json --compare limitsA:main:error \
+    --latency main=build/serial-main.json --latency limitsA=build/serial-limits.json
+```
+
+`benchmark.cost.analyze` pairs the arms' runs by task (each task's mean over its repeats; the
+reasoning class's `dev` runs left out) and gives, per class, every metric's difference —
+success, tool coverage, wrong calls, errors, time-outs, model calls, failed model calls,
+tokens (input, output, cached, cached share), dollars, p50 and p95 seconds (from a serial pass,
+`--latency`, else marked as not latency) — with its 95% bootstrap interval (2,000 resamples of
+the tasks), and the verdict: `KEEP` when the change is past the keep rule's threshold on its
+target class (success +3 points, or tokens or p50 −10%, the whole interval past it), at least
+−2 points of success on every other class, the harness's CPU p95 and peak memory within 5%,
+and measurably better on one metric and measurably worse on none; `REVERT` when measurably worse
+anywhere or short of a threshold for certain; `TIE` otherwise, with the classes to repeat — a
+tie that more repeats do not break is reported with its numbers, never broken by a rule.
+
 ### The baseline, measured
 
 `benchmark/cost/results/baseline-local.md` (and `.json`, every run): Granite 3.3 2B on

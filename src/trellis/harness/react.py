@@ -23,11 +23,16 @@ loop is the harness's. What it is built with:
   large model, the ``delegate`` tool: jobs handed to helpers that only read, each a child run,
   at once under the adaptive limit, their answers merged for the model to check
   (``trellis.harness.delegate``, offered by ``automatic.Delegation``);
+* **LangChain's limits and errors** — ``max_steps`` model calls a run
+  (``ModelCallLimitMiddleware``), ``max_repeats`` calls of each memory search tool
+  (``ToolCallLimitMiddleware``), a tool that raised read as an error result
+  (``ToolErrorMiddleware``), and, on a model name without a gateway's retries, failed model
+  calls retried (``ModelRetryMiddleware``);
 * **the harness's** — :func:`middleware`, what neither has a piece for: the run's tools per
   model call (narrowed per turn: the tool hints, the memory and gateway MCP tools), governed
-  with full parity; the model call's span, ``call_timeout`` and model routing; ``max_steps`` then a
-  final answer; ``max_repeats``; older results cleared past half the window and read back; the
-  request fitted to the window; the run's budget; planning on a long task
+  with full parity; the model call's span, ``call_timeout`` and model routing; the same call
+  repeated ``max_repeats`` times not run again; older results cleared past half the window
+  and read back; the request fitted to the window; the run's budget; planning on a long task
   (``trellis.harness.automatic``); and the graph's checkpoint in the run
   (:class:`~.middleware.RunCheckpointer`: a resume continues in place);
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware, added before
@@ -64,6 +69,7 @@ from trellis.harness.adapters.base import (
     context_window,
 )
 from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.clients.memory import READ_ONLY_TOOLS
 from trellis.harness.gateways import routed_chat_model
 from trellis.harness.prompts import Stored
 from trellis.harness.removed import removed
@@ -139,11 +145,14 @@ def middleware(
                                   checkpointer=RunCheckpointer())
         agent = h.wrap(graph, id="stock")
 
-    In order: planning on a long task (:class:`~.automatic.Planning`); the run's tools per
-    model call, narrowed per turn, the memory and gateway MCP tools among them
-    (:class:`~.middleware.HarnessTools`); the graph's own tools governed with full parity
-    (:class:`~.middleware.GovernTools`); ``max_repeats`` (:class:`~.middleware.StallGuard`);
-    ``max_steps`` then one answer without tools (:class:`~.middleware.StepLimit`); the run's
+    In order: a tool that raised read by the model as an error result (LangChain's
+    ``ToolErrorMiddleware``, :func:`~.middleware.tool_error`); planning on a long task
+    (:class:`~.automatic.Planning`); the run's tools per model call, narrowed per turn, the
+    memory and gateway MCP tools among them (:class:`~.middleware.HarnessTools`); the graph's
+    own tools governed with full parity (:class:`~.middleware.GovernTools`); the loop's
+    limits (:func:`limits`: ``max_repeats`` — the same call repeated not run again, the memory
+    search tools' calls; ``max_steps`` — LangChain's ``ModelCallLimitMiddleware``, counted per
+    invocation here, per run in ``ReAct``); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
     cleared past half of it and ``read_result`` to read them back; the request made to fit
     the window, never failing for its size (:class:`~.middleware.FitWindow`: the tools
@@ -151,7 +160,9 @@ def middleware(
     needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
-    headers on a routed model). Outside a harness run each steps aside."""
+    headers on a routed model). Model calls are retried by your model's own client (``ReAct``,
+    on a model name, adds LangChain's ``ModelRetryMiddleware`` where no gateway retries).
+    Outside a harness run each steps aside."""
     return _middleware(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -172,13 +183,19 @@ def _middleware(
     files: bool = True,
     summarization: Any = None,
     delegation: Any = None,
+    scoped: bool = False,
+    retry: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
     offered (``held``: on its own backend, the scratch file tools, and its general-purpose
     ``task`` helper when it has no sub-agents of its own), whether ``read_file`` is offered
     from the start (``files``: its files are not in the graph's state), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
-    sent; and its ``delegation`` (``automatic.Delegation``: ``delegate`` on a wide task)."""
+    sent; its ``delegation`` (``automatic.Delegation``: ``delegate`` on a wide task); whether
+    its thread is the run (``scoped``: its checkpoint is the run's, so the loop's limits count
+    the run, a resume included — :func:`limits`); and whether it calls a model name
+    (``retry``: the harness routes it, so LangChain's ``ModelRetryMiddleware`` is its retry
+    layer when no gateway's is — ``middleware.retried``)."""
     _checked(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -186,7 +203,11 @@ def _middleware(
         context_window=context_window,
         system_prompt=system_prompt,
     )
-    from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
+    from langchain.agents.middleware import (
+        ClearToolUsesEdit,
+        ContextEditingMiddleware,
+        ToolErrorMiddleware,
+    )
 
     from trellis.harness import automatic
     from trellis.harness import middleware as ours
@@ -215,6 +236,8 @@ def _middleware(
         else []
     )
     return [
+        # outermost of the tool calls: a tool that raised is an error result the model reads
+        ToolErrorMiddleware(aon_error=ours.tool_error),
         # what a long task is offered, decided before anything reads the request's tools
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
@@ -222,8 +245,7 @@ def _middleware(
         ours.HarnessTools(),
         *([automatic.ToolSelection()] if "ToolSelection" in _ON.get() else []),
         ours.GovernTools(),
-        ours.StallGuard(max_repeats),
-        ours.StepLimit(max_steps),
+        *limits(max_steps=max_steps, max_repeats=max_repeats, scoped=scoped),
         automatic.Budgeted(),
         *clearing,
         *reads,
@@ -231,8 +253,52 @@ def _middleware(
         # summarization after it summarizes the older turns, else it leaves them out
         ours.FitWindow(window, turns=summarization is None),
         *([summarization] if summarization is not None else []),
+        # around each call ModelHooks makes (its errors classified: ``middleware.retried``)
+        *([_retrying()] if retry else []),
         ours.ModelHooks(timeout=call_timeout, prompt=system_prompt),
     ]
+
+
+def limits(*, max_steps: int, max_repeats: int, scoped: bool) -> list[Any]:
+    """The loop's limits, LangChain's own, and the harness's repeat check: the same call with
+    the same arguments in ``max_repeats`` consecutive steps not run again
+    (:class:`~.middleware.StallGuard`); each of the memory service's search tools
+    (``memory_search``, ``tool_search``) called at most ``max_repeats`` times
+    (``ToolCallLimitMiddleware``, ``exit_behavior="continue"``: a call past it is not run, and
+    the model is told not to call that tool again, so it answers with what it has); and at most
+    ``max_steps`` model calls (``ModelCallLimitMiddleware``, ``exit_behavior="end"``: past them
+    the run ends with LangChain's own message saying the limit was reached — LangChain has no
+    exit that asks the model for an answer). ``scoped``: counted per thread (checkpointed: a
+    resume keeps the counts; a ``ReAct`` graph's thread is its run), else per invocation
+    (LangChain's run counts, which a resume starts again)."""
+    from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+
+    from trellis.harness import middleware as ours
+
+    def counted(limit: int) -> dict[str, int]:
+        return {"thread_limit" if scoped else "run_limit": limit}
+
+    return [
+        ours.StallGuard(max_repeats),
+        *(
+            ToolCallLimitMiddleware(
+                tool_name=name, exit_behavior="continue", **counted(max_repeats)
+            )
+            for name in sorted(READ_ONLY_TOOLS)
+        ),
+        ModelCallLimitMiddleware(exit_behavior="end", **counted(max_steps)),
+    ]
+
+
+def _retrying() -> Any:
+    """LangChain's ``ModelRetryMiddleware`` as ``ReAct`` retries a model name's calls: those that
+    may pass, on a route without a gateway's retries (``middleware.retried``); its defaults
+    (two retries, backoff from a second, jittered); a call that still fails fails the run."""
+    from langchain.agents.middleware import ModelRetryMiddleware
+
+    from trellis.harness import middleware as ours
+
+    return ModelRetryMiddleware(retry_on=ours.retried, on_failure="error")
 
 
 @removed(
@@ -293,8 +359,9 @@ def ReAct(
     journal); LangChain's: ``state_schema``, ``context_schema``, ``cache``. Its checkpoint is kept
     in the run (:class:`~.middleware.RunCheckpointer`) and its store is the memory service.
 
-    The loop's settings are :func:`middleware`'s: ``max_steps``, ``max_repeats``,
-    ``call_timeout`` (each model call's), ``context_window`` (else the model's profile);
+    The loop's settings are :func:`middleware`'s: ``max_steps`` (the most model calls a run
+    makes), ``max_repeats`` (:func:`limits`), ``call_timeout`` (each model call's),
+    ``context_window`` (else the model's profile);
     ``effort`` is the reasoning effort sent with every call of a model name. ``middleware``
     adds yours; one named as the harness's is refused."""
     try:
@@ -332,7 +399,11 @@ def ReAct(
         log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
     own, run = _split(tools)
     native, helpers = _subagents(
-        subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
+        subagents,
+        call_timeout=call_timeout,
+        max_steps=max_steps,
+        max_repeats=max_repeats,
+        named=named is not None,
     )
     profiled = _profiled(chat, window)
     delegation = _delegation(chat, named, window, helpers)
@@ -361,6 +432,8 @@ def ReAct(
                         context_window=window,
                         system_prompt=stored_prompt,
                         delegation=delegation,
+                        scoped=True,
+                        retry=named is not None,
                     ),
                     middleware,
                 ),
@@ -395,6 +468,8 @@ def ReAct(
         files=outside or bool(skills) or bool(memory_files),
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
         delegation=delegation,
+        scoped=True,
+        retry=named is not None,
     )
     graph = create_deep_agent(
         profiled,
@@ -485,7 +560,12 @@ def _split(tools: Sequence[Any]) -> tuple[list[Any], list[Any]]:
 
 
 def _subagents(
-    subagents: Sequence[Any], *, call_timeout: float | None, max_steps: int, max_repeats: int
+    subagents: Sequence[Any],
+    *,
+    call_timeout: float | None,
+    max_steps: int,
+    max_repeats: int,
+    named: bool = False,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
     """``subagents=`` as Deep Agents' (its ``SubAgent``, ``CompiledSubAgent`` and
     ``AsyncSubAgent`` dicts, :func:`_native`) and the harness's (wrapped agents and
@@ -507,6 +587,7 @@ def _subagents(
                     call_timeout=call_timeout,
                     max_steps=max_steps,
                     max_repeats=max_repeats,
+                    named=named,
                 )
             )
         elif isinstance(given, Pregel):
@@ -524,26 +605,33 @@ def _subagents(
 
 
 def _native(
-    spec: dict[str, Any], *, call_timeout: float | None, max_steps: int, max_repeats: int
+    spec: dict[str, Any],
+    *,
+    call_timeout: float | None,
+    max_steps: int,
+    max_repeats: int,
+    named: bool = False,
 ) -> dict[str, Any]:
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
-    the loop's guards (``StallGuard``, ``StepLimit``, ``ModelHooks``: its own middleware of
-    those names kept) and its ``interrupt_on`` turned into its tools' declared risk — a tool it
-    names asks a person (``irreversible``), as the catalog says; a name that is none of its
-    tools (a Deep Agents tool of its own) stays Deep Agents' approval, which the harness asks
-    once."""
+    the loop's guards (:func:`limits`, counted per task it is given; on a model name — its
+    own, else ``ReAct``'s (``named``) — ``ModelRetryMiddleware``; ``ModelHooks``: its own
+    middleware of those names kept) and its ``interrupt_on`` turned into its tools' declared
+    risk — a tool it names asks a person (``irreversible``), as the catalog says; a name that
+    is none of its tools (a Deep Agents tool of its own) stays Deep Agents' approval, which the
+    harness asks once."""
     if "runnable" in spec or "graph_id" in spec:
         return spec
     from trellis.harness import middleware as ours
 
+    retry = isinstance(spec.get("model"), str) or ("model" not in spec and named)
     if isinstance(spec.get("model"), str):
         spec["model"] = routed_chat_model(spec["model"])
     given = list(spec.get("middleware") or [])
     names = {m.name for m in given}
     guards = [
-        ours.StallGuard(max_repeats),
-        ours.StepLimit(max_steps),
+        *limits(max_steps=max_steps, max_repeats=max_repeats, scoped=False),
+        *([_retrying()] if retry else []),
         ours.ModelHooks(timeout=call_timeout),
     ]
     spec["middleware"] = [*given, *(g for g in guards if g.name not in names)]
@@ -601,8 +689,10 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
 #: What a default middleware of ``ReAct`` is set by, where a parameter sets it: a given one of
 #: the same name is refused, naming it (it would have replaced the default silently).
 SET_BY: Final = {
-    "StepLimit": "max_steps=",
+    "ModelCallLimitMiddleware": "max_steps=",
     "StallGuard": "max_repeats=",
+    **{f"ToolCallLimitMiddleware[{name}]": "max_repeats=" for name in sorted(READ_ONLY_TOOLS)},
+    "ModelRetryMiddleware": "BIFROST_URL: the gateway retries when it is set, else ReAct",
     "ModelHooks": "call_timeout= and system_prompt=stored(...) (and h.wrap(hooks=) for the hooks)",
     "ContextEditingMiddleware": "context_window=",
 }

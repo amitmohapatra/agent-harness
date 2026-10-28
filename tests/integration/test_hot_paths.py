@@ -118,7 +118,6 @@ def test_a_model_node_of_another_shape_is_said_once(caplog: pytest.LogCaptureFix
 def test_the_stall_look_back_reads_only_the_latest_turn() -> None:
     messages = conversation(500)
     ahead = Ahead(messages, start=len(messages) - 3)
-    assert mw._failing(ahead) == 1
     assert [len(s) for s in mw._steps(ahead)] == [1]
 
 
@@ -206,4 +205,4 @@ def test_a_text_reply_or_a_note_in_the_turn_changes_nothing(monkeypatch: Any) ->
     )
     assert accounted == []  # a completion model's text reply carries no chat usage
     noted = [*conversation(1), SystemMessage(content="a note")]
-    assert mw._failing(noted) == 1
+    assert [len(s) for s in mw._steps(noted)] == [1]
