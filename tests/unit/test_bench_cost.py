@@ -111,6 +111,16 @@ async def test_the_command_picks_a_suites_classes_and_memory(
     assert len(seen["tasks"]) == 10 and seen["memory"] is False
     await cli.bench(cli.arguments([*common, "--suite", "classes", "--classes", "large"]))
     assert len(seen["tasks"]) == 10 and all("export" in t for t in seen["tasks"])
+    await cli.bench(
+        cli.arguments(
+            [*common, "--suite", "react", "--classes", "reasoning,simple", "--split", "test"]
+        )
+    )
+    assert len(seen["tasks"]) == 40 and not any("maths 0" in t for t in seen["tasks"])  # dev
+    await cli.bench(
+        cli.arguments([*common, "--suite", "react", "--classes", "simple,wide", "--per-class", "5"])
+    )
+    assert len(seen["tasks"]) == 10
 
 
 # --------------------------------------------------------------------------- statistics
@@ -208,7 +218,19 @@ TRAVEL_SCRIPT: list[Any] = [
 ]
 
 
-@pytest.mark.parametrize("variant", list(VARIANTS))
+#: The arms that need a service a unit test has not: a sandbox, the memory service, Anthropic's
+#: client (``test_bench_reasoning`` covers them).
+UNSCRIPTED = {
+    "code",
+    "examples",
+    "anthropic-cache",
+    "plan+code",
+    "plan+code+helpers",
+    "plan+think-tool+code",
+}
+
+
+@pytest.mark.parametrize("variant", [v for v in VARIANTS if v not in UNSCRIPTED])
 async def test_a_cell_runs_every_task_and_records_each_run(
     variant: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

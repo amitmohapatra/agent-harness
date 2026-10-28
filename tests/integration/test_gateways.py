@@ -28,6 +28,7 @@ from trellis.harness.adapters.claude import routed_env
 from trellis.harness.evals import EvalServices, llm_judge
 from trellis.harness.gateways import (
     BIFROST_CLIENT_RETRIES,
+    PROVIDER_CLIENT_RETRIES,
     Bifrost,
     Capability,
     GatewayKind,
@@ -146,16 +147,18 @@ async def test_the_settings_given_in_code_route_over_the_environment(
     assert len(said) == 1 and "OPENAI_API_KEY" in said[0].getMessage()  # once
 
 
-def test_the_client_retries_where_no_gateway_does(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_one_layer_retries_a_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     direct = ProviderKey().chat_model("gpt-x", effort=None)
-    assert direct.max_retries is None  # the OpenAI client's own default: nothing else retries
+    # ReAct's ModelRetryMiddleware retries (middleware.retried): the client none
+    assert direct.max_retries == PROVIDER_CLIENT_RETRIES == 0
     assert direct.request_timeout is None  # a call's bound is the run's, applied once
     bifrost = Bifrost("http://bf/v1", None).chat_model("m", effort=None)
     assert bifrost.max_retries == BIFROST_CLIENT_RETRIES == 0  # the gateway retries
     other = ProviderKey().chat_model("anthropic:claude-x", effort=None)
     assert type(other).__name__ == "ChatAnthropic"  # any other provider: init_chat_model
+    assert other.max_retries == 2  # its own client's retries: middleware.retried leaves it
 
 
 def test_a_routed_name_knows_its_window_and_is_routed_when_called(

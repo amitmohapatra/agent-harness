@@ -15,6 +15,7 @@ import pytest
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend, StateBackend
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.tools import tool as lc_tool
 
 from tests.support.arm import arm
@@ -23,7 +24,6 @@ from tests.support.memory import FakeMemoryService
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, ReAct, a2a, middleware, sandbox, stored, tool
 from trellis.contracts import ConfigurationError, RunStatus
-from trellis.harness import middleware as ours
 from trellis.harness.adapters.langgraph import bound_tools, graph_tools
 from trellis.harness.automatic import JournalBackend
 from trellis.harness.gateways import routed
@@ -63,11 +63,14 @@ def marked(graph: Any, key: str) -> dict[str, Any]:
 def test_middleware_is_the_harness_part_in_its_order() -> None:
     found = [m.name for m in middleware(context_window=64_000)]
     assert found == [
+        "ToolErrorMiddleware",
         "TodoListMiddleware",
         "HarnessTools",
         "GovernTools",
         "StallGuard",
-        "StepLimit",
+        "ToolCallLimitMiddleware[memory_search]",
+        "ToolCallLimitMiddleware[tool_search]",
+        "ModelCallLimitMiddleware",
         "Budgeted",
         "ContextEditingMiddleware",
         "ReadTools",
@@ -89,7 +92,12 @@ def test_middleware_settings_mean_what_reacts_do() -> None:
         m.name: m
         for m in middleware(max_steps=4, max_repeats=5, call_timeout=2.0, context_window=64_000)
     }
-    assert stack["StepLimit"].max_steps == 4 and stack["StallGuard"].max_repeats == 5
+    # counted per invocation: a graph of yours may keep a conversation on its thread
+    assert (stack["ModelCallLimitMiddleware"].run_limit, stack["StallGuard"].max_repeats) == (4, 5)
+    assert stack["ModelCallLimitMiddleware"].thread_limit is None
+    searched = stack["ToolCallLimitMiddleware[memory_search]"]
+    assert (searched.run_limit, searched.exit_behavior) == (5, "continue")
+    assert "ModelRetryMiddleware" not in stack  # your model's client retries
     assert stack["ModelHooks"].timeout == 2.0
     pinned = {m.name: m for m in middleware(system_prompt=stored("triage"))}
     assert pinned["ModelHooks"].prompt == stored("triage")
@@ -114,12 +122,12 @@ async def test_middleware_on_create_agent_gives_its_runs_the_harness_tools(
     harness: Harness,
 ) -> None:
     model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "done"])
-    graph = create_agent(model, middleware=middleware(max_steps=1), checkpointer=RunCheckpointer())
+    graph = create_agent(model, middleware=middleware(max_steps=2), checkpointer=RunCheckpointer())
     agent = arm(harness.wrap(graph, id="plain"), [stock])
     result = await agent.run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
     assert "stock" in names(model, 0)  # the run's tool, offered per call
-    assert model.requests[1].get("tool_choice") == "none"  # one step, then the answer
+    assert len(model.requests) == 2
 
 
 async def test_middleware_on_create_deep_agent_runs_and_resumes_in_place(
@@ -173,7 +181,7 @@ def test_a_sandbox_is_a_backend_and_an_agent_a_sub_agent(harness: Harness) -> No
 
 
 def test_a_declarative_sub_agent_is_given_the_loops_guards_and_a_routed_model() -> None:
-    mine = ours.StepLimit(2)
+    mine = ModelCallLimitMiddleware(run_limit=2)
     spec = _native(
         {
             "name": "payer",
@@ -188,9 +196,17 @@ def test_a_declarative_sub_agent_is_given_the_loops_guards_and_a_routed_model() 
         max_repeats=3,
     )
     assert routed(spec["model"])
-    assert [m.name for m in spec["middleware"]] == ["StepLimit", "StallGuard", "ModelHooks"]
+    assert [m.name for m in spec["middleware"]] == [
+        "ModelCallLimitMiddleware",
+        "StallGuard",
+        "ToolCallLimitMiddleware[memory_search]",
+        "ToolCallLimitMiddleware[tool_search]",
+        "ModelRetryMiddleware",  # a model name: routed, retried where no gateway does
+        "ModelHooks",
+    ]
     assert spec["middleware"][0] is mine  # its own kept
-    assert spec["middleware"][2].timeout == 5.0
+    assert spec["middleware"][-1].timeout == 5.0
+    assert spec["middleware"][2].run_limit == 3  # per task it is given
     by_name = {t.name: t for t in spec["tools"]}
     assert by_name["wire"].metadata["side_effects"] == "irreversible"  # the catalog's ask
     assert "side_effects" not in (by_name["stock_lc"].metadata or {})

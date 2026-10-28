@@ -8,8 +8,10 @@ and the model calls, counted from every chat model call the run made (a LangChai
 so a summarization call counts too, not only the loop's) and each call's seconds — the wall
 time, the CPU seconds of this process and of each watched one (``--watch``: the model server,
 the gateway), ``tool_coverage`` (the share of the task's needed tools called: the
-evaluator's score, or, for a run that ended in an error, from the calls it made before) and
-task success.
+evaluator's score, or, for a run that ended in an error, from the calls it made before),
+the wrong tool calls (:func:`wrong_calls`), whether it ran out of time, and task success. A
+task that injects a fault (``classes.INJECT``) has its needed tool's first call fail
+(:class:`Faults`).
 """
 
 from __future__ import annotations
@@ -19,19 +21,21 @@ import importlib
 import os
 import platform
 import re
+import subprocess
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.tracers.context import register_configure_hook
 
 from benchmark import procstat
-from benchmark.cost import catalog, prices, stats
+from benchmark.cost import catalog, classes, prices, stats
 from benchmark.cost.variants import VARIANTS, Setup
 from trellis import Harness, Hooks, Settings
 from trellis.contracts import ToolCall, ToolOutcome
@@ -118,14 +122,176 @@ def metered(meter: Meter | None = None) -> Iterator[Meter]:
 
 
 class Called(Hooks):
-    """The tools the current run called (reset before each run)."""
+    """The tools the current run called, and the calls (reset before each run)."""
 
     def __init__(self) -> None:
         self.tools: list[str] = []
+        self.calls: list[ToolCall] = []
 
     async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
         self.tools.append(call.tool)
+        self.calls.append(call)
         return outcome
+
+
+#: Who answers a measured run's questions and approvals, and how many pauses a run is
+#: answered at most.
+REVIEWER: Final = "trellis:bench"
+MOST_PAUSES: Final = 4
+#: What a question is answered with when the task left nothing out.
+GO_AHEAD: Final = "Go ahead with what I asked."
+
+
+def reply_to(task: dict[str, Any], options: Sequence[Any]) -> str:
+    """A question's answer from the task's gold data (``answer_given``): an option holding it,
+    when the question offers options."""
+    gold = task["metadata"].get("answer_given") or GO_AHEAD
+    values = [str(getattr(o, "value", o)) for o in options]
+    tokens = task["metadata"].get("gold") or []
+    picked = [v for v in values if tokens and all(t.casefold() in v.casefold() for t in tokens)]
+    return picked[0] if picked else gold
+
+
+@dataclass
+class Dialogue:
+    """What a run's person did (:func:`answered`): the questions answered, the approvals given
+    and, of them, the calls edited to their gold arguments; and the calls the run made or
+    stopped at (``None``: not followed — an ``h.evaluate`` run)."""
+
+    questions: list[str] = field(default_factory=list)
+    approvals: int = 0
+    edits: int = 0
+    calls: list[Any] | None = None
+
+
+async def answered(
+    agent: Any, task: dict[str, Any], *, user: str, called: Called, review: bool = False
+) -> tuple[Any, Dialogue]:
+    """``task`` run with its questions answered (:func:`reply_to`, as a person resuming it) and,
+    with ``review``, its approvals given by a careful reviewer — a call of the task's change
+    edited to its gold arguments where they are wrong (``classes.wrong_args``), the run going
+    on; without it, an approval ends the run as ``h.evaluate`` ends one. Scored by the same
+    evaluators, on the same terms."""
+    from types import SimpleNamespace
+
+    from trellis.contracts import RunStatus
+    from trellis.harness.evals import EvalResult, EvalScore, tool_coverage
+
+    said = Dialogue()
+    meta = task["metadata"]
+    result = await agent.run(task["input"], user=user)
+    while (
+        result.status is RunStatus.PAUSED
+        and (asked := result.interrupt) is not None
+        and len(said.questions) + said.approvals < MOST_PAUSES
+    ):
+        call = asked.tool_call
+        if call is None:
+            said.questions.append(asked.question)
+            reply = reply_to(task, asked.options)
+            result = await agent.resume(
+                asked.interrupt_id, "answer", answer=reply, reviewer=REVIEWER
+            )
+            continue
+        if not review:
+            break
+        said.approvals += 1
+        mine = call.tool == meta.get("change")
+        wrong = classes.wrong_args(meta, dict(call.args)) if mine else {}
+        if wrong:
+            said.edits += 1
+            fixed = {**call.args, **wrong}
+            result = await agent.resume(asked.interrupt_id, "edit", answer=fixed, reviewer=REVIEWER)
+        else:
+            result = await agent.resume(asked.interrupt_id, "approve", reviewer=REVIEWER)
+    paused = result.interrupt if result.status is RunStatus.PAUSED else None
+    if paused is not None:
+        await agent.resume(paused.interrupt_id, "cancel", reviewer=REVIEWER)
+    steps: list[Any] = [(c, None) for c in called.calls]
+    if paused is not None and paused.tool_call is not None:
+        steps.append((paused.tool_call, None))
+    said.calls = [c for c, _ in steps]
+    error = result.error.message if result.error is not None else None
+    if result.status is not RunStatus.SUCCESS and (paused is None or paused.tool_call is None):
+        status = "interrupted" if paused is not None else "error"
+        return EvalResult(
+            task["input"], task.get("expected"), None, status, None, error=error
+        ), said
+    case = SimpleNamespace(
+        metadata=meta,
+        output=result.answer if paused is None else None,
+        expected=task.get("expected"),
+        trajectory=steps,
+    )
+    judges = [
+        j
+        for j in classes.EVALUATORS
+        if not isinstance(j, tool_coverage)
+        and (paused is None or getattr(j, "scores_paused", False))
+    ]
+    scores = [s for j in judges if (s := await j(case)) is not None]
+    made = [c.tool for c, _ in steps]
+    coverage = coverage_of(meta["needed_tools"], made)
+    if coverage is not None:  # none when the task needs no tool: no score, as h.evaluate gives
+        avoided = [t for t in made if t in (meta.get("avoid_tools") or [])]
+        comment = f"called though not needed: {', '.join(avoided)}" if avoided else None
+        scores.append(EvalScore("tool_coverage", coverage, comment))
+    status = "success" if paused is None else "interrupted"
+    item = EvalResult(
+        task["input"], task.get("expected"), case.output, status, None, scores, error=error
+    )
+    return item, said
+
+
+class Faults(Hooks):
+    """The current run's fault (``classes.Fault``, set before each run): the first call of its
+    tool fails as it says, every later call passes — the bridge's own retries done, as the
+    model would see a service's failure."""
+
+    def __init__(self) -> None:
+        self.fault: classes.Fault | None = None
+        self.fired = False
+
+    def arm(self, task: dict[str, Any]) -> None:
+        self.fault, self.fired = classes.fault_of(task), False
+
+    async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
+        if self.fault is None or self.fired or call.tool != self.fault.tool:
+            return outcome
+        self.fired = True
+        status, said = self.fault.outcome(call.args)
+        return outcome.model_copy(
+            update={"status": status, "output": said, "error_class": self.fault.kind}
+        )
+
+
+#: Tools a run calls for itself, never a wrong call: the memory service's, reading back a
+#: cleared result or a file, planning, a helper.
+OWN_TOOLS: Final = frozenset(
+    {
+        "memory_search",
+        "tool_search",
+        "read_result",
+        "read_file",
+        "write_todos",
+        "task",
+        "delegate",
+        "ask_user",  # asking when nothing was missing is ask precision's
+    }
+)
+#: What an error of a run that ran out of time says.
+TIMED_OUT: Final = re.compile(r"time ?out|timed out|out of time|deadline", re.IGNORECASE)
+
+
+def wrong_calls(task: dict[str, Any], called: Sequence[str]) -> int:
+    """The run's calls of tools its task does not need: of a task that needs tools, any other
+    (the run's own aside, :data:`OWN_TOOLS`); of one that needs none, the ones it should not
+    call (``avoid_tools``: a change it was not asked for)."""
+    meta = task["metadata"]
+    needed, avoid = set(meta["needed_tools"]), set(meta.get("avoid_tools") or [])
+    if needed:
+        return sum(1 for t in called if t not in needed and t not in OWN_TOOLS)
+    return sum(1 for t in called if t in avoid)
 
 
 def harness(*, memory: bool = False) -> Harness:
@@ -160,6 +326,32 @@ def succeeded(row: dict[str, Any], *, approval: bool) -> bool:
     )
 
 
+#: The classes whose runs say whether they asked their user (``vague``: a value was missing).
+ASKING: Final = frozenset({"ambiguous", "simple"})
+
+
+def asking(
+    task: dict[str, Any], output: Any, called: Sequence[str], questions: Sequence[str]
+) -> dict[str, Any]:
+    """Of a run of an :data:`ASKING` class: whether its task left a value out (``vague``),
+    whether it asked (the question tool, or a question in its answer), how many questions it
+    asked, and — when it asked about a missing value — whether the question named it
+    (``targeted``: one of ``metadata["about"]``)."""
+    meta = task["metadata"]
+    if meta.get("length") not in ASKING:
+        return {"vague": None, "asked": None, "questions": len(questions), "targeted": None}
+    vague = bool(meta.get("ambiguous"))
+    asked = bool(questions) or classes.asked_in(output, list(called))
+    said = " ".join(questions) or (output if isinstance(output, str) else "")
+    named = any(word in said.casefold() for word in meta.get("about") or [])
+    return {
+        "vague": vague,
+        "asked": asked,
+        "questions": len(questions),
+        "targeted": (asked and named) if vague else None,
+    }
+
+
 def row_of(
     result: Any,
     task: dict[str, Any],
@@ -169,6 +361,7 @@ def row_of(
     *,
     approval: bool = False,
     cpu: Mapping[str, float | None] | None = None,
+    questions: Sequence[str] = (),
 ) -> dict[str, Any]:
     """One run, as the report keeps it (``approval``: its task asks for a change; ``cpu``: the
     CPU seconds each process used during it)."""
@@ -187,6 +380,11 @@ def row_of(
         # contains, picks...: what else the task expects
         "checks": {n: s.value for n, s in scores.items() if n != "tool_coverage"},
         "errored": result.status == "error",
+        "timed_out": result.status == "error" and bool(TIMED_OUT.search(result.error or "")),
+        "wrong_calls": wrong_calls(task, called),
+        "injected": task["metadata"].get(classes.INJECT),
+        "split": task["metadata"].get("split"),
+        **asking(task, result.output, called, questions),
         "called": called,
         "input_tokens": meter.input_tokens,
         "output_tokens": meter.output_tokens,
@@ -235,38 +433,62 @@ async def run_cell(
         tools = catalog.catalogue(taskset.tools, size)
         built = Setup(system=taskset.system, **setup, tools=tuple(tools))
         target, options = VARIANTS[variant].build(built)
-        called = Called()
+        # an arm of its own user (its documents its own), prepared once per cell
+        user, prepare = options.pop("user", USER), options.pop("prepare", None)
+        answers = options.pop("answers", False)  # questions answered: run.answered
+        review = options.pop("review", False)  # approvals given by a careful reviewer
+        if prepare is not None:
+            await prepare(h, user)
+        called, faults = Called(), Faults()
         changes = {t.spec.name for t in taskset.tools if t.spec.side_effects != "read"}
         agent = h.wrap(
             target,
             id=f"bench-{variant}-{taskset.name.replace(' ', '-')}-{size}",
-            hooks=[called],
+            hooks=[faults, called],  # the fault first: the record is the model's
             run_timeout=run_seconds,
             **options,
         )
         for repeat, task in todo:
-            called.tools = []
+            called.tools, called.calls = [], []
+            faults.arm(task)
             cpu_before = {name: procstat.cpu_seconds(pid) for name, pid in pids.items()}
             fitted_before = collections.Counter(FITTED)
             began = time.monotonic()
             with metered() as meter:
-                report = await h.evaluate(
-                    agent,
-                    [task],
-                    scenario.EVALUATORS,
-                    run_name=f"bench-cost-{variant}-{size}",
-                    concurrency=1,
-                    user=USER,
-                )
+                if answers:
+                    item, said = await answered(
+                        agent, task, user=user, called=called, review=review
+                    )
+                else:
+                    report = await h.evaluate(
+                        agent,
+                        [task],
+                        classes.EVALUATORS,
+                        run_name=f"bench-cost-{variant}-{size}",
+                        concurrency=1,
+                        user=user,
+                    )
+                    item, said = report.items[0], Dialogue()
             row = row_of(
-                report.items[0],
+                item,
                 task,
                 meter,
                 list(called.tools),
                 time.monotonic() - began,
-                approval=bool(changes & set(task["metadata"]["needed_tools"])),
+                # a task that asks for a change, or leaves a value out (its change, made with the
+                # value the user gave, ends at its approval: classes.asks_back decides)
+                approval=bool(changes & set(task["metadata"]["needed_tools"]))
+                or bool(task["metadata"].get("ambiguous")),
                 cpu=_used(cpu_before, pids),
+                questions=said.questions,
             )
+            row |= {
+                "approvals": said.approvals,
+                "edits": said.edits,
+                "correct_change": None
+                if said.calls is None
+                else classes.right_change(task["metadata"], said.calls),
+            }
             row |= {"size": size, "variant": variant, "set": taskset.name, "repeat": repeat}
             row["fitted"] = dict(collections.Counter(FITTED) - fitted_before)  # FitWindow's steps
             rows.append(row)
@@ -315,6 +537,11 @@ FIGURES: Final = (
     "tool_coverage",
     "success",
     "errored",
+    "timed_out",
+    "wrong_calls",
+    "failed_model_calls",
+    "asked",
+    "questions",
 )
 
 
@@ -365,6 +592,31 @@ def environment() -> dict[str, Any]:
             for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
         },
         "bifrost": bool(os.environ.get("BIFROST_URL", "").strip()),
+        "trellis": source(),
+    }
+
+
+def source() -> dict[str, Any]:
+    """The ``trellis`` the run measured: where it was imported from, its commit and whether
+    its tree had changes — what tells today's ``main`` from a branch's arm."""
+    import trellis.harness as measured
+
+    where = Path(measured.__file__).resolve().parent
+
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(
+                ["git", *args], cwd=where, capture_output=True, text=True, timeout=10, check=True
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip()
+
+    status = git("status", "--porcelain", "--", ".")
+    return {
+        "path": str(where),
+        "commit": git("rev-parse", "HEAD"),
+        "dirty": None if status is None else bool(status),
     }
 
 

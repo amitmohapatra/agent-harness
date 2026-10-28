@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-from benchmark.cost import catalog, prices, run, stats
+from benchmark.cost import catalog, classes, prices, run, stats
 from benchmark.cost.variants import DEFAULT, VARIANTS
 from trellis.harness.react import window_of
 
@@ -56,14 +56,27 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sets", default="", help="task sets by name (default: all)")
     parser.add_argument(
         "--suite",
-        choices=("default", "classes"),
+        choices=("default", "classes", "react"),
         default="default",
-        help="the ten tasks (default), or ten tasks per class (catalog.CLASSES)",
+        help="the ten tasks (default), ten tasks per class (catalog.CLASSES), or the ReAct "
+        "loop's classes (classes.CLASSES)",
     )
     parser.add_argument(
         "--classes",
         default="",
         help="with --suite classes: the classes run (default: all), 'mix' the mixed ten",
+    )
+    parser.add_argument(
+        "--split",
+        choices=("dev", "test"),
+        default=None,
+        help="only the tasks of this split (the reasoning class's; other tasks have none)",
+    )
+    parser.add_argument(
+        "--per-class",
+        type=int,
+        default=None,
+        help="only the first N tasks of each class (a serial latency pass on a few)",
     )
     parser.add_argument(
         "--memory",
@@ -118,12 +131,32 @@ async def bench(args: argparse.Namespace) -> dict:
     sizes = [int(s) for s in _list(args.sizes)]
     variants = _list(args.variants)
     chosen = set(_list(args.sets))
-    suite = catalog.class_sets() if args.suite == "classes" else catalog.task_sets()
+    suite = {
+        "classes": catalog.class_sets,
+        "react": classes.react_sets,
+        "default": catalog.task_sets,
+    }[args.suite]()
     sets = [s for s in suite if not chosen or s.name in chosen]
-    classes = set(_list(args.classes))
-    if classes:
-        sets = [dataclasses.replace(s, tasks=[t for t in s.tasks if _in(t, classes)]) for s in sets]
-        sets = [s for s in sets if s.tasks]
+    wanted = set(_list(args.classes))
+    if wanted:
+        sets = [dataclasses.replace(s, tasks=[t for t in s.tasks if _in(t, wanted)]) for s in sets]
+    if args.split:  # a task of no split (every other class's) is kept
+        sets = [
+            dataclasses.replace(
+                s, tasks=[t for t in s.tasks if t["metadata"].get("split") in (None, args.split)]
+            )
+            for s in sets
+        ]
+    if args.per_class:
+        taken: dict[str, int] = {}
+
+        def first(task: dict) -> bool:
+            kind = task["metadata"].get("length", "")
+            taken[kind] = taken.get(kind, 0) + 1
+            return taken[kind] <= args.per_class
+
+        sets = [dataclasses.replace(s, tasks=[t for t in s.tasks if first(t)]) for s in sets]
+    sets = [s for s in sets if s.tasks]
     window, source = window_of(None, args.window)
     setup = {
         "model": args.model,
@@ -163,6 +196,8 @@ async def bench(args: argparse.Namespace) -> dict:
         written()
 
     async with run.harness(memory=args.memory) as h:
+        if args.memory and any(t["metadata"]["length"] == "memory" for s in sets for t in s.tasks):
+            await classes.seed(h, run.USER)  # what the memory class's questions ask about
         for size in sizes:
             for variant in variants:
                 await run.run_cell(

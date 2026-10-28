@@ -21,11 +21,10 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
   pinned for the run (``prompt``: journaled, sent as headers, on the span), and the model
   client's errors as a :class:`~trellis.contracts.ModelError` saying whether it may pass;
-* :class:`StepLimit` — at ``max_steps`` model calls one more, without tools, for the best
-  answer (and a ``max_steps`` warning event), instead of LangChain's canned limit message;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
-  steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
-  within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
+  steps is not run again: the model is told so and goes on (a repeat within one step runs
+  once: :class:`HarnessTools`, :func:`governed_call`); the loop's limits are LangChain's own
+  (``ModelCallLimitMiddleware``, ``ToolCallLimitMiddleware``: ``ReAct`` adds them);
 * :func:`read_result` — the tool that reads an earlier result back by its call's id: what a
   ``ContextEditingMiddleware`` placeholder points to (the state keeps the result whole);
 * :class:`RunCheckpointer` — a LangGraph checkpointer that keeps only the latest checkpoint,
@@ -74,7 +73,6 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 from langchain.agents.middleware.types import (
-    ExtendedModelResponse,
     PrivateStateAttr,
     hook_config,
 )
@@ -120,6 +118,7 @@ from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
+from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.gateways import Capability, route_now, routed
@@ -138,31 +137,26 @@ from trellis.harness.tools.mcp import side_effects_of as annotated
 
 log = logging.getLogger("trellis.run")
 
-#: Model calls with tools one run may make (:class:`StepLimit`); then one more, without tools.
-MAX_STEPS: Final = 12
-#: Consecutive steps making the same call with the same arguments that stop the run.
+#: Consecutive steps making the same call with the same arguments: the last is not run
+#: (:class:`StallGuard`).
 MAX_REPEATS: Final = 3
-#: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
-#: error or a timeout) that stop the run.
-ERROR_STREAK: Final = 3
+#: What the model reads for a call :class:`StallGuard` did not run.
+REPEATED: Final = (
+    "Not run: {tool} was called with these same arguments in {steps} steps in a row, and its "
+    "result is above. Do not call it again with them: answer with what you have, or change "
+    "the arguments or the tool."
+)
 #: The tool that reads a cleared result back by its call's id (:func:`read_result`), and the
 #: most it reads at once, in characters.
 READ_RESULT: Final = "read_result"
 #: Deep Agents' tool that reads a large result saved as a file.
 READ_FILE: Final = "read_file"
 READ_LIMIT: Final = 20_000
-#: What the model is asked when its steps run out.
-LAST_STEP: Final = (
-    "You have used every step this run allows. Do not call tools: answer now with what you "
-    "have, and say what is left undone."
-)
 #: The tool outcomes that count as a failed call (in a streak; a ``ToolMessage``'s status).
 FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The free variable of ``create_agent``'s model node holding its composed ``awrap_model_call``
 #: handler (:func:`narrowing`).
 HANDLER: Final = "awrap_model_call_handler"
-#: The state key of :class:`StepLimit`: the model calls of this invocation.
-STEPS: Final = "trellis_steps"
 #: The openai client's statuses a call may pass after (its own retry rule).
 RETRYABLE_STATUS: Final = frozenset({408, 409, 429})
 
@@ -865,6 +859,30 @@ def model_error(exc: Exception, timeout: float | None = None) -> Exception:
     return exc
 
 
+def retried(exc: BaseException) -> bool:
+    """Whether LangChain's ``ModelRetryMiddleware`` retries a failed model call (``ReAct``'s,
+    on a model name): a :class:`~trellis.contracts.ModelError` that may pass
+    (:func:`model_error`: no answer, a timeout, 408, 409, 429, 5xx), on a route without a
+    gateway's own retries and fallbacks (Bifrost's are the one layer there). An error of a
+    provider SDK the harness does not classify is not retried here: that client retries it
+    itself (only the OpenAI-compatible client's retries are off: ``gateways.ProviderKey``)."""
+    return (
+        isinstance(exc, ModelError) and exc.retryable and not route_now().has(Capability.FALLBACKS)
+    )
+
+
+async def tool_error(exc: Exception, request: ToolCallRequest) -> str | None:
+    """What the model reads for a tool that raised (LangChain's ``ToolErrorMiddleware``): what
+    a harness tool's failure reads as (``"<tool> failed: <error>"``) — a tool the bridge does
+    not run (the graph's state tools: ``write_todos``, ``read_result``, Deep Agents' files on
+    the graph's state; any tool outside a harness run), the bridge's own failures being results
+    already. A pause, or the run cancelled, is raised on (``None``)."""
+    if is_pause_signal(exc) or isinstance(exc, RunCancelled):
+        return None
+    name = request.tool.name if request.tool is not None else request.tool_call["name"]
+    return f"{name} failed: {exc}"
+
+
 def _model_name(model: Any) -> str | None:
     for attribute in ("model_name", "model"):
         name = getattr(model, attribute, None)
@@ -911,69 +929,14 @@ def _ai(reply: ModelResponse[Any]) -> AIMessage | None:
 
 
 # --------------------------------------------------------------------------- limits
-class _StepsState(AgentState[Any]):
-    trellis_steps: NotRequired[Annotated[int, PrivateStateAttr]]
-
-
-class StepLimit(AgentMiddleware):
-    """At most ``max_steps`` model calls with tools in one invocation; then one more, told to
-    answer with what it has (:data:`LAST_STEP`) and to call no tool (``tool_choice="none"``;
-    with structured output, offered none but the answer's own), and a ``max_steps`` warning on
-    the run's stream. No answer then fails the run (``ModelError``)."""
-
-    state_schema = _StepsState
-
-    def __init__(self, max_steps: int = MAX_STEPS) -> None:
-        super().__init__()
-        if max_steps < 1:
-            raise ConfigurationError("max_steps is a number of model calls from 1")
-        self.max_steps = max_steps
-
-    async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        return {STEPS: 0}
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any] | ExtendedModelResponse[Any]:
-        taken = request.state.get(STEPS, 0)
-        if taken < self.max_steps:
-            reply = await handler(request)
-            return ExtendedModelResponse(
-                model_response=reply, command=Command(update={STEPS: taken + 1})
-            )
-        told = [*request.messages, HumanMessage(content=LAST_STEP)]
-        if request.response_format is not None:
-            # the answer may be the structured output's own tool call: no other tool
-            last = request.override(messages=told, tools=[])
-        else:
-            # the same tools (the cached prompt holds), none of them called
-            last = request.override(
-                messages=told, tool_choice="none" if request.tools else request.tool_choice
-            )
-        reply = await handler(last)
-        message = _ai(reply)
-        answered = reply.structured_response is not None or (
-            message is not None and not message.tool_calls and bool(message.text)
-        )
-        if not answered:
-            raise ModelError(
-                f"stopped after {self.max_steps} model calls without an answer",
-                source="langgraph",
-            )
-        runtime = current()
-        stopped = f"run {runtime.run_id if runtime else '-'} stopped at its {self.max_steps} steps"
-        log.warning("%s", stopped)
-        if runtime is not None:
-            runtime.events.warning("max_steps", stopped)
-        return reply
-
-
 class StallGuard(AgentMiddleware):
-    """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
-    in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed (a malformed one among them)."""
+    """The same call with the same arguments in ``max_repeats`` consecutive steps is not run
+    again: the model reads that it repeats itself (:data:`REPEATED`, an error result of the
+    call) and goes on — it answers with what it has, or changes the call — as LangChain's
+    ``ToolCallLimitMiddleware`` blocks a call past its limit (``exit_behavior="continue"``);
+    the run's model call limit (``ModelCallLimitMiddleware``) bounds the rest. A repeat within
+    one step runs once (``bridge.same``). A call another middleware already answered (a
+    ``ToolCallLimitMiddleware`` placed after this one) is left as it is."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()
@@ -981,37 +944,38 @@ class StallGuard(AgentMiddleware):
             raise ConfigurationError("max_repeats is a number of steps from 2")
         self.max_repeats = max_repeats
 
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        history = request.state.get("messages", [])
-        failing = _failing(history)
-        if failing >= ERROR_STREAK:
-            raise ModelError(
-                f"stopped: every tool call failed in {failing} consecutive steps",
-                source="langgraph",
-            )
-        reply = await handler(request)
-        message = _ai(reply)
-        if message is not None and message.tool_calls:
-            # a stall needs only the latest steps: no more than max_repeats - 1 are looked at
-            steps = list(itertools.islice(_steps(history), self.max_repeats - 1))
-            for call in message.tool_calls:
-                key = _call_key(call)
-                streak = 1
-                for earlier in steps:
-                    if key not in earlier:
-                        break
-                    streak += 1
-                if streak >= self.max_repeats:
-                    raise ModelError(
-                        f"stopped: the model called {call['name']!r} with the same arguments "
-                        f"{streak} times in a row (a stall)",
-                        source="langgraph",
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        history = state.get("messages", [])
+        at = next(
+            (n for n in range(len(history) - 1, -1, -1) if isinstance(history[n], AIMessage)),
+            None,
+        )
+        if at is None or not history[at].tool_calls:
+            return None
+        message = cast(AIMessage, history[at])
+        answered = {m.tool_call_id for m in history[at + 1 :] if isinstance(m, ToolMessage)}
+        # a stall needs only the latest steps: no more than max_repeats - 1 are looked at
+        steps = list(itertools.islice(_steps(history[:at]), self.max_repeats - 1))
+        told = []
+        for call in message.tool_calls:
+            if call["id"] in answered:
+                continue
+            key = _call_key(call)
+            streak = 1
+            for earlier in steps:
+                if key not in earlier:
+                    break
+                streak += 1
+            if streak >= self.max_repeats:
+                told.append(
+                    ToolMessage(
+                        REPEATED.format(tool=call["name"], steps=streak),
+                        tool_call_id=call["id"],
+                        name=call["name"],
+                        status="error",
                     )
-        return reply
+                )
+        return {"messages": told} if told else None
 
 
 def _call_key(call: Any) -> str:
@@ -1033,25 +997,6 @@ def _steps(history: Sequence[AnyMessage]) -> Iterator[set[str]]:
     for message in _turn_back(history):
         if isinstance(message, AIMessage):
             yield {_call_key(c) for c in message.tool_calls}
-
-
-def _failing(history: Sequence[AnyMessage]) -> int:
-    """How many of the latest steps had every call fail: read from the end, a step's results
-    (after it) before the step, as far as the first step with a call that did not fail."""
-    statuses: dict[str, str] = {}
-    streak = 0
-    for message in _turn_back(history):
-        if isinstance(message, ToolMessage):
-            statuses[message.tool_call_id] = message.status
-            continue
-        if not isinstance(message, AIMessage):
-            continue
-        repeats = _repeats(message)  # a repeat did not run: its first call's status counts
-        made = [statuses.get(c["id"] or "") for c in message.tool_calls if c["id"] not in repeats]
-        if not made or any(s != "error" for s in made):
-            break
-        streak += 1
-    return streak
 
 
 # --------------------------------------------------------------------------- results
@@ -1813,7 +1758,6 @@ __all__ = [
     "ReadTools",
     "RunCheckpointer",
     "StallGuard",
-    "StepLimit",
     "model_error",
     "read_result",
 ]
