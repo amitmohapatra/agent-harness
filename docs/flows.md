@@ -557,7 +557,7 @@ sequenceDiagram
   MH->>MH: usage on the span, a model error → ModelError (retryable?), on_error hooks
   MH-->>G: the response, back out through every layer (ModelRetryMiddleware, without a gateway: a retryable error tried again)
   G->>MH: after_model: calls whose arguments are not JSON answered with what was wrong
-  G->>SL: after_model: the model calls counted; ToolCallLimit: a memory search past max_repeats answered "do not call it again"; StallGuard: the same call max_repeats steps in a row answered "not run", not run
+  G->>SL: after_model: the model calls counted, a memory search past max_repeats answered "do not call it again" (ToolCallLimit), the same call max_repeats steps in a row not run, the model told (StallGuard)
   G->>T: the calls of the step (at once)
   T->>FS: wrap_tool_call(lookup)
   FS->>HT: wrap_tool_call(lookup)
