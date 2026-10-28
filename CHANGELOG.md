@@ -208,6 +208,19 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   ([docs/frameworks/react.md](docs/frameworks/react.md#tool-choice)).
 
 ### Fixed
+- A tool call a model step repeats — the same tool with the same arguments, in any key order
+  (seen live: a small model on `ReAct` emitting `style_stock(style='ZZ999999')` 14 times in one
+  message) — ran every time: 14 calls, 14 results back to the model, and for a write 14 side
+  effects. It now runs once: each repeat runs nothing (no hooks, governance, approval, budget
+  charge or journal entry) and the model reads, under the repeat's own call id, that its result
+  is the first call's (`Same call as <id> above ...`); its `TOOL_CALL_RESULT` names that call
+  (`same_as`). One owner, `tools.bridge` (`firsts`, `same`), fed by whoever reads the step: the
+  LangGraph tool node's calls (`HarnessTools`, and `governed_call` for every tool node: `ReAct`,
+  `middleware()`, `create_agent`, Deep Agents, a graph's own `ToolNode`) and an OpenAI Agents
+  reply (the harness's `RunHooks`; its tools and the agent's own governed `FunctionTool`s).
+  Claude and Kimi run a step's calls themselves over MCP, which carries no call id: unchanged.
+  The same call in a later step runs again (`StallGuard`'s `max_repeats`); a step whose only
+  run call failed still counts toward the error streak. Matrix row `F25d`.
 - The tool-choice scenario's answer checks (`examples/06_scenarios/tool_choice.py`) no longer
   fail a right answer on its wording: `plain_answer` reads "no" from the same `CANNOT` words
   as `says_cannot` ("I don't have the capability to …"), and `says_no_record` also reads

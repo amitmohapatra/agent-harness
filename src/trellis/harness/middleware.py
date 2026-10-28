@@ -272,8 +272,8 @@ async def governed_call(
         or _GOVERNING.get() == (call["name"], str(call["id"]))
     ):
         return await handler(request)
-    found = _calling(_messages(request), call["id"])
-    first = _repeats(found[1]).get(str(call["id"])) if found is not None else None
+    _, step = _step_of(request)
+    first = _repeats(step).get(str(call["id"]))
     if first is not None:
         repeat = bridge.same(
             runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
@@ -489,11 +489,7 @@ class HarnessTools(AgentMiddleware):
         """The model step the call is one of (numbered on its first call's arrival), and the
         call's place in it."""
         call_id = request.tool_call["id"]
-        messages = _messages(request)
-        at, message = _calling(messages, call_id) or (
-            len(messages),
-            AIMessage(content="", tool_calls=[request.tool_call]),
-        )
+        at, message = _step_of(request)
         calls = message.tool_calls
         # where the step is in the conversation, and what it is: a model may reuse call ids
         key = content_key("step", at, message.id, [c["id"] for c in calls])
@@ -513,9 +509,15 @@ class HarnessTools(AgentMiddleware):
         return step, next(n for n, c in enumerate(calls) if c["id"] == call_id)
 
 
-def _messages(request: ToolCallRequest) -> Sequence[AnyMessage]:
-    """The conversation a tool call's request carries (its graph's state)."""
-    return request.state.get("messages", []) if isinstance(request.state, dict) else []
+def _step_of(request: ToolCallRequest) -> tuple[int, AIMessage]:
+    """The model message making a tool call's request, and where it is in the conversation the
+    request carries (its graph's state); one of the call alone, at the end, when the
+    conversation does not hold it."""
+    messages = request.state.get("messages", []) if isinstance(request.state, dict) else []
+    return _calling(messages, request.tool_call["id"]) or (
+        len(messages),
+        AIMessage(content="", tool_calls=[request.tool_call]),
+    )
 
 
 def _repeats(message: AIMessage) -> dict[str, str]:

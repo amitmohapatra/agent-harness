@@ -20,6 +20,7 @@ from trellis.harness.events import WARNING
 from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
+from trellis.harness.tools.bridge import SAME_CALL
 
 done: list[str] = []
 
@@ -596,3 +597,37 @@ async def test_the_providers_hosted_tool_calls_are_recorded_with_the_steps_durat
     assert all(r["latency_ms"] is not None for r in recorded.values())
     results = [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
     assert sorted(results) == sorted(recorded)
+
+
+async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
+    harness: Harness,
+) -> None:
+    """The SDK runs a reply's calls; the harness's tools — and the agent's own, governed — run
+    a call the reply repeats once, and answer each repeat with where its result is."""
+    asked: list[str] = []
+
+    @function_tool
+    def eta(order: str) -> str:
+        asked.append(order)
+        return "tomorrow"
+
+    calls: list[Any] = [("ship", {"order": "o1"}), ("eta", {"order": "o1"})] * 3
+    model = ScriptedModel([calls, "shipped, arriving tomorrow"])
+    target = Agent(name="shipper", model=model, tools=[eta])
+    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
+    result = await agent.run("ship o1", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert done == ["o1"] and asked == ["o1"]
+    outputs = [
+        (i["call_id"], i["output"])
+        for i in model.inputs[-1]
+        if isinstance(i, dict) and i.get("type") == "function_call_output"
+    ]
+    assert outputs == [
+        ("call_1", "shipped o1"),
+        ("call_1_1", "tomorrow"),
+        ("call_1_2", SAME_CALL.format(first="call_1")),
+        ("call_1_3", SAME_CALL.format(first="call_1_1")),
+        ("call_1_4", SAME_CALL.format(first="call_1")),
+        ("call_1_5", SAME_CALL.format(first="call_1_1")),
+    ]

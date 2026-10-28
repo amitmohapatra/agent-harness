@@ -1,8 +1,8 @@
 """``ReAct`` with several calls in one step: every call at once (LangChain's own parallel
 calls), the writes one at a time in the model's order, the tool messages in the model's order;
 pauses inside a step; a resume that hands each call its own output whatever order they finished
-in; the bridge safe under calls made at once from any framework; the step limit, the error
-streak and a stable tool order."""
+in; the bridge safe under calls made at once from any framework; a call repeated in one step
+run once; the step limit, the error streak and a stable tool order."""
 
 from __future__ import annotations
 
@@ -12,10 +12,11 @@ from typing import Any
 
 from tests.support.arm import arm
 from tests.support.models import ScriptedChat
-from trellis import Harness, ReAct, Runtime, current, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis import Budget, Harness, Hooks, ReAct, Runtime, current, tool
+from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolOutcome
 from trellis.harness.middleware import LAST_STEP
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.bridge import SAME_CALL
 from trellis.runs import Lease
 
 
@@ -145,16 +146,19 @@ async def test_a_resumed_run_hands_each_call_its_output_whatever_order_they_fini
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="dice"), [roll, publish])
     paused = await agent.run("x", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    # the two identical calls ran one after another, beside the quick one
-    assert sorted(rolls) == ["quick", "slow", "slow"]
+    # the slow die rolled once (its repeat in the step points to it), beside the quick one
+    assert sorted(rolls) == ["quick", "slow"]
     first = told(model, 1)
-    # the quick one finished first; the two identical calls took their turns (in either order)
-    assert first[1] == ("call_1_1", "0")
-    assert {first[0][1], first[2][1]} == {"1", "2"}
-    assert len(set(keys)) == 3  # each identical call has its own idempotency key
+    # the quick one finished first
+    assert first == [
+        ("call_1", "1"),
+        ("call_1_1", "0"),
+        ("call_1_2", SAME_CALL.format(first="call_1")),
+    ]
+    assert len(set(keys)) == 2  # each call that ran has its own idempotency key
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.answer == "done"
-    assert len(rolls) == 3  # replayed, not rolled again
+    assert len(rolls) == 2  # replayed, not rolled again
     assert told(model, 2)[:3] == first  # the same outputs, call by call
 
 
@@ -253,6 +257,139 @@ async def test_cancelling_the_run_cancels_the_calls_running_beside_each_other(
     await agent.cancel(record.run_id, reason="enough")
     assert (await running).status is RunStatus.CANCELLED
     assert sorted(cancelled) == ["a", "b"]
+
+
+# --------------------------------------------------------------------------- repeats
+class Counted(Hooks):
+    """How often the run's tool hooks saw a call."""
+
+    def __init__(self) -> None:
+        self.before = 0
+        self.after = 0
+
+    async def before_tool(self, call: ToolCall) -> None:
+        self.before += 1
+
+    async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
+        self.after += 1
+        return outcome
+
+
+async def test_a_call_repeated_in_one_step_runs_once_and_each_repeat_is_answered(
+    harness: Harness,
+) -> None:
+    """A small model making one call 14 times in one step: it runs once — one budget charge,
+    one pass of the hooks, one announcement — and every call gets its tool message."""
+    stocked: list[str] = []
+
+    @tool(side_effects="write")
+    def style_stock(style: str, store: str) -> str:
+        """Stock a style in a store."""
+        stocked.append(style)
+        return f"stocked {style}"
+
+    hooks = Counted()
+    # the same arguments, in any key order
+    same = {"style": "ZZ999999", "store": "S1"}
+    step = [("style_stock", same)] * 7 + [("style_stock", dict(reversed(same.items())))] * 7
+    model = ScriptedChat([step, "done"])
+    react = ReAct(system_prompt="s", model=model)
+    # a second charge would reach the budget: the run would end PARTIAL
+    wrapped = harness.wrap(react, id="repeats", hooks=[hooks], budget=Budget(max_tool_calls=2))
+    events = [e async for e in arm(wrapped, [style_stock]).stream("x", user="u")]
+    finished = events[-1]
+    assert finished.outcome is not None and finished.outcome.value == "success", finished
+    assert finished.data["result"] == "done"
+    assert stocked == ["ZZ999999"] and (hooks.before, hooks.after) == (1, 1)
+    repeat = SAME_CALL.format(first="call_1")
+    assert told(model, 1) == [
+        ("call_1", "stocked ZZ999999"),
+        *[(f"call_1_{n}", repeat) for n in range(1, 14)],
+    ]
+    results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert sorted(str(r.get("same_as")) for r in results) == ["None"] + ["call_1"] * 13
+    assert {r["status"] for r in results} == {"ok"}
+    custom = [e.data["name"] for e in events if e.type is RunEventType.CUSTOM]
+    assert custom.count("tool_notice") == 1
+
+
+async def test_an_irreversible_call_repeated_in_one_step_is_approved_once(
+    harness: Harness,
+) -> None:
+    wired: list[str] = []
+
+    @tool(side_effects="irreversible")
+    def wire(to: str) -> str:
+        """Wire money."""
+        wired.append(to)
+        return f"wired {to}"
+
+    model = ScriptedChat([[("wire", {"to": "ada"})] * 3, "done"])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="wires"), [wire])
+    paused = await agent.run("x", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    assert paused.interrupt.question.startswith("Approve wire?") and wired == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+    assert wired == ["ada"] and len(model.requests) == 2  # resumed in place, asked once
+    repeat = SAME_CALL.format(first="call_1")
+    assert told(model, 1) == [
+        ("call_1", "wired ada"),
+        ("call_1_1", repeat),
+        ("call_1_2", repeat),
+    ]
+
+
+async def test_calls_with_other_arguments_all_run_and_a_repeat_in_a_later_step_runs_again(
+    harness: Harness,
+) -> None:
+    ran: list[str] = []
+
+    @tool(side_effects="write")
+    def note(text: str) -> str:
+        """Take a note."""
+        ran.append(text)
+        return f"noted {text}"
+
+    hooks = Counted()
+    model = ScriptedChat(
+        [
+            [("note", {"text": "a"}), ("note", {"text": "b"}), ("note", {"text": "a"})],
+            ("note", {"text": "a"}),  # the next step: StallGuard's, not a repeat
+            "done",
+        ]
+    )
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model), id="notes", hooks=[hooks]), [note]
+    )
+    events = [e async for e in agent.stream("x", user="u")]
+    assert events[-1].data["result"] == "done"
+    assert ran == ["a", "b", "a"] and hooks.before == 3
+    assert told(model, 1) == [
+        ("call_1", "noted a"),
+        ("call_1_1", "noted b"),
+        ("call_1_2", SAME_CALL.format(first="call_1")),
+    ]
+    assert told(model, 2)[-1] == ("call_2", "noted a")
+    notices = [
+        e for e in events if e.type is RunEventType.CUSTOM and e.data["name"] == "tool_notice"
+    ]
+    assert len(notices) == 3  # each write that ran announced once
+
+
+async def test_a_failing_call_repeated_in_one_step_still_counts_toward_the_error_streak(
+    harness: Harness,
+) -> None:
+    @tool(side_effects="read")
+    def broken(n: int) -> str:
+        """Fails."""
+        raise ValueError("down")
+
+    model = ScriptedChat([[("broken", {"n": n}), ("broken", {"n": n})] for n in range(3)])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="broken"), [broken])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
 
 
 # --------------------------------------------------------------------------- stopping
