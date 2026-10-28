@@ -357,8 +357,10 @@ async def test_a_later_steps_identical_call_is_asked_about_again_after_a_pause(
     model = ScriptedChatModel(
         turns=[("lc_wire", {"to": "ada"}), ("confirm", {}), ("lc_wire", {"to": "ada"}), "twice"]
     )
-    own = {"checkpointer": InMemorySaver()} if checkpointer == "its own" else {}
-    graph = create_agent(model, tools=[lc_wire, confirm], middleware=middleware(), **own)
+    saver = InMemorySaver() if checkpointer == "its own" else None  # None: the run's
+    graph = create_agent(
+        model, tools=[lc_wire, confirm], middleware=middleware(), checkpointer=saver
+    )
     agent = harness.wrap(graph, id="wiring")
     result = await agent.run("wire ada twice", user="u", thread="t")
     asked: list[str] = []
