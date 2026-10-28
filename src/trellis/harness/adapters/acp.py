@@ -29,6 +29,9 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   not shown over ACP — only those it asks permission for, which are governed;
 * helpers: each sub-agent the agent starts (Kimi's ``Agent``) and each member of a swarm
   (``AgentSwarm``) is a child run of the run (``bridges.helpers``), from the call to its result;
+  how many members a swarm runs at once is the harness's adaptive limit of child runs
+  (``admission.py``), as ``KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`` (the agent's own ``env``
+  wins);
 * pause: the turn is cancelled (``session/cancel``) and the process ends; the session is in the
   journal and the next attempt resumes it, told to call the tool again, which the journal
   answers. The agent keeps its sessions on its machine (Kimi: ``KIMI_CODE_HOME``): a resume
@@ -75,7 +78,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
-from trellis.harness import budget, compat
+from trellis.harness import admission, budget, compat
 from trellis.harness.adapters.base import (
     Extracted,
     Invocation,
@@ -204,6 +207,10 @@ class Profile:
     #: the variable that names where the agent keeps its state (sessions, config, skills), set
     #: to a home of the run's own when the run gives it one (a sandboxed run)
     home: str | None = None
+    #: the variable that caps how many members of a swarm the agent runs at once: set to the
+    #: harness's adaptive limit of child runs (``admission.py``) unless the agent's own ``env``
+    #: names it
+    swarm_limit: str | None = None
 
 
 def _kimi_routed(env: dict[str, str], runtime: Runtime, model: str | None) -> None:
@@ -299,6 +306,7 @@ KIMI: Final = Profile(
     routed=_kimi_routed,
     usage=_kimi_usage,
     home="KIMI_CODE_HOME",
+    swarm_limit="KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY",
 )
 
 
@@ -525,6 +533,8 @@ class ACPAdapter:
         env = home.env() if home is not None else {**os.environ, **target.env}
         if profile is not None and profile.routed is not None:
             profile.routed(env, runtime, target.model)
+        if profile is not None and profile.swarm_limit is not None:
+            env.setdefault(profile.swarm_limit, str(admission.ADMISSION.limit))
         cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
         attempt = Attempt(self, runtime, target, boxed)
         capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()

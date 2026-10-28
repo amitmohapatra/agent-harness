@@ -276,7 +276,8 @@ def test_without_a_deep_agents_capability_react_is_langchains_loop() -> None:
     """No backend, sub-agent of its own, skills, memory files or permissions: ``create_agent``
     with the harness's part — no file tools, no ``task`` (measured the better base)."""
     graph = ReAct("s", ScriptedChatModel(turns=[]))
-    assert {t.name for t in graph_tools(graph)} == {"write_todos"}  # planning, on a long task
+    # planning, on a long task; helpers at once, on a wide one
+    assert {t.name for t in graph_tools(graph)} == {"write_todos", "delegate"}
 
 
 def test_on_the_graphs_state_the_file_tools_are_its_own_and_execute_is_machinery() -> None:

@@ -18,7 +18,7 @@ from tests.support.memory import FakeMemoryService
 from tests.support.sandbox import FakeSandboxes
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolCall
-from trellis.harness import compat
+from trellis.harness import admission, compat
 from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
     EDITED,
@@ -32,6 +32,9 @@ from trellis.harness.adapters.acp import (
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.budget import Budget
 from trellis.harness.sandbox import sandbox
+
+#: What Kimi reads its swarm's concurrency from.
+SWARM_LIMIT = "KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"
 
 FAKE = str(Path(__file__).resolve().parents[1] / "support" / "fake_acp_agent.py")
 refunds: list[str] = []
@@ -321,6 +324,35 @@ async def test_each_swarm_member_is_a_child_run(harness: Harness, tmp_path: Path
         ("Review c.ts", RunStatus.ERROR),
     ]
     assert native_spec("AgentSwarm", KIMI).tags == ["helper"]
+
+
+async def test_a_swarm_runs_as_many_at_once_as_the_harness_admits_and_is_on_the_tree(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kimi is told the adaptive limit of child runs as its swarm's concurrency (the agent's own
+    ``env`` wins); each member is on the run's task tree."""
+    monkeypatch.delenv(SWARM_LIMIT, raising=False)
+    monkeypatch.setattr(admission, "ADMISSION", admission.Admission(start=3, machine=None))
+    result = (
+        "<agent_swarm_result>\n"
+        '<subagent agent_id="agent-0" item="a.ts" outcome="completed">fine</subagent>\n'
+        "</agent_swarm_result>"
+    )
+    swarm = {"description": "review", "prompt_template": "Review {{item}}", "items": ["a.ts"]}
+    script = [{"swarm": swarm, "result": result}, {"text": "reviewed"}]
+    agent = harness.wrap(fake(tmp_path, script), id="swarm")
+    events = [e async for e in agent.stream("review", user="u1")]
+    assert recorded(tmp_path)["started"][0]["env"][SWARM_LIMIT] == "3"
+    tree = [e.data for e in events if e.type is RunEventType.CUSTOM]
+    tree = [d for d in tree if d["name"].startswith("helper_")]
+    assert [(d["name"], d.get("status")) for d in tree] == [
+        ("helper_started", None),
+        ("helper_finished", "success"),
+    ]
+    assert tree[0]["framework"] == "acp" and tree[0]["kind"] == "subagent"
+    own = harness.wrap(fake(tmp_path, [{"text": "ok"}], env={SWARM_LIMIT: "7"}), id="own")
+    await own.run("x", user="u1")
+    assert recorded(tmp_path)["started"][-1]["env"][SWARM_LIMIT] == "7"
 
 
 # --------------------------------------------------------------------------- sessions

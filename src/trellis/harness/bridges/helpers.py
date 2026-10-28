@@ -16,6 +16,9 @@ hooks (the spawning stays the framework's):
   (:meth:`Helpers.working`, :func:`inside`), recorded under its run; its turns — the task and
   its answer — under its run and its own thread (the conversation of the run is not the
   helper's); and how it ended, as its run's ``system`` outcome;
+* **the task tree** — on the run's stream as every child run is (``admission.py``):
+  ``helper_started`` when the framework starts it, ``helper_finished`` (its status and
+  seconds) when it ends; its parallelism stays the framework's own;
 * **governance and budget** — its tool calls and its model replies are the run's: they go
   through the same governance (the catalog's rules) and count toward the run's budget, by the
   adapter's hooks that reach the helper (:mod:`trellis.harness.adapters`).
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from collections import Counter
 from collections.abc import Iterator
 from contextvars import ContextVar
@@ -77,6 +81,8 @@ class Helper:
     said: list[Said] = field(default_factory=list)
     memory: RunMemory | None = None
     context: str | None = None
+    #: when it started (``time.monotonic``)
+    began: float = field(default_factory=time.monotonic)
 
 
 #: The helper whose work is running in this task (:meth:`Helpers.working`).
@@ -133,6 +139,9 @@ class Helpers:
         helper.memory = self._memory(run_id)
         helper.context = await self._pushed(helper, task)
         self._open[key] = helper
+        parent.events.helper(
+            "started", run_id=run_id, agent_id=name, framework=self.framework, kind=kind.value
+        )
         log.info(
             "helper started",
             extra={"run_id": parent.run_id, "helper_run_id": run_id, "helper": name},
@@ -184,6 +193,14 @@ class Helpers:
                 error=None if error is None else AgentError(code=UNFINISHED, message=error),
                 tenant=self.runtime.tenant,
             )
+        self.runtime.events.helper(
+            "finished",
+            run_id=helper.run_id,
+            agent_id=helper.name,
+            framework=self.framework,
+            status=(RunStatus.SUCCESS if error is None else RunStatus.ERROR).value.lower(),
+            seconds=round(time.monotonic() - helper.began, 3),
+        )
         await self._recorded(helper)
         await self._outcome(helper, error)
         log.info(

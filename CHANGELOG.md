@@ -12,6 +12,25 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 
 ### Added
 
+- `ReAct` hands wide tasks to helpers at once: the `delegate` tool, offered by itself to a
+  request of several independent items of one kind on a large model (never to steps in order,
+  a request to change something, a small model or a helper). Its jobs take Deep Agents' `task`
+  fields (`description`, and `subagent_type` or `role`); each is a child run that only reads
+  (a write is refused, never asked about), its answers merged for the model to check; a
+  failed, timed-out, refused or skipped job is reported so; identical jobs run once; the
+  budget is shared and stops the fan-out early; cancelling the run cancels them; with
+  `RUNS_URL` the jobs queue in agent-runs for any worker. See
+  [docs/frameworks/react.md](docs/frameworks/react.md#helpers-at-once-delegate).
+- Child runs at once, adaptively, for every engine (`trellis.harness.admission`): a parent's
+  sub-agent calls, nested `agent.run`s and `delegate` jobs are admitted under an AIMD limit (1
+  to 16, from 4) that rises while the container's CPU and memory (cgroup limits), the
+  provider's pace and the gateway's 429s stay healthy and halves when they do not; Kimi Code
+  gets it as `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`. The live task tree: `helper_queued`,
+  `helper_started`, `helper_finished` (status, seconds, tokens, cost) and `delegate` events
+  on the run's stream, every framework's helpers included. See
+  [docs/runs.md](docs/runs.md#child-runs-at-once-and-the-task-tree).
+- A sub-agent's child run works at most its own time limit too, not only what is left of its
+  parent's.
 - Kimi Code as a target: `kimi(model=..., cwd=..., env=..., mcp_servers=..., mode=...,
   sandbox=..., skills=...)` drives Kimi Code's own agent (`kimi acp`, `@moonshot-ai/kimi-code`
   2.1.x) over the Agent Client Protocol, through the official SDK (`pip install
