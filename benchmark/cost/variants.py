@@ -10,8 +10,7 @@ same instructions and model. A new cost feature lands as one more entry of :data
 * ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: with no Deep Agents
   capability asked for, LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep
   Agents' ``PatchToolCallsMiddleware``) — planning on a long task, older results cleared past
-  half the window, the request fitted to the window (``FitWindow``), ``ToolGuidance`` and
-  ``AnswerCheck`` off by default.
+  half the window, the request fitted to the window (``FitWindow``).
 * ``deep`` — ``ReAct`` on Deep Agents (a backend given: the journal's), ``create_deep_agent``
   with the harness's middleware: result paging (``FilesystemMiddleware``: a large result saved,
   a preview sent), summarization near the window's end, the scratch files and the ``task``
@@ -20,8 +19,6 @@ same instructions and model. A new cost feature lands as one more entry of :data
   Agents' own pieces attached by hand (its ``FilesystemMiddleware`` on the journal, its
   summarization placed after the narrowing, ``PatchToolCallsMiddleware``; the scratch tools on a
   long task): Deep Agents' capabilities gated per call without ``create_deep_agent``'s assembly.
-* ``main+guidance``, ``main+check`` — ``main`` with ``tool_guidance=True`` or
-  ``answer_check=True``: what each is worth when forced on.
 * ``main-planning``, ``deep-files`` — without a feature turned on by itself (:data:`AUTOMATIC`:
   its middleware left out); ``main@8k`` — ``main`` on an 8,192-token window;
 * ``deep-<piece>`` — ``deep`` with one of Deep Agents' pieces off (:data:`PIECES`: ``paging``,
@@ -92,7 +89,6 @@ def main(
     off: tuple[str, ...] = (),
     on: tuple[str, ...] = (),
     window: int | None = None,
-    switches: dict[str, bool] | None = None,
     deep: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """``ReAct`` as it is built — ``deep``: on Deep Agents (a backend given: the journal's)."""
@@ -106,8 +102,6 @@ def main(
             max_steps=setup.max_steps,
             context_window=window or setup.window,
             tools=setup.tools,
-            tool_guidance=(switches or {}).get("tool_guidance"),
-            answer_check=(switches or {}).get("answer_check"),
             backend=JournalBackend() if deep else None,
         )
     return target, {}
@@ -133,8 +127,6 @@ def pieces(setup: Setup) -> tuple[Any, dict[str, Any]]:
         max_repeats=ours.MAX_REPEATS,
         call_timeout=None,
         context_window=setup.window,
-        tool_guidance=None,
-        answer_check=None,
         system_prompt=None,
         held=automatic.SCRATCH,
         files=False,
@@ -211,16 +203,6 @@ VARIANTS: Final[dict[str, Variant]] = {
         "main@16k",
         "main on a 16,384-token window (the model server's own: -c 16384)",
         functools.partial(main, window=16_384),
-    ),
-    "main+guidance": Variant(
-        "main+guidance",
-        "main with tool_guidance=True",
-        functools.partial(main, switches={"tool_guidance": True}),
-    ),
-    "main+check": Variant(
-        "main+check",
-        "main with answer_check=True",
-        functools.partial(main, switches={"answer_check": True}),
     ),
     "main@8k": Variant(
         "main@8k",

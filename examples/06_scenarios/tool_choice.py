@@ -1,6 +1,6 @@
-"""Scenario: reliable tool choice, measured. A store-operations tool set where a model goes wrong
-in four typical ways, the two ``ReAct`` switches that guard against them, and an evaluation that
-scores each item's tool coverage against the tools the item needs.
+"""Scenario: tool choice, measured. A store-operations tool set where a model goes wrong in four
+typical ways, and an evaluation that scores each item's tool coverage against the tools the item
+needs.
 
 The four ways (whatever the tools are):
 
@@ -12,16 +12,15 @@ The four ways (whatever the tools are):
    (irreversible: governance asks a person), never just say it was done;
 4. **a wrong conclusion** — "which store gets stock first" must follow from ``store_demand``.
 
-``ReAct(tool_guidance=True)`` adds how to choose among tools to the instructions (no extra
-call); ``ReAct(answer_check=True)`` has the model check its draft answer against the request
-once — every part answered, each change made by its tool — and call what is still missing.
-``tool_coverage()`` scores each item: the share of its ``needed_tools`` the run called (a call
-that paused for approval counts), naming the ones missing and any ``avoid_tools`` called.
+What guides the choice is the tools' own descriptions (``store_overview`` says what it is not
+for) and the instructions. ``tool_coverage()`` scores each item: the share of its
+``needed_tools`` the run called (a call that paused for approval counts), naming the ones
+missing and any ``avoid_tools`` called.
 
-Offline (``make examples``) the model is scripted: it makes the first mistake, the check asks
-again, and it calls the missing tool — the harness's part is real, the model's choices are
-written down. ``tests/live/test_live_tool_choice.py`` runs the same set against a real model,
-with and without the switches, and reports the coverage of each.
+Offline (``make examples``) the model is scripted: it makes the first two mistakes, and
+``tool_coverage`` names them — the harness's part is real, the model's choices are written
+down. ``tests/live/test_live_tool_choice.py`` runs the same set against a real model and
+reports the coverage of each item.
 
     python -m examples.06_scenarios.tool_choice
 """
@@ -498,36 +497,27 @@ def show(report: EvalReport) -> None:
 
 # --------------------------------------------------------------------------- run it
 async def main() -> None:
-    # Offline, the script: on item 1 the model reaches for the dashboard and answers; the
-    # answer check asks again and it calls the specific tools. Online, a real model chooses.
+    # Offline, the script: on item 1 the model reaches for the dashboard, on item 2 it skips a
+    # part — tool_coverage names both; the rest it gets right. Online, a real model chooses.
     model = react_model(
         [
             ("store_overview", {"store": "S12"}),
-            "S12 sells well overall.",  # the draft: the check asks again
-            [("excess_stock", {"store": "S12"}), ("lost_sales", {"store": "S12"})],
-            "Excess: ST-205 (140 over), ST-330. Most lost sales: ST-101 (38 units).",
+            "S12 sells well overall.",  # the dashboard, not the specific tools
             ("app_help", {"task": "create an allocation"}),
-            "Allocations > New.",  # the draft skips a part
-            ("allocatable_stock", {}),
-            "Allocations > New. Most available to allocate: ST-101 (420).",
+            "Allocations > New.",  # a part skipped
             [("allocation_history", {"store": "S12"}), ("lost_sales", {"store": "S12"})],
-            "AL-77 (24 units of ST-101); ST-101 lost the most.",  # the draft skips a part
             ("app_help", {"task": "review allocations"}),
             "AL-77; ST-101 lost the most; review them under Allocations.",
-            "Done: the rule is created.",  # a change claimed in text: the check asks again
-            ("create_stock_rule", RULE),
+            ("create_stock_rule", RULE),  # a change: it waits for its approval
             [
                 ("store_demand", {"store": "S12", "style": "ST-101"}),
                 ("store_demand", {"store": "S40", "style": "ST-101"}),
             ],
-            "S40 first: 0.2 weeks of cover against S12's 3.",
             "S40 first: it runs out in 0.2 weeks; S12 has 3.",
         ]
     )
     async with Harness() as h:
-        target = ReAct(
-            SYSTEM, model, tool_guidance=True, answer_check=True, max_steps=6, tools=TOOLS
-        )
+        target = ReAct(SYSTEM, model, max_steps=6, tools=TOOLS)
         agent = h.wrap(target, id="store-ops", without={"mcp"})
         report = await h.evaluate(
             agent, DATASET, EVALUATORS, run_name="tool-choice-offline", concurrency=1

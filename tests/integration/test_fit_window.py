@@ -1,8 +1,8 @@
 """``FitWindow``: a model call never fails because its request does not fit the window — the
-optional guidance dropped, the tools narrowed (the used ones kept, the hinted ones next, then by
-the words they share with the request), their descriptions compacted, older results cleared and
-cut, older turns left out — each only as far as needed, said on the run and counted; a request
-that fits is the same object; one whose user message alone cannot fit fails saying so."""
+tools narrowed (the used ones kept, the hinted ones next, then by the words they share with the
+request), their descriptions compacted, older results cleared and cut, older turns left out —
+each only as far as needed, said on the run and counted; a request that fits is the same object;
+one whose user message alone cannot fit fails saying so."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from trellis.harness.events import WARNING
 from trellis.harness.middleware import (
     FIT_CLEARED,
     FITTED,
-    TOOL_GUIDANCE,
     ContextTooLarge,
     FitWindow,
     RunCheckpointer,
@@ -76,17 +75,8 @@ async def test_a_request_that_fits_is_sent_as_it_is() -> None:
     assert await sent(FitWindow(), given) is given  # no window known: it steps aside
     with pytest.raises(ConfigurationError, match="a window is a number of tokens"):
         FitWindow(0)
-
-
-async def test_the_guidance_goes_first_and_only_as_far_as_needed() -> None:
-    system = f"You help.\n\n{TOOL_GUIDANCE}\nThese tools change data: a."
-    given = request([HumanMessage("hi")], [lc("a")], system=system)
-    window = int((_size(given) - 100) / 0.95)
-    before = FITTED["guidance"]
-    out = await sent(FitWindow(window), given)
-    assert out.system_message is not None and out.system_message.text == "You help."
-    assert out.tools == given.tools  # no further than needed
-    assert FITTED["guidance"] == before + 1
+    with pytest.raises(TypeError, match=r"FitWindow\(optional=\) was removed: .*tool guidance"):
+        FitWindow(optional=("a text",))  # pyright: ignore[reportCallIssue]
 
 
 async def test_the_tools_are_narrowed_to_the_most_relevant_then_compacted() -> None:
@@ -142,7 +132,7 @@ async def test_react_on_a_small_window_with_many_tools_runs_and_says_what_it_dro
 
         many.append(tool(look, name=f"look_{n}", description=LONG, side_effects="read"))
     model = ScriptedChatModel(turns=[("look_3", {"query": "a"}), "found it"])
-    target = ReAct("s", model, context_window=4096, tool_guidance=True)
+    target = ReAct("s", model, context_window=4096)
     agent = arm(harness.wrap(target, id="crowded"), many)
     events = [e async for e in agent.stream("look a up with look_3", user="u")]
     finished = [e for e in events if e.type is RunEventType.RUN_FINISHED][-1]

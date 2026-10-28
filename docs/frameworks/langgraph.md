@@ -70,7 +70,7 @@ everything `ReAct` adds on top of
 Deep Agents: the run's tools per model call narrowed per turn (the memory and gateway MCP tools
 among them), the graph's own tools governed, `max_steps` then a final answer, the stall guard,
 the hooks and spans, `call_timeout`, the budget's stop, planning on a long task, older results
-cleared and read back with a `context_window`, the tool guidance and the answer check, and its
+cleared and read back with a `context_window`, the request fitted to the window, and its
 checkpoint in the run: compiled without a checkpointer, it is run with `RunCheckpointer()`, so a
 resume after a pause or a crash continues where it stopped
 ([react.md](react.md#middleware-on-your-own-graph), [runs.md](../runs.md#continuing-where-a-run-stopped)). A `create_agent` graph wrapped without it

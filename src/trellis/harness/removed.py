@@ -33,6 +33,6 @@ def removed(**instead: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
 
 
 def _shown(func: Callable[..., object]) -> str:
-    """How the call is written: ``h.evaluate``, ``ReAct``, ``middleware``, ``ToolGuidance``."""
+    """How the call is written: ``h.evaluate``, ``ReAct``, ``middleware``, ``FitWindow``."""
     name = func.__qualname__.removesuffix(".__init__")
     return "h." + name.split(".", 1)[1] if name.startswith("Harness.") else name
