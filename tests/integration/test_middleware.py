@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import Field
 
 from tests.support.arm import arm
-from tests.support.chat_model import ScriptedChatModel
+from tests.support.chat_model import ScriptedChatModel, Turn
 from trellis import Harness, Hooks, Settings, current, tool
 from trellis.contracts import ConfigurationError, ModelError, RunStatus
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
@@ -540,7 +540,8 @@ async def test_the_same_call_repeated_is_not_run_and_the_model_goes_on(harness: 
         looked.append(item)
         return f"{item} found"
 
-    model = ScriptedChatModel(turns=[("lookup", {"item": "a"})] * 3 + ["a is found"])
+    turns: list[Turn] = [*[("lookup", {"item": "a"})] * 3, "a is found"]
+    model = ScriptedChatModel(turns=turns)
     target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="stall"), [lookup]).run("x", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "a is found", result.error
@@ -557,7 +558,8 @@ async def test_the_same_call_repeated_is_not_run_and_the_model_goes_on(harness: 
 
 async def test_a_call_the_tool_limit_answered_is_answered_once(harness: Harness) -> None:
     memory_search = tool(lambda query: "nothing", name="memory_search", side_effects="read")
-    model = ScriptedChatModel(turns=[("memory_search", {"query": "q"})] * 3 + ["none"])
+    turns: list[Turn] = [*[("memory_search", {"query": "q"})] * 3, "none"]
+    model = ScriptedChatModel(turns=turns)
     stack = limits(max_steps=12, max_repeats=2, scoped=True)
     target = graph(model, HarnessTools(), *stack, checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="once"), [memory_search]).run("x", user="u")
