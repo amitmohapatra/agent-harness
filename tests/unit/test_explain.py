@@ -18,9 +18,8 @@ from trellis.harness.explain import (
     Step,
     admin_view,
     client_view,
-    conversation_budget,
-    measured,
-    measuring,
+    offered,
+    without_lookup,
 )
 from trellis.harness.tools.base import Citation, citations
 from trellis.harness.tools.sources import tool
@@ -215,18 +214,11 @@ def test_who_decided_is_said_by_role_only() -> None:
     assert explain._principal("u1") == "user:u1" and explain._principal("agent:x") == "agent:x"
 
 
-def test_the_arms_are_measured_never_taken_by_default() -> None:
-    assert measuring() is None and conversation_budget(128_000) is None
-    with measured("sized", share=0.25, cap=16_000):
-        assert measuring() == "sized"
-        assert conversation_budget(128_000) == 16_000
-        assert conversation_budget(32_000) == 8000
-        assert conversation_budget(None) is None
-    with measured("lookup"):
-        assert measuring() == "lookup" and conversation_budget(128_000) is None
-    assert measuring() is None
-    with pytest.raises(ValueError, match="share of the window"), measured("sized"):
-        pass
+def test_the_lookup_is_offered_unless_measured_without() -> None:
+    assert offered()
+    with without_lookup():
+        assert not offered()
+    assert offered()
 
 
 def test_an_artifact_names_sources_only_as_citations() -> None:

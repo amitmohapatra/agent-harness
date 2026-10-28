@@ -12,18 +12,13 @@ survives a pause and a crash with it; when the run ends it is kept (:func:`keep`
 agent-runs in the run's event log (a :data:`RECORD` event, read by any replica), else in the
 agent, as long as the in-process store keeps finished runs (``runs.KEEP_FINISHED``).
 
-A follow-up about an earlier answer is given what it needs one of two ways, each measured
-against the other and against neither (``benchmark.cost``'s ``explain`` suite), and neither on
-until the measurements decide (:func:`measured`; ``docs/explanations.md#the-two-arms``):
-
-* ``sized`` — the conversation window asked of the memory service at a share of the model's
-  window, capped (:func:`conversation_budget`), and the request fitted to the model by
-  LangChain's ``trim_messages`` (``middleware.FitWindow``), the older tool results cleared by
-  LangChain's ``ContextEditingMiddleware`` as always;
-* ``lookup`` — the window as the service cuts it by default (whole turns), and the record of an
-  earlier answer read on demand with one tool, :data:`EARLIER` (:func:`earlier_tool`):
-  read-only, governed as a read, offered in every run of a conversation and scoped to it — its
-  tenant, user, agent and thread, never a child run's.
+A follow-up about an earlier answer is fetched only when the question needs it: the
+conversation window stays as lean as the memory service cuts it (whole turns, its default
+budget), and a run of a conversation with an earlier answer is offered one read-only tool,
+:data:`EARLIER` (:func:`earlier_tool`), governed as a read and scoped to the conversation — its
+tenant, user, agent and thread, never a child run's. Nothing forces the call: whether the model
+makes it when it should is measured (``benchmark.cost``'s ``explain`` suite, against
+:func:`without_lookup`, today's agent).
 
 What :data:`EARLIER` returns is rendered here from the record, never written by the model, for
 the audience the harness's key is (:func:`audience`):
@@ -47,7 +42,6 @@ import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Literal
 
@@ -101,53 +95,26 @@ EARLIER_DESCRIPTION: Final = (
 _WORD_CHARS: Final = r"[\w.:-]"
 
 
-# --------------------------------------------------------------------------- the two arms
-Arm = Literal["sized", "lookup"]
-
-
-@dataclass(frozen=True, slots=True)
-class Measured:
-    """The arm agents wrapped (and graphs built) inside :func:`measured` take: for ``sized``,
-    the ``share`` of the model's window the conversation window may take, at most ``cap``
-    tokens."""
-
-    arm: Arm
-    share: float = 0.0
-    cap: int = 0
-
-
-_MEASURED: ContextVar[Measured | None] = ContextVar("trellis_explain_arm", default=None)
+# --------------------------------------------------------------------------- measured without
+_UNOFFERED: ContextVar[bool] = ContextVar("trellis_explain_unoffered", default=False)
 
 
 @contextlib.contextmanager
-def measured(arm: Arm, *, share: float = 0.0, cap: int = 0) -> Iterator[Measured]:
-    """Agents wrapped and ``ReAct`` graphs built inside take ``arm`` (the module says what each
-    is; ``sized`` takes the window's ``share``, at most ``cap`` tokens): a measurement of what
-    each is worth, as ``react.defaults_on`` — not an option of ``h.wrap``: until the
-    measurements decide, an agent takes neither."""
-    if arm == "sized" and not (0 < share <= 1 and cap > 0):
-        raise ValueError("the sized arm takes a share of the window (0 to 1) and a cap over 0")
-    taken = Measured(arm, share, cap)
-    token = _MEASURED.set(taken)
+def without_lookup() -> Iterator[None]:
+    """Agents wrapped inside are not offered :data:`EARLIER`: today's agent, the baseline the
+    lookup is measured against (``benchmark.cost``'s ``explain`` suite, as
+    ``react.defaults_off``) — not an option of ``h.wrap``."""
+    token = _UNOFFERED.set(True)
     try:
-        yield taken
+        yield
     finally:
-        _MEASURED.reset(token)
+        _UNOFFERED.reset(token)
 
 
-def measuring() -> Arm | None:
-    """The arm agents wrapped now take (:func:`measured`); ``None``: neither."""
-    taken = _MEASURED.get()
-    return None if taken is None else taken.arm
-
-
-def conversation_budget(window: int | None) -> int | None:
-    """The conversation window's budget for a model reading ``window`` tokens: in the ``sized``
-    arm its share, at most its cap; else (or the window unknown) ``None``, the service's own."""
-    taken = _MEASURED.get()
-    if taken is None or taken.arm != "sized" or not window:
-        return None
-    return min(taken.cap, int(window * taken.share))
+def offered() -> bool:
+    """Whether agents wrapped now are offered :data:`EARLIER` (not inside
+    :func:`without_lookup`)."""
+    return not _UNOFFERED.get()
 
 
 class Step(BaseModel):
@@ -298,6 +265,17 @@ def earlier_tool() -> Tool:
         return await earlier(runtime, back=max(1, int(args.get("back") or 1)))
 
     return Tool(spec, run)
+
+
+async def answered_before(runtime: Runtime) -> bool:
+    """Whether ``runtime``'s conversation holds a run of its agent that ended before it: the
+    lookup is offered only then (a conversation's first turn has nothing to look up)."""
+    async for summary in runtime.agent.harness.runs.iterate(
+        thread_id=runtime.thread, agent_id=runtime.agent_id, tenant=runtime.tenant
+    ):
+        if summary.run_id != runtime.run_id and summary.status.final:
+            return True
+    return False
 
 
 async def earlier(runtime: Runtime, *, back: int = 1) -> str:
@@ -562,18 +540,17 @@ def _limits(record: Record, sources: Sequence[Citation]) -> str:
 __all__ = [
     "EARLIER",
     "RECORD",
-    "Measured",
     "Record",
     "Step",
     "admin_view",
+    "answered_before",
     "audience",
     "client_view",
-    "conversation_budget",
     "earlier",
     "earlier_tool",
     "keep",
-    "measured",
-    "measuring",
+    "offered",
     "record_of",
     "recorded",
+    "without_lookup",
 ]

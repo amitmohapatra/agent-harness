@@ -32,8 +32,8 @@ NOW: Final = "2026-10-01T00:00:00Z"
 #: learned skills come back for any toolbox.
 HINTS_MIN_TOOLS: Final = 5
 #: The messages-form window's cut, as the service makes it (``ContextSettings``,
-#: ``modules/context/window.py``): its token budget when the request names none
-#: (``conversation_token_budget``), the most turns, and what a message costs beyond its text.
+#: ``modules/context/window.py``): its token budget, the most turns, and what a message costs
+#: beyond its text.
 WINDOW_TOKEN_BUDGET: Final = 2000
 WINDOW_MAX_TURNS: Final = 20
 MESSAGE_OVERHEAD_TOKENS: Final = 4
@@ -114,9 +114,6 @@ class FakeMemoryService:
     #: what ``GET /v1/keys/self`` says about the key
     tenant: str | None = "acme"
     role: str = "service"
-    #: whether the service takes a caller's window budget (``conversation_token_budget``: 0.6
-    #: on); an older one refuses the field as unknown (``422``)
-    sized_windows: bool = True
     #: the catalog by tool name: risk / approve_when / annotations / side_effects
     catalog: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: the approval suggestions learned (as the service answers them, plus the ``rule`` an
@@ -266,10 +263,7 @@ class FakeMemoryService:
             "may_act_as": ["*"],
         }
 
-    def _context(self, call: Call) -> dict[str, Any] | httpx.Response:
-        refused = self._refused_field(call)
-        if refused is not None:
-            return refused
+    def _context(self, call: Call) -> dict[str, Any]:
         rendered = self.context_text
         requested = call.body.get("tools") or {}
         available = requested.get("available")
@@ -303,8 +297,7 @@ class FakeMemoryService:
             answer["rendered"] = rendered
         answer["token_estimate"] = len(rendered) // 4
         if call.body.get("window", True) and call.body.get("window_format") == "messages":
-            budget = call.body.get("conversation_token_budget") or WINDOW_TOKEN_BUDGET
-            window, over = self._window(call.scope.get("thread_id"), budget)
+            window, over = self._window(call.scope.get("thread_id"), WINDOW_TOKEN_BUDGET)
             if window:
                 answer["conversation"] = {"thread_id": call.scope["thread_id"], "messages": window}
                 if over and OVER_BUDGET:
@@ -341,32 +334,6 @@ class FakeMemoryService:
             used += cost
         over = bool(chosen) and sum(map(_message_tokens, chosen[-1])) > budget
         return [m for turn in chosen for m in turn], over
-
-    def _refused_field(self, call: Call) -> httpx.Response | None:
-        """An older service refuses a field it does not know, as FastAPI does (``422``)."""
-        if self.sized_windows or "conversation_token_budget" not in (call.body or {}):
-            return None
-        body = {
-            "type": "urn:trellis:problem:validation",
-            "title": "Invalid request",
-            "status": 422,
-            "detail": "Request validation failed",
-            "instance": "/v1/context",
-            "code": "VALIDATION",
-            "retryable": False,
-            "request_id": "req_fake",
-            "details": {
-                "errors": [
-                    {
-                        "loc": ["body", "conversation_token_budget"],
-                        "msg": "Extra inputs are not permitted",
-                        "type": "extra_forbidden",
-                    }
-                ]
-            },
-        }
-        headers = {"content-type": "application/problem+json"}
-        return httpx.Response(422, content=json.dumps(body).encode(), headers=headers)
 
     def _agent_tools(self, call: Call) -> dict[str, Any]:
         return {"tools": self.agent_tools}

@@ -27,56 +27,15 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   `(content, artifact)`, the artifact a `trellis.Citation(name, date, link)` or a list; a
   LangChain tool's `content_and_artifact` artifact is read the same way. `Result.sources`: the
   sources a run's tools returned, each once, never one the model named.
-- Two ways a follow-up gets the earlier answer's calls and results, each measured and neither on
-  until the data decides — the release keeps one and removes the other
-  (`trellis.harness.explain.measured`): `sized` — the conversation window
-  asked of the memory service at a share of the model's window, capped
-  (`conversation_token_budget`, trellis-memory 0.6; an older service is asked as before), and
-  `FitWindow` keeping the newer older turns that fit (LangChain's `trim_messages`); `lookup` —
-  the service's own window and a read-only `earlier_answers` tool, scoped to the run's
-  conversation (tenant, user, agent, thread). The cost benchmark's `--suite explain` measures
-  both against neither: accuracy against the earlier run's record per question kind, lookups
-  made (and wrongly made on ordinary follow-ups), never-see items, and every turn's tokens,
-  cached share and seconds, as the end user and (`--admin`) as an administrator.
-
-- `ReAct` hands wide tasks to helpers at once: the `delegate` tool, offered by itself to a
-  request of several independent items of one kind on a large model (never to steps in order,
-  a request to change something, a small model or a helper). Its jobs take Deep Agents' `task`
-  fields (`description`, and `subagent_type` or `role`); each is a child run that only reads
-  (a write is refused, never asked about), its answers merged for the model to check; a
-  failed, timed-out, refused or skipped job is reported so; identical jobs run once; the
-  budget is shared and stops the fan-out early; cancelling the run cancels them; with
-  `RUNS_URL` the jobs queue in agent-runs for any worker. See
-  [docs/frameworks/react.md](docs/frameworks/react.md#helpers-at-once-delegate).
-- Child runs at once, adaptively, for every engine (`trellis.harness.admission`): a parent's
-  sub-agent calls, nested `agent.run`s and `delegate` jobs are admitted under an AIMD limit (1
-  to 16, from 4) that rises while the container's CPU and memory (cgroup limits), the
-  provider's pace and the gateway's 429s stay healthy and halves when they do not; Kimi Code
-  gets it as `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`. The live task tree: `helper_queued`,
-  `helper_started`, `helper_finished` (status, seconds, tokens, cost) and `delegate` events
-  on the run's stream, every framework's helpers included. See
-  [docs/runs.md](docs/runs.md#child-runs-at-once-and-the-task-tree).
-- A sub-agent's child run works at most its own time limit too, not only what is left of its
-  parent's.
-- Kimi Code as a target: `kimi(model=..., cwd=..., env=..., mcp_servers=..., mode=...,
-  sandbox=..., skills=...)` drives Kimi Code's own agent (`kimi acp`, `@moonshot-ai/kimi-code`
-  2.1.x) over the Agent Client Protocol, through the official SDK (`pip install
-  'trellis-harness[kimi]'`). Moonshot archived the Python Kimi CLI and its Python agent SDK,
-  which is why Kimi is driven through ACP. The adapter is a generic ACP client
-  (`trellis.harness.adapters.acp`, `ACPAgent`); Kimi is the one agent configured, pinned and
-  tested. Everything Kimi does on its own (its tools, sub-agents and swarms, plan mode,
-  compaction) passes through: the harness's tools reach it as an MCP server, every call it asks
-  permission for is governed (a person's approval a durable pause, resumed in Kimi's session),
-  each sub-agent and swarm member is a child run, its usage log counts toward the budget
-  (tokens; dollars are a follow-up), its model goes through Bifrost with the run's headers. The
-  `kimi` program's tested range is checked at each run (`compat.BINARIES`); a version outside it
-  fails the run. See [docs/frameworks/kimi.md](docs/frameworks/kimi.md), including what ACP
-  does not show (calls Kimi does not ask about, a sub-agent's own calls) and the sandbox's
-  limit (Kimi's reads stay on the host).
-- `src.kimi()`: a skill set in Kimi Code's own skills folder, written per run.
-- `tools.convert.mcp`: the harness's tools as an MCP server (the official SDK), served per
-  attempt on the loopback interface with a bearer token.
-- Requires `trellis-contracts>=0.6.2` (its `acp` error source).
+- A follow-up about an earlier answer is fetched only when the question needs it: the
+  conversation window stays as the memory service cuts it, and a run of a conversation that
+  already holds an answer is offered `earlier_answers` — read-only, governed as a read, scoped
+  to the run's tenant, user, agent and thread, never a child run's. Nothing forces the call.
+  The cost benchmark's `--suite explain` measures it against today's agent
+  (`explain.without_lookup()`): accuracy against the earlier run's record per question kind,
+  lookups made (and wrongly made on ordinary follow-ups) per model tier, never-see items, and
+  every turn's tokens, cached share and seconds (the hard guard), as the end user and
+  (`--admin`) as an administrator.
 
 ### Fixed
 
@@ -87,8 +46,9 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   is the model's to use; what depends on something the user said that is not there is still
   "I do not know".
 - The tests' memory service cuts the conversation window as the service does (whole turns
-  within the budget, at most 20, the newest whole with `over_budget`), so a large earlier turn
-  no longer passes a test it fails against the service.
+  within its budget, at most 20, the newest whole — flagged `over_budget` where the service's
+  contract has it), so a large earlier turn no longer passes a test it fails against the
+  service.
 
 ### Removed
 

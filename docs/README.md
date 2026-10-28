@@ -39,7 +39,7 @@ for you.
 | [governance.md](governance.md) | which calls run, are announced or ask: risks, the catalog's `approve_when`, failing closed |
 | [hooks.md](hooks.md) | your code around runs, model calls and tool calls: guardrails, redaction of your own, audit |
 | [memory.md](memory.md) | push, pull, what is recorded, background writes, documents, outcomes and grounding, the model key |
-| [explanations.md](explanations.md) | a run's record — its steps, the sources its tools returned, its approvals and memories — and what the end user and an administrator see of it when a follow-up asks about an earlier answer; the two measured arms |
+| [explanations.md](explanations.md) | a run's record — its steps, the sources its tools returned, its approvals and memories — and what the end user and an administrator see of it when a follow-up asks about an earlier answer, read on demand |
 | [interrupts.md](interrupts.md) | `ask`, approvals (the harness's and the frameworks' own), `resume`, the journal, artifacts, an inbox of your own |
 | [runs.md](runs.md) | run records, `start` and the worker, progress checkpoints, queue order, schedules, events from anywhere |
 | [reliability.md](reliability.md) | time limits, retries, idempotency keys, crashes and unknown outcomes, cancel, the agent's version |

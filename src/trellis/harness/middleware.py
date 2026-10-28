@@ -87,7 +87,7 @@ from langchain_core.messages import (
     ToolMessage,
     convert_to_messages,
 )
-from langchain_core.messages.utils import count_tokens_approximately, trim_messages
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import (
@@ -122,7 +122,6 @@ from trellis.harness import (
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
-from trellis.harness.explain import measuring
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.hooks import running
 from trellis.harness.journal import content_key
@@ -1197,10 +1196,8 @@ class FitWindow(AgentMiddleware):
     3. ``results`` — older tool results cleared (``read_result`` reads them back), then the
        tools narrowed past :data:`FIT_KEEP`, then the longest results cut to their head and
        tail;
-    4. ``turns`` — the older turns left out, the latest kept whole — in the ``sized`` arm
-       measured (``explain.measured``), only those that do not fit, the newest that do kept
-       (:func:`_recent`: LangChain's ``trim_messages``) — (``turns=False`` leaves them to a
-       summarization after it: ``ReAct``'s summarizes them);
+    4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
+       to a summarization after it: ``ReAct``'s summarizes them);
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
        lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
        last first), never a line that states a rule, nor one of the standing instructions (the
@@ -1225,8 +1222,6 @@ class FitWindow(AgentMiddleware):
             raise ConfigurationError("a window is a number of tokens over 0")
         self.window = window
         self.turns = turns
-        #: the older turns that fit kept (:func:`_recent`): the ``sized`` arm, measured
-        self.trim = measuring() == "sized"
         #: each run's tools its last narrowed call kept (:func:`_narrowed`'s ``before``)
         self._kept: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = weakref.WeakKeyDictionary()
 
@@ -1290,7 +1285,7 @@ class FitWindow(AgentMiddleware):
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
             lambda r, b: _cut(_narrowed(_cleared(r), b, runtime, least=0, before=before), b),
-            lambda r, b: (_recent(r, b) if self.trim else _latest(r)) if self.turns else r,
+            lambda r, b: _latest(r) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
         for name, step in zip(FIT_STEPS, steps, strict=True):
@@ -1439,34 +1434,6 @@ def _cleared(request: ModelRequest[Any]) -> ModelRequest[Any]:
             messages[n] = message.model_copy(update={"content": FIT_CLEARED})
             changed = True
     return request.override(messages=messages) if changed else request
-
-
-def _recent(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
-    """The request with as many of its latest turns as fit ``budget``, by LangChain's
-    ``trim_messages`` — the last messages, from a user's message on (so a tool call is never
-    parted from its result), the leading instructions kept, the oldest kept message cut to fit
-    — else, when its latest turn alone does not fit whole, that turn only (:func:`_latest`)."""
-    messages = list(request.messages)
-    lead = list(itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages))
-    rest = messages[len(lead) :]
-    head = lead[:1]
-    # the instructions, the tools and any other leading system message: what is not trimmed
-    fixed = _size(request.override(messages=lead[1:]))
-    kept = trim_messages(
-        [*head, *rest],
-        max_tokens=max(0, budget - fixed),
-        token_counter=count_tokens_approximately,
-        strategy="last",
-        start_on="human",
-        include_system=True,
-        allow_partial=True,
-    )[len(head) :]
-    asked = next((m for m in reversed(rest) if isinstance(m, HumanMessage)), None)
-    if asked is None or not any(m is asked for m in kept):
-        return _latest(request)
-    if len(kept) == len(rest):
-        return request
-    return request.override(messages=cast("list[AnyMessage]", [*lead, *kept]))
 
 
 def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:

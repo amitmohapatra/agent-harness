@@ -20,8 +20,7 @@ from tests.support.models import ScriptedChat
 from tests.support.runlog import LoggedRuns
 from trellis import Ask, Harness, Hooks, ReAct, Settings, tool
 from trellis.contracts import RunStatus, ToolCall
-from trellis.harness.clients.memory import CONVERSATION_BUDGET
-from trellis.harness.explain import RECORD, measured
+from trellis.harness.explain import RECORD, without_lookup
 from trellis.harness.runs import LocalRuns
 from trellis.harness.runtime import EARLIER
 from trellis.harness.tools.base import Citation
@@ -29,6 +28,17 @@ from trellis.runs import Job
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-explain"
+#: what the harness asks the memory service's context with (no window budget of its own)
+CONTEXT_FIELDS = {
+    "query",
+    "scope",
+    "window",
+    "format",
+    "debug",
+    "token_budget",
+    "window_format",
+    "tools",
+}
 SYSTEM = "You answer stock price questions."
 NASDAQ = Citation(name="Nasdaq Last Sale feed", date="2026-10-27", link="https://nasdaq.test/acme")
 #: what the client view never holds (the tool's name and arguments, its raw output, ids)
@@ -66,9 +76,8 @@ def memory(fake: FakeMemoryService, memory_id: str, user: str, content: str, **k
 
 
 def looking(h: Harness, model: Any, tools: list[Any], *, id: str = "stock", **wrap: Any) -> Any:
-    """A ``ReAct`` agent of the ``lookup`` arm: it reads its earlier answers' records."""
-    with measured("lookup"):
-        return arm(h.wrap(ReAct(SYSTEM, model), id=id, **wrap), tools)
+    """A ``ReAct`` agent: it reads its earlier answers' records."""
+    return arm(h.wrap(ReAct(SYSTEM, model), id=id, **wrap), tools)
 
 
 def tool_results(request: dict[str, Any]) -> list[str]:
@@ -84,10 +93,9 @@ async def two_turns(
         turns
         or [(TOOL, {"symbol": "ACME"}), "ACME closed at 123.45 USD.", (EARLIER, {}), "From Nasdaq."]
     )
-    with measured("lookup"):
-        agent = arm(
-            h.wrap(ReAct(SYSTEM, model, context_window=16_000), id="stock"), tools or [stock_quote]
-        )
+    agent = arm(
+        h.wrap(ReAct(SYSTEM, model, context_window=16_000), id="stock"), tools or [stock_quote]
+    )
     first = await agent.run("What did ACME close at yesterday?", user="u1", thread=THREAD)
     assert first.status is RunStatus.SUCCESS, first.error
     later = await agent.run(second, user="u1", thread=THREAD)
@@ -267,86 +275,47 @@ async def test_a_run_whose_record_was_not_kept_says_it_does_not_know_its_steps(
 
 
 # --------------------------------------------------------------------------- large and long turns
-async def test_in_the_sized_arm_a_large_long_turn_reaches_the_next_one_whole(
+async def test_the_window_stays_the_services_and_the_record_is_offered_after_an_answer(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     pages = [("intraday", {"symbol": "ACME", "page": n}) for n in range(12)]
-    model = ScriptedChat([*pages, "ACME traded 120 to 126.", "12 calls, from the tape."])
-    with measured("sized", share=0.5, cap=40_000):
-        target = ReAct(SYSTEM, model, context_window=128_000)
-        agent = arm(memory_harness.wrap(target, id="tape"), [intraday])
-    await agent.run("How did ACME trade today?", user="u1", thread=THREAD)
-    await agent.run("How many tool calls did you make?", user="u1", thread=THREAD)
-    asked = memory_service.named("context")[-1]
-    # a window sized to the model (its share, at most the cap): the whole earlier turn
-    assert asked.body[CONVERSATION_BUDGET] == 40_000
-    said = [m["role"] for m in model.requests[-1]["messages"] if m["role"] != "system"]
-    assert said[0] == "user" and said.count("tool") == 12 and said[-1] == "user"
-    assert EARLIER not in [t["function"]["name"] for t in model.requests[-1]["tools"]]
-
-
-async def test_by_default_the_window_is_the_services_and_no_record_is_offered(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    pages = [("intraday", {"symbol": "ACME", "page": n}) for n in range(12)]
-    model = ScriptedChat([*pages, "ACME traded 120 to 126.", "I do not know."])
+    model = ScriptedChat([*pages, "ACME traded 120 to 126.", "Thanks."])
     agent = arm(
         memory_harness.wrap(ReAct(SYSTEM, model, context_window=128_000), id="tape"), [intraday]
     )
     await agent.run("How did ACME trade today?", user="u1", thread=THREAD)
-    await agent.run("How many tool calls did you make?", user="u1", thread=THREAD)
-    assert all(CONVERSATION_BUDGET not in c.body for c in memory_service.named("context"))
-    # the service's own window: the newest turn whole even past its budget (over_budget)
+    await agent.run("Thanks!", user="u1", thread=THREAD)
+    # the window as the service cuts it: the newest turn whole, its 12 calls with it
+    assert all(set(c.body) <= CONTEXT_FIELDS for c in memory_service.named("context"))
     said = [m["role"] for m in model.requests[-1]["messages"] if m["role"] != "system"]
     assert said.count("tool") == 12
-    assert EARLIER not in [t["function"]["name"] for t in model.requests[-1]["tools"]]
+    # the record is fetched only when asked: not offered before there is an answer
+    offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
+    assert EARLIER not in offered[0] and EARLIER in offered[-1]
 
 
-async def test_in_the_lookup_arm_a_long_turns_record_counts_every_call(
+async def test_without_the_lookup_nothing_is_offered(harness: Harness) -> None:
+    model = ScriptedChat(["One.", "Two."])
+    with without_lookup():
+        agent = arm(harness.wrap(ReAct(SYSTEM, model), id="stock"), [stock_quote])
+    await agent.run("First?", user="u1", thread=THREAD)
+    await agent.run("Second?", user="u1", thread=THREAD)
+    assert [t["function"]["name"] for t in model.requests[-1]["tools"]] == [TOOL]
+
+
+async def test_a_long_turns_record_counts_every_call(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     pages = [("intraday", {"symbol": "ACME", "page": n}) for n in range(12)]
     model = ScriptedChat([*pages, "ACME traded 120 to 126.", (EARLIER, {}), "12 steps."])
-    with measured("lookup"):
-        target = ReAct(SYSTEM, model, context_window=128_000)
-        agent = arm(memory_harness.wrap(target, id="tape"), [intraday])
+    target = ReAct(SYSTEM, model, context_window=128_000)
+    agent = arm(memory_harness.wrap(target, id="tape"), [intraday])
     await agent.run("How did ACME trade today?", user="u1", thread=THREAD)
     await agent.run("How many tool calls did you make?", user="u1", thread=THREAD)
-    assert all(CONVERSATION_BUDGET not in c.body for c in memory_service.named("context"))
     [seen] = tool_results(model.requests[-1])[-1:]
     assert "What I did (12 step(s)):" in seen and "12. One page of the day's trades" in seen
     assert seen.count("Exchange tape") == 13  # each step, and the one source once
     assert "Limits: it rests on a single source." in seen
-
-
-async def test_an_older_memory_service_is_asked_for_its_own_window_from_then_on(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    memory_service.sized_windows = False
-    model = ScriptedChat([(TOOL, {"symbol": "ACME"}), "123.45", "Again: 123.45."])
-    with measured("sized", share=0.25, cap=8000):
-        target = ReAct(SYSTEM, model, context_window=16_000)
-        agent = arm(memory_harness.wrap(target, id="stock"), [stock_quote])
-    await agent.run("ACME?", user="u1", thread=THREAD)
-    await agent.run("Again?", user="u1", thread=THREAD)
-    asked = memory_service.named("context")
-    # the first ask was refused for the field, then asked as before, and so was the next turn
-    assert [CONVERSATION_BUDGET in c.body for c in asked] == [True, False, False]
-    assert memory_harness.memory is not None and not memory_harness.memory.sized_windows
-    roles = [m["role"] for m in model.requests[-1]["messages"] if m["role"] != "system"]
-    assert roles == ["user", "assistant", "tool", "assistant", "user"]
-
-
-async def test_a_context_refused_for_another_reason_is_no_context_and_no_downgrade(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    memory_service.failures["context"] = 422
-    model = ScriptedChat(["Without memory."])
-    with measured("sized", share=0.25, cap=8000):
-        agent = memory_harness.wrap(ReAct(SYSTEM, model, context_window=16_000), id="stock")
-    result = await agent.run("ACME?", user="u1", thread=THREAD)
-    assert result.status is RunStatus.SUCCESS
-    assert memory_harness.memory is not None and memory_harness.memory.sized_windows
 
 
 async def test_insufficient_memory_lets_the_model_use_its_own_earlier_calls(

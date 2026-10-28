@@ -62,7 +62,7 @@ async def test_each_arm_is_scored_against_the_earlier_runs_record() -> None:
         )  # fmt: skip
     assert report["audience"] == "client" and report["tier"] == "large"
     arms = report["arms"]
-    assert set(arms) == {"main", "sized", "lookup"}
+    assert set(arms) == {"main", "lookup"}
     looked = arms["lookup"]["explain"]
     assert looked["looked_up"]["mean"] == 1.0 and looked["forbidden_items"] == 0
     assert (
@@ -123,10 +123,8 @@ def test_the_checks_read_the_record() -> None:
 def test_the_cli_takes_the_suite_and_its_arms(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    args = arguments(
-        ["--model", "m", "--suite", "explain", "--arms", "main,lookup", "--cap", "8000"]
-    )
-    assert args.suite == "explain" and args.arms == "main,lookup" and args.cap == 8000
+    args = arguments(["--model", "m", "--suite", "explain", "--arms", "main,lookup"])
+    assert args.suite == "explain" and args.arms == "main,lookup"
     seen: dict[str, Any] = {}
 
     async def bench(**kw: Any) -> dict[str, Any]:
@@ -136,7 +134,7 @@ def test_the_cli_takes_the_suite_and_its_arms(
     monkeypatch.setattr(explain, "bench", bench)
     out = tmp_path / "x"
     assert main(["--model", "m", "--suite", "explain", "--arms", "lookup", "--out", str(out)]) == 0
-    assert seen["arms"] == ["lookup"] and seen["share"] == explain.SHARE
+    assert seen["arms"] == ["lookup"] and seen["repeats"] == 3
     assert json.loads(out.with_suffix(".json").read_text())["model"] == "m"
 
 

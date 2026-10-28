@@ -8,7 +8,7 @@ the harness keeps, and each audience is shown only what it may see of it.
 - [What a run's record holds](#what-a-runs-record-holds)
 - [Sources: where a result came from](#sources-where-a-result-came-from)
 - [What each audience sees](#what-each-audience-sees)
-- [The two arms](#the-two-arms)
+- [Fetched only when the question needs it](#fetched-only-when-the-question-needs-it)
 - [The model's note about memory](#the-models-note-about-memory)
 - [Limits](#limits)
 
@@ -108,7 +108,7 @@ the run spent, and every memory it was shown with its owner and visibility.
 
 ### How the agent reads it
 
-In the [`lookup` arm](#the-two-arms) a run of a conversation is offered one more tool,
+A run of a conversation that already holds an answer is offered one more tool,
 `earlier_answers` (`back`: 1 for the latest answer before this question, 2 the one before):
 
 - read-only, and governed as a read (the catalog's word on it applies as on any tool);
@@ -119,46 +119,34 @@ In the [`lookup` arm](#the-two-arms) a run of a conversation is offered one more
 - what it returns is the view above; with no earlier answer, or no record of it, it says so —
   "I have no record of the steps behind that answer, so I do not know them."
 
-A run with no conversation (no `thread=`) is not offered it.
+A run with no conversation (no `thread=`), or the first of one, is not offered it.
 
-## The two arms
+## Fetched only when the question needs it
 
-A follow-up about an earlier answer needs that answer's calls and results. Two ways give them to
-the model, and each costs differently, so both are measured — against each other and against
-neither — and **neither is on until the measurements decide**. They exist only to be measured:
-the release keeps exactly one of them, whichever the data supports, and the other's code goes.
+The conversation window stays as lean as the memory service cuts it — whole turns, newest
+first, within its default budget (2,000 tokens), the newest turn whole even past it — and the
+earlier answer's record is read only when the model asks for it. Nothing forces the call, and
+nothing rule-based decides it: how often the model makes it when it should is measured, per
+model tier.
 
-| Arm | The conversation window | What a follow-up reads |
-|---|---|---|
-| neither (what an agent does) | the memory service's own: whole turns, newest first, within its default budget (2,000 tokens), the newest turn whole even past it | the window |
-| `sized` | asked at a share of the model's window, capped (`conversation_token_budget`, trellis-memory 0.6); a request over the model's window keeps the newer older turns that fit (LangChain's `trim_messages`: the last messages from a user's message on, so a call is never parted from its result, the leading instructions kept, the oldest kept message cut to fit) instead of none; older tool results cleared by `ContextEditingMiddleware` as always | the window |
-| `lookup` | the service's own, as neither | the window, and the record on demand (`earlier_answers`) |
+The benchmark's `explain` suite measures it (`python -m benchmark.cost --suite explain`,
+[evaluation.md](evaluation.md#follow-ups-about-an-earlier-answer---suite-explain)) against
+today's agent, never offered the record (`trellis.harness.explain.without_lookup()`, a
+measurement switch as `react.defaults_off` is, not an option of `h.wrap`):
 
-An arm is taken by agents wrapped (and `ReAct` graphs built) inside
-`trellis.harness.explain.measured(...)` — a measurement, as `react.defaults_on` is, not an option
-of `h.wrap`:
+- **never miss** — conversations whose first turn runs tools with distinctive sources (a short
+  result, a long one of about 10,000 characters, twelve pages of a tape: twelve calls) and whose
+  second asks each kind of question above, scored against the first run's actual record (the
+  source named, the step count, the time, the approvals, the user's own note; "I do not know"
+  where the record holds no answer), the end user's view and answer checked for every never-see
+  item;
+- **the hard guard** — ordinary follow-ups (controls): their tokens, cached share, model calls
+  and seconds per turn must not rise past today's agent's 95% interval;
+- **how often the lookup is called** when it should be, and wrongly on a control, per model
+  tier — reported as measured.
 
-```python
-from trellis.harness.explain import measured
-
-with measured("lookup"):
-    agent = h.wrap(ReAct("You answer stock questions.", "gpt-4o", tools=[stock_quote]), id="stock")
-```
-
-A memory service older than the `conversation_token_budget` field refuses it; the harness then
-asks for the window as before, from then on in that process (said once in the log).
-
-The benchmark's `explain` suite measures the three (`python -m benchmark.cost --suite explain`,
-[evaluation.md](evaluation.md#cost-benchmark)): conversations whose first turn runs tools with
-distinctive sources — a short result, a long one (about 10,000 characters), twelve pages of a
-tape (twelve calls) — and whose second asks each kind of question above, scored against the
-first run's actual record (the source named, the step count, the time, the approvals, the
-user's own note, "I do not know" where the record holds no answer), the end user's view and
-answer checked for every never-see item; and ordinary follow-ups as controls. Per arm it reports
-that accuracy, how often the record was looked up when it should have been (and, on a control,
-when it should not), and the tokens, cached share, model calls and seconds of every turn — what
-the controls must not raise. Run it with a service key (the end user) and with an admin key
-(`--admin`, `TRELLIS_ADMIN_API_KEY`, memory on).
+Run it with a service key (the end user) and with an admin key (`--admin`,
+`TRELLIS_ADMIN_API_KEY`, memory on).
 
 ## The model's note about memory
 

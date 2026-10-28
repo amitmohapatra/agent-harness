@@ -75,8 +75,6 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--arms", default=",".join(explain.ARMS), help="with --suite explain: the arms run"
     )
-    parser.add_argument("--share", type=float, default=explain.SHARE, help="the sized arm's share")
-    parser.add_argument("--cap", type=int, default=explain.CAP, help="the sized arm's cap")
     parser.add_argument(
         "--admin",
         action="store_true",
@@ -202,8 +200,6 @@ def main(argv: list[str] | None = None) -> int:
                 window=window,
                 arms=_list(args.arms),
                 repeats=args.repeats,
-                share=args.share,
-                cap=args.cap,
                 max_steps=args.max_steps,
                 memory=args.memory,
                 admin=args.admin,

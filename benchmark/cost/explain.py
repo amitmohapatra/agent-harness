@@ -1,11 +1,11 @@
 """The ``explain`` suite (``--suite explain``): follow-up questions about an earlier answer,
 scored against the earlier run's actual record, and ordinary follow-ups as controls — each
-conversation run in each arm of ``trellis.harness.explain`` and in neither:
+conversation run two ways:
 
-* ``main`` — neither arm: the memory service's own window (whole turns), no record offered;
-* ``sized`` — the window a share of the model's window, capped (``--share``, ``--cap``), fitted
-  by ``trim_messages``;
-* ``lookup`` — the service's own window, and the record read on demand (``earlier_answers``).
+* ``lookup`` — the agent as it is: the memory service's own window (whole turns), and the
+  record of an earlier answer read on demand (``earlier_answers``);
+* ``main`` — today's agent, the baseline: the same, never offered the record
+  (``trellis.harness.explain.without_lookup``).
 
 Each conversation is two turns. Turn 1 runs tools whose results name distinctive sources —
 one short result (one call), one long one (about 10,000 characters, one call) or twelve
@@ -22,10 +22,12 @@ a control — an ordinary follow-up (:data:`CONTROLS`). What is scored of turn 2
   ``lookup`` arm; should not be, for a control);
 
 and of every turn: input, output and cached tokens, the cached share, model calls and seconds —
-what the controls' must not raise against ``main``. The principal is the key's: a service key
-acts for a user, an admin key (``--admin``: ``TRELLIS_ADMIN_API_KEY``, memory on) for the
-administrator. The report gives each arm's figures per kind and per principal, with the model's
-tier (``automatic.model_tier``); no rule picks an arm — the data does, per tier if it must.
+what the controls' must not raise against ``main`` (the hard guard: beyond its 95% interval).
+The principal is the key's: a service key acts for a user, an admin key (``--admin``:
+``TRELLIS_ADMIN_API_KEY``, memory on) for the administrator. The report gives each arm's
+figures per kind and per principal, with the model's tier (``automatic.model_tier``): how often
+the model calls the lookup when it should, per tier, is reported as measured — nothing forces
+the call.
 """
 
 from __future__ import annotations
@@ -46,14 +48,11 @@ from benchmark.cost.variants import VARIANTS, Setup
 from trellis import Harness, Hooks, Settings, tool
 from trellis.contracts import ToolCall, ToolOutcome
 from trellis.harness.automatic import model_tier
-from trellis.harness.explain import EARLIER, Record, audience, measured, recorded
+from trellis.harness.explain import EARLIER, Record, audience, recorded, without_lookup
 from trellis.harness.tools.base import Citation
 
-#: The arms, by name: ``None`` is neither (``main``).
-ARMS: Final = ("main", "sized", "lookup")
-#: The sized arm's share of the model's window and its cap, unless ``--share``/``--cap`` say.
-SHARE: Final = 0.25
-CAP: Final = 16_000
+#: The arms: today's agent (``main``, never offered the record) and the agent as it is.
+ARMS: Final = ("main", "lookup")
 SYSTEM: Final = (
     "You answer questions about stock prices and trading with your tools. Say where an answer "
     "came from when asked."
@@ -252,16 +251,17 @@ def figures(meter: runner.Meter, seconds: float) -> dict[str, Any]:
     }
 
 
-def build(h: Harness, arm: str, setup: Setup, seen: Seen, *, share: float, cap: int) -> Any:
-    """The ``main`` variant's ``ReAct`` wrapped in ``arm`` (``main``: neither)."""
+def build(h: Harness, arm: str, setup: Setup, seen: Seen) -> Any:
+    """The ``main`` variant's ``ReAct`` wrapped as ``arm`` (``main``: never offered the
+    record)."""
 
     def wrapped() -> Any:
         target, options = VARIANTS["main"].build(setup)
         return h.wrap(target, id=f"bench-explain-{arm}", hooks=[seen], **options)
 
-    if arm == "main":
+    if arm == "lookup":
         return wrapped()
-    with measured("sized" if arm == "sized" else "lookup", share=share, cap=cap):
+    with without_lookup():
         return wrapped()
 
 
@@ -386,8 +386,6 @@ async def bench(
     window: int | None,
     arms: Sequence[str] = ARMS,
     repeats: int = 1,
-    share: float = SHARE,
-    cap: int = CAP,
     max_steps: int = 16,
     memory: bool = False,
     admin: bool = False,
@@ -408,7 +406,7 @@ async def bench(
         setup = Setup(system=SYSTEM, model=model, window=window, max_steps=max_steps, tools=TOOLS)
         for arm in arms:
             seen = Seen()
-            agent = build(h, arm, setup, seen, share=share, cap=cap)
+            agent = build(h, arm, setup, seen)
             who = await audience(agent)
             for n in range(repeats):
                 for first in firsts:
@@ -434,7 +432,6 @@ async def bench(
         "audience": who,
         "window": window,
         "arms": summary(conversations),
-        "sized": {"share": share, "cap": cap},
         "date": datetime.now(UTC).strftime("%Y-%m-%d"),
         "conversations": [
             {"arm": c.arm, "first": c.first.name, "kind": c.kind, "rows": c.rows}

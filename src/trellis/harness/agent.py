@@ -78,7 +78,7 @@ from trellis.harness.evals import (
     sample_of,
     sampled,
 )
-from trellis.harness.explain import Record, conversation_budget, earlier_tool, measuring
+from trellis.harness.explain import Record, answered_before, earlier_tool, offered
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
@@ -218,17 +218,11 @@ class Agent:
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
-        window = context_window(target)
         #: the pushed context's token budget: a share of the model's window when it is known
-        self.context_budget = context_budget(window)
-        #: the conversation window's budget, where memory keeps the conversation and the
-        #: framework replays it (``Window.MESSAGES``): the memory service's default (``None``),
-        #: or — the ``sized`` arm measured (``explain.measured``) — a share of the model's window,
-        #: capped
-        self.conversation_budget = conversation_budget(window)
-        #: whether its runs of a conversation read their earlier answers' records on demand
-        #: (``explain.EARLIER``: the ``lookup`` arm measured)
-        self.looks_up = measuring() == "lookup"
+        self.context_budget = context_budget(context_window(target))
+        #: whether its runs of a conversation may read their earlier answers' records
+        #: (``explain.EARLIER``; not inside ``explain.without_lookup``, a measurement)
+        self.looks_up = offered()
         #: the tools the harness runs for the agent: what its builder declares
         #: (``ReAct(tools=, subagents=)``); besides them every run has the MCP tools the
         #: virtual key allows and the memory tools (``tools_for``)
@@ -784,8 +778,8 @@ class Agent:
         tools — none, with a warning, when the memory service cannot list them — less the
         tools of what the run is without (``without=``: its MCP tools...); a ``delegate`` job's
         run (``Runtime.delegated``) has only those that read. A run of a conversation (its own
-        thread, not a child run's) of an agent in the ``lookup`` arm also has the record of its
-        earlier answers (``explain.EARLIER``)."""
+        thread, not a child run's) that has an earlier answer also has that answer's record
+        (``explain.EARLIER``)."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -799,7 +793,7 @@ class Agent:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
         conversation = runtime.thread not in (None, runtime.run_id)
         top = runtime.identity.parent_run is None and not self.adapter.fixed_tools
-        if self.looks_up and conversation and top:
+        if self.looks_up and conversation and top and await answered_before(runtime):
             tools.append(earlier_tool())
         return [
             t
@@ -871,7 +865,6 @@ class Agent:
                     hints=hints,
                     budget=self.context_budget,
                     document_ids=runtime.document_ids,
-                    conversation=self.conversation_budget,
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
