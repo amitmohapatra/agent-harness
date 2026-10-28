@@ -79,13 +79,20 @@ CANONICAL = [
 EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
 
 
+def written(path: Path, data: dict[str, Any]) -> None:
+    """Replaces ``path`` whole, so a reader (the test, the next agent) never sees half of it."""
+    part = path.with_suffix(".part")
+    part.write_text(json.dumps(data))
+    os.replace(part, path)
+
+
 def record(key: str, value: Any) -> None:
     if not RECORD:
         return
     path = Path(RECORD)
     data = json.loads(path.read_text()) if path.exists() else {}
     data.setdefault(key, []).append(value)
-    path.write_text(json.dumps(data))
+    written(path, data)
 
 
 def session_dir(session_id: str) -> Path:
@@ -100,7 +107,7 @@ def state(session_id: str) -> dict[str, Any]:
 def save(session_id: str, data: dict[str, Any]) -> None:
     path = session_dir(session_id) / "state.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data))
+    written(path, data)
 
 
 def logged_usage(session_id: str, agent: str, usage: dict[str, Any]) -> None:
