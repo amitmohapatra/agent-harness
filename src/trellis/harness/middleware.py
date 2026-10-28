@@ -1466,7 +1466,7 @@ def _recent(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         return _latest(request)
     if len(kept) == len(rest):
         return request
-    return request.override(messages=[*lead, *kept])
+    return request.override(messages=cast("list[AnyMessage]", [*lead, *kept]))
 
 
 def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
