@@ -80,12 +80,12 @@ async def test_structured_output_is_the_native_response_format(harness: Harness)
     assert record is not None and record.output == {"sku": "a", "units": 7}
 
 
-async def test_at_the_step_limit_a_structured_answer_is_the_only_tool(harness: Harness) -> None:
+async def test_a_structured_answer_at_the_last_step_is_the_runs(harness: Harness) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), ("Answer", {"sku": "a", "units": 7})])
-    target = ReAct(system_prompt="s", model=model, response_format=Answer, max_steps=1)
+    target = ReAct(system_prompt="s", model=model, response_format=Answer, max_steps=2)
     result = await arm(harness.wrap(target, id="last"), [stock]).run("a?", user="u1")
     assert result.answer == Answer(sku="a", units=7)
-    assert names(model.requests[-1]) == ["Answer"]  # its own tool, no other
+    assert len(model.requests) == 2
 
 
 async def test_an_unknown_tool_is_told_to_the_model(harness: Harness) -> None:
@@ -95,16 +95,16 @@ async def test_an_unknown_tool_is_told_to_the_model(harness: Harness) -> None:
     assert "nope is not a valid tool" in model.requests[1]["messages"][-1]["content"]
 
 
-async def test_a_loop_that_never_answers_is_stopped(harness: Harness) -> None:
-    # asked once more without tools at the step limit, the model still calls a tool
+async def test_a_loop_that_never_answers_ends_at_the_step_limit(harness: Harness) -> None:
     model = ScriptedChat([*[("stock", {"sku": sku}) for sku in "abc"], ("stock", {"sku": "d"})])
     agent = arm(
         harness.wrap(ReAct(system_prompt="s", model=model, max_steps=3), id="loop"), [stock]
     )
     result = await agent.run("x", user="u1")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.message == "stopped after 3 model calls without an answer"
-    assert model.requests[-1]["tool_choice"] == "none"
+    # LangChain's ModelCallLimitMiddleware: the run ends with its message, not an error
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "Model call limits exceeded: thread limit (3/3)"
+    assert len(model.requests) == 3
 
 
 @respx.mock

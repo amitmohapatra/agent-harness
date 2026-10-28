@@ -122,12 +122,12 @@ async def test_middleware_on_create_agent_gives_its_runs_the_harness_tools(
     harness: Harness,
 ) -> None:
     model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "done"])
-    graph = create_agent(model, middleware=middleware(max_steps=1), checkpointer=RunCheckpointer())
+    graph = create_agent(model, middleware=middleware(max_steps=2), checkpointer=RunCheckpointer())
     agent = arm(harness.wrap(graph, id="plain"), [stock])
     result = await agent.run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
     assert "stock" in names(model, 0)  # the run's tool, offered per call
-    assert model.requests[1].get("tool_choice") == "none"  # one step, then the answer
+    assert len(model.requests) == 2
 
 
 async def test_middleware_on_create_deep_agent_runs_and_resumes_in_place(
