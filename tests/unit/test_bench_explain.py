@@ -16,9 +16,6 @@ from tests.support.models import Script, ScriptedChat
 from trellis import Harness, Settings
 from trellis.harness.explain import EARLIER, Record, Step
 
-pytestmark = pytest.mark.asyncio
-
-
 #: Each turn 1's calls.
 FIRST_CALLS: dict[str, Any] = {
     explain.FIRSTS[0].question: ("stock_quote", {"symbol": "ACME"}),
@@ -55,6 +52,7 @@ def reader() -> ScriptedChat:
     return ScriptedChat(script=Reader([]))
 
 
+@pytest.mark.asyncio
 async def test_each_arm_is_scored_against_the_earlier_runs_record() -> None:
     kinds = [k for k in explain.KINDS if k.name in ("citation", "how_many", "unknown")]
     async with Harness(config=Settings()) as h:
@@ -79,6 +77,7 @@ async def test_each_arm_is_scored_against_the_earlier_runs_record() -> None:
     assert "| lookup | 0.67 ± 0.38 | 1.00 ± 0.00 | 0 | 0.00" in explain.markdown(report)
 
 
+@pytest.mark.asyncio
 async def test_as_the_administrator_the_record_is_shown_whole_and_not_checked_for_leaks() -> None:
     fake = FakeMemoryService(role="admin")
     kinds = [k for k in explain.KINDS if k.name == "which_tools"]

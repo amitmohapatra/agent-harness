@@ -40,6 +40,11 @@ MESSAGE_OVERHEAD_TOKENS: Final = 4
 #: The memory service's committed OpenAPI document: every request the harness sends and every
 #: answer this fake gives is checked against it (``FakeMemoryService.violations``).
 CONTRACT: Final = OpenAPI.load(MEMORY_OPENAPI)
+#: Whether the service flags a newest turn over the window's budget (``conversation.over_budget``,
+#: trellis-memory 0.6): the fake answers as the service its contract describes does.
+OVER_BUDGET: Final = "over_budget" in CONTRACT.document["components"]["schemas"].get(
+    "ConversationBody", {}
+).get("properties", {})
 #: Every fake made, so a test's fakes can be checked when it ends (``tests/conftest.py``).
 MADE: list[FakeMemoryService] = []
 
@@ -302,7 +307,7 @@ class FakeMemoryService:
             window, over = self._window(call.scope.get("thread_id"), budget)
             if window:
                 answer["conversation"] = {"thread_id": call.scope["thread_id"], "messages": window}
-                if over:
+                if over and OVER_BUDGET:
                     answer["conversation"]["over_budget"] = True
         return answer
 
