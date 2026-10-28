@@ -26,12 +26,15 @@ import hashlib
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 
 from benchmark.cost import reasoning
 from trellis.harness.runtime import current
+
+if TYPE_CHECKING:
+    from trellis.harness.automatic import Planning
 
 Handler = Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]]
 
@@ -180,7 +183,7 @@ def think_tool() -> Any:
     return tool(_think, name="think", side_effects="read")
 
 
-def plan_from_start(window: int | None) -> Any:
+def plan_from_start(window: int | None) -> Planning:
     """The harness's own planning (``automatic.Planning``: LangChain's ``TodoListMiddleware``)
     with only its trigger changed: ``write_todos`` offered from the first call, whatever the
     task or the window (today: a long task on a window of 32k or more). Named apart, so the
