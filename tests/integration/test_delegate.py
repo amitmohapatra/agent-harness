@@ -17,7 +17,7 @@ import pytest
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.models import Script, ScriptedChat
-from trellis import Budget, Harness, ReAct, Runtime, Settings, tool
+from trellis import Budget, Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import RunEvent, RunEventType, RunRecord, RunStatus
 from trellis.harness import admission, delegate
 from trellis.harness.admission import Admission
@@ -604,3 +604,45 @@ async def test_cancelling_the_run_cancels_its_queued_jobs() -> None:
         await agent.cancel(run_id)
         assert (await task).status is RunStatus.CANCELLED
         assert {k.status for k in await children(h, run_id)} == {RunStatus.CANCELLED}
+
+
+@tool(side_effects="read")
+async def confirm_year(company: str) -> str:
+    """Ask a person which fiscal year to report for a company.
+
+    Args:
+        company: The company.
+    """
+    runtime = current()
+    assert runtime is not None
+    year = await runtime.ask(f"Which year for {company}?")
+    done.append(f"year {company} {year}")
+    return f"{company}: {year}"
+
+
+async def test_a_helper_paused_mid_job_resumes_without_running_its_calls_again(
+    harness: Harness,
+) -> None:
+    """The step-tagged journal: a helper (a ReAct graph of its own) that looked up, then asked
+    a person, continues from its checkpoint when the run resumes — its lookup is not made
+    again, nor is the other helper, which had finished."""
+
+    def asks(part: str, made: int) -> Any:
+        if made == 0:
+            return ("lookup", {"topic": part})
+        if made == 1 and part == "Apple":
+            return ("confirm_year", {"company": part})
+        return f"found {part}"
+
+    script = Routed([("delegate", jobs("Apple", "Google")), "merged"], asks)
+    agent = lead(harness, script, tools=[lookup, confirm_year])
+    paused = await agent.run(WIDE, user="ada")
+    assert paused.status is RunStatus.PAUSED, paused.error
+    assert paused.interrupt is not None
+    assert sorted(done) == ["lookup Apple", "lookup Google"]
+    result = await agent.resume(
+        paused.interrupt.interrupt_id, "answer", answer="2024", reviewer="ada"
+    )
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert sorted(done) == ["lookup Apple", "lookup Google", "year Apple 2024"]
+    assert [j["status"] for j in merged(script)["jobs"]] == ["success", "success"]
