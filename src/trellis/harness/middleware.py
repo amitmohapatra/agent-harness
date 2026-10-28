@@ -7,6 +7,9 @@ any ``create_agent`` or Deep Agents graph may take any of them:
                          checkpointer=RunCheckpointer())
     agent = h.wrap(graph, id="support")
 
+(A graph built with ``middleware()`` — :class:`HarnessTools` among it — and no checkpointer is
+run with a :class:`RunCheckpointer` without being given one: ``adapters.langgraph.checkpointing``.)
+
 * :class:`HarnessTools` — the run's harness tools offered per model call (the tool hints'
   narrowing, the memory tools, what ``tool_search`` found), sorted by name so the cached prompt
   holds; every call goes through the bridge (``tools.bridge``: governance, journal, record),
@@ -113,6 +116,7 @@ from langgraph.types import Command
 
 from trellis.contracts import (
     ConfigurationError,
+    HarnessError,
     ModelError,
     ToolError,
     ToolOutcome,
@@ -562,7 +566,7 @@ async def _turn(runtime: Runtime, step: _Step, call_id: str) -> AsyncIterator[No
         step.stopped = exc
         raise
     else:
-        runtime.replay.record_call(_ran(step.key, call_id), True)
+        runtime.replay.record_call(_ran(step.key, call_id), True, stepped=True)
         step.finished.add(call_id)
     finally:
         async with step.turn:
@@ -1880,6 +1884,14 @@ def _cut(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
 
 
 # --------------------------------------------------------------------------- checkpoints
+class CheckpointUnreadable(HarnessError):
+    """A graph checkpoint :class:`RunCheckpointer` kept that cannot be read back (damaged, or
+    written with types this release cannot load): the run fails with it, and is not run again
+    — starting the graph over would make again the calls its checkpoint had moved past."""
+
+    code = "CHECKPOINT_UNREADABLE"
+
+
 #: Outside a run, how many threads :class:`RunCheckpointer` keeps (the most recently used).
 THREADS_KEPT: Final = 10_000
 
@@ -1898,7 +1910,12 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     latest checkpoint only, those writes would be gone: each such channel keeps its last
     snapshot and the writes applied since, beside the checkpoint (``deltas``), and they are
     what the history returns — a new snapshot starts them again, so they never hold more than
-    the channel's own updates since its last one."""
+    the channel's own updates since its last one.
+
+    As the root graph's checkpoint moves past a step, the journal's records of that step's
+    calls go (``Replay.passed``): the graph never makes them again, so a long run's journal is
+    its latest checkpoint and the records of the step under way. A checkpoint that cannot be
+    read back fails the run (:class:`CheckpointUnreadable`)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1922,7 +1939,14 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         return [kind, base64.b64encode(data).decode()]
 
     def _loaded(self, dumped: list[str]) -> Any:
-        return self.serde.loads_typed((dumped[0], base64.b64decode(dumped[1])))
+        try:
+            return self.serde.loads_typed((dumped[0], base64.b64decode(dumped[1])))
+        except Exception as exc:
+            raise CheckpointUnreadable(
+                f"the graph's checkpoint cannot be read back ({type(exc).__name__}: {exc}): "
+                "the run stops rather than start the graph over, which would make its calls "
+                "again; start a new run"
+            ) from exc
 
     # ------------------------------------------------------------------ the saver
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
@@ -1990,6 +2014,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
             "writes": [w for w in kept if w[0] >= checkpoint["id"]],
             "deltas": self._deltas(before.get("deltas") or {}, checkpoint, metadata, applied),
         }
+        runtime = current()
+        if not ns and runtime is not None and runtime.run_id == thread_id:
+            runtime.replay.passed(parent)  # the steps it follows are done: not made again
         return _config(thread_id, ns, checkpoint["id"])
 
     def _deltas(
@@ -2131,6 +2158,7 @@ def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfi
 
 __all__ = [
     "AnswerCheck",
+    "CheckpointUnreadable",
     "ContextTooLarge",
     "FitWindow",
     "HarnessTools",

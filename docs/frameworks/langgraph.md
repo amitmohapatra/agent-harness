@@ -65,13 +65,15 @@ harness sets `configurable.thread_id` itself (the run's thread, else the run id)
 
 ## middleware(): ReAct's harness part on your graph
 
-`create_agent(model, tools, middleware=trellis.middleware(...),
-checkpointer=RunCheckpointer())` gives a `create_agent` graph everything `ReAct` adds on top of
+`create_agent(model, tools, middleware=trellis.middleware(...))` gives a `create_agent` graph
+everything `ReAct` adds on top of
 Deep Agents: the run's tools per model call narrowed per turn (the memory and gateway MCP tools
 among them), the graph's own tools governed, `max_steps` then a final answer, the stall guard,
 the hooks and spans, `call_timeout`, the budget's stop, planning on a long task, older results
-cleared and read back with a `context_window`, the tool guidance and the answer check
-([react.md](react.md#middleware-on-your-own-graph)). A `create_agent` graph wrapped without it
+cleared and read back with a `context_window`, the tool guidance and the answer check, and its
+checkpoint in the run: compiled without a checkpointer, it is run with `RunCheckpointer()`, so a
+resume after a pause or a crash continues where it stopped
+([react.md](react.md#middleware-on-your-own-graph), [runs.md](../runs.md#continuing-where-a-run-stopped)). A `create_agent` graph wrapped without it
 is still narrowed and governed, said once at `h.wrap`.
 
 ## What is automatic
@@ -142,7 +144,10 @@ input, as without a checkpointer (the model is asked again; the calls already ma
 approved one runs once). A graph's own `interrupt()` and the middleware's pause can only be
 answered by the checkpointer: resumed where it does not hold them, the run fails saying so. When
 those may be resumed in another process, give every process a shared, durable checkpointer
-(`langgraph-checkpoint-postgres`'s `AsyncPostgresSaver`).
+(`langgraph-checkpoint-postgres`'s `AsyncPostgresSaver`). A worker that dies leaves such a
+checkpointer the run's latest checkpoint (marked `trellis_run_id`), and the next worker
+continues from it ([runs.md](../runs.md#continuing-where-a-run-stopped)). A graph built with
+`middleware()` and no checkpointer keeps its checkpoint in the run: every process holds it.
 
 ## The graph's own run options
 

@@ -10,11 +10,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from langchain.agents import create_agent
+from langchain_core.tools import tool as lc_tool
 
 from tests.support.arm import arm
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.models import ScriptedChat
-from trellis import Harness, ReAct, Runtime, Settings, current, tool
+from trellis import Harness, ReAct, Runtime, Settings, current, middleware, tool
 from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
+from trellis.harness import runtime as runtime_module
+from trellis.harness.events import PREVIEW_CHARS
 from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES, content_key
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job, Lease, LeaseLostError, PayloadTooLargeError
@@ -294,6 +299,74 @@ async def test_a_journal_whose_artifact_is_gone_leaves_the_run_waiting(harness: 
         await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
     record = await store.get(paused.run_id)
     assert record is not None and record.status is RunStatus.PAUSED
+
+
+# --------------------------------------------------------------------------- a long run
+async def test_a_long_runs_journal_keeps_the_step_under_way_not_every_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run of many steps, saved at every checkpoint: what the journal adds to the graph's
+    checkpoint stays the size of one step — the records of the steps the checkpoint moved
+    past are dropped, each output on the trajectory is its preview — and a crash late in the
+    run continues from the step under way, every write done once."""
+    monkeypatch.setattr(runtime_module, "PROGRESS_SECONDS", 0.0)
+    steps, crash_at = 80, 60
+    crashes = [Crash()]
+    logged: list[int] = []
+    saved: list[dict[str, Any]] = []
+
+    @lc_tool
+    def log_line(n: int) -> str:
+        """Log a line."""
+        logged.append(n)
+        return f"{n}:" + "x" * (PREVIEW_CHARS + 500)
+
+    log_line.metadata = {"side_effects": "write"}
+
+    @lc_tool
+    def lc_boom() -> str:
+        """The worker dies here, once."""
+        if crashes:
+            raise crashes.pop()
+        return "fine"
+
+    class Kept(LocalRuns):
+        async def heartbeat(
+            self,
+            run_id: str,
+            worker_id: str,
+            *,
+            checkpoint: dict[str, Any] | None = None,
+            **kw: Any,
+        ) -> Lease:
+            if checkpoint is not None:
+                saved.append(checkpoint)
+            return await super().heartbeat(run_id, worker_id, checkpoint=checkpoint, **kw)
+
+    turns: list[Any] = [("log_line", {"n": n}) for n in range(steps)]
+    turns.insert(crash_at, ("lc_boom", {}))
+    model = ScriptedChatModel(turns=[*turns, "logged"])
+    graph = create_agent(model, tools=[log_line, lc_boom], middleware=middleware(max_steps=200))
+    store = Kept()
+    async with Harness(config=Settings(), runs=store) as h:
+        agent = h.wrap(graph, id="logger")
+        handle = await agent.start("log every line", user="u")
+        await crash_once(store, agent, handle)
+        assert await h.worker([agent]).run_once()
+        done = await handle.result(wait=30)
+    assert done.status is RunStatus.SUCCESS and done.answer == "logged", done.error
+    assert logged == list(range(steps))  # each write once, across the crash
+    assert len(model.seen) == steps + 2  # nothing asked again after the crash
+    assert all(set(c) != {JOURNAL_REF} for c in saved)
+    # the replay records: one step's at most, at every save
+    assert max(len(c["calls"]) for c in saved) <= 2
+    assert max(len(c["steps"]) for c in saved) <= 2
+    assert max(len(c.get("started", {})) for c in saved) <= 2
+    last = saved[-1]
+    outputs = [outcome["output"] for _, outcome in last["trajectory"]]
+    assert len(outputs) == steps + 1 and all(len(o) <= PREVIEW_CHARS + 1 for o in outputs)
+    added = {k: v for k, v in last.items() if k not in ("graph", "trajectory")}
+    assert len(json.dumps(added)) < 2_000  # the same at step 1 and at step 80
 
 
 # --------------------------------------------------------------------------- a call in flight

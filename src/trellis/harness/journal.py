@@ -27,7 +27,17 @@ result the model read a preview of is kept whole here (``results``), for ``read_
 
 Every call that ran is also on the run's trajectory (``trajectory``), in order: the calls and
 outcomes its tool records are made of, kept across its attempts for the evaluators
-(``EvalCase.trajectory``).
+(``EvalCase.trajectory``), each output as the event stream previews it (``events.preview``).
+
+A graph that keeps a checkpoint (``middleware.RunCheckpointer``, or a checkpointer of its own)
+continues from it rather than from its input, so an earlier step's records are not what a call
+of a later step repeats: each tool call's record, and each answer a call read, is marked with
+the step it was made in — the graph checkpoint the step started from (``steps``,
+:attr:`Replay.where`). An attempt passes over the records of the steps before the checkpoint it
+resumed from (:attr:`Replay.resumed`), so a later step's identical call runs, and is asked about,
+as a new one; and as a graph that checkpoints into its run moves past a step, that step's
+records are dropped (:meth:`Replay.passed`): its journal holds the graph's latest checkpoint and
+the records of the step under way, however long the run.
 
 Calls made at once (a framework running several tools together) take their occurrences in the
 order they asked: identical calls run one after another (:meth:`Replay.exclusive`), so each has
@@ -40,6 +50,7 @@ import asyncio
 import hashlib
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,6 +64,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
+from trellis.harness.events import preview
 
 if TYPE_CHECKING:
     from trellis.harness.runs import RunArtifacts
@@ -126,6 +138,10 @@ class Journal(BaseModel):
     #: the graph's latest checkpoint and its pending writes, by namespace, when the graph keeps
     #: them in the run (``middleware.RunCheckpointer``): a resume continues where it stopped
     graph: dict[str, Any] | None = None
+    #: the step each tool call record (``"c:<key>"``) and each answer a call read
+    #: (``"a:<key>"``) was made in, in their order: the graph checkpoint the step started from
+    #: (``None``: not made in a checkpointed graph's step)
+    steps: dict[str, list[str | None]] = Field(default_factory=dict)
     #: what the run has spent so far, its sub-agents' runs included (``budget.py``): tokens,
     #: cached tokens, cost, model calls, tool calls — a resume goes on from it
     spent: dict[str, float] = Field(default_factory=dict)
@@ -205,12 +221,18 @@ class Journal(BaseModel):
 class Replay:
     """One attempt's cursor over a journal: what the n-th occurrence of a key already got."""
 
-    __slots__ = ("_seen", "_turns", "journal")
+    __slots__ = ("_seen", "_turns", "journal", "resumed", "where")
 
     def __init__(self, journal: Journal) -> None:
         self.journal = journal
         self._seen: dict[str, int] = defaultdict(int)
         self._turns: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        #: the step a call is being made in now (its graph's checkpoint id), for a graph that
+        #: keeps a checkpoint (``adapters.langgraph``); ``None`` elsewhere
+        self.where: Callable[[], str | None] | None = None
+        #: the checkpoint the attempt's graph resumed from: the records of the steps before it
+        #: are passed over (:meth:`_index`)
+        self.resumed: str | None = None
 
     def exclusive(self, key: str) -> asyncio.Lock:
         """What one call of ``key`` holds from its replay to its record: identical calls made
@@ -219,16 +241,17 @@ class Replay:
 
     def answer(self, key: str) -> InterruptResolution | None:
         """The recorded answer for this occurrence of ``key``, advancing the cursor."""
-        index = self._seen[f"a:{key}"]
+        index = self._index("a", key, len(self.journal.answers.get(key, ())))
         recorded = self.journal.answers.get(key, [])
         if index < len(recorded):
             self._seen[f"a:{key}"] = index + 1
+            self._mark("a", key, index, self._here())
             return InterruptResolution.model_validate(recorded[index])
         return None
 
     def occurrence(self, key: str) -> int:
         """Which occurrence of ``key`` the next call is (0 for the first)."""
-        return self._seen[f"c:{key}"]
+        return self._index("c", key, len(self.journal.calls.get(key, ())))
 
     def interrupted(self, key: str) -> bool:
         """Whether this occurrence of ``key`` started in an earlier attempt and never ended."""
@@ -248,23 +271,96 @@ class Replay:
 
     def call(self, key: str) -> tuple[bool, Any]:
         """``(True, output)`` when this occurrence of the call already ran."""
-        index = self._seen[f"c:{key}"]
+        index = self.occurrence(key)
         recorded = self.journal.calls.get(key, [])
         if index >= len(recorded):
             return False, None
         self._seen[f"c:{key}"] = index + 1
+        tags = self.journal.steps.get(f"c:{key}")
+        if tags is not None and index < len(tags) and tags[index] is not None:
+            self._mark("c", key, index, self._here())  # a step's record: now this step's
         return True, recorded[index]
 
-    def record_call(self, key: str, output: Any, *, tool: str | None = None) -> None:
+    def record_call(
+        self, key: str, output: Any, *, tool: str | None = None, stepped: bool = False
+    ) -> None:
         """Record what this occurrence of ``key`` produced: a tool's output (``tool`` names
-        it, and it stays offered after a pause), or a model step of a loop the harness runs."""
-        self.journal.calls.setdefault(key, []).append(output)
-        self._seen[f"c:{key}"] += 1
+        it, and it stays offered after a pause), or a model step of a loop the harness runs.
+        ``stepped``: a record of the step it is made in (a tool call's) — dropped once the
+        run's graph has moved past that step (:meth:`passed`); else it is the run's (a stored
+        prompt's version, pinned for the run)."""
+        recorded = self.journal.calls.setdefault(key, [])
+        index = self.occurrence(key)
+        recorded.append(output)
+        self._seen[f"c:{key}"] = index + 1
+        if stepped:
+            self._mark("c", key, len(recorded) - 1, self._here())
         if tool is not None and tool not in self.journal.used:
             self.journal.used.append(tool)
 
     def record_step(self, call: ToolCall, outcome: ToolOutcome) -> None:
         """A call that ran, and its outcome, on the run's trajectory (the call without the
-        run's task, which every call repeats)."""
-        step = (call.model_copy(update={"task": None}), outcome.model_copy())
-        self.journal.trajectory.append(step)
+        run's task, which every call repeats; the outcome's output as the stream previews
+        it)."""
+        kept = outcome.model_copy(update={"output": preview(outcome.output)})
+        self.journal.trajectory.append((call.model_copy(update={"task": None}), kept))
+
+    def passed(self, step: str | None) -> None:
+        """The run's graph moved past ``step`` (a checkpoint id) and the steps before it: their
+        records are dropped — the graph does not make their calls again — and the cursor and
+        the calls started move back by as many."""
+        if step is None:
+            return
+        steps = self.journal.steps
+        for marked in list(steps):
+            kind, key = marked.split(":", 1)
+            tags = steps[marked]
+            gone = next((n for n, tag in enumerate(tags) if tag is None or tag > step), len(tags))
+            if not gone:
+                continue
+            kept = self.journal.calls if kind == "c" else self.journal.answers
+            entries = kept.get(key, [])
+            del entries[:gone], tags[:gone]
+            if not entries:
+                kept.pop(key, None)
+            if not tags:
+                del steps[marked]
+            self._seen[marked] = max(0, self._seen[marked] - gone)
+            if kind == "c" and key in self.journal.started:
+                left = self.journal.started[key] - gone
+                if left > 0:
+                    self.journal.started[key] = left
+                else:
+                    del self.journal.started[key]
+
+    def _here(self) -> str | None:
+        return None if self.where is None else self.where()
+
+    def _index(self, kind: str, key: str, length: int) -> int:
+        """The cursor of ``key``, past the records of a step before the one the graph resumed
+        from (made in an earlier attempt: the graph does not make that call again, so this one
+        is a later step's)."""
+        seen = f"{kind}:{key}"
+        index = self._seen[seen]
+        tags = self.journal.steps.get(seen)
+        if tags is None or self.resumed is None:
+            return index
+        here = self._here()
+        while (
+            index < min(length, len(tags))
+            and (tag := tags[index]) is not None
+            and here is not None
+            and tag != here
+            and tag <= self.resumed
+        ):
+            index += 1
+        self._seen[seen] = index
+        return index
+
+    def _mark(self, kind: str, key: str, index: int, step: str | None) -> None:
+        """Mark the ``index``-th record of ``key`` as made in ``step`` (none: left as it is)."""
+        if step is None:
+            return
+        tags = self.journal.steps.setdefault(f"{kind}:{key}", [])
+        tags.extend([None] * (index + 1 - len(tags)))
+        tags[index] = step

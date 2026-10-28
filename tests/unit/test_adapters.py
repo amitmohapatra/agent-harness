@@ -455,3 +455,45 @@ def test_framework_options_merge_mapping_by_mapping() -> None:
     assert merged({"k": {"a": 1}}, {"k": None}) == {"k": None}  # a value over a mapping wins
     assert merged({"k": 1}, {"k": {"a": 1}}) == {"k": {"a": 1}}
     assert base["configurable"] == {"shop": "north", "nested": {"a": 1}}  # unchanged
+
+
+def test_a_call_is_made_in_the_step_its_graphs_task_started_from() -> None:
+    from langchain_core.runnables import RunnableLambda
+
+    from trellis.harness.adapters.langgraph import CHECKPOINT_MAP, _stepping
+
+    where = _stepping("run-1")
+    assert where() is None  # not inside a graph's step
+
+    def config(thread: str, steps: dict[str, Any] | None) -> Any:
+        configurable: dict[str, Any] = {"thread_id": thread}
+        if steps is not None:
+            configurable[CHECKPOINT_MAP] = steps
+        return {"configurable": configurable}
+
+    step = RunnableLambda(lambda _: where())
+    assert step.invoke(None, config("run-1", {"": "cp-3", "tools:x": "cp-9"})) == "cp-3"
+    assert step.invoke(None, config("another-thread", {"": "cp-3"})) is None
+    assert step.invoke(None, config("run-1", None)) is None  # no checkpoint: no step
+
+
+def test_only_a_middleware_graph_compiled_without_a_checkpointer_is_given_one() -> None:
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis import middleware
+    from trellis.harness.adapters.langgraph import checkpointing, run_scoped
+    from trellis.harness.middleware import RunCheckpointer
+
+    model = ScriptedChatModel(turns=[])
+    bare = create_agent(model, middleware=middleware())
+    given = checkpointing(bare)
+    assert run_scoped(given) and given is not bare and bare.checkpointer is None
+    assert given.nodes.keys() == bare.nodes.keys()
+    own = create_agent(model, middleware=middleware(), checkpointer=InMemorySaver())
+    off = create_agent(model, middleware=middleware(), checkpointer=False)
+    plain = create_agent(model)  # not a middleware() graph: run as it was built
+    ours = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
+    for kept in (own, off, plain, ours, object()):
+        assert checkpointing(kept) is kept

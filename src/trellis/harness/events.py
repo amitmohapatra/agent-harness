@@ -150,7 +150,7 @@ class RunEvents:
         if self.quiet:
             return
         if "output" in data:
-            data["output"] = _preview(data["output"])
+            data["output"] = preview(data["output"])
         self.emit(type, tool_call_id=tool_call_id, data=data)
 
     def custom(self, name: str, **data: Any) -> None:
@@ -177,7 +177,9 @@ class RunEvents:
         self.emit(RunEventType.RUN_FINISHED, outcome=outcome, error=error, data=data)
 
 
-def _preview(output: Any) -> Any:
+def preview(output: Any) -> Any:
+    """A tool result as the stream carries it: a short one as it is, a longer one's first
+    :data:`PREVIEW_CHARS` characters (the run's trajectory keeps the same, ``Journal``)."""
     if output is None or isinstance(output, bool | int | float):
         return output
     text = output if isinstance(output, str) else repr(output)

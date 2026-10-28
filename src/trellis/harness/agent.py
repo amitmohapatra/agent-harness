@@ -52,7 +52,7 @@ from trellis.harness.adapters.base import (
     declared_tools,
     merged,
 )
-from trellis.harness.adapters.langgraph import hitl_response, is_hitl
+from trellis.harness.adapters.langgraph import checkpointing, hitl_response, is_hitl
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges import helpers
 from trellis.harness.budget import BUDGET, Budget
@@ -189,6 +189,8 @@ class Agent:
         #: (``llm_judge(sample=)``: the share of runs each scores)
         self.judges: list[Evaluator] = list(judges)
         self.adapter = detect(target)
+        if self.adapter.name == "langgraph":  # a middleware() graph: its checkpoint in the run
+            self.target = checkpointing(target)
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
         if self.adapter.name == "openai_agents":  # its SDK's own tracing: left as set, said

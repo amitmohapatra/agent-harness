@@ -227,7 +227,8 @@ async def test_without_a_checkpointer_a_pause_stops_the_later_writes_and_replays
         return f"shipped {item}"
 
     script = ScriptedChatModel(turns=[[("ship", {"item": "a"}), ("ship", {"item": "b"})], "done"])
-    target = graph(script, HarnessTools())
+    # compiled with none, explicitly: a graph compiled with no word on it is given the run's
+    target = graph(script, HarnessTools(), checkpointer=False)
     agent = arm(harness.wrap(target, id="replayed"), [ship])
     first = await agent.run("x", user="u")
     assert first.status is RunStatus.PAUSED and first.interrupt is not None
