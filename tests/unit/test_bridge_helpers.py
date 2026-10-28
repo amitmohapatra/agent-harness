@@ -9,8 +9,9 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
-from trellis.contracts import RunStart, RunStatus
+from trellis.contracts import AgentExecutionContext, RunEvent, RunStart, RunStatus
 from trellis.harness.bridges.helpers import HELPER, NOT_CONTINUED, Helpers, Kind, text_of
+from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
 from trellis.harness.runs import LocalRuns
 
@@ -21,8 +22,13 @@ class GraphInterrupt(Exception):
 
 def runtime(runs: LocalRuns, attempt: int = 1) -> Any:
     identity = Identity(tenant="t", user="u", agent_id="desk", run_id="run_p")
+    events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="desk"))
+    seen: list[RunEvent] = []
+    events.listen(seen.append)
     return SimpleNamespace(
         agent=SimpleNamespace(harness=SimpleNamespace(runs=runs, memory=None)),
+        events=events,
+        seen=seen,
         identity=identity,
         run_id="run_p",
         tenant="t",
@@ -40,10 +46,18 @@ async def statuses(runs: LocalRuns) -> list[RunStatus]:
 
 async def test_a_helper_started_again_is_the_same_record_and_ends_once() -> None:
     runs = LocalRuns()
-    helpers = Helpers(runtime(runs), "langgraph")
+    first = runtime(runs)
+    helpers = Helpers(first, "langgraph")
     await helpers.start("k", kind=Kind.TASK, name="checker", task="check o1")
     await helpers.end("k", output="fine")
     await helpers.end("k", output="again")  # ended already: no change
+    tree = [e.data for e in first.seen]  # on the run's task tree, once each
+    assert [(d["name"], d.get("status")) for d in tree] == [
+        ("helper_started", None),
+        ("helper_finished", "success"),
+    ]
+    assert tree[0]["framework"] == "langgraph" and tree[0]["kind"] == "task"
+    assert tree[1]["agent_id"] == "checker" and tree[1]["seconds"] >= 0
     again = Helpers(runtime(runs, attempt=2), "langgraph")
     await again.start("k2", kind=Kind.TASK, name="checker", task="check o1")  # the same record
     await again.end("k2", output="fine")  # ended before: left as it is
@@ -201,7 +215,10 @@ async def test_a_helpers_context_that_cannot_be_had_is_a_warning() -> None:
     parent = runtime(LocalRuns())
     parent.uses = lambda feature: True
     parent.document_ids = None
-    parent.events = SimpleNamespace(warning=lambda code, message: warned.append((code, message)))
+    parent.events = SimpleNamespace(
+        warning=lambda code, message: warned.append((code, message)),
+        helper=lambda phase, **data: None,
+    )
     helpers = Helpers(parent, "langgraph")
     helper = SimpleNamespace(memory=Down(), name="checker")
     assert await helpers._pushed(helper, "check o1") is None  # type: ignore[arg-type]

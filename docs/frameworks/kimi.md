@@ -128,7 +128,10 @@ Kimi's own tools run again.
   the deny-all MCP scope, the run's dimensions and its `traceparent` as
   `KIMI_CODE_CUSTOM_HEADERS` lines beside your own. Elsewhere, said once in the log.
 * **Swarms.** Kimi's `AgentSwarm` runs its members concurrently, at most
-  `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` at once when you set it in `env`.
+  `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` at once: the harness's adaptive limit of child runs
+  as the attempt starts ([runs.md](../runs.md#child-runs-at-once-and-the-task-tree)), unless you
+  set it in `env` (or this process's environment has it). Each member is on the run's task tree
+  (`helper_started`, `helper_finished`).
 * **Framework options.** `framework_options=` takes `ACPAgent` fields: `env` and `mcp_servers`
   are added to the agent's, `cwd`, `mode` and `model` replace them. Kimi's own step limit is
   `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer.

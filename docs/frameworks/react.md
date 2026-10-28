@@ -387,6 +387,7 @@ default (`automatic.ToolSelection`, for a measurement).
 | Model steps | the graph's checkpoint is the run's: a resume continues from the last step, so the model is not asked again for what it already decided |
 | Several calls in one step | the read-only calls run at once; the others one at a time, in the model's order; a call that pauses lets the others finish (journaled) before the run pauses, and the pauses of one step come one by one; a call the step repeats (same tool, same arguments) runs once, each repeat told to read the first one's result ([reliability.md](../reliability.md#calls-made-at-once)) |
 | Sub-agents | each call a child run, Deep Agents' through `task` and the wrapped and A2A agents as tools ([above](#sub-agents-and-child-runs)) |
+| Wide tasks | on a large model, a request of several independent items of one kind is offered `delegate`: helpers that only read, at once, merged for the model to check ([below](#helpers-at-once-delegate)) |
 | Learned skills | the ones the agent learned, with its memory context ([skills.md](../skills.md#learned-skills)); Deep Agents' `skills=` beside them |
 | Store | a `StoreBackend` (and `runtime.store`) is the memory service's, wrapped |
 | Records, grounding, judges, tracing, trajectory | as for every target |
@@ -440,6 +441,62 @@ lead = ReAct(
 Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/subagents.py),
 [examples/05_features/subagents.py](../../examples/05_features/subagents.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
+## Helpers at once: delegate
+
+**What.** A tool `ReAct` offers by itself, `delegate`: the model hands independent parts of the
+task to helpers that work at once, each in a fresh context, and reads their answers together.
+Its jobs take the fields of Deep Agents' `task` tool:
+
+```json
+{"jobs": [
+  {"role": "an analyst", "description": "Apple's 2024 revenue, from its 10-K"},
+  {"subagent_type": "research", "description": "Microsoft's 2024 revenue, from its 10-K"}
+]}
+```
+
+`description` is the part, with everything the helper needs (it sees nothing else);
+`subagent_type` names one of the agent's wrapped sub-agents (`subagents=[h.wrap(...)]`), and
+`role` makes a general helper: the agent itself, told its role and its part. One job is one
+helper, for context isolation; up to 16 at once.
+
+**When it is offered** — read without a model call, from the user's latest message and the
+model (`automatic.Delegation`):
+
+| | Offered |
+|---|---|
+| A wide request: 4 or more items of one kind, as a list or "each / every / compare / across" over them | yes, on a large model |
+| Steps that build on each other ("then", "finally", "step by step") | no |
+| A request to change something (create, update, send, refund...) | no: writes stay the agent's, one at a time |
+| Fewer than 4 items | no |
+| A small model: a window under 32,000 tokens or not known, a Granite model, a name of 14B parameters or fewer | no |
+| A helper's own run | no: helpers do not delegate again |
+
+Until it is offered the model is sent neither the tool nor its definition (the prompt prefix is
+unchanged), as the long-task tools are held. Explicit `subagents=` stay what they were: each is
+also a tool of its own, and `delegate` names the wrapped ones as its `subagent_type`.
+
+**Automatic.**
+
+* **Helpers only read.** Each job's run is marked a helper's (`Runtime.delegated`): it is given
+  only the tools that read, and a call of one that does more — as governance sees it, the
+  catalog's risk over the tool's own — is refused without asking anyone. A sub-agent that may
+  change anything is refused as a job (call it on its own). The agent merges, and writes.
+* **At once, adaptively.** Every job is a child run under the process's adaptive limit of child
+  runs ([runs.md](../runs.md#child-runs-at-once-and-the-task-tree)): it waits for a slot, is on
+  the run's task tree, and works at most what is left of the run's time less what the run keeps
+  to merge and reply (half of it, at most 5 s). Its spending is the run's budget's.
+* **Merged.** One result, in the jobs' order: each job's helper, status (`success`, `partial`,
+  `error`, `timeout`, `refused`, `skipped`, `cancelled`) and answer or error, with how many
+  answered and a note to check the answers against each other. Identical jobs run once.
+* **Durable.** A job's run is named by the call and the job, so a resumed or re-run call finds
+  every finished helper's answer in its record; one helper's question to a person pauses the
+  run, as a sub-agent's does, once the others are done.
+
+**On failure.** A helper that fails, times out or is refused is reported so in the merge; the
+others are not affected. Once the run's budget is spent or its time is up, the jobs not started
+are `skipped` (early stop). Cancelling the run cancels every helper's run. A call with no job,
+or more than 16, is an error the model reads.
 
 ## Where sandbox, skills and hooks go
 

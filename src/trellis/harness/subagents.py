@@ -54,8 +54,9 @@ from trellis.contracts import (
     ToolSpec,
     stable_id,
 )
-from trellis.harness import pipeline
+from trellis.harness import admission, pipeline
 from trellis.harness.adapters.langgraph import bound_tools
+from trellis.harness.admission import Branch
 from trellis.harness.journal import Journal, content_key
 from trellis.harness.result import Result
 from trellis.harness.runtime import Runtime, current
@@ -169,6 +170,8 @@ async def child_run(
     without: Collection[str] = (),
     framework_options: Mapping[str, Any] | None = None,
     document_ids: Sequence[str] | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    branch: Branch | None = None,
 ) -> Result:
     """A run of ``agent`` inside ``parent``'s — a sub-agent's call, or ``agent.run`` called
     from the parent's code — as the parent's child: started (its record names the parent and
@@ -177,12 +180,37 @@ async def child_run(
     pauses the parent, and the parent's answer resumes it. ``run_id``: the call's, else one
     derived from where the parent is (its tool call, or its run) and how many children of this
     agent it started there, so the parent's re-run finds each again. Its result, however it
-    ended."""
+    ended.
+
+    It is one of the parent's children at once (``admission.branch``: it waits for a slot
+    under the adaptive limit, and is on the parent's task tree), unless the caller admitted it
+    already (``branch``: a ``delegate`` job). ``metadata`` is kept with its record."""
     if run_id is None:
         place = parent.idempotency_key or parent.run_id
         run_id = stable_id(
             place, CHILD, agent.id, parent.child_number(place, agent.id), prefix="run_"
         )
+    if branch is None:
+        async with admission.branch(parent, run_id, agent.id) as found:
+            result = await child_run(
+                agent,
+                parent,
+                input,
+                user=user,
+                run_id=run_id,
+                thread=thread,
+                tenant=tenant,
+                timeout=timeout,
+                deadline=deadline,
+                budget=budget,
+                without=without,
+                framework_options=framework_options,
+                document_ids=document_ids,
+                metadata=metadata,
+                branch=found,
+            )
+            found.ended(result.status.value.lower(), error=_why(result))
+            return result
     left = parent.remaining()
     limits = [t for t in (timeout, left) if t is not None]
     start = await agent._start(
@@ -199,8 +227,9 @@ async def child_run(
         without=without,
         framework_options=framework_options,
         document_ids=document_ids,
+        metadata=metadata,
     )
-    result = await _continued(agent, parent, await agent.harness.runs.start(start))
+    result = await _continued(agent, parent, await agent.harness.runs.start(start), branch)
     while result.status is RunStatus.PAUSED:
         assert result.interrupt is not None
         asked = result.interrupt
@@ -210,21 +239,29 @@ async def child_run(
             payload={**(asked.payload or {}), SUBAGENT: named},
             **{name: getattr(asked, name) for name in ASKED},
         )
-        result = await _answered(agent, parent, asked, answered)
+        result = await _answered(agent, parent, asked, answered, branch)
     return result
 
 
-async def _continued(agent: Agent, parent: Runtime, record: RunRecord) -> Result:
+def _why(result: Result) -> str | None:
+    return result.error.message if result.error is not None else None
+
+
+async def _continued(agent: Agent, parent: Runtime, record: RunRecord, branch: Branch) -> Result:
     """The child as its record says: paused or ended as it is, else run — new, or cut by a
     crash (its journal is the copy the parent's progress saved)."""
     if record.status is RunStatus.PAUSED or record.final:
         return Result.of(record)
     journal = parent.replay.journal.children.get(record.run_id) or Journal()
-    return await _attempt(agent, parent, record, journal, None)
+    return await _attempt(agent, parent, record, journal, None, branch=branch)
 
 
 async def _answered(
-    agent: Agent, parent: Runtime, asked: Interrupt, answer: InterruptResolution
+    agent: Agent,
+    parent: Runtime,
+    asked: Interrupt,
+    answer: InterruptResolution,
+    branch: Branch,
 ) -> Result:
     """The parent's answer to the child's question, the child's own: resumed with it (in this
     process: a child is never queued, and a cancel never reaches it this way — the parent's
@@ -235,7 +272,7 @@ async def _answered(
         update={"interrupt_id": asked.interrupt_id, "run_id": asked.run_id}
     )
     journal, resumed = await agent._resumed(record, resolution)
-    return await _attempt(agent, parent, resumed, journal, resolution)
+    return await _attempt(agent, parent, resumed, journal, resolution, branch=branch)
 
 
 async def _attempt(
@@ -244,9 +281,11 @@ async def _attempt(
     record: RunRecord,
     journal: Journal,
     resolution: InterruptResolution | None,
+    *,
+    branch: Branch,
 ) -> Result:
     """One attempt of the child inside the parent's call, its journal kept in the parent's
-    meanwhile, its time what is left of the parent's."""
+    meanwhile, its time what is left of the parent's; what it has spent on its ``branch``."""
     children = parent.replay.journal.children
     children[record.run_id] = journal
     try:
@@ -256,11 +295,21 @@ async def _attempt(
             record.input,
             journal=journal,
             resolution=resolution,
-            remaining=parent.remaining(),
+            remaining=_left(parent, record),
             parent=parent,
         )
     finally:
         del children[record.run_id]
+        branch.spent = dict(journal.spent)
+
+
+def _left(parent: Runtime, record: RunRecord) -> float | None:
+    """What the child may still work: what is left of the parent's time, and of its own limit
+    (``None``: neither limits it)."""
+    own = record.timeout_seconds
+    limits = [parent.remaining(), None if own is None else own - record.worked_seconds]
+    found = [t for t in limits if t is not None]
+    return max(0.0, min(found)) if found else None
 
 
 def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
@@ -295,7 +344,7 @@ def _unseen(agent: Agent) -> bool:
     """Whether the target has tools of its framework's own, whose effects the harness does not
     know: a function target's (its code's calls), Claude's built-in tools, an OpenAI Agents
     agent's own tools or handoffs, a graph's own tools (a ``ReAct``'s are only the harness's
-    own read tools)."""
+    own read tools, and ``delegate``, whose helpers only read)."""
     from trellis.harness.middleware import READ_RESULT, STATE_TOOLS  # noqa: PLC0415 - react
 
     target, framework = agent.target, agent.adapter.name
@@ -305,7 +354,9 @@ def _unseen(agent: Agent) -> bool:
         return True
     if framework == "openai_agents":
         return bool(target.tools or target.handoffs)
-    harness_own = {READ_RESULT, *STATE_TOOLS}
+    from trellis.harness.delegate import DELEGATE  # noqa: PLC0415 - react
+
+    harness_own = {READ_RESULT, DELEGATE, *STATE_TOOLS}
     return any(getattr(t, "name", None) not in harness_own for t in bound_tools(target))
 
 

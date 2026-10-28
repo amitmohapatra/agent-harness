@@ -4,12 +4,15 @@ callback, attached to every LangChain run of the process (``register_configure_h
 watches each call from its start to its reply or its error and accounts each reply's usage —
 whatever graph made the call (``ReAct``'s loop, its summarization, a grader, a ``create_agent``
 or LangGraph graph of the team's own, with or without ``ModelHooks``, a function's own model).
-Outside a harness run it does nothing."""
+Each call's pace (seconds per output token) and a ``429`` from the provider or its gateway are
+what the child runs' adaptive limit reads of the provider (``admission.py``). Outside a harness
+run it does nothing."""
 
 from __future__ import annotations
 
 import functools
 import logging
+import time
 from contextvars import ContextVar
 from typing import Any, Final
 from uuid import UUID
@@ -18,8 +21,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 from langchain_core.tracers.context import register_configure_hook
 
-from trellis.harness import budget
-from trellis.harness.bounded import SAID_ONCE
+from trellis.harness import admission, budget
+from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.gateways import Bifrost
 from trellis.harness.runtime import current
 
@@ -38,6 +41,7 @@ class UsageAccounting(BaseCallbackHandler):
         runtime = current()
         if runtime is not None:
             runtime.model_started(str(run_id))
+            _STARTED[str(run_id)] = time.monotonic()
             _routed_or_said(runtime, serialized)
 
     def on_llm_start(
@@ -51,17 +55,39 @@ class UsageAccounting(BaseCallbackHandler):
         runtime = current()
         if runtime is not None:
             runtime.model_ended(str(run_id))
+            _STARTED.pop(str(run_id))
+            if _status(error) == RATE_LIMITED:
+                admission.ADMISSION.throttled()
 
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
         runtime = current()
         if runtime is None:
             return
         runtime.model_ended(str(run_id))
+        began = _STARTED.pop(str(run_id))
         for generations in response.generations:
             for generation in generations:
                 message = getattr(generation, "message", None)
                 if isinstance(message, AIMessage):
                     budget.account_reply(runtime, message)
+                    out = int((message.usage_metadata or {}).get("output_tokens") or 0)
+                    if began is not None:
+                        admission.ADMISSION.paced(time.monotonic() - began, out)
+
+
+#: The status a rate-limited model call fails with.
+RATE_LIMITED: Final = 429
+#: When each chat model call under way started, by its LangChain run id (bounded: a call that
+#: never ends is forgotten).
+_STARTED: Final[LRU[str, float]] = LRU(1024)
+
+
+def _status(error: BaseException) -> int | None:
+    """The HTTP status a model client's error carries (its own, or its response's)."""
+    found = getattr(error, "status_code", None)
+    if found is None:
+        found = getattr(getattr(error, "response", None), "status_code", None)
+    return found if isinstance(found, int) else None
 
 
 #: Where a LangChain chat model says it sends its calls (its serialized constructor

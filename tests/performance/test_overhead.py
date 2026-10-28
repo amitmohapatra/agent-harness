@@ -21,6 +21,7 @@ import pytest
 
 from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings, tool
+from trellis.harness import delegate
 
 ITERATIONS = 500
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +45,10 @@ async def answer(input: str, agent: Runtime) -> str:
 
 async def with_tool(input: str, agent: Runtime) -> Any:
     return await agent.tools.call("lookup", sku=input)
+
+
+#: The jobs one ``delegate`` call fans out in the benchmark.
+FANOUT = 8
 
 
 async def measure(call: Callable[[], Awaitable[Any]]) -> dict[str, float]:
@@ -74,10 +79,26 @@ async def test_harness_overhead() -> None:
             async for _ in plain.stream("hi", user="u"):
                 pass
 
+        kid = arm(h.wrap(with_tool, id="kid"), [lookup])
+
+        async def nests(input: str, agent: Runtime) -> Any:
+            return (await kid.run(input, user="u")).answer  # one child run
+
+        async def fans_out(input: str, agent: Runtime) -> Any:
+            jobs = [{"subagent_type": "kid", "description": f"{input}{n}"} for n in range(FANOUT)]
+            return await delegate.delegate(agent, jobs)  # FANOUT child runs at once
+
+        nested = arm(h.wrap(nests, id="nested"), [kid])
+        fanned = arm(h.wrap(fans_out, id="fanned"), [kid])
         results = {
             "run": await measure(lambda: plain.run("hi", user="u")),
             "run_with_tool": await measure(lambda: tooled.run("a", user="u")),
             "stream": await measure(stream),
+            # a run whose code starts one child run (``admission.branch``, ``child_run``), and
+            # one that delegates FANOUT jobs at once: less "run_with_tool", the overhead of a
+            # child run in process
+            "child_run": await measure(lambda: nested.run("a", user="u")),
+            f"delegate_{FANOUT}": await measure(lambda: fanned.run("a", user="u")),
         }
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text(json.dumps({"iterations": ITERATIONS, "results": results}, indent=2) + "\n")
