@@ -117,6 +117,10 @@ async def test_the_command_picks_a_suites_classes_and_memory(
         )
     )
     assert len(seen["tasks"]) == 40 and not any("maths 0" in t for t in seen["tasks"])  # dev
+    await cli.bench(
+        cli.arguments([*common, "--suite", "react", "--classes", "simple,wide", "--per-class", "5"])
+    )
+    assert len(seen["tasks"]) == 10
 
 
 # --------------------------------------------------------------------------- statistics

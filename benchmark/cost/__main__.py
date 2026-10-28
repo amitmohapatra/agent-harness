@@ -73,6 +73,12 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="only the tasks of this split (the reasoning class's; other tasks have none)",
     )
     parser.add_argument(
+        "--per-class",
+        type=int,
+        default=None,
+        help="only the first N tasks of each class (a serial latency pass on a few)",
+    )
+    parser.add_argument(
         "--memory",
         action="store_true",
         help="memory on: the environment's MEMORY_URL (its context and tool hints)",
@@ -141,6 +147,15 @@ async def bench(args: argparse.Namespace) -> dict:
             )
             for s in sets
         ]
+    if args.per_class:
+        taken: dict[str, int] = {}
+
+        def first(task: dict) -> bool:
+            kind = task["metadata"].get("length", "")
+            taken[kind] = taken.get(kind, 0) + 1
+            return taken[kind] <= args.per_class
+
+        sets = [dataclasses.replace(s, tasks=[t for t in s.tasks if first(t)]) for s in sets]
     sets = [s for s in sets if s.tasks]
     window, source = window_of(None, args.window)
     setup = {
