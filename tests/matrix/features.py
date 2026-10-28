@@ -296,12 +296,18 @@ RUN_LIMIT: Final = 2.0
 #: start. ``elsewhere`` starts it twice (it pauses first, then another process resumes it), all
 #: within the run's one limit; ``hold`` holds longer than either limit.
 KIMI_START_SECONDS: Final = 6.0
+#: ``elsewhere`` hands the run to another process, which builds the graph before its first model
+#: call, all within the run's one limit: on a loaded CI runner that has taken past 2 s (Deep
+#: Agents' graph, ReAct's), so the run timed out before its tool started. The hand-off gets its
+#: own margin; ``hold`` holds longer than the limit with it.
+HANDOFF_SECONDS: Final = 6.0
 
 
 def run_limit(w: World) -> float:
+    handoff = w.mode == "elsewhere"
     if w.adapter != "kimi":
-        return RUN_LIMIT
-    starts = 2 if w.mode == "elsewhere" else 1
+        return RUN_LIMIT + (HANDOFF_SECONDS if handoff else 0.0)
+    starts = 2 if handoff else 1
     return RUN_LIMIT + starts * KIMI_START_SECONDS
 
 
