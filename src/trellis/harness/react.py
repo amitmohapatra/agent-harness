@@ -19,10 +19,6 @@ loop is the harness's. What it is built with:
   memory) or ``permissions=``, it is ``create_deep_agent``: a large tool result saved as a file
   with a preview in its place, summarization near the window's end, prompt caching, and, on a
   long task, its scratch tools and general-purpose helper;
-* **helpers, on demand** — on a wide task (several independent items of one kind) and a
-  large model, the ``delegate`` tool: jobs handed to helpers that only read, each a child run,
-  at once under the adaptive limit, their answers merged for the model to check
-  (``trellis.harness.delegate``, offered by ``automatic.Delegation``);
 * **the harness's** — :func:`middleware`, what neither has a piece for: the run's tools per
   model call (narrowed per turn: the tool hints, the memory and gateway MCP tools), governed
   with full parity; the model call's span, ``call_timeout`` and model routing; ``max_steps`` then a
@@ -167,14 +163,13 @@ def _middleware(
     held: frozenset[str] = frozenset(),
     files: bool = True,
     summarization: Any = None,
-    delegation: Any = None,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
     offered (``held``: on its own backend, the scratch file tools, and its general-purpose
     ``task`` helper when it has no sub-agents of its own), whether ``read_file`` is offered
     from the start (``files``: its files are not in the graph's state), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
-    sent; and its ``delegation`` (``automatic.Delegation``: ``delegate`` on a wide task)."""
+    sent."""
     _checked(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -219,7 +214,6 @@ def _middleware(
         # what a long task is offered, decided before anything reads the request's tools
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
-        *([delegation] if delegation is not None else []),
         *check,
         ours.HarnessTools(),
         *([automatic.ToolSelection()] if "ToolSelection" in _ON.get() else []),
@@ -338,7 +332,6 @@ def ReAct(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
     profiled = _profiled(chat, window)
-    delegation = _delegation(chat, named, window, helpers)
     stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
     instructions = system_prompt if not isinstance(system_prompt, Stored) else None
     if not _deep(
@@ -365,7 +358,6 @@ def ReAct(
                         tool_guidance=tool_guidance,
                         answer_check=answer_check,
                         system_prompt=stored_prompt,
-                        delegation=delegation,
                     ),
                     middleware,
                 ),
@@ -401,7 +393,6 @@ def ReAct(
         held=held,
         files=outside or bool(skills) or bool(memory_files),
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
-        delegation=delegation,
     )
     graph = create_deep_agent(
         profiled,
@@ -423,20 +414,6 @@ def ReAct(
     )
     _declared(graph, backend=graph_backend, outside=outside, helper_only=not native)
     return _described(graph, named, window, [*run, *helpers])
-
-
-def _delegation(chat: Any, named: str | None, window: int | None, helpers: list[Any]) -> Any:
-    """``delegate`` as this agent offers it (``automatic.Delegation``): on its model's tier
-    (its name, else the chat model's, and its window), its wrapped sub-agents the jobs'
-    ``subagent_type``."""
-    from trellis.harness import automatic
-    from trellis.harness.agent import Agent
-
-    name = named or getattr(chat, "model_name", None) or getattr(chat, "model", None)
-    tier = automatic.model_tier(name if isinstance(name, str) else None, window)
-    return automatic.Delegation(
-        tier=tier, subagents=[h.id for h in helpers if isinstance(h, Agent)]
-    )
 
 
 def _deep(

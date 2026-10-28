@@ -244,10 +244,9 @@ held across them: queue them (`start`) for that.
 ## Child runs at once, and the task tree
 
 **What.** Every child run the harness starts — a sub-agent's call in any framework, `agent.run`
-inside a run, a `ReAct`'s `delegate` jobs ([react.md](frameworks/react.md#helpers-at-once-delegate))
-— is admitted under one adaptive limit (`trellis.harness.admission`): a parent run has at most
-that many of its own children working at once, the rest waiting for a slot. Each child admits
-its own children, so nesting never waits on a parent's slots.
+inside a run — is admitted under one adaptive limit (`trellis.harness.admission`): a parent run
+has at most that many of its own children working at once, the rest waiting for a slot. Each
+child admits its own children, so nesting never waits on a parent's slots.
 
 **Automatic: the limit adapts (AIMD).** It starts at 4 and stays between 1 and 16. Each child
 that ends while the process is healthy raises it by `1/limit` (about one more per round of
@@ -267,31 +266,20 @@ swarm's concurrency (`KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`, unless the agent's
 it); a framework that spawns its own helpers (Deep Agents' `task`, an OpenAI agent as a tool,
 Claude's sub-agents) keeps its own parallelism.
 
-**Automatic: `delegate` jobs spread over the workers.** With `RUNS_URL`, a `delegate` job is
-queued in agent-runs instead of run in this process, so any worker with room takes it (scale
-the workers on the queue's depth, its `QUEUED` runs, with KEDA or an HPA: the harness does not
-scale them). Its
-`concurrency_key` is `delegate:<parent run>:<slot>`, one per admitted slot, so agent-runs' per-key
-limit (one by default) and the parent's slots agree; its budget is an equal share of what the
-parent has left (agent-runs keeps no spending); the parent polls for its result and cancels it
-when its own time is up or it is cancelled. Without `RUNS_URL` the jobs run in this process
-under the same limit.
-
 **The task tree.** Each child is on its parent's stream (`agent.stream`, `agent.events`, AG-UI's
 `CUSTOM` events) as it goes, every framework's alike:
 
 | `CUSTOM` event `name` | Data |
 |---|---|
-| `delegate` | a `ReAct`'s fan-out: `jobs`, `runs` (identical jobs run once), `limit` |
-| `helper_queued` | waiting for a slot: `run_id`, `agent_id`, `limit`, and for a job `job`, `helper` |
+| `helper_queued` | waiting for a slot: `run_id`, `agent_id`, `limit` |
 | `helper_started` | working: `run_id`, `agent_id` (a framework's own helper: `framework`, `kind`) |
-| `helper_finished` | ended: `status` (`success`, `partial`, `error`, `timeout`, `cancelled`, `paused`, `skipped`), `seconds`, `tokens` and `cost` (the child's spending, when the harness counted it), `error` |
+| `helper_finished` | ended: `status` (`success`, `partial`, `error`, `timeout`, `cancelled`, `paused`), `seconds`, `tokens` and `cost` (the child's spending, when the harness counted it), `error` |
 
 A child's spans are in its parent's trace, so Langfuse shows the same tree.
 
 **On failure.** A child that waits for a slot past its parent's time ends `timeout` (for a
-`delegate` job, reported in the merge; for a sub-agent's call, the call's error). Cancelling
-the parent cancels its children, queued ones included.
+sub-agent's call, the call's error). Cancelling the parent cancels its children, those waiting
+for a slot included.
 
 ## A run's events from anywhere
 

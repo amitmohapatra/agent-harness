@@ -20,7 +20,7 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   failed, timed-out, refused or skipped job is reported so; identical jobs run once; the
   budget is shared and stops the fan-out early; cancelling the run cancels them; with
   `RUNS_URL` the jobs queue in agent-runs for any worker. See
-  [docs/frameworks/react.md](docs/frameworks/react.md#helpers-at-once-delegate).
+  [docs/frameworks/react.md](docs/frameworks/react.md).
 - Child runs at once, adaptively, for every engine (`trellis.harness.admission`): a parent's
   sub-agent calls, nested `agent.run`s and `delegate` jobs are admitted under an AIMD limit (1
   to 16, from 4) that rises while the container's CPU and memory (cgroup limits), the
@@ -50,6 +50,20 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
 - `tools.convert.mcp`: the harness's tools as an MCP server (the official SDK), served per
   attempt on the loopback interface with a bearer token.
 - Requires `trellis-contracts>=0.6.2` (its `acp` error source).
+
+### Removed
+
+- `ReAct`'s `delegate` tool (`trellis.harness.delegate`), with what only it used: the wide-task
+  and model-tier routing that offered it (`automatic.Delegation`, `wide`, `model_tier`,
+  `SMALL_PARAMS`, `SMALL_FAMILIES`), the read-only helper runs (`Runtime.delegated`, the
+  `delegated` run metadata, the read-only toolbox and the bridge's `HelperOnlyReads` refusal),
+  its agent-runs queueing of jobs, the `delegate` stream event and the `delegate_8` overhead
+  case. Deep Agents has helpers natively: its `task` tool, offered as before (a sub-agent of
+  its own, else the general-purpose helper on a long task); the model calls it several times in
+  one step for helpers at once, and LangGraph runs those calls at once. Kept for every engine:
+  the adaptive limit of child runs and the live task tree
+  ([docs/runs.md](docs/runs.md#child-runs-at-once-and-the-task-tree)), Kimi Code's
+  `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`, and a sub-agent's own time limit.
 
 ### Breaking
 

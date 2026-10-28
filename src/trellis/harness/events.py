@@ -58,10 +58,8 @@ DECISION: Final = "decision"
 #: The ``CUSTOM`` event names of the live task tree (``admission.py``): a child run of the run
 #: waiting for a slot (``helper_queued``), working (``helper_started``) and ended
 #: (``helper_finished``: its status, seconds, tokens and cost) — every engine's (a sub-agent's
-#: call, a framework's own helper, a ``delegate`` job) — and a ``ReAct``'s fan-out of jobs
-#: (``delegate``: how many, at most how many at once).
+#: call, a framework's own helper).
 HELPER_PHASES: Final = ("queued", "started", "finished")
-DELEGATED: Final = "delegate"
 #: How much of a tool result rides on the event stream.
 PREVIEW_CHARS: Final = 2000
 

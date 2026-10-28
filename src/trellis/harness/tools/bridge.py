@@ -91,15 +91,6 @@ CUT: Final = {
     CANCELLED: "{tool} was cut short: the run was cancelled",
     ToolStatus.TIMEOUT.value: "{tool} was cut short: the run ran out of time",
 }
-#: What a ``delegate`` job's helper reads of a call of a tool that does more than read (as
-#: governance sees it): not run, nor asked about — helpers work beside each other, and only
-#: the agent that delegated changes anything (``trellis.harness.delegate``).
-ONLY_READS: Final = (
-    "{tool} was not run: this helper only reads, beside other helpers. Leave changes to the "
-    "agent that gave you the job: say in your answer what should change."
-)
-#: The ``error_class`` of that call.
-HELPER_WRITE: Final = "HelperOnlyReads"
 #: What the model reads for a call that repeats an earlier one of its model step (:func:`same`).
 SAME_CALL: Final = "Same call as {first} above (the same tool, the same arguments): see its result."
 
@@ -392,14 +383,6 @@ async def _decided(
     )
     if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
         runtime.events.warning(decision.error.code, decision.error.message)
-    if runtime.delegated and decision.risk != "read":  # a helper never writes: not even asked
-        refused = ToolOutcome(
-            tool=spec.name,
-            status=ToolStatus.REJECTED,
-            output=ONLY_READS.format(tool=spec.name),
-            error_class=HELPER_WRITE,
-        )
-        return decision, call, refused
     if asked is not None:
         decision = decision.asking(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
