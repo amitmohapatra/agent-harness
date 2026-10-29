@@ -369,13 +369,13 @@ def markdown(report: dict[str, Any]) -> str:
 
 
 async def seed(h: Harness, user: str) -> list[str]:
-    """The user's own note, and another person's shared with the workspace (memory on): what
+    """The user's own note, and another person's own (memory on): what
     ``about_me`` asks for, and what the end user must never see."""
     if h.memory is None:
         return []
     tenant = await h._tenant()
     await h.memory.for_user(tenant, user).ctx.remember(OWN_NOTE)
-    await h.memory.for_user(tenant, OTHER_USER).ctx.remember(OTHER_NOTE, visibility="WORKSPACE")
+    await h.memory.for_user(tenant, OTHER_USER).ctx.remember(OTHER_NOTE)
     return [OWN_NOTE]
 
 
