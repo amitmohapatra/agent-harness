@@ -30,6 +30,10 @@ own model work follows the harness's configuration.
   returns `(content, artifact)`, the artifact a `Citation(name, date, link)` or a list of them
   (also a LangChain tool's own artifact); the model reads the content alone and the call's
   outcome keeps the citations in `metadata["sources"]`, so the run's trajectory has them.
+- The turn written to memory carries its run record (`Said.facts`, under
+  `custom_metadata["run_record"]`, plain values): each tool result its call's status, seconds and sources
+  (the trajectory's outcome of the same call), the turn's last message the run's status,
+  seconds and approvals — what the memory service's steps list of the turn shows.
 - A `ReAct` agent with a known window sizes the conversation the memory service replays
   (`conversation_token_budget`, trellis-memory 0.6): what one request may hold (95% of the
   window, as `FitWindow` fits it) less its instructions, offered tools and question
