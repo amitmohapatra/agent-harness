@@ -305,11 +305,13 @@ class World:
         self.models = ModelLog(monkeypatch)
         #: the tools each Claude or Kimi run was given (its CLI lists them itself)
         self.claude_offered: list[list[str]] = []
+        self.claude_described: dict[str, str] = {}
         converted = pipeline.convert
 
         def converting(tool_format: Any, tools: Any) -> Any:
             if tool_format in ("claude", "mcp"):
                 self.claude_offered.append([t.name for t in tools])
+                self.claude_described.update({t.name: t.spec.description for t in tools})
             return converted(tool_format, tools)
 
         monkeypatch.setattr(pipeline, "convert", converting)
