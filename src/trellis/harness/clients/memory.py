@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Final
@@ -336,13 +337,21 @@ class RunMemory:
         """The model endpoint the service calls for this agent's memory work, in an agent
         scope: the whole ``Endpoint``, its key in plain (``SecretStr`` masks it; the service
         keeps it encrypted). The same request from every process and run, so the idempotent PUT
-        repeats rather than conflicts; a rotated key or a moved endpoint is a new request."""
+        repeats rather than conflicts; a rotated key or a moved endpoint is a new request. An
+        answer that holds no endpoint — the replay of an earlier request whose registration the
+        service has since dropped (a migration, a cleared store) — is sent again, as a new
+        request."""
         agent = self.ctx.scope.agent_id
         wire = endpoint.model_dump(mode="json")
         wire["api_key"] = endpoint.api_key.get_secret_value() if endpoint.api_key else None
         said = json.dumps(wire, sort_keys=True).encode()
         digest = hashlib.blake2b(said, digest_size=8).hexdigest()
-        await self.ctx.advanced.model_keys.set(wire, idempotency_key=f"model-key:{agent}:{digest}")
+        key = f"model-key:{agent}:{digest}"
+        status = await self.ctx.advanced.model_keys.set(wire, idempotency_key=key)
+        if not status.registered or status.endpoint is None:
+            await self.ctx.advanced.model_keys.set(
+                wire, idempotency_key=f"{key}:{uuid.uuid4().hex}"
+            )
 
 
 def documents(document_ids: Sequence[str]) -> list[str]:

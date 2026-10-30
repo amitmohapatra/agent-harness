@@ -138,6 +138,9 @@ class FakeMemoryService:
     #: whether model endpoints can be registered (the service's credential encryption is
     #: configured); without, ``PUT /v1/agents/model-key`` answers what the service does
     model_keys: bool = True
+    #: how many registrations are answered as the replay of one the service has since
+    #: dropped (its idempotent answer from before: nothing registered)
+    stale_registrations: int = 0
     #: feedback by id, each stored once however often it is sent
     stored_feedback: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: uploaded documents by id, with the scope they were uploaded in
@@ -688,6 +691,16 @@ class FakeMemoryService:
 
     def _model_key(self, call: Call) -> dict[str, Any]:
         """The status the service answers: the endpoint as it keeps it, never its key."""
+        if self.stale_registrations:
+            self.stale_registrations -= 1
+            return {
+                "registered": False,
+                "revoked": False,
+                "revision": 0,
+                "endpoint": None,
+                "source": "service",
+                "reason": "no endpoint registered for this agent",
+            }
         endpoint = dict(call.body["endpoint"])
         endpoint["has_api_key"] = endpoint.pop("api_key", None) is not None
         return {

@@ -375,6 +375,17 @@ async def test_the_model_endpoint_is_registered_in_the_agents_scope() -> None:
     assert first.scope == {"tenant_id": "t", "agent_id": "a", "custom_metadata": {}}
 
 
+async def test_an_answer_that_holds_no_endpoint_is_sent_again_as_a_new_request() -> None:
+    """A replay of an earlier registration the service has since dropped (its migration
+    deleted the bare keys): the endpoint is registered again, under a fresh key."""
+    service = FakeMemoryService(stale_registrations=1)
+    await memory(service).scoped("t", "a").register_endpoint(Endpoint(base_url="http://l/v1"))
+    replayed, again = service.named("model_key")
+    assert replayed.idempotency_key is not None and again.idempotency_key is not None
+    assert again.idempotency_key.startswith(replayed.idempotency_key + ":")
+    assert again.body == replayed.body
+
+
 @respx.mock
 async def test_a_tool_result_that_is_not_json_is_returned_as_it_came() -> None:
     respx.post(f"{GATEWAY}/v1/mcp/tool/execute").mock(

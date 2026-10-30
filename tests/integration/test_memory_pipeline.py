@@ -633,6 +633,7 @@ async def test_an_endpoint_the_service_refuses_is_said_once(
             await h.writes.drain()
         assert h.writes.failed == 0 and h._endpoints_off
     assert caplog.text.count("refused http://localhost:11434/v1") == 1
+    assert "(the fake memory service)" in caplog.text  # the service's reason, as it said it
 
 
 async def test_a_registration_that_fails_otherwise_is_a_failed_write(
