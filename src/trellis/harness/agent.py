@@ -879,7 +879,8 @@ class Agent:
         lets them be narrowed. The tenant's first hints wait for its tools to be indexed
         (``Toolbox.indexed``); hints below :data:`NARROW_FLOOR` narrow nothing; the tools
         behind Code Mode are asked about too, and a hint naming one keeps the meta-tools that
-        reach it. A failure is a warning."""
+        reach it; a hinted tool keeps its chain (``Toolbox.related``: the tools its output
+        feeds, and those whose output it needs). A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
@@ -915,6 +916,10 @@ class Agent:
         best = max((t.confidence for t in pushed.tools or ()), default=0.0)
         if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
             offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
+            # a candidate's chain stays whole: the tools its output feeds, and those giving
+            # what it needs (``tools.links``, from the tools' schemas)
+            chain = box.related(offered, code_mode=runtime.uses("code_mode"))
+            offered |= chain & set(runtime.toolbox)
             if set(pushed.tool_names) & set(behind):  # reached through the meta-tools
                 offered |= {n for n, t in runtime.toolbox.items() if t.feature == "code_mode"}
             runtime.offered = offered

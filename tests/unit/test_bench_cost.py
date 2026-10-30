@@ -84,13 +84,45 @@ def test_the_class_suite_has_ten_distinct_tasks_per_class_on_their_own_tools() -
     tasks = [t for s in sets for t in s.tasks]
     kinds = [t["metadata"]["length"] for t in tasks]
     assert {k: kinds.count(k) for k in catalog.CLASSES} == dict.fromkeys(catalog.CLASSES, 10)
-    assert len({t["metadata"]["task"] for t in tasks}) == 40
+    assert len({t["metadata"]["task"] for t in tasks}) == 10 * len(catalog.CLASSES)
     assert sum(bool(t["metadata"]["mix"]) for t in tasks) == 10
     for taskset in sets:
         own = {t.spec.name for t in taskset.tools}
         assert all(set(t["metadata"]["needed_tools"]) <= own for t in taskset.tasks)
     large = [t for t in tasks if t["metadata"]["length"] == "large"]
     assert {t["expected"] for t in large} >= {"NET-0001", "DES-1100"}
+
+
+def test_the_chain_class_is_answered_only_through_the_chain() -> None:
+    """Each chain task's answer is what its tools give, called in order, each taking the one
+    before's output; the tools' schemas link them (``tools.links``)."""
+    from trellis.harness.tools.links import links
+
+    tasks = catalog.chain_tasks()
+    assert {len(t["metadata"]["needed_tools"]) for t in tasks} == {2, 3, 4}
+    assert not any("SKU-" in t["input"] or "SUP-" in t["input"] for t in tasks)
+    found = links([t.spec for t in catalog.CHAIN_TOOLS])
+    said = {(link.source, link.target) for link in found}
+    assert {
+        ("find_sku", "get_stock"),
+        ("get_stock", "supplier_lead_time"),
+        ("get_stock", "reorder_quantity"),
+        ("supplier_lead_time", "reorder_quantity"),
+    } <= said
+    found_sku = catalog.find_sku.fn("blue mugs")
+    level = catalog.get_stock.fn(found_sku["sku_id"])
+    days = catalog.supplier_lead_time.fn(level["supplier_id"])["lead_time_days"]
+    qty = catalog.reorder_quantity.fn(level["on_hand"], days, level["daily_demand"])
+    assert str(qty) == next(
+        t["expected"] for t in tasks if t["input"].startswith("How many blue mugs should")
+    )
+    for bad in (
+        lambda: catalog.find_sku.fn("teapot"),
+        lambda: catalog.get_stock.fn("SKU-1"),
+        lambda: catalog.supplier_lead_time.fn("SUP-1"),
+    ):
+        with pytest.raises(ValueError):
+            bad()
 
 
 async def test_the_command_picks_a_suites_classes_and_memory(
