@@ -36,6 +36,27 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- Where a tool's result came from: `tool(response_format="content_and_artifact")` (LangChain's)
+  returns `(content, artifact)`, the artifact a `Citation(name, date, link)` or a list of them
+  (also a LangChain tool's own artifact); the model reads the content alone and the call's
+  outcome keeps the citations in `metadata["sources"]`, so the run's trajectory has them.
+- The turn written to memory carries its run record (`Said.facts`, under
+  `custom_metadata["run_record"]`, plain values): each tool result its call's status, seconds and sources
+  (the trajectory's outcome of the same call), the turn's last message the run's status,
+  seconds and approvals — what the memory service's steps list of the turn shows.
+- A `ReAct` agent with a known window sizes the conversation the memory service replays
+  (`conversation_token_budget`, trellis-memory 0.6): what one request may hold (95% of the
+  window, as `FitWindow` fits it) less its instructions, offered tools and question
+  (LangChain's `count_tokens_approximately`), the memory context's budget and 1,024 tokens for
+  the reply (`Agent.conversation_budget`). Tool-result clearing (`ThisTurnsResults`, LangChain's
+  `ClearToolUsesEdit`) clears only the turn under way's older results, never the replayed
+  turns' that memory already sized.
+- The cost benchmark's `--suite explain`: two-turn conversations, memory on, whose second turn
+  asks about the first answer (its steps, sources, tools, time, approvals...) or is an ordinary
+  follow-up, scored strictly against turn 1's own journal record (exact tool names, source
+  names and dates, the step count, seconds within a tolerance), with the made-up claims and
+  leaked template tags counted, every model request kept, and `--render` checking what a
+  llama.cpp chat template shows the model (`benchmark/cost/explain.py`).
 - Conversations across runs ([ADR 0005](docs/adr/0005-conversations-across-runs.md)):
   - with memory off, a run of a conversation is given its earlier turns from the run store
     (each run's question and answer) where the framework keeps no thread of its own —

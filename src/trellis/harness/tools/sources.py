@@ -20,7 +20,7 @@ import re
 import typing
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, overload
+from typing import Any, Final, Literal, get_args, overload
 
 import httpx
 from pydantic import BaseModel, ConfigDict, create_model
@@ -32,9 +32,15 @@ from trellis.harness.tools.base import (
     REMOTE_TIMEOUT_SECONDS,
     SideEffects,
     Source,
+    Sourced,
     Tool,
+    citations,
     invoked,
 )
+
+#: How a function tool returns its result (LangChain's ``response_format``): the content the
+#: model reads, or that and an artifact — the result's sources (``tools.base.Citation``).
+ResponseFormat = Literal["content", "content_and_artifact"]
 
 #: What an OpenAPI method does, as a risk tier.
 METHOD_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
@@ -66,8 +72,14 @@ class FunctionTool:
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
         idempotent: bool = False,
         timeout: float | None = None,
+        response_format: ResponseFormat = "content",
     ) -> None:
+        if response_format not in get_args(ResponseFormat):
+            raise ConfigurationError(
+                f"response_format is 'content' or 'content_and_artifact', not {response_format!r}"
+            )
         self.fn = fn
+        self.response_format = response_format
         self.model = _arguments_model(fn)
         said, params = documented(inspect.getdoc(fn) or "")
         self.spec = ToolSpec(
@@ -90,7 +102,17 @@ class FunctionTool:
     async def _run(self, args: dict[str, Any]) -> Any:
         validated = self.model.model_validate(args)
         values = {name: getattr(validated, name) for name in type(validated).model_fields}
-        return await invoked(self.fn, **values)
+        returned = await invoked(self.fn, **values)
+        if self.response_format == "content":
+            return returned
+        if not isinstance(returned, tuple) or len(returned) != 2:
+            raise ToolError(
+                f"{self.spec.name} is a content_and_artifact tool: it returns (content, "
+                f"artifact), not a {type(returned).__name__}",
+                source="tools",
+            )
+        content, artifact = returned
+        return Sourced(content, citations(artifact))
 
 
 @overload
@@ -103,6 +125,7 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    response_format: ResponseFormat = "content",
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -112,6 +135,7 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    response_format: ResponseFormat = "content",
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -122,6 +146,7 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    response_format: ResponseFormat = "content",
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
@@ -135,6 +160,11 @@ def tool(
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped). A result that comes from outside the run (a person, another system) is an
     ``ask`` in the function: ``return await trellis.current().ask(question, expects=...)``.
+    ``response_format="content_and_artifact"`` (LangChain's): the function returns ``(content,
+    artifact)`` — the content the model reads, and where it came from, a
+    ``trellis.Citation(name=, date=, link=)`` or a list of them — the run keeps the sources with
+    the call (an answer's ``Result.sources``, ``docs/explanations.md``); an artifact that names
+    no source is not kept.
     """
     made = functools.partial(
         FunctionTool,
@@ -143,6 +173,7 @@ def tool(
         side_effects=side_effects,
         idempotent=idempotent,
         timeout=call_timeout,
+        response_format=response_format,
     )
     return made(fn) if fn is not None else made
 

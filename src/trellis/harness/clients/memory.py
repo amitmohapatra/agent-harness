@@ -166,13 +166,16 @@ class Memory:
 
 
 def _identified(said: Said, run_id: str) -> dict[str, Any]:
-    """The ``custom_metadata`` of a message with its harness id: the id, the run, and the
-    tool call it answers (a result) or the first it makes (an assistant's calls)."""
+    """The message as the service stores it (:func:`recorded`), its ``custom_metadata`` with
+    its harness id when it has one: the id, the run, and the tool call it answers (a result)
+    or the first it makes (an assistant's calls)."""
+    message = recorded(said)
     if said.id is None:
-        return {}
+        return message
     call = said.tool_call_id or (said.tool_calls[0].id if said.tool_calls else None)
     linked = {MESSAGE_ID: said.id, "run_id": run_id} | ({"tool_call_id": call} if call else {})
-    return {"custom_metadata": linked}
+    message["custom_metadata"] = message.get("custom_metadata", {}) | linked
+    return message
 
 
 class RunMemory:
@@ -199,13 +202,15 @@ class RunMemory:
         window: Window,
         hints: bool,
         budget: int = CONTEXT_TOKEN_BUDGET,
+        conversation_budget: int | None = None,
         document_ids: Sequence[str] | None = None,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
         skills it learned for the task and - unless ``hints`` is off - the tools that fit.
         ``window``: the thread's recent messages left out (``Window.NONE``: the framework
         keeps them itself), in the rendered text (``RENDERED``), or verbatim as
-        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own.
+        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own,
+        within ``conversation_budget`` tokens (``None``: the service's default).
         ``document_ids`` narrows the documents its passages come from to those (``None``:
         every one the scope may read)."""
         return await self.ctx.context(
@@ -216,6 +221,11 @@ class RunMemory:
             window=window is not Window.NONE,
             window_format="messages" if window is Window.MESSAGES else "rendered",
             document_ids=document_ids,
+            **(
+                {}
+                if conversation_budget is None
+                else {"conversation_token_budget": conversation_budget}
+            ),
         )
 
     # ------------------------------------------------------------------ pull
@@ -238,14 +248,13 @@ class RunMemory:
         it in its ``custom_metadata``, with the run it was said in and the tool call it makes
         or answers (one level: the service allows two)."""
         batch = [
-            recorded(said)
+            _identified(said, run_id)
             | {
                 "source_system": SOURCE_SYSTEM,
                 "source_message_id": f"{run_id}:user:{index}"
                 if said.role is Speaker.USER
                 else f"{run_id}:{attempt}:msg:{index}",
             }
-            | _identified(said, run_id)
             for index, said in enumerate(messages)
         ]
         await self.ctx.history.add(batch, idempotency_key=f"{run_id}:{attempt}:transcript")
