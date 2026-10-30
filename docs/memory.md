@@ -105,7 +105,9 @@ said:
   SDK) — each message named by the harness (`source_system: trellis-harness`,
   `source_message_id`: the run for the question, which every attempt asks, the attempt and
   position for what the agent said), so the service stores a message it has already seen once.
-  A run started with no thread — a scheduled run — is its own thread (`thread = run_id`). Where
+  A run started with no thread — a scheduled run — is its own thread (`thread = run_id`); a run
+  with one writes to its conversation's thread — keyed by the tenant, the user and the thread
+  (`h.conversation(user=, thread=)`), so two users' threads named alike are two threads. Where
   memory keeps the conversation the transcript is written before the run returns (at most 5 s,
   then queued like the rest), so the next turn's window holds it wherever that turn runs;
 * every harness tool call (not the memory tools, which the service logs itself), and Code

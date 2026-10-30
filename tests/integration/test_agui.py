@@ -137,6 +137,16 @@ async def test_an_unknown_interrupt_is_refused(client: httpx.AsyncClient) -> Non
     assert response.status_code == 404
 
 
+async def test_another_users_thread_named_alike_cannot_answer_its_interrupt(
+    client: httpx.AsyncClient,
+) -> None:
+    entry = finished(await post(client, body("ask")))["outcome"]["interrupts"][0]
+    resume = body(resume=[{"interruptId": entry["id"], "payload": "yes"}])
+    response = await client.post(f"{PATH}/run", json=resume, headers={"x-user": "u2"})
+    assert response.status_code == 404  # u2's "t1" is not u1's
+    assert finished(await post(client, resume))["result"] == "you said yes"
+
+
 async def test_a_client_reconnects_after_the_last_event_it_saw(client: httpx.AsyncClient) -> None:
     events = await post(client, body("hello", runId="run-r"))
     replay = await client.get(f"{PATH}/runs/run-r/events", headers={"Last-Event-ID": "0"})

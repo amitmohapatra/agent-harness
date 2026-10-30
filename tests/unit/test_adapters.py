@@ -253,7 +253,12 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
             yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
 
     runtime = SimpleNamespace(
-        thread=None, run_id="run_1", framework_options={}, run_memory=None, attempt=1, pending=None
+        conversation="run_1",
+        run_id="run_1",
+        framework_options={},
+        run_memory=None,
+        attempt=1,
+        pending=None,
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]

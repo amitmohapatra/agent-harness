@@ -60,9 +60,10 @@ async def test_a_run_finds_what_its_user_said_in_an_earlier_conversation() -> No
         asker = h.wrap(recall, id=f"live-asker-{suffix}")
         asked = await asker.run("What is my locker code?", user=user, thread=f"live-new-{suffix}")
         assert asked.status is RunStatus.SUCCESS, asked
+        kept = await h.conversation(user=user, thread=old_thread)  # the memory service's thread
 
     every = _texts(found["all"])
-    assert (f"USER: My {mine}.", old_thread) in every, every
+    assert (f"USER: My {mine}.", kept) in every, every
     assert not any(theirs in text for text, _ in every), "another user's chat is never read"
 
 

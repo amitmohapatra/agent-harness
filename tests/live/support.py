@@ -53,11 +53,12 @@ async def seed(scope: MemoryContext, content: str, **options: Any) -> None:
 async def memory_scope(
     h: Harness, *, user: str, agent_id: str, thread: str | None = None
 ) -> MemoryContext:
-    """The memory service in a user's (and thread's) scope, read as the agent reads it."""
+    """The memory service in a user's (and thread's) scope, read as the agent reads it: the
+    thread is the user's conversation (``h.conversation``)."""
     assert h.memory is not None
     scope = {"tenant_id": await h._tenant(), "user_id": user, "agent_id": agent_id}
     if thread is not None:
-        scope["thread_id"] = thread
+        scope["thread_id"] = await h.conversation(user=user, thread=thread)
     return h.memory.client.bind(**scope)
 
 

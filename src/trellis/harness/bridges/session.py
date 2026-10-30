@@ -51,7 +51,7 @@ class MemorySession:
     def __init__(self, runtime: Runtime) -> None:
         assert runtime.run_memory is not None
         self.runtime = runtime
-        self.session_id = runtime.thread or runtime.run_id
+        self.session_id = runtime.conversation
 
     async def get_items(self, limit: int | None = None) -> list[Any]:
         """The thread's earlier turns, oldest first (``limit``: the newest that many), as the

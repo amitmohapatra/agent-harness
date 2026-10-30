@@ -148,7 +148,8 @@ async def test_a_graphs_configurable_keys_merge_key_by_key_and_the_thread_is_the
         thread="t1",
         framework_options={"configurable": {"region": "uk", "tier": "gold"}},
     )
-    assert result.answer == "north/uk/gold on t1"
+    thread = await harness.conversation(user="u", thread="t1")  # the user's conversation
+    assert result.answer == f"north/uk/gold on {thread}"
     with pytest.raises(ConfigurationError, match=r"pass agent\.run\(thread=\.\.\.\) instead"):
         await agent.run("hi", user="u", framework_options={"configurable": {"thread_id": "theirs"}})
     with pytest.raises(ConfigurationError, match=r"configurable\.thread_id"):
