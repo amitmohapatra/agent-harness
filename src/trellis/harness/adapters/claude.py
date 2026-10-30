@@ -32,11 +32,12 @@
   ``SessionStore`` (``bridges.claude.JournalSessions``): the SDK writes it back for the CLI on
   any machine. A session the CLI cannot continue (options keeping their own store, a transcript
   it refuses) is a warning, and the query runs again from its prompt against the journal;
-* models: with Bifrost serving the harness, the CLI's model calls go through Bifrost's
-  Anthropic route with the virtual key (:func:`routed_env`; the options' own
-  ``ANTHROPIC_BASE_URL`` wins), carrying the deny-all MCP scope, the run's dimensions and its
-  ``traceparent`` as ``ANTHROPIC_CUSTOM_HEADERS`` beside the options' own — the CLI reads them
-  as it starts, once per attempt;
+* models: with a route that has an Anthropic route (``Capability.ANTHROPIC_ROUTE``: Bifrost)
+  serving the harness, the CLI's model calls go through the gateway's Anthropic route with the
+  virtual key (:func:`routed_env`; the options' own ``ANTHROPIC_BASE_URL`` wins), carrying
+  the deny-all MCP scope, the run's dimensions and its ``traceparent`` as
+  ``ANTHROPIC_CUSTOM_HEADERS`` beside the options' own — the CLI reads them as it starts, once
+  per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``hooks`` (the governance and context
   hooks go after theirs), ``can_use_tool`` (the
@@ -80,7 +81,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.bridges.helpers import Helpers, Kind
-from trellis.harness.gateways import NO_KEY, Bifrost
+from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
@@ -547,15 +548,17 @@ def _options(
 
 
 def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
-    """The CLI's environment with its model calls routed through Bifrost when it serves the
-    harness (``None``: as it is): Bifrost's Anthropic route (``ANTHROPIC_BASE_URL``, the
+    """The CLI's environment with its model calls routed through the gateway when the route
+    serving the harness has an Anthropic route (``Capability.ANTHROPIC_ROUTE``: Bifrost;
+    ``None``: as it is): the gateway's Anthropic route (``ANTHROPIC_BASE_URL``, the
     virtual key as ``ANTHROPIC_API_KEY``) — unless the options' own ``env`` names a base URL
     (code over the environment) — and, on Bifrost's route, its headers as
     ``ANTHROPIC_CUSTOM_HEADERS`` lines beside the options' own: the deny-all MCP scope, the
     run's dimensions and its ``traceparent`` (read as the CLI starts)."""
     gateway = runtime.agent.harness.model_gateway
-    if not isinstance(gateway, Bifrost):
+    if not gateway.has(Capability.ANTHROPIC_ROUTE):
         return None
+    gateway = cast("OpenAICompatible", gateway)
     given = dict(env)
     route = f"{gateway.origin}/{ANTHROPIC_ROUTE}"
     if "ANTHROPIC_BASE_URL" not in given:

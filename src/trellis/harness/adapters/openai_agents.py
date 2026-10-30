@@ -70,7 +70,7 @@ from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.session import MemorySession
 from trellis.harness.features import MEMORY_TOOLS
-from trellis.harness.gateways import GatewayKind, per_loop
+from trellis.harness.gateways import Capability, per_loop
 from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
@@ -630,7 +630,8 @@ def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
 
 
 def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str, Any]:
-    """With Bifrost serving the harness, every model name of the run's agents goes through it
+    """With Bifrost serving the harness (a route with ``Capability.ATTRIBUTION``), every model
+    name of the run's agents goes through it
     (``RunConfig.model_provider``: :func:`bifrost_provider`, the name mapped to Bifrost's
     ``provider/model``) — unless the run's own ``run_config`` names a model provider of its
     own (code over the environment). An agent whose model is an object of its own calls its
@@ -639,7 +640,7 @@ def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str,
     from agents.models.multi_provider import MultiProvider
 
     gateway = runtime.agent.harness.model_gateway
-    if gateway.kind is not GatewayKind.BIFROST:
+    if not gateway.has(Capability.ATTRIBUTION):
         return options
     config = options.get("run_config") or RunConfig()
     if not isinstance(config.model_provider, MultiProvider):
@@ -656,7 +657,7 @@ def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str,
 def _unrouted(agent_id: str, name: str, model: str) -> None:
     log.warning(
         "%s: the OpenAI agent %r has a model object (%s), which calls its provider directly, "
-        "not Bifrost: give it a model name to route it through BIFROST_URL",
+        "not Bifrost: give it a model name to route it through LLM_BASE_URL",
         agent_id,
         name,
         model,

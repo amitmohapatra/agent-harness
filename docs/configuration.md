@@ -16,8 +16,8 @@ One place for each thing, decided by who owns it and how often it changes — ne
 
 | Place | Owner | What goes there | Example |
 |---|---|---|---|
-| the environment | the deployment | where each service is, its key, the spool: the seven [settings](#settings-and-the-environment) | `BIFROST_URL=http://localhost:8091/v1` |
-| the tools' own variables | their SDKs | `OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`, the providers' keys (without Bifrost) | `OPENAI_API_KEY=sk-...` |
+| the environment | the deployment | where the models and each service are, their keys, the spool: the nine [settings](#settings-and-the-environment) | `LLM_BASE_URL=http://localhost:8091/v1` |
+| the tools' own variables | their SDKs | `OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`, the providers' keys and credentials (without `LLM_BASE_URL`; Google's and AWS's for `LLM_AUTH=google`, `aws`) | `OPENAI_API_KEY=sk-...` |
 | Bifrost | the gateway's administrator | model routing, fallbacks, model retries, rate limits, key and team budgets, caching, the MCP allow-list of a key, stored prompts, the judge's model alias | a virtual key allowed the `erp` MCP server |
 | the memory service | its administrator, or a deploy script | the tool catalog: each tool's `risk` and `approve_when` rules; learned approvals | `refund`: `approve_when amount > 100` |
 | agent-runs | the people and code that schedule | schedules and their ticker, the inbox, webhooks | `await agent.schedule("0 9 * * 1-5", user="ada", input="Digest")` |
@@ -31,8 +31,8 @@ One place for each thing, decided by who owns it and how often it changes — ne
 
 When two places could say the same, the narrower wins: a run's over its agent's (`without=` is
 added to, `framework_options=` merged key by key, `run_timeout`/`budget` replaced), code over
-the environment, the environment over what is detected — and Bifrost over a provider key
-([below](#where-a-model-name-goes)).
+the environment, the environment over what is detected — and `LLM_BASE_URL` over a provider
+key ([below](#where-a-model-name-goes)).
 
 ## Settings and the environment
 
@@ -77,36 +77,60 @@ accepted on its own (in effect or revoked), and what to set — it changes nothi
 #### Where a model name goes
 
 Every model call of every framework is routed one way, chosen from the settings — never a
-chain of fallbacks (`trellis.harness.gateways`). The settings given in code
-(`Harness(config=Settings(...))`) route the runs' models over the environment's, whenever the
-agent was built:
+chain of fallbacks (`trellis.harness.gateways`, [ADR 0004](adr/0004-provider-neutral-models.md)).
+`LLM_GATEWAY` names the route — a strategy from one registry —, `LLM_AUTH` how its requests
+are authenticated; the settings given in code (`Harness(config=Settings(...))`) route the
+runs' models over the environment's, whenever the agent was built:
 
-| Set | Model calls go | What else it can do |
-|---|---|---|
-| `BIFROST_URL` | through Bifrost, with `BIFROST_VIRTUAL_KEY` — it wins over a provider key also set (said once at start, and by `trellis doctor`) | everything: the MCP tools, Code Mode, the cost of each call (dollar budgets), fallbacks and retries, stored prompts, the judge alias, each call's run as its dimensions |
-| no `BIFROST_URL` | to the model's provider, through the provider's own SDK and key (`OPENAI_API_KEY` and `OPENAI_BASE_URL` for any OpenAI-compatible endpoint — LiteLLM's proxy, vLLM, Ollama —, `ANTHROPIC_API_KEY`...) | models only: the client's own retries; a judge by name is an OpenAI model (`llm_judge(model="openai:...")`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
+| Set | Route (`LLM_GATEWAY`) | Model calls go | What else it can do |
+|---|---|---|---|
+| `LLM_BASE_URL` | `openai-compatible` (unset) | to that OpenAI-compatible endpoint — OpenAI, OpenRouter, a LiteLLM proxy, Ollama, vLLM, llama.cpp, Anthropic's and Gemini's OpenAI-compatible endpoints —, the name as given, authenticated by `LLM_AUTH` (`LLM_API_KEY` as the bearer key) | models only: the client's own retries; a judge by name on the same endpoint |
+| `LLM_BASE_URL` | `bifrost` | through Bifrost, with `LLM_API_KEY` as the virtual key, the name as Bifrost's `provider/model` | everything: the MCP tools, Code Mode, the cost of each call (dollar budgets), fallbacks and retries, stored prompts, skills, the judge alias, each call's run as its dimensions, the Claude CLI on its Anthropic route |
+| no `LLM_BASE_URL` | `provider-sdk` | to the model's provider, through the provider's own SDK and key — LangChain's `init_chat_model` (`OPENAI_API_KEY` and `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, Google's and AWS's own credentials for Vertex and Bedrock...) | models only: the client's own retries; a judge by name is an OpenAI model (`llm_judge(model="openai:...")`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
+
+A URL route wins over a provider key also set (said once at start, and by `trellis doctor`).
+A route of your own is a `ModelGateway` subclass a package registers under the entry-point
+group `trellis.gateways` (its name is its `LLM_GATEWAY` value); a feature asks the route
+whether it has a capability (`gateway.has(Capability.MCP)`), never which route it is.
+
+`LLM_AUTH` picks bifrost-sdk's auth strategy by name: `bearer` (unset: `LLM_API_KEY`, or a
+placeholder for a server that takes none), `google` (a Google OAuth token from the application
+default credentials, refreshed when it expires: `pip install 'trellis-harness[vertex]'`) or
+`aws` (each request signed with SigV4 from the AWS environment, for Bedrock's
+OpenAI-compatible endpoint: `trellis-harness[bedrock]`). A login takes no `LLM_API_KEY`; Bifrost
+authenticates with its virtual key only (`bearer`). A combination that fits no route —
+`LLM_GATEWAY=bifrost` without `LLM_BASE_URL`, `LLM_API_KEY` with `google`, an unknown name — is
+refused when the `Harness` is built (`ConfigurationError`).
 
 A name says its provider — `openai/gpt-4o` or `openai:gpt-4o` — or starts the way its
-provider's do (`gpt-`, `o3`, `claude-`, `gemini-`, `mistral-`): it is mapped to the route's
-form (`openai/gpt-4o` on Bifrost, `openai:gpt-4o` for LangChain's `init_chat_model`). Per
+provider's do (`gpt-`, `o3`, `claude-`, `gemini-`, `mistral-`): each route renders it in its
+own form — as given on an OpenAI-compatible endpoint, `openai/gpt-4o` on Bifrost,
+`openai:gpt-4o` for LangChain's `init_chat_model` (`gemini:` is `google_genai:`, `vertex:` is
+`google_vertexai:`, `bedrock:` is `bedrock_converse:`). The provider SDKs other than OpenAI's
+are optional extras: `trellis-harness[anthropic]`, `[gemini]`, `[vertex]`, `[bedrock]`. Per
 framework:
 
 | Framework | How its models are routed |
 |---|---|
 | `ReAct(model="name")` | its chat model routes each call as the harness running it says |
-| OpenAI Agents | an agent's model name (or the SDK's default) through Bifrost's chat completions (`RunConfig.model_provider`), unless the run's own `run_config` names a provider |
-| Claude Agent SDK | the CLI through Bifrost's Anthropic route (`ANTHROPIC_BASE_URL`, the virtual key), its headers in `ANTHROPIC_CUSTOM_HEADERS`, unless the options' own `env` names a base URL |
+| OpenAI Agents | with Bifrost, an agent's model name (or the SDK's default) through Bifrost's chat completions (`RunConfig.model_provider`), unless the run's own `run_config` names a provider |
+| Claude Agent SDK | with Bifrost (`Capability.ANTHROPIC_ROUTE`), the CLI through its Anthropic route (`ANTHROPIC_BASE_URL`, the virtual key), its headers in `ANTHROPIC_CUSTOM_HEADERS`, unless the options' own `env` names a base URL |
 | a model object you built (a `ChatOpenAI`, an OpenAI `Model`) | as you built it: with Bifrost set, a call that does not go through it is said once per agent and model |
 
-`trellis doctor` names the route, the provider keys it leaves unused, and what is off without
-Bifrost. Runnable, one agent on each route:
+`trellis doctor` names the route, its auth and where each model's profile comes from, checks
+the endpoint against the route declared (a `bifrost` route must answer MCP at the endpoint's
+root; an endpoint that does under `openai-compatible` is said to have more to give), names the
+provider keys it leaves unused, and what is off on the route. Runnable, one agent on each
+route:
 [examples/05_features/model_routing.py](../examples/05_features/model_routing.py).
 
 | Variable | `Settings` field | Unset (default) | Example | Automatic when set |
 |---|---|---|---|---|
-| `BIFROST_URL` | `bifrost_url` | no gateway: no MCP tools, no stored prompts; model names go to their provider's own SDK | `http://localhost:8091/v1` | the MCP tools the key allows, Code Mode, stored prompts, every model name routed through it |
-| `BIFROST_VIRTUAL_KEY` | `bifrost_virtual_key` | gateway calls without a key (the gateway's own policy decides); no memory model key | `vk-support` | registered once per process as each agent's model key in the memory service |
-| `TRELLIS_JUDGE_VIRTUAL_KEY` | `judge_virtual_key` | `BIFROST_VIRTUAL_KEY` (the agents' budget) | `vk-evals` | the judge's calls on their own key: evaluation's own budget, rate limits and models in Bifrost, so its spend never exhausts production's |
+| `LLM_BASE_URL` | `llm_base_url` | no endpoint: model names go to their provider's own SDK; no MCP tools, no stored prompts | `http://localhost:8091/v1` | every model name routed there; told to the memory service per agent (its own model work goes there too) |
+| `LLM_API_KEY` | `llm_api_key` | no key sent (a placeholder, for a server that takes none); with Bifrost, the gateway's own policy decides | `vk-support` | the bearer key of every model call; Bifrost's virtual key; sent to the memory service with the endpoint |
+| `LLM_GATEWAY` | `llm_gateway` | `openai-compatible` with `LLM_BASE_URL`, `provider-sdk` without | `bifrost` | the route's capabilities: Bifrost's MCP tools, Code Mode, stored prompts, skills, cost, the Anthropic route |
+| `LLM_AUTH` | `llm_auth` | `bearer` (`LLM_API_KEY`) | `google` | each model request authenticated by that strategy (a refreshed Google token, AWS SigV4); no secret sent to the memory service |
+| `TRELLIS_JUDGE_VIRTUAL_KEY` | `judge_virtual_key` | `LLM_API_KEY` (the agents' budget) | `vk-evals` | the judge's calls on their own key: evaluation's own budget, rate limits and models in Bifrost, so its spend never exhausts production's |
 | `TRELLIS_API_KEY` | `api_key` | only allowed without `MEMORY_URL` and `RUNS_URL` (`ConfigurationError` otherwise) | `trk_...` | the tenant: the memory service says who the key is (`GET /v1/keys/self`) |
 | `MEMORY_URL` | `memory_url` | memory off: no context, no memory tools, no records, no catalog (the tools' own risks decide) | `http://localhost:8080` | memory push, pull and records; the tool catalog; grounding; documents; feedback in memory |
 | `RUNS_URL` | `runs_url` | runs, the queue and schedules kept in process (`LocalRuns`: the last 1,000 finished runs, an hour each), lost on restart | `http://localhost:8090` | durable runs, workers across processes, the ticker's schedules and deadlines, artifacts, the event log (needs `MEMORY_URL`) |
@@ -135,7 +159,7 @@ memory service's development key, which speaks for the tenant `default`):
 ```bash
 export MEMORY_URL=http://localhost:8080 TRELLIS_API_KEY=dev-key
 export RUNS_URL=http://localhost:8090
-export BIFROST_URL=http://localhost:8091/v1 BIFROST_VIRTUAL_KEY=vk-local
+export LLM_BASE_URL=http://localhost:8091/v1 LLM_GATEWAY=bifrost LLM_API_KEY=vk-local
 python -m examples.02_way1_react.agent      # the same example, now on the real services
 ```
 
@@ -156,10 +180,12 @@ h = Harness(config=settings)
 are refused when the `Harness` is built (`ConfigurationError`), rather than a `401` at the
 first run. A field `Settings` does not have is refused (`ValidationError`). The names are the
 platform's: agent-runs reads the memory service at `MEMORY_URL` too, the memory SDK defaults to
-`MEMORY_URL` and `TRELLIS_API_KEY`, and the gateway is `BIFROST_URL` everywhere. The blocks read
+`MEMORY_URL` and `TRELLIS_API_KEY`, and the models are `LLM_BASE_URL`, `LLM_API_KEY`,
+`LLM_GATEWAY` and `LLM_AUTH` everywhere (the memory service reads the same four for its own
+settings). The blocks read
 the same names: `MemoryClient()` `MEMORY_URL` and `TRELLIS_API_KEY`, `RunsClient()` `RUNS_URL`
 and `TRELLIS_API_KEY`, `Governance.from_env()` `MEMORY_URL` and `TRELLIS_API_KEY`,
-`EvalServices.from_env()` the Langfuse keys, `BIFROST_URL` and `TRELLIS_JUDGE_VIRTUAL_KEY`. A
+`EvalServices.from_env()` the Langfuse keys, the `LLM_*` settings and `TRELLIS_JUDGE_VIRTUAL_KEY`. A
 team on Langfuse sets only Langfuse's own names (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`,
 and `LANGFUSE_BASE_URL` unless it is on Langfuse Cloud): with no OpenTelemetry exporter
 variable set, the harness exports its traces there too, so traces, scores and datasets all
@@ -205,8 +231,8 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 |---|---|---|---|
 | `memory` | `MEMORY_URL` | the memory context pushed into the framework's input, the memory tools, the records (transcript, tool calls, outcome, decisions as feedback) and the tool narrowing | the run has no memory scope: no context, no memory tools, nothing recorded, `trellis.current().memory` refused |
 | `tool_search` | `MEMORY_URL`, from 5 tools | the one owner of tool narrowing: the memory service's tool hints narrow the tools the model is offered, and its `tool_search` tool widens them | every tool offered (the learned skills stay) |
-| `mcp` | `BIFROST_URL`, or an `mcp(...)` entry | the MCP tools the virtual key allows and the agent's own `mcp(...)` servers, Code Mode included | no MCP tools: the gateway is not asked for them and no server is started |
-| `code_mode` | `BIFROST_URL`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
+| `mcp` | `LLM_GATEWAY=bifrost`, or an `mcp(...)` entry | the MCP tools the virtual key allows and the agent's own `mcp(...)` servers, Code Mode included | no MCP tools: the gateway is not asked for them and no server is started |
+| `code_mode` | `LLM_GATEWAY=bifrost`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
 | `judges` | `h.wrap(judges=[...])`, each on its share of runs (`llm_judge(sample=)`) | the online judges | not judged |
 | `grounding` | `MEMORY_URL`, a fixed tenth of the runs given a context | the grounding check (`/v1/verify`) and its score on the run's trace | not checked |
 
@@ -282,9 +308,17 @@ be asked about (the first ask failed), raises `ConfigurationError` with what wen
   tenant is `default` too — so local development needs no `tenant=`.
 * **What it may write** — not the key's role: the memory service decides per scope (its
   relationship checks) and a refused write is a reported warning.
-* **Memory model key** — `BIFROST_VIRTUAL_KEY` is registered as each agent's model key once per
-  process (idempotently): the memory service's LLM work for the agent runs on it. A memory
-  service that takes no model keys is logged once per process and not asked again.
+* **Memory model endpoint** — with `LLM_BASE_URL`, each agent tells the memory service its model
+  endpoint once per process (idempotently): the route's `trellis.contracts.Endpoint` — the
+  base URL, the route and auth names, the agent's model as the route names it, its LangChain
+  profile (reasoning, temperature, output tokens, tool calling) and `LLM_API_KEY` when it is a
+  bearer key (a Google or AWS login sends no secret). The memory service's LLM work for the
+  agent then goes where the agent's does: configure the harness only, memory follows. Without
+  `LLM_BASE_URL` nothing is told and the service uses its own `LLM_*` settings; an operator can
+  make it always do so (`models.llm.accept_agent_endpoints: false`). The service checks the
+  endpoint answers before it keeps it, so an endpoint only the harness's machine reaches
+  (`localhost`) is refused, said once in the log. A memory service that takes no endpoints is
+  logged once per process and not asked again.
 
 ## What is not a setting
 

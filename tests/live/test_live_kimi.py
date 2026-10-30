@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.live.conftest import BIFROST_URL, MODEL, live_harness, needs_gateway
+from tests.live.conftest import GATEWAY_URL, MODEL, live_harness, needs_gateway
 from tests.support.arm import arm
 from tests.support.kimi import KIMI_BIN
 from trellis import kimi, tool
@@ -28,7 +28,7 @@ pytestmark = [
 
 @pytest.mark.timeout(600)
 async def test_kimi_runs_through_the_gateway_and_resumes_its_session(tmp_path: Path) -> None:
-    assert BIFROST_URL is not None
+    assert GATEWAY_URL is not None
     closed: list[str] = []
 
     @tool(side_effects="irreversible")

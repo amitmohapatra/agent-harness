@@ -3,7 +3,7 @@
 ``await`` allowed, as the README shows it).
 
     python scripts/run_readme.py           # offline: a scripted model answers (make examples)
-    python scripts/run_readme.py --live    # the environment as it is: BIFROST_URL or the
+    python scripts/run_readme.py --live    # the environment as it is: LLM_BASE_URL or the
                                            # provider's key (make examples-live)
 
 Offline the walkthrough's model name is served by the examples' scripted model
@@ -50,7 +50,7 @@ def offline() -> None:
     from examples._support.offline import langchain_model  # noqa: PLC0415 - ROOT on the path
 
     model = langchain_model(SCRIPT)
-    gateways.ProviderKey.chat_model = lambda self, name, *, effort: model  # type: ignore[method-assign]
+    gateways.ProviderSDK.chat_model = lambda self, name, *, effort: model  # type: ignore[method-assign]
 
 
 async def run(source: str) -> dict[str, Any]:

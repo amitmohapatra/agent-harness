@@ -223,7 +223,7 @@ class Prompts:
         if self.gateway is None:
             raise ConfigurationError(
                 f"the prompt {named(name, version)!r} is a stored prompt of the gateway: set "
-                "BIFROST_URL (a prompt in code is a string)"
+                "LLM_GATEWAY=bifrost (a prompt in code is a string)"
             )
         if version is not None and not (version.isdigit() and int(version) >= 1):
             raise NotFound(f"a stored prompt's version is a number from 1, not {version!r}")

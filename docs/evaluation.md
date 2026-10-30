@@ -184,8 +184,8 @@ is a `ConfigurationError`.
 | | |
 |---|---|
 | `llm_judge(criteria, model="name")` | this judge's own Bifrost model name: two judges of one run may ask two models |
-| the judge alias `trellis-judge` | else, the model name every judge asks through `BIFROST_URL`: an alias the Bifrost admin routes to the judging model, changed at runtime with no redeploy |
-| `TRELLIS_JUDGE_VIRTUAL_KEY` | the virtual key the judge's calls go through; unset: `BIFROST_VIRTUAL_KEY` |
+| the judge alias `trellis-judge` | else, with Bifrost (`LLM_GATEWAY=bifrost`), the model name every judge asks: an alias the Bifrost admin routes to the judging model, changed at runtime with no redeploy; on another route a judge names its model |
+| `TRELLIS_JUDGE_VIRTUAL_KEY` | the virtual key the judge's calls go through; unset: `LLM_API_KEY` |
 
 The judge never becomes the judged agent's own model. An alias the gateway does not route
 (it answers 404) turns the judges off: each judge's failure says so in the report's `failed`,
@@ -334,7 +334,7 @@ SDK does.
 
 `make bench-cost` (`python -m benchmark.cost`) measures what a `ReAct` agent costs and how
 well it chooses its tools as its tool catalogue grows, against whatever model the environment
-configures (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, a gateway model name), so a cost feature's
+configures (`LLM_BASE_URL`, `LLM_GATEWAY=bifrost`, `LLM_API_KEY`, a gateway model name), so a cost feature's
 saving is a measured number before it is switched on by default.
 
 ```bash
@@ -405,8 +405,8 @@ early sent fewer tokens for less work: counting it would reward failing). Better
 only one report measured is listed, not failed.
 
 `.github/workflows/bench.yml` runs it where a gateway serving the baseline's model is
-configured (the repository variable `BENCH_BIFROST_URL` and the secret
-`BENCH_BIFROST_VIRTUAL_KEY`; without them the job is skipped): the smoke set (10 tools, one
+configured (the repository variable `BENCH_LLM_BASE_URL` and the secret
+`BENCH_LLM_API_KEY`, a Bifrost; without them the job is skipped): the smoke set (10 tools, one
 repeat) on a pull request, the 10- and 50-tool catalogues nightly.
 
 ## Thread-history benchmark

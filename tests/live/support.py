@@ -171,13 +171,13 @@ def gateway_model(h: Harness, sent: Sent, *, wait: float = 600.0, **kwargs: Any)
     from bifrost_sdk import NO_GATEWAY_TOOLS
     from langchain_openai import ChatOpenAI
 
-    from tests.live.conftest import BIFROST_URL, MODEL
+    from tests.live.conftest import GATEWAY_URL, MODEL
 
     client = httpx.AsyncClient(timeout=wait, event_hooks={"request": [sent]})
     return ChatOpenAI(
         model=MODEL,
-        base_url=BIFROST_URL,
-        api_key=h.settings.bifrost_virtual_key or "none",  # type: ignore[arg-type]
+        base_url=GATEWAY_URL,
+        api_key=h.settings.llm_api_key or "none",  # type: ignore[arg-type]
         default_headers=dict(NO_GATEWAY_TOOLS),
         max_tokens=160,  # type: ignore[call-arg]
         http_async_client=client,

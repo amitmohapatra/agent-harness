@@ -11,7 +11,7 @@ wrapped — with the blocks plugged in by the team's own code.
   and the reviewer's answer approves or rejects the call on the restored state.
 * Evaluation (``trellis.harness.evals``): the answer is judged on the run's trace.
 
-Offline (no ``RUNS_URL``, ``MEMORY_URL`` or ``BIFROST_URL``) the run store is the in-process
+Offline (no ``RUNS_URL``, ``MEMORY_URL`` or ``LLM_BASE_URL``) the run store is the in-process
 one, the memory service a scripted one in this process, and the model and the judge are
 scripted.
 

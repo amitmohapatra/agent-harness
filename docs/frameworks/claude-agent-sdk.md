@@ -7,7 +7,7 @@ gateway's MCP tools, memory's); your options object is never changed.
 **Install:** `pip install 'trellis-harness[claude-agent-sdk]'`, and the Claude Code CLI the SDK
 drives. Through Bifrost: `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic",
 "ANTHROPIC_API_KEY": "<virtual key>"}` is set on the run's copy of the options by the harness
-when `BIFROST_URL` is set (unless your `env` names a base URL), with Bifrost's headers — the
+when Bifrost is the route (`LLM_GATEWAY=bifrost`, its `Capability.ANTHROPIC_ROUTE`; unless your `env` names a base URL), with Bifrost's headers — the
 deny-all MCP scope, whose run it is — as `ANTHROPIC_CUSTOM_HEADERS` lines.
 
 This page is Way 1: the harness runs `query()`. To keep calling `query()` yourself and plug in
@@ -198,6 +198,6 @@ the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (
 
 * [`examples/02_way1_claude/agent.py`](../../examples/02_way1_claude/agent.py) — offline it
   drives a scripted stand-in for the CLI (`tests/support/fake_claude_cli.py`); with
-  `BIFROST_URL` the real `claude` CLI through Bifrost.
+  `LLM_GATEWAY=bifrost` the real `claude` CLI through Bifrost.
 * Tests: `tests/integration/test_claude.py`, and against the real services
   `tests/live/test_live_matrix.py` (`claude`).

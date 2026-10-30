@@ -24,7 +24,8 @@ from trellis.runs import Job, Worker
 EVERYTHING = Settings(
     memory_url="http://memory.env",
     runs_url="http://runs.env",
-    bifrost_url="http://gateway.env/v1",
+    llm_gateway="bifrost",
+    llm_base_url="http://gateway.env/v1",
     api_key="key",
 )
 

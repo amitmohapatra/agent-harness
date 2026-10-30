@@ -234,7 +234,7 @@ async def test_kimi_through_bifrost_carries_the_runs_headers(tmp_path: Path) -> 
     """With Bifrost serving the harness and a model named, Kimi's model calls go to Bifrost's
     OpenAI route with the virtual key, the deny-all MCP scope and the run's dimensions."""
     async with PlannedEndpoint().serving() as endpoint:
-        settings = Settings(bifrost_url=endpoint.url, bifrost_virtual_key="vk-test")
+        settings = Settings(llm_gateway="bifrost", llm_base_url=endpoint.url, llm_api_key="vk-test")
         async with Harness(config=settings, gateway=False) as h:
             target = kimi_target(endpoint, tmp_path, model="moonshot/kimi-k2")
             env = {k: v for k, v in target.env.items() if not k.startswith("KIMI_MODEL")}

@@ -1,6 +1,7 @@
-"""Where a model name goes — model routing, one strategy, never a fallback: through Bifrost when
-``BIFROST_URL`` is set (it wins over a provider key: said once, and by ``trellis doctor``), else
-to its provider through the provider's own SDK and key. The settings given in code
+"""Where a model name goes — model routing, one strategy, never a fallback: to the endpoint
+``LLM_BASE_URL`` names, by the route ``LLM_GATEWAY`` names (an OpenAI-compatible endpoint, or
+Bifrost; it wins over a provider key: said once, and by ``trellis doctor``), else to its
+provider through the provider's own SDK and key. The settings given in code
 (``Harness(config=)``) route the run's models over the environment's, the name is mapped to the
 route's form, every framework's model calls follow the route (``ReAct``'s chat model per call,
 an OpenAI agent's through ``RunConfig.model_provider``, Claude's CLI through its ``env``), and
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,13 +27,13 @@ from trellis import Harness, ReAct, Settings
 from trellis.contracts import ConfigurationError
 from trellis.harness import doctor, gateways
 from trellis.harness.adapters.claude import routed_env
-from trellis.harness.evals import EvalServices, llm_judge
+from trellis.harness.evals import EvalServices, OpenAICompatibleJudge, llm_judge
 from trellis.harness.gateways import (
     BIFROST_CLIENT_RETRIES,
     Bifrost,
     Capability,
-    GatewayKind,
-    ProviderKey,
+    OpenAICompatible,
+    ProviderSDK,
     missing,
     model_gateway,
     routed_chat_model,
@@ -52,28 +54,74 @@ REPLY = {
 
 @pytest.fixture(autouse=True)
 def _no_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("BIFROST_URL", "BIFROST_VIRTUAL_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
+    for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_GATEWAY", "LLM_AUTH", "OPENAI_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
-    gateways._bifrost_wins.cache_clear()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    gateways._endpoint_wins.cache_clear()
 
 
 def test_one_route_is_chosen_never_a_chain() -> None:
-    bifrost = model_gateway(Settings(bifrost_url="http://bf/v1"))
-    assert isinstance(bifrost, Bifrost) and bifrost.kind is GatewayKind.BIFROST
-    assert bifrost.capabilities == frozenset(Capability) and bifrost.probe_key == "no-key"
-    assert bifrost.origin == "http://bf"
+    bifrost = model_gateway(Settings(llm_gateway="bifrost", llm_base_url="http://bf/v1"))
+    assert isinstance(bifrost, Bifrost) and bifrost.name == "bifrost"
+    assert bifrost.capabilities == frozenset(Capability) and bifrost.key is None
+    assert bifrost.origin == "http://bf" and bifrost.where == "http://bf/v1"
+    compatible = model_gateway(Settings(llm_base_url="http://llm/v1", llm_api_key="sk"))
+    assert type(compatible) is OpenAICompatible and compatible.name == "openai-compatible"
+    assert compatible.capabilities == {Capability.MODELS} and compatible.auth == "bearer"
     direct = model_gateway(Settings())
-    assert isinstance(direct, ProviderKey) and direct.kind is GatewayKind.PROVIDER_KEY
-    assert direct.capabilities == {Capability.MODELS} and direct.probe_key == "no-key"
+    assert isinstance(direct, ProviderSDK) and direct.name == "provider-sdk"
+    assert direct.capabilities == {Capability.MODELS} and direct.url is None
+    assert direct.where == "each provider's own endpoint"
     said = missing(direct, Capability.CODE_MODE, "Code Mode")
-    assert said == "Code Mode needs a gateway with code_mode: Bifrost (BIFROST_URL)"
+    assert said == "Code Mode needs a gateway with code_mode: Bifrost (LLM_GATEWAY=bifrost)"
     assert missing(bifrost, Capability.CODE_MODE, "Code Mode") is None
+
+
+@pytest.mark.parametrize(
+    ("settings", "said"),
+    [
+        (Settings(llm_gateway="nowhere"), "LLM_GATEWAY='nowhere' names no route; known: bifrost"),
+        (Settings(llm_gateway="bifrost"), "LLM_GATEWAY=bifrost needs LLM_BASE_URL"),
+        (Settings(llm_base_url="localhost:8080/v1"), "LLM_BASE_URL is an http(s) URL"),
+        (Settings(llm_base_url="http://x/v1", llm_auth="kerberos"), "LLM_AUTH='kerberos'"),
+        (
+            Settings(llm_base_url="http://x/v1", llm_auth="google", llm_api_key="k"),
+            "LLM_AUTH=google signs with its own credentials: unset LLM_API_KEY",
+        ),
+        (
+            Settings(llm_base_url="http://x/v1", llm_gateway="bifrost", llm_auth="aws"),
+            "authenticates with its virtual key",
+        ),
+        (Settings(llm_api_key="k"), "LLM_API_KEY set with LLM_GATEWAY=provider-sdk"),
+        (
+            Settings(llm_base_url="http://x/v1", llm_gateway="provider-sdk"),
+            "LLM_BASE_URL set with LLM_GATEWAY=provider-sdk",
+        ),
+    ],
+)
+def test_settings_that_fit_no_route_are_refused(settings: Settings, said: str) -> None:
+    with pytest.raises(ConfigurationError, match=re.escape(said)):
+        model_gateway(settings)
 
 
 @pytest.mark.parametrize(
     ("name", "provider", "model", "on_bifrost", "on_key"),
     [
         ("gpt-4o", "openai", "gpt-4o", "openai/gpt-4o", "openai:gpt-4o"),
+        (
+            "vertex/gemini-2.5-pro",
+            "vertex",
+            "gemini-2.5-pro",
+            None,
+            "google_vertexai:gemini-2.5-pro",
+        ),
+        (
+            "bedrock:claude-x",
+            "bedrock",
+            "claude-x",
+            "bedrock/claude-x",
+            "bedrock_converse:claude-x",
+        ),
         ("openai:gpt-4o", "openai", "gpt-4o", "openai/gpt-4o", "openai:gpt-4o"),
         ("openai/gpt-4o", "openai", "gpt-4o", "openai/gpt-4o", "openai:gpt-4o"),
         ("o3-mini", "openai", "o3-mini", "openai/o3-mini", "openai:o3-mini"),
@@ -88,16 +136,17 @@ def test_a_name_is_mapped_to_the_routes_form(
     name: str, provider: str | None, model: str, on_bifrost: str | None, on_key: str | None
 ) -> None:
     assert split(name) == (provider, model)
+    assert OpenAICompatible("http://llm/v1").routed(name) == name  # as given
     if on_bifrost is not None:
         assert Bifrost("http://bf/v1", None).routed(name) == on_bifrost
     if on_key is not None:
-        assert ProviderKey().routed(name) == on_key
+        assert ProviderSDK().routed(name) == on_key
 
 
 def test_a_name_whose_provider_cannot_be_told_says_how_to_name_it() -> None:
     with pytest.raises(ConfigurationError, match=r"name its provider \('openai:granite'"):
-        ProviderKey().routed("granite")
-    assert ProviderKey().routed("anthropic/claude-x") == "anthropic:claude-x"
+        ProviderSDK().routed("granite")
+    assert ProviderSDK().routed("anthropic/claude-x") == "anthropic:claude-x"
 
 
 @respx.mock
@@ -109,7 +158,7 @@ async def test_a_name_through_a_provider_key(monkeypatch: pytest.MonkeyPatch) ->
     )
     graph = ReAct(system_prompt="s", model="openai/gpt-x", context_window=50_000)
     async with Harness(config=Settings()) as h:
-        assert h.model_gateway.kind is GatewayKind.PROVIDER_KEY
+        assert isinstance(h.model_gateway, ProviderSDK)
         result = await h.wrap(graph, id="direct").run("x", user="u")
     assert result.answer == "hi", result.error
     request = route.calls[0].request
@@ -134,27 +183,31 @@ async def test_the_settings_given_in_code_route_over_the_environment(
     )
     graph = ReAct(system_prompt="s", model="gpt-x", context_window=50_000)
     with caplog.at_level(logging.INFO, logger="trellis.harness"):
-        async with Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key="vk")) as h:
+        async with Harness(
+            config=Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+        ) as h:
             assert (await h.wrap(graph, id="coded").run("x", user="u")).answer == "hi"
-        async with Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key="vk")):
+        async with Harness(
+            config=Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+        ):
             pass
     request = gateway.calls[0].request
     assert request.headers["authorization"] == "Bearer vk"
     assert json.loads(request.content)["model"] == "openai/gpt-x"  # Bifrost's form
     assert request.headers["x-bf-dim-agent"] == "coded"  # the run's dimensions
-    said = [r for r in caplog.records if "Bifrost wins over a provider key" in r.getMessage()]
+    said = [r for r in caplog.records if "the endpoint wins over a provider key" in r.getMessage()]
     assert len(said) == 1 and "OPENAI_API_KEY" in said[0].getMessage()  # once
 
 
 def test_the_client_retries_where_no_gateway_does(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
-    direct = ProviderKey().chat_model("gpt-x", effort=None)
+    direct = ProviderSDK().chat_model("gpt-x", effort=None)
     assert direct.max_retries is None  # the OpenAI client's own default: nothing else retries
     assert direct.request_timeout is None  # a call's bound is the run's, applied once
     bifrost = Bifrost("http://bf/v1", None).chat_model("m", effort=None)
     assert bifrost.max_retries == BIFROST_CLIENT_RETRIES == 0  # the gateway retries
-    other = ProviderKey().chat_model("anthropic:claude-x", effort=None)
+    other = ProviderSDK().chat_model("anthropic:claude-x", effort=None)
     assert type(other).__name__ == "ChatAnthropic"  # any other provider: init_chat_model
 
 
@@ -164,7 +217,8 @@ def test_a_routed_name_knows_its_window_and_is_routed_when_called(
     model = routed_chat_model("openai/gpt-4o")
     assert model.profile is not None and model.profile["max_input_tokens"] > 0
     assert routed_chat_model("ollama/granite").profile is None  # LangChain knows nothing
-    monkeypatch.setenv("BIFROST_URL", "http://bf/v1")  # outside a run: the environment's route
+    monkeypatch.setenv("LLM_BASE_URL", "http://bf/v1")  # outside a run: the environment's route
+    monkeypatch.setenv("LLM_GATEWAY", "bifrost")
     resolved = model.resolved()
     assert resolved.model_name == "openai/gpt-4o" and resolved is model.resolved()  # kept
 
@@ -184,8 +238,9 @@ async def test_a_judge_by_name_through_a_provider_key(monkeypatch: pytest.Monkey
         services.model()  # the alias is Bifrost's routing
     with pytest.raises(ConfigurationError, match="an OpenAI model on the OpenAI SDK's"):
         services.model("anthropic:claude-x")
-    with pytest.raises(ConfigurationError, match="is Bifrost's"):
-        EvalServices(models=Bifrost(URL, None)).model("m")  # Bifrost, with no judge client
+    on_route = EvalServices(models=Bifrost(URL, None)).model("gpt-j")  # no judge client
+    assert isinstance(on_route, OpenAICompatibleJudge) and on_route.model == "openai/gpt-j"
+    assert on_route.base_url == URL and on_route.key == "no-key"
 
 
 async def test_an_openai_agent_by_name_goes_through_bifrost(
@@ -193,7 +248,7 @@ async def test_an_openai_agent_by_name_goes_through_bifrost(
 ) -> None:
     fake = FakeGateway(turns=["routed"])
     fake.serve_models(monkeypatch)
-    settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
     async with Harness(config=settings, gateway=fake.gateway()) as h:
         result = await h.wrap(Agent(name="a", model="gpt-x"), id="named").run("x", user="u")
         again = await h.wrap(Agent(name="b"), id="default").run("x", user="u")
@@ -214,7 +269,9 @@ async def test_a_run_config_with_its_own_provider_or_a_model_object_is_kept(
     from agents.models.openai_provider import OpenAIProvider
 
     own = RunConfig(model_provider=OpenAIProvider(api_key="theirs"))
-    async with Harness(config=Settings(bifrost_url=URL), gateway=FakeGateway().gateway()) as h:
+    async with Harness(
+        config=Settings(llm_gateway="bifrost", llm_base_url=URL), gateway=FakeGateway().gateway()
+    ) as h:
         agent = h.wrap(Agent(name="mine", model=ScriptedModel(["mine", "again"])), id="mine")
         with caplog.at_level(logging.WARNING, logger="trellis.harness"):
             assert (await agent.run("x", user="u")).answer == "mine"
@@ -228,7 +285,9 @@ async def test_a_langchain_model_object_is_said_once_as_not_routed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     graph = ReAct(system_prompt="s", model=ScriptedChat(["one", "two"]))
-    async with Harness(config=Settings(bifrost_url=URL), gateway=FakeGateway().gateway()) as h:
+    async with Harness(
+        config=Settings(llm_gateway="bifrost", llm_base_url=URL), gateway=FakeGateway().gateway()
+    ) as h:
         agent = h.wrap(graph, id="objects")
         with caplog.at_level(logging.WARNING, logger="trellis.harness"):
             await agent.run("x", user="u")
@@ -257,7 +316,7 @@ def test_claude_is_routed_through_bifrosts_anthropic_route() -> None:
     assert routed_env(theirs, _claude_runtime(bifrost)) is None
     own = routed_env({"ANTHROPIC_BASE_URL": "http://bf/anthropic"}, _claude_runtime(bifrost))
     assert own is not None and "ANTHROPIC_API_KEY" not in own  # their key, from their env
-    assert routed_env({}, _claude_runtime(ProviderKey())) is None  # the CLI's own key
+    assert routed_env({}, _claude_runtime(ProviderSDK())) is None  # the CLI's own key
 
 
 async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> None:
@@ -267,7 +326,7 @@ async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> N
 
     record = tmp_path / "cli.json"
     env = {"FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]), "FAKE_CLAUDE_RECORD": str(record)}
-    settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
     async with Harness(config=settings, gateway=FakeGateway().gateway()) as h:
         agent = h.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="claude")
         assert (await agent.run("x", user="ada")).answer == "ok"
@@ -286,10 +345,27 @@ def test_doctor_says_how_models_are_routed_and_what_is_off(
     assert "provider keys: each provider's own SDK reads its own (OPENAI_API_KEY, " in out
     assert "off: Code Mode" in out and "off: model names" not in out
     said = doctor.gateway_said(Settings(), {})
-    assert said[0] == "provider keys: each provider's own SDK reads its own (none set)"
-    both = doctor.gateway_said(Settings(bifrost_url=URL), {"ANTHROPIC_API_KEY": "k"})
-    assert both[0] == f"Bifrost at {URL} (BIFROST_URL)"
-    assert both[1].startswith("note: ANTHROPIC_API_KEY set, not used for model calls")
+    assert said[0] == "route: provider-sdk (provider SDK) at each provider's own endpoint"
+    assert said[1] == "provider keys: each provider's own SDK reads its own (none set)"
+    assert said[2].endswith("the memory service uses its own settings")
+    both = doctor.gateway_said(
+        Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk"),
+        {"ANTHROPIC_API_KEY": "k"},
+    )
+    assert both[0] == f"route: bifrost (Bifrost) at {URL}"
+    assert both[1] == "auth: bearer, with LLM_API_KEY"
+    assert both[2].startswith("note: ANTHROPIC_API_KEY set, not used for model calls")
+    assert both[3].endswith("the memory service is told it per agent with the endpoint")
+    assert not [line for line in both if line.startswith("off:")]  # Bifrost: nothing off
+    google = doctor.gateway_said(Settings(llm_base_url=URL, llm_auth="google"), {})
+    assert google[:2] == [
+        f"route: openai-compatible (OpenAI-compatible endpoint) at {URL}",
+        "auth: google",
+    ]
+    wrong = doctor.gateway_said(Settings(llm_gateway="nowhere"), {})
+    assert wrong == [
+        "misconfigured: LLM_GATEWAY='nowhere' names no route; known: bifrost, openai-compatible, provider-sdk"
+    ]
     assert "Gateway" not in doctor.report([("a", "b", "c")], [], [])  # none said: no section
 
 
@@ -304,7 +380,7 @@ async def test_a_routed_name_is_the_routed_models_in_every_way_it_is_called(
     made: list[Any] = []
 
     class Route:
-        kind, url, key = GatewayKind.PROVIDER_KEY, "here", None
+        name, url, key, auth = "provider-sdk", "here", None, "bearer"
 
         def chat_model(self, model: str, *, effort: str | None) -> Any:
             replies = iter([AIMessage(content=f"{model} says hi")] * 8)

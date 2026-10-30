@@ -1190,7 +1190,7 @@ FEATURES: Final[list[Feature]] = [
         "F17",
         "the key's MCP tools (through the gateway)",
         "F17",
-        "the gateway (BIFROST_URL / Harness(gateway=))",
+        "the gateway (LLM_GATEWAY=bifrost / Harness(gateway=))",
         key_tools,
         needs=frozenset({"gateway", "mcp"}),
         way2=way2.key_tools,

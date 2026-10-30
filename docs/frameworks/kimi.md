@@ -123,7 +123,7 @@ Kimi's own tools run again.
 
 ## Models, swarms and limits
 
-* **Through Bifrost.** With `BIFROST_URL` set and `model=` named (and no `KIMI_MODEL_BASE_URL`
+* **Through Bifrost.** With Bifrost the route (`LLM_GATEWAY=bifrost`) and `model=` named (and no `KIMI_MODEL_BASE_URL`
   in `env`), `kimi` gets `KIMI_MODEL_PROVIDER_TYPE=openai`, Bifrost's URL, the virtual key, and
   the deny-all MCP scope, the run's dimensions and its `traceparent` as
   `KIMI_CODE_CUSTOM_HEADERS` lines beside your own. Elsewhere, said once in the log.

@@ -17,8 +17,10 @@ DEFAULT_SPOOL = settings_module.default_spool
 
 def test_every_variable_is_read_from_the_environment() -> None:
     env = {
-        "BIFROST_URL": "http://gw/v1",
-        "BIFROST_VIRTUAL_KEY": "vk",
+        "LLM_BASE_URL": "http://gw/v1",
+        "LLM_API_KEY": "vk",
+        "LLM_GATEWAY": "bifrost",
+        "LLM_AUTH": "bearer",
         "TRELLIS_API_KEY": "tk",
         "MEMORY_URL": "http://mem",
         "RUNS_URL": "http://runs",
@@ -27,15 +29,17 @@ def test_every_variable_is_read_from_the_environment() -> None:
     }
     settings = Settings.from_env(env)
     assert settings.model_dump() == {
-        "bifrost_url": "http://gw/v1",
-        "bifrost_virtual_key": "vk",
+        "llm_base_url": "http://gw/v1",
+        "llm_api_key": "vk",
+        "llm_gateway": "bifrost",
+        "llm_auth": "bearer",
         "api_key": "tk",
         "memory_url": "http://mem",
         "runs_url": "http://runs",
         "spool_dir": "/var/spool/trellis",
         "judge_virtual_key": "eval-vk",
     }
-    assert set(env) == set(settings_module.VARIABLES.values())  # the seven, and only them
+    assert set(env) == set(settings_module.VARIABLES.values())  # the nine, and only them
     assert sourced(env)["api_key"] == ("tk", "TRELLIS_API_KEY")
 
 

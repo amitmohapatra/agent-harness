@@ -9,9 +9,9 @@ destructive, so it waits for a person. The memory context is
 appended to the system prompt. A pause stops the CLI; the resume continues its session, the
 journal answering the paused call.
 
-Offline this drives a scripted stand-in for the Claude Code CLI (``cli_path``). With
-``BIFROST_URL`` set it runs the real ``claude`` CLI (install Claude Code), pointed at Bifrost's
-Anthropic route: ``ANTHROPIC_BASE_URL=<gateway>/anthropic`` and
+Offline this drives a scripted stand-in for the Claude Code CLI (``cli_path``). With Bifrost
+set (``LLM_BASE_URL``, ``LLM_GATEWAY=bifrost``) it runs the real ``claude`` CLI (install Claude
+Code), pointed at Bifrost's Anthropic route: ``ANTHROPIC_BASE_URL=<gateway>/anthropic`` and
 ``ANTHROPIC_API_KEY=<virtual key>`` in the options' ``env``.
 
     python -m examples.02_way1_claude.agent

@@ -56,7 +56,7 @@ exports the queued spans and closes the clients it built; a client you give is y
 | `config` | `Settings.from_env()` | the deployment as fields, instead of the environment ([Settings](#settings)) |
 | `memory` | a `MemoryClient` with `MEMORY_URL`, else none | `trellis.memory.MemoryClient`; `False`: no memory whatever `MEMORY_URL` says — for the whole deployment: no client, the local tenant, no `h.add_document` (and `RUNS_URL` refused, agent-runs needing the key's tenant). To leave memory out for one agent or one run while the rest keep it, use `without={"memory"}` ([memory.md](memory.md)) |
 | `runs` | agent-runs' `RunsClient` with `RUNS_URL`, else the in-process `LocalRuns` | the run store: `trellis.runs.RunsClient`, `trellis.harness.runs.LocalRuns(keep_finished=1000, keep_finished_seconds=3600)` (the finished runs it keeps, and how long), or yours with the same calls; `False`: in process whatever `RUNS_URL` says ([runs.md](runs.md)) |
-| `gateway` | a `Gateway` with `BIFROST_URL`, else none | `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`; `False`: no gateway ([gateway.md](gateway.md)) |
+| `gateway` | a `Gateway` with `LLM_GATEWAY=bifrost`, else none | `trellis.harness.clients.bifrost.Gateway(url, virtual_key)`; `False`: no gateway ([gateway.md](gateway.md)) |
 
 Governance is the memory service's tool catalog, per tenant (with memory), else each tool's own
 risk ([governance.md](governance.md)). `h.agents` is every agent it wraps, by id; `h.runs` the
@@ -293,7 +293,7 @@ can and cannot do beyond its tools ("you cannot accept an image upload") goes in
 | Argument | Default | What it is |
 |---|---|---|
 | `system_prompt` | required | the instructions: a string, or `stored("name", **values)` — the gateway's stored prompt, pinned per run ([prompts.md](prompts.md)) |
-| `model` | required | a model name — through Bifrost with `BIFROST_URL`, else the provider's own SDK with its own key (`openai/...`, `anthropic/...`) — or any LangChain chat model ([configuration.md](configuration.md#models)) |
+| `model` | required | a model name — to `LLM_BASE_URL` by `LLM_GATEWAY`'s route (as given, or Bifrost's `provider/model`), else the provider's own SDK with its own key (`openai/...`, `anthropic/...`) — or any LangChain chat model ([configuration.md](configuration.md#models)) |
 
 **Usual**
 
@@ -491,9 +491,10 @@ defining `before_model` or `after_model` is refused.
 
 ## Settings
 
-`Settings(bifrost_url=, bifrost_virtual_key=, api_key=, memory_url=, runs_url=, spool_dir=,
-judge_virtual_key=)` — every field optional; `Settings.from_env()` is what `Harness()` reads:
-`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL`,
+`Settings(llm_base_url=, llm_api_key=, llm_gateway=, llm_auth=, api_key=, memory_url=,
+runs_url=, spool_dir=, judge_virtual_key=)` — every field optional; `Settings.from_env()` is
+what `Harness()` reads: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_GATEWAY`, `LLM_AUTH`,
+`TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL`,
 `TRELLIS_SPOOL_DIR`, `TRELLIS_JUDGE_VIRTUAL_KEY`. The tools' own variables (`OTEL_*`,
 `LANGFUSE_*`, the providers' keys, `DOCKER_HOST`) are read by their own SDKs. Each field, its
 variable, default and an example: [configuration.md](configuration.md#settings-and-the-environment).

@@ -102,18 +102,21 @@ def _docker_up() -> bool:
         return False
 
 
-BIFROST_URL = _env("BIFROST_URL")
+#: Bifrost's ``/v1`` root, when the environment names Bifrost (``LLM_GATEWAY=bifrost``).
+GATEWAY_URL = _env("LLM_BASE_URL") if _env("LLM_GATEWAY") == "bifrost" else None
 MODEL = _env("TRELLIS_LIVE_MODEL") or DEFAULT_MODEL
 MCP_URL = _env("TRELLIS_LIVE_MCP_URL") or DEEPWIKI_URL
 #: The wiki server is this machine's (``mcp_fixture.py``): declared in the gateway, not added.
 LOCAL_MCP = urlsplit(MCP_URL).hostname in ("127.0.0.1", "localhost")
 MEMORY_URL = _env("MEMORY_URL")
 RUNS_URL = _env("RUNS_URL")
-GATEWAY_UP = _reachable(BIFROST_URL.removesuffix("/v1") if BIFROST_URL else None, "/health")
+GATEWAY_UP = _reachable(GATEWAY_URL.removesuffix("/v1") if GATEWAY_URL else None, "/health")
 MEMORY_UP = _reachable(MEMORY_URL, "/health/live")
 RUNS_UP = _reachable(RUNS_URL, "/health/live")
 
-needs_gateway = pytest.mark.skipif(not GATEWAY_UP, reason="needs a Bifrost gateway (BIFROST_URL)")
+needs_gateway = pytest.mark.skipif(
+    not GATEWAY_UP, reason="needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)"
+)
 needs_memory = pytest.mark.skipif(not MEMORY_UP, reason="needs the memory service (MEMORY_URL)")
 needs_runs = pytest.mark.skipif(not RUNS_UP, reason="needs agent-runs (RUNS_URL)")
 needs_docker = pytest.mark.skipif(
@@ -163,7 +166,7 @@ def live_harness(
     ``sampled`` (the share of runs grounded and judged) and Langfuse's variables
     (``langfuse``: its scores and datasets, not its traces)."""
     if key is not None:
-        changes["bifrost_virtual_key"] = key
+        changes["llm_api_key"] = key
     s = settings(**changes)
     memory = (
         MemoryClient(s.memory_url, api_key=s.api_key, timeout=LIVE_TIMEOUT)
@@ -208,10 +211,10 @@ def claude_cli_env() -> dict[str, str]:
     replies capped at 512 tokens as the local server caps every other client's (its ``-n``).
     The CLI asks for tens of thousands, which the server honours: a reply the small model
     fell into repeating ran 2,100 tokens at ~4 token/s, past the test's ten minutes."""
-    assert BIFROST_URL is not None
+    assert GATEWAY_URL is not None
     return {
-        "ANTHROPIC_BASE_URL": f"{BIFROST_URL.removesuffix('/v1')}/anthropic",
-        "ANTHROPIC_API_KEY": settings().bifrost_virtual_key or "unused",
+        "ANTHROPIC_BASE_URL": f"{GATEWAY_URL.removesuffix('/v1')}/anthropic",
+        "ANTHROPIC_API_KEY": settings().llm_api_key or "unused",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "512",
     }
@@ -223,8 +226,8 @@ def mcp_fixture() -> Iterator[str]:
     session unless they already run, and the gateway's clients of them connected; the wiki
     server's URL. Skips when the URL is not this machine's, or the gateway declares none of
     the clients."""
-    if not GATEWAY_UP or BIFROST_URL is None:
-        pytest.skip("needs a Bifrost gateway (BIFROST_URL)")
+    if not GATEWAY_UP or GATEWAY_URL is None:
+        pytest.skip("needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)")
     if not LOCAL_MCP:
         pytest.skip("needs the local MCP servers: TRELLIS_LIVE_MCP_URL=http://127.0.0.1:<port>/mcp")
     started = None
@@ -235,7 +238,7 @@ def mcp_fixture() -> Iterator[str]:
             stderr=subprocess.DEVNULL,
         )
     try:
-        asyncio.run(_connected(BIFROST_URL))
+        asyncio.run(_connected(GATEWAY_URL))
         yield MCP_URL
     finally:
         if started is not None:
@@ -247,7 +250,10 @@ async def _connected(url: str) -> None:
     """The gateway's clients of the local servers, reconnected (or their tools refreshed) when
     they were down when the gateway started, and waited for until their tools are listed;
     skips when its ``config.json`` declares none."""
-    async with Bifrost(url) as bf, httpx.AsyncClient(base_url=url.removesuffix("/v1")) as api:
+    async with (
+        Bifrost(url, gateway="bifrost") as bf,
+        httpx.AsyncClient(base_url=url.removesuffix("/v1")) as api,
+    ):
         for _ in range(60):  # the servers start
             if _reachable(MCP_URL.rsplit("/", 1)[0], "/"):
                 break
@@ -279,16 +285,16 @@ def wikis(request: pytest.FixtureRequest) -> Iterator[list[str]]:
     """Code Mode MCP clients of the wiki server in the gateway, under :data:`WIKIS` names:
     the local server's, declared in the gateway (``mcp_fixture``), or the public one's, added
     for the session and removed after it."""
-    if not GATEWAY_UP or BIFROST_URL is None:
-        pytest.skip("needs a Bifrost gateway (BIFROST_URL)")
-    url = BIFROST_URL
+    if not GATEWAY_UP or GATEWAY_URL is None:
+        pytest.skip("needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)")
+    url = GATEWAY_URL
     if LOCAL_MCP:
         request.getfixturevalue("mcp_fixture")
         yield list(WIKIS)
         return
 
     async def change(add: bool) -> None:
-        async with Bifrost(url) as bf:
+        async with Bifrost(url, gateway="bifrost") as bf:
             for client in await bf.mcp.clients():
                 if client.config.name in WIKIS:
                     await bf.mcp.remove(client.id)
@@ -322,7 +328,7 @@ def _virtual_key(name: str, mcp: list[dict[str, object]]) -> Iterator[str]:
     """A virtual key for the session: every provider, and the ``mcp`` allow-list. Its name
     is the session's own (``name`` and this process), so sessions running at the same time
     against one gateway never delete each other's key."""
-    url = BIFROST_URL
+    url = GATEWAY_URL
     assert url is not None
     name = f"{name}-{os.getpid()}"
 

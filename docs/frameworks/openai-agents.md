@@ -5,7 +5,7 @@ your agent that also carries the harness's tools (the gateway's MCP tools, memor
 object is never changed.
 
 **Install:** `pip install 'trellis-harness[openai-agents]'`. A model name (or the SDK's
-default) goes through Bifrost when `BIFROST_URL` is set (`RunConfig.model_provider`, unless the
+default) goes through Bifrost when it is the route (`LLM_GATEWAY=bifrost`; `RunConfig.model_provider`, unless the
 run's own `run_config` names one), else to its provider with its own key
 ([configuration.md](../configuration.md#models)). `agents.set_tracing_disabled(True)` keeps the
 SDK's own tracing (which goes to OpenAI) off; the harness traces through OpenTelemetry.

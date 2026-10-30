@@ -92,8 +92,8 @@ async def test_a_langfuse_dataset_is_graded_for_grounding_by_the_memory_service(
 
 @needs_gateway
 @pytest.mark.skipif(
-    not (_env("BIFROST_URL") and _env("BIFROST_VIRTUAL_KEY")),
-    reason="the judge's model needs BIFROST_URL and BIFROST_VIRTUAL_KEY",
+    not (_env("LLM_BASE_URL") and _env("LLM_API_KEY")),
+    reason="the judge's model needs LLM_BASE_URL and LLM_API_KEY",
 )
 @pytest.mark.timeout(TIMEOUT_SECONDS)
 async def test_a_real_judge_model_grades_the_answers(langfuse: StubLangfuse) -> None:

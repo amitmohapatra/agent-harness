@@ -68,7 +68,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline, telemetry
 from trellis.harness.clients.bifrost import Gateway, PromptPin
-from trellis.harness.gateways import ModelGateway, ProviderKey, model_gateway
+from trellis.harness.gateways import ModelGateway, model_gateway, openai_auth
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.removed import removed
@@ -285,15 +285,17 @@ class EvalServices:
     langfuse: telemetry.Langfuse | None = None
     judge_gateway: Gateway | None = None
     judge_model: Any = None
-    #: how a model name is routed without Bifrost (the harness's: ``Harness.model_gateway``)
+    #: how a model name is routed without a gateway client (the harness's:
+    #: ``Harness.model_gateway``)
     models: ModelGateway | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> EvalServices:
         """The services the environment names: Langfuse through the OTLP variables, or its own
         keys (which also export the spans, unless the application installed its own tracer
-        provider), the judge through ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else
-        ``BIFROST_VIRTUAL_KEY``). Close them with :meth:`aclose` (or ``async with``)."""
+        provider), the judge through the route's gateway client (Bifrost's) with
+        ``TRELLIS_JUDGE_VIRTUAL_KEY`` (else ``LLM_API_KEY``), else on the route itself. Close
+        them with :meth:`aclose` (or ``async with``)."""
         telemetry.configure(environ)
         return cls.of(Settings.from_env(environ), environ=environ)
 
@@ -307,15 +309,15 @@ class EvalServices:
     ) -> EvalServices:
         """The services ``settings`` name. ``gateway`` is the agents' own (``Harness``): the
         judge's too, unless the judge has a virtual key of its own (its budget apart)."""
-        own_key = settings.judge_virtual_key not in (None, settings.bifrost_virtual_key)
+        models = model_gateway(settings)
+        own_key = settings.judge_virtual_key not in (None, settings.llm_api_key)
         judge_gateway = gateway
-        if settings.bifrost_url and (gateway is None or own_key):
-            key = settings.judge_virtual_key or settings.bifrost_virtual_key
-            judge_gateway = Gateway(settings.bifrost_url, key)
+        if gateway is None or own_key:
+            judge_gateway = models.gateway_client(settings.judge_virtual_key) or gateway
         return cls(
             langfuse=telemetry.Langfuse.of(environ),
             judge_gateway=judge_gateway,
-            models=model_gateway(settings),
+            models=models,
         )
 
     def model(self, named: str | None = None) -> Any:
@@ -327,15 +329,14 @@ class EvalServices:
             return model
         if self.judge_gateway is not None:
             return _Named(self.judge_gateway, model)
-        # no Bifrost in the settings given (the harness's, else the environment's): the
-        # provider's own SDK, as the agents' models are routed
-        gateway = self.models or model_gateway(Settings.from_env())
-        if model == JUDGE_ALIAS or not isinstance(gateway, ProviderKey):
+        # no gateway client in the settings given (the harness's, else the environment's): the
+        # route itself, as the agents' models are routed
+        if model == JUDGE_ALIAS:
             raise ConfigurationError(
-                f"the judge alias {JUDGE_ALIAS!r} is Bifrost's (BIFROST_URL): without it, name "
-                "the judge's model, llm_judge(model='openai:...')"
+                f"the judge alias {JUDGE_ALIAS!r} is Bifrost's (LLM_GATEWAY=bifrost): without "
+                "it, name the judge's model, llm_judge(model='...')"
             )
-        return gateway.judge(model)
+        return (self.models or model_gateway(Settings.from_env())).judge(model)
 
     async def score(
         self,
@@ -586,7 +587,7 @@ class llm_judge:
     comment, which names the judge's model). The model is ``model`` (a model name, routed as
     every model name is: two judges may use two models), else the one :func:`evaluate` or
     :func:`judge` was given (:meth:`EvalServices.model`: the gateway's judge alias through
-    ``BIFROST_URL`` with ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``BIFROST_VIRTUAL_KEY``). Online
+    ``LLM_GATEWAY=bifrost`` with ``TRELLIS_JUDGE_VIRTUAL_KEY``, else ``LLM_API_KEY``). Online
     (``h.wrap(judges=)``) it scores ``sample`` of the agent's successful runs, chosen by the
     run id. A reply that is not the JSON asked for is asked once more; a second one is no
     score, with a warning."""
@@ -696,18 +697,29 @@ class _Named:
 
 @dataclass
 class OpenAICompatibleJudge:
-    """A model name on the OpenAI-compatible endpoint the OpenAI SDK's own variables name
-    (``key``: the one to send when the SDK has none, for a server that takes none)."""
+    """A model name on an OpenAI-compatible endpoint: ``base_url`` (``LLM_BASE_URL``) with
+    ``auth`` (its strategy), else the one the OpenAI SDK's own variables name (``key``: the
+    one to send when the SDK has none, for a server that takes none)."""
 
     model: str
     key: str | None = None
     client: Any = None
+    base_url: str | None = None
+    auth: Any = None
+    #: what the route adds to its client (Bifrost's deny-all MCP scope, no retries)
+    options: dict[str, Any] = field(default_factory=dict)
 
     async def complete(self, messages: list[dict[str, Any]], **body: Any) -> dict[str, Any]:
         if self.client is None:
             import openai  # noqa: PLC0415 - the react extra installs it
 
-            self.client = openai.AsyncOpenAI(api_key=self.key)  # OPENAI_BASE_URL, _API_KEY
+            # unset, OPENAI_BASE_URL and OPENAI_API_KEY (the SDK's own)
+            self.client = openai.AsyncOpenAI(
+                api_key=self.key,
+                base_url=self.base_url,
+                http_client=openai.DefaultAsyncHttpxClient(auth=openai_auth(self.auth)),
+                **self.options,
+            )
         response = await self.client.chat.completions.create(
             model=self.model, messages=messages, **body
         )

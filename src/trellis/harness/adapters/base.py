@@ -239,6 +239,13 @@ def metadata_of(target: Any) -> dict[str, Any]:
     return found if isinstance(found, dict) else {}
 
 
+def model_name(target: Any) -> str | None:
+    """The name of the target's model when the graph's metadata says it (``ReAct`` given a
+    model name); ``None`` otherwise."""
+    found = metadata_of(target).get(MODEL_METADATA)
+    return found if isinstance(found, str) else None
+
+
 def context_window(target: Any) -> int | None:
     """The context window of the target's model, in tokens, when the target or its model
     says, or the graph's metadata (``ReAct``) does (``None`` otherwise: a compiled graph of

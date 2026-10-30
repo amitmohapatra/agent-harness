@@ -849,7 +849,7 @@ class BifrostSource:
         runtime = current()
         gateway = runtime.agent.harness.gateway if runtime is not None else None
         if gateway is None:
-            raise ConfigurationError("skills.bifrost(): set BIFROST_URL, or pass admin=")
+            raise ConfigurationError("skills.bifrost(): set LLM_GATEWAY=bifrost, or pass admin=")
         return gateway.admin
 
     async def list(self, scope: Scope) -> list[SkillInfo]:
@@ -875,7 +875,7 @@ class BifrostSource:
 
 
 def bifrost(admin: Admin | None = None) -> SkillSet:
-    """The gateway's skills repository: through the harness's gateway (``BIFROST_URL``) in a
+    """The gateway's skills repository: through the harness's gateway (``LLM_GATEWAY=bifrost``) in a
     run, else ``admin`` (``bifrost_sdk.admin.Admin``)."""
     return SkillSet([BifrostSource(admin)])
 

@@ -16,7 +16,8 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | `TypeError: wrap() got an unexpected keyword argument 'tools'` | tools given to `h.wrap` | tools are the builder's: `ReAct(tools=[...])`, or your framework's own ([tools.md](tools.md)) |
 | `ConfigurationError: without= names no feature ...` | a name not in the `without=` table | use one of the names listed in the message ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `ConfigurationError` naming a `framework_options` key | the framework's run call cannot take it, or the harness keeps it for itself | see what each framework takes ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
-| `ConfigurationError: ReAct with a model name needs BIFROST_URL` | `ReAct(model="name")` is a gateway model | set `BIFROST_URL`, or pass a LangChain chat model object |
+| `ConfigurationError: model 'granite': name its provider ...` | no `LLM_BASE_URL`, and the name does not say its provider | name it (`openai:...`, `anthropic:...`), set `LLM_BASE_URL` to an endpoint that serves it, or pass a LangChain chat model object |
+| `ConfigurationError: LLM_GATEWAY=... names no route` / `needs LLM_BASE_URL` / `signs with its own credentials` | the `LLM_*` settings fit no route | `trellis doctor` says which; see [configuration.md](configuration.md#where-a-model-name-goes) |
 | `ConfigurationError: ReAct needs the react extra` | `langchain-openai` or Deep Agents is not installed | `pip install 'trellis-harness[react]'` |
 | a log line `... is installed, but this trellis-harness was tested with ...` | a framework outside the tested range | use a newer `trellis-harness`, or the framework version in the range ([versioning.md](versioning.md)) |
 
@@ -44,7 +45,7 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | every tool that writes asks for approval | the tool catalog cannot be read (memory down): governance fails closed | bring the memory service back; rules read in the last 300 s still stand ([governance.md](governance.md#the-catalog-kept-fresh)) |
 | a tool runs although it should ask | its risk is `read`/`write` and no `approve_when` holds | declare it `irreversible`, or set the catalog's `approve_when` ([governance.md](governance.md)) |
 | the approval is asked twice | a framework gate (`HumanInTheLoopMiddleware`, `interrupt_on`, `needs_approval`) and the harness's both gate the tool | gate each tool in one place ([interrupts.md](interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)) |
-| no MCP tools | no `BIFROST_URL`, the key allows none, `without={"mcp"}`, or `mcp(...)` entries that name other servers | check the key's MCP allow-list ([gateway.md](gateway.md)) |
+| no MCP tools | the route is not `bifrost` (`LLM_GATEWAY`), the key allows none, `without={"mcp"}`, or `mcp(...)` entries that name other servers | check the key's MCP allow-list ([gateway.md](gateway.md)) |
 | an MCP tool is missing | the gateway would run it itself (Agent Mode: `tools_to_auto_execute`) | take it off the client's auto-execute list ([gateway.md](gateway.md#what-the-gateway-never-does-for-a-run)) |
 | the model is offered only some tools | tool hints narrow from 5 tools on | nothing, or `without={"tool_search"}` ([tools.md](tools.md#tool-hints-what-the-model-is-offered)) |
 | `execute_tool_code` instead of the server's tools | Code Mode: 3+ read-only Code Mode servers or 20+ tools | nothing, or `without={"code_mode"}` ([tools.md](tools.md#code-mode)) |
@@ -60,7 +61,7 @@ section with the details; they are indexed [at the end](#on-failure-feature-by-f
 | `warning` events about writes, `trellis.writes.undelivered`, `trellis doctor` "records failing" | memory writes given up after retries | check the memory service; set `TRELLIS_SPOOL_DIR` on a volume that outlives the process ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 | a run ended `MODEL_TIMEOUT` ("the step stalled") | a model call got no answer within its bound | the provider is slow or down; a `ReAct`'s `call_timeout` or the run's `timeout` ([reliability.md](reliability.md#stalled-model-calls)) |
 | a person's feedback does not change memory | human feedback waits for the tenant administrator's review | accept it in review in the memory service (`POST /v1/feedback/{id}/approve`); the trace score is there already |
-| no judge scores | the judge alias `trellis-judge` is not routed in Bifrost (the log says so once), or no `BIFROST_URL` | route the alias in Bifrost, or give `llm_judge(model=)` ([evaluation.md](evaluation.md#the-judges-model)) |
+| no judge scores | the judge alias `trellis-judge` is not routed in Bifrost (the log says so once), or the route is not `bifrost` | route the alias in Bifrost, or give `llm_judge(model=)` ([evaluation.md](evaluation.md#the-judges-model)) |
 | few runs judged | an online judge scores a sample (`llm_judge(sample=)`, 0.1 by default) | raise its sample |
 | no traces | no `OTEL_EXPORTER_OTLP_ENDPOINT`, no Langfuse keys and no provider of your own | set it ([observability.md](observability.md#export)) |
 | a value shows as `[redacted]` in a span | its name or value looks like a secret | expected; redact more with a hook of your own ([observability.md](observability.md#redaction)) |

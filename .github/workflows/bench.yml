@@ -2,7 +2,7 @@ name: bench
 
 # The cost benchmark's gate against benchmark/cost/results/baseline-local.json. It needs a
 # model behind a gateway, so it runs only where one is configured: the repository variable
-# BENCH_BIFROST_URL (and the secret BENCH_BIFROST_VIRTUAL_KEY) naming a gateway serving the
+# BENCH_LLM_BASE_URL (and the secret BENCH_LLM_API_KEY) naming a Bifrost gateway serving the
 # baseline's model. On a pull request: the smoke set (10 tools, one repeat). Nightly: the
 # 10- and 50-tool catalogues, two repeats. Without the variable the job is skipped.
 on:
@@ -13,15 +13,16 @@ on:
 
 jobs:
   gate:
-    if: ${{ vars.BENCH_BIFROST_URL != '' }}
+    if: ${{ vars.BENCH_LLM_BASE_URL != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     defaults:
       run:
         working-directory: agent-harness
     env:
-      BIFROST_URL: ${{ vars.BENCH_BIFROST_URL }}
-      BIFROST_VIRTUAL_KEY: ${{ secrets.BENCH_BIFROST_VIRTUAL_KEY }}
+      LLM_BASE_URL: ${{ vars.BENCH_LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.BENCH_LLM_API_KEY }}
+      LLM_GATEWAY: bifrost
     steps:
       - uses: actions/checkout@v4
         with:

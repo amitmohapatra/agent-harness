@@ -60,7 +60,9 @@ async def test_every_memory_call_the_harness_makes_speaks_the_contract(
         return await agent.tools.call("refund", order="o1")
 
     memory_service.claims = 3
-    settings = Settings(memory_url="http://memory.test", api_key="test", bifrost_virtual_key="vk")
+    settings = Settings(
+        memory_url="http://memory.test", api_key="test", llm_base_url="http://llm.test/v1"
+    )
     async with Harness(config=settings, memory=memory_service.client()) as h:
         agent = arm(h.wrap(works, id="contract"), [refund])
         paused = await agent.run("refund o1", user="ada", thread="thr_1")

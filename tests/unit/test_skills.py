@@ -298,7 +298,7 @@ async def test_the_gateways_repository_serves_one_version_and_files_of_it_only()
         await source.read_file("gone", "1", "r.md", ADA)
     with pytest.raises(NotFound, match="no skill 'gone'"):
         await source.load("gone", "1", ADA)
-    with pytest.raises(ConfigurationError, match="set BIFROST_URL"):
+    with pytest.raises(ConfigurationError, match="set LLM_GATEWAY=bifrost"):
         await skills.bifrost().sources[0].list(ADA)  # type: ignore[attr-defined]
 
 
@@ -313,7 +313,7 @@ async def test_in_a_run_the_gateways_repository_is_the_harness_gateways(
     [source] = skills.bifrost().sources
     assert [i.name for i in await source.list(ADA)] == ["tone"]  # type: ignore[attr-defined]
     harness.gateway = None
-    with pytest.raises(ConfigurationError, match="set BIFROST_URL"):
+    with pytest.raises(ConfigurationError, match="set LLM_GATEWAY=bifrost"):
         await source.list(ADA)  # type: ignore[attr-defined]
 
 

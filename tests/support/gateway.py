@@ -49,18 +49,21 @@ class FakeGateway:
         transport = httpx.MockTransport(self.handle)
         http = httpx.AsyncClient(transport=transport, base_url=URL)
         api = httpx.AsyncClient(transport=transport, base_url=URL.removesuffix("/v1"))
-        bifrost = Bifrost(URL, api_key="vk", client=http, admin_client=api, max_retries=0)
+        bifrost = Bifrost(
+            URL, api_key="vk", gateway="bifrost", client=http, admin_client=api, max_retries=0
+        )
         return Gateway(URL, "vk", client=bifrost, admin=Admin(URL, client=api))
 
     def serve_models(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A gateway model ``ReAct`` builds (``ChatOpenAI`` on ``BIFROST_URL``), and an OpenAI
+        """A gateway model ``ReAct`` builds (``ChatOpenAI`` on ``LLM_BASE_URL``), and an OpenAI
         agent's (the SDK's ``AsyncOpenAI`` on it), is answered here, as the gateway's other
         routes are."""
         import langchain_openai
         import openai
 
-        monkeypatch.setenv("BIFROST_URL", URL)
-        monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
+        monkeypatch.setenv("LLM_BASE_URL", URL)
+        monkeypatch.setenv("LLM_API_KEY", "vk")
+        monkeypatch.setenv("LLM_GATEWAY", "bifrost")
         handle = self.handle
 
         class Served(langchain_openai.ChatOpenAI):
@@ -85,7 +88,8 @@ class FakeGateway:
         import langchain_openai
         import openai
 
-        monkeypatch.delenv("BIFROST_URL", raising=False)
+        for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_GATEWAY", "LLM_AUTH"):
+            monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("OPENAI_BASE_URL", URL)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-compat")
         handle = self.handle

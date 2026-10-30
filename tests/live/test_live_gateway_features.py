@@ -27,7 +27,7 @@ from bifrost_sdk import NO_GATEWAY_TOOLS, Bifrost
 from bifrost_sdk.admin import Admin
 
 from tests.live.conftest import (
-    BIFROST_URL,
+    GATEWAY_URL,
     MODEL,
     WIKIS,
     claude_cli_env,
@@ -87,11 +87,11 @@ async def gateway_requests(since: datetime, key: str) -> list[dict[str, Any]]:
     ``since``, oldest first, from its request log (written a few seconds behind: read until it
     settles). One completion of ours is one request, or more when the gateway's agent loop runs
     a tool itself and asks the model again with the result (a ``tool`` message)."""
-    assert BIFROST_URL is not None
+    assert GATEWAY_URL is not None
     params = {"start_time": since.isoformat(), "limit": 100, "sort_by": "timestamp"}
     seen: list[str] | None = None
     found: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(base_url=BIFROST_URL.removesuffix("/v1"), timeout=10) as api:
+    async with httpx.AsyncClient(base_url=GATEWAY_URL.removesuffix("/v1"), timeout=10) as api:
         for _ in range(30):
             listed = (await api.get("/api/logs", params={**params, "order": "asc"})).json()
             found = [e for e in listed.get("logs") or [] if e.get("virtual_key_name") == key]
@@ -130,8 +130,8 @@ def started(events: list[Any]) -> list[str]:
 
 @pytest.fixture
 async def admin() -> AsyncIterator[Admin]:
-    assert BIFROST_URL is not None
-    async with Admin(BIFROST_URL) as made:
+    assert GATEWAY_URL is not None
+    async with Admin(GATEWAY_URL) as made:
         yield made
 
 
@@ -275,7 +275,7 @@ async def test_no_model_call_gets_the_keys_mcp_tools(wikis: list[str], wikis_key
     """Under a key with nine MCP tools, the harness's completion costs what one under a key
     with none costs; a framework's client with ``h.model_headers()`` too — and without them
     the gateway adds the key's tools."""
-    assert BIFROST_URL is not None
+    assert GATEWAY_URL is not None
     turn = [{"role": "user", "content": "Say hi."}]
     async with live_harness() as bare, live_harness(wikis_key) as h:
         assert bare.gateway is not None and h.gateway is not None
@@ -284,7 +284,7 @@ async def test_no_model_call_gets_the_keys_mcp_tools(wikis: list[str], wikis_key
         assert mine["usage"]["prompt_tokens"] == base["usage"]["prompt_tokens"]
         headers = {"authorization": f"Bearer {wikis_key}"}
         body = {"model": MODEL, "messages": turn, "max_tokens": 4}
-        async with httpx.AsyncClient(base_url=BIFROST_URL, headers=headers, timeout=120) as raw:
+        async with httpx.AsyncClient(base_url=GATEWAY_URL, headers=headers, timeout=120) as raw:
             guarded = await raw.post("/chat/completions", json=body, headers=dict(NO_GATEWAY_TOOLS))
             unguarded = await raw.post("/chat/completions", json=body)
         tokens = base["usage"]["prompt_tokens"]
@@ -339,8 +339,8 @@ async def test_a_per_user_server_acts_for_the_runs_user(ops: str, ops_key: str) 
 
 # --------------------------------------------------------------------------- Agent Mode
 async def test_a_tool_the_gateway_would_run_itself_is_not_offered(ops: str, ops_key: str) -> None:
-    assert BIFROST_URL is not None
-    async with Bifrost(BIFROST_URL) as bf:
+    assert GATEWAY_URL is not None
+    async with Bifrost(GATEWAY_URL, gateway="bifrost") as bf:
         [client] = [c for c in await bf.mcp.clients() if c.config.name == ops]
         await bf.mcp.update(
             client, client.config.model_copy(update={"tools_to_auto_execute": ("write_note",)})
@@ -361,8 +361,8 @@ async def test_a_frameworks_own_mcp_client_works_on_the_gateway_ungoverned(
     straight to the gateway, so nothing of the harness sees the call."""
     from agents.mcp import MCPServerStreamableHttp
 
-    assert BIFROST_URL is not None
-    url = BIFROST_URL.removesuffix("/v1") + "/mcp"
+    assert GATEWAY_URL is not None
+    url = GATEWAY_URL.removesuffix("/v1") + "/mcp"
     params = {"url": url, "headers": {"Authorization": f"Bearer {ops_key}"}}
     async with MCPServerStreamableHttp(params=params) as server:  # type: ignore[arg-type]
         listed = sorted(t.name for t in await server.list_tools())
@@ -398,12 +398,12 @@ asyncio.run(main())
 def test_langchains_mcp_adapters_on_the_gateway(ops: str, ops_key: str, tmp_path: Path) -> None:
     """langchain-mcp-adapters (0.3.2, the latest) requires mcp<2 and the harness has mcp 2, so
     the docs' client runs in an environment of its own (``uv run --with``), not the harness's."""
-    assert BIFROST_URL is not None
+    assert GATEWAY_URL is not None
     uv = shutil.which("uv")
     assert uv is not None, "needs uv (the harness's own installer: make install)"
     env = {
         **os.environ,
-        "GATEWAY_MCP": BIFROST_URL.removesuffix("/v1") + "/mcp",
+        "GATEWAY_MCP": GATEWAY_URL.removesuffix("/v1") + "/mcp",
         "VIRTUAL_KEY": ops_key,
         "CALL": f"{ops}-write_note",
     }
@@ -443,7 +443,7 @@ async def test_the_claude_agent_sdks_mcp_servers_on_the_gateway(
         query,
     )
 
-    assert BIFROST_URL is not None
+    assert GATEWAY_URL is not None
     note = f"mcp__bifrost__{ops}-write_note"
     options = ClaudeAgentOptions(
         model=MODEL,
@@ -451,7 +451,7 @@ async def test_the_claude_agent_sdks_mcp_servers_on_the_gateway(
         mcp_servers={
             "bifrost": {
                 "type": "http",
-                "url": BIFROST_URL.removesuffix("/v1") + "/mcp",
+                "url": GATEWAY_URL.removesuffix("/v1") + "/mcp",
                 "headers": {"Authorization": f"Bearer {ops_key}"},
             }
         },
@@ -482,8 +482,8 @@ async def test_the_claude_agent_sdks_mcp_servers_on_the_gateway(
 
 
 async def test_mcp_on_the_gateway_takes_the_key_and_refuses_no_key(ops_key: str) -> None:
-    assert BIFROST_URL is not None
-    origin = BIFROST_URL.removesuffix("/v1")
+    assert GATEWAY_URL is not None
+    origin = GATEWAY_URL.removesuffix("/v1")
     message = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
     async with httpx.AsyncClient(base_url=origin, timeout=30) as http:
         bearer = await http.post(

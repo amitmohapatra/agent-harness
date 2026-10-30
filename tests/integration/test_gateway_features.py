@@ -35,7 +35,7 @@ def fake() -> FakeGateway:
 @pytest.fixture
 async def h(fake: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
     fake.serve_models(monkeypatch)
-    settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
     async with Harness(config=settings, gateway=fake.gateway()) as made:
         yield made
 
@@ -139,7 +139,7 @@ async def test_a_run_whose_prompt_cannot_be_given_fails_saying_why(
 
 async def test_a_stored_prompt_needs_the_gateway() -> None:
     async with Harness(config=Settings()) as bare:
-        with pytest.raises(ConfigurationError, match="set BIFROST_URL"):
+        with pytest.raises(ConfigurationError, match="set LLM_GATEWAY=bifrost"):
             await bare.prompt("triage")
 
 
