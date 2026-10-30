@@ -16,7 +16,7 @@ reasonable it looks.
 **Status.** *exists*: on main. *in flight*: being built, on the branch named. *next*: the
 next to build, once measured. *later*: deliberately deferred.
 
-The target shape of what the model gets (context map, data cards, built-in tools by run state) is [ADR 0006](../adr/0006-what-the-model-gets.md) (proposed).
+The direction, the intelligent harness and what the model gets (context map, data cards, built-in tools by run state), is [ADR 0006](../adr/0006-what-the-model-gets.md).
 
 Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7, a snapshot of
 2026-10-30) and [SELF_EXPLANATION.md](SELF_EXPLANATION.md) (the explain shortlist).
@@ -77,7 +77,10 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | A "test my tools" scenario command: run a team's own tools through the scenario suite | next | `examples/06_scenarios/tool_choice.py`, `tests/live/heldout.py` |
 | LangChain limits, errors and retries measured by a ReAct suite | in flight: `-reactnative` (#58) | audit I, E4 |
 | `delegate` removed; helpers are Deep Agents' `task` | in flight: `claude/cool-maxwell-w5avo8-rmdelegate` (#57) | audit E2 |
-| In-run verification of an answer against its tool results | later (re-test with arm D's record) | audit E3 |
+| In-run verification, deterministic: every number traced to a tool or query result, every tool and source named present in the run record (no extra model call) | later (re-test with arm D's record) | audit E3; ADR 0006 |
+| Decomposing multi-part questions (Plan-and-Solve, least-to-most), and selective self-consistency only on conflicting evidence or an unverified number, capped in cost | later | ADR 0006 |
+| Grammar-constrained tool calls for local models (llama.cpp grammars, XGrammar) | next: the chain measurement showed a 2B model writing its calls as text the server did not parse | #65; ADR 0006 |
+| The complex suite (retrieve, compute, chain, converse, explain, with edge cases) and a big-model reference answer per case | next | ADR 0006; [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md) |
 | Prompt cache: memory context before the history | later | audit K1 |
 
 ## Safety and privacy

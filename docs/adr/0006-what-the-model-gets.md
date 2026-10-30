@@ -1,7 +1,8 @@
-# 0006. What the model gets: a context map, data cards, and built-in tools offered by run state
+# 0006. The intelligent harness: what the model gets, so a small model gives a big model's answers
 
-**Status:** Proposed (2026-10-30). Some parts exist already. A new part ships only after it
-passes the [evaluation protocol](../research/EVAL_PROTOCOL.md).
+**Status:** Accepted as the direction (2026-10-30). The parts marked *proposed* below ship only
+after they pass the [evaluation protocol](../research/EVAL_PROTOCOL.md), each tracked in the
+[improvement backlog](../research/IMPROVEMENT_BACKLOG.md).
 
 ## Context
 
@@ -14,8 +15,48 @@ undated results, large results, aggregation, explaining earlier answers). The
 
 ## Decision
 
-The context holds a map, and the details come on demand. The harness never guesses what kind of
-question it has. What it offers follows from three things, all of them data:
+**The goal.** On business questions (retrieve, compute, chain tools, converse, explain), a small
+model with the harness matches a big-model reference within a small margin. The gap is measured
+per category: a big-model judge writes the reference answer from the same inputs.
+
+**The layers.** Each layer has one owner, and the adapters' own mechanisms come first
+([DESIGN_RULES.md](../research/DESIGN_RULES.md)).
+
+| Layer | What it is | Status |
+|---|---|---|
+| Models | `LLM_*` routes, and a model profile (window, size) that drives density and behaviour | exists ([ADR 0004](0004-provider-neutral-models.md)) |
+| Context engine | §1 below | partly exists, see §1 |
+| Tools | §2 below | partly exists, see §2 |
+| Reasoning scaffold (`ReAct`, per call) | a plan for a long task (`write_todos`); errors told in the harness's own words (`tools.base.not_run`); the stall guard and the step limit | exists. *Proposed*: decomposing multi-part questions (Plan-and-Solve, least-to-most); selective self-consistency, used only when the evidence conflicts or a number is unverified, and capped in cost (backlog: ReAct) |
+| Verification | deterministic and cheap: every number traced to a tool or query result, and every tool and source named present in the run record (CRITIC-style checking without an extra model call) | *proposed* (backlog: in-run verification). The model-based answer check stays removed: it measured worse (#56) |
+| Record and explain | the journal and one id per message (#64); steps lists and fetch times | the journal and the message ids exist. Steps lists are in flight (`-explain2`); see §4 |
+| Learning | memory facts and preferences, tool statistics, learned plans (successful paths only) | exists (memory service, its ADR 0018) |
+| Evaluation | the big-model judge (is the answer correct, is the context sufficient) and the keep rule | the protocol exists ([EVAL_PROTOCOL.md](../research/EVAL_PROTOCOL.md)). *Proposed*: the complex suite with its edge cases (backlog) |
+
+**Libraries.**
+
+- LangChain `create_agent` and its middleware, the LangGraph checkpointer, Deep Agents (files,
+  summarization, sub-agents);
+- the memory service (retrieval, facts, plans);
+- bifrost-sdk (the OpenAI-compatible client, auth strategies);
+- pydantic for schemas;
+- *proposed*: DuckDB for compute, or stdlib `sqlite3` if it measures as sufficient (`-data`);
+  llama.cpp grammars or XGrammar for local models' tool calls (backlog).
+
+**Not doing.**
+
+- our own reasoning engine;
+- a second history store;
+- model-based answer checks;
+- rules keyed on how a question is worded;
+- escalating to a bigger model by default (only as an opt-in capability the user enables).
+
+**The honest limit.** The harness closes gaps of information, computation, procedure and memory.
+Deep novel reasoning is bound by the model. Those cases are reported as model gaps, not hidden.
+
+**What the model gets.** The context holds a map, and the details come on demand.
+
+The harness never guesses what kind of question it has. What it offers follows from three things, all of them data:
 
 - what the run actually holds;
 - what the deployment can do (capabilities, such as `gateway.has()`);
