@@ -82,6 +82,7 @@ from trellis.contracts import (
 from trellis.harness import admission, budget, compat
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     Output,
@@ -424,10 +425,20 @@ class ACPAdapter:
     narrows: Narrowing = "run"
     #: a prompt takes one message, not a conversation: memory's window is in the context's text
     replays_history = False
+    #: with memory off, the conversation's earlier turns are in the context's text too
+    history_in: HistoryIn = "context"
+    #: its session (the journal's) is continued by the conversation's next turn
+    sessions = True
 
     def __init__(self) -> None:
         #: the MCP tools the agent was seen calling, the most recent kept
         self.seen: LRUSet[str] = LRUSet(maxsize=SEEN_KEPT)
+
+    def steers(self, target: Any) -> bool:
+        """None: ACP has no point between an agent's steps where a client adds a message to a
+        turn under way (``session/prompt`` takes a turn's messages as it starts), so a
+        steered message waits its turn."""
+        return False
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
@@ -767,7 +778,7 @@ class Attempt:
     def _first(self, native_input: ACPInput) -> list[Any]:
         from acp import text_block
 
-        if self.resumed:
+        if self.resumed and self.runtime.attempt > 1:  # the run's own session, after a pause
             return [text_block(self._resumed(native_input))]
         blocks = [text_block(native_input.prompt)]
         if native_input.context:

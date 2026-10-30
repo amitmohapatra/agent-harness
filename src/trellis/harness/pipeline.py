@@ -45,7 +45,7 @@ from trellis.contracts import (
     RunStatus,
     ToolCall,
 )
-from trellis.harness import budget, sandbox
+from trellis.harness import budget, conversation, sandbox
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -61,6 +61,14 @@ from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.budget import BUDGET as KEPT_BUDGET
 from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
+from trellis.harness.conversation import (
+    Live,
+    Mode,
+    answer_id,
+    identified,
+    question_id,
+    steering,
+)
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
 from trellis.harness.history import Said, Speaker
@@ -155,6 +163,7 @@ async def attempt(
     remaining: float | None = None,
     observe: Callable[[PromptContext | None], None] | None = None,
     parent: Runtime | None = None,
+    mode: Mode = Mode.QUEUE,
 ) -> Result:
     """Run the next attempt of the run ``record`` is (already RUNNING), on ``input`` (its
     record's, or — a run started in this process — the object it was started with), and
@@ -168,13 +177,21 @@ async def attempt(
     A run of a conversation (its thread) waits while another run of the same conversation and
     agent works in this process: a second message to a busy conversation is answered after
     the first, never beside it (queued runs wait the same way in the run store, by their
-    ``concurrency_key``). A sub-agent's run and a worker's are not held here."""
+    ``concurrency_key``). A sub-agent's run and a worker's are not held here. ``mode`` says
+    what a run sent while another holds the conversation's turn does instead of waiting
+    (``conversation.Mode``: :func:`_arrived`)."""
     if job is not None or parent is not None:
         turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
     else:
-        turn = agent.turns.taken(Identity.of(record).conversation)
-    async with turn:
-        return await _attempt(
+        key = Identity.of(record).conversation
+        live = agent.turns.live(key)
+        if live is not None and mode is not Mode.QUEUE:
+            answered = await _arrived(agent, record, input, live, mode=mode, listener=listener)
+            if answered is not None:
+                return answered
+        turn = agent.turns.taken(key, record.run_id, steers=agent.adapter.steers(agent.target))
+    async with turn as live:
+        result = await _attempt(
             agent,
             record,
             input,
@@ -186,6 +203,75 @@ async def attempt(
             observe=observe,
             parent=parent,
         )
+        if live is not None:
+            live.result = result
+        return result
+
+
+#: The reason a run cancelled by a message sent with ``mode="interrupt"`` ends with.
+INTERRUPTED: Final = "interrupted by a newer message of the conversation"
+
+
+async def _arrived(
+    agent: Agent,
+    record: RunRecord,
+    input: Any,
+    live: Live,
+    *,
+    mode: Mode,
+    listener: Callable[[RunEvent], None] | None,
+) -> Result | None:
+    """A run sent while ``live`` holds the conversation's turn, in ``mode``: ``INTERRUPT``
+    cancels ``live`` (``agent.cancel``) and the run takes the turn after it; ``STEER`` gives
+    the run's question to ``live`` where its target takes one (``Adapter.steers``; else it
+    waits its turn, said once), and once ``live`` ends with an answer having taken it, that
+    answer is this run's (:func:`_answered_by`). ``None``: the run takes its own turn."""
+    if mode is Mode.INTERRUPT:
+        with contextlib.suppress(ConflictError):  # it ended meanwhile
+            await agent.cancel(live.run_id, reason=INTERRUPTED, tenant=record.tenant_id)
+        return None
+    if not live.steers:
+        steering(agent.id, agent.adapter.name)
+        return None
+    taken = await live.steered(query_of(input) or str(input), record.run_id)
+    answered: Result | None = live.result
+    if not taken or answered is None or answered.status not in conversation.ANSWERED:
+        return None  # it ended first, or without an answer: the message takes its own turn
+    return await _answered_by(agent, record, answered, listener)
+
+
+async def _answered_by(
+    agent: Agent,
+    record: RunRecord,
+    answered: Result,
+    listener: Callable[[RunEvent], None] | None,
+) -> Result:
+    """A run whose question the run ``answered`` took (``mode="steer"``) ends with its answer:
+    its events are its start, that answer's text under that answer's id, and its end."""
+    identity = Identity.of(record)
+    events = _emitter(agent, identity, record.attempt, listener, None)
+    events.emit(RunEventType.RUN_STARTED, data={"agent_id": agent.id})
+    answer = jsonable(answered.answer)
+    if isinstance(answer, str) and answer:
+        said = answer_id(identity.conversation, answered.run_id)
+        events.text(RunEventType.TEXT_MESSAGE_START, said)
+        events.text(RunEventType.TEXT_MESSAGE_CONTENT, said, delta=answer)
+        events.text(RunEventType.TEXT_MESSAGE_END, said)
+
+    async def write() -> None:
+        await _recorded(
+            agent,
+            identity.run_id,
+            identity.tenant,
+            lambda: agent.harness.runs.finish(
+                identity.run_id, RunStatus.SUCCESS, output=answer, tenant=identity.tenant
+            ),
+            lambda r: r.status is RunStatus.SUCCESS,
+        )
+
+    await events.settle(lambda: events.finished(RunOutcome.SUCCESS, result=answer), write)
+    metrics.run_finished(agent.id, RunOutcome.SUCCESS.value)
+    return Result(run_id=identity.run_id, status=RunStatus.SUCCESS, answer=answered.answer)
 
 
 async def _attempt(
@@ -206,6 +292,7 @@ async def _attempt(
         remaining = job.remaining_seconds
     budget = _budget(agent, record, remaining)
     journal = journal or Journal()
+    continued = _continued_session(agent, identity, journal, record.attempt, parent)
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
     events = _emitter(agent, identity, record.attempt, listener, job)
@@ -232,6 +319,7 @@ async def _attempt(
         deadline=None if budget is None else budget.deadline,
         parent=parent,
         running_in=asyncio.current_task(),
+        continued=continued,
     )
     events.trace_run = runtime.trace_run
     decision = _started(agent, runtime, record, resolution)
@@ -284,8 +372,40 @@ async def _attempt(
     result = await _concluded(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
+    _kept_session(agent, runtime, journal, result)
     await agent.hooks.ended(runtime, result)
     return result
+
+
+def _continued_session(
+    agent: Agent, identity: Identity, journal: Journal, attempt: int, parent: Runtime | None
+) -> bool:
+    """A conversation's turn on a target that keeps a session of its own (``Adapter.sessions``:
+    the Claude Agent SDK's, an ACP agent's) continues the one its framework kept for the
+    conversation's last turn in this process (``Agent.sessions``): its first attempt starts
+    with that session in its journal — the journal's own session path, as a resume after a
+    pause takes it. Whether it does."""
+    if not agent.adapter.sessions or parent is not None or attempt != 1 or journal.session:
+        return False
+    kept = agent.sessions.get(identity.conversation)
+    if kept is None:
+        return False
+    journal.session, transcripts = kept
+    journal.transcripts = {name: list(entries) for name, entries in transcripts.items()}
+    return True
+
+
+def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
+    """The session a conversation's turn ended in, kept for its next turn
+    (:func:`_continued_session`); a paused turn keeps it in its journal until it ends."""
+    if (
+        agent.adapter.sessions
+        and journal.session
+        and runtime.parent is None
+        and runtime.conversation != runtime.run_id
+        and result.status is not RunStatus.PAUSED
+    ):
+        agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
 
 
 async def _worked(
@@ -600,7 +720,7 @@ async def _execute(
     if not streaming:
         return await adapter.invoke(target, native_input, invocation)
     events = invocation.runtime.events
-    message_id = f"{invocation.runtime.run_id}.{invocation.runtime.attempt}.m"
+    message_id = answer_id(invocation.runtime.conversation, invocation.runtime.run_id)
     opened = False
     output: Any = None
     async for item in adapter.stream(target, native_input, invocation):
@@ -840,7 +960,15 @@ def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[Said]:
     said: list[Said] = list(extracted.transcript) if extracted is not None else []
     if not said and extracted is not None and isinstance(extracted.answer, str):
         said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
-    return [Said(Speaker.USER, runtime.task), *said] if runtime.task else said
+    asked = [Said(Speaker.USER, runtime.task)] if runtime.task else []
+    # a message steered into the run that its framework does not report: after the question
+    reported = {s.id for s in said}
+    steered = [
+        Said(Speaker.USER, s.text, id=question_id(runtime.conversation, s.run_id))
+        for s in runtime.steers
+        if question_id(runtime.conversation, s.run_id) not in reported
+    ]
+    return identified([*asked, *steered, *said], runtime)
 
 
 async def _settle_cancelled(

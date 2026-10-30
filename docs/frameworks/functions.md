@@ -96,6 +96,14 @@ A2A servers, which serve wrapped agents only: wrap the function that calls your 
 `framework_options=` does not apply: a function has no framework run call to hand them to, so
 they are refused (`ConfigurationError`) — the function reads what it needs from its input.
 
+## Conversations
+
+With memory off, a run of a conversation (`thread=`) reads its earlier turns as
+`agent.history` (each earlier run's question and answer: [runs.md](../runs.md#earlier-turns-with-memory-off)); with memory on,
+memory's window is in `agent.context`. A function has no step the harness sees, so
+`mode="steer"` waits as `"queue"` (said once); `"interrupt"` cancels the working run
+([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
+
 ## Limits
 
 * A resume calls the function again from its input: code outside tool calls and `ask` runs

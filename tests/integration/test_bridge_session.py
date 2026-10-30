@@ -68,12 +68,19 @@ async def test_a_session_of_the_teams_own_is_kept(memory_harness: Harness) -> No
     assert asked == ["hi", "hi"]  # the SDK kept its own session, as it was given
 
 
-async def test_without_memory_the_sdk_has_no_session(memory_harness: Harness) -> None:
+async def test_without_memory_the_sdk_has_no_session_and_reads_the_run_stores_turns(
+    memory_harness: Harness,
+) -> None:
     model = ScriptedModel(["one", "two"])
     agent = memory_harness.wrap(Agent(name="s", model=model), id="off", without={"memory"})
     await agent.run("remember tides", user="u1", thread="t1")
     await agent.run("what did I say?", user="u1", thread="t1")
-    assert said_to_model(model, 1) == [("user", "what did I say?")]
+    # no session: the earlier turn is the run store's question and answer, as input items
+    assert said_to_model(model, 1) == [
+        ("user", "remember tides"),
+        ("assistant", "one"),
+        ("user", "what did I say?"),
+    ]
 
 
 async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grows() -> None:

@@ -104,7 +104,11 @@ said:
   their call) with its answers, where the framework reports them (LangGraph, the OpenAI Agents
   SDK) — each message named by the harness (`source_system: trellis-harness`,
   `source_message_id`: the run for the question, which every attempt asks, the attempt and
-  position for what the agent said), so the service stores a message it has already seen once.
+  position for what the agent said), so the service stores a message it has already seen once;
+  each message's `custom_metadata` carries its harness id (`message_id`: the conversation's
+  digest of `<run>:input`, `<run>:answer`, `result:<call>` or `call:<call>` — the same id the
+  AG-UI stream says, across a resume), its `run_id` and the `tool_call_id` it answers or makes
+  ([ADR 0005](adr/0005-conversations-across-runs.md)).
   A run started with no thread — a scheduled run — is its own thread (`thread = run_id`); a run
   with one writes to its conversation's thread — keyed by the tenant, the user and the thread
   (`h.conversation(user=, thread=)`), so two users' threads named alike are two threads. Where
