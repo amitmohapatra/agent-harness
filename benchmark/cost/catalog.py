@@ -400,6 +400,142 @@ def ticket_export(team: str) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- the SKUs
+#: The inventory the aggregate and freshness tasks read: 10,000 SKUs, as CSV about 330,000
+#: characters long — far past what a model reads at once, so a count, a sum, a filter or a
+#: top-N over it is computed from every row (code in a sandbox, or page by page), not read.
+SKUS: Final = 10_000
+CATEGORIES: Final = ("garden", "kitchen", "toys", "tools", "office", "outdoor", "bath", "pets")
+INVENTORY_SYSTEM: Final = (
+    "You are an inventory assistant for a retailer. Answer from the tools: never guess a "
+    "number. For a question over many SKUs, read every row (or compute over them), not a "
+    "sample. Stock changes all day: give the current figure. Write numbers as plain digits, "
+    "without thousands separators."
+)
+
+
+def sku_rows() -> list[tuple[str, str, int, int]]:
+    """Every SKU: its id, category, units in stock and revenue this year (whole euros) — a
+    fixed, spread-out pattern (stock 0-499, a few under 10 in each category)."""
+    return [
+        (
+            f"SKU-{n:05d}",
+            CATEGORIES[(n * 7) % len(CATEGORIES)],
+            (n * 37 + n // 97) % 500,
+            (n * 7919 + n * n) % 250_000,
+        )
+        for n in range(1, SKUS + 1)
+    ]
+
+
+@tool(side_effects="read")
+def sku_export() -> str:
+    """Export every SKU as CSV, one per line: sku, name, category, stock (units on hand at the
+    last count) and revenue (this year, in euros). Large: use it for questions over all SKUs
+    (counts, totals, rankings), not for one SKU's current stock."""
+    lines = ["sku,name,category,stock,revenue"]
+    lines += [f"{s},{c.title()} item {s[4:]},{c},{u},{r}" for s, c, u, r in sku_rows()]
+    return "\n".join(lines)
+
+
+@tool(side_effects="read", freshness="live")
+def sku_stock(sku: str) -> dict[str, Any]:
+    """The units of one SKU in stock right now, at every store together.
+
+    Args:
+        sku: The SKU's id, such as SKU-00123.
+    """
+    n = int(sku.removeprefix("SKU-") or 0)
+    return {"sku": sku, "stock": (n * 13 + 5) % 97, "as_of": "now"}
+
+
+def _aggregates() -> list[tuple[str, str, Any]]:
+    """The aggregate tasks — (name, question, expected) — each answered from every row."""
+    rows = sku_rows()
+    by_revenue = sorted(rows, key=lambda r: (-r[3], r[0]))
+    kitchen = [r for r in rows if r[1] == "kitchen"]
+    return [
+        (
+            "inventory: SKUs with stock under 10",
+            "How many SKUs have fewer than 10 units in stock? Give the number.",
+            str(sum(r[2] < 10 for r in rows)),
+        ),
+        (
+            "inventory: top 5 by revenue",
+            "Which five SKUs have the highest revenue this year? List their ids.",
+            [r[0] for r in by_revenue[:5]],
+        ),
+        (
+            "inventory: the top SKU by revenue",
+            "Which SKU has the highest revenue this year?",
+            by_revenue[0][0],
+        ),
+        (
+            "inventory: total units in stock",
+            "How many units do we hold in stock across all SKUs? Give the total.",
+            str(sum(r[2] for r in rows)),
+        ),
+        (
+            "inventory: SKUs out of stock",
+            "How many SKUs are out of stock (zero units)?",
+            str(sum(r[2] == 0 for r in rows)),
+        ),
+        (
+            "inventory: SKUs in the garden category",
+            "How many SKUs are in the garden category?",
+            str(sum(r[1] == "garden" for r in rows)),
+        ),
+        (
+            "inventory: kitchen SKUs under 10",
+            "How many kitchen SKUs have fewer than 10 units in stock?",
+            str(sum(r[2] < 10 for r in kitchen)),
+        ),
+        (
+            "inventory: toys revenue",
+            "What is the total revenue of the toys category this year, in euros?",
+            str(sum(r[3] for r in rows if r[1] == "toys")),
+        ),
+        (
+            "inventory: the lowest revenue",
+            "Which SKU has the lowest revenue this year?",
+            min(rows, key=lambda r: (r[3], r[0]))[0],
+        ),
+        (
+            "inventory: the category with the most stock",
+            "Which category holds the most units in stock? Name it.",
+            max(CATEGORIES, key=lambda c: sum(r[2] for r in rows if r[1] == c)),
+        ),
+    ]
+
+
+#: The freshness tasks' SKUs and the older figure each question gives (never the current one).
+FRESH_SKUS: Final = (123, 777, 2048, 31, 9001, 4500, 66, 1200, 8080, 516)
+
+
+def _freshness() -> list[tuple[str, str, dict[str, Any]]]:
+    """The freshness tasks — (name, question, the SKU and its older value) — each giving an
+    earlier value of a live figure, which the answer must not repeat: the current one is
+    fetched (``sku_stock``, declared live)."""
+    tasks = []
+    for n, number in enumerate(FRESH_SKUS):
+        sku = f"SKU-{number:05d}"
+        now = sku_stock.fn(sku)["stock"]
+        older = now + 11 + n
+        said = (
+            f"This morning you told me {sku} had {older} units in stock. How many does it "
+            "have now?",
+            f"Yesterday {sku} was at {older} units. What is its stock now?",
+        )[n % 2]
+        tasks.append((f"inventory: current stock of {sku}", said, {"sku": sku, "older": older}))
+    return tasks
+
+
+def _fresh(task: dict[str, Any], *, sku: str, older: int) -> dict[str, Any]:
+    """A freshness task expecting the SKU's current stock, its SKU and older value noted."""
+    now = str(sku_stock.fn(sku)["stock"])
+    return {**task, "expected": [now], "metadata": {**task["metadata"], "sku": sku, "older": older}}
+
+
 # --------------------------------------------------------------------------- the tasks
 @dataclass(frozen=True)
 class TaskSet:
@@ -477,8 +613,10 @@ def task_sets() -> list[TaskSet]:
 
 
 #: The class suite's task classes (``--suite classes``), and the tasks ``mix`` marks for the
-#: catalogues of 50 and 100 tools: four simple, three multi-step, three wide.
-CLASSES: Final = ("simple", "multi", "wide", "large")
+#: catalogues of 50 and 100 tools: four simple, three multi-step, three wide. ``aggregate``: a
+#: count, a sum, a filter, a top-N or a group over 10,000 SKUs; ``freshness``: a live figure
+#: asked again after an older value of it was given (it is fetched, not repeated).
+CLASSES: Final = ("simple", "multi", "wide", "large", "aggregate", "freshness")
 #: The teams whose ticket export the large tasks read, and its id prefix (``ticket_export``).
 TEAMS: Final = (
     "network",
@@ -637,6 +775,13 @@ def class_sets() -> list[TaskSet]:
         ),
     ]
     store_tools = [t for t in scenario.TOOLS if t.spec.name != "transfer_status"]  # it hangs
+    inventory = [
+        _classed(item(question, ["sku_export"], expected=expected), name, "aggregate")
+        for name, question, expected in _aggregates()
+    ] + [
+        _classed(_fresh(item(question, ["sku_stock"]), **given), name, "freshness")
+        for name, question, given in _freshness()
+    ]
     return [
         TaskSet("store", scenario.SYSTEM, store_tools, store),
         TaskSet(
@@ -646,6 +791,7 @@ def class_sets() -> list[TaskSet]:
             help_desk,
         ),
         TaskSet("travel", heldout.TRAVEL_SYSTEM, heldout.TRAVEL_TOOLS, travel),
+        TaskSet("inventory", INVENTORY_SYSTEM, [sku_export, sku_stock], inventory),
     ]
 
 

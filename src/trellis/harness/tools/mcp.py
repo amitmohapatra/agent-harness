@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
-from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool
+from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool, fresh
 
 if TYPE_CHECKING:
     from mcp import Client
@@ -76,6 +76,16 @@ def side_effects_of(annotations: Any) -> SideEffects:
     if _hint(annotations, "destructive_hint", "destructiveHint"):
         return "irreversible"
     return "write"
+
+
+def freshness_of(listed: Any) -> dict[str, float]:
+    """An MCP tool's declared freshness (``tools.base.fresh``): in its ``_meta`` (MCP's place
+    for what the protocol does not name: ``{"freshness": "live"}``, ``{"maxAge": 60}``), else
+    in its annotations where the SDK keeps keys it does not know; a value of another kind is
+    not read."""
+    return fresh(getattr(listed, "meta", None), strict=False) or fresh(
+        getattr(listed, "annotations", None), strict=False
+    )
 
 
 def _hint(annotations: Any, attribute: str, key: str) -> bool:
@@ -151,6 +161,7 @@ class MCPSource:
             server=server,
             side_effects=side_effects_of(annotations),
             idempotent=bool(annotations is not None and annotations.idempotent_hint),
+            **freshness_of(listed),
         )
 
         async def run(args: dict[str, Any]) -> Any:

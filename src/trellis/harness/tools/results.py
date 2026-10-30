@@ -1,6 +1,7 @@
-"""Large tool results where the framework has no cut of its own (OpenAI Agents, Claude): the
-convention Deep Agents' ``FilesystemMiddleware`` gives ``ReAct`` and Deep Agents, so a model
-reads one convention everywhere — without importing Deep Agents (an optional extra).
+"""Large tool results where the framework has no cut of its own (OpenAI Agents, Claude, Kimi,
+``ReAct`` without a backend, a ``create_agent`` graph with ``middleware()``): the convention
+Deep Agents' ``FilesystemMiddleware`` gives ``ReAct`` with a backend and Deep Agents, so a
+model reads one convention everywhere — without importing Deep Agents (an optional extra).
 
 A result over :data:`MAX_CHARS` (Deep Agents' 20,000 tokens, at 4 characters each) is kept
 whole in the run's journal (``Journal.results``: it stays readable for the rest of the run,
@@ -11,14 +12,21 @@ first and last lines, numbered. ``read_file`` (Deep Agents' contract: ``file_pat
 it, at most :data:`PAGE_CHARS` at a time, each page saying where the next starts. A line
 longer than :data:`MAX_LINE` characters reads as several (Deep Agents' ``read_file`` numbers
 their parts 5.1, 5.2… in one page): a one-line JSON result pages too.
+
+``query_result`` (``tools.query``) runs read-only SQL over its rows — a count, a sum, a filter,
+a top-N or a group over every row, exact — and the stub says so before its preview, naming the
+table's columns; a run with a sandbox is also told the result is a file there to run code over
+(:data:`CODE`: the sandbox writes every kept result in, ``SandboxSource.with_results``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Final
 
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import current
+from trellis.harness.tools import query
 from trellis.harness.tools.base import arguments_problem, not_run
 from trellis.harness.tools.convert import text_of
 
@@ -54,6 +62,22 @@ READ_FILE_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
+#: What a stub says first: the kept rows are a table that ``query_result`` computes over
+#: (``tools.query``) — a count, a sum, a filter, a top-N or a group, exact, with no sandbox.
+QUERY: Final = (
+    "Its rows are the table {table} (columns: {columns}). For a count, a sum, an average, a "
+    'filter, a ranking or a group over them, call query_result(file_path="{path}", '
+    'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Do not add up '
+    "or rank rows yourself."
+)
+#: Deep Agents' tool that runs a command on its backend (a sandbox's: ``ReAct(backend=sandbox())``).
+EXECUTE: Final = "execute"
+#: What a stub adds for a run with a sandbox: the kept result is a file there, which code reads
+#: whole — a count, a sum, a filter, a top-N or a group over every row, without paging it.
+CODE: Final = (
+    "The whole result is also the file {path} in your sandbox: to count, sum, filter, rank or "
+    "group its rows, run code over that file with {tool} instead of reading it page by page."
+)
 #: Deep Agents' stub for a large result (``_message_eviction._TOO_LARGE_TOOL_MSG``).
 STUB: Final = """Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
 
@@ -80,13 +104,49 @@ def readable(output: Any) -> str:
     """A tool's result as the model of the current run reads it: its text, or — longer than
     :data:`MAX_CHARS` — the stub naming where it is kept, with a preview."""
     text = text_of(output)
-    runtime = current()
-    if len(text) <= MAX_CHARS or runtime is None:
+    if len(text) <= MAX_CHARS:
         return text
-    ident = content_key("result", text)
-    path = f"{PREFIX}/{ident}"
+    path = keep(text)
+    if path is None:
+        return text
+    columns = ", ".join(query.columns_of(text))
+    table = QUERY.format(table=query.TABLE, columns=columns, path=path)
+    return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
+
+
+def keep(text: str) -> str | None:
+    """``text`` kept whole in the current run's journal, where ``read_file`` pages it (and the
+    run's sandbox finds it: ``sandbox.SandboxSource``), and the path it is kept at — named by
+    its content, so the same text is kept once; ``None`` outside a run."""
+    runtime = current()
+    if runtime is None:
+        return None
+    path = f"{PREFIX}/{content_key('result', text)}"
     runtime.replay.journal.results[path] = text
-    return _stub(ident, path, _lines(text))
+    return path
+
+
+def line_at(text: str, chars: int) -> int:
+    """The line (0-indexed, as ``read_file`` numbers them: :func:`_lines`) that character
+    ``chars`` of ``text`` is on — where reading on from the first ``chars`` characters starts."""
+    head = text[:chars]
+    if not head or head.endswith(("\n", "\r")):
+        return len(_lines(head))
+    return len(_lines(head)) - 1
+
+
+def coding_tool() -> str | None:
+    """The tool the current run runs code with in its sandbox — the sandbox's own tool
+    (``sandbox().tools()``), else Deep Agents' ``execute`` on the run's sandbox — or ``None``:
+    a kept result is a file there too, which code counts, sums, filters and ranks whole."""
+    runtime = current()
+    if runtime is None:
+        return None
+    from trellis.harness.sandbox import EXEC  # noqa: PLC0415 - the sandbox imports the tools
+
+    if EXEC in runtime.toolbox:
+        return EXEC
+    return EXECUTE if EXECUTE in runtime.native else None
 
 
 def kept() -> bool:
@@ -141,16 +201,21 @@ def _lines(text: str) -> list[str]:
     ]
 
 
-def _stub(ident: str, path: str, lines: list[str]) -> str:
+def _stub(ident: str, path: str, lines: list[str], *, code: str | None, table: str) -> str:
     """Deep Agents' stub: the path, and the head and tail lines, each at most
     :data:`PREVIEW_LINE` characters (a kept result has more lines than :data:`HEAD` and
-    :data:`TAIL`: none is longer than :data:`MAX_LINE`)."""
+    :data:`TAIL`: none is longer than :data:`MAX_LINE`) — and, before the preview, its rows as
+    the table ``query_result`` computes over (``table``: :data:`QUERY`) and, for a run with a
+    sandbox (``code``: its tool), that the file is there to run code over (:data:`CODE`)."""
     head, tail = lines[:HEAD], lines[-TAIL:]
     marker = MARKER.format(omitted_lines=len(lines) - HEAD - TAIL)
     sample = f"{_numbered(head, 1)}\n{marker}\n{_numbered(tail, len(lines) - TAIL + 1)}"
     clipped = any(len(line) > PREVIEW_LINE for line in (*head, *tail))
     caveats = "; ".join([OMITTED, CLIPPED] if clipped else [OMITTED])
     note = f"Here is a preview showing the head and tail of the result ({caveats}):"
+    if code is not None:
+        note = f"{CODE.format(path=path, tool=code)}\n\n{note}"
+    note = f"{table}\n\n{note}"
     return STUB.format(tool_call_id=ident, file_path=path, preview_note=note, content_sample=sample)
 
 
@@ -158,3 +223,12 @@ def _numbered(lines: list[str], first: int) -> str:
     """Lines numbered from ``first``, as Deep Agents numbers them, each clipped for a preview."""
     width = len(str(first + len(lines) - 1))
     return "\n".join(f"{first + n:>{width}}  {line[:PREVIEW_LINE]}" for n, line in enumerate(lines))
+
+
+#: The tools that read a kept result — ``read_file`` (its pages) and ``query_result`` (SQL over
+#: its rows: ``tools.query``) — as each adapter offers them: name, description, JSON schema, and
+#: what answers a call (its arguments, as the model wrote them).
+READERS: Final[tuple[tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], str]], ...]] = (
+    (READ_FILE, READ_FILE_DESCRIPTION, READ_FILE_SCHEMA, read),
+    (query.QUERY_RESULT, query.QUERY_RESULT_DESCRIPTION, query.QUERY_RESULT_SCHEMA, query.query),
+)

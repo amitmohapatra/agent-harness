@@ -354,10 +354,11 @@ async def test_the_toolbox_for_openai_agents_is_function_tools(harness: Harness)
         """Units of a SKU."""
         return 1
 
-    # with read_file, which pages a large result the run keeps (enabled once there is one)
-    [native, read_file] = await native_tools(harness, lookup, framework="openai_agents")
+    # with read_file and query_result, which page and query a large result the run keeps
+    # (enabled once there is one)
+    [native, read_file, query] = await native_tools(harness, lookup, framework="openai_agents")
     assert isinstance(native, FunctionTool) and native.name == "lookup"
-    assert read_file.name == "read_file"
+    assert (read_file.name, query.name) == ("read_file", "query_result")
 
 
 async def test_a_finish_already_recorded_is_not_a_failed_run(

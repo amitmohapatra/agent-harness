@@ -187,6 +187,9 @@ class Runtime:
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
+    #: when each tool call of this attempt returned, by its reference (the framework's call
+    #: id): the time a replayed result says it was fetched (``snapshots.stamped``)
+    fetched: dict[str, datetime] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,

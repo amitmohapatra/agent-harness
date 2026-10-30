@@ -43,7 +43,7 @@ from trellis.harness.clients.bifrost import Gateway, code_mode_tools
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.tools.base import Source, Tool
+from trellis.harness.tools.base import Source, Tool, fresh
 from trellis.harness.tools.lint import lint
 from trellis.harness.tools.mcp import MCPSource, side_effects_of
 
@@ -242,6 +242,7 @@ def _mcp(
                 d,
                 side_effects=side_effects_of(d.annotations),
                 idempotent=bool(d.annotations and d.annotations.idempotent_hint),
+                **fresh(d.annotations, strict=False),
             ),
             functools.partial(gateway.execute, d.name, clients=(d.client,)),
             feature="mcp",

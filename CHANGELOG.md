@@ -26,6 +26,21 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- Large results in `ReAct` without a backend and in a `create_agent` graph with
+  `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
+  and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
+  its cut naming the `read_file` call that reads on from there.
+- `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
+  of a kept result — or of one Deep Agents saved — offered with `read_file` on every adapter,
+  for counts, sums, filters, top-N and groups without a sandbox (`tools.query`). A run with a
+  sandbox finds every kept result as a file there too (`sandbox_exec`, `execute`).
+- Freshness: `tool(freshness="live")`, `tool(max_age=)`, a LangChain tool's
+  `metadata={"freshness": ...}`, an MCP tool's `_meta` (`tools.base.fresh`). Tool results
+  written to memory's thread start with `[snapshot of <tool> from <UTC time>]`; replayed past
+  the tool's declared age they are marked out of date, the context says so, and the tool stays
+  offered (`trellis.harness.snapshots`).
+- `benchmark/cost`: the `aggregate` and `freshness` classes over 10,000 SKUs.
+
 - `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
   `LLM_GATEWAY` from one registry that packages extend under the entry-point group
   `trellis.gateways`. Bifrost's features ask `gateway.has(Capability.X)`; new capabilities

@@ -45,6 +45,25 @@ DEFAULT_SIDE_EFFECTS: SideEffects = "write"
 
 Runner = Callable[[dict[str, Any]], Awaitable[Any]]
 
+#: How long a value a tool returns stays current, as the tool declares it beside its other
+#: metadata (``tool(freshness="live")``, ``tool(max_age=)``, a LangChain tool's ``metadata``,
+#: an MCP tool's annotations, camel case there: ``maxAge``): kept on its ``ToolSpec`` as
+#: :data:`MAX_AGE`, in seconds — 0 for a live tool, whose every earlier value is out of date.
+#: A tool that says nothing is a snapshot like any other (``None``).
+MAX_AGE: Final = "max_age"
+FRESHNESS: Final = "freshness"
+LIVE: Final = "live"
+#: What a tool that declares it adds to its description, so every framework's model reads it
+#: where it reads how to use the tool.
+CHANGES: Final = (
+    "Its values change: call it again for the current value whenever one is asked for; a "
+    "value it returned earlier (in this conversation, or remembered) is out of date."
+)
+CHANGES_AFTER: Final = (
+    "Its values change: a value it returned more than {age} ago is out of date: call it "
+    "again for the current value."
+)
+
 #: A JSON schema ``type`` and the Python values that are one (a bool is not a number).
 JSON_TYPES: Final[dict[str, tuple[type, ...]]] = {
     "string": (str,),
@@ -91,6 +110,13 @@ class Tool:
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
             raise ConfigurationError(f"{self.spec.name}: a timeout is a number of seconds over 0")
+        age = max_age(self.spec)
+        said = CHANGES if age == 0 else CHANGES_AFTER.format(age=_duration(age or 0))
+        if age is not None and said not in self.spec.description:
+            described = f"{self.spec.description.rstrip()} {said}".strip()
+            object.__setattr__(
+                self, "spec", self.spec.model_copy(update={"description": described})
+            )
 
     @property
     def name(self) -> str:
@@ -99,6 +125,60 @@ class Tool:
     @property
     def side_effects(self) -> str:
         return self.spec.side_effects
+
+
+def max_age(spec: ToolSpec) -> float | None:
+    """How long a value the tool returns stays current, in seconds (0: live), as it declared it
+    (:data:`MAX_AGE`); ``None``: it did not say."""
+    found = (spec.model_extra or {}).get(MAX_AGE)
+    return float(found) if isinstance(found, int | float) and not isinstance(found, bool) else None
+
+
+def fresh(declared: Any, *, name: str = "the tool", strict: bool = True) -> dict[str, float]:
+    """A tool's declared freshness as its ``ToolSpec`` keeps it (``{MAX_AGE: seconds}``, or
+    nothing): ``freshness`` ``"live"`` (0) or ``max_age`` (``maxAge``) seconds, read from a
+    mapping (a LangChain tool's ``metadata``, an MCP tool's annotations on the wire), or an
+    object's attributes and pydantic extras (the MCP SDK's ``ToolAnnotations``). A value of
+    another kind is refused, naming the tool — or, not ``strict`` (what a server says of its
+    tools), not read."""
+    if declared is None:
+        return {}
+    if isinstance(declared, dict):
+        found = dict(declared)
+    else:
+        found = {**(getattr(declared, "model_extra", None) or {}), **vars_of(declared)}
+    age = next((found[k] for k in (MAX_AGE, "maxAge") if found.get(k) is not None), None)
+    freshness = found.get(FRESHNESS)
+    problem = None
+    if freshness is not None and freshness != LIVE:
+        problem = f"{name}: freshness is {LIVE!r} (or give max_age in seconds)"
+    elif age is not None and (isinstance(age, bool) or not isinstance(age, int | float) or age < 0):
+        problem = f"{name}: max_age is a number of seconds, 0 or more"
+    if problem is not None:
+        if strict:
+            raise ConfigurationError(problem)
+        return {}
+    if freshness == LIVE:
+        return {MAX_AGE: 0.0}
+    return {} if age is None else {MAX_AGE: float(age)}
+
+
+def vars_of(declared: Any) -> dict[str, Any]:
+    """An object's own attributes (``__dict__``, or a ``__slots__`` class's), as a mapping."""
+    try:
+        return dict(vars(declared))
+    except TypeError:
+        return {}
+
+
+def _duration(seconds: float) -> str:
+    """Seconds as a person says them: ``30 seconds``, ``5 minutes``, ``2 hours``, ``3 days``."""
+    for unit, size in (("day", 86_400), ("hour", 3_600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            count = int(seconds // size)
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    count = round(seconds)
+    return f"{count} second{'s' if count != 1 else ''}"
 
 
 class Source(Protocol):

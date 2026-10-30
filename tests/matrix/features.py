@@ -54,16 +54,17 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
-from trellis.harness.automatic import JournalBackend
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, Rewrite, Verdict
+from trellis.harness.journal import content_key
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.sandbox import sandbox
 from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
+from trellis.harness.tools.results import MAX_LINE
 
 #: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
@@ -404,17 +405,46 @@ async def repeated_calls(w: World) -> None:
 
 
 # --------------------------------------------------------------------------- context
+#: The report a large-result scenario reads: past ``tools.results.MAX_CHARS``, one line.
+LARGE_REPORT: Final = 100_000
+
+
 async def large_result(w: World) -> None:
     d = Desk()
-
-    async def deep(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
-        # ReAct on Deep Agents: a backend given (the journal's), its file tools and paging
-        return ReAct("You read.", PlannedChat(plan), backend=JournalBackend()), tools
-
-    target = deep if w.adapter == "react" else None
-    o = (await w.go([d.report(100_000)], [("report", {"name": "q3"})], target=target)).succeeded()
+    o = (await w.go([d.report(LARGE_REPORT)], [("report", {"name": "q3"})])).succeeded()
     assert "/large_tool_results/" in o.text, f"the model read all {len(o.text)} characters"
     assert len(o.text) < 25_000
+
+
+async def large_result_read(w: World) -> None:
+    """The kept result read to its last part (``read_file`` from an offset): every part is
+    within reach, not only the preview's head and tail."""
+    d = Desk()
+    report = d.report(LARGE_REPORT)
+    text = "".join(f"{n:04d}" for n in range(LARGE_REPORT // 4 + 1))[:LARGE_REPORT]
+    path = f"/large_tool_results/{content_key('result', text)}"
+    last = LARGE_REPORT // MAX_LINE - 1  # a 100,000-character line read in parts of 5,000
+    plan: list[Call] = [
+        ("report", {"name": "q3"}),
+        ("read_file", {"file_path": path, "offset": last}),
+    ]
+    o = (await w.go([report], plan)).succeeded()
+    assert o.text.endswith(text[-MAX_LINE:]), o.text[:200]
+
+
+async def large_result_query(w: World) -> None:
+    """The kept result queried with read-only SQL (``query_result``): computed over all of it,
+    with no sandbox — the model adds nothing up itself."""
+    d = Desk()
+    text = "".join(f"{n:04d}" for n in range(LARGE_REPORT // 4 + 1))[:LARGE_REPORT]
+    path = f"/large_tool_results/{content_key('result', text)}"
+    sql = "SELECT length(line) AS n, substr(line, -8) AS tail FROM result"
+    plan: list[Call] = [
+        ("report", {"name": "q3"}),
+        ("query_result", {"file_path": path, "sql": sql}),
+    ]
+    o = (await w.go([d.report(LARGE_REPORT)], plan)).succeeded()
+    assert o.text.endswith(f"n,tail\n{LARGE_REPORT},{text[-8:]}"), o.text[:200]
 
 
 async def context_management(w: World) -> None:
@@ -1066,7 +1096,8 @@ FEATURES: Final[list[Feature]] = [
         "F26",
         "automatic: Deep Agents' FilesystemMiddleware (ReAct's given a backend, Deep Agents' by "
         "default); "
-        "OpenAI Agents and Claude: the same cut, kept in the run (tools.results)",
+        "ReAct, middleware(), OpenAI Agents and Claude: the same cut, kept in the run "
+        "(tools.results)",
         large_result,
         adapters={
             "function": NA("a function target gets the whole result: it has no context to fill"),
@@ -1074,9 +1105,50 @@ FEATURES: Final[list[Feature]] = [
                 "native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct "
                 "and Deep Agents have it by default)"
             ),
-            "middleware": NA(
-                "Deep Agents' own: middleware() adds what Deep Agents lacks; build on "
-                "create_deep_agent (as ReAct does given a backend), or add FilesystemMiddleware"
+        },
+        way2=NA(
+            "by design: a Way 2 caller's own code receives the whole result and decides what "
+            "its model reads"
+        ),
+    ),
+    Feature(
+        "F26r",
+        "large results: read to the last part (read_file from an offset), none out of reach",
+        "F26",
+        "automatic: read_file pages the kept result (tools.results), from any offset",
+        large_result_read,
+        adapters={
+            "function": NA("a function target gets the whole result: it has no context to fill"),
+            "langgraph": NA(
+                "native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct "
+                "and Deep Agents have it by default)"
+            ),
+            "deepagents": NA(
+                "native: Deep Agents' FilesystemMiddleware saves it under the call's id on its "
+                "backend, and its read_file pages it (F26)"
+            ),
+        },
+        way2=NA(
+            "by design: a Way 2 caller's own code receives the whole result and decides what "
+            "its model reads"
+        ),
+    ),
+    Feature(
+        "F26q",
+        "large results: counted, summed, filtered and ranked by read-only SQL over every row "
+        "(query_result), no sandbox needed",
+        "F26",
+        "automatic: query_result is offered with read_file once a result is kept (tools.query)",
+        large_result_query,
+        adapters={
+            "function": NA("a function target gets the whole result: it has no context to fill"),
+            "langgraph": NA(
+                "native: add FilesystemMiddleware(tools=['read_file']) to create_agent, or build "
+                "it with middleware() (query_result comes with it)"
+            ),
+            "deepagents": NA(
+                "native: Deep Agents saves it under the call's id; with middleware() "
+                "query_result reads it from the state (tests/integration/test_large_data.py)"
             ),
         },
         way2=NA(

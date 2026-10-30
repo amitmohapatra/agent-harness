@@ -20,7 +20,7 @@ import re
 import typing
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, overload
+from typing import Any, Final, Literal, overload
 
 import httpx
 from pydantic import BaseModel, ConfigDict, create_model
@@ -33,6 +33,7 @@ from trellis.harness.tools.base import (
     SideEffects,
     Source,
     Tool,
+    fresh,
     invoked,
 )
 
@@ -66,6 +67,8 @@ class FunctionTool:
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
         idempotent: bool = False,
         timeout: float | None = None,
+        freshness: Literal["live"] | None = None,
+        max_age: float | None = None,
     ) -> None:
         self.fn = fn
         self.model = _arguments_model(fn)
@@ -77,6 +80,7 @@ class FunctionTool:
             source="local",
             side_effects=side_effects,
             idempotent=idempotent,
+            **fresh({"freshness": freshness, "max_age": max_age}, name=name or fn.__name__),
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -103,6 +107,8 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    freshness: Literal["live"] | None = None,
+    max_age: float | None = None,
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -112,6 +118,8 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    freshness: Literal["live"] | None = None,
+    max_age: float | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -122,6 +130,8 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    freshness: Literal["live"] | None = None,
+    max_age: float | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
@@ -135,6 +145,10 @@ def tool(
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped). A result that comes from outside the run (a person, another system) is an
     ``ask`` in the function: ``return await trellis.current().ask(question, expects=...)``.
+    ``freshness="live"`` (its values change: every earlier value is out of date) or
+    ``max_age`` (the seconds a value stays current): an earlier result of it that the
+    conversation replays past that age is marked out of date, and the model calls it again
+    (``trellis.harness.snapshots``).
     """
     made = functools.partial(
         FunctionTool,
@@ -143,6 +157,8 @@ def tool(
         side_effects=side_effects,
         idempotent=idempotent,
         timeout=call_timeout,
+        freshness=freshness,
+        max_age=max_age,
     )
     return made(fn) if fn is not None else made
 
