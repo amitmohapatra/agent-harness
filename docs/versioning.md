@@ -44,7 +44,7 @@ The providers' own LangChain packages, for a model name on the provider SDK's ro
 | Sibling | Pinned | Tested | Service |
 |---|---|---|---|
 | `trellis-contracts` | `>=0.6.3,<0.7` | 0.6.3 | — |
-| `trellis-memory` | `>=MEMSDK` | MEMSDK | agent-memory-service with agents' model endpoints (`PUT /v1/agents/model-key` takes an `Endpoint`, `docs/openapi.json`) |
+| `trellis-memory` | `>=0.6` | 0.6.0 | agent-memory-service 0.4.0 with agents' model endpoints (`PUT /v1/agents/model-key` takes an `Endpoint`, `docs/openapi.json`) |
 | `trellis-runs` | `>=0.4.0` | 0.4.1 | agent-runs 0.4.0 (`docs/openapi.json`) |
 | `bifrost-sdk` | `>=0.4` | 0.4.0 | any OpenAI-compatible endpoint; Bifrost's extras with `gateway="bifrost"` |
 

@@ -22,7 +22,7 @@ classifiers = [
 # framework arrives with a newer trellis-harness.
 dependencies = [
   "trellis-contracts>=0.6.3,<0.7",
-  "trellis-memory>=0.5",
+  "trellis-memory>=0.6",
   "trellis-runs>=0.4.0",
   "bifrost-sdk>=0.4",
   "pydantic>=2.13,<3",
