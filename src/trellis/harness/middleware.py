@@ -131,7 +131,7 @@ from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results
-from trellis.harness.tools.base import SideEffects, Tool, arguments_of, fresh, not_run
+from trellis.harness.tools.base import SideEffects, Tool, arguments_of, data_of, not_run
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.mcp import side_effects_of as annotated
@@ -303,7 +303,7 @@ def _message(outcome: ToolOutcome, call_id: str, name: str, *, kept: bool = Fals
     """A harness call's outcome as the tool message the model reads — ``kept``: a large one
     kept in the run and previewed, ``read_file`` paging it (``tools.results``)."""
     return ToolMessage(
-        content=results.readable(outcome.output) if kept else text_of(outcome.output),
+        content=results.readable(outcome.output, name) if kept else text_of(outcome.output),
         tool_call_id=call_id,
         name=name,
         status="error" if outcome.status in FAILED else "success",
@@ -322,12 +322,12 @@ def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
     return not any(getattr(t, "name", None) == READ_FILE for t in tools)
 
 
-def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
+async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
     """A call reading a result the run keeps, answered: ``read_file`` with its page (the graph
     has no ``read_file`` of its own, or the path is one the run keeps: a result cut to fit the
-    window, in a Deep Agents graph); ``query_result`` with its rows (``tools.query``) — of a
-    result the run keeps, or of one Deep Agents saved in the graph's state. Any other call:
-    ``None``."""
+    window, in a Deep Agents graph); ``query_result`` with what it computes (``tools.query``)
+    — over a result the run keeps, or one Deep Agents saved in the graph's state. Any other
+    call: ``None``."""
     call = request.tool_call
     args = dict(call["args"])
     path = "/" + str(args.get("file_path", "")).lstrip("/")
@@ -336,7 +336,7 @@ def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None
     if call["name"] == READ_FILE and (request.tool is None or kept):
         said = results.read(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
-        said = query.query(args, None if kept else _state_file(request.state, path))
+        said = await query.query(args, None if kept else _state_file(request.state, path))
     if said is None:
         return None  # another tool, or the graph's own read_file of its own files
     return ToolMessage(content=said, tool_call_id=str(call["id"]), name=call["name"])
@@ -361,7 +361,7 @@ def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) ->
     once there is one, its calls answered by :class:`HarnessTools` (no tool node runs it)."""
 
     async def run(**args: Any) -> str:
-        return str(answer(args))
+        return str(await answer(args))
 
     return StructuredTool.from_function(
         coroutine=run, name=name, description=description, args_schema=schema
@@ -468,7 +468,7 @@ def spec_of(tool: BaseTool) -> ToolSpec:
         description=tool.description or tool.name,
         input_schema=_schema_of(tool),
         side_effects=side_effects_of(tool.metadata),
-        **fresh(tool.metadata, name=tool.name),
+        **data_of(tool.metadata, name=tool.name),
     )
 
 
@@ -534,7 +534,7 @@ class HarnessTools(AgentMiddleware):
     ) -> ToolMessage | Command[Any]:
         runtime = current()
         call = request.tool_call
-        page = _kept_read(runtime, request) if runtime is not None else None
+        page = await _kept_read(runtime, request) if runtime is not None else None
         if page is not None:
             return page
         tool = runtime.toolbox.get(call["name"]) if runtime is not None else None
@@ -1608,7 +1608,7 @@ def _cut(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
             continue
         half = keep // 2
         said = f"{len(text) - keep} characters cut to fit the window"
-        path = results.keep(text) if inside else None
+        path = results.keep(text, tool=messages[n].name) if inside else None
         if path is not None:
             line = results.line_at(text, half)
             said += f'; the rest: {results.READ_FILE}(file_path="{path}", offset={line})'

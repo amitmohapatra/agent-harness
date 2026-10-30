@@ -21,7 +21,7 @@ table's columns; a run with a sandbox is also told the result is a file there to
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
 from trellis.harness.journal import content_key
@@ -67,8 +67,9 @@ READ_FILE_SCHEMA: Final[dict[str, Any]] = {
 QUERY: Final = (
     "Its rows are the table {table} (columns: {columns}). For a count, a sum, an average, a "
     'filter, a ranking or a group over them, call query_result(file_path="{path}", '
-    'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Do not add up '
-    "or rank rows yourself."
+    'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Every result '
+    "this run saved is a table of the same query, named by its tool, so one query can JOIN "
+    "them. Do not add up or rank rows yourself."
 )
 #: Deep Agents' tool that runs a command on its backend (a sandbox's: ``ReAct(backend=sandbox())``).
 EXECUTE: Final = "execute"
@@ -100,29 +101,35 @@ CLIPPED: Final = (
 )
 
 
-def readable(output: Any) -> str:
-    """A tool's result as the model of the current run reads it: its text, or — longer than
-    :data:`MAX_CHARS` — the stub naming where it is kept, with a preview."""
+def readable(output: Any, tool: str | None = None) -> str:
+    """A tool's result (``tool``'s, when named) as the model of the current run reads it: its
+    text, or — longer than :data:`MAX_CHARS` — the stub naming where it is kept, with a
+    preview."""
     text = text_of(output)
     if len(text) <= MAX_CHARS:
         return text
-    path = keep(text)
-    if path is None:
+    path = keep(text, tool=tool)
+    runtime = current()
+    if path is None or runtime is None:
         return text
     columns = ", ".join(query.columns_of(text))
-    table = QUERY.format(table=query.TABLE, columns=columns, path=path)
+    name = query.tables(runtime)[path]
+    table = QUERY.format(table=name, columns=columns, path=path)
     return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
 
 
-def keep(text: str) -> str | None:
+def keep(text: str, *, tool: str | None = None) -> str | None:
     """``text`` kept whole in the current run's journal, where ``read_file`` pages it (and the
     run's sandbox finds it: ``sandbox.SandboxSource``), and the path it is kept at — named by
-    its content, so the same text is kept once; ``None`` outside a run."""
+    its content, so the same text is kept once; ``None`` outside a run. ``tool``: the tool that
+    returned it, whose name its table has in a query (``tools.query.tables``)."""
     runtime = current()
     if runtime is None:
         return None
     path = f"{PREFIX}/{content_key('result', text)}"
     runtime.replay.journal.results[path] = text
+    if tool is not None and getattr(runtime, "kept_from", None) is not None:
+        runtime.kept_from.setdefault(path, tool)
     return path
 
 
@@ -228,7 +235,14 @@ def _numbered(lines: list[str], first: int) -> str:
 #: The tools that read a kept result — ``read_file`` (its pages) and ``query_result`` (SQL over
 #: its rows: ``tools.query``) — as each adapter offers them: name, description, JSON schema, and
 #: what answers a call (its arguments, as the model wrote them).
-READERS: Final[tuple[tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], str]], ...]] = (
-    (READ_FILE, READ_FILE_DESCRIPTION, READ_FILE_SCHEMA, read),
+async def aread(args: dict[str, Any]) -> str:
+    """:func:`read`, as a reader answers (``READERS``: each awaited)."""
+    return read(args)
+
+
+READERS: Final[
+    tuple[tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]], ...]
+] = (
+    (READ_FILE, READ_FILE_DESCRIPTION, READ_FILE_SCHEMA, aread),
     (query.QUERY_RESULT, query.QUERY_RESULT_DESCRIPTION, query.QUERY_RESULT_SCHEMA, query.query),
 )

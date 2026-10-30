@@ -19,7 +19,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final
 
 from agents import FunctionTool
@@ -72,7 +72,7 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
             return await original(context, arguments)
         repeat = _repeat(context, arguments, args)
         if repeat is not None:
-            return results.readable(repeat.output)
+            return results.readable(repeat.output, tool.name)
 
         async def run(given: dict[str, Any]) -> Any:
             return await original(context, json.dumps(given))
@@ -85,7 +85,7 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
             side_effects="write",
         )
         outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
-        return results.readable(outcome.output)
+        return results.readable(outcome.output, tool.name)
 
     setattr(invoke, MADE, True)
     enabled = _narrowed(tool.name, tool.is_enabled)
@@ -168,7 +168,7 @@ def _one(tool: Tool) -> FunctionTool:
         outcome = _repeat(context, arguments, args)
         if outcome is None:
             outcome = await bridge.call(tool, args, call_id=context.tool_call_id)
-        return results.readable(outcome.output)
+        return results.readable(outcome.output, tool.name)
 
     return FunctionTool(
         name=tool.name,
@@ -196,14 +196,14 @@ def _reader(
     name: str,
     description: str,
     schema: dict[str, Any],
-    answer: Callable[[dict[str, Any]], str],
+    answer: Callable[[dict[str, Any]], Awaitable[str]],
 ) -> FunctionTool:
     """A tool reading a large result the run keeps (``tools.results.READERS``: ``read_file``
     its pages, ``query_result`` SQL over its rows), enabled once the run keeps one."""
 
     async def invoke(context: ToolContext[Any], arguments: str) -> str:
         args = arguments_of(arguments)
-        return not_run(name, args) if isinstance(args, str) else answer(args)
+        return not_run(name, args) if isinstance(args, str) else await answer(args)
 
     return FunctionTool(
         name=name,

@@ -3,9 +3,13 @@ Python's own SQLite — JSON, CSV or plain lines as a table, exact answers, noth
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
+import statistics
 from collections.abc import Iterator
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -14,17 +18,19 @@ from trellis.harness.journal import Journal
 from trellis.harness.tools import query, results
 
 
-class Run(SimpleNamespace):
-    """A run in progress, as ``tools.query`` reads it (held weakly, as a ``Runtime`` is)."""
+class Run:
+    """A run in progress, as ``tools.query`` reads it."""
 
-    __slots__ = ("__weakref__",)
-    __hash__ = object.__hash__
+    def __init__(self, journal: Journal) -> None:
+        self.replay = SimpleNamespace(journal=journal)
+        self.toolbox: dict[str, object] = {}
+        self.native: dict[str, object] = {}
 
 
 @pytest.fixture
 def journal() -> Iterator[Journal]:
     journal = Journal()
-    run = Run(replay=SimpleNamespace(journal=journal), toolbox={}, native={})
+    run = Run(journal)
     token = runtime_module._current.set(run)  # type: ignore[arg-type]
     yield journal
     runtime_module._current.reset(token)
@@ -33,7 +39,7 @@ def journal() -> Iterator[Journal]:
 def ask(text: str, sql: str) -> str:
     path = results.keep(text)
     assert path is not None
-    return query.query({"file_path": path, "sql": sql})
+    return asyncio.run(query.query({"file_path": path, "sql": sql}))
 
 
 ROWS = [
@@ -100,14 +106,17 @@ def test_a_query_is_bounded_in_time_rows_and_length(
 
 
 def test_a_wrong_call_is_said(journal: Journal) -> None:
-    assert "sql" in query.query({"file_path": "/large_tool_results/x"})
-    assert query.query({"file_path": "/x", "sql": "SELECT 1"}) == "Error: File '/x' not found"
-    given = query.query({"file_path": "x", "sql": "SELECT count(*) FROM result"}, "a\nb")
+    assert "sql" in asyncio.run(query.query({"file_path": "/large_tool_results/x"}))
+    missing = asyncio.run(query.query({"file_path": "/x", "sql": "SELECT 1"}))
+    assert missing == "Error: File '/x' not found"
+    given = asyncio.run(
+        query.query({"file_path": "x", "sql": "SELECT count(*) FROM result"}, "a\nb")
+    )
     assert given == "count(*)\n2"  # a text given (a file Deep Agents saved in the state)
 
 
 def test_outside_a_run_nothing_is_read() -> None:
-    said = query.query({"file_path": "/x", "sql": "SELECT 1"}, "a,b\n1,2")
+    said = asyncio.run(query.query({"file_path": "/x", "sql": "SELECT 1"}, "a,b\n1,2"))
     assert said == "Error: File '/x' not found"
 
 
@@ -127,3 +136,41 @@ def test_outside_a_run_nothing_is_read() -> None:
 )
 def test_a_column_is_a_number_only_when_sqlite_keeps_it_exactly(cells: list, kind: str) -> None:
     assert query._kind(cells) == kind
+
+
+def aggregate(name: str, *rows: tuple[Any, ...]) -> Any:
+    """``name`` (of ``query.AGGREGATES``) over ``rows`` on a database of its own."""
+    db = sqlite3.connect(":memory:")
+    try:
+        for fn, arguments, made in query.AGGREGATES:
+            db.create_aggregate(fn, arguments, made)
+        width = len(rows[0]) if rows else 1
+        db.execute(f"CREATE TABLE t ({', '.join(f'c{i}' for i in range(width))})")
+        db.executemany(f"INSERT INTO t VALUES ({', '.join('?' * width)})", rows)
+        cells = ", ".join(f"c{i}" for i in range(width))
+        return db.execute(f"SELECT {name}({cells}) FROM t").fetchone()[0]
+    finally:
+        db.close()
+
+
+def test_the_statistics_sqlite_lacks_are_pythons_own() -> None:
+    xs, ys = [1.0, 2.0, 4.0, 7.0], [2.0, 4.1, 7.9, 14.2]
+    pairs = [(y, x) for x, y in zip(xs, ys, strict=True)]
+    assert aggregate("stddev", *[(x,) for x in xs]) == statistics.stdev(xs)
+    assert aggregate("var_pop", *[(x,) for x in xs], (None,), ("text",)) == statistics.pvariance(xs)
+    assert aggregate("covar_pop", *pairs, (None, 1)) == statistics.covariance(xs, ys) * 3 / 4
+    assert aggregate("regr_r2", *pairs) == statistics.correlation(xs, ys) ** 2
+    assert aggregate("percentile_cont", *[(x, 0.5) for x in xs]) == 3.0
+    assert aggregate("stddev", (1.0,)) is None  # too few
+    assert aggregate("corr", (1.0, 1.0), (2.0, 1.0)) is None  # no spread
+    assert aggregate("corr", (1.0, 1.0)) is None
+    assert aggregate("percentile_cont", (1.0, 2)) is None  # p outside 0..1
+    assert aggregate("percentile_cont", (None, 0.5)) is None
+
+
+def test_two_results_of_one_tool_are_two_tables(journal: Journal) -> None:
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    for text in ("a\n1", "a\n2", "b\n3"):
+        results.keep(text, tool="rows")
+    assert list(query.tables(run).values()) == ["rows", "rows_2", "rows_3"]

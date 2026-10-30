@@ -10,11 +10,14 @@ middleware) — the SKU scenario: a tool answers 10,000 SKUs, and every row stay
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from langchain_core.messages import convert_to_messages
 
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
@@ -25,7 +28,7 @@ from trellis import Harness, ReAct, sandbox, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.automatic import JournalBackend
 from trellis.harness.journal import content_key
-from trellis.harness.tools import results
+from trellis.harness.tools import query, results
 
 #: 10,000 SKUs: id, units in stock, revenue — a CSV of about 250,000 characters
 SKUS: Final = [(f"SKU-{n:05d}", (n * 37) % 500, (n * 7919) % 100_000) for n in range(1, 10_001)]
@@ -216,7 +219,8 @@ async def test_the_stub_names_the_table_and_its_columns_before_the_preview(
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="sql-stub"), [inventory])
     assert (await agent.run("x", user="u")).status is RunStatus.SUCCESS
     stub = last(model.requests[1])
-    said = results.QUERY.format(table="result", columns="sku, stock, revenue", path=KEPT)
+    # its table named by its tool: one query joins it with the run's other saved results
+    said = results.QUERY.format(table="inventory", columns="sku, stock, revenue", path=KEPT)
     assert said in stub and stub.index(said) < stub.index("Here is a preview")
     assert {"read_file", "query_result"} <= set(names(model.requests[1]))
     assert "query_result" not in names(model.requests[0])
@@ -282,3 +286,144 @@ async def test_the_harness_readers_answer_as_langchain_tools_too(harness: Harnes
 
     said = await ours.READERS["query_result"].ainvoke({"file_path": "/x", "sql": "SELECT 1"})
     assert said == "Error: File '/x' not found"  # outside a run, nothing is kept
+
+
+# --------------------------------------------------------------------------- joins (50,000 rows)
+#: 50,000 SKUs, their sales over 30 days (another tool), and their suppliers' lead times (a
+#: third tool, which pages: 1,000 a page)
+N: Final = 50_000
+CATS: Final = ("garden", "kitchen", "toys", "tools")
+STOCK: Final = {f"S{n:05d}": (n * 31) % 400 for n in range(N)}
+SOLD: Final = {f"S{n:05d}": (n * 17) % 300 for n in range(N)}
+LEAD: Final = {f"S{n:05d}": 3 + (n * 7) % 40 for n in range(N)}
+CATEGORY: Final = {f"S{n:05d}": CATS[n % 4] for n in range(N)}
+PAGE: Final = 1_000
+
+
+@tool(side_effects="read")
+def inventory50k() -> str:
+    """Every SKU with its category and units in stock, as CSV."""
+    return "sku,category,stock\n" + "\n".join(f"{s},{CATEGORY[s]},{u}" for s, u in STOCK.items())
+
+
+@tool(side_effects="read")
+def sales() -> str:
+    """Units each SKU sold over the last 30 days, as JSON."""
+    return json.dumps([{"sku_id": s, "units_30d": u} for s, u in SOLD.items()])
+
+
+@tool(side_effects="read", paged=True)
+def lead_times(cursor: str | None = None) -> dict[str, Any]:
+    """Each SKU's supplier lead time in days, a page at a time.
+
+    Args:
+        cursor: Where the page starts (the last page's next_cursor).
+    """
+    start = int(cursor or 0)
+    skus = list(LEAD)[start : start + PAGE]
+    after = start + PAGE
+    return {
+        "items": [{"sku": s, "lead_days": LEAD[s]} for s in skus],
+        "next_cursor": str(after) if after < N else None,
+    }
+
+
+#: Stock-out risk: a SKU sells out before more arrives (stock < 30-day sales / 30 x lead time):
+#: the shortfall, in thirtieths of a unit (exact integers in SQL and in Python alike).
+RISK_SQL: Final = (
+    "SELECT i.sku, s.units_30d * l.lead_days - i.stock * 30 AS shortfall30 "
+    "FROM inventory50k i JOIN sales s ON s.sku_id = i.sku JOIN lead_times l ON l.sku = i.sku "
+    "WHERE i.stock * 30 < s.units_30d * l.lead_days ORDER BY shortfall30 DESC, i.sku LIMIT 5"
+)
+GROUP_SQL: Final = (
+    "SELECT i.category, count(*) AS at_risk, sum(s.units_30d * l.lead_days - i.stock * 30) AS "
+    "shortfall30 FROM inventory50k i JOIN sales s ON s.sku_id = i.sku JOIN lead_times l ON "
+    "l.sku = i.sku WHERE i.stock * 30 < s.units_30d * l.lead_days GROUP BY i.category "
+    "ORDER BY i.category"
+)
+
+
+def shortfalls() -> dict[str, int]:
+    """Python's own answer: each SKU at risk, and its shortfall in thirtieths of a unit."""
+    return {
+        s: SOLD[s] * LEAD[s] - STOCK[s] * 30 for s in STOCK if STOCK[s] * 30 < SOLD[s] * LEAD[s]
+    }
+
+
+def expected_risks() -> str:
+    top = sorted(shortfalls().items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+    return "sku,shortfall30\n" + "\n".join(f"{s},{v}" for s, v in top)
+
+
+def expected_groups() -> str:
+    found = shortfalls()
+    rows = [
+        f"{c},{sum(CATEGORY[s] == c for s in found)},"
+        f"{sum(v for s, v in found.items() if CATEGORY[s] == c)}"
+        for c in sorted(CATS)
+    ]
+    return "category,at_risk,shortfall30\n" + "\n".join(rows)
+
+
+def kept_path(text: str) -> str:
+    return f"/large_tool_results/{content_key('result', text)}"
+
+
+@pytest.mark.parametrize("sql", ["risks", "groups"])
+@pytest.mark.parametrize(
+    "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
+)
+async def test_three_tools_results_are_joined_in_one_query_exactly(
+    harness: Harness, framework: str, sql: str, tmp_path: Path
+) -> None:
+    """50,000 SKUs from one tool, their sales from another, their lead times from a third that
+    pages (fetched to its last page): every saved result is a table named by its tool, and one
+    read-only query joins them — the answer equals Python's, the model reads only that."""
+    query, answer = (
+        (RISK_SQL, expected_risks()) if sql == "risks" else (GROUP_SQL, expected_groups())
+    )
+    path = kept_path(inventory50k.fn())
+    plan: list[Call] = [("inventory50k", {}), ("sales", {}), ("lead_times", {})]
+    plan.append(("query_result", {"file_path": path, "sql": query}))
+    target, own = await BUILDERS[framework](
+        harness, [inventory50k, sales, lead_times], tmp_path, plan
+    )
+    result = await arm(harness.wrap(target, id=f"join-{framework}"), own).run("q", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == f"Done. {answer}"
+
+
+async def test_a_join_over_50000_rows_costs_the_model_a_few_thousand_tokens(
+    harness: Harness,
+) -> None:
+    """What the model is sent in all — three previews and one small answer, never the rows —
+    and how long the query takes (``tools.query.SECONDS`` at most)."""
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    path = kept_path(inventory50k.fn())
+    model = ScriptedChat(
+        [
+            [("inventory50k", {}), ("sales", {}), ("lead_times", {})],
+            ("query_result", {"file_path": path, "sql": RISK_SQL}),
+            "done",
+        ]
+    )
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model), id="join-cost"),
+        [inventory50k, sales, lead_times],
+    )
+    began = time.monotonic()
+    result = await agent.run("top 5 stock-out risks", user="u")
+    seconds = time.monotonic() - began
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert last(model.requests[2]) == expected_risks()
+    sent = sum(
+        count_tokens_approximately(convert_to_messages(r["messages"])) for r in model.requests
+    )
+    raw = sum(len(t) for t in (inventory50k.fn(), sales.fn())) // 4
+    print(f"\njoin over 3 x 50,000 rows: {sent} tokens sent in all ({raw}+ raw), {seconds:.2f} s")
+    assert sent < 20_000 and seconds < query.SECONDS * 2
+    previews = [m for m in model.requests[1]["messages"] if m["role"] == "tool"]
+    assert [m["content"].count("query_result(") for m in previews] == [1, 1, 1]
+    tables = {t for m in previews for t in re.findall(r"the table (\w+)", m["content"])}
+    assert tables == {"inventory50k", "sales", "lead_times"}  # each its tool's, one query

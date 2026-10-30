@@ -88,7 +88,7 @@ from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
-from trellis.harness.tools.mcp import freshness_of, side_effects_of
+from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
 
@@ -718,7 +718,7 @@ async def _sdk_tools(server: str, instance: Any) -> list[ToolSpec]:
             source="mcp",
             server=server,
             side_effects=side_effects_of(tool.annotations),
-            **freshness_of(tool),
+            **data_of_listed(tool),
         )
         for tool in listed
     ]

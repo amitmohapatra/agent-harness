@@ -20,11 +20,14 @@ from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, tool
 from trellis.contracts import ConfigurationError, RunStatus, ToolSpec
 from trellis.harness import snapshots
+from trellis.harness.identity import conversation_key
 from trellis.harness.middleware import spec_of
-from trellis.harness.tools.base import MAX_AGE, _duration, fresh, max_age
+from trellis.harness.tools.base import MAX_AGE, _duration, data_of, max_age
 from trellis.harness.tools.mcp import MCPSource
 
 THREAD = "skus"
+#: where the memory service keeps the conversation: the tenant's, the user's and the thread's
+KEPT = conversation_key("acme", "u1", THREAD)
 #: when the first turn fetched the stock
 FETCHED = datetime(2026, 10, 30, 9, 0, 0, tzinfo=UTC)
 STOCK = {"SKU-00123": [40, 7]}  # what each fetch of the SKU's stock answers, in turn
@@ -82,22 +85,19 @@ def test_a_framework_tool_and_an_mcp_tool_declare_it_beside_their_side_effects()
     quote.metadata = {"side_effects": "read", "freshness": "live"}
     assert max_age(spec_of(quote)) == 0
     source = MCPSource("https://example.test/mcp", name="inv")
-    listed = type(
-        "Listed",
-        (),
-        {
-            "name": "stock",
-            "title": None,
-            "description": "Stock.",
-            "input_schema": {"type": "object"},
-            "annotations": None,
-        },
-    )()
-    assert max_age(source._tool("inv", listed).spec) is None
+    from mcp.types import Tool as Listed
     from mcp.types import ToolAnnotations
 
-    listed.annotations = ToolAnnotations(readOnlyHint=True)
-    listed.meta = {"maxAge": 60}  # MCP's _meta: what the protocol does not name
+    listed = Listed.model_validate(
+        {"name": "stock", "description": "Stock.", "inputSchema": {"type": "object"}}
+    )
+    assert max_age(source._tool("inv", listed).spec) is None
+    listed = listed.model_copy(
+        update={
+            "annotations": ToolAnnotations.model_validate({"readOnlyHint": True}),
+            "meta": {"maxAge": 60},  # MCP's _meta: what the protocol does not name
+        }
+    )
     made = source._tool("inv", listed).spec
     assert max_age(made) == 60 and made.side_effects == "read"
 
@@ -118,7 +118,7 @@ async def test_a_replayed_result_says_which_tool_fetched_it_and_when(
     assert result.status is RunStatus.SUCCESS, result.error
     [told] = replayed(model.requests[-1])
     assert told == "[snapshot of get_stock from 2026-10-30T09:00:00Z]\n40"
-    stored = [m for m in memory_service.threads[THREAD] if m["role"] == "TOOL"]
+    stored = [m for m in memory_service.threads[KEPT] if m["role"] == "TOOL"]
     assert stored[0]["content"] == told  # kept so: any later turn reads when it was fetched
     assert "out of date" not in context(model.requests[-1])  # not declared live: a snapshot
 
@@ -189,14 +189,14 @@ class Slotted:
     ],
 )
 def test_freshness_is_read_from_a_mapping_attributes_or_extras(declared: Any, found: Any) -> None:
-    assert fresh(declared) == found
+    assert data_of(declared) == found
 
 
 @pytest.mark.parametrize("declared", [{"freshness": "hourly"}, {"max_age": -1}, {"max_age": True}])
 def test_a_freshness_of_another_kind_is_refused_or_from_a_server_not_read(declared: Any) -> None:
     with pytest.raises(ConfigurationError, match="quote"):
-        fresh(declared, name="quote")
-    assert fresh(declared, strict=False) == {}
+        data_of(declared, name="quote")
+    assert data_of(declared, strict=False) == {}
 
 
 def test_a_spec_that_says_nothing_or_something_else_has_no_max_age() -> None:

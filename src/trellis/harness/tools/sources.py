@@ -33,7 +33,7 @@ from trellis.harness.tools.base import (
     SideEffects,
     Source,
     Tool,
-    fresh,
+    data_of,
     invoked,
 )
 
@@ -69,6 +69,7 @@ class FunctionTool:
         timeout: float | None = None,
         freshness: Literal["live"] | None = None,
         max_age: float | None = None,
+        paged: bool = False,
     ) -> None:
         self.fn = fn
         self.model = _arguments_model(fn)
@@ -80,7 +81,10 @@ class FunctionTool:
             source="local",
             side_effects=side_effects,
             idempotent=idempotent,
-            **fresh({"freshness": freshness, "max_age": max_age}, name=name or fn.__name__),
+            **data_of(
+                {"freshness": freshness, "max_age": max_age, "paged": paged},
+                name=name or fn.__name__,
+            ),
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -109,6 +113,7 @@ def tool(
     call_timeout: float | None = None,
     freshness: Literal["live"] | None = None,
     max_age: float | None = None,
+    paged: bool = False,
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -120,6 +125,7 @@ def tool(
     call_timeout: float | None = None,
     freshness: Literal["live"] | None = None,
     max_age: float | None = None,
+    paged: bool = False,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -132,6 +138,7 @@ def tool(
     call_timeout: float | None = None,
     freshness: Literal["live"] | None = None,
     max_age: float | None = None,
+    paged: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
@@ -148,7 +155,8 @@ def tool(
     ``freshness="live"`` (its values change: every earlier value is out of date) or
     ``max_age`` (the seconds a value stays current): an earlier result of it that the
     conversation replays past that age is marked out of date, and the model calls it again
-    (``trellis.harness.snapshots``).
+    (``trellis.harness.snapshots``). ``paged``: it returns its rows a page at a time (a cursor
+    argument, the next cursor in its result): one call fetches every page (``tools.pages``).
     """
     made = functools.partial(
         FunctionTool,
@@ -159,6 +167,7 @@ def tool(
         timeout=call_timeout,
         freshness=freshness,
         max_age=max_age,
+        paged=paged,
     )
     return made(fn) if fn is not None else made
 

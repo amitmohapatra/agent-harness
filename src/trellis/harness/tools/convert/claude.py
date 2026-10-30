@@ -12,7 +12,7 @@ the start: before a result was kept it finds nothing to read.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final
 
 from claude_agent_sdk import McpSdkServerConfig, create_sdk_mcp_server
@@ -40,20 +40,23 @@ def _one(tool: Tool) -> Any:
             outcome = await bridge.call(tool, dict(args))
         except Paused:  # the run stops here (the harness reads the pause from the runtime)
             return {"content": [{"type": "text", "text": WAITING}], "is_error": True}
-        content = [{"type": "text", "text": results.readable(outcome.output)}]
+        content = [{"type": "text", "text": results.readable(outcome.output, tool.name)}]
         return {"content": content, "is_error": not outcome.ok}
 
     return sdk_tool(tool.name, tool.spec.description or tool.name, _schema(tool))(handler)
 
 
 def _reader(
-    name: str, description: str, schema: dict[str, Any], answer: Callable[[dict[str, Any]], str]
+    name: str,
+    description: str,
+    schema: dict[str, Any],
+    answer: Callable[[dict[str, Any]], Awaitable[str]],
 ) -> Any:
     """A tool reading a large result the run keeps (``tools.results.READERS``: ``read_file``
     its pages, ``query_result`` SQL over its rows)."""
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": answer(dict(args))}]}
+        return {"content": [{"type": "text", "text": await answer(dict(args))}]}
 
     return sdk_tool(name, description, schema)(handler)
 

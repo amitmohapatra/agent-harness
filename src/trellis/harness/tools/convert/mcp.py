@@ -76,7 +76,7 @@ def convert(tools: Sequence[Tool]) -> Tools:
         args = dict(params.arguments or {})
         reader = next((r for r in results.READERS if r[0] == params.name), None)
         if reader is not None:
-            return _result(reader[3](args), error=False)
+            return _result(await reader[3](args), error=False)
         tool = by_name.get(params.name)
         if tool is None:
             return _result(f"no tool named {params.name!r}", error=True)
@@ -94,7 +94,7 @@ def convert(tools: Sequence[Tool]) -> Tools:
             outcome = call.result()
         except Paused:  # the run stops here (the adapter reads the pause from the runtime)
             return _result(WAITING, error=True)
-        return _result(results.readable(outcome.output), error=not outcome.ok)
+        return _result(results.readable(outcome.output, tool.name), error=not outcome.ok)
 
     return Tools(calls, on_list_tools=list_tools, on_call_tool=call_tool)
 

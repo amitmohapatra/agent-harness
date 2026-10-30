@@ -41,11 +41,13 @@ own model work follows the harness's configuration.
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
   its cut naming the `read_file` call that reads on from there.
 - `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
-  of a kept result — or of one Deep Agents saved — offered with `read_file` on every adapter,
-  for counts, sums, filters, top-N and groups without a sandbox (`tools.query`). A run with a
-  sandbox finds every kept result as a file there too (`sandbox_exec`, `execute`).
+  of the run's saved results — each a table named by its tool, so one query joins them — with
+  formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
+  `regr_*`), offered with `read_file` on every adapter, bounded in time, input, sort memory and
+  answer (`tools.query`). A tool declared `paged=True` is fetched to its last page in one call
+  (`tools.pages`). A run with a sandbox finds every kept result as a file there too.
 - Freshness: `tool(freshness="live")`, `tool(max_age=)`, a LangChain tool's
-  `metadata={"freshness": ...}`, an MCP tool's `_meta` (`tools.base.fresh`). Tool results
+  `metadata={"freshness": ...}`, an MCP tool's `_meta` (`tools.base.data_of`). Tool results
   written to memory's thread start with `[snapshot of <tool> from <UTC time>]`; replayed past
   the tool's declared age they are marked out of date, the context says so, and the tool stays
   offered (`trellis.harness.snapshots`).

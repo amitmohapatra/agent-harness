@@ -37,6 +37,7 @@ from trellis.contracts import (
 )
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.features import Feature
+from trellis.harness.tools import pages
 
 SideEffects = Literal["read", "write", "irreversible"]
 
@@ -52,6 +53,10 @@ Runner = Callable[[dict[str, Any]], Awaitable[Any]]
 #: A tool that says nothing is a snapshot like any other (``None``).
 MAX_AGE: Final = "max_age"
 FRESHNESS: Final = "freshness"
+#: A tool that returns its rows a page at a time, declared so (``tool(paged=True)``, a
+#: LangChain tool's ``metadata``, an MCP tool's ``_meta``): the harness follows its cursor to
+#: the last page (``tools.pages``).
+PAGED: Final = "paged"
 LIVE: Final = "live"
 #: What a tool that declares it adds to its description, so every framework's model reads it
 #: where it reads how to use the tool.
@@ -134,9 +139,11 @@ def max_age(spec: ToolSpec) -> float | None:
     return float(found) if isinstance(found, int | float) and not isinstance(found, bool) else None
 
 
-def fresh(declared: Any, *, name: str = "the tool", strict: bool = True) -> dict[str, float]:
-    """A tool's declared freshness as its ``ToolSpec`` keeps it (``{MAX_AGE: seconds}``, or
-    nothing): ``freshness`` ``"live"`` (0) or ``max_age`` (``maxAge``) seconds, read from a
+def data_of(declared: Any, *, name: str = "the tool", strict: bool = True) -> dict[str, Any]:
+    """What a tool declares of the data it returns, as its ``ToolSpec`` keeps it: how long it
+    stays current (``{MAX_AGE: seconds}``: ``freshness`` ``"live"``, 0, or ``max_age`` /
+    ``maxAge`` seconds) and whether it returns its rows a page at a time (``{PAGED: True}``:
+    ``paged``, fetched to completion by the harness: ``tools.pages``) — read from a
     mapping (a LangChain tool's ``metadata``, an MCP tool's annotations on the wire), or an
     object's attributes and pydantic extras (the MCP SDK's ``ToolAnnotations``). A value of
     another kind is refused, naming the tool — or, not ``strict`` (what a server says of its
@@ -158,9 +165,10 @@ def fresh(declared: Any, *, name: str = "the tool", strict: bool = True) -> dict
         if strict:
             raise ConfigurationError(problem)
         return {}
+    paging = {PAGED: True} if found.get(PAGED) is True else {}
     if freshness == LIVE:
-        return {MAX_AGE: 0.0}
-    return {} if age is None else {MAX_AGE: float(age)}
+        return {MAX_AGE: 0.0, **paging}
+    return paging if age is None else {MAX_AGE: float(age), **paging}
 
 
 def vars_of(declared: Any) -> dict[str, Any]:
@@ -223,6 +231,8 @@ async def execute(
     async def once() -> Any:
         nonlocal attempts
         attempts += 1
+        if tool.spec.model_extra and tool.spec.model_extra.get(PAGED):
+            return await pages.every_page(tool.spec, args, tool.run)  # every page, as one call
         return await tool.run(args)
 
     began = time.monotonic()

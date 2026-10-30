@@ -113,7 +113,7 @@ def test_a_kept_text_is_named_by_its_content_and_read_on_from_where_a_cut_starts
     assert results.line_at(text, 0) == 0
     assert results.line_at(text, two) == 2  # on a line's end: the next line
     assert results.line_at(text, two + 2) == 2  # within a line: that line, again
-    assert read_file(path, offset=2, limit=1).startswith("3  row 3")
+    assert path is not None and read_file(path, offset=2, limit=1).startswith("3  row 3")
 
 
 def test_outside_a_run_nothing_is_kept_and_no_code_runs() -> None:
