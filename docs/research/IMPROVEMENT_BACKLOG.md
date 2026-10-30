@@ -11,6 +11,8 @@ the made-up rate does not rise, controls do not drop, and tokens, model calls an
 materially up (accuracy wins ties against cost). A change that does not pass is not kept, however
 reasonable it looks.
 
+**Design rules.** Every change follows [DESIGN_RULES.md](DESIGN_RULES.md): the framework's own mechanism first, the harness adds only what is missing, library-first and research-backed, and the code is checked before every change.
+
 **Status.** *exists*: on main. *in flight*: being built, on the branch named. *next*: the
 next to build, once measured. *later*: deliberately deferred.
 
