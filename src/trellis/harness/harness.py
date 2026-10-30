@@ -41,7 +41,7 @@ from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
-from trellis.harness.identity import Identity
+from trellis.harness.identity import Identity, conversation_key
 from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
 from trellis.harness.runs import LocalRuns, RunStore
@@ -318,6 +318,14 @@ class Harness:
             comment=comment,
         )
         return stored
+
+    async def conversation(self, *, user: str, thread: str, tenant: str | None = None) -> str:
+        """The key ``user``'s conversation ``thread`` keeps its state under: the ``thread_id``
+        of a graph's own checkpointer, the memory service's thread, the trace's session
+        (``identity.conversation_key``). A thread id is the caller's name for a chat, so the
+        same one given by two users (or in two tenants) is two conversations. ``tenant`` is
+        named by a platform key only."""
+        return conversation_key(await self._tenant(tenant), user, thread)
 
     async def add_document(
         self,

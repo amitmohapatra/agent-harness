@@ -52,7 +52,8 @@ async def test_the_thread_in_memory_is_the_agents_session(
     # the session owns the history: memory's window is not sent beside it
     assert [c.body.get("window") for c in memory_service.named("context")] == [False, False]
     # every turn is recorded once, by the harness (the session adds nothing of its own)
-    texts = [m["content"] for m in memory_service.threads["t1"]]
+    kept = await memory_harness.conversation(user="u1", thread="t1")
+    texts = [m["content"] for m in memory_service.threads[kept]]
     assert texts.count("remember tides") == 1 and texts.count("what did I say?") == 1
 
 
@@ -105,9 +106,9 @@ async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grow
         return thread
 
     memory = SimpleNamespace(ctx=SimpleNamespace(history=history))
-    runtime = SimpleNamespace(run_memory=memory, thread="t1", run_id="run_1")
+    runtime = SimpleNamespace(run_memory=memory, conversation="conv_t1", run_id="run_1")
     session = MemorySession(runtime)  # type: ignore[arg-type]
-    assert session.session_id == "t1"
+    assert session.session_id == "conv_t1"  # the run's conversation (Runtime.conversation)
     assert await session.get_items() == [
         {"role": "user", "content": "earlier"},
         {"type": "function_call", "call_id": "c1", "name": "lookup", "arguments": '{"q": "a"}'},

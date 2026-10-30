@@ -24,8 +24,19 @@ own model work follows the harness's configuration.
   where it took a virtual key (`MemoryScope.register_endpoint`, was `register_model_key`),
   needing trellis-memory with endpoint registration; trellis-contracts 0.6.3 and bifrost-sdk 0.4.
 
+- A conversation is its tenant's, its user's and its thread's (`identity.conversation_key`, a
+  digest of the three): the memory service's thread (its window, the OpenAI Agents
+  `MemorySession`, `h.add_document(thread=)`), a graph's own checkpointer `thread_id`, the turn
+  a busy conversation waits for in process, `start`'s default `concurrency_key`
+  (`thread:<conversation>`) and the trace's `session.id` were keyed by the bare thread id, so
+  two users (or tenants) giving the same `thread=` shared them. A conversation kept under a
+  bare thread id before this release is not continued: its next run starts a new one. Read a
+  graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
+  interrupt only for the user whose run it is (`404` for another user's thread named alike).
+
 ### Added
 
+- `h.conversation(user=, thread=)`: the key a user's conversation keeps its state under.
 - `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
   `LLM_GATEWAY` from one registry that packages extend under the entry-point group
   `trellis.gateways`. Bifrost's features ask `gateway.has(Capability.X)`; new capabilities

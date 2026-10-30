@@ -229,11 +229,16 @@ otherwise), the others wait `QUEUED`.
 at once (one customer's account, one repository).
 
 **Automatic: a second message to a busy conversation waits.** A queued run of a conversation
-(`thread=`) gets `concurrency_key="thread:<thread>"` unless you name one: a second message sent
-while the first run works is answered after it, never beside it (both would write the same
+(`thread=`) gets `concurrency_key="thread:<conversation>"` unless you name one: a second message
+sent while the first run works is answered after it, never beside it (both would write the same
 thread). The same holds in process: a run of a conversation started with `run`, `stream`,
 `serve_chat` or `serve_a2a` (or resumed) waits while another run of the same agent and
 conversation works in this process, in order. A run with no `thread` is its own conversation.
+A conversation is the tenant's, the user's and the thread's: a thread id is the caller's own
+name for a chat, so another user's thread named alike is another conversation — it never waits
+for this one, and never shares its memory thread, its graph checkpointer thread or its trace
+session. `<conversation>` is that key (`await h.conversation(user=, thread=)`, a digest of the
+three: the same wherever it is made, safe in a URL, 37 characters).
 `LocalRuns` claims the same way agent-runs does. A sub-agent's run and a worker's are not held
 in process (the queue holds a worker's).
 
@@ -339,7 +344,7 @@ run options as `start`, and every fired run gets them — agent-runs and `LocalR
 | `without=` | `RunStart.metadata["without"]` | `ScheduleSpec.metadata["without"]` | `metadata["without"]` |
 | `framework_options=` (JSON) | `RunStart.metadata["framework_options"]` | `ScheduleSpec.metadata["framework_options"]` | `metadata["framework_options"]` |
 | `priority=` | `RunStart.priority` | `ScheduleSpec.priority` | `priority` |
-| `concurrency_key=` (`start`: by default `thread:<thread>`) | `RunStart.concurrency_key` | `ScheduleSpec.concurrency_key` | `concurrency_key` |
+| `concurrency_key=` (`start`: by default `thread:<conversation>`) | `RunStart.concurrency_key` | `ScheduleSpec.concurrency_key` | `concurrency_key` |
 
 agent-runs copies a schedule's `metadata` into each fired run's `RunStart.metadata`, its own
 keys (`schedule_id`...) laid over it, so a worker reads a scheduled run's choices exactly as a

@@ -3,10 +3,12 @@
 Spans (every attribute passes the redactor first):
 
 * ``invoke_agent <agent>`` — one per attempt of a run (``gen_ai.operation.name=invoke_agent``,
-  ``gen_ai.agent.id``/``.name``, ``gen_ai.conversation.id`` = the thread), carrying the trace
-  attributes Langfuse maps: ``langfuse.trace.name`` (the agent id), ``user.id``,
-  ``session.id`` (the thread), ``langfuse.trace.tags``, ``langfuse.trace.metadata.*`` (run id,
-  tenant, framework, attempt), and the run's input and output;
+  ``gen_ai.agent.id``/``.name``, ``gen_ai.conversation.id`` = the conversation), carrying the
+  trace attributes Langfuse maps: ``langfuse.trace.name`` (the agent id), ``user.id``,
+  ``session.id`` (the conversation: ``identity.conversation_key`` of the run's tenant, user
+  and thread, so two users' threads named alike are two sessions), ``langfuse.trace.tags``,
+  ``langfuse.trace.metadata.*`` (run id, tenant, framework, attempt), and the run's input and
+  output;
 * ``execute_tool <tool>`` — one per tool call (``gen_ai.tool.name``, ``gen_ai.tool.call.id``,
   ``gen_ai.tool.call.arguments``/``.result``);
 * ``chat <model>`` — one per model call of a graph with ``middleware.ModelHooks`` (a
@@ -307,6 +309,7 @@ class RunTrace:
     agent_id: str
     tenant: str
     user: str
+    #: the run's conversation (``Runtime.conversation``), its session
     thread: str | None
     framework: str
     attempt: int = 1

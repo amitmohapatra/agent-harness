@@ -29,7 +29,7 @@ from trellis.contracts import Feedback as Decision
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.history import Said, Speaker, recorded, said_of
-from trellis.harness.identity import Identity
+from trellis.harness.identity import Identity, conversation_key
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.errors import NotFoundError
 from trellis.memory.models import (
@@ -128,8 +128,12 @@ class Memory:
         return RunMemory(self, child)
 
     def for_user(self, tenant: str, user: str, thread: str | None = None) -> RunMemory:
-        """Calls made for a person outside a run (adding a document they can retrieve)."""
-        scope = {"tenant_id": tenant, "user_id": user} | ({"thread_id": thread} if thread else {})
+        """Calls made for a person outside a run (adding a document they can retrieve) — in
+        their conversation ``thread``, the memory service's thread its runs write to
+        (``identity.conversation_key``)."""
+        scope = {"tenant_id": tenant, "user_id": user} | (
+            {"thread_id": conversation_key(tenant, user, thread)} if thread else {}
+        )
         return RunMemory(self, self.client.bind(**scope))
 
     def scoped(self, tenant: str, agent_id: str | None = None) -> RunMemory:

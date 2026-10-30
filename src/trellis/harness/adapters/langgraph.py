@@ -392,8 +392,10 @@ def _narrowed(target: Any) -> Any | None:
 
 def thread_of(target: Any, runtime: Any) -> str:
     """The LangGraph thread a run of ``target`` runs on: the run's own for a graph that
-    checkpoints into its run, else the run's conversation (or the run)."""
-    return runtime.run_id if run_scoped(target) else runtime.thread or runtime.run_id
+    checkpoints into its run, else the run's conversation — its tenant's, its user's
+    (``Identity.conversation``: two users naming their threads alike never share one), or
+    the run's own."""
+    return runtime.run_id if run_scoped(target) else runtime.conversation
 
 
 async def holds(target: Any, thread: str, native_id: str, journal: Journal) -> bool:

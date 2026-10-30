@@ -66,7 +66,8 @@ async def main() -> None:
         done = await agent.resume(
             asked.interrupt_id, "answer", answer=["basic", "pro"], reviewer="lee"
         )
-        state = await graph.aget_state({"configurable": {"thread_id": "deal-1"}})
+        thread = await h.conversation(user="ada", thread="deal-1")  # ada's deal-1
+        state = await graph.aget_state({"configurable": {"thread_id": thread}})
         print(done.status.value, "offered:", state.values["plans"])
 
 

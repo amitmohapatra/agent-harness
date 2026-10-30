@@ -22,9 +22,12 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.agent import TURN_WRITE_SECONDS
+from trellis.harness.identity import conversation_key
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"
+#: the memory service's thread user u1's conversation THREAD writes to (the fake's tenant)
+KEPT = conversation_key("acme", "u1", THREAD)
 
 
 @tool
@@ -51,7 +54,7 @@ async def test_the_window_is_the_conversation_itself_and_the_last_turn_is_in_it(
         result = await agent.run(text, user="u1", thread=THREAD)  # no drain between turns
         assert result.status is RunStatus.SUCCESS
         # written before the run returned, once
-        assert len(memory_service.threads[THREAD]) == 2 * n
+        assert len(memory_service.threads[KEPT]) == 2 * n
         assert len(memory_service.named("messages")) == n
     last = model.script.requests[-1]
     assert _said(last) == [
@@ -172,7 +175,7 @@ async def test_turns_run_at_once_on_one_thread_are_each_recorded_whole(
     for batch in batches:
         user, assistant = batch.body["messages"]
         assert user["role"] == "USER" and assistant["role"] == "ASSISTANT"
-    stored = [m["content"] for m in memory_service.threads[THREAD]]
+    stored = [m["content"] for m in memory_service.threads[KEPT]]
     assert len(stored) == 8 and all(
         q.startswith("question") and a.startswith("answer")
         for q, a in zip(stored[::2], stored[1::2], strict=True)
@@ -206,7 +209,7 @@ async def test_a_turn_whose_write_fails_is_queued_and_delivered() -> None:
         result = await agent.run("hi", user="u1", thread=THREAD)
         assert result.status is RunStatus.SUCCESS
         await h.writes.drain()
-        assert [m["content"] for m in service.threads[THREAD]] == ["hi", "ok"]
+        assert [m["content"] for m in service.threads[KEPT]] == ["hi", "ok"]
 
 
 async def test_a_slow_write_does_not_hold_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,4 +236,4 @@ async def test_a_slow_write_does_not_hold_the_run(monkeypatch: pytest.MonkeyPatc
         result = await agent.run("hi", user="u1", thread=THREAD)
         assert result.status is RunStatus.SUCCESS
         await h.writes.drain()
-        assert [m["content"] for m in service.threads[THREAD]] == ["hi", "ok"]
+        assert [m["content"] for m in service.threads[KEPT]] == ["hi", "ok"]
