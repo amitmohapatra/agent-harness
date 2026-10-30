@@ -68,6 +68,8 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Gateway MCP tools' output schemas (Bifrost listing has none) | later: needs the gateway SDK to carry `outputSchema` | `bifrost_sdk.ToolDef` |
 | Cold catalogs of 100–500 tools (0 successes recorded on an 8k window) | next: re-run `benchmark/cost` at 100/500 with hints on | audit M3 |
 | Clarifying questions (ask vs guess) | in flight: `claude/cool-maxwell-w5avo8-reactnative` (#58, `ask_user` arms) | audit F |
+| AG-UI frontend tools: `RunAgentInput.tools` is parsed but never used. Offer the client's tools to the model. On a call, stream `TOOL_CALL` events and pause through the existing interrupt and resume path, then continue when the client returns the tool's result. Test it with a fake AG-UI client | next | `src/trellis/harness/agui/events.py` (`tools` is declared, and nothing reads it) |
+| A structured `ask_user` (on #58) with optional `options[]`, `date`, `date_range` and `number`, so a UI shows dropdowns and pickers and plain chat shows text | next | #58 |
 
 ## ReAct
 
