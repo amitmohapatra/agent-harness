@@ -419,6 +419,21 @@ facts from the first. It reports recall, input tokens per turn and seconds per t
 (`build/bench-thread.json`, `.md`). The measurement and the decision are in
 [ADR 0003](adr/0003-automatic-features.md) (§6).
 
+## Complex-questions suite
+
+`python -m benchmark.cost.complex` asks 81 conversations of the questions a ChatGPT or Claude
+user brings to an analytics assistant, over a fake retailer's data (2,000 SKUs, 50,000 sales
+lines, stock that moves between turns; `benchmark/cost/retail.py`), each scored against an
+answer Python computed from the same data: multi-hop tool chains, joins and statistics,
+formulas and what-ifs, follow-ups and corrections, explanations, fresh values, ambiguity,
+missing data, conflicting sources, failing or huge tool results and multi-part requests, in
+three tiers. `--scripted` replays every case's gold calls through the harness with the scripted
+chat model (no endpoint); `--model` runs the model the `LLM_*` settings serve, `--max-usd`
+stops the run at a spend (from the usage the replies report), `--cases` and `--rerun-failed`
+pick what runs. `python -m benchmark.cost.judge` writes each scored turn's judge packet (the
+exact model input, the answer, the ground truth) and reports the judge's verdicts as harness
+gaps (the input lacked what the answer needs) and model gaps (it did not).
+
 ## Load benchmark
 
 `make bench-load` (`python -m benchmark.load`) runs many `ReAct` runs at once — a tool call and
