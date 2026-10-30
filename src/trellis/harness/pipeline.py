@@ -172,7 +172,7 @@ async def attempt(
     if job is not None or parent is not None:
         turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
     else:
-        turn = agent.turns.taken(f"{record.tenant_id}:{record.thread_id or record.run_id}")
+        turn = agent.turns.taken(Identity.of(record).conversation)
     async with turn:
         return await _attempt(
             agent,
@@ -387,7 +387,7 @@ def _traced(runtime: Runtime) -> RunTrace:
         agent_id=runtime.agent_id,
         tenant=runtime.tenant,
         user=runtime.user,
-        thread=runtime.thread,
+        thread=runtime.conversation,
         framework=runtime.agent.adapter.name,
         attempt=runtime.attempt,
         version=runtime.agent.version,
@@ -536,7 +536,7 @@ async def _unheld(
         or pending is None
         or pending.native_id is None
         or pending.native_state is not None  # a serialised run (OpenAI Agents) travels along
-        or await holds(agent.target, identity.thread or identity.run_id, pending.native_id, journal)
+        or await holds(agent.target, identity.conversation, pending.native_id, journal)
     ):
         return None
     if pending.key in (FOREIGN, HITL):

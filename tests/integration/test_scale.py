@@ -98,7 +98,8 @@ async def test_a_worker_appends_its_runs_events_fenced_by_its_lease(
     worker = h.worker([agent], concurrency=1)
     assert await worker.run_once()
     record = await handle.status()
-    assert (record.priority, record.concurrency_key) == (5, "thread:chat-1")
+    conversation = await h.conversation(user="ada", thread="chat-1")
+    assert (record.priority, record.concurrency_key) == (5, f"thread:{conversation}")
     assert {w for r, w, _ in runs.appends if r == handle.id} == {worker.worker_id}
     assert runs.logged(handle.id)[-1].outcome is RunOutcome.INTERRUPT
 

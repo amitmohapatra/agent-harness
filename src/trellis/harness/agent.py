@@ -82,7 +82,7 @@ from trellis.harness.evals import (
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
-from trellis.harness.identity import AGENT_GROUP, Identity
+from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
@@ -368,13 +368,18 @@ class Agent:
         ``h.wrap(framework_options=)``). ``priority`` (-1000 to 1000):
         a higher one is claimed first among the tenant's queued runs. ``concurrency_key``:
         runs sharing it run one at a time (the run store's limit) — by default the
-        conversation's (``thread:<thread>``, when ``thread`` is given), so a second message to
-        a busy conversation waits for the first run instead of running beside it."""
+        conversation's (``thread:<conversation>``, when ``thread`` is given: the key of the
+        tenant's, the user's and the thread's, ``identity.conversation_key``), so a second
+        message to a busy conversation waits for the first run instead of running beside it,
+        and another user's conversation named alike never waits for it."""
         try:
             json.dumps(input)
         except (TypeError, ValueError) as exc:
             raise ConfigurationError("a queued run's input must be JSON") from exc
         _kept_as_json(framework_options)
+        tenant = await self.harness._tenant(tenant)
+        conversation = conversation_key(tenant, user, thread) if thread else None
+        concurrency_key = concurrency_key or (conversation and f"thread:{conversation}")
         start = await self._start(
             input,
             user=user,
@@ -386,7 +391,7 @@ class Agent:
             without=without,
             framework_options=framework_options,
             priority=priority,
-            concurrency_key=concurrency_key or (f"thread:{thread}" if thread else None),
+            concurrency_key=concurrency_key,
             document_ids=document_ids,
             parent=current(),
         )

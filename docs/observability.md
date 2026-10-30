@@ -14,7 +14,7 @@ nothing (attributes are built only for a recording span).
 
 | Span | Attributes |
 |---|---|
-| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the thread), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer); with an agent version (`h.wrap(..., version=)`, else `service.version`), `gen_ai.agent.version` and `langfuse.version` |
+| `invoke_agent <agent>` — one per attempt | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id` (the conversation, as `session.id`), `langfuse.observation.type=agent`, the trace attributes below, `langfuse.observation.input` (the question), `langfuse.observation.output` (the answer); with an agent version (`h.wrap(..., version=)`, else `service.version`), `gen_ai.agent.version` and `langfuse.version` |
 | `retrieve memory` — the pushed context | `gen_ai.operation.name=retrieve`, `langfuse.observation.type=retriever`, input (the question), output (the rendered context) |
 | `execute_tool <tool>` — one per call | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` (`extension` for MCP, else `function`), `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `langfuse.observation.type=tool`, `trellis.tool.source`, `trellis.governance.action` (`run`, `announce` or `ask`: [governance.md](governance.md)) |
 | `chat <model>` — a model call of a graph with the harness's `ModelHooks` middleware (a `ReAct`'s) | `gen_ai.operation.name=chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens` (when the prompt cache was used), `gen_ai.response.finish_reasons`, `langfuse.observation.type=generation`, input/output |
@@ -33,7 +33,7 @@ are not harness tools and get no `execute_tool` span of the harness's
 |---|---|
 | `langfuse.trace.name` = the agent id | trace name |
 | `user.id` = the run's user | user id |
-| `session.id` = the thread (or the run id) | session id |
+| `session.id` = the conversation (`h.conversation(user=, thread=)`: the tenant's, the user's and the thread's, so two users' threads named alike are two sessions), or the run id | session id |
 | `langfuse.trace.tags` = `[agent id, framework]` | tags |
 | `langfuse.trace.metadata.run_id`, `.tenant`, `.framework` | filterable trace metadata |
 | `trellis.run_id`, `trellis.tenant`, `trellis.attempt` | span attributes (Datadog facets) |

@@ -30,7 +30,7 @@ from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.governance import catalog
-from trellis.harness.identity import Identity
+from trellis.harness.identity import Identity, conversation_key
 from trellis.memory.models import ToolHints
 
 
@@ -117,7 +117,8 @@ async def test_push_injects_the_context_as_a_system_message(
     assert instructions == {"role": "system", "content": "You answer stock questions."}
     assert context == {"role": "system", "content": memory_service.context_text}
     [call] = memory_service.named("context")
-    assert call.scope["user_id"] == "u1" and call.scope["thread_id"] == "t1"
+    assert call.scope["user_id"] == "u1"
+    assert call.scope["thread_id"] == conversation_key("acme", "u1", "t1")  # u1's own "t1"
     assert call.body["query"] == "how many a?" and call.body["token_budget"] == 2000
     assert call.body["window"] is True  # ReAct keeps no conversation of its own
     assert "tools" not in call.body  # no tools of its own: nothing learned to offer
@@ -428,7 +429,8 @@ async def test_an_agent_searches_what_was_said_as_the_service_offers_it(
     assert "earlier conversations" in kinds
     [call] = memory_service.named("call_agent_tool")
     assert call.body["args"] == args
-    assert call.body["scope"]["user_id"] == "u1" and call.body["scope"]["thread_id"] == "t-new"
+    assert call.body["scope"]["user_id"] == "u1"
+    assert call.body["scope"]["thread_id"] == conversation_key("acme", "u1", "t-new")
 
 
 # --------------------------------------------------------------------------- records
@@ -884,7 +886,8 @@ async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexe
     assert info.status == "READY"
     [upload] = memory_service.named("add_document")
     assert upload.scope["tenant_id"] == "acme" and upload.scope["user_id"] == "u"
-    assert memory_service.documents[info.document_id]["thread_id"] == "thr_1"
+    kept = memory_service.documents[info.document_id]["thread_id"]
+    assert kept == conversation_key("acme", "u", "thr_1")  # u's conversation thr_1
 
 
 async def test_a_document_is_staged_then_ready_or_failed_with_its_error(

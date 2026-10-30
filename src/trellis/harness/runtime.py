@@ -278,6 +278,11 @@ class Runtime:
         return self.identity.thread
 
     @property
+    def conversation(self) -> str:
+        """The key the run's conversation keeps its state under (``Identity.conversation``)."""
+        return self.identity.conversation
+
+    @property
     def tenant(self) -> str:
         return self.identity.tenant
 

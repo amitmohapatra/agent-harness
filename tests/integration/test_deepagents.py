@@ -42,7 +42,8 @@ async def test_a_deep_agent_uses_its_own_tools_and_the_harness_tools(harness: Ha
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
     assert done.status is RunStatus.SUCCESS and done.answer == "refund of o1 done"
     assert refunded == ["o1"]
-    state = await graph.aget_state({"configurable": {"thread_id": "th"}})
+    thread = await harness.conversation(user="u1", thread="th")
+    state = await graph.aget_state({"configurable": {"thread_id": thread}})
     assert "/notes.md" in state.values["files"]
 
 
@@ -75,5 +76,6 @@ async def test_a_tool_of_the_deep_agents_own_asking_with_interrupt_offers_what_i
     assert (asked.component, asked.props) == ("plan-picker", {"customer": "acme"})
     done = await agent.resume(asked.interrupt_id, "answer", answer=["a", "b"], reviewer="lead")
     assert done.status is RunStatus.SUCCESS and done.answer == "offered a and b"
-    state = await graph.aget_state({"configurable": {"thread_id": "sales-1"}})
+    thread = await harness.conversation(user="u1", thread="sales-1")
+    state = await graph.aget_state({"configurable": {"thread_id": thread}})
     assert any(getattr(m, "content", None) == "a,b" for m in state.values["messages"])

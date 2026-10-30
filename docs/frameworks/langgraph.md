@@ -61,7 +61,11 @@ call: every MCP tool the Bifrost virtual key allows and — memory on — the me
 without memory, run records or traces, and a harness tool refuses to run (`ToolError`: "runs
 inside a Harness run"). Config the graph needs at run time goes in the
 input, the graph's defaults or `graph.with_config(...)` before wrapping (still a graph); the
-harness sets `configurable.thread_id` itself (the run's thread, else the run id).
+harness sets `configurable.thread_id` itself (the run's conversation, else the run id). The
+conversation is the tenant's, the user's and the thread's, so two users giving the same
+`thread=` never share a checkpointer thread; to read your graph's state yourself, ask for its
+key: `graph.aget_state({"configurable": {"thread_id": await h.conversation(user="ada",
+thread="t-7")}})`.
 
 ## middleware(): ReAct's harness part on your graph
 

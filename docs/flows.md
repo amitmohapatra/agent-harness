@@ -149,7 +149,7 @@ sequenceDiagram
   App->>Agent: await agent.run(input, user="ada", thread="t-7")
   Agent->>AR: start → RUNNING
   Agent->>P: attempt 1
-  P->>G: ainvoke(messages, {thread_id: t-7, ...framework_options})
+  P->>G: ainvoke(messages, {thread_id: conversation(ada, t-7), ...framework_options})
   G->>Br: tool node: refund(o-7, 40)
   Br->>Gov: check(refund, args)
   Gov-->>Br: ask (irreversible)

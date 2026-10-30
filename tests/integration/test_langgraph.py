@@ -17,6 +17,8 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
+from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.identity import conversation_key
 
 executed: list[str] = []
 
@@ -76,7 +78,8 @@ async def test_with_a_checkpointer_an_approval_is_a_langgraph_interrupt(harness:
         "sku": "a",
         "qty": 5,
     }
-    snapshot = await graph.aget_state({"configurable": {"thread_id": "t1"}})
+    thread = await harness.conversation(user="u1", thread="t1")
+    snapshot = await graph.aget_state({"configurable": {"thread_id": thread}})
     assert snapshot.interrupts  # LangGraph holds the pause itself
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "ordered"
@@ -200,7 +203,8 @@ async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conve
     agent = memory_harness.wrap(graph, id="helper")
     for question in ("one?", "two?"):
         assert (await agent.run(question, user="u1", thread="th")).status is RunStatus.SUCCESS
-    state = await graph.aget_state({"configurable": {"thread_id": "th"}})
+    thread = await memory_harness.conversation(user="u1", thread="th")
+    state = await graph.aget_state({"configurable": {"thread_id": thread}})
     systems = [m for m in state.values["messages"] if m.type == "system"]
     # one context message in the checkpointed thread, replaced each turn, asked for without
     # the conversation the checkpointer already holds
@@ -371,7 +375,9 @@ def asking_graph(value: Any) -> Any:
 
 
 def picked(graph: Any, thread: str) -> Any:
-    return graph.get_state({"configurable": {"thread_id": thread}}).values["picked"]
+    """What the node got, on user ``u1``'s conversation ``thread`` (the default tenant's)."""
+    key = conversation_key(LOCAL_TENANT, "u1", thread)
+    return graph.get_state({"configurable": {"thread_id": key}}).values["picked"]
 
 
 async def test_a_graphs_interrupt_offers_labelled_options_and_several_picks(
@@ -498,5 +504,6 @@ async def test_the_graphs_context_and_durability_pass_through(harness: Harness) 
     options = {"context": Ctx(tier="gold"), "durability": "exit", "recursion_limit": 5}
     result = await agent.run({}, user="u1", thread="t1", framework_options=options)
     assert result.status is RunStatus.SUCCESS, result.error
-    state = await agent.target.aget_state({"configurable": {"thread_id": "t1"}})
+    thread = await harness.conversation(user="u1", thread="t1")
+    state = await agent.target.aget_state({"configurable": {"thread_id": thread}})
     assert state.values == {"seen": "gold"}

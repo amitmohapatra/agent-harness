@@ -260,7 +260,12 @@ class _Surface:
     ) -> tuple[RunBuffer, int]:
         agent = self.agent
         record = await agent.harness.runs.get(run_of(answer.interrupt_id), tenant=tenant)
-        if record is None or record.thread_id != body.thread_id or record.awaiting is None:
+        if (
+            record is None
+            or record.thread_id != body.thread_id
+            or record.user_id != user  # a thread id is the user's own name for the chat
+            or record.awaiting is None
+        ):
             raise HTTPException(404, "no such interrupt for this thread")
         try:
             decision = _decision(answer, record.awaiting)
