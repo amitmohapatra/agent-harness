@@ -1,4 +1,4 @@
-# 0005. What the model gets: a context map, data cards, and built-in tools offered by run state
+# 0006. What the model gets: a context map, data cards, and built-in tools offered by run state
 
 **Status:** Proposed (2026-10-30). Some parts exist already. A new part ships only after it
 passes the [evaluation protocol](../research/EVAL_PROTOCOL.md).

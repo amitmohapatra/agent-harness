@@ -122,6 +122,7 @@ from trellis.harness import (
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
+from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.hooks import running
 from trellis.harness.journal import content_key
@@ -411,8 +412,16 @@ def _schema_of(tool: Any) -> dict[str, Any]:
     return dict(convert_to_openai_tool(tool)["function"].get("parameters") or {})
 
 
+#: The ``response_metadata`` key of a user message steered into a run (``mode="steer"``):
+#: the run it was sent as (its transcript keeps it as said, not as the run's question).
+STEERED: Final = "trellis_steered"
+
+
 class HarnessTools(AgentMiddleware):
-    """The run's harness tools, offered per model call and run through the bridge."""
+    """The run's harness tools, offered per model call and run through the bridge — and,
+    before each model call, the messages sent to the run's conversation with
+    ``mode="steer"`` since the last one (``Runtime.steered``), added to the graph's messages
+    as the user's, each with its id (``conversation.question_id``)."""
 
     state_schema = _HarnessToolsState
 
@@ -429,6 +438,25 @@ class HarnessTools(AgentMiddleware):
         self._toolsets: LRU[tuple[int, ...], tuple[tuple[Tool, ...], dict[str, BaseTool]]] = LRU(
             TOOLSETS
         )
+
+    def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        run = current()
+        steered = run.steered() if run is not None else []
+        if not steered:
+            return None
+        assert run is not None
+        said = [
+            HumanMessage(
+                content=s.text,
+                id=question_id(run.conversation, s.run_id),
+                response_metadata={STEERED: s.run_id},
+            )
+            for s in steered
+        ]
+        return {"messages": said}
+
+    async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        return self.before_model(state, runtime)
 
     async def awrap_model_call(
         self,

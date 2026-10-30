@@ -16,7 +16,7 @@ reasonable it looks.
 **Status.** *exists*: on main. *in flight*: being built, on the branch named. *next*: the
 next to build, once measured. *later*: deliberately deferred.
 
-The target shape of what the model gets (context map, data cards, built-in tools by run state) is [ADR 0005](../adr/0005-what-the-model-gets.md) (proposed).
+The target shape of what the model gets (context map, data cards, built-in tools by run state) is [ADR 0006](../adr/0006-what-the-model-gets.md) (proposed).
 
 Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7, a snapshot of
 2026-10-30) and [SELF_EXPLANATION.md](SELF_EXPLANATION.md) (the explain shortlist).

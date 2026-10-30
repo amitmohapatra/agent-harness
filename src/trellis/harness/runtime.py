@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from trellis.harness.bridges.helpers import Helpers
     from trellis.harness.budget import Budget
     from trellis.harness.clients.memory import RunMemory
+    from trellis.harness.conversation import Steer
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
@@ -138,8 +139,14 @@ class Runtime:
     #: whether the run's own code read :attr:`context` (a function target, a graph's node)
     context_read: bool = field(default=False, repr=False)
     #: where memory keeps the conversation and the framework replays it as messages: the
-    #: thread's recent messages (``[]``: none yet); ``None`` where it does not
+    #: thread's recent messages (``[]``: none yet); with memory off, the conversation's
+    #: earlier turns from the run store (``Agent.recalled``); ``None`` where it does not
     history: list[Said] | None = None
+    #: the run continues the session its framework kept for the conversation's last turn
+    #: (``Agent.sessions``: a Claude Agent SDK or ACP session), which holds the history
+    continued: bool = False
+    #: the messages given to the run with ``mode="steer"`` that its framework took, in order
+    steers: list[Steer] = field(default_factory=list)
     #: how far memory covered the question (its ``evidence_status``: ``COMPLETE``,
     #: ``INCOMPLETE``, ``INSUFFICIENT``), when a context was pushed
     evidence: str | None = None
@@ -278,6 +285,13 @@ class Runtime:
     def conversation(self) -> str:
         """The key the run's conversation keeps its state under (``Identity.conversation``)."""
         return self.identity.conversation
+
+    def steered(self) -> list[Steer]:
+        """The messages sent to the run's conversation with ``mode="steer"`` since its
+        framework last looked (at one of its steps), now taken: its answer answers them."""
+        taken = self.agent.turns.steered(self.conversation, self.run_id)
+        self.steers.extend(taken)
+        return taken
 
     @property
     def tenant(self) -> str:

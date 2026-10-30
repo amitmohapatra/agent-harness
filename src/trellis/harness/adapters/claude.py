@@ -71,6 +71,7 @@ from trellis.contracts import (
 from trellis.harness import budget, skills
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     Output,
@@ -136,6 +137,8 @@ ANTHROPIC_ROUTE: Final = "anthropic"
 TOOL_EVENT: Final = "PreToolUse"
 RAN_EVENT: Final = "PostToolUse"
 FAILED_EVENT: Final = "PostToolUseFailure"
+#: How a message steered into the run reads to Claude, after a tool call's result.
+STEERED_SAYS: Final = "The user adds, while you work: "
 #: The key a query's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "claude_agent_sdk"
 #: When the SDK hands the session store a step: as soon as the CLI mirrors it.
@@ -198,6 +201,10 @@ class ClaudeAdapter:
     narrows: Narrowing = "run"
     #: a query takes one prompt, not a conversation: memory's window is in the context's text
     replays_history = False
+    #: with memory off, the conversation's earlier turns are in the context's text too
+    history_in: HistoryIn = "context"
+    #: its session (the journal's) is continued by the conversation's next turn
+    sessions = True
 
     def __init__(self) -> None:
         #: the tools the options declare (:meth:`native`), once read
@@ -207,6 +214,12 @@ class ClaudeAdapter:
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
+
+    def steers(self, target: Any) -> bool:
+        """Every query: a steered message is added after a tool call's result (a
+        ``PostToolUse`` hook's ``additionalContext``, :func:`_with_governance`); a query that
+        calls no tool takes none."""
+        return True
 
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
@@ -367,7 +380,10 @@ class ClaudeAdapter:
             target = dataclasses.replace(target, plugins=plugins)
         steps = Steps(runtime, self)
         options = _options(target, native_input.context, run, session, steps)
-        prompt = native_input.prompt if session is None else _resumed(native_input, run)
+        # a first attempt resumes only the conversation's session (``Runtime.continued``):
+        # the turn's own prompt; a later one, the run's own session after a pause
+        first = session is None or runtime.attempt == 1
+        prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
         try:
             # closed as it is left (``aclosing``): its CLI process ends here, in this loop
@@ -592,7 +608,24 @@ def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) ->
     recorded = _recorded(steps)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
+    given[RAN_EVENT] = [*given[RAN_EVENT], _steering()]
     return given
+
+
+def _steering() -> Any:
+    """The ``PostToolUse`` hook that gives Claude the messages steered into the run since its
+    last tool call (``Runtime.steered``), as the context a hook adds after the call's result."""
+    from claude_agent_sdk import HookMatcher
+
+    async def steered(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
+        runtime = current()
+        taken = runtime.steered() if runtime is not None else []
+        if not taken:
+            return {}
+        said = "\n\n".join(f"{STEERED_SAYS}{s.text}" for s in taken)
+        return {"hookSpecificOutput": {"hookEventName": RAN_EVENT, "additionalContext": said}}
+
+    return HookMatcher(hooks=[steered])
 
 
 def _governance(own: Any, steps: Steps) -> Any:

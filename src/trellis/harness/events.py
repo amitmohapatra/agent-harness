@@ -145,13 +145,16 @@ class RunEvents:
             data["delta"] = delta
         self.emit(type, message_id=message_id, data=data)
 
-    def tool(self, type: RunEventType, tool_call_id: str, **data: Any) -> None:
-        """A step of a tool call: its ``args`` and ``output``, the output a preview."""
+    def tool(
+        self, type: RunEventType, tool_call_id: str, message_id: str | None = None, **data: Any
+    ) -> None:
+        """A step of a tool call: its ``args`` and ``output``, the output a preview; its
+        result's ``message_id`` the one the result keeps (``conversation.result_id``)."""
         if self.quiet:
             return
         if "output" in data:
             data["output"] = preview(data["output"])
-        self.emit(type, tool_call_id=tool_call_id, data=data)
+        self.emit(type, tool_call_id=tool_call_id, message_id=message_id, data=data)
 
     def custom(self, name: str, **data: Any) -> None:
         if not self.quiet:
