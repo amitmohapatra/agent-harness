@@ -60,6 +60,7 @@ from pydantic import BaseModel
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import (
     MODEL_METADATA,
+    PROMPT_METADATA,
     TOOLS_ATTRIBUTE,
     WINDOW_METADATA,
     context_window,
@@ -187,7 +188,7 @@ def _middleware(
         context_window=context_window,
         system_prompt=system_prompt,
     )
-    from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
+    from langchain.agents.middleware import ContextEditingMiddleware
 
     from trellis.harness import automatic
     from trellis.harness import middleware as ours
@@ -197,7 +198,7 @@ def _middleware(
         [
             ContextEditingMiddleware(
                 edits=[
-                    ClearToolUsesEdit(
+                    ours.ThisTurnsResults(
                         trigger=int(CLEAR_AT * window),
                         clear_at_least=int(MIN_FREED * window),
                         keep=KEEP_RESULTS,
@@ -373,7 +374,7 @@ def ReAct(
             cache=cache,
             name="react",
         )
-        return _described(graph, named, window, [*run, *helpers])
+        return _described(graph, named, window, instructions, [*run, *helpers])
     files_backend = backend if backend is not None else automatic.JournalBackend()
     graph_backend = files_backend
     if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
@@ -416,7 +417,7 @@ def ReAct(
         name="react",
     )
     _declared(graph, backend=graph_backend, outside=outside, helper_only=not native)
-    return _described(graph, named, window, [*run, *helpers])
+    return _described(graph, named, window, instructions, [*run, *helpers])
 
 
 def _delegation(chat: Any, named: str | None, window: int | None, helpers: list[Any]) -> Any:
@@ -454,10 +455,15 @@ def _backend(given: Any) -> Any:
     return given.deep_agent()["backend"] if isinstance(given, SandboxSource) else given
 
 
-def _described(graph: Any, named: str | None, window: int | None, run: list[Any]) -> Any:
+def _described(
+    graph: Any, named: str | None, window: int | None, instructions: str | None, run: list[Any]
+) -> Any:
     """What the harness reads of the graph: the model's name, the window when known (the
-    pushed memory context's budget is a share of it), and the tools it runs for the agent."""
-    graph = graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
+    pushed memory context's budget is a share of it, and the replayed conversation's is what
+    is left of it), its instructions' text, and the tools it runs for the agent."""
+    graph = graph.with_config(
+        metadata={MODEL_METADATA: named, WINDOW_METADATA: window, PROMPT_METADATA: instructions}
+    )
     setattr(graph, TOOLS_ATTRIBUTE, run)
     return graph
 

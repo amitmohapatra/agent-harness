@@ -47,10 +47,13 @@ from trellis.contracts import (
 from trellis.harness import compat, history, pipeline, sandbox, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
+    FIT_SHARE,
     FRAMEWORK_OPTIONS,
+    PROMPT_METADATA,
     context_window,
     declared_tools,
     merged,
+    metadata_of,
     model_name,
 )
 from trellis.harness.adapters.langgraph import checkpointing, hitl_response, is_hitl
@@ -112,6 +115,11 @@ POLL_SECONDS: Final = 0.5
 #: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
 #: service scores relative to the best match); nothing matching scores 0 to 0.1.
 NARROW_FLOOR: Final = 0.5
+#: What a reply is left room for when the replayed conversation's budget is sized from the
+#: model's window (:func:`conversation_budget`), in tokens.
+REPLY_TOKENS: Final = 1024
+#: The fewest and most tokens the memory service sizes a conversation window to.
+CONVERSATION_TOKENS: Final = (100, 1_000_000)
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
 UNREACHED_FIX: Final = {
@@ -140,6 +148,18 @@ ABSTAIN_NOTES: Final = {
         "you do not know rather than fill the gap."
     ),
 }
+
+
+def conversation_budget(window: int | None, *, holds: int, context: int) -> int | None:
+    """The tokens the replayed conversation may take of a model reading ``window`` tokens: what
+    one request may hold (:data:`~trellis.harness.adapters.base.FIT_SHARE` of it, as
+    ``FitWindow`` fits it) less what else the request ``holds`` (its instructions, tools and
+    question), the memory context's ``context`` budget and :data:`REPLY_TOKENS`, within what
+    the service takes (:data:`CONVERSATION_TOKENS`); ``None`` when the window is not known."""
+    if not window:
+        return None
+    low, high = CONVERSATION_TOKENS
+    return max(low, min(high, int(window * FIT_SHARE) - holds - context - REPLY_TOKENS))
 
 
 class Agent:
@@ -210,8 +230,13 @@ class Agent:
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
-        #: the pushed context's token budget: a share of the model's window when it is known
-        self.context_budget = context_budget(context_window(target))
+        #: the model's window when it is known, and the pushed context's token budget: a share
+        #: of it
+        self.model_window = context_window(target)
+        self.context_budget = context_budget(self.model_window)
+        #: the instructions' text, when the builder says it (``ReAct``): what the replayed
+        #: conversation's budget leaves room for
+        self.instructions: str | None = metadata_of(target).get(PROMPT_METADATA)
         #: the name of the agent's model when its builder says it (``ReAct``): what the
         #: memory service is told with the endpoint, with its profile
         self.model = model_name(target)
@@ -839,6 +864,7 @@ class Agent:
         if hints:
             await box.indexed()
         window = self.window(runtime)
+        replayed = self.conversation_budget(runtime) if window is Window.MESSAGES else None
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
@@ -847,6 +873,7 @@ class Agent:
                     window=window,
                     hints=hints,
                     budget=self.context_budget,
+                    conversation_budget=replayed,
                     document_ids=runtime.document_ids,
                 )
             except Exception as exc:
@@ -882,6 +909,32 @@ class Agent:
             data={"chars": len(rendered), "evidence_status": status},
         )
         return pushed
+
+    def conversation_budget(self, runtime: Runtime) -> int | None:
+        """The tokens the conversation memory replays may take: what the run's next request
+        leaves of the model's window once its instructions, offered tools and question are
+        in (LangChain's ``count_tokens_approximately``), with the memory context's budget and a
+        reply's room kept (:func:`conversation_budget`); ``None`` when the window is not
+        known (the service's default). Only a framework that replays messages asks it, so
+        LangChain is there to count with."""
+        from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415 - extra
+        from langchain_core.messages.utils import count_tokens_approximately  # noqa: PLC0415
+
+        specs = [t.spec for t in runtime.toolbox.values()] + list(runtime.native.values())
+        tools: list[Any] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": s.name,
+                    "description": s.description,
+                    "parameters": s.input_schema,
+                },
+            }
+            for s in specs
+        ]
+        said = [SystemMessage(self.instructions or ""), HumanMessage(runtime.task)]
+        holds = count_tokens_approximately(said, tools=tools)
+        return conversation_budget(self.model_window, holds=holds, context=self.context_budget)
 
     def unreached(self, runtime: Runtime) -> None:
         """The memory context pushed for ``runtime`` reached nothing: the adapter found no

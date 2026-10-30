@@ -30,6 +30,13 @@ own model work follows the harness's configuration.
   returns `(content, artifact)`, the artifact a `Citation(name, date, link)` or a list of them
   (also a LangChain tool's own artifact); the model reads the content alone and the call's
   outcome keeps the citations in `metadata["sources"]`, so the run's trajectory has them.
+- A `ReAct` agent with a known window sizes the conversation the memory service replays
+  (`conversation_token_budget`, trellis-memory 0.6): what one request may hold (95% of the
+  window, as `FitWindow` fits it) less its instructions, offered tools and question
+  (LangChain's `count_tokens_approximately`), the memory context's budget and 1,024 tokens for
+  the reply (`Agent.conversation_budget`). Tool-result clearing (`ThisTurnsResults`, LangChain's
+  `ClearToolUsesEdit`) clears only the turn under way's older results, never the replayed
+  turns' that memory already sized.
 - The cost benchmark's `--suite explain`: two-turn conversations, memory on, whose second turn
   asks about the first answer (its steps, sources, tools, time, approvals...) or is an ordinary
   follow-up, scored strictly against turn 1's own journal record (exact tool names, source

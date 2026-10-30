@@ -63,16 +63,18 @@ from collections.abc import (
     Sequence,
 )
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
 from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
+    ClearToolUsesEdit,
     ModelRequest,
     ModelResponse,
 )
+from langchain.agents.middleware.context_editing import TokenCounter
 from langchain.agents.middleware.types import (
     ExtendedModelResponse,
     PrivateStateAttr,
@@ -119,6 +121,7 @@ from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
+from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Kind
@@ -1134,10 +1137,6 @@ class ReadTools(AgentMiddleware):
 
 
 # --------------------------------------------------------------------------- the window
-#: What one model call's request may hold, as a share of the window: what Deep Agents'
-#: summarization budgets (its ``_input_budget``: 95%, less the reply's tokens), so a request
-#: :class:`FitWindow` fitted is one the summarization after it never refuses.
-FIT_SHARE: Final = 0.95
 #: Tools a narrowing keeps at least, beside the ones the run already used (then the
 #: descriptions are compacted before any of them is dropped).
 FIT_KEEP: Final = 8
@@ -1179,6 +1178,29 @@ class ContextTooLarge(ModelError):
     """The user's own message, with the instructions, does not fit the model's window."""
 
     code = "CONTEXT_TOO_LARGE"
+
+
+@dataclass(slots=True)
+class ThisTurnsResults(ClearToolUsesEdit):
+    """LangChain's ``ClearToolUsesEdit`` for the turn under way: past its ``trigger`` (counted
+    over the whole request, as LangChain counts it), it clears the older results of the calls
+    made since the user's latest message, never those of the earlier turns before it. The
+    conversation the memory service replays was sized for the request it goes into (its
+    budget is what the window leaves: ``Agent.conversation_budget``), so clearing its results
+    at the turn's start would only undo that; a request still over the window is fitted by
+    :class:`FitWindow`, which leaves older turns out first."""
+
+    def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
+        start = next(
+            (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
+            0,
+        )
+        turn = messages[start:]
+        earlier = count_tokens(messages[:start]) if start else 0
+        ClearToolUsesEdit.apply(
+            replace(self, trigger=self.trigger - earlier), turn, count_tokens=count_tokens
+        )
+        messages[start:] = turn
 
 
 class FitWindow(AgentMiddleware):

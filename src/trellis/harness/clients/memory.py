@@ -185,13 +185,15 @@ class RunMemory:
         window: Window,
         hints: bool,
         budget: int = CONTEXT_TOKEN_BUDGET,
+        conversation_budget: int | None = None,
         document_ids: Sequence[str] | None = None,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
         skills it learned for the task and - unless ``hints`` is off - the tools that fit.
         ``window``: the thread's recent messages left out (``Window.NONE``: the framework
         keeps them itself), in the rendered text (``RENDERED``), or verbatim as
-        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own.
+        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own,
+        within ``conversation_budget`` tokens (``None``: the service's default).
         ``document_ids`` narrows the documents its passages come from to those (``None``:
         every one the scope may read)."""
         return await self.ctx.context(
@@ -202,6 +204,11 @@ class RunMemory:
             window=window is not Window.NONE,
             window_format="messages" if window is Window.MESSAGES else "rendered",
             document_ids=document_ids,
+            **(
+                {}
+                if conversation_budget is None
+                else {"conversation_token_budget": conversation_budget}
+            ),
         )
 
     # ------------------------------------------------------------------ pull
