@@ -10,6 +10,11 @@ one executor, :func:`execute` — at most its ``timeout``, a call that only read
 idempotent) tried again after an error that may pass (:func:`retried`), a sync function in a
 worker thread (:func:`invoked`), and a call that timed out told to the model as
 :func:`timed_out` says (for one that does more than read: its effect is unknown).
+
+Where a result came from travels beside it, never in what the model reads: a tool that knows
+its source returns it as LangChain's ``content_and_artifact`` does — the content, and an
+artifact that is its :class:`Citation` (or a list of them) — and the outcome keeps the
+citations in its ``metadata`` (:data:`SOURCES`), which the run's trajectory keeps.
 """
 
 from __future__ import annotations
@@ -24,6 +29,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import ValidationError as PydanticError
 from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
 
 from trellis.contracts import (
@@ -71,6 +78,43 @@ REMOTE_TIMEOUT_SECONDS: Final = 120.0
 #: (:data:`OUTCOME_UNKNOWN`), which the memory service's tool records keep.
 UNKNOWN: Final = "unknown"
 OUTCOME_UNKNOWN: Final = "OutcomeUnknown"
+#: The ``ToolOutcome.metadata`` key of the sources a call's result came from (each a
+#: :class:`Citation`, as JSON).
+SOURCES: Final = "sources"
+
+
+class Citation(BaseModel):
+    """Where a tool's result came from: what the source is called (``name``), when what it said
+    was true or published (``date``, as the source gives it) and where to find it (``link``: a
+    URL, or a reference such as a document and page)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    date: str | None = None
+    link: str | None = None
+
+
+_CITED: Final = TypeAdapter(Citation | list[Citation])
+
+
+def citations(artifact: Any) -> list[Citation]:
+    """The sources an artifact names: a :class:`Citation`, or a list of them (as objects or as
+    JSON); anything else names none (a LangChain tool's artifact may be any value)."""
+    try:
+        found = _CITED.validate_python(artifact)
+    except PydanticError:
+        return []
+    return found if isinstance(found, list) else [found]
+
+
+@dataclass(frozen=True, slots=True)
+class Sourced:
+    """What a tool's run returns when it knows where its result came from: the ``content`` the
+    model reads and the ``sources`` it came from (:func:`execute` keeps them apart)."""
+
+    content: Any
+    sources: list[Citation]
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +219,15 @@ async def execute(
         timeout = ToolTimeout(text, unknown=not reads)
         timeout.__cause__ = exc
         return late, timeout
+    if isinstance(output, Sourced):
+        cited = [c.model_dump(mode="json", exclude_none=True) for c in output.sources]
+        sourced = ToolOutcome(
+            tool=tool.name,
+            output=output.content,
+            attempts=attempts,
+            metadata={SOURCES: cited} if cited else {},
+        )
+        return sourced, None
     return ToolOutcome(tool=tool.name, output=output, attempts=attempts), None
 
 

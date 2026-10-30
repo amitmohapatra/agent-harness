@@ -131,7 +131,14 @@ from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import SideEffects, Tool, arguments_of, not_run
+from trellis.harness.tools.base import (
+    SideEffects,
+    Sourced,
+    Tool,
+    arguments_of,
+    citations,
+    not_run,
+)
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.mcp import side_effects_of as annotated
@@ -287,7 +294,9 @@ async def governed_call(
         if isinstance(done, ToolMessage) and done.status == "error":
             raise ToolError(text_of(done.content), source="tools")
         produced.append(done)
-        return text_of(_told(done))
+        # a content_and_artifact tool's artifact: the sources of its result, when it names any
+        cited = citations(getattr(done, "artifact", None))
+        return Sourced(text_of(_told(done)), cited) if cited else text_of(_told(done))
 
     async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
         return await handler(request.override(tool_call={**call, "args": args}))

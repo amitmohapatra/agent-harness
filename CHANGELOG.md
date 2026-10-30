@@ -26,6 +26,16 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- Where a tool's result came from: `tool(response_format="content_and_artifact")` (LangChain's)
+  returns `(content, artifact)`, the artifact a `Citation(name, date, link)` or a list of them
+  (also a LangChain tool's own artifact); the model reads the content alone and the call's
+  outcome keeps the citations in `metadata["sources"]`, so the run's trajectory has them.
+- The cost benchmark's `--suite explain`: two-turn conversations, memory on, whose second turn
+  asks about the first answer (its steps, sources, tools, time, approvals...) or is an ordinary
+  follow-up, scored strictly against turn 1's own journal record (exact tool names, source
+  names and dates, the step count, seconds within a tolerance), with the made-up claims and
+  leaked template tags counted, every model request kept, and `--render` checking what a
+  llama.cpp chat template shows the model (`benchmark/cost/explain.py`).
 - `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
   `LLM_GATEWAY` from one registry that packages extend under the entry-point group
   `trellis.gateways`. Bifrost's features ask `gateway.has(Capability.X)`; new capabilities
