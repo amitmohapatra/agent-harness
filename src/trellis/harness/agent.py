@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import re
@@ -44,7 +43,7 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, history, pipeline, sandbox, telemetry
+from trellis.harness import compat, conversation, history, pipeline, sandbox, telemetry
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -67,6 +66,7 @@ from trellis.harness.clients.memory import (
     context_budget,
     documents,
 )
+from trellis.harness.conversation import STEERED_INTO, Mode, Turns
 from trellis.harness.evals import (
     GROUNDING_SAMPLE,
     EvalCase,
@@ -125,6 +125,10 @@ UNREACHED_FIX: Final = {
 #: How long a turn's transcript may take to write before the run returns, where memory keeps
 #: the conversation; past it the write is queued (``writes``) and the run returns.
 TURN_WRITE_SECONDS: Final = 5.0
+#: How many conversations' last framework sessions an agent keeps in this process
+#: (``Agent.sessions``; a session's transcripts can be large): the least recently used goes,
+#: and its next turn starts a new one.
+SESSIONS_KEPT: Final = 128
 #: What the model is told when memory has nothing for the question (``evidence_status``
 #: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
 #: the user's history, instead of a confident guess the memory never held. Not when a hinted
@@ -227,6 +231,10 @@ class Agent:
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
         self.turns = Turns()
+        #: the session its framework kept for each conversation's last turn in this process
+        #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
+        #: turn continues it (``pipeline``, ADR 0005), the most recent kept
+        self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(SESSIONS_KEPT)
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -252,6 +260,7 @@ class Agent:
         without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
+        mode: Mode | str = Mode.QUEUE,
     ) -> Result:
         """Run to its end (or its first pause) and return how it ended. ``run_timeout``: the
         most working time the run may take, in seconds (not counting a pause; else the
@@ -265,7 +274,11 @@ class Agent:
         is not JSON (an object) is this call's only. ``document_ids``: the documents
         (``h.add_document``'s ``document_id``) the run's memory context draws its passages
         from, none else (unset: all the person's); kept with the run, its sub-agents' runs
-        included.
+        included. ``mode``: what the run does when another run of the same conversation
+        (``thread``) works in this process (``conversation.Mode``): ``"queue"`` waits for it
+        to end (the default), ``"interrupt"`` cancels it and continues the conversation,
+        ``"steer"`` gives the message to it at its framework's next step — its answer is this
+        run's — where the target can take one (else it waits, as ``"queue"``).
 
         Called inside another run (a tool of it, a node, a function target's code), the run is
         that run's child, as a sub-agent's is (``trellis.harness.subagents.child_run``): its
@@ -291,6 +304,7 @@ class Agent:
                 document_ids=document_ids,
             )
             return self.hooks.answer(result)
+        mode = Mode(mode)
         record = await self._opened(
             input,
             user=user,
@@ -302,8 +316,9 @@ class Agent:
             without=without,
             framework_options=framework_options,
             document_ids=document_ids,
+            mode=mode,
         )
-        return self.hooks.answer(await pipeline.attempt(self, record, input))
+        return self.hooks.answer(await pipeline.attempt(self, record, input, mode=mode))
 
     async def stream(
         self,
@@ -318,12 +333,15 @@ class Agent:
         without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
+        mode: Mode | str = Mode.QUEUE,
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
         early cancels the run. ``run_timeout``, ``deadline``, ``budget``, ``without``,
-        ``framework_options`` and ``document_ids`` as for :meth:`run`. Streamed inside another
-        run, it is that run's child (its record names the parent; tenant, thread, documents
-        and what the parent is without carried over), whose events are the stream's: a
+        ``framework_options``, ``document_ids`` and ``mode`` as for :meth:`run` (a message
+        steered into the working run streams that run's answer, under its id). Streamed
+        inside another run, it is that run's child (its record names the parent; tenant,
+        thread, documents and what the parent is without carried over), whose events are the
+        stream's: a
         question it asks ends the stream paused, for the caller to answer (``run`` pauses the
         parent instead)."""
         record = await self._opened(
@@ -338,9 +356,10 @@ class Agent:
             framework_options=framework_options,
             document_ids=document_ids,
             parent=current(),
+            mode=Mode(mode),
         )
         async for event in self._events(
-            lambda listen: pipeline.attempt(self, record, input, listener=listen)
+            lambda listen: pipeline.attempt(self, record, input, listener=listen, mode=Mode(mode))
         ):
             yield self.hooks.event(event)
 
@@ -819,8 +838,35 @@ class Agent:
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """What is pushed into the framework's input, in the runtime's context: the memory
-        context (:meth:`remembered`), returned when there is one."""
+        context (:meth:`remembered`), returned when there is one — or, with memory off, the
+        conversation's earlier turns (:meth:`recalled`)."""
+        if runtime.run_memory is None:
+            await self.recalled(runtime)
+            return None
         return await self.remembered(runtime)
+
+    async def recalled(self, runtime: Runtime) -> None:
+        """With memory off, the conversation's earlier turns from the run store
+        (``conversation.earlier``: each one's question and answer) — only where nothing else
+        keeps them (ADR 0005): not where the framework keeps its own thread (a checkpointer,
+        a session of the run's, a conversation on OpenAI's servers) or continues the session
+        it kept for the conversation's last turn (``Runtime.continued``). A target that takes
+        messages (``Adapter.history_in == "messages"``) gets them as its own (a function as
+        ``agent.history``); the others in the context's text."""
+        store = self.adapter.thread_store(self.target, runtime.framework_options)
+        if runtime.continued or (store is not None and store is not history.MEMORY_THREAD):
+            return
+        try:
+            earlier = await conversation.earlier(runtime)
+        except Exception as exc:
+            runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
+            return
+        if not earlier:
+            return
+        if self.adapter.history_in == "messages":
+            runtime.history = earlier
+        else:
+            runtime.context = conversation.rendered(earlier)
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
         """The memory context for this run, in the runtime. Asked with the run's tool set —
@@ -1113,6 +1159,7 @@ class Agent:
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
         parent: Runtime | None = None,
+        mode: Mode = Mode.QUEUE,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
@@ -1133,6 +1180,12 @@ class Agent:
             document_ids=document_ids,
             parent=parent,
         )
+        live = None
+        if mode is Mode.STEER and parent is None and thread:
+            live = self.turns.live(conversation_key(start.tenant_id, user, thread))
+        if live is not None and live.steers:  # its answer may be this run's (``earlier``)
+            given = {**start.metadata, STEERED_INTO: live.run_id}
+            start = start.model_copy(update={"metadata": given})
         await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
         if not framework_options:
@@ -1257,28 +1310,6 @@ async def admitted[T](call: Awaitable[T], operation: str) -> T:
             f"agent-runs is rate limiting this tenant ({operation}): try again{after}",
             retry_after=exc.retry_after,
         ) from exc
-
-
-class Turns:
-    """One run of a conversation at a time in this process: the others wait their turn, in
-    order (``pipeline.attempt``)."""
-
-    def __init__(self) -> None:
-        self._held: dict[str, tuple[asyncio.Lock, int]] = {}
-
-    @contextlib.asynccontextmanager
-    async def taken(self, key: str) -> AsyncIterator[None]:
-        lock, waiting = self._held.get(key) or (asyncio.Lock(), 0)
-        self._held[key] = (lock, waiting + 1)
-        try:
-            async with lock:
-                yield
-        finally:
-            lock, waiting = self._held[key]
-            if waiting == 1:
-                del self._held[key]
-            else:
-                self._held[key] = (lock, waiting - 1)
 
 
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing

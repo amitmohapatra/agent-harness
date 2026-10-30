@@ -36,6 +36,24 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- Conversations across runs ([ADR 0005](docs/adr/0005-conversations-across-runs.md)):
+  - with memory off, a run of a conversation is given its earlier turns from the run store
+    (each run's question and answer) where the framework keeps no thread of its own —
+    messages for `ReAct`, graphs and OpenAI Agents, `agent.history` for a function, the
+    context's text for Claude and ACP;
+  - `run(mode=)` / `stream(mode=)`: `"queue"` (default, as before), `"interrupt"` (cancel the
+    conversation's working run and continue), `"steer"` (give the message to the working run
+    at its next step: `HarnessTools.before_model`, OpenAI Agents `call_model_input_filter`,
+    Claude `PostToolUse`; a function, ACP or a graph without the harness's middleware waits as
+    `"queue"`, said once — `Adapter.steers`);
+  - one id per message (`conversation.message_id`): the AG-UI text message and
+    `TOOL_CALL_RESULT` ids, and each message's `custom_metadata` in the memory service
+    (`message_id`, `run_id`, `tool_call_id`), stable across a resume;
+  - a Claude Agent SDK or ACP conversation continues its last turn's session in this process
+    (`agent.sessions`).
+  - `HarnessTools` (in `ReAct` and `middleware()`) has a `before_model` hook: one more
+    LangGraph step per model call, so a `recursion_limit` set to the bare minimum needs one
+    more.
 - `h.conversation(user=, thread=)`: the key a user's conversation keeps its state under.
 - `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
   `LLM_GATEWAY` from one registry that packages extend under the entry-point group

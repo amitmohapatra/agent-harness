@@ -157,9 +157,10 @@ What `h.wrap` returns.
 
 ```text
 await agent.run(input, *, user, thread=None, tenant=None, run_timeout=None, deadline=None,
-                budget=None, without=(), framework_options=None, document_ids=None) -> Result
+                budget=None, without=(), framework_options=None, document_ids=None,
+                mode="queue") -> Result
 agent.stream(...same...) -> AsyncIterator[RunEvent]
-await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
+await agent.start(...same but mode..., priority=0, concurrency_key=None) -> RunHandle
 ```
 
 | Argument | Default | What it is |
@@ -174,6 +175,7 @@ await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 | `without` | `()` | parts off for this run, on top of the agent's; kept with the run ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | the agent's | the framework's own options for this run, over the agent's ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 | `document_ids` | none (every document the person's scope reads) | the documents (`h.add_document(...).document_id`) the run's memory context draws its passages from, none else; kept with the run and its sub-agents' runs ([memory.md](memory.md#push)) |
+| `mode` (`run`, `stream`) | `"queue"` | what the run does while another run of its conversation works in this process: `"queue"` waits for it, `"interrupt"` cancels it and continues the conversation, `"steer"` gives the message to it at its framework's next step — that run's answer is this run's — where the target takes one, else waits as `"queue"` ([runs.md](runs.md#a-message-to-a-busy-conversation-mode)) |
 | `priority` (`start`) | `0` | -1000 to 1000: a higher one is claimed first ([runs.md](runs.md#queue-order-and-busy-conversations)) |
 | `concurrency_key` (`start`) | `thread:<conversation>` (`h.conversation(user=, thread=)`) | runs sharing one run one at a time |
 

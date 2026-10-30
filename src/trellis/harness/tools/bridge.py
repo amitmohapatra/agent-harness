@@ -62,6 +62,7 @@ from trellis.contracts import (
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled, answer_of
+from trellis.harness.conversation import result_id
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
@@ -517,4 +518,5 @@ def _ended(runtime: Runtime, ref: str, tool: str, **result: Any) -> None:
     if runtime.open_calls.pop(ref, None) is None:
         return
     runtime.events.tool(RunEventType.TOOL_CALL_END, ref, tool=tool)
-    runtime.events.tool(RunEventType.TOOL_CALL_RESULT, ref, tool=tool, **result)
+    said = result_id(runtime.conversation, ref)  # the id the result has in the transcript
+    runtime.events.tool(RunEventType.TOOL_CALL_RESULT, ref, said, tool=tool, **result)

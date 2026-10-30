@@ -230,6 +230,16 @@ and a graph of yours its tools, `sandbox().tools()`, which govern and journal ev
 ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). A LangChain `create_agent` can
 take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders ([skills.md](../skills.md#native-or-ours)).
 
+## Conversations
+
+A graph with its own checkpointer keeps the conversation on its thread (the conversation's key,
+`h.conversation`). Without one — and `ReAct`, whose checkpoint is the run's — memory's window
+keeps it, or with memory off the run store's earlier turns, as messages before the question
+([runs.md](../runs.md#earlier-turns-with-memory-off)). `mode="steer"` reaches a graph with the harness's middleware (`ReAct`,
+`middleware()`: `HarnessTools.before_model` adds the message before the next model call, kept in
+the graph's messages and in the run's transcript); any other graph waits as `"queue"`, said once
+([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
+
 ## Limits
 
 * A graph's tools are fixed when it is compiled: a tool of a part turned off

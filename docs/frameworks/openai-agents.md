@@ -184,6 +184,13 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 [examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py)
 (an agent of every framework queued, one worker for all).
 
+## Conversations
+
+With memory off and no `session` of yours, a run of a conversation is given its earlier turns
+from the run store as input items before the question ([runs.md](../runs.md#earlier-turns-with-memory-off)). `mode="steer"` adds the
+message as a user item to each later model call's input (`RunConfig.call_model_input_filter`,
+after yours) ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
+
 ## Limits
 
 * A resume after a harness approval re-runs the conversation: the model is asked again for the

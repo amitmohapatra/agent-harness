@@ -125,6 +125,12 @@ A Deep Agent is a graph: `framework_options=` goes into its run's config as for 
 refused: the thread is `run(thread=)` —
 [langgraph.md](langgraph.md#the-graphs-own-run-options)).
 
+## Conversations
+
+As for [LangGraph](langgraph.md#conversations): a Deep Agent built with `HarnessTools` in its
+middleware (`ReAct`'s, or `middleware()`) takes a `mode="steer"` message before its next model
+call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
+
 ## Limits
 
 * Tools are bound when the graph is built, as for `create_agent`: give it the harness's
