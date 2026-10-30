@@ -52,7 +52,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 
 | Gap | Status | Evidence |
 |---|---|---|
-| Tool chains: output→input links from the tools' published schemas, said in descriptions, a hinted tool's chain kept offered | exists once `claude/cool-maxwell-w5avo8-chains` lands (`tools/links.py`; matrix F28c; `--classes chain`) | [tools.md](../tools.md#tool-chains); on main the F28c cells fail: hints narrowed to `find_sku` drop `get_stock` |
+| Tool chains: output→input links from the tools' published schemas, said in descriptions, a hinted tool's chain kept offered | exists once `claude/cool-maxwell-w5avo8-chains` lands (`tools/links.py`; matrix F28c; `--classes chain`) | [tools.md](../tools.md#tool-chains); on main the F28c cells fail: hints narrowed to `find_sku` drop `get_stock`. Proxy on a 2B model (#65): first step right 8/10 → 10/10, invented ids 4 → 2, +8.5% input tokens; an end-to-end re-run with a chat template that parses tool calls is next |
 | Learned plans with "next step" and argument bindings (earlier output → later argument) | exists (memory ADR 0018: `modules/tools/procedures.py`, `hints.py` `_from_earlier_step`) | memory `tests/unit/test_tool_learning.py` |
 | Learned plans matched by meaning, not only token Jaccard | exists (memory #53: `modules/tools/matching.py`, embeddings with a calibrated `procedure_cosine` floor) | memory `tests/eval/test_procedure_match_gate.py` |
 | B11: a learned literal (`ST-101`) prefilled when the task names another value | exists, fixed (memory `procedures._constant`, `hints._names_another`) | memory `test_tool_learning.py` B11 tests |
