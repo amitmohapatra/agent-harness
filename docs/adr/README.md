@@ -10,6 +10,7 @@ and says so in both.
 | [0002](0002-tool-choice.md) | Tool choice is guarded by opt-in middleware, a warning-only check of the tool set, and per-item coverage | Accepted; amended 2026-10-28 (the middleware removed) |
 | [0003](0003-automatic-features.md) | ReAct turns native features on from signals, never from new settings | Accepted |
 | [0004](0004-provider-neutral-models.md) | Model access is provider-neutral: three strategies (route, auth, profile); configure the harness only, memory follows | Accepted |
+| [0005](0005-what-the-model-gets.md) | What the model gets: a context map, data cards, and built-in tools offered by run state | Proposed |
 
 The sibling repositories keep their own: the memory service's
 [docs/adr](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/adr/README.md)

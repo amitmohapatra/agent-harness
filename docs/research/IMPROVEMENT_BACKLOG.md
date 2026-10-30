@@ -16,6 +16,8 @@ reasonable it looks.
 **Status.** *exists*: on main. *in flight*: being built, on the branch named. *next*: the
 next to build, once measured. *later*: deliberately deferred.
 
+The target shape of what the model gets (context map, data cards, built-in tools by run state) is [ADR 0005](../adr/0005-what-the-model-gets.md) (proposed).
+
 Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7, a snapshot of
 2026-10-30) and [SELF_EXPLANATION.md](SELF_EXPLANATION.md) (the explain shortlist).
 
@@ -24,7 +26,11 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Gap | Status | Evidence |
 |---|---|---|
 | Follow-ups with pronouns: the memory query is the raw latest message | next (after the window work lands): query = latest message + the previous user turn when short | audit A1, M1 |
-| Messages sent mid-run (steer, interrupt, queue), memory-off history, stable message ids, session continuity | in flight: `claude/cool-maxwell-w5avo8-conv2` (#64) | audit A6, G6 |
+| Messages sent mid-run (steer, interrupt, queue), memory-off history, stable message ids, session continuity | exists (#64) | audit A6, G6 |
+| `mode` (queue / interrupt / steer) on AG-UI, A2A and `start()`: today only `run()` and `stream()` take it | next | #64 |
+| A steered message reaches OpenAI Agents and Claude models but is recorded after the question in their transcripts: record messages in the order they came | later | #64 |
+| Claude and ACP sessions are kept per process: a turn on another worker starts a new session (it falls back to the run store's history or the memory window) | later | #64 |
+| The memory service keys threads by tenant and thread only: the harness passes the scoped conversation key, but a direct memory API user can still collide; consider scoping in memory | later | #63, #64 |
 | Conversation scoped by tenant, user and thread | exists (#63) | audit J1 (memory side) |
 | agent-runs reads are tenant-wide for every key | in flight: user-scoped threads | audit J1 |
 | Window fixed at 2,000 tokens; a large turn drops out | in flight: memory `claude/cool-maxwell-w5avo8-winbudget` (#62), harness/memory `-explain2` (#62/#64, arm C) | audit A1, A4, K3, M4 |
