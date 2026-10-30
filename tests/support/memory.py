@@ -135,7 +135,7 @@ class FakeMemoryService:
     failures: dict[str, int | str] = field(default_factory=dict)
     #: the ``Retry-After`` (seconds) a 429 or 503 carries
     retry_after: str = "0"
-    #: whether model keys can be registered (the service's credential encryption is
+    #: whether model endpoints can be registered (the service's credential encryption is
     #: configured); without, ``PUT /v1/agents/model-key`` answers what the service does
     model_keys: bool = True
     #: feedback by id, each stored once however often it is sent
@@ -687,7 +687,17 @@ class FakeMemoryService:
         return {"tools": [_catalog_tool(t["name"], t) for t in call.body["tools"]]}
 
     def _model_key(self, call: Call) -> dict[str, Any]:
-        return {"registered": True, "revoked": False, "revision": 1}
+        """The status the service answers: the endpoint as it keeps it, never its key."""
+        endpoint = dict(call.body["endpoint"])
+        endpoint["has_api_key"] = endpoint.pop("api_key", None) is not None
+        return {
+            "registered": True,
+            "revoked": False,
+            "revision": 1,
+            "endpoint": endpoint,
+            "source": "agent",
+            "reason": "the agent's registered endpoint",
+        }
 
     def _id(self, prefix: str) -> str:
         return f"{prefix}_{next(self._ids)}"

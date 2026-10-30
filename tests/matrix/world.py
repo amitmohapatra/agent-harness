@@ -351,8 +351,9 @@ class World:
         self.monkeypatch.setattr(agent_module, "GROUNDING_SAMPLE", sample)
         self.monkeypatch.setattr(evals, "JUDGE_SAMPLE", sample)
         settings = Settings(
-            bifrost_virtual_key="vk" if "gateway" in on else None,
-            bifrost_url=GATEWAY_URL if "gateway" in on else None,
+            llm_api_key="vk" if "gateway" in on else None,
+            llm_base_url=GATEWAY_URL if "gateway" in on else None,
+            llm_gateway="bifrost" if "gateway" in on else None,
         )
         memory = self.memory_service.client() if "memory" in on else False
         gateway = self.fake_gateway.gateway() if "gateway" in on else False

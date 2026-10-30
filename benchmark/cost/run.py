@@ -364,7 +364,8 @@ def environment() -> dict[str, Any]:
             name: bool(os.environ.get(name, "").strip())
             for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
         },
-        "bifrost": bool(os.environ.get("BIFROST_URL", "").strip()),
+        "bifrost": os.environ.get("LLM_GATEWAY", "").strip() == "bifrost"
+        and bool(os.environ.get("LLM_BASE_URL", "").strip()),
     }
 
 

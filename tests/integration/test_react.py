@@ -107,8 +107,9 @@ async def test_a_loop_that_never_answers_is_stopped(harness: Harness) -> None:
 
 @respx.mock
 async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")
-    monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
+    monkeypatch.setenv("LLM_BASE_URL", "http://gw.test/v1")
+    monkeypatch.setenv("LLM_API_KEY", "vk")
+    monkeypatch.setenv("LLM_GATEWAY", "bifrost")
     respx.post("http://gw.test/mcp").mock(
         return_value=httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
     )
@@ -127,7 +128,7 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
     graph = ReAct(system_prompt="s", model="provider/model", context_window=50_000)
     assert context_window(graph) == 50_000
     async with Harness(
-        config=Settings(bifrost_url="http://gw.test/v1", bifrost_virtual_key="vk")
+        config=Settings(llm_gateway="bifrost", llm_base_url="http://gw.test/v1", llm_api_key="vk")
     ) as h:
         agent = h.wrap(graph, id="named")
         result = await agent.run("x", user="u")
@@ -147,7 +148,8 @@ def test_each_event_loop_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPatch
 
     from trellis.harness.gateways import routed_chat_model
 
-    monkeypatch.setenv("BIFROST_URL", "http://gw.test/v1")
+    monkeypatch.setenv("LLM_BASE_URL", "http://gw.test/v1")
+    monkeypatch.setenv("LLM_GATEWAY", "bifrost")
     made: list[httpx.AsyncClient] = []
 
     def client(**params: Any) -> httpx.AsyncClient:
@@ -168,7 +170,7 @@ def test_each_event_loop_has_a_client_of_its_own(monkeypatch: pytest.MonkeyPatch
 async def test_a_name_whose_provider_cannot_be_told_fails_the_run_saying_why(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("BIFROST_URL", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
     graph = ReAct(system_prompt="s", model="granite")  # built: the route is the run's to choose
     async with Harness(config=Settings()) as h:
         result = await h.wrap(graph, id="unnamed").run("x", user="u")

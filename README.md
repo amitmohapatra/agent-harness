@@ -46,7 +46,7 @@ def reorder(sku: str, qty: int) -> str:
 
 target = ReAct(
     system_prompt="You keep stock above 10 units.",
-    model="openai/gpt-4.1-mini",  # through Bifrost when BIFROST_URL is set, else OPENAI_API_KEY
+    model="openai/gpt-4.1-mini",  # to LLM_BASE_URL when it is set, else OPENAI_API_KEY
     tools=[stock, reorder],
 )
 ```
@@ -96,19 +96,24 @@ every setting and argument: [docs/configuration.md](docs/configuration.md#where-
 
 | Place | What goes there |
 |---|---|
-| the environment | where each service is and its key: `BIFROST_URL`, `BIFROST_VIRTUAL_KEY`, `MEMORY_URL`, `RUNS_URL`, `TRELLIS_API_KEY` (and `OTEL_*`, `LANGFUSE_*`, the providers' keys, read by their own SDKs) |
+| the environment | where the models and each service are and their keys: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_GATEWAY`, `LLM_AUTH`, `MEMORY_URL`, `RUNS_URL`, `TRELLIS_API_KEY` (and `OTEL_*`, `LANGFUSE_*`, the providers' keys, read by their own SDKs) |
 | the services | Bifrost: model routing, fallbacks, budgets, MCP tools, stored prompts; the memory catalog: tool risk and approval rules; agent-runs: schedules |
 | the builder (`ReAct` or your framework's) | the model, the instructions, the tools, the output schema, sub-agents |
 | `h.wrap(...)` | every run of the agent: `hooks`, `judges`, `budget`, `run_timeout`, `without`, `framework_options` |
 | `agent.run(...)` | this run: `user`, `thread`, `run_timeout`, `deadline`, `budget`, `without`, `framework_options` |
 
-### Bifrost or a provider key
+### Any provider: an endpoint, Bifrost, or a provider key
 
-A model name is routed one way for every framework. With `BIFROST_URL` set, every model call
-goes through Bifrost on `BIFROST_VIRTUAL_KEY` — and Bifrost wins when a provider key is set
-too. Without it, a name goes to its provider's own SDK, which reads its own key
-(`OPENAI_API_KEY`, `OPENAI_BASE_URL` for any OpenAI-compatible endpoint, `ANTHROPIC_API_KEY`):
-models only — the MCP tools, Code Mode, stored prompts and dollar budgets are Bifrost's
+A model name is routed one way for every framework. With `LLM_BASE_URL` set, every model call
+goes to that OpenAI-compatible endpoint — OpenAI, OpenRouter, a LiteLLM proxy, Ollama, vLLM,
+llama.cpp, Anthropic's or Gemini's compatible endpoints — on `LLM_API_KEY` (or a Google or AWS
+login: `LLM_AUTH=google`, `aws`), and it wins when a provider key is set too;
+`LLM_GATEWAY=bifrost` makes it Bifrost, whose MCP tools, Code Mode, stored prompts, skills and
+dollar budgets come with it. Without it, a name goes to its provider's own SDK, which reads
+its own key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`...; the providers beyond
+OpenAI are extras: `trellis-harness[anthropic]`, `[gemini]`, `[vertex]`, `[bedrock]`): models
+only. The memory service is told the agent's endpoint, so its own model work follows the
+harness's configuration
 ([configuration.md](docs/configuration.md#where-a-model-name-goes),
 [examples/05_features/model_routing.py](examples/05_features/model_routing.py)).
 
@@ -121,7 +126,7 @@ models only — the MCP tools, Code Mode, stored prompts and dollar budgets are 
 | `ReAct`'s harness part in my own `create_agent` / `create_deep_agent` | `create_deep_agent(model, tools, middleware=middleware())` | [react.md](docs/frameworks/react.md#middleware-on-your-own-graph) |
 | the agent to remember the user | `export MEMORY_URL=... TRELLIS_API_KEY=...` | [memory.md](docs/memory.md) |
 | a tool of my own | `ReAct(..., tools=[lookup])`, or your framework's own tool (governed as it runs) | [tools.md](docs/tools.md) |
-| the gateway's MCP tools | `export BIFROST_URL=... BIFROST_VIRTUAL_KEY=...` | [gateway.md](docs/gateway.md) |
+| the gateway's MCP tools | `export LLM_BASE_URL=... LLM_GATEWAY=bifrost LLM_API_KEY=...` | [gateway.md](docs/gateway.md) |
 | a person to approve a risky call | `@tool(side_effects="irreversible")`, then `agent.resume(id, "approve", reviewer="lee")` | [governance.md](docs/governance.md) |
 | to ask a person something | `await trellis.current().ask("Which plan?", options=["basic", "pro"])` | [interrupts.md](docs/interrupts.md) |
 | a rule of my own around calls | `h.wrap(target, id="a", hooks=[MyRule()])` | [hooks.md](docs/hooks.md) |
@@ -229,8 +234,8 @@ only `trellis.memory`, `trellis.runs` or `trellis.contracts` installs that one s
 
 ## Configuration
 
-The environment holds the endpoints and keys: `BIFROST_URL`, `BIFROST_VIRTUAL_KEY`,
-`TRELLIS_JUDGE_VIRTUAL_KEY` (optional), `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL` and
+The environment holds the endpoints and keys: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_GATEWAY`,
+`LLM_AUTH`, `TRELLIS_JUDGE_VIRTUAL_KEY` (optional), `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL` and
 `TRELLIS_SPOOL_DIR`; the tools' own standard variables (`OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`,
 the providers' keys) are read by their SDKs. Everything else is in
 code; `trellis doctor` prints each setting and where it came from. Each one, its default, an
@@ -262,7 +267,7 @@ make examples      # every example, offline, in parallel
 make matrix        # the generated feature matrix (build/matrix.md)
 make docs-check    # links, anchors, and every snippet against the real API
 make bench         # the overhead benchmark against benchmark-results.json
-make test-live     # opt-in tests against BIFROST_URL / MEMORY_URL / RUNS_URL / TRELLIS_API_KEY
+make test-live     # opt-in tests against LLM_BASE_URL / MEMORY_URL / RUNS_URL / TRELLIS_API_KEY
 ```
 
 `make test-live` reads the deployment environment and skips whatever is unset or unreachable;

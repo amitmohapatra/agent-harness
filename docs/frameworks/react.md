@@ -42,7 +42,7 @@ def temperature(city: str) -> float:
 h = Harness()
 target = ReAct(
     system_prompt="You give weather advice. Use the tool, then answer.",
-    model="provider/model",  # through Bifrost with BIFROST_URL, else the provider's own key
+    model="provider/model",  # to LLM_BASE_URL when set, else the provider's own key
     tools=[temperature],
     response_format=Forecast,  # optional: the answer parsed into it
 )

@@ -14,7 +14,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions
 
 from tests.live.conftest import (
-    BIFROST_URL,
+    GATEWAY_URL,
     MODEL,
     claude_cli_env,
     live_harness,
@@ -31,7 +31,7 @@ pytestmark = [pytest.mark.live, needs_gateway, needs_claude_cli]
 
 @pytest.mark.timeout(600)
 async def test_claude_runs_through_the_gateway_and_resumes_its_session(cli_home: Path) -> None:
-    assert BIFROST_URL is not None
+    assert GATEWAY_URL is not None
     closed: list[str] = []
 
     @tool(side_effects="irreversible")

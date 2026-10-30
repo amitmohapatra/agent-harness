@@ -22,10 +22,10 @@ pip install -e '../agent-harness[openai-agents]'   # governance, evals, the Open
 pip install -e ../agent-runs/sdk/python             # trellis.runs (the harness brings it too)
 ```
 
-Set `MEMORY_URL`, `RUNS_URL` and `TRELLIS_API_KEY` for the services, and `BIFROST_URL` for the
-judge (its judge alias, or `llm_judge(model=)`). Your model is your own
-(`OpenAIChatCompletionsModel(model=..., openai_client=AsyncOpenAI(base_url=BIFROST_URL))` to go
-through Bifrost).
+Set `MEMORY_URL`, `RUNS_URL` and `TRELLIS_API_KEY` for the services, and `LLM_BASE_URL` for the
+judge (with `LLM_GATEWAY=bifrost` its judge alias, else `llm_judge(model=)`). Your model is
+your own (`OpenAIChatCompletionsModel(model=..., openai_client=AsyncOpenAI(base_url=LLM_BASE_URL))`
+to go through the endpoint).
 
 ## The tools: governed and recorded
 

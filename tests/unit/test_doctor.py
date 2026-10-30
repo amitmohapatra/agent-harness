@@ -18,8 +18,9 @@ from trellis.harness.sandbox.docker import DOCKER_SOCKET, DockerSandbox, docker_
 from trellis.harness.settings import Settings
 
 ENV = {
-    "BIFROST_URL": "http://gw.test/v1",
-    "BIFROST_VIRTUAL_KEY": "vk-secret-1234",
+    "LLM_BASE_URL": "http://gw.test/v1",
+    "LLM_API_KEY": "vk-secret-1234",
+    "LLM_GATEWAY": "bifrost",
     "MEMORY_URL": "http://mem.test",
     "TRELLIS_API_KEY": "trk_secret_5678",
     "RUNS_URL": "http://runs.test",
@@ -29,8 +30,10 @@ ENV = {
 
 def test_the_settings_are_shown_with_their_sources_and_secrets_redacted() -> None:
     rows = {name: (value, source) for name, value, source in doctor.effective(ENV)}
-    assert rows["bifrost_url"] == ("http://gw.test/v1", "BIFROST_URL")
-    assert rows["bifrost_virtual_key"] == ("set (...1234)", "BIFROST_VIRTUAL_KEY")
+    assert rows["llm_base_url"] == ("http://gw.test/v1", "LLM_BASE_URL")
+    assert rows["llm_api_key"] == ("set (...1234)", "LLM_API_KEY")
+    assert rows["llm_gateway"] == ("bifrost", "LLM_GATEWAY")
+    assert rows["llm_auth"] == ("unset", "default")
     assert rows["api_key"][0] == "set (...5678)" and "secret" not in rows["api_key"][0]
     assert rows["spool_dir"] == ("unset", "default")
     assert set(rows) == set(Settings.model_fields)  # every setting, and nothing else
@@ -66,7 +69,8 @@ def memory_answers(
 
 @respx.mock
 async def test_each_service_is_reached_with_its_key(tmp_path: Path) -> None:
-    respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(200, json={}))
+    models = respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(200, json={}))
+    respx.post("http://gw.test/mcp").mock(return_value=httpx.Response(200, json={}))
     memory_answers(suggestions=False)
     respx.get("http://mem.test/v1/keys/self").mock(return_value=httpx.Response(401))
     respx.get("http://runs.test/v1/runs/doctor-check").mock(return_value=httpx.Response(404))
@@ -84,6 +88,8 @@ async def test_each_service_is_reached_with_its_key(tmp_path: Path) -> None:
     settings = Settings.from_env({**ENV, "TRELLIS_SPOOL_DIR": str(tmp_path)})
     found = {c.name: c for c in await doctor.checks(settings, agents=["buyer", "clerk", "buyer"])}
     assert found["gateway"].ok and found["runs"].ok and found["spool"].ok
+    assert found["gateway"].said == "http://gw.test/v1/models answered as bifrost (Bifrost)"
+    assert models.calls[0].request.headers["authorization"] == "Bearer vk-secret-1234"
     assert not found["memory"].ok and "refused the key (401)" in found["memory"].said
     # wire waits for a person; each agent asked once
     assert found["approval_rules"].said == "accepted: buyer: po (auto_approve); clerk: none"
@@ -114,6 +120,38 @@ async def test_a_service_down_or_failing_is_a_failed_check(tmp_path: Path) -> No
     ready = found["memory ready"]
     assert not ready.ok and "cannot be read (ConnectError)" in ready.said
     assert not found["memory version"].ok and "HTTPStatusError" in found["memory version"].said
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("env", "mcp", "ok", "said"),
+    [
+        ({"LLM_GATEWAY": "bifrost"}, 200, True, "answered as bifrost (Bifrost)"),
+        ({"LLM_GATEWAY": "bifrost"}, 404, False, "LLM_GATEWAY=bifrost, but http://gw.test/mcp"),
+        ({"LLM_GATEWAY": "bifrost"}, None, False, "the endpoint is not Bifrost"),
+        ({}, 404, True, "answered as openai-compatible (OpenAI-compatible endpoint)"),
+        ({}, 200, True, "answers MCP as Bifrost does: LLM_GATEWAY=bifrost turns on"),
+        ({"LLM_GATEWAY": "nowhere"}, 200, False, "LLM_GATEWAY='nowhere' names no route"),
+    ],
+)
+async def test_the_declared_route_is_checked_against_the_endpoint(
+    env: dict[str, str], mcp: int | None, ok: bool, said: str
+) -> None:
+    """A route with MCP (Bifrost) must answer MCP's ``tools/list`` at the endpoint's root; an
+    endpoint that does under another route is said to have more to give."""
+    respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(200, json={}))
+    listing = respx.post("http://gw.test/mcp")
+    if mcp is None:
+        listing.mock(side_effect=httpx.ConnectError("no"))
+    else:
+        listing.mock(return_value=httpx.Response(mcp, json={}))
+    settings = Settings.from_env({"LLM_BASE_URL": "http://gw.test/v1", **env})
+    [check] = await doctor.checks(settings)
+    assert check.name == "gateway" and check.ok is ok and said in check.said
+
+
+async def test_a_provider_sdk_route_is_not_asked() -> None:
+    assert await doctor.checks(Settings()) == []
 
 
 @respx.mock
@@ -171,7 +209,11 @@ def _model_key(agent: str, answer: httpx.Response) -> None:
 
 
 async def _model_key_said() -> doctor.Check:
-    settings = Settings(memory_url=MEM, api_key="k", bifrost_virtual_key="vk")
+    respx.get("http://llm.test/v1/models").mock(return_value=httpx.Response(200, json={}))
+    respx.post("http://llm.test/mcp").mock(return_value=httpx.Response(404))
+    settings = Settings(
+        memory_url=MEM, api_key="k", llm_base_url="http://llm.test/v1", llm_api_key="vk"
+    )
     [said] = [c for c in await doctor.checks(settings) if c.name == "model key"]
     return said
 
@@ -183,10 +225,30 @@ async def test_the_model_key_is_said_for_the_agents_the_key_names() -> None:
     _model_key("support", httpx.Response(200, json=status))
     _model_key("billing", httpx.Response(200, json={**status, "revoked": True, "revision": 3}))
     assert (await _model_key_said()).said == (
-        "support: registered (revision 2); billing: revoked (registered again at its next run)"
+        "support: registered (revision 2); billing: revoked (told again at its next run)"
     )
     _model_key("billing", httpx.Response(200, json={**status, "registered": False}))
-    assert (await _model_key_said()).said.endswith("billing: registered at its first run")
+    assert (await _model_key_said()).said.endswith("billing: told at its first run")
+    # what the service holds for the agent, and which endpoint its memory work uses now
+    endpoint = {
+        "base_url": "http://llm.test/v1",
+        "gateway": "openai-compatible",
+        "auth": "google",
+        "model": None,
+        "has_api_key": False,
+        "profile": {"reasoning_output": True, "temperature": False, "tool_calling": True},
+    }
+    held = {**status, "endpoint": endpoint, "source": "agent", "reason": "registered"}
+    _model_key("billing", httpx.Response(200, json=held))
+    plain = {**held, "endpoint": {**endpoint, "profile": {}}, "source": "service", "reason": ""}
+    _model_key("support", httpx.Response(200, json=plain))
+    assert (await _model_key_said()).said == (
+        "support: registered (revision 2): openai-compatible at http://llm.test/v1, auth google, "
+        "model the service picks, profile a plain chat model; its memory work uses the service "
+        "endpoint; billing: registered (revision 2): openai-compatible at http://llm.test/v1, "
+        "auth google, model the service picks, profile reasoning_output, tool_calling; its "
+        "memory work uses the agent endpoint (registered)"
+    )
     _model_key("support", httpx.Response(403))
     refused = await _model_key_said()
     assert not refused.ok and "refused the key (403)" in refused.said
@@ -195,10 +257,13 @@ async def test_the_model_key_is_said_for_the_agents_the_key_names() -> None:
 @respx.mock
 async def test_the_model_key_without_named_agents_or_a_virtual_key() -> None:
     memory_answers()
-    assert (await _model_key_said()).said.startswith("each agent registers BIFROST_VIRTUAL_KEY")
-    without = await doctor.checks(Settings(memory_url=MEM, api_key="k"))
-    [said] = [c.said for c in without if c.name == "model key"]
-    assert said.startswith("BIFROST_VIRTUAL_KEY unset")
+    assert (await _model_key_said()).said.startswith("each agent tells the memory service its")
+    for settings in (
+        Settings(memory_url=MEM, api_key="k"),
+        Settings(memory_url=MEM, api_key="k", llm_gateway="nowhere"),
+    ):
+        [said] = [c.said for c in await doctor.checks(settings) if c.name == "model key"]
+        assert said.startswith("no model endpoint to tell")
 
 
 @respx.mock
@@ -236,7 +301,7 @@ def test_main_prints_the_report_and_says_whether_everything_passed(
     out = capsys.readouterr().out
     assert out.startswith("Settings (value, and where it came from):") and "Checks:\n  none" in out
     respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(403))
-    assert doctor.main([], {"BIFROST_URL": "http://gw.test/v1"}) == 1
+    assert doctor.main([], {"LLM_BASE_URL": "http://gw.test/v1"}) == 1
 
 
 def test_the_cli_takes_doctor(monkeypatch: pytest.MonkeyPatch) -> None:

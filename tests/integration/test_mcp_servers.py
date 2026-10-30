@@ -153,7 +153,7 @@ async def test_a_server_over_http_with_its_token(harness: Harness, http_server: 
 async def gw(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Harness, FakeGateway]]:
     fake = FakeGateway()
     fake.serve_models(monkeypatch)
-    settings = Settings(bifrost_url=URL, bifrost_virtual_key="vk")
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
     async with Harness(config=settings, gateway=fake.gateway()) as made:
         yield made, fake
 

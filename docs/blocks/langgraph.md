@@ -25,8 +25,8 @@ pip install -e ../agent-runs/sdk/python         # trellis.runs (the harness brin
 ```
 
 `trellis.memory` and `trellis.contracts` come with them. Set `MEMORY_URL`, `RUNS_URL` and
-`TRELLIS_API_KEY` for the services, and `BIFROST_URL` for the judge (its judge alias, or
-`llm_judge(model=)`).
+`TRELLIS_API_KEY` for the services, and `LLM_BASE_URL` for the judge (with
+`LLM_GATEWAY=bifrost` its judge alias, else `llm_judge(model=)`).
 
 ## The tools: governed and recorded
 

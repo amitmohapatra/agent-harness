@@ -1,10 +1,13 @@
 # The Bifrost gateway
 
-The harness reaches models and MCP tools through Bifrost (`BIFROST_URL`, `BIFROST_VIRTUAL_KEY`):
-the tools a virtual key allows are the agent's ([tools.md](tools.md)), and every model name is
-routed through it ([configuration.md](configuration.md#models)). This page is the rest of what
-the harness uses of the gateway — stored prompts, who a tool call is for — and what it makes
-sure the gateway never does for a run. Nothing here is configured beyond the two variables.
+With Bifrost as its route (`LLM_GATEWAY=bifrost`, `LLM_BASE_URL` its `/v1` root, `LLM_API_KEY`
+the virtual key) the harness reaches models and MCP tools through it: the tools a virtual key
+allows are the agent's ([tools.md](tools.md)), and every model name is routed through it
+([configuration.md](configuration.md#models)). Any other OpenAI-compatible endpoint serves the
+models alone (`LLM_GATEWAY=openai-compatible`); what follows is Bifrost's. This page is the
+rest of what the harness uses of the gateway — stored prompts, who a tool call is for — and
+what it makes sure the gateway never does for a run. Nothing here is configured beyond the
+three variables.
 
 | You want | Use | Section |
 |---|---|---|
@@ -25,7 +28,7 @@ pointed at the gateway sends them itself (`bifrost_sdk.NO_GATEWAY_TOOLS`):
 from bifrost_sdk import NO_GATEWAY_TOOLS
 
 model = ChatOpenAI(
-    base_url=BIFROST_URL, api_key=VIRTUAL_KEY, model=MODEL, default_headers=NO_GATEWAY_TOOLS
+    base_url=LLM_BASE_URL, api_key=LLM_API_KEY, model=MODEL, default_headers=NO_GATEWAY_TOOLS
 )
 ```
 
@@ -120,7 +123,7 @@ def my_orders(ctx: Context) -> list[dict]:
 **Credentials the gateway holds per person.** The gateway keys them by the signed-in user, else
 the virtual key, else the session id: under one shared virtual key every run is the same
 "person". For a credential per person, give each person a virtual key and build their runs'
-harness with it — `Harness(config=Settings.from_env().model_copy(update={"bifrost_virtual_key":
+harness with it — `Harness(config=Settings.from_env().model_copy(update={"llm_api_key":
 key_of(person)}))`, the key resolved by your application as it resolves a person's agent-runs
 key ([onboarding.md](onboarding.md#4-optional-a-key-per-person-for-an-approvals-ui)) — or have
 the server take a token from a header of its own that your gateway forwards.

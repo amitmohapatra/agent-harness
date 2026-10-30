@@ -10,9 +10,10 @@ from typing import Any, cast
 import httpx
 import pytest
 import respx
+from pydantic import SecretStr
 
 from tests.support.memory import AGENT_TOOLS, FakeMemoryService
-from trellis.contracts import ToolCall, ToolError, ToolOutcome
+from trellis.contracts import Endpoint, ToolCall, ToolError, ToolOutcome
 from trellis.harness import runtime as runtime_module
 from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
@@ -357,13 +358,21 @@ async def test_records_carry_idempotency() -> None:
     assert feedback.body["source"] == "system" and feedback.idempotency_key == "run_1:outcome"
 
 
-async def test_the_model_key_is_registered_once_in_the_agents_scope() -> None:
+async def test_the_model_endpoint_is_registered_in_the_agents_scope() -> None:
+    """The whole endpoint, its key in plain (``SecretStr`` masks it); a key rotated or an
+    endpoint moved is a new request, the same one repeated is not."""
     service = FakeMemoryService()
-    await memory(service).scoped("t", "a").register_model_key("sk")
-    [key] = service.named("model_key")
-    assert key.body["virtual_key"] == "sk"
-    assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:a:")
-    assert key.scope == {"tenant_id": "t", "agent_id": "a", "custom_metadata": {}}
+    scoped = memory(service).scoped("t", "a")
+    endpoint = Endpoint(base_url="http://llm.test/v1", api_key=SecretStr("sk"))
+    await scoped.register_endpoint(endpoint)
+    await scoped.register_endpoint(endpoint)
+    await scoped.register_endpoint(endpoint.model_copy(update={"api_key": SecretStr("sk-2")}))
+    await scoped.register_endpoint(Endpoint(base_url="https://login.test/v1", auth="google"))
+    first, again, rotated, login = service.named("model_key")
+    assert first.body["endpoint"]["api_key"] == "sk" and login.body["endpoint"]["api_key"] is None
+    assert first.idempotency_key is not None and first.idempotency_key.startswith("model-key:a:")
+    assert first.idempotency_key == again.idempotency_key != rotated.idempotency_key
+    assert first.scope == {"tenant_id": "t", "agent_id": "a", "custom_metadata": {}}
 
 
 @respx.mock

@@ -30,8 +30,9 @@ GATEWAY = "http://gw.test/v1"
 
 @pytest.fixture(autouse=True)
 def _gateway(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setenv("BIFROST_URL", GATEWAY)
-    monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "vk")
+    monkeypatch.setenv("LLM_BASE_URL", GATEWAY)
+    monkeypatch.setenv("LLM_GATEWAY", "bifrost")
+    monkeypatch.setenv("LLM_API_KEY", "vk")
     for cached in (react._unknown, budget._no_cost):
         cached.cache_clear()
     yield
@@ -54,7 +55,10 @@ def stock(sku: str) -> int:
 
 
 def harness() -> Harness:
-    return Harness(config=Settings(bifrost_url=GATEWAY, bifrost_virtual_key="vk"), gateway=False)
+    return Harness(
+        config=Settings(llm_gateway="bifrost", llm_base_url=GATEWAY, llm_api_key="vk"),
+        gateway=False,
+    )
 
 
 def completion(content: str = "ok", *, model: str = "granite/g", **usage: int) -> dict[str, Any]:

@@ -14,11 +14,11 @@ below starts from what you are trying to do and names the call. The API itself i
 | A LangGraph graph, or a Deep Agent (`create_deep_agent`) | the compiled graph | Your graph keeps its control flow and its tools (governed as it runs them); `HarnessTools()` adds the harness's. Compile it with a checkpointer to resume in place. |
 | An OpenAI Agents SDK `Agent` | the `Agent` | Harness tools are added to a copy per run (your agent is not changed), narrowed per turn; the SDK's own `needs_approval` tools pause and resume from its `RunState`. |
 | A Claude Agent SDK setup | the `ClaudeAgentOptions` | Harness tools reach the CLI as one in-process MCP server (`mcp__trellis__*`); Claude Code's built-ins are governed through the SDK's permission callback; a pause resumes the CLI's session; the memory context is appended to your system prompt. |
-| No framework, but a model that should call tools | `ReAct(system_prompt=..., model="provider/model", tools=[...])` | LangChain's `create_agent` loop with the middleware a long run needs (context editing, summarization, large results kept as files) and the harness's (the tools narrowed per call, a step limit, stall detection, a `chat` span per model call), `response_format=` for a pydantic answer. A model name goes through Bifrost with `BIFROST_URL`, else to its provider with its own key; any LangChain chat model works instead. |
+| No framework, but a model that should call tools | `ReAct(system_prompt=..., model="provider/model", tools=[...])` | LangChain's `create_agent` loop with the middleware a long run needs (context editing, summarization, large results kept as files) and the harness's (the tools narrowed per call, a step limit, stall detection, a `chat` span per model call), `response_format=` for a pydantic answer. A model name goes to `LLM_BASE_URL` (Bifrost with `LLM_GATEWAY=bifrost`), else to its provider with its own key; any LangChain chat model works instead. |
 | Code that decides itself what happens (a workflow, a router, glue between agents) | an async function `(input, agent)` | No model of its own: call tools with `await agent.tools.call(...)`, ask with `await agent.ask(...)`, read `agent.context` and `agent.memory`. |
 
 Teams bring their own model objects pointed at Bifrost's OpenAI-compatible endpoint
-(`ChatOpenAI(base_url=BIFROST_URL, default_headers=NO_GATEWAY_TOOLS)`,
+(`ChatOpenAI(base_url=LLM_BASE_URL, default_headers=NO_GATEWAY_TOOLS)`,
 `OpenAIChatCompletionsModel(AsyncOpenAI(base_url=..., default_headers=...))`); the harness wraps
 agents, not models ([gateway.md](gateway.md)). Each target has a page with the lines to add to an
 existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.md),

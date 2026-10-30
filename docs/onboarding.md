@@ -62,8 +62,9 @@ The same environment for the process that runs the agents and for every worker:
 export TRELLIS_API_KEY=mk_...                # the service key from step 2
 export MEMORY_URL=https://memory.example.com
 export RUNS_URL=https://runs.example.com      # durable runs, the inbox, workers, schedules
-export BIFROST_URL=https://bifrost.example.com/v1   # MCP tools and model names, when used
-export BIFROST_VIRTUAL_KEY=sk-bf-...                # the agent's models, tools and budget
+export LLM_BASE_URL=https://bifrost.example.com/v1  # model names (any OpenAI-compatible endpoint)
+export LLM_GATEWAY=bifrost                          # Bifrost: its MCP tools, prompts, cost too
+export LLM_API_KEY=sk-bf-...                        # the agent's models, tools and budget
 ```
 
 `Harness()` (and each block's `from_env`) reads exactly these; every variable is in

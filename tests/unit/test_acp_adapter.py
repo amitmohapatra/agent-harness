@@ -12,7 +12,7 @@ from trellis.contracts import ConfigurationError
 from trellis.harness import compat
 from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import KIMI, KIMI_HEADERS, ACPAdapter, given, kimi
-from trellis.harness.gateways import Bifrost, ProviderKey
+from trellis.harness.gateways import Bifrost, ProviderSDK
 
 
 def runtime(gateway: Any) -> Any:
@@ -40,7 +40,7 @@ def test_kimi_keeps_its_own_endpoint_and_is_said_once_as_not_routed(
     theirs = {"KIMI_MODEL_BASE_URL": "https://api.moonshot.ai/v1"}
     with caplog.at_level("INFO", logger="trellis.harness"):
         acp._kimi_routed(theirs, runtime(bifrost), "kimi-k2")
-        acp._kimi_routed({}, runtime(ProviderKey()), None)
+        acp._kimi_routed({}, runtime(ProviderSDK()), None)
     assert theirs == {
         "KIMI_MODEL_BASE_URL": "https://api.moonshot.ai/v1",
         "KIMI_MODEL_NAME": "kimi-k2",

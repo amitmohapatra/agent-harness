@@ -19,7 +19,7 @@ SWITCHES: Final[tuple[Switch, ...]] = (
     Switch(
         "gateway",
         "the Bifrost gateway (MCP tools, stored prompts)",
-        "BIFROST_URL, or Harness(gateway=); off: gateway=False",
+        "LLM_GATEWAY=bifrost, or Harness(gateway=); off: gateway=False",
     ),
     Switch("judges", "online judges", "h.wrap(judges=[...]) (llm_judge(sample=))"),
     Switch(

@@ -51,6 +51,7 @@ from trellis.harness.adapters.base import (
     context_window,
     declared_tools,
     merged,
+    model_name,
 )
 from trellis.harness.adapters.langgraph import checkpointing, hitl_response, is_hitl
 from trellis.harness.bounded import LRU
@@ -211,6 +212,9 @@ class Agent:
         self.adapter.check_options(self.framework_options)
         #: the pushed context's token budget: a share of the model's window when it is known
         self.context_budget = context_budget(context_window(target))
+        #: the name of the agent's model when its builder says it (``ReAct``): what the
+        #: memory service is told with the endpoint, with its profile
+        self.model = model_name(target)
         #: the tools the harness runs for the agent: what its builder declares
         #: (``ReAct(tools=, subagents=)``); besides them every run has the MCP tools the
         #: virtual key allows and the memory tools (``tools_for``)
@@ -755,7 +759,7 @@ class Agent:
         memory = self.harness.memory
         if memory is None or without | self.without >= MEMORY:
             return None
-        await self.harness._registered(memory, identity)
+        await self.harness._registered(memory, identity, self.model)
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:

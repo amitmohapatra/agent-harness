@@ -86,7 +86,9 @@ async def test_the_gateways_prompts_by_number_rendered_and_as_messages() -> None
 
 
 async def test_a_stored_prompt_needs_the_gateway() -> None:
-    with pytest.raises(ConfigurationError, match="a stored prompt of the gateway: set BIFROST_URL"):
+    with pytest.raises(
+        ConfigurationError, match="a stored prompt of the gateway: set LLM_GATEWAY=bifrost"
+    ):
         await Prompts(None).get("triage@2")
 
 

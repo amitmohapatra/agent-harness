@@ -40,7 +40,8 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   and its own usage log (``usage.record``, every model request of every agent, sub-agents
   included) is read as the turn runs — tokens only (dollars need the gateway's log: not yet);
   past the budget the turn is cancelled;
-* models: with Bifrost serving the harness and a ``model`` named, Kimi's model calls go through
+* models: with a route that attributes calls (``Capability.ATTRIBUTION``: Bifrost) serving the
+  harness and a ``model`` named, Kimi's model calls go through
   Bifrost's OpenAI route with the virtual key, carrying the deny-all MCP scope, the run's
   dimensions and its ``traceparent`` as ``KIMI_CODE_CUSTOM_HEADERS`` lines;
 * stalls: a model step that sends nothing for ``runtime.STALL_SECONDS`` (the time a tool call
@@ -91,7 +92,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
-from trellis.harness.gateways import NO_KEY, Bifrost
+from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
@@ -214,13 +215,14 @@ class Profile:
 
 
 def _kimi_routed(env: dict[str, str], runtime: Runtime, model: str | None) -> None:
-    """Kimi's model calls through Bifrost when it serves the harness and the agent names its
+    """Kimi's model calls through Bifrost when it serves the harness (a route with
+    ``Capability.ATTRIBUTION``) and the agent names its
     model (its own ``KIMI_MODEL_BASE_URL`` wins): Bifrost's OpenAI route, the virtual key, and —
     on Bifrost's route — its headers as ``KIMI_CODE_CUSTOM_HEADERS`` lines beside the agent's
     own: the deny-all MCP scope, the run's dimensions and its ``traceparent``. Elsewhere Kimi
     calls the model it is configured with (said once)."""
     gateway = runtime.agent.harness.model_gateway
-    bifrost = gateway if isinstance(gateway, Bifrost) else None
+    bifrost = cast("OpenAICompatible", gateway) if gateway.has(Capability.ATTRIBUTION) else None
     if bifrost is not None and model and "KIMI_MODEL_BASE_URL" not in env:
         env["KIMI_MODEL_PROVIDER_TYPE"] = "openai"
         env["KIMI_MODEL_BASE_URL"] = bifrost.url
@@ -240,7 +242,7 @@ def _kimi_routed(env: dict[str, str], runtime: Runtime, model: str | None) -> No
 @functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent, of the most recent
 def _unrouted(agent_id: str) -> None:
     log.info(
-        "Kimi's model calls do not go through Bifrost (no BIFROST_URL, no model= named, or "
+        "Kimi's model calls do not go through Bifrost (no LLM_GATEWAY=bifrost, no model= named, or "
         "the agent's own KIMI_MODEL_BASE_URL): the gateway does not attribute them to the "
         "run; their tokens are counted from Kimi's usage log",
         extra={"agent_id": agent_id},

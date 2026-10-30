@@ -2,17 +2,18 @@
 
 Each piece is real when its variable is set and scripted when it is not:
 
-* the model — with ``BIFROST_URL``, a real one through Bifrost's OpenAI-compatible endpoint
+* the model — with Bifrost set (``LLM_BASE_URL``, ``LLM_GATEWAY=bifrost``), a real one through
+  Bifrost's OpenAI-compatible endpoint
   (:data:`MODEL`); else a scripted one that answers from a fixed script. The harness, the
   frameworks and the tools are always real; only the model's choices are written down;
 * the memory service — with ``MEMORY_URL`` (and ``TRELLIS_API_KEY``), the real one; else
   :class:`~examples._support.memory.ScriptedMemory`, in process (:func:`offline_blocks`,
   :func:`memory_client`);
-* the gateway's MCP tools — with ``BIFROST_URL``, the tools its virtual key allows; else
+* the gateway's MCP tools — with Bifrost set, the tools its virtual key allows; else
   :class:`~examples._support.gateway.ScriptedGateway`, serving the example's own functions;
 * runs — with ``RUNS_URL``, agent-runs; else the harness's in-process store, which takes the
   same calls (:func:`runs_store`);
-* the judge — with ``BIFROST_URL``, the gateway's judge alias; else :class:`Judging`.
+* the judge — with Bifrost set, the gateway's judge alias; else :class:`Judging`.
 """
 
 from __future__ import annotations
@@ -46,12 +47,14 @@ Turns = Turn | list[tuple[str, dict[str, Any]]]
 
 
 def online() -> bool:
-    return bool(os.environ.get("BIFROST_URL"))
+    """Whether a real Bifrost serves the examples: ``LLM_BASE_URL`` with ``LLM_GATEWAY=bifrost``
+    (its model names, MCP tools, Anthropic route and judge alias are what they use)."""
+    return bool(os.environ.get("LLM_BASE_URL")) and os.environ.get("LLM_GATEWAY") == "bifrost"
 
 
 def gateway() -> tuple[str, str]:
     """Bifrost's base URL and virtual key, for a framework's own OpenAI client."""
-    return os.environ["BIFROST_URL"], os.environ.get("BIFROST_VIRTUAL_KEY") or "unused"
+    return os.environ["LLM_BASE_URL"], os.environ.get("LLM_API_KEY") or "unused"
 
 
 # --------------------------------------------------------------------------- LangChain
@@ -238,7 +241,7 @@ def offline_blocks(
 ) -> dict[str, Any]:
     """The blocks the environment does not name, scripted, for ``Harness(**offline_blocks())``:
     the memory service unless ``MEMORY_URL`` is set, the gateway (serving ``mcp``) unless
-    ``BIFROST_URL`` is. What is set is the deployment's, as ``Harness()`` reads it."""
+    Bifrost is set. What is set is the deployment's, as ``Harness()`` reads it."""
     blocks: dict[str, Any] = {}
     if not os.environ.get("MEMORY_URL"):
         blocks["memory"] = (memory or ScriptedMemory()).client()

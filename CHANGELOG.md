@@ -3,6 +3,45 @@
 What changed in each release of `trellis-harness`. The framework versions each release was
 tested with are in [docs/versioning.md](docs/versioning.md).
 
+## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
+
+Model access is provider-neutral ([ADR 0004](docs/adr/0004-provider-neutral-models.md)): a
+model name goes to any OpenAI-compatible endpoint, to Bifrost, or to the provider's own SDK,
+chosen by name from one registry, and the memory service is told the agent's endpoint so its
+own model work follows the harness's configuration.
+
+### Breaking
+
+- `BIFROST_URL` and `BIFROST_VIRTUAL_KEY` are gone, with no alias: `LLM_BASE_URL` (the
+  endpoint's `/v1` root) and `LLM_API_KEY` (its bearer key; Bifrost's virtual key), with
+  `LLM_GATEWAY=bifrost` for Bifrost. `Settings(bifrost_url=, bifrost_virtual_key=)` are
+  `Settings(llm_base_url=, llm_api_key=, llm_gateway=, llm_auth=)`. An endpoint without
+  `LLM_GATEWAY` is `openai-compatible`: model names as given, models only.
+- `trellis.harness.gateways`: `ProviderKey` is `ProviderSDK`, `GatewayKind` is each route's
+  `name` (its `LLM_GATEWAY` value), `bifrost_wins` is the route's `announce`; `GATEWAYS` maps
+  names to routes and `model_gateway` picks from `registry()`.
+- The memory service is sent the agent's whole model endpoint (`trellis.contracts.Endpoint`)
+  where it took a virtual key (`MemoryScope.register_endpoint`, was `register_model_key`),
+  needing trellis-memory with endpoint registration; trellis-contracts 0.6.3 and bifrost-sdk 0.4.
+
+### Added
+
+- `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
+  `LLM_GATEWAY` from one registry that packages extend under the entry-point group
+  `trellis.gateways`. Bifrost's features ask `gateway.has(Capability.X)`; new capabilities
+  `SKILLS` and `ANTHROPIC_ROUTE` (the Claude Agent SDK's routed environment).
+- `LLM_AUTH`: bifrost-sdk's auth strategies by name — `bearer`, `google` (a refreshed Google
+  token), `aws` (SigV4) — on every model client, the judge and `doctor`'s probe.
+- Optional extras `trellis-harness[anthropic]`, `[gemini]`, `[vertex]`, `[bedrock]` (the last
+  two with bifrost-sdk's `[google]` and `[aws]` login strategies); `vertex:` and `bedrock:`
+  model names for LangChain's `init_chat_model`.
+- `trellis doctor` names the route, its auth and where model profiles come from, checks the
+  declared route against the endpoint (a `bifrost` route must answer MCP), and refuses
+  settings that fit no route with the reason.
+- A conformance suite over every registered route, auth strategy and profile against stubs of
+  OpenAI's chat completions, the Anthropic, Gemini, Ollama and Bifrost endpoints that speak it,
+  a Google token refresh and an AWS SigV4 signature recomputed from the specification.
+
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
 `ReAct` is LangChain's `create_agent` with the harness's part on top, and Deep Agents'

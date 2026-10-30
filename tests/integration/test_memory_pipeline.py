@@ -29,6 +29,7 @@ from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import telemetry
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.governance import catalog
+from trellis.harness.identity import Identity
 from trellis.memory.models import ToolHints
 
 
@@ -532,61 +533,119 @@ async def test_an_approval_decision_is_feedback_on_the_tool_call(
     assert feedback.body["metadata"]["args"] == {"disk": "d1"}
 
 
-async def test_the_virtual_key_is_registered_as_the_model_key_once_per_agent(
+ENDPOINT = "http://llm.test/v1"
+
+
+async def ok(input: str, agent: Runtime) -> str:
+    return "ok"
+
+
+async def test_each_agent_tells_the_memory_service_its_model_endpoint_once(
     memory_service: FakeMemoryService,
 ) -> None:
-    async with harness_with(memory_service, bifrost_virtual_key="sk-bf-agent") as h:
-
-        async def fn(input: str, agent: Runtime) -> str:
-            return "ok"
-
-        agent = h.wrap(fn, id="keyed")
+    """The route's whole endpoint, its key in plain, once per process and agent; the agent's
+    model and its profile when its builder names one (``ReAct``)."""
+    settings = {"llm_base_url": ENDPOINT, "llm_api_key": "sk-agent"}
+    async with harness_with(memory_service, **settings) as h:
+        agent = h.wrap(ok, id="keyed")
         await agent.run("a", user="u")
         await agent.run("b", user="u")
+        named = h.wrap(ReAct(system_prompt="s", model="openai/o3"), id="named")
+        assert named.model == "openai/o3" and agent.model is None
+        assert h.memory is not None
+        whose = Identity(tenant="acme", user="u", agent_id="named", run_id="r1")
+        await h._registered(h.memory, whose, named.model)
         await h.writes.drain()
-    [key] = memory_service.named("model_key")
-    assert key.body["virtual_key"] == "sk-bf-agent"
-    assert key.idempotency_key is not None and key.idempotency_key.startswith("model-key:keyed:")
-    assert key.scope["agent_id"] == "keyed" and "user_id" not in key.scope
+    first, second = memory_service.named("model_key")
+    assert first.body["endpoint"] == {
+        "base_url": ENDPOINT,
+        "gateway": "openai-compatible",
+        "auth": "bearer",
+        "model": None,
+        "api_key": "sk-agent",
+        "profile": {
+            "reasoning_output": False,
+            "temperature": True,
+            "max_output_tokens": None,
+            "tool_calling": True,
+        },
+    }
+    assert first.idempotency_key is not None and first.idempotency_key.startswith(
+        "model-key:keyed:"
+    )
+    assert first.scope["agent_id"] == "keyed" and "user_id" not in first.scope
+    assert second.body["endpoint"]["model"] == "openai/o3"  # as the route names it
+    profile = second.body["endpoint"]["profile"]
+    assert profile["reasoning_output"] is True and profile["temperature"] is False
 
 
-async def test_a_service_that_takes_no_model_keys_is_told_once(
+@pytest.mark.parametrize(
+    ("settings", "told"),
+    [
+        ({"llm_base_url": ENDPOINT, "llm_auth": "google"}, {"auth": "google", "api_key": None}),
+        (
+            {"llm_base_url": ENDPOINT, "llm_gateway": "bifrost", "llm_api_key": "vk"},
+            {"gateway": "bifrost", "api_key": "vk"},
+        ),
+        ({}, None),  # the providers' own SDKs: their keys are theirs, nothing is told
+    ],
+    ids=["login", "bifrost", "provider sdk"],
+)
+async def test_a_login_sends_no_secret_and_the_provider_sdks_nothing(
+    memory_service: FakeMemoryService, settings: dict[str, Any], told: dict[str, Any] | None
+) -> None:
+    async with harness_with(memory_service, **settings) as h:
+        await h.wrap(ok, id="a").run("x", user="u")
+        await h.writes.drain()
+    sent = [call.body["endpoint"] for call in memory_service.named("model_key")]
+    assert sent == ([] if told is None else [sent[0] | told])
+
+
+async def test_a_service_that_takes_no_endpoints_is_told_once(
     memory_service: FakeMemoryService, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Credential encryption off in the memory service: the registration is logged once per
     process and never asked again, and no failed write is reported for it."""
     memory_service.model_keys = False
-
-    async def fn(input: str, agent: Runtime) -> str:
-        return "ok"
-
-    async with harness_with(memory_service, bifrost_virtual_key="sk-bf-agent") as h:
+    async with harness_with(memory_service, llm_base_url=ENDPOINT, llm_api_key="sk") as h:
         with caplog.at_level("INFO", logger="trellis.harness"):
-            await h.wrap(fn, id="a").run("x", user="u")
-            await h.wrap(fn, id="b").run("x", user="u")  # both asked before either answer
+            await h.wrap(ok, id="a").run("x", user="u")
+            await h.wrap(ok, id="b").run("x", user="u")  # both asked before either answer
             await h.writes.drain()
-            await h.wrap(fn, id="c").run("x", user="u")  # after the answer: not asked
+            await h.wrap(ok, id="c").run("x", user="u")  # after the answer: not asked
             await h.writes.drain()
         assert h.writes.failed == 0
-    assert caplog.text.count("takes no model keys") == 1
+    assert caplog.text.count("takes no model endpoints") == 1
     assert memory_service.named("model_key") == []  # refused each time it was asked: once
 
 
-async def test_a_model_key_registration_that_fails_otherwise_is_a_failed_write(
+async def test_an_endpoint_the_service_refuses_is_said_once(
+    memory_service: FakeMemoryService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One it cannot reach (a ``localhost`` only this machine reaches): a warning once, not a
+    failed write, and not asked again; the service's own settings serve."""
+    memory_service.failures["model_key"] = 422
+    async with harness_with(memory_service, llm_base_url="http://localhost:11434/v1") as h:
+        with caplog.at_level("WARNING", logger="trellis.harness"):
+            await h.wrap(ok, id="a").run("x", user="u")
+            await h.writes.drain()
+            await h.wrap(ok, id="b").run("x", user="u")
+            await h.writes.drain()
+        assert h.writes.failed == 0 and h._endpoints_off
+    assert caplog.text.count("refused http://localhost:11434/v1") == 1
+
+
+async def test_a_registration_that_fails_otherwise_is_a_failed_write(
     memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from trellis.harness import writes as writes_module
 
     monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.0)
     memory_service.fail.add("model_key")
-
-    async def fn(input: str, agent: Runtime) -> str:
-        return "ok"
-
-    async with harness_with(memory_service, bifrost_virtual_key="sk-bf-agent") as h:
-        await h.wrap(fn, id="a").run("x", user="u")
+    async with harness_with(memory_service, llm_base_url=ENDPOINT) as h:
+        await h.wrap(ok, id="a").run("x", user="u")
         await h.writes.drain()
-        assert h.writes.failed == 1 and not h._model_keys_off
+        assert h.writes.failed == 1 and not h._endpoints_off
 
 
 def test_a_memory_service_needs_the_api_key() -> None:

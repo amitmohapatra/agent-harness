@@ -1,9 +1,10 @@
 """``trellis doctor`` (``python -m trellis.harness.doctor``): the effective settings and where
 each came from — the environment variable, derived, detected, or the default — secrets
-redacted; which gateway serves model names and what it cannot do (``trellis.harness.gateways``);
-whether each service is reachable and takes its key — for the memory service also the key's
-role, the agents' model key, its readiness (``/health/ready``) and its version (``/version``);
-the approval rules accepted from the
+redacted; which route serves model names — its name, auth and profile, the endpoint checked
+against the route ``LLM_GATEWAY`` declares — and what it cannot do
+(``trellis.harness.gateways``); whether each service is reachable and takes its key — for the
+memory service also the key's role, the endpoint each agent told it, its readiness
+(``/health/ready``) and its version (``/version``); the approval rules accepted from the
 memory service's learned suggestions — learned and accepted per agent: those of each agent the
 key may act as, and of each ``--agent`` named (governance accepts them automatically, but for a
 tool at the highest risk); whether the spool can be written, and the memory writes that failed
@@ -28,10 +29,12 @@ from typing import Any, Final
 
 import httpx
 
+from trellis.contracts import ConfigurationError
 from trellis.harness.gateways import (
     CAPABILITIES,
-    GatewayKind,
+    Capability,
     ModelGateway,
+    OpenAICompatible,
     model_gateway,
     provider_keys,
 )
@@ -40,7 +43,7 @@ from trellis.harness.settings import Settings, service_version, sourced
 #: The settings whose values are secrets: shown as set, never as their value.
 SECRETS: Final = frozenset(
     {
-        "bifrost_virtual_key",
+        "llm_api_key",
         "api_key",
         "judge_virtual_key",
         "langfuse_secret_key",
@@ -52,12 +55,16 @@ SECRETS: Final = frozenset(
 CHECK_SECONDS: Final = 3.0
 #: Where the memory service lists the approval suggestions it learned.
 SUGGESTIONS_PATH: Final = "/v1/tools/approval-suggestions"
-#: Where it says what the key is, whether it is ready, which version it is, and an agent's
-#: model-key status.
+#: Where it says what the key is, whether it is ready, which version it is, and the model
+#: endpoint an agent told it.
 KEY_PATH: Final = "/v1/keys/self"
 READY_PATH: Final = "/health/ready"
 VERSION_PATH: Final = "/version"
 MODEL_KEY_PATH: Final = "/v1/agents/model-key"
+#: Where a gateway with MCP (``Capability.MCP``: Bifrost) answers MCP's JSON-RPC, under its
+#: root: the request ``doctor`` checks a declared route with.
+MCP_PATH: Final = "/mcp"
+MCP_LIST: Final = {"jsonrpc": "2.0", "id": "trellis-doctor", "method": "tools/list"}
 #: The memory service's readiness answers that still serve (``degraded``: an optional
 #: dependency is down).
 READY: Final = frozenset({"ready", "degraded"})
@@ -108,20 +115,32 @@ def effective(environ: Mapping[str, str] | None = None) -> list[tuple[str, str, 
 
 
 def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
-    """How model names are routed, what named the route, the provider keys it leaves unused
-    (Bifrost wins over them) and what is off without Bifrost."""
-    gateway = model_gateway(settings)
+    """How model names are routed — the route, its auth, where each model's profile comes
+    from —, the provider keys it leaves unused (an endpoint wins over them) and what is off on
+    the route."""
+    try:
+        gateway = model_gateway(settings)
+    except ConfigurationError as exc:
+        return [f"misconfigured: {exc}"]
     keys = provider_keys(environ)
-    if gateway.kind is GatewayKind.BIFROST:
-        lines = [f"{gateway.title} at {gateway.url} ({gateway.source})"]
+    lines = [f"route: {gateway.name} ({gateway.title}) at {gateway.where}"]
+    if gateway.url is not None:
+        key = ", with LLM_API_KEY" if gateway.key else ""
+        lines.append(f"auth: {gateway.auth}{key}")
         if keys:
             lines.append(
-                f"note: {', '.join(keys)} set, not used for model calls: Bifrost wins over a "
-                "provider key"
+                f"note: {', '.join(keys)} set, not used for model calls: the endpoint wins "
+                "over a provider key"
             )
     else:
         said = ", ".join(keys) if keys else "none set"
-        lines = [f"provider keys: each provider's own SDK reads its own ({said})"]
+        lines.append(f"provider keys: each provider's own SDK reads its own ({said})")
+    lines.append(
+        "profile: each model's LangChain profile (reasoning, temperature, output tokens, "
+        "tools); the memory service is told it per agent with the endpoint"
+        if gateway.endpoint(None) is not None
+        else "profile: each model's LangChain profile; the memory service uses its own settings"
+    )
     off = sorted(set(CAPABILITIES) - gateway.capabilities)
     lines += [f"off: {CAPABILITIES[c]}" for c in off]
     return lines
@@ -135,7 +154,7 @@ async def checks(
     ``DOCKER_HOST`` is set, where ``sandbox()`` makes its sandboxes)."""
     async with httpx.AsyncClient(timeout=CHECK_SECONDS) as client:
         gateway, (memory, key), runs = await asyncio.gather(
-            _gateway(client, model_gateway(settings)),
+            _gateway(client, settings),
             _memory(client, settings),
             _runs(client, settings),
         )
@@ -152,7 +171,8 @@ async def checks(
 def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     """What to set, from what is and is not set (never applied)."""
     said: list[str] = []
-    if settings.bifrost_url:
+    route = _route(settings)
+    if route is not None and route.has(Capability.FALLBACKS):
         said.append(
             "model retries are the gateway's: set the provider's network_config.max_retries in "
             "Bifrost (its default is 0), and the virtual key's fallbacks"
@@ -171,13 +191,58 @@ def suggestions(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     return said
 
 
-async def _gateway(client: httpx.AsyncClient, gateway: ModelGateway) -> Check | None:
-    """Bifrost, when it routes the model names, asked for its models with its key (a
-    provider's own SDK is not asked: its key is its own)."""
-    if gateway.kind is not GatewayKind.BIFROST:
+def _route(settings: Settings) -> ModelGateway | None:
+    """The route ``settings`` name; ``None`` when they fit none (the gateway check says why)."""
+    try:
+        return model_gateway(settings)
+    except ConfigurationError:
+        return None
+
+
+async def _gateway(client: httpx.AsyncClient, settings: Settings) -> Check | None:
+    """The endpoint the route sends model names to, asked for its models with the route's
+    auth, then checked against the route ``LLM_GATEWAY`` declares: a route with MCP
+    (Bifrost) must answer MCP's ``tools/list`` at the endpoint's root, and an endpoint that
+    does under another route is said to have more to give. A provider's own SDK is not asked:
+    its key is its own."""
+    try:
+        gateway: ModelGateway = model_gateway(settings)
+    except ConfigurationError as exc:
+        return Check("gateway", False, str(exc))
+    if not isinstance(gateway, OpenAICompatible):
         return None
     url = f"{gateway.url.rstrip('/')}/models"
-    return await _reached(client, "gateway", url, {"Authorization": f"Bearer {gateway.probe_key}"})
+    reached, answer = await _asked(client, "gateway", url, {}, auth=gateway.http_auth)
+    if answer is None:
+        return reached
+    mcp = await _serves_mcp(client, gateway)
+    if gateway.has(Capability.MCP) and not mcp:
+        return Check(
+            "gateway",
+            False,
+            f"LLM_GATEWAY={gateway.name}, but {gateway.origin}{MCP_PATH} answers no MCP: the "
+            "endpoint is not Bifrost (set LLM_GATEWAY=openai-compatible, or point LLM_BASE_URL "
+            "at Bifrost's /v1)",
+        )
+    if mcp and not gateway.has(Capability.MCP):
+        return Check(
+            "gateway",
+            True,
+            f"{url} answered; {gateway.origin} answers MCP as Bifrost does: LLM_GATEWAY=bifrost "
+            "turns on its MCP tools, stored prompts, skills and cost",
+        )
+    return Check("gateway", True, f"{url} answered as {gateway.name} ({gateway.title})")
+
+
+async def _serves_mcp(client: httpx.AsyncClient, gateway: OpenAICompatible) -> bool:
+    """Whether the endpoint's root answers MCP's ``tools/list`` (:data:`MCP_PATH`)."""
+    try:
+        response = await client.post(
+            f"{gateway.origin}{MCP_PATH}", json=MCP_LIST, auth=gateway.http_auth
+        )
+    except httpx.HTTPError:
+        return False
+    return response.is_success
 
 
 async def _memory(
@@ -232,22 +297,25 @@ async def _model_key(
     headers: Mapping[str, str],
     key: Mapping[str, Any],
 ) -> Check:
-    """The model key the memory service's model work for the agents is paid with: each agent
-    registers ``BIFROST_VIRTUAL_KEY`` at its first run; the agents the key is restricted to
-    (``may_act_as``) are asked for their status."""
-    if not s.bifrost_virtual_key:
+    """The model endpoint the memory service's model work for the agents is sent to: each
+    agent tells it the route's (``ModelGateway.endpoint``) at its first run; the agents the
+    key is restricted to (``may_act_as``) are asked what it holds for them."""
+    route = _route(s)
+    if route is None or route.endpoint(None) is None:
         return Check(
             "model key",
             True,
-            "BIFROST_VIRTUAL_KEY unset: the memory service's model work for these agents runs "
-            "on the tenant's or the operator's key",
+            "no model endpoint to tell (no LLM_BASE_URL, or a route the gateway check says is "
+            "misconfigured): the memory service's model work for these agents runs on its own "
+            "settings",
         )
     named = _acting_as(key)
     if not named:
         return Check(
             "model key",
             True,
-            "each agent registers BIFROST_VIRTUAL_KEY as its memory model key at its first run",
+            "each agent tells the memory service its model endpoint (LLM_BASE_URL, route, "
+            "auth, model, profile) at its first run",
         )
     said: list[str] = []
     for agent in named:
@@ -260,12 +328,27 @@ async def _model_key(
 
 
 def _key_state(status: Mapping[str, Any]) -> str:
-    """An agent's model-key status, as the report says it."""
+    """An agent's model-endpoint status, as the report says it: whether it is registered, the
+    route, auth, model and profile it holds, and which endpoint the agent's memory work uses
+    now, and why."""
     if status.get("revoked"):
-        return "revoked (registered again at its next run)"
-    if status.get("registered"):
-        return f"registered (revision {status.get('revision')})"
-    return "registered at its first run"
+        said = "revoked (told again at its next run)"
+    elif status.get("registered"):
+        said = f"registered (revision {status.get('revision')})"
+        endpoint = status.get("endpoint")
+        if endpoint:
+            accepts = [k for k, v in (endpoint.get("profile") or {}).items() if v is True]
+            said += (
+                f": {endpoint.get('gateway')} at {endpoint.get('base_url')}, auth "
+                f"{endpoint.get('auth')}, model {endpoint.get('model') or 'the service picks'}, "
+                f"profile {', '.join(sorted(accepts)) or 'a plain chat model'}"
+            )
+    else:
+        said = "told at its first run"
+    if status.get("source"):
+        said += f"; its memory work uses the {status['source']} endpoint"
+        said += f" ({status['reason']})" if status.get("reason") else ""
+    return said
 
 
 async def _ready(client: httpx.AsyncClient, base: str) -> Check:
@@ -356,10 +439,14 @@ async def _asked(
     headers: Mapping[str, str],
     *,
     found_ok: bool = False,
+    auth: httpx.Auth | None = None,
 ) -> tuple[Check, httpx.Response | None]:
-    """``url`` asked with the key: the check, and the answer when it was a success."""
+    """``url`` asked with the key (in ``headers``, or ``auth``'s): the check, and the answer
+    when it was a success."""
     try:
-        response = await client.get(url, headers=dict(headers))
+        response = await client.get(
+            url, headers=dict(headers), auth=auth or httpx.USE_CLIENT_DEFAULT
+        )
     except httpx.HTTPError as exc:
         return Check(name, False, f"{url} cannot be reached ({type(exc).__name__})"), None
     if response.status_code in (401, 403):

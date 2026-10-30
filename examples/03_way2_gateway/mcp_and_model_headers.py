@@ -10,8 +10,9 @@ no harness.
   requests and runs none itself, so your code decides every call. (A wrapped agent's model
   calls through the gateway carry them already.)
 
-Offline the gateway is a scripted one serving two functions; with ``BIFROST_URL`` (and
-``BIFROST_VIRTUAL_KEY``) it is the real one and the tools are whatever the key allows.
+Offline the gateway is a scripted one serving two functions; with ``LLM_BASE_URL`` and
+``LLM_GATEWAY=bifrost`` (and ``LLM_API_KEY``) it is the real one and the tools are whatever the
+key allows.
 
     python -m examples.03_way2_gateway.mcp_and_model_headers
 """
@@ -20,10 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 from bifrost_sdk import NO_GATEWAY_TOOLS, Bifrost, Options
 from examples._support.gateway import McpTool, ScriptedGateway
+from examples._support.offline import gateway as endpoint
+from examples._support.offline import online
 
 
 def stock(sku: str) -> int:
@@ -37,8 +39,9 @@ def reorder(sku: str, qty: int) -> str:
 
 
 def gateway() -> Bifrost:
-    if os.environ.get("BIFROST_URL"):
-        return Bifrost(os.environ["BIFROST_URL"], api_key=os.environ.get("BIFROST_VIRTUAL_KEY"))
+    if online():
+        url, key = endpoint()
+        return Bifrost(url, api_key=key, gateway="bifrost")
     erp = {
         "erp-stock": McpTool(stock, read_only=True),
         "erp-reorder": McpTool(reorder, destructive=True),

@@ -23,7 +23,7 @@ from langchain_core.tracers.context import register_configure_hook
 
 from trellis.harness import admission, budget
 from trellis.harness.bounded import LRU, SAID_ONCE
-from trellis.harness.gateways import Bifrost
+from trellis.harness.gateways import Capability
 from trellis.harness.runtime import current
 
 log = logging.getLogger("trellis.harness")
@@ -96,11 +96,12 @@ BASE_URL_ARGUMENTS: Final = ("openai_api_base", "base_url", "anthropic_api_url",
 
 
 def _routed_or_said(runtime: Any, serialized: dict[str, Any] | None) -> None:
-    """With Bifrost serving the harness, a chat model call that does not go through it — a
-    model object built with a client of its own, in a graph of the team's — is said once per
-    agent and model (it is not routed: the harness cannot change a model object's client)."""
+    """With Bifrost serving the harness (a route with ``Capability.ATTRIBUTION``), a chat model
+    call that does not go through it — a model object built with a client of its own, in a
+    graph of the team's — is said once per agent and model (it is not routed: the harness
+    cannot change a model object's client)."""
     gateway = runtime.agent.harness.model_gateway
-    if not isinstance(gateway, Bifrost) or not serialized:
+    if not gateway.has(Capability.ATTRIBUTION) or not serialized:
         return
     kind = (serialized.get("id") or ["?"])[-1]
     if kind == "RoutedChatModel":
@@ -117,7 +118,7 @@ def _routed_or_said(runtime: Any, serialized: dict[str, Any] | None) -> None:
 def _unrouted(agent_id: str, kind: str, model: str) -> None:
     log.warning(
         "%s: its chat model %s (%s) calls its provider directly, not Bifrost: build it with a "
-        "model name (ReAct(model='...')) or point its client at BIFROST_URL",
+        "model name (ReAct(model='...')) or point its client at LLM_BASE_URL",
         agent_id,
         model,
         kind,

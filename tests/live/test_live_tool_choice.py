@@ -324,7 +324,7 @@ async def test_mcp_tools_reach_the_model_as_their_servers_list_them(
         coded = with_governance(
             Harness(
                 config=settings(
-                    bifrost_virtual_key=store_key, memory_url=None, runs_url=None, api_key=None
+                    llm_api_key=store_key, memory_url=None, runs_url=None, api_key=None
                 ),
             ),
             Governance(FakeCatalog(rules)),
