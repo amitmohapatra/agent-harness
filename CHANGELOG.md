@@ -51,6 +51,9 @@ own model work follows the harness's configuration.
     (`message_id`, `run_id`, `tool_call_id`), stable across a resume;
   - a Claude Agent SDK or ACP conversation continues its last turn's session in this process
     (`agent.sessions`).
+  - `HarnessTools` (in `ReAct` and `middleware()`) has a `before_model` hook: one more
+    LangGraph step per model call, so a `recursion_limit` set to the bare minimum needs one
+    more.
 - `h.conversation(user=, thread=)`: the key a user's conversation keeps its state under.
 - `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
   `LLM_GATEWAY` from one registry that packages extend under the entry-point group
