@@ -90,3 +90,14 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Prompt injection in tool results and the memory context | **later** (by the user's decision) | audit J2 |
 | PII detection in memory and run records | **later** (by the user's decision) | audit J3 |
 | "Forget that" said in chat | later | audit H4 |
+
+## Resume plan
+
+1. Merge the in-flight branches when their CI is green: the data PR (`claude/cool-maxwell-w5avo8-data`), the provider fixes (`-provfix`), and arm D, the steps list as the run's record (`-explain2`).
+2. Check for duplication: for each adapter, does the framework's own compaction (LangChain context editing, Deep Agents summarization, OpenAI Agents and Claude session trimming) overlap with `FitWindow` and clearing? Keep one owner per adapter.
+3. A holistic run with a small hosted model: the complex suite (#67) across `ReAct`, `create_agent`, Deep Agents, OpenAI Agents and the Claude Agent SDK, plus the memory capabilities and learning over time.
+   - Cap the cost at about $5.
+   - Judge per [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md).
+   - Fix the harness gaps it finds, then re-run the failures.
+4. Add the model provider's key again as an environment secret (`ANTHROPIC_API_KEY`, in the environment's settings). A copy in a session's scratch directory is lost on restart.
+5. B11 (a learned literal prefilled when the task names another value) needs no work: it is fixed and tested on memory main (see Tools above).
