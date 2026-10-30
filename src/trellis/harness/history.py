@@ -143,6 +143,10 @@ class Said:
     content: str
     tool_calls: tuple[Called, ...] = ()
     tool_call_id: str | None = None
+    #: the harness's id of the message (``conversation.message_id``): the same wherever the
+    #: message is seen — the AG-UI stream, the memory service's thread, an attempt after a
+    #: resume — ``None`` until the run's transcript names it (``conversation.identified``)
+    id: str | None = None
 
 
 #: The memory service's role of each speaker, and the reverse.
@@ -155,6 +159,8 @@ MEMORY_ROLES: Final[Mapping[Speaker, str]] = {
 SPEAKERS: Final[Mapping[str, Speaker]] = {role: speaker for speaker, role in MEMORY_ROLES.items()}
 #: The kind the memory service keeps a tool result as: not chat, but replayed with its call.
 INTERNAL: Final = "INTERNAL"
+#: The ``custom_metadata`` key a stored message keeps its harness id under (``Said.id``).
+MESSAGE_ID: Final = "message_id"
 
 
 def from_window(messages: Sequence[WindowMessage]) -> list[Said]:
@@ -181,7 +187,7 @@ def answered(said: Sequence[Said]) -> list[Said]:
     kept: list[Said] = []
     for s in said:
         whole = not s.tool_calls or all(c.id in results for c in s.tool_calls)
-        message = s if whole else Said(s.role, s.content)
+        message = s if whole else Said(s.role, s.content, id=s.id)
         if message.role is Speaker.TOOL or message.content or message.tool_calls:
             kept.append(message)
     calls = {c.id for s in kept for c in s.tool_calls}
@@ -200,6 +206,8 @@ def recorded(said: Said) -> dict[str, Any]:
         ]
     if said.tool_call_id is not None:
         message["tool_call_id"] = said.tool_call_id
+    if said.id is not None:
+        message["custom_metadata"] = {MESSAGE_ID: said.id}
     return message
 
 
@@ -217,6 +225,7 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
             for c in stored.get("tool_calls") or ()
         ),
         tool_call_id=stored.get("tool_call_id"),
+        id=(stored.get("custom_metadata") or {}).get(MESSAGE_ID),
     )
 
 
@@ -224,6 +233,7 @@ __all__ = [
     "INTERNAL",
     "IN_RAM",
     "MEMORY_THREAD",
+    "MESSAGE_ID",
     "Called",
     "MemoryThread",
     "Owner",

@@ -1489,7 +1489,8 @@ async def run_options_without(w: World) -> None:
 #: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
 #: what its error says), and set far above it.
 TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
-    "react": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
+    # one step more than a model call: HarnessTools.before_model (a steered message, ADR 0005)
+    "react": ({"recursion_limit": 4}, "Recursion limit of 4 reached"),
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),

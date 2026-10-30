@@ -180,6 +180,15 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
 [examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py)):
 the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (or its own `model=`).
 
+## Conversations
+
+A conversation's turn continues the session the conversation's last turn ran in, in this
+process (`resume=`, through the journal's session store, with the turn's own prompt:
+[runs.md](../runs.md#a-claude-or-acp-session-across-turns)); in another process, or the first turn, a new session — with memory off given
+the run store's earlier turns in its context. `mode="steer"` gives the message to Claude after
+its next tool call (a `PostToolUse` hook's `additionalContext`); a query that calls no tool
+takes none, and the message then runs as its own turn ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
+
 ## Limits
 
 * A built-in that ran is not journaled or recorded (above).

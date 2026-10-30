@@ -58,6 +58,7 @@ from trellis.contracts import (
 )
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     NativePause,
@@ -68,10 +69,10 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
-from trellis.harness.bridges.session import MemorySession
+from trellis.harness.bridges.session import MemorySession, input_items
 from trellis.harness.features import MEMORY_TOOLS
 from trellis.harness.gateways import Capability, per_loop
-from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker
+from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker, answered
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
@@ -152,6 +153,9 @@ class OpenAIAgentsAdapter:
     #: its history comes through its session: the run's own, or the memory service's thread
     #: (``bridges.session.MemorySession``), never as messages in the input
     replays_history = False
+    #: with memory off and no session, the conversation's earlier turns come as input items
+    history_in: HistoryIn = "messages"
+    sessions = False
 
     def __init__(self) -> None:
         #: the tools the agents declare (:meth:`native`), once read
@@ -163,10 +167,16 @@ class OpenAIAgentsAdapter:
         memory on is given (``bridges.session``)."""
         return _thread_store(options)
 
+    def steers(self, target: Any) -> bool:
+        """Every agent: a steered message joins the input of its next model call
+        (``RunConfig.call_model_input_filter``, :func:`_steering`)."""
+        return True
+
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
     ) -> Any:
-        system = [{"role": "system", "content": context}] if context else []
+        system: list[Any] = [{"role": "system", "content": context}] if context else []
+        system += [item for said in answered(history) for item in input_items(said)]
         if isinstance(input, str):
             return [*system, {"role": "user", "content": input}] if system else input
         if isinstance(input, list):
@@ -628,7 +638,34 @@ def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
     options = dict(runtime.framework_options)
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
-    return _routed(runtime, target, options)
+    return _routed(runtime, target, _steering(runtime, options))
+
+
+def _steering(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the messages steered into the run (``Runtime.steered``) joining the
+    input of each model call where they were taken, as the user's
+    (``RunConfig.call_model_input_filter``, after the run's own filter): the SDK keeps a
+    filter's input for that call only, so each call is given them again, in place."""
+    from agents import RunConfig
+    from agents.run_config import ModelInputData
+
+    config = options.get("run_config") or RunConfig()
+    theirs = config.call_model_input_filter
+    kept: list[tuple[int, dict[str, Any]]] = []
+
+    async def steered(data: Any) -> Any:
+        given = data.model_data
+        if theirs is not None:
+            given = theirs(data)
+            if inspect.isawaitable(given):
+                given = await given
+        items: list[Any] = list(given.input)
+        kept.extend((len(items), {"role": "user", "content": s.text}) for s in runtime.steered())
+        for offset, (at, item) in enumerate(kept):
+            items.insert(at + offset, item)
+        return ModelInputData(input=items, instructions=given.instructions)
+
+    return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=steered)}
 
 
 def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str, Any]:
