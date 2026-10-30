@@ -127,13 +127,14 @@ worker.run_once()` ([runs.md](runs.md#workers)). From a shell:
 python -m trellis.harness.worker app.agents:h --concurrency 4
 ```
 
-### h.inbox, h.feedback, h.add_document, h.evaluate
+### h.inbox, h.feedback, h.add_document, h.conversation, h.evaluate
 
 ```text
 await h.inbox(assignee=None, *, tenant=None) -> list[RunSummary]
 await h.feedback(run_id, verdict, correction=None, *, tenant=None) -> Feedback | None
 await h.add_document(file, *, user, tenant=None, thread=None, title=None, visibility=None,
                      wait=60) -> DocumentInfo
+await h.conversation(*, user, thread, tenant=None) -> str
 await h.evaluate(agent, dataset, judges, *, run_name=None, description=None, metadata=None,
                  concurrency=4, limit=None, user=None) -> EvalReport
 ```
@@ -143,6 +144,7 @@ await h.evaluate(agent, dataset, judges, *, run_name=None, description=None, met
 | `inbox` | the paused runs waiting on `assignee` (`user:…`, `role:…`) or anyone, newest first; answer one with `agent.resume` | [interrupts.md](interrupts.md#an-inbox-of-your-own) |
 | `feedback` | a person's verdict on a run (`confirm`, `reject`, `correct`): a score on its trace, and with memory the run's `human` feedback citing the memories its answer rested on (the judge's), pending the tenant administrator's review (accepted or dismissed). `approve` and `edit` are refused: they record a decision on a paused action, which `agent.resume` makes | [memory.md](memory.md) |
 | `add_document` | a file into a user's (or a thread's) document memory, waiting until it is indexed (`wait=None`: at once); needs `MEMORY_URL`; a run scoped to it: `agent.run(..., document_ids=[doc.document_id])` | [memory.md](memory.md) |
+| `conversation` | the key `user`'s `thread` keeps its state under (`trellis.harness.identity.conversation_key` of the tenant, the user and the thread): the `thread_id` of a graph's own checkpointer, the memory service's thread, the trace's session — to read your graph's state yourself (`graph.aget_state({"configurable": {"thread_id": await h.conversation(user=..., thread=...)}})`) | [runs.md](runs.md#queue-order-and-busy-conversations) |
 | `evaluate` | the agent over a dataset (a Langfuse dataset's name, or a list), each answer scored by `judges` (the same kind as `h.wrap(judges=)`) onto its run's trace | [evaluation.md](evaluation.md) |
 
 `tenant=` is only for a platform key (one with no tenant of its own).
@@ -155,16 +157,17 @@ What `h.wrap` returns.
 
 ```text
 await agent.run(input, *, user, thread=None, tenant=None, run_timeout=None, deadline=None,
-                budget=None, without=(), framework_options=None, document_ids=None) -> Result
+                budget=None, without=(), framework_options=None, document_ids=None,
+                mode="queue") -> Result
 agent.stream(...same...) -> AsyncIterator[RunEvent]
-await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
+await agent.start(...same but mode..., priority=0, concurrency_key=None) -> RunHandle
 ```
 
 | Argument | Default | What it is |
 |---|---|---|
 | `input` | required | the framework's input: a string, a message list, a dict (queued runs: JSON) |
 | `user` | required | whom the run is for: its memory scope, its approvals' default assignee |
-| `thread` | none (the run is its own) | the conversation: memory's thread, LangGraph's `thread_id`, the default `concurrency_key` |
+| `thread` | none (the run is its own) | the conversation — `user`'s own name for it: memory's thread, LangGraph's `thread_id`, the default `concurrency_key` are keyed by the tenant, the user and the thread (`h.conversation`), so two users' threads named alike are two conversations |
 | `tenant` | the key's tenant | only for a platform key |
 | `run_timeout` | the agent's (`h.wrap(run_timeout=)`) | the most working time in seconds, across attempts, pauses not counted → `TIMEOUT` ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
 | `deadline` | none | the clock time (a `datetime`) the run must have ended by, time queued and paused for a person counted (agent-runs ends it even while it is queued or paused) → `TIMEOUT`; a child run keeps the earlier of its own and its parent's |
@@ -172,8 +175,9 @@ await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 | `without` | `()` | parts off for this run, on top of the agent's; kept with the run ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | the agent's | the framework's own options for this run, over the agent's ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 | `document_ids` | none (every document the person's scope reads) | the documents (`h.add_document(...).document_id`) the run's memory context draws its passages from, none else; kept with the run and its sub-agents' runs ([memory.md](memory.md#push)) |
+| `mode` (`run`, `stream`) | `"queue"` | what the run does while another run of its conversation works in this process: `"queue"` waits for it, `"interrupt"` cancels it and continues the conversation, `"steer"` gives the message to it at its framework's next step — that run's answer is this run's — where the target takes one, else waits as `"queue"` ([runs.md](runs.md#a-message-to-a-busy-conversation-mode)) |
 | `priority` (`start`) | `0` | -1000 to 1000: a higher one is claimed first ([runs.md](runs.md#queue-order-and-busy-conversations)) |
-| `concurrency_key` (`start`) | `thread:<thread>` | runs sharing one run one at a time |
+| `concurrency_key` (`start`) | `thread:<conversation>` (`h.conversation(user=, thread=)`) | runs sharing one run one at a time |
 
 `run_timeout` is working time and `deadline` is clock time: a run that waits a day for an
 approver is not past a `run_timeout` of an hour, and is past a `deadline` an hour away. The

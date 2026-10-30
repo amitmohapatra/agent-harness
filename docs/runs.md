@@ -229,17 +229,65 @@ otherwise), the others wait `QUEUED`.
 at once (one customer's account, one repository).
 
 **Automatic: a second message to a busy conversation waits.** A queued run of a conversation
-(`thread=`) gets `concurrency_key="thread:<thread>"` unless you name one: a second message sent
-while the first run works is answered after it, never beside it (both would write the same
+(`thread=`) gets `concurrency_key="thread:<conversation>"` unless you name one: a second message
+sent while the first run works is answered after it, never beside it (both would write the same
 thread). The same holds in process: a run of a conversation started with `run`, `stream`,
 `serve_chat` or `serve_a2a` (or resumed) waits while another run of the same agent and
 conversation works in this process, in order. A run with no `thread` is its own conversation.
+A conversation is the tenant's, the user's and the thread's: a thread id is the caller's own
+name for a chat, so another user's thread named alike is another conversation — it never waits
+for this one, and never shares its memory thread, its graph checkpointer thread or its trace
+session. `<conversation>` is that key (`await h.conversation(user=, thread=)`, a digest of the
+three: the same wherever it is made, safe in a URL, 37 characters).
 `LocalRuns` claims the same way agent-runs does. A sub-agent's run and a worker's are not held
 in process (the queue holds a worker's).
 
 **On failure.** A priority outside -1000..1000 or a key over 200 characters is refused by the
 contract (`ValidationError`). A conversation's runs waiting in process across replicas are not
 held across them: queue them (`start`) for that.
+
+## A message to a busy conversation: mode
+
+**What.** `agent.run(..., mode=)` and `agent.stream(..., mode=)` say what a message does when
+another run of its conversation works in this process ([ADR 0005](adr/0005-conversations-across-runs.md)):
+
+| `mode` | What happens |
+|---|---|
+| `"queue"` (default) | it waits for the working run to end, then runs: what a second message always did |
+| `"interrupt"` | the working run is cancelled (`agent.cancel`, reason `interrupted by a newer message of the conversation`); the message takes the turn and continues the conversation — the cancelled turn's question is in its history |
+| `"steer"` | the message is given to the working run at its framework's next step, and that run's answer is the message's: its run ends `SUCCESS` with that answer, streamed under that answer's message id |
+
+Where `"steer"` reaches the working run:
+
+| Target | Steers | Its hook |
+|---|---|---|
+| `ReAct`, a graph built with `middleware()` (Deep Agents with `HarnessTools` too) | yes | `HarnessTools.before_model`: a user message before the next model call |
+| OpenAI Agents SDK | yes | `RunConfig.call_model_input_filter` (after the run's own): a user item in each later model call's input |
+| Claude Agent SDK | yes, after a tool call | a `PostToolUse` hook's `additionalContext` (a query that calls no tool takes none) |
+| a function, Kimi (ACP), a graph without the harness's middleware | no (`Adapter.steers`) | none: the message waits as `"queue"`, said once per agent |
+
+A steered message the working run never took (it ended first, or ended without an answer)
+runs as its own turn. **When.** `interrupt` for a chat whose user sends a correction; `steer`
+for a "also…" while the agent works. **On failure.** `start` takes no `mode`: a queued run waits
+by its `concurrency_key`, and a worker's run is not held in process.
+
+## Earlier turns with memory off
+
+A run of a conversation reads its earlier turns from the run store when nothing else keeps
+them — memory off (`without={"memory"}`, or no `MEMORY_URL`), and a target with no thread of
+its own (no checkpointer, no OpenAI `session`) and no session continued: each earlier run's
+question and answer (a cancelled one's question), of the same agent, tenant, user and thread,
+the newest 10, oldest first. `ReAct`, a graph and an OpenAI agent get them as their own
+messages, a function as `agent.history`, Claude and Kimi in the context's text. With memory on,
+memory's window keeps the conversation as before ([memory.md](memory.md)).
+
+## A Claude or ACP session across turns
+
+A conversation's turn on the Claude Agent SDK or an ACP agent (Kimi) continues the session its
+framework kept for the conversation's last turn in this process (`agent.sessions`, the most
+recent 128 conversations): the journal's session path a resume after a pause takes, sent the
+turn's own prompt. A turn another process runs starts a new session, with the earlier turns as
+above (memory off) or memory's window (memory on).
 
 ## Child runs at once, and the task tree
 
@@ -339,7 +387,7 @@ run options as `start`, and every fired run gets them — agent-runs and `LocalR
 | `without=` | `RunStart.metadata["without"]` | `ScheduleSpec.metadata["without"]` | `metadata["without"]` |
 | `framework_options=` (JSON) | `RunStart.metadata["framework_options"]` | `ScheduleSpec.metadata["framework_options"]` | `metadata["framework_options"]` |
 | `priority=` | `RunStart.priority` | `ScheduleSpec.priority` | `priority` |
-| `concurrency_key=` (`start`: by default `thread:<thread>`) | `RunStart.concurrency_key` | `ScheduleSpec.concurrency_key` | `concurrency_key` |
+| `concurrency_key=` (`start`: by default `thread:<conversation>`) | `RunStart.concurrency_key` | `ScheduleSpec.concurrency_key` | `concurrency_key` |
 
 agent-runs copies a schedule's `metadata` into each fired run's `RunStart.metadata`, its own
 keys (`schedule_id`...) laid over it, so a worker reads a scheduled run's choices exactly as a

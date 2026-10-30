@@ -52,7 +52,8 @@ async def test_the_thread_in_memory_is_the_agents_session(
     # the session owns the history: memory's window is not sent beside it
     assert [c.body.get("window") for c in memory_service.named("context")] == [False, False]
     # every turn is recorded once, by the harness (the session adds nothing of its own)
-    texts = [m["content"] for m in memory_service.threads["t1"]]
+    kept = await memory_harness.conversation(user="u1", thread="t1")
+    texts = [m["content"] for m in memory_service.threads[kept]]
     assert texts.count("remember tides") == 1 and texts.count("what did I say?") == 1
 
 
@@ -67,12 +68,19 @@ async def test_a_session_of_the_teams_own_is_kept(memory_harness: Harness) -> No
     assert asked == ["hi", "hi"]  # the SDK kept its own session, as it was given
 
 
-async def test_without_memory_the_sdk_has_no_session(memory_harness: Harness) -> None:
+async def test_without_memory_the_sdk_has_no_session_and_reads_the_run_stores_turns(
+    memory_harness: Harness,
+) -> None:
     model = ScriptedModel(["one", "two"])
     agent = memory_harness.wrap(Agent(name="s", model=model), id="off", without={"memory"})
     await agent.run("remember tides", user="u1", thread="t1")
     await agent.run("what did I say?", user="u1", thread="t1")
-    assert said_to_model(model, 1) == [("user", "what did I say?")]
+    # no session: the earlier turn is the run store's question and answer, as input items
+    assert said_to_model(model, 1) == [
+        ("user", "remember tides"),
+        ("assistant", "one"),
+        ("user", "what did I say?"),
+    ]
 
 
 async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grows() -> None:
@@ -105,9 +113,9 @@ async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grow
         return thread
 
     memory = SimpleNamespace(ctx=SimpleNamespace(history=history))
-    runtime = SimpleNamespace(run_memory=memory, thread="t1", run_id="run_1")
+    runtime = SimpleNamespace(run_memory=memory, conversation="conv_t1", run_id="run_1")
     session = MemorySession(runtime)  # type: ignore[arg-type]
-    assert session.session_id == "t1"
+    assert session.session_id == "conv_t1"  # the run's conversation (Runtime.conversation)
     assert await session.get_items() == [
         {"role": "user", "content": "earlier"},
         {"type": "function_call", "call_id": "c1", "name": "lookup", "arguments": '{"q": "a"}'},

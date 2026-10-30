@@ -252,5 +252,6 @@ async def test_the_graphs_state_tools_keep_their_state_and_are_not_tool_calls(
     )
     events = [e async for e in harness.wrap(target, id="g").stream("plan", user="u", thread="t")]
     assert "write_todos" not in results(events)  # the graph's state, not a governed call
-    state = await target.aget_state({"configurable": {"thread_id": "t"}})
+    thread = await harness.conversation(user="u", thread="t")
+    state = await target.aget_state({"configurable": {"thread_id": thread}})
     assert state.values["todos"] == todos

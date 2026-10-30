@@ -11,6 +11,7 @@ names its callers another way (``identity=``).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any, Final
@@ -25,6 +26,21 @@ IDENTITY_HEADER: Final = "x-trellis-identity"
 HEADER_MAX_CHARS: Final = 4096
 #: The ``RunStart.metadata`` key a sub-agent's run keeps its agent group under.
 AGENT_GROUP: Final = "agent_group"
+#: The prefix of a conversation's key (:func:`conversation_key`).
+CONVERSATION_PREFIX: Final = "conv_"
+
+
+def conversation_key(tenant: str, user: str, thread: str) -> str:
+    """The key the conversation ``thread`` of ``user`` in ``tenant`` keeps its state under —
+    the framework's thread (a LangGraph ``thread_id``), the memory service's thread, the
+    turn a busy conversation waits for, the run store's ``concurrency_key``, the trace's
+    session: a thread id is the caller's name for a chat, unique only for one user, so two
+    users (or tenants) naming theirs alike never share one. A digest of the three, so it is
+    the same wherever it is made, of fixed length (the run store and the memory service keep
+    ids of up to 200 characters) and safe in a URL path (the memory service's
+    ``/v1/threads/{id}``)."""
+    named = json.dumps([tenant, user, thread], separators=(",", ":"))
+    return CONVERSATION_PREFIX + hashlib.sha256(named.encode()).hexdigest()[:32]
 
 
 class Identity(BaseModel):
@@ -64,6 +80,14 @@ class Identity(BaseModel):
         )
 
     @property
+    def conversation(self) -> str:
+        """The key the run's conversation keeps its state under (:func:`conversation_key`);
+        a run with no conversation of its own is its own (its run id)."""
+        if self.thread is None or self.thread == self.run_id:
+            return self.run_id
+        return conversation_key(self.tenant, self.user, self.thread)
+
+    @property
     def own_group(self) -> str:
         """The agent group the runs this one starts (its sub-agents', its framework's
         helpers') work in: its own, else the one it names by being at the top of the tree."""
@@ -77,7 +101,7 @@ class Identity(BaseModel):
             user_id=self.user,
             agent_id=self.agent_id,
             agent_run_id=self.run_id,
-            thread_id=self.thread,
+            thread_id=self.conversation,
             workspace_id=self.workspace,
         )
 
@@ -89,7 +113,7 @@ class Identity(BaseModel):
             tenant_id=self.tenant,
             user_id=self.user,
             agent_run_id=self.parent_run,
-            thread_id=self.thread,
+            thread_id=self.conversation,
             workspace_id=self.workspace,
         )
 

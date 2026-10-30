@@ -24,6 +24,16 @@ own model work follows the harness's configuration.
   where it took a virtual key (`MemoryScope.register_endpoint`, was `register_model_key`),
   needing trellis-memory with endpoint registration; trellis-contracts 0.6.3 and bifrost-sdk 0.4.
 
+- A conversation is its tenant's, its user's and its thread's (`identity.conversation_key`, a
+  digest of the three): the memory service's thread (its window, the OpenAI Agents
+  `MemorySession`, `h.add_document(thread=)`), a graph's own checkpointer `thread_id`, the turn
+  a busy conversation waits for in process, `start`'s default `concurrency_key`
+  (`thread:<conversation>`) and the trace's `session.id` were keyed by the bare thread id, so
+  two users (or tenants) giving the same `thread=` shared them. A conversation kept under a
+  bare thread id before this release is not continued: its next run starts a new one. Read a
+  graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
+  interrupt only for the user whose run it is (`404` for another user's thread named alike).
+
 ### Added
 
 - Where a tool's result came from: `tool(response_format="content_and_artifact")` (LangChain's)
@@ -47,6 +57,25 @@ own model work follows the harness's configuration.
   names and dates, the step count, seconds within a tolerance), with the made-up claims and
   leaked template tags counted, every model request kept, and `--render` checking what a
   llama.cpp chat template shows the model (`benchmark/cost/explain.py`).
+- Conversations across runs ([ADR 0005](docs/adr/0005-conversations-across-runs.md)):
+  - with memory off, a run of a conversation is given its earlier turns from the run store
+    (each run's question and answer) where the framework keeps no thread of its own —
+    messages for `ReAct`, graphs and OpenAI Agents, `agent.history` for a function, the
+    context's text for Claude and ACP;
+  - `run(mode=)` / `stream(mode=)`: `"queue"` (default, as before), `"interrupt"` (cancel the
+    conversation's working run and continue), `"steer"` (give the message to the working run
+    at its next step: `HarnessTools.before_model`, OpenAI Agents `call_model_input_filter`,
+    Claude `PostToolUse`; a function, ACP or a graph without the harness's middleware waits as
+    `"queue"`, said once — `Adapter.steers`);
+  - one id per message (`conversation.message_id`): the AG-UI text message and
+    `TOOL_CALL_RESULT` ids, and each message's `custom_metadata` in the memory service
+    (`message_id`, `run_id`, `tool_call_id`), stable across a resume;
+  - a Claude Agent SDK or ACP conversation continues its last turn's session in this process
+    (`agent.sessions`).
+  - `HarnessTools` (in `ReAct` and `middleware()`) has a `before_model` hook: one more
+    LangGraph step per model call, so a `recursion_limit` set to the bare minimum needs one
+    more.
+- `h.conversation(user=, thread=)`: the key a user's conversation keeps its state under.
 - `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
   `LLM_GATEWAY` from one registry that packages extend under the entry-point group
   `trellis.gateways`. Bifrost's features ask `gateway.has(Capability.X)`; new capabilities

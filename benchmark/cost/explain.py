@@ -72,8 +72,8 @@ OTHER_NOTE: Final = "Kofi's portfolio is mostly ZETA."
 OTHER_USER: Final = "trellis-bench-other"
 #: How far a stated time may be from the record's: this share of it, or this many seconds.
 SECONDS_TOLERANCE: Final = (0.25, 2.0)
-#: The steps list the memory service gives each earlier turn opens with this.
-STEPS_HEADING: Final = "Steps taken for this answer, from the run's record"
+#: The memory context's section that holds each earlier turn's steps list (its run record).
+STEPS_HEADING: Final = "## Run record"
 
 
 @tool(side_effects="read", response_format="content_and_artifact")

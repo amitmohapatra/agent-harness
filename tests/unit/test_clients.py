@@ -19,7 +19,7 @@ from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory, Window
 from trellis.harness.history import Called, Said, Speaker, recorded
-from trellis.harness.identity import Identity
+from trellis.harness.identity import Identity, conversation_key
 
 GATEWAY = "http://gw.test"
 
@@ -286,7 +286,7 @@ async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
         "user_id": "u",
         "agent_id": "a",
         "agent_run_id": "run_1",
-        "thread_id": "th",
+        "thread_id": conversation_key("t", "u", "th"),  # u's conversation "th"
         "custom_metadata": {},
     }
     assert call.body["tools"] == {"available": ["erp-get_stock"], "k": 8}

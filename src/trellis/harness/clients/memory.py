@@ -28,8 +28,8 @@ from trellis.contracts import (
 from trellis.contracts import Feedback as Decision
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance.catalog import MemoryCatalog
-from trellis.harness.history import Said, Speaker, recorded, said_of
-from trellis.harness.identity import Identity
+from trellis.harness.history import MESSAGE_ID, Said, Speaker, recorded, said_of
+from trellis.harness.identity import Identity, conversation_key
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.errors import NotFoundError
 from trellis.memory.models import (
@@ -128,8 +128,12 @@ class Memory:
         return RunMemory(self, child)
 
     def for_user(self, tenant: str, user: str, thread: str | None = None) -> RunMemory:
-        """Calls made for a person outside a run (adding a document they can retrieve)."""
-        scope = {"tenant_id": tenant, "user_id": user} | ({"thread_id": thread} if thread else {})
+        """Calls made for a person outside a run (adding a document they can retrieve) — in
+        their conversation ``thread``, the memory service's thread its runs write to
+        (``identity.conversation_key``)."""
+        scope = {"tenant_id": tenant, "user_id": user} | (
+            {"thread_id": conversation_key(tenant, user, thread)} if thread else {}
+        )
         return RunMemory(self, self.client.bind(**scope))
 
     def scoped(self, tenant: str, agent_id: str | None = None) -> RunMemory:
@@ -159,6 +163,19 @@ class Memory:
             case "publish_catalog":
                 return lambda: MemoryCatalog(run.ctx).publish(args["entries"])
         return None
+
+
+def _identified(said: Said, run_id: str) -> dict[str, Any]:
+    """The message as the service stores it (:func:`recorded`), its ``custom_metadata`` with
+    its harness id when it has one: the id, the run, and the tool call it answers (a result)
+    or the first it makes (an assistant's calls)."""
+    message = recorded(said)
+    if said.id is None:
+        return message
+    call = said.tool_call_id or (said.tool_calls[0].id if said.tool_calls else None)
+    linked = {MESSAGE_ID: said.id, "run_id": run_id} | ({"tool_call_id": call} if call else {})
+    message["custom_metadata"] = message.get("custom_metadata", {}) | linked
+    return message
 
 
 class RunMemory:
@@ -227,9 +244,11 @@ class RunMemory:
         """One attempt's transcript - its tool calls and their results with it - in one
         request. Each message names itself (the run for the question, which every attempt
         asks; the attempt and position for what the agent said), and the service stores a
-        message it has seen before once."""
+        message it has seen before once. A message with its harness id (``Said.id``) carries
+        it in its ``custom_metadata``, with the run it was said in and the tool call it makes
+        or answers (one level: the service allows two)."""
         batch = [
-            recorded(said)
+            _identified(said, run_id)
             | {
                 "source_system": SOURCE_SYSTEM,
                 "source_message_id": f"{run_id}:user:{index}"
