@@ -95,6 +95,16 @@ own model work follows the harness's configuration.
   OpenAI's chat completions, the Anthropic, Gemini, Ollama and Bifrost endpoints that speak it,
   a Google token refresh and an AWS SigV4 signature recomputed from the specification.
 
+### Removed (one clearing pass, one read-back tool)
+
+- `read_result`, `READ_RESULT`, `READ_LIMIT`, `FIT_CLEARED` and `FitWindow`'s clearing of older
+  results: LangChain's `ClearToolUsesEdit` is the one clearing pass, and its placeholder names
+  `read_file` with the cleared call's id as its path (`/large_tool_results/<call id>`, Deep
+  Agents' own), paged from the graph's state with the limits every kept result uses (100 lines,
+  20,000 characters). `FitWindow` cuts the longest results instead (each kept whole, its cut
+  naming the `read_file` call that reads on). Before, `FitWindow` cleared results to a
+  placeholder naming `read_result`, a tool that request did not offer.
+
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
 `ReAct` is LangChain's `create_agent` with the harness's part on top, and Deep Agents'

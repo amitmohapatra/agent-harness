@@ -80,7 +80,8 @@ KEEP_RESULTS: Final = 3
 MIN_FREED: Final = 0.1
 #: What a cleared result reads as (the tool message keeps its call's id).
 CLEARED: Final = (
-    "[result cleared to keep the context small: read_result(id=<this call's id>) reads it again]"
+    "[result cleared to keep the context small: "
+    'read_file(file_path="/large_tool_results/<this call\'s id>") reads it again]'
 )
 #: Deep Agents' file tools that read, and those that change files: on a backend outside the
 #: graph's state they are governed as any tool, with these risks.
@@ -146,9 +147,10 @@ def middleware(
     (:class:`~.middleware.GovernTools`); ``max_repeats`` (:class:`~.middleware.StallGuard`);
     ``max_steps`` then one answer without tools (:class:`~.middleware.StepLimit`); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
-    cleared past half of it and ``read_result`` to read them back; the request made to fit
-    the window, never failing for its size (:class:`~.middleware.FitWindow`: the tools
-    narrowed and compacted, older results cleared, older turns left out — only as far as
+    cleared past half of it (LangChain's ``ClearToolUsesEdit``) and ``read_file`` to read them
+    back; the request made to fit the window, never failing for its size
+    (:class:`~.middleware.FitWindow`: the tools narrowed and compacted, the longest results
+    cut, older turns left out — only as far as
     needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
@@ -201,7 +203,7 @@ def _middleware(
                         trigger=int(CLEAR_AT * window),
                         clear_at_least=int(MIN_FREED * window),
                         keep=KEEP_RESULTS,
-                        exclude_tools=(ours.READ_RESULT, ours.READ_FILE),
+                        exclude_tools=(ours.READ_FILE,),
                         placeholder=CLEARED,
                     )
                 ]
