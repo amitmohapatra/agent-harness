@@ -417,9 +417,12 @@ async def _worked(
     tools = await agent.tools_for(runtime)
     runtime.toolbox = {t.name: t for t in tools}
     runtime.native = await agent.native_tools(runtime)
-    # the memory context, and — read meanwhile — the files kept for the run's user
-    pushed, files = await asyncio.gather(agent.push(runtime), stored.note(runtime))
-    stored.told(runtime, files)
+    if stored.looks(runtime):
+        # the memory context, and — read meanwhile — the files kept for the run's user
+        pushed, files = await asyncio.gather(agent.push(runtime), stored.note(runtime))
+        stored.told(runtime, files)
+    else:
+        pushed = await agent.push(runtime)
     if observe is not None:
         observe(pushed)
     if unresumable is not None:

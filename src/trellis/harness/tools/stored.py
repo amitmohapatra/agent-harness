@@ -142,13 +142,18 @@ async def kept(runtime: Runtime, *, everywhere: bool, store: FileStore | None = 
     return listed
 
 
+def looks(runtime: Runtime) -> bool:
+    """Whether a run is told of the files kept for its user (:func:`note`): not a sub-agent's
+    (its parent was told), nor a function's (its code is offered no reader: ``agent.tools`` is
+    its toolbox)."""
+    return runtime.parent is None and runtime.agent.adapter.name != "function"
+
+
 async def note(runtime: Runtime) -> str | None:
     """What a run is told as it starts of the files kept for its user: its chat's (:data:`NOTE`,
     the :data:`NOTED` newest, a line each), else that other chats have some (:data:`ELSEWHERE`:
-    a folder of another chat, one listing); ``None`` when there are none, for a sub-agent's run
-    (its parent was told), or when the store cannot say (a warning)."""
-    if runtime.parent is not None or runtime.agent.adapter.name == "function":
-        return None  # a function's code is offered no reader (``agent.tools`` is its toolbox)
+    a folder of another chat, one listing); ``None`` when there are none, or when the store
+    cannot say (a warning). Asked only of a run that :func:`looks`."""
     store = runtime.agent.harness.files
     try:
         here = (
@@ -307,4 +312,15 @@ def _args(args: Any) -> str:
 ARGS_CHARS: Final = 300
 
 
-__all__ = ["PREFIX", "Kept", "is_stored", "kept", "note", "read", "table", "told", "where"]
+__all__ = [
+    "PREFIX",
+    "Kept",
+    "is_stored",
+    "kept",
+    "looks",
+    "note",
+    "read",
+    "table",
+    "told",
+    "where",
+]
