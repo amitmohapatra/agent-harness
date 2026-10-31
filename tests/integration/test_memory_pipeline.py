@@ -17,6 +17,7 @@ import pytest
 import respx
 from agents import Agent as OpenAIAgent
 from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver
 
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
@@ -30,6 +31,7 @@ from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
+from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
 from trellis.memory.models import ToolHints
@@ -444,14 +446,21 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     result = await agent.run("how many a?", user="u1")
     await memory_harness.writes.drain()
     [batch] = memory_service.named("messages")
-    # the question, the call with its result, the answer: as a checkpoint would replay them
-    assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
-        ("USER", "how many a?", f"{result.run_id}:user:0"),
-        ("ASSISTANT", "", f"{result.run_id}:1:msg:1"),
+    # the question, the call with its result, the answer: as a checkpoint would replay them,
+    # each under its harness id (the same on every attempt)
+    sent = batch.body["messages"]
+    assert [(m["role"], m["content"]) for m in sent] == [
+        ("USER", "how many a?"),
+        ("ASSISTANT", ""),
         # which tool returned it, and when: a later turn replays it so (``snapshots``)
-        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7", f"{result.run_id}:1:msg:2"),
-        ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:3"),
+        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7"),
+        ("ASSISTANT", "7 units"),
     ]
+    assert [m["source_message_id"] for m in sent] == [
+        m["custom_metadata"]["message_id"] for m in sent
+    ]
+    assert sent[0]["source_message_id"] == question_id(result.run_id, result.run_id)
+    assert sent[3]["source_message_id"] == answer_id(result.run_id, result.run_id)
     call, answered = batch.body["messages"][1:3]
     [made] = call["tool_calls"]
     assert made["name"] == "stock" and made["arguments"] == {"sku": "a"}
@@ -529,13 +538,48 @@ async def test_the_transcript_is_recorded_on_a_pause_and_on_a_failure(
     ]
     run = paused.run_id
     assert sent[:3] == [
-        ("USER", "ask", f"{run}:user:0"),  # on the pause
-        ("USER", "ask", f"{run}:user:0"),  # again on the resumed attempt: the service stores
-        ("ASSISTANT", "yes", f"{run}:2:msg:1"),  # it once (its source id is the same)
+        ("USER", "ask", question_id(run, run)),  # on the pause
+        ("USER", "ask", question_id(run, run)),  # again on the resumed attempt: the service
+        ("ASSISTANT", "yes", answer_id(run, run)),  # stores it once (the same source id)
     ]
     assert sent[3][:2] == ("USER", "fail")  # a failed run's question is kept too
     # a run with no thread is its own thread
     assert {b.scope["thread_id"] for b in batches} == {paused.run_id, failed.run_id}
+
+
+async def test_a_resumed_graph_run_stores_each_message_of_its_transcript_once(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A checkpointed graph run paused on an approval and resumed sends its whole transcript
+    again on the second attempt: the question, and the first attempt's assistant call. Each
+    message is stored once: the service de-duplicates by ``source_message_id``, which is the
+    message's own stable id (``conversation.identified``), not its attempt (ADR 0005 §3)."""
+
+    @tool(side_effects="irreversible")
+    def wipe(disk: str) -> str:
+        """Wipe a disk."""
+        return "wiped"
+
+    model = ScriptedChatModel(turns=[("wipe", {"disk": "d1"}), "wiped d1"])
+    graph = create_agent(
+        model,
+        tools=await native_tools(memory_harness, wipe, framework="langgraph"),
+        checkpointer=InMemorySaver(),
+    )
+    agent = memory_harness.wrap(graph, id="graph-ops")
+    paused = await agent.run("wipe d1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
+    await memory_harness.writes.drain()
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
+    assert done.status is RunStatus.SUCCESS, done.error
+    await memory_harness.writes.drain()
+    stored = memory_service.threads[paused.run_id]
+    said = [(m["role"], m["content"], bool(m.get("tool_calls"))) for m in stored]
+    assert said.count(("USER", "wipe d1", False)) == 1
+    assert sum(1 for role, _, calls in said if role == "ASSISTANT" and calls) == 1, said
+    assert [r for r, _, _ in said] == ["USER", "ASSISTANT", "TOOL", "ASSISTANT"], said
+    ids = [m["custom_metadata"].get("message_id") for m in stored]
+    assert len(ids) == len(set(ids)), ids
 
 
 async def test_an_approval_decision_is_feedback_on_the_tool_call(
