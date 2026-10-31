@@ -297,6 +297,16 @@ async def test_a_buffer_keeps_its_last_events_and_numbers_them() -> None:
     assert read[-2] == (MAX_EVENTS_PER_RUN + 4, MAX_EVENTS_PER_RUN + 4)
 
 
+async def test_a_derived_event_shares_the_number_of_the_event_before_it() -> None:
+    buffer = Hub().open("r", "u")
+    buffer.publish(AGUIEvent(type=AGUIEventType.TOOL_CALL_RESULT, value="result"))
+    buffer.publish(AGUIEvent(type=AGUIEventType.ACTIVITY_SNAPSHOT, value="line"), derived=True)
+    buffer.publish(AGUIEvent(type=AGUIEventType.RUN_FINISHED, value="end"), final=True)
+    read = [(n, e.value) async for n, e in buffer.read(-1)]
+    assert read == [(0, "result"), (0, "line"), (1, "end")]  # numbered as the log's events
+    assert [(n, e.value) async for n, e in buffer.read(0)] == [(1, "end")]
+
+
 def test_the_hub_forgets_finished_runs_first(monkeypatch: pytest.MonkeyPatch) -> None:
     from trellis.harness.agui import hub as module
 

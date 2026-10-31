@@ -43,6 +43,13 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- `trellis.ask_user()`: an opt-in tool the model asks the person with — free text, a choice
+  (`options`), a `date`, a `date_range` or a `number` — through the run's own pause, the answer
+  its result. The interrupt names the `ask_user` component (`props`: `kind`, `options`) for an
+  app's own picker, carries the schema and widget hints for any other UI, and its question says
+  the kind of answer for plain chat ([interrupts.md](docs/interrupts.md#asking)).
+- AG-UI activity: an `ACTIVITY_SNAPSHOT` after each tool call that ends groups the run's calls
+  into one line, `used 2 tools · ran 1 command` ([surfaces.md](docs/surfaces.md)).
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

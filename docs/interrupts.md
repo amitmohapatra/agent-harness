@@ -77,6 +77,21 @@ where `ask` returns, saying so.
 `question.answer(record.last_resolution)` reads the answer back (into `form`); agent-runs checks
 the answer when it is given.
 
+**The model asks: `ask_user()`.** Opt-in: `ReAct(tools=[trellis.ask_user()])` (or any
+agent's tools) gives the model an `ask_user(question, options=None, kind="text")` tool, its
+answer the call's result. `kind` is `text`, `date`, `date_range` or `number`; `options` makes it
+a choice. It is `ask` with what every surface needs:
+
+| | `options` | `date` | `date_range` | `number` |
+|---|---|---|---|---|
+| `component`, `props` (an app's own control) | `ask_user`, `{"kind": "text", "options": [...]}` | `ask_user`, `{"kind": "date", "options": []}` | the same, `date_range` | the same, `number` |
+| `ui` and the schema (any other UI) | `choice` | `form`, `{"type": "string", "format": "date"}`, a date widget | `form`, `{start, end}` dates, or text | `form`, a number or text |
+| What plain chat reads | `Which size? (one of: S, L)` | `… (a date, YYYY-MM-DD)` | `… (a date range: its start and end, YYYY-MM-DD)` | `… (a number)` |
+
+A range and a number may be answered in words, so a plain chat can answer them; a choice is
+one of its options. Whether a model should ask or guess, and offering `ask_user` by default,
+is being measured (#58).
+
 An approval (an `irreversible` tool, a catalog `approve_when` that holds, a hook's `Ask`) is
 the same pause with `reason=APPROVAL` and the tool call attached.
 
