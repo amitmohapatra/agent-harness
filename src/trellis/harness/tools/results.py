@@ -13,13 +13,6 @@ it, at most :data:`PAGE_CHARS` at a time, each page saying where the next starts
 longer than :data:`MAX_LINE` characters reads as several (Deep Agents' ``read_file`` numbers
 their parts 5.1, 5.2… in one page): a one-line JSON result pages too.
 
-An earlier turn's result that the conversation replays is not read again as raw text: it is
-kept the same way, in this run's journal, and the model reads its *data card* in its place
-(:func:`carded`, :data:`CARD`) — the tool, where it is kept, its size, its table's columns and
-the first characters — while the run record (the memory service's steps list) says what was
-called, when it was fetched and where it came from. ``read_file`` and ``query_result`` read
-it whole. A result shorter than its card is replayed as it is.
-
 ``query_result`` (``tools.query``) runs read-only SQL over its rows — a count, a sum, a filter,
 a top-N or a group over every row, exact — and the stub says so before its preview, naming the
 table's columns; a run with a sandbox is also told the result is a file there to run code over
@@ -28,19 +21,14 @@ table's columns; a run with a sandbox is also told the result is a file there to
 
 from __future__ import annotations
 
-import dataclasses
-from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, Final
+from collections.abc import Awaitable, Callable
+from typing import Any, Final
 
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import current
 from trellis.harness.tools import query
 from trellis.harness.tools.base import arguments_problem, not_run
 from trellis.harness.tools.convert import text_of
-
-if TYPE_CHECKING:
-    from trellis.harness.history import Said
-    from trellis.harness.runtime import Runtime
 
 #: The most characters a result is read as it is; a longer one is kept and previewed.
 MAX_CHARS: Final = 20_000 * 4
@@ -91,17 +79,6 @@ CODE: Final = (
     "The whole result is also the file {path} in your sandbox: to count, sum, filter, rank or "
     "group its rows, run code over that file with {tool} instead of reading it page by page."
 )
-#: What an earlier turn's replayed result reads as (:func:`carded`): its data card. When it
-#: was fetched and its source are the run record's to say, not the card's. It says the result
-#: was read whole when it came back: a model reading only the card in its own earlier turn
-#: otherwise disowned that turn's answer ("I only saw the opening").
-CARD: Final = (
-    "[data card: this {tool} result was read whole when it came back, and is shown here in "
-    "short. Kept at {path} ({chars} characters, {lines} lines; table {table}, columns "
-    "{columns}): read_file or query_result reads it again]\nBegins: {head}"
-)
-#: The most of an earlier result a data card shows.
-CARD_HEAD: Final = 120
 #: Deep Agents' stub for a large result (``_message_eviction._TOO_LARGE_TOOL_MSG``).
 STUB: Final = """Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
 
@@ -147,50 +124,13 @@ def keep(text: str, *, tool: str | None = None) -> str | None:
     its content, so the same text is kept once; ``None`` outside a run. ``tool``: the tool that
     returned it, whose name its table has in a query (``tools.query.tables``)."""
     runtime = current()
-    return None if runtime is None else kept_in(runtime, text, tool=tool)
-
-
-def kept_in(runtime: Any, text: str, *, tool: str | None = None) -> str:
-    """:func:`keep` in ``runtime``'s journal."""
+    if runtime is None:
+        return None
     path = f"{PREFIX}/{content_key('result', text)}"
     runtime.replay.journal.results[path] = text
     if tool is not None and getattr(runtime, "kept_from", None) is not None:
         runtime.kept_from.setdefault(path, tool)
     return path
-
-
-def carded(history: Sequence[Said], runtime: Runtime) -> list[Said]:
-    """``history`` (a replayed conversation) with each tool result read as its data card
-    (:data:`CARD`), the result kept whole in ``runtime``'s journal for ``read_file`` and
-    ``query_result``; a result its card would not shorten is left as it is."""
-    from trellis.harness.history import Speaker  # noqa: PLC0415 - history imports the tools
-
-    tools = {c.id: c.name for m in history for c in m.tool_calls}
-    out: list[Said] = []
-    for m in history:
-        tool = tools.get(m.tool_call_id or "") if m.role is Speaker.TOOL else None
-        card = None if tool is None else _card(runtime, m.content, tool)
-        out.append(m if card is None else dataclasses.replace(m, content=card))
-    return out
-
-
-def _card(runtime: Runtime, text: str, tool: str) -> str | None:
-    """``text``'s data card, kept in ``runtime``; ``None`` when the card is no shorter."""
-    head = " ".join(text[:CARD_HEAD].split()) + ("…" if len(text) > CARD_HEAD else "")
-    path = f"{PREFIX}/{content_key('result', text)}"
-    columns = ", ".join(query.columns_of(text))
-
-    def card(table: str) -> str:
-        lines = len(_lines(text))
-        return CARD.format(
-            tool=tool, path=path, lines=lines, chars=len(text), table=table, columns=columns,
-            head=head,
-        )  # fmt: skip
-
-    if len(card(tool)) >= len(text):
-        return None
-    kept_in(runtime, text, tool=tool)
-    return card(query.tables(runtime)[path])
 
 
 def line_at(text: str, chars: int) -> int:

@@ -55,10 +55,6 @@ own model work follows the harness's configuration.
   "how sure" (trellis-memory 0.6.2). The fetch time is said there only: a tool result written
   to memory is no longer stamped `[snapshot of <tool> from <UTC time>]`, and a replayed result
   past its tool's age is marked out of date from its run record.
-- An earlier turn's replayed tool result reaches the model as its data card (the tool, where it
-  is kept, its size, its table's columns, its first characters), the result itself kept in the
-  run for `read_file` and `query_result` (`tools.results.carded`); a result shorter than its
-  card is replayed as it is.
 - A `ReAct` agent with a known window sizes the conversation the memory service replays
   (`conversation_token_budget`, trellis-memory 0.6): what one request may hold (95% of the
   window, as `FitWindow` fits it) less its instructions, offered tools and question

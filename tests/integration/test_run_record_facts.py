@@ -62,3 +62,21 @@ def test_the_facts_survive_the_write_spool() -> None:
     assert recorded(said)["custom_metadata"] == {RUN_RECORD: {"status": "OK"}}
     assert said_of(recorded(said)) == said
     assert "custom_metadata" not in recorded(Said(Speaker.USER, "hi"))
+
+
+def test_a_run_not_yet_timed_records_no_seconds() -> None:
+    """A transcript written before the attempt's clock started (``Runtime.started_at`` unset)
+    says the run's status and approvals, and no seconds it cannot know."""
+    from types import SimpleNamespace
+
+    from trellis.contracts import RunStatus
+    from trellis.harness import pipeline
+    from trellis.harness.journal import Journal
+
+    runtime = SimpleNamespace(
+        replay=SimpleNamespace(journal=Journal()), started_at=None, fetched={}, toolbox={},
+        native={},
+    )  # fmt: skip
+    said = [Said(Speaker.USER, "q"), Said(Speaker.ASSISTANT, "a")]
+    out = pipeline._with_facts(said, runtime, RunStatus.SUCCESS)  # type: ignore[arg-type]
+    assert out[-1].facts == {"status": "SUCCESS", "approvals": "none"}

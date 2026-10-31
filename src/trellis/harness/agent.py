@@ -100,7 +100,6 @@ from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools import results
 from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
@@ -937,13 +936,8 @@ class Agent:
             output(span, pushed.rendered)
         stale: list[str] = []
         if window is Window.MESSAGES:
-            # earlier turns' results as data cards, the results kept for read_file and
-            # query_result (``tools.results.carded``); out of date past their tools' age
             runtime.history, stale = snapshots.out_of_date(
-                results.carded(
-                    from_window(pushed.conversation.messages if pushed.conversation else []),
-                    runtime,
-                ),
+                from_window(pushed.conversation.messages if pushed.conversation else []),
                 lambda name: snapshots.declared_max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the

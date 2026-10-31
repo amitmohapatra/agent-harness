@@ -7,7 +7,6 @@ returns): no drain, no worker, no blob of text in the system message."""
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
@@ -25,8 +24,6 @@ from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import snapshots
 from trellis.harness.agent import TURN_WRITE_SECONDS
 from trellis.harness.identity import conversation_key
-from trellis.harness.journal import content_key
-from trellis.harness.tools.results import PREFIX
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"
@@ -94,35 +91,6 @@ async def test_a_tool_call_comes_back_with_its_result(
     said = messages[2]["content"]
     assert said == snapshots.STALE.format(tool="stock") + "\n7"
     assert messages[3]["content"] == "7 units."
-
-
-async def test_an_earlier_result_is_its_data_card_and_read_file_reads_it_whole(
-    memory_harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    """An earlier turn's result is not replayed raw: its data card stands in, the run record
-    says when it was fetched, and ``read_file`` reads the result itself."""
-    rows = json.dumps([{"sku": f"S-{n}", "qty": n} for n in range(100)])
-
-    @tool(side_effects="read")
-    def inventory() -> str:
-        """Every SKU's stock."""
-        return rows
-
-    path = f"{PREFIX}/{content_key('result', rows)}"
-    model = ScriptedChat(
-        [("inventory", {}), "100 SKUs.", ("read_file", {"file_path": path}), "S-99: 99."]
-    )
-    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="inv"), [inventory])
-    await agent.run("How many SKUs?", user="u1", thread=THREAD)
-    result = await agent.run("What is S-99's stock?", user="u1", thread=THREAD)
-    assert result.status is RunStatus.SUCCESS and result.answer == "S-99: 99.", result.error
-    asked = model.requests[2]  # the second turn's first request
-    [card] = [m["content"] for m in asked["messages"] if m["role"] == "tool"]
-    assert "data card: this inventory result was read whole" in card and path in card
-    assert rows not in card and len(card) < len(rows) / 2
-    assert "read_file" in [t["function"]["name"] for t in asked["tools"]]
-    [read] = [m["content"] for m in model.requests[3]["messages"] if m["role"] == "tool"][-1:]
-    assert '"sku": "S-99", "qty": 99' in read
 
 
 async def test_multilingual_turns_reach_the_model_as_said(
