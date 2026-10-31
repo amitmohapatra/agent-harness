@@ -6,12 +6,13 @@ conversation that replays it in a later turn says so.
   (``Runtime.fetched``, else the time it is written). A later turn's window replays it with
   that line, so the model can say where a number came from and when, and can tell an old
   value from a current one.
-* **out of date** — a tool that declares how long its values stay current (``freshness="live"``
-  or ``max_age``: ``tools.base.max_age``) and whose earlier result is replayed past that age:
-  the replayed result says it is out of date (:data:`STALE`), the run's context says the same
-  in one line naming the tool (:func:`note`), and the tool stays offered — the model fetches
-  the value again instead of answering from the old one. A tool that declares nothing is never
-  marked: its result is a snapshot with its time, like any other.
+* **out of date** — a tool's data is live unless it declares otherwise (``tools.base.max_age``:
+  0 by default, ``max_age`` seconds, or none for ``freshness="static"`` reference data), so an
+  earlier result replayed past that age says it is out of date (:data:`STALE`), the run's
+  context says the same in one line naming the tool (:func:`note`), and the tool stays offered
+  — the model fetches the value again instead of answering from the old one. Memory is never
+  the source of a tool's data; a repeated call is served from an earlier one only within its
+  own model step (``tools.bridge.same``) and run (the journal), never across turns.
 """
 
 from __future__ import annotations

@@ -86,7 +86,9 @@ async def test_a_tool_call_comes_back_with_its_result(
     [call] = messages[1]["tool_calls"]
     assert call["function"]["name"] == "stock" and '"sku": "a"' in call["function"]["arguments"]
     assert messages[2]["tool_call_id"] == call["id"]
-    assert re.fullmatch(r"\[snapshot of stock from [0-9TZ:-]+\]\n7", messages[2]["content"])
+    # a dated snapshot, out of date already (a tool's data is live unless it says otherwise)
+    said = messages[2]["content"]
+    assert re.fullmatch(r"\[snapshot of stock from [0-9TZ:-]+: out of date[^\]]*\]\n7", said)
     assert messages[3]["content"] == "7 units."
 
 

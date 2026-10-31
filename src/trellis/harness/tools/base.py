@@ -58,6 +58,8 @@ FRESHNESS: Final = "freshness"
 #: the last page (``tools.pages``).
 PAGED: Final = "paged"
 LIVE: Final = "live"
+#: A tool's data that does not change (reference data): its earlier values stay current.
+STATIC: Final = "static"
 #: What a tool that declares it adds to its description, so every framework's model reads it
 #: where it reads how to use the tool.
 CHANGES: Final = (
@@ -115,7 +117,7 @@ class Tool:
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
             raise ConfigurationError(f"{self.spec.name}: a timeout is a number of seconds over 0")
-        age = max_age(self.spec)
+        age = (self.spec.model_extra or {}).get(MAX_AGE)  # said only of what a tool declared
         said = CHANGES if age == 0 else CHANGES_AFTER.format(age=_duration(age or 0))
         if age is not None and said not in self.spec.description:
             described = f"{self.spec.description.rstrip()} {said}".strip()
@@ -133,10 +135,15 @@ class Tool:
 
 
 def max_age(spec: ToolSpec) -> float | None:
-    """How long a value the tool returns stays current, in seconds (0: live), as it declared it
-    (:data:`MAX_AGE`); ``None``: it did not say."""
-    found = (spec.model_extra or {}).get(MAX_AGE)
-    return float(found) if isinstance(found, int | float) and not isinstance(found, bool) else None
+    """How long a value the tool returns stays current, in seconds: as it declared it
+    (:data:`MAX_AGE`); ``None`` for a tool that declared its data static (reference data: an
+    earlier value is as good as a new one); else 0 — live, by default: a tool's data changes,
+    so a value of an earlier turn, a replayed window or memory is a dated snapshot."""
+    extra = spec.model_extra or {}
+    if extra.get(FRESHNESS) == STATIC:
+        return None
+    found = extra.get(MAX_AGE)
+    return float(found) if isinstance(found, int | float) and not isinstance(found, bool) else 0.0
 
 
 def data_of(declared: Any, *, name: str = "the tool", strict: bool = True) -> dict[str, Any]:
@@ -157,8 +164,8 @@ def data_of(declared: Any, *, name: str = "the tool", strict: bool = True) -> di
     age = next((found[k] for k in (MAX_AGE, "maxAge") if found.get(k) is not None), None)
     freshness = found.get(FRESHNESS)
     problem = None
-    if freshness is not None and freshness != LIVE:
-        problem = f"{name}: freshness is {LIVE!r} (or give max_age in seconds)"
+    if freshness is not None and freshness not in (LIVE, STATIC):
+        problem = f"{name}: freshness is {LIVE!r} or {STATIC!r} (or give max_age in seconds)"
     elif age is not None and (isinstance(age, bool) or not isinstance(age, int | float) or age < 0):
         problem = f"{name}: max_age is a number of seconds, 0 or more"
     if problem is not None:
@@ -166,6 +173,8 @@ def data_of(declared: Any, *, name: str = "the tool", strict: bool = True) -> di
             raise ConfigurationError(problem)
         return {}
     paging = {PAGED: True} if found.get(PAGED) is True else {}
+    if freshness == STATIC:
+        return {FRESHNESS: STATIC, **paging}
     if freshness == LIVE:
         return {MAX_AGE: 0.0, **paging}
     return paging if age is None else {MAX_AGE: float(age), **paging}

@@ -65,7 +65,9 @@ def test_a_tool_declares_how_long_its_values_stay_current() -> None:
     live = tool(lambda sku: 1, name="live_stock", freshness="live", side_effects="read")
     aged = tool(lambda sku: 1, name="price", max_age=300, side_effects="read")
     plain = tool(lambda sku: 1, name="catalog", side_effects="read")
-    assert max_age(live.spec) == 0 and max_age(aged.spec) == 300 and max_age(plain.spec) is None
+    static = tool(lambda sku: 1, name="country", freshness="static", side_effects="read")
+    assert max_age(live.spec) == 0 and max_age(aged.spec) == 300 and max_age(static.spec) is None
+    assert max_age(plain.spec) == 0  # live by default: a tool's data changes
     # the model reads it in the tool's description; a tool that says nothing is as it was
     assert "call it again for the current value" in live.tool.spec.description
     assert "5 minutes" in aged.tool.spec.description
@@ -91,7 +93,7 @@ def test_a_framework_tool_and_an_mcp_tool_declare_it_beside_their_side_effects()
     listed = Listed.model_validate(
         {"name": "stock", "description": "Stock.", "inputSchema": {"type": "object"}}
     )
-    assert max_age(source._tool("inv", listed).spec) is None
+    assert max_age(source._tool("inv", listed).spec) == 0  # said nothing: live
     listed = listed.model_copy(
         update={
             "annotations": ToolAnnotations.model_validate({"readOnlyHint": True}),
@@ -117,10 +119,11 @@ async def test_a_replayed_result_says_which_tool_fetched_it_and_when(
     result = await agent.run("Where did that number come from?", user="u1", thread=THREAD)
     assert result.status is RunStatus.SUCCESS, result.error
     [told] = replayed(model.requests[-1])
-    assert told == "[snapshot of get_stock from 2026-10-30T09:00:00Z]\n40"
     stored = [m for m in memory_service.threads[KEPT] if m["role"] == "TOOL"]
-    assert stored[0]["content"] == told  # kept so: any later turn reads when it was fetched
-    assert "out of date" not in context(model.requests[-1])  # not declared live: a snapshot
+    # kept so: any later turn reads which tool fetched it and when
+    assert stored[0]["content"] == "[snapshot of get_stock from 2026-10-30T09:00:00Z]\n40"
+    assert told.startswith("[snapshot of get_stock from 2026-10-30T09:00:00Z: out of date")
+    assert "out of date" in context(model.requests[-1])  # live by default: call it again
 
 
 #: (what the tool declares, how much later the second turn is, whether the first value is stale)
@@ -128,6 +131,8 @@ CASES = {
     "live": ({"freshness": "live"}, timedelta(seconds=30), True),
     "past-max-age": ({"max_age": 600}, timedelta(hours=2), True),
     "within-max-age": ({"max_age": 600}, timedelta(minutes=5), False),
+    "live-by-default": ({}, timedelta(seconds=1), True),
+    "static": ({"freshness": "static"}, timedelta(days=30), False),
 }
 
 
@@ -180,6 +185,7 @@ class Slotted:
         ({"max_age": 5}, {MAX_AGE: 5.0}),
         ({"maxAge": 7.5, "readOnlyHint": True}, {MAX_AGE: 7.5}),
         ({"freshness": None, "max_age": None}, {}),
+        ({"freshness": "static", "paged": True}, {"freshness": "static", "paged": True}),
         (Annotated(maxAge=60), {MAX_AGE: 60.0}),
         (
             type("Attrs", (), {"__init__": lambda self: setattr(self, "freshness", "live")})(),
@@ -199,9 +205,10 @@ def test_a_freshness_of_another_kind_is_refused_or_from_a_server_not_read(declar
     assert data_of(declared, strict=False) == {}
 
 
-def test_a_spec_that_says_nothing_or_something_else_has_no_max_age() -> None:
-    assert max_age(ToolSpec(name="t")) is None
-    assert max_age(ToolSpec(name="t", max_age=True)) is None  # type: ignore[call-arg]
+def test_a_spec_that_says_nothing_is_live_and_a_static_one_never_ages() -> None:
+    assert max_age(ToolSpec(name="t")) == 0  # live by default
+    assert max_age(ToolSpec(name="t", max_age=True)) == 0  # type: ignore[call-arg]
+    assert max_age(ToolSpec(name="t", freshness="static")) is None  # type: ignore[call-arg]
     assert max_age(ToolSpec(name="t", max_age=3)) == 3  # type: ignore[call-arg]
 
 

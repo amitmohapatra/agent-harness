@@ -67,7 +67,7 @@ class FunctionTool:
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
         idempotent: bool = False,
         timeout: float | None = None,
-        freshness: Literal["live"] | None = None,
+        freshness: Literal["live", "static"] | None = None,
         max_age: float | None = None,
         paged: bool = False,
     ) -> None:
@@ -112,7 +112,7 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
-    freshness: Literal["live"] | None = None,
+    freshness: Literal["live", "static"] | None = None,
     max_age: float | None = None,
     paged: bool = False,
 ) -> FunctionTool: ...
@@ -124,7 +124,7 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
-    freshness: Literal["live"] | None = None,
+    freshness: Literal["live", "static"] | None = None,
     max_age: float | None = None,
     paged: bool = False,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
@@ -137,7 +137,7 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
-    freshness: Literal["live"] | None = None,
+    freshness: Literal["live", "static"] | None = None,
     max_age: float | None = None,
     paged: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
@@ -153,11 +153,13 @@ def tool(
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped). A result that comes from outside the run (a person, another system) is an
     ``ask`` in the function: ``return await trellis.current().ask(question, expects=...)``.
-    ``freshness="live"`` (its values change: every earlier value is out of date) or
-    ``max_age`` (the seconds a value stays current): an earlier result of it that the
-    conversation replays past that age is marked out of date, and the model calls it again
-    (``trellis.harness.snapshots``). ``paged``: it returns its rows a page at a time (a cursor
-    argument, the next cursor in its result): one call fetches every page (``tools.pages``).
+    A tool's data is live by default: an earlier result of it that the conversation replays is
+    a dated snapshot, marked out of date, and the model calls it again
+    (``trellis.harness.snapshots``); ``max_age`` (the seconds a value stays current) or
+    ``freshness="static"`` (reference data that does not change) say otherwise;
+    ``freshness="live"`` says it in the tool's description too. ``paged``: it returns its rows
+    a page at a time (a cursor argument, the next cursor in its result): one call fetches every
+    page (``tools.pages``).
     """
     made = functools.partial(
         FunctionTool,

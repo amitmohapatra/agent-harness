@@ -165,19 +165,22 @@ a top-N and a group over 10,000 SKUs).
 
 ## Values that change: freshness
 
-A tool says how long what it returns stays current, beside its other metadata:
-`tool(fn, freshness="live")` (every earlier value is out of date) or `tool(fn, max_age=300)`
-(seconds); a LangChain tool's `metadata={"freshness": "live"}` (beside `side_effects`); an MCP
-tool's `_meta` (`{"freshness": "live"}`, `{"maxAge": 300}`). The tool's description says so
-to the model (`tools.base.CHANGES`), whatever the framework.
+A tool's data is live by default: any value from an earlier turn, a replayed window or memory is
+a dated snapshot. A tool says otherwise beside its other metadata: `tool(fn, max_age=300)`
+(seconds a value stays current) or `tool(fn, freshness="static")` (reference data: an earlier
+value is as good as a new one); `freshness="live"` also says the default in the tool's
+description (`tools.base.CHANGES`). The same keys go in a LangChain tool's `metadata` (beside
+`side_effects`) and an MCP tool's `_meta` (`{"freshness": "static"}`, `{"maxAge": 300}`).
 
 Where memory owns the conversation, every tool result a run writes to it starts with
 `[snapshot of <tool> from <UTC time>]`, so a later turn replays when (and by which tool) each
-value was fetched — the model can say where a number came from. A replayed result of a tool
-past its declared age is marked out of date in the replay, the run's context says the same in
-one line, and the tool stays offered even when the tool hints narrow the rest: the model fetches
-the value again instead of answering from the old one (`trellis.harness.snapshots`). A tool
-that declares nothing is never marked: its results are dated snapshots like any other. The
+value was fetched — the model can say where a number came from. A replayed result past its
+tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
+same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
+fetches the value again instead of answering from the old one, and the fresh result, with the
+older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). A repeated
+call is answered from an earlier one only within its own model step and run, never across
+turns; `memory_search` items carry `observed_on`. The
 memory service never turns a tool's result into a long-term fact (it forms memories from what
 it was told, not from tool output), so the user's facts and preferences stay and live values do
 not.

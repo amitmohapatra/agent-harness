@@ -46,11 +46,11 @@ own model work follows the harness's configuration.
   `regr_*`), offered with `read_file` on every adapter, bounded in time, input, sort memory and
   answer (`tools.query`). A tool declared `paged=True` is fetched to its last page in one call
   (`tools.pages`). A run with a sandbox finds every kept result as a file there too.
-- Freshness: `tool(freshness="live")`, `tool(max_age=)`, a LangChain tool's
-  `metadata={"freshness": ...}`, an MCP tool's `_meta` (`tools.base.data_of`). Tool results
-  written to memory's thread start with `[snapshot of <tool> from <UTC time>]`; replayed past
-  the tool's declared age they are marked out of date, the context says so, and the tool stays
-  offered (`trellis.harness.snapshots`).
+- Freshness: a tool's data is live by default; `tool(max_age=)`, `tool(freshness="static")`
+  (or `"live"`), a LangChain tool's `metadata`, an MCP tool's `_meta` say otherwise
+  (`tools.base.data_of`). Tool results written to memory's thread start with
+  `[snapshot of <tool> from <UTC time>]`; replayed past the tool's age they are marked out of
+  date, the context says so, and the tool stays offered (`trellis.harness.snapshots`).
 - `benchmark/cost`: the `aggregate` and `freshness` classes over 10,000 SKUs.
 - Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
   from the schemas the tools publish (a function's return annotation, now its
