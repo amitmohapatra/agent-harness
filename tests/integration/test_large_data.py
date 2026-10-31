@@ -427,3 +427,67 @@ async def test_a_join_over_50000_rows_costs_the_model_a_few_thousand_tokens(
     assert [m["content"].count("query_result(") for m in previews] == [1, 1, 1]
     tables = {t for m in previews for t in re.findall(r"the table (\w+)", m["content"])}
     assert tables == {"inventory50k", "sales", "lead_times"}  # each its tool's, one query
+
+
+#: 300 sales lines: a result well under ``tools.results.MAX_CHARS``, read whole, that a model
+#: would otherwise count and add up itself
+LINES: Final = "date,sku,units\n" + "\n".join(
+    f"2026-09-{1 + n % 30:02d},SKU-{n % 41:05d},{1 + n % 7}" for n in range(300)
+)
+LINES_KEPT: Final = f"/large_tool_results/{content_key('result', LINES)}"
+DISTINCT: Final = "SELECT COUNT(DISTINCT sku) FROM result"
+
+
+@tool(side_effects="read")
+def sales_lines() -> str:
+    """September's sales lines, as CSV."""
+    return LINES
+
+
+@tool(side_effects="read")
+def few_lines() -> str:
+    """Three sales lines, as CSV."""
+    return "date,sku,units\n" + "\n".join(LINES.splitlines()[1:4])
+
+
+async def test_a_table_read_whole_is_also_queryable_so_no_row_is_counted_by_hand(
+    harness: Harness,
+) -> None:
+    """A result of many rows that fits is read whole and also kept as a table: its message
+    says so, ``query_result`` is offered and counts over every row exactly."""
+    model = ScriptedChat(
+        [("sales_lines", {}), ("query_result", {"file_path": LINES_KEPT, "sql": DISTINCT}), "41"]
+    )
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="lines"), [sales_lines])
+    result = await agent.run("how many distinct SKUs sold?", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    told = last(model.requests[1])
+    assert told.startswith(LINES)  # every row, as it came
+    said = results.QUERY.format(table="sales_lines", columns="date, sku, units", path=LINES_KEPT)
+    assert said in told and "300 rows" in told
+    assert "query_result" in names(model.requests[1])
+    assert last(model.requests[2]).splitlines()[1] == "41"
+
+
+async def test_a_few_rows_are_read_as_they_are(harness: Harness) -> None:
+    model = ScriptedChat([("few_lines", {}), "done"])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="few"), [few_lines])
+    assert (await agent.run("x", user="u")).status is RunStatus.SUCCESS
+    assert last(model.requests[1]) == "date,sku,units\n" + "\n".join(LINES.splitlines()[1:4])
+    assert "query_result" not in names(model.requests[1])
+
+
+@pytest.mark.parametrize(
+    "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
+)
+async def test_every_framework_counts_a_table_read_whole_exactly(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    plan: list[Call] = [
+        ("sales_lines", {}),
+        ("query_result", {"file_path": LINES_KEPT, "sql": DISTINCT}),
+    ]
+    target, own = await BUILDERS[framework](harness, [sales_lines], tmp_path, plan)
+    result = await arm(harness.wrap(target, id=f"lines-{framework}"), own).run("q", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer.endswith("41")

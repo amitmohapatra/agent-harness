@@ -34,6 +34,13 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Fixed
+
+- A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
+  counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
+  result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
+  and got them wrong.
+
 ### Added
 
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
