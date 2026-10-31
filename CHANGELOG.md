@@ -34,8 +34,20 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Changed
+
+- The tool hints narrow what the model is offered only from 30 tools in the run
+  (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
+  still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
+  looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
+  every adapter.
+
 ### Fixed
 
+- A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
+  counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
+  result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
+  and got them wrong.
 - A Docker sandbox's anonymous volumes (an image's `VOLUME`) are removed with it: before, each
   run of such an image left one volume behind (50 runs, 50 volumes; now none).
 
