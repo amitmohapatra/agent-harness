@@ -34,6 +34,14 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Fixed
+
+- A live tool's value from an earlier turn reads as out of date in every adapter, not only
+  where memory's window replays the conversation. A `create_agent` or Deep Agents graph keeps
+  its own thread (its checkpointer), so its earlier results are marked in the request it sends
+  (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
+  marks them as memory's window does. In both, the tool stays offered.
+
 ### Added
 
 - Large results in `ReAct` without a backend and in a `create_agent` graph with

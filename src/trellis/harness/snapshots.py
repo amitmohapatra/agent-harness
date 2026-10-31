@@ -35,6 +35,12 @@ STALE: Final = (
 _STAMPED: Final = re.compile(
     r"^\[snapshot of (?P<tool>[^\]\s]+) from (?P<at>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)[^\]\n]*\]\n"
 )
+#: The mark of a live tool's result from an earlier turn of a thread its framework keeps (a
+#: graph's checkpointer: no fetch time is kept with it, and it is from before this turn).
+EARLIER: Final = (
+    "[{tool}'s result from an earlier turn: out of date, {tool}'s values change — call {tool} "
+    "again for the current value]"
+)
 #: What the context says of the tools whose replayed results are out of date.
 NOTE: Final = (
     "The values {tools} returned in earlier turns are out of date (older than they stay "
@@ -104,4 +110,4 @@ def _parsed(text: str) -> datetime | None:
         return None
 
 
-__all__ = ["NOTE", "STALE", "STAMP", "note", "now", "out_of_date", "stamped"]
+__all__ = ["EARLIER", "NOTE", "STALE", "STAMP", "note", "now", "out_of_date", "stamped"]

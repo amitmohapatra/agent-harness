@@ -6,6 +6,7 @@ worker continues it; and an agent called as a tool (``Agent.as_tool``) a governe
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,8 +18,8 @@ from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Harness, Settings
-from trellis.contracts import RunStatus
-from trellis.harness import budget
+from trellis.contracts import RunStatus, ToolSpec
+from trellis.harness import budget, snapshots
 from trellis.harness.adapters.openai_agents import _said_inside
 from trellis.harness.bridges.session import HISTORY_LIMIT, MemorySession, ThreadReadOnly
 from trellis.harness.governance import Governance
@@ -113,7 +114,14 @@ async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grow
         return thread
 
     memory = SimpleNamespace(ctx=SimpleNamespace(history=history))
-    runtime = SimpleNamespace(run_memory=memory, conversation="conv_t1", run_id="run_1")
+    runtime = SimpleNamespace(
+        run_memory=memory,
+        conversation="conv_t1",
+        run_id="run_1",
+        toolbox={},
+        native={},
+        offered=None,
+    )
     session = MemorySession(runtime)  # type: ignore[arg-type]
     assert session.session_id == "conv_t1"  # the run's conversation (Runtime.conversation)
     assert await session.get_items() == [
@@ -130,6 +138,43 @@ async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grow
         await session.pop_item()
     with pytest.raises(ThreadReadOnly):
         await session.clear_session()
+
+
+async def test_an_earlier_live_value_in_the_thread_reads_as_out_of_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The thread's tool results are stamped when they are written; read back as the SDK's
+    session, a live tool's earlier value is marked out of date (as the memory window's replay
+    is) and its tool stays offered."""
+    stamped = "[snapshot of stock from 2026-10-30T09:00:00Z]\n40"
+    thread = [
+        MessageInfo.model_validate(m)
+        for m in (
+            {"message_id": "1", "role": "USER", "kind": "VISIBLE", "sequence": 1,
+             "content": "stock?", "agent_run_id": "run_0"},
+            {"message_id": "2", "role": "ASSISTANT", "kind": "VISIBLE", "sequence": 2,
+             "content": "", "agent_run_id": "run_0",
+             "tool_calls": [{"id": "c1", "name": "stock", "arguments": {}}]},
+            {"message_id": "3", "role": "TOOL", "kind": "INTERNAL", "sequence": 3,
+             "content": stamped, "agent_run_id": "run_0", "tool_call_id": "c1"},
+        )
+    ]  # fmt: skip
+
+    async def history(*, limit: int, include_internal: bool) -> list[MessageInfo]:
+        return thread
+
+    monkeypatch.setattr(snapshots, "now", lambda: datetime(2026, 10, 30, 10, tzinfo=UTC))
+    live = SimpleNamespace(spec=ToolSpec(name="stock", description="d"))
+    runtime = SimpleNamespace(
+        run_memory=SimpleNamespace(ctx=SimpleNamespace(history=history)),
+        conversation="conv_t1", run_id="run_1", toolbox={"stock": live}, native={},
+        offered={"other"},
+    )  # fmt: skip
+    items = await MemorySession(runtime).get_items()  # type: ignore[arg-type]
+    told = next(i["output"] for i in items if i.get("type") == "function_call_output")
+    stale = snapshots.STALE.format(tool="stock", at="2026-10-30T09:00:00Z")
+    assert told == f"{stale}\n40"
+    assert runtime.offered == {"other", "stock"}
 
 
 async def test_the_sdks_saved_run_state_resumes_on_another_worker() -> None:
