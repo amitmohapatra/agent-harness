@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
@@ -26,9 +27,10 @@ from tests.unit.test_toolbox import Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import telemetry
+from trellis.harness import snapshots, telemetry
 from trellis.harness.agent import NARROW_FROM
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
+from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
 from trellis.memory.models import ToolHints
@@ -467,8 +469,9 @@ async def test_an_agent_searches_what_was_said_as_the_service_offers_it(
 
 # --------------------------------------------------------------------------- records
 async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(snapshots, "now", lambda: datetime(2026, 10, 30, 9, 0, tzinfo=UTC))
     model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
     agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="stock"), [stock])
     result = await agent.run("how many a?", user="u1")
@@ -478,7 +481,8 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
         ("USER", "how many a?", f"{result.run_id}:user:0"),
         ("ASSISTANT", "", f"{result.run_id}:1:msg:1"),
-        ("TOOL", "7", f"{result.run_id}:1:msg:2"),
+        # which tool returned it, and when: a later turn replays it so (``snapshots``)
+        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7", f"{result.run_id}:1:msg:2"),
         ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:3"),
     ]
     call, answered = batch.body["messages"][1:3]
@@ -491,6 +495,29 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert outcome.body["target_kind"] == "run" and outcome.body["target_id"] == result.run_id
     assert outcome.body["verdict"] == "confirm" and outcome.body["source"] == "system"
     assert outcome.idempotency_key == f"{result.run_id}:outcome"
+
+
+async def test_a_large_result_is_recorded_within_the_services_limit(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The service refuses a recorded output over 256 KiB (its ``TOOL_OUTPUT_MAX_BYTES``) with
+    a 422, and the call's record was lost: a large result's call is recorded with its output
+    cut to the limit, so the service still learns from the call."""
+
+    @tool(side_effects="read")
+    def sales_rows(region: str) -> list[dict[str, Any]]:
+        """Every sales line of a region."""
+        return [{"region": region, "line": n, "note": "x" * 80} for n in range(5000)]
+
+    model = ScriptedChat([("sales_rows", {"region": "north"}), "5000 lines"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="rows"), [sales_rows])
+    await agent.run("every north line?", user="u1")
+    await memory_harness.writes.drain()
+    [recorded] = memory_service.named("record_tool")
+    output = recorded.body["output"]
+    assert len(json.dumps(output).encode()) <= RECORDED_OUTPUT_MAX_BYTES
+    assert isinstance(output, str) and output.startswith('[{"region": "north", "line": 0')
+    assert output.endswith("bytes; cut to the service's limit)")
 
 
 async def test_a_failed_run_is_rejected_and_a_cancelled_one_says_nothing(
