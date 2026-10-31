@@ -157,6 +157,17 @@ LAST_STEP: Final = (
     "You have used every step this run allows. Do not call tools: answer now with what you "
     "have, and say what is left undone."
 )
+#: What a model that stalled is told, for its one answer without tools (:class:`StallGuard`).
+STALLED: Final = (
+    "You called {tool} with the same arguments {times} times in a row and it did not give you "
+    "what you need: do not call it again. Do not call tools: answer now with what you have, and "
+    "say what went wrong."
+)
+#: What a model whose every call failed in a row is told, for its one answer without tools.
+FAILING: Final = (
+    "Every tool call failed in the last {steps} steps. Do not call tools: answer now with what "
+    "you have, and say what failed."
+)
 #: The tool outcomes that count as a failed call (in a streak; a ``ToolMessage``'s status).
 FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The free variable of ``create_agent``'s model node holding its composed ``awrap_model_call``
@@ -999,9 +1010,12 @@ class StepLimit(AgentMiddleware):
 
 
 class StallGuard(AgentMiddleware):
-    """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
-    in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed (a malformed one among them)."""
+    """A run that goes nowhere ends with one answer: the same call with the same arguments in
+    ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
+    consecutive steps in which every call failed (a malformed one among them). The model is
+    told so (:data:`STALLED`, :data:`FAILING`) and called once more, offered no tool
+    (``tool_choice="none"``, as :class:`StepLimit`'s last step), so the user is told what
+    went wrong; no answer then stops the run (``ModelError``)."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()
@@ -1017,9 +1031,11 @@ class StallGuard(AgentMiddleware):
         history = request.state.get("messages", [])
         failing = _failing(history)
         if failing >= ERROR_STREAK:
-            raise ModelError(
+            return await _answer_now(
+                request,
+                handler,
+                FAILING.format(steps=failing),
                 f"stopped: every tool call failed in {failing} consecutive steps",
-                source="langgraph",
             )
         reply = await handler(request)
         message = _ai(reply)
@@ -1034,12 +1050,37 @@ class StallGuard(AgentMiddleware):
                         break
                     streak += 1
                 if streak >= self.max_repeats:
-                    raise ModelError(
+                    return await _answer_now(
+                        request,
+                        handler,
+                        STALLED.format(tool=call["name"], times=streak),
                         f"stopped: the model called {call['name']!r} with the same arguments "
                         f"{streak} times in a row (a stall)",
-                        source="langgraph",
                     )
         return reply
+
+
+async def _answer_now(
+    request: ModelRequest[Any],
+    handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    told: str,
+    stopped: str,
+) -> ModelResponse[Any]:
+    """The model called once more, told ``told`` and offered no tool; its answer, or the run
+    stopped (``ModelError(stopped)``) when it gives none."""
+    last = request.override(
+        messages=[*request.messages, HumanMessage(content=told)],
+        tool_choice="none" if request.tools else request.tool_choice,
+    )
+    reply = await handler(last)
+    message = _ai(reply)
+    if message is None or message.tool_calls or not message.text:
+        raise ModelError(stopped, source="langgraph")
+    runtime = current()
+    log.warning("run %s %s", runtime.run_id if runtime else "-", stopped)
+    if runtime is not None:
+        runtime.events.warning("stalled", stopped)
+    return reply
 
 
 def _call_key(call: Any) -> str:

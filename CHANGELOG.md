@@ -34,6 +34,14 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Changed
+
+- A stall no longer ends the run with no answer. A stall is the same call with the same
+  arguments in `max_repeats` steps, or every call failing in 3 steps in a row. The model is
+  now told so and called once more with no tool, as `StepLimit`'s last step is. The user
+  gets an answer that says what went wrong, for example that the tool timed out. The run
+  still stops (`ModelError`) when that call gives no answer.
+
 ### Added
 
 - Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
