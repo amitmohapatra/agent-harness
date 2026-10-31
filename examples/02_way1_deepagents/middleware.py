@@ -5,9 +5,9 @@ checkpointer, then wrapped.
 What the middleware gives them: the run's tools per model call (here the gateway's MCP tool
 ``shop-order`` and the memory tools, beside the graph's own ``refund``), narrowed per turn; the
 graph's own tools governed (the catalog says ``refund`` is irreversible: a person approves it,
-and the resume continues the graph in place, the model not asked again); ``max_steps`` then an
-answer; the stall guard; the hooks and spans; ``call_timeout``. A graph wrapped without it still
-runs governed and narrowed, said once in the log.
+and the resume continues the graph in place, the model not asked again); ``max_steps``
+(LangChain's model call limit); the stall guard; the hooks and spans; ``call_timeout``. A graph
+wrapped without it still runs governed and narrowed, said once in the log.
 
     python -m examples.02_way1_deepagents.middleware
 """
