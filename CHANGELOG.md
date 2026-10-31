@@ -53,6 +53,12 @@ own model work follows the harness's configuration.
   service never learned from it. The output is recorded cut to fit, saying so
   (`clients.memory.recorded_output`).
 
+### Changed
+
+- The note the model gets when memory holds nothing (or only part) for the question says
+  what an honest answer does: name the detail it does not have, and offer to look it up or
+  ask the user for it, instead of a bare "say you do not know" (`agent.ABSTAIN_NOTES`).
+
 ### Added
 
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
