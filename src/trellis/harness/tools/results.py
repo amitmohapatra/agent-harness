@@ -32,6 +32,13 @@ from trellis.harness.tools.convert import text_of
 
 #: The most characters a result is read as it is; a longer one is kept and previewed.
 MAX_CHARS: Final = 20_000 * 4
+#: The rows from which a table read whole is also kept, ``query_result`` computing over it
+#: (:func:`tabled`): a small model counts, adds up and ranks a few dozen rows by hand wrongly
+#: (the holistic run: 748 distinct SKUs counted where there were 740, a 237-row join summed
+#: £18,533 off), and the query is exact.
+TABLE_ROWS: Final = 30
+#: What a table read whole says after its rows (then :data:`QUERY`).
+TABLED: Final = "These {rows} rows are also saved at {path}. "
 #: Where a kept result is read (Deep Agents' ``/large_tool_results/<call id>``).
 PREFIX: Final = "/large_tool_results"
 #: The longest line read as one, and the most of a line a preview shows.
@@ -109,7 +116,7 @@ def readable(output: Any, tool: str | None = None) -> str:
     preview."""
     text = text_of(output)
     if len(text) <= MAX_CHARS:
-        return text
+        return tabled(text, tool)
     path = keep(text, tool=tool)
     runtime = current()
     if path is None or runtime is None:
@@ -118,6 +125,30 @@ def readable(output: Any, tool: str | None = None) -> str:
     name = query.tables(runtime)[path]
     table = QUERY.format(table=name, columns=columns, path=path)
     return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
+
+
+def tabled(text: str, tool: str | None = None) -> str:
+    """``text`` read whole, as it is — and, when it is a table of :data:`TABLE_ROWS` rows or
+    more (``tools.query.rows_of``: CSV with a header, or JSON objects), kept as well, followed
+    by where and how ``query_result`` computes over its rows, so a count, a sum or a ranking is
+    exact rather than done by hand. Parsed only when long enough to hold that many rows; a text
+    over :data:`MAX_CHARS` is the cut's (:func:`readable`, or the framework's own), not this."""
+    runtime = current()
+    if runtime is None or not TABLE_ROWS * MIN_ROW_CHARS <= len(text) <= MAX_CHARS:
+        return text
+    columns, rows = query.rows_of(text)
+    if len(rows) < TABLE_ROWS or columns == ["line"]:
+        return text
+    path = keep(text, tool=tool)
+    assert path is not None  # in a run
+    name = query.tables(runtime)[path]
+    table = QUERY.format(table=name, columns=", ".join(query.column_names(columns)), path=path)
+    return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}"
+
+
+#: The fewest characters a table's row takes (``a,1`` and its line break): a shorter text
+#: cannot hold :data:`TABLE_ROWS` rows, and is not parsed.
+MIN_ROW_CHARS: Final = 4
 
 
 def keep(text: str, *, tool: str | None = None) -> str | None:

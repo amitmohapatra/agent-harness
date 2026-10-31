@@ -78,7 +78,7 @@ async def test_a_request_that_fits_is_sent_as_it_is() -> None:
         FitWindow(optional=("a text",))  # pyright: ignore[reportCallIssue]
 
 
-async def test_the_tools_are_narrowed_to_the_most_relevant_then_compacted() -> None:
+async def test_the_tools_are_narrowed_to_the_most_relevant_then_compacted(narrowing: None) -> None:
     tools = [lc(f"tool_{n}") for n in range(40)] + [lc("refund_order", "Refunds an order.")]
     given = request([HumanMessage("please refund order o-7")], tools)
     window = int(_size(request([HumanMessage("please refund order o-7")], tools[:12])) / 0.95)
