@@ -109,15 +109,81 @@ preview, then pages the rest with `read_file` (`file_path`, `offset` the line to
 
 | Target | Who cuts | Where the whole result is kept |
 |---|---|---|
-| `ReAct`, Deep Agents | Deep Agents' `FilesystemMiddleware` (on by default: [react.md](frameworks/react.md#the-middleware)) | the graph's state |
-| a `create_agent` graph | add `FilesystemMiddleware(tools=["read_file"])` (or build it with `create_deep_agent`) | the graph's state |
-| OpenAI Agents, Claude | the harness, as Deep Agents does (`tools/results.py`; Deep Agents is not needed) | the run's journal: it stays readable for the rest of the run, across a pause and on another worker |
+| `ReAct` given a backend, Deep Agents | Deep Agents' `FilesystemMiddleware` (on by default: [react.md](frameworks/react.md#the-middleware)) | the graph's backend (its state, a disk, the run's sandbox) |
+| `ReAct` (no backend), a `create_agent` graph with `middleware()` | the harness (`HarnessTools`, as Deep Agents does: `tools/results.py`), its `read_file` offered once a result is kept | the run's journal: it stays readable for the rest of the run, across a pause and on another worker |
+| OpenAI Agents, Claude, Kimi (MCP) | the harness, the same way (Deep Agents is not needed) | the run's journal |
+| a `create_agent` graph of your own (no `middleware()`) | add `FilesystemMiddleware(tools=["read_file"])` (or build it with `create_deep_agent`) | the graph's state |
 | a function target, Way 2 | nobody: your code gets the whole result and decides what its model reads | — |
 
 On OpenAI Agents `read_file` is offered once the run keeps a result (`FunctionTool.is_enabled`);
 on Claude it is on the `trellis` server from the start (the CLI lists a server's tools once).
 A page holds at most 20,000 characters and says where the next one starts; a line longer than
 5,000 characters reads as several, so a one-line JSON result pages too.
+
+A result under 80,000 characters that still does not fit a small window is cut to its head
+and tail by `FitWindow`; the cut is kept the same way and says where the rest is
+(`…[N characters cut to fit the window; the rest: read_file(file_path="…", offset=L)]…`, the
+line the cut starts on), so no row is silently out of reach.
+
+### Counting, summing, ranking over a large result
+
+A model that pages 10,000 rows into its context to add them up gets the sum wrong, so it never
+has to. In order of preference:
+
+1. **the tool's own arguments** — a tool that filters, sorts, limits or aggregates on its side
+   (`max_stock`, `category`, `top`, `group_by`) answers exactly and small: say so in its
+   parameters' descriptions (the model reads every tool's schema; the lint warns about a
+   parameter with no description);
+2. **`query_result`**: offered with `read_file` whenever a result is kept, on every adapter
+   (ReAct with or without a backend, `middleware()`, Deep Agents, OpenAI Agents, Claude, Kimi):
+   a read-only SQL `SELECT` over every row, in process (`tools/query.py`: Python's own SQLite,
+   no dependency, no sandbox). Every result the run saved is a table named by the tool that
+   returned it (`result` is the file asked about), so one query joins results of several tools;
+   a JSON array of objects (or the first one a JSON object holds), CSV with a header
+   (`,` tab `;` `|`), else one row per line, with whole-number, number and text columns. Besides
+   SQLite's arithmetic, `CASE`, math, date and window functions (a moving average, `lag` for
+   growth), it has `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `corr`,
+   `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` (named as PostgreSQL and DuckDB
+   name them). Only reading runs (an authorizer: `SELECT` and functions; never a write,
+   `ATTACH`, a `PRAGMA` or an extension), on a database made for the query and closed after it
+   whatever happens, in a worker thread (4 at once in a process): a query runs at most 5 s
+   (a cancelled run interrupts it), loads at most 64 MB of its own run's results (never
+   another run's), holds at most 8 MB of sort memory (more spills to SQLite's temporary
+   files), and answers at most 200 rows and 20,000 characters — the model reads the small
+   answer, never the rows. A tool declared `paged=True` (a cursor argument; `next_cursor` in
+   its result) is fetched to its last page in one call (`tools/pages.py`, at most 200 pages),
+   so its rows are queried whole too;
+3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
+   result in the sandbox, and `execute` runs code over it), or `agent.tools.use(sandbox().tools())`
+   on any adapter (`sandbox_exec`): every result the run keeps is written into the run's sandbox
+   at the path the model was given, before a command runs there, and the preview says so; or
+   **Code Mode** for a gateway's read-only MCP tools ([Code Mode](#code-mode)): the Starlark
+   script calls the tool and computes over what it returns inside the gateway.
+
+`benchmark/cost` measures it (`--suite classes --classes aggregate`: a count, a sum, a filter,
+a top-N and a group over 10,000 SKUs).
+
+## Values that change: freshness
+
+A tool's data is live by default: any value from an earlier turn, a replayed window or memory is
+a dated snapshot. A tool says otherwise beside its other metadata: `tool(fn, max_age=300)`
+(seconds a value stays current) or `tool(fn, freshness="static")` (reference data: an earlier
+value is as good as a new one); `freshness="live"` also says the default in the tool's
+description (`tools.base.CHANGES`). The same keys go in a LangChain tool's `metadata` (beside
+`side_effects`) and an MCP tool's `_meta` (`{"freshness": "static"}`, `{"maxAge": 300}`).
+
+Where memory owns the conversation, every tool result a run writes to it starts with
+`[snapshot of <tool> from <UTC time>]`, so a later turn replays when (and by which tool) each
+value was fetched — the model can say where a number came from. A replayed result past its
+tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
+same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
+fetches the value again instead of answering from the old one, and the fresh result, with the
+older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). A repeated
+call is answered from an earlier one only within its own model step and run, never across
+turns; `memory_search` items carry `observed_on`. The
+memory service never turns a tool's result into a long-term fact (it forms memories from what
+it was told, not from tool output), so the user's facts and preferences stay and live values do
+not.
 
 ## The run's tool set
 

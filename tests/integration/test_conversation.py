@@ -242,6 +242,32 @@ async def test_the_conversations_session_is_continued_only_where_it_is_kept(
     assert list(agent.sessions) == [key]
 
 
+@pytest.mark.parametrize("framework", ["claude_agent_sdk", "kimi"])
+async def test_a_continued_session_with_memory_on_gets_no_memory_window_beside_it(
+    memory_harness: Harness, tmp_path: Path, framework: str
+) -> None:
+    """The session the framework continues replays the earlier turns; memory's window of the
+    same turns is not put into the context beside it (ADR 0005 §4: one owner of the history).
+    Where no session is kept (another process), the window is the history again."""
+    seen: list[Any] = []
+    target, tools = await BUILDERS[framework](memory_harness, [], tmp_path, [], seen=seen)
+    agent = arm(memory_harness.wrap(target, id=f"sess-mem-{framework}"), tools)
+    earlier_turn = "The locker code is 4242."
+    await agent.run(earlier_turn, user="ada", thread=THREAD)
+    await memory_harness.writes.drain()
+    forget(seen)
+    second = await agent.run("What is the locker code?", user="ada", thread=THREAD)
+    assert second.status is RunStatus.SUCCESS, second.error
+    # the continued session carries the earlier turn once; the window adds no second copy
+    assert told(seen).count(earlier_turn) == 1
+    await memory_harness.writes.drain()
+    agent.sessions = LRU()  # another process: no session kept, memory's window instead
+    forget(seen)
+    third = await agent.run("And again?", user="ada", thread=THREAD)
+    assert third.status is RunStatus.SUCCESS, third.error
+    assert told(seen).count(earlier_turn) == 1
+
+
 # --------------------------------------------------------------------------- busy conversations
 @pytest.mark.parametrize("mode", [m.value for m in Mode])
 @pytest.mark.parametrize("framework", sorted(BUILDERS))

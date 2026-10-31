@@ -90,7 +90,7 @@ async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path
     assert result.status is RunStatus.SUCCESS and result.answer == "found: facts about tea"
     record = recorded(tmp_path)
     # read_file is listed from the start: the agent lists a server's tools once
-    assert record["listed"] == [["lookup", "read_file"]]
+    assert record["listed"] == [["lookup", "read_file", "query_result"]]
     [session] = record["sessions"]
     [server] = session["servers"]
     assert server["name"] == "trellis" and server["url"].startswith("http://127.0.0.1:")

@@ -36,6 +36,22 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- Large results in `ReAct` without a backend and in a `create_agent` graph with
+  `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
+  and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
+  its cut naming the `read_file` call that reads on from there.
+- `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
+  of the run's saved results — each a table named by its tool, so one query joins them — with
+  formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
+  `regr_*`), offered with `read_file` on every adapter, bounded in time, input, sort memory and
+  answer (`tools.query`). A tool declared `paged=True` is fetched to its last page in one call
+  (`tools.pages`). A run with a sandbox finds every kept result as a file there too.
+- Freshness: a tool's data is live by default; `tool(max_age=)`, `tool(freshness="static")`
+  (or `"live"`), a LangChain tool's `metadata`, an MCP tool's `_meta` say otherwise
+  (`tools.base.data_of`). Tool results written to memory's thread start with
+  `[snapshot of <tool> from <UTC time>]`; replayed past the tool's age they are marked out of
+  date, the context says so, and the tool stays offered (`trellis.harness.snapshots`).
+- `benchmark/cost`: the `aggregate` and `freshness` classes over 10,000 SKUs.
 - Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
   from the schemas the tools publish (a function's return annotation, now its
   `ToolSpec.output_schema`; an MCP tool's `outputSchema`), said at the end of each linked
