@@ -6,8 +6,8 @@ Two variables of its own pick what it runs against: ``TRELLIS_LIVE_MODEL``, the 
 its agents use (default :data:`DEFAULT_MODEL`), and ``TRELLIS_LIVE_MCP_URL``, the wiki MCP
 server (default the public DeepWiki, :data:`DEEPWIKI_URL`); ``TRELLIS_LIVE_TIMEOUT`` and
 ``TRELLIS_LIVE_MAX_TOKENS`` size the model-driven tests' runs to the model
-(``tests/live/proof.py``). The sandbox tests need only the Docker daemon (its socket), and
-make their sandboxes of ``SANDBOX_IMAGE`` when it is set. ``LIVE_SHARD=i/n`` runs the i-th of
+(``tests/live/proof.py``). The sandbox tests need only the Docker daemon (its socket); the
+data ones also its data image (``SANDBOX_DATA_IMAGE``, built from ``tests/live/sandbox-data``). ``LIVE_SHARD=i/n`` runs the i-th of
 n shards, packed by the last measured durations so each finishes under a job's limit on a CPU
 model (``tests/live/shards.py``, ``make live-shard``).
 
