@@ -140,7 +140,8 @@ def middleware(
     model call, narrowed per turn, the memory and gateway MCP tools among them
     (:class:`~.middleware.HarnessTools`); the graph's own tools governed with full parity
     (:class:`~.middleware.GovernTools`); ``max_repeats`` (:class:`~.middleware.StallGuard`);
-    ``max_steps`` then one answer without tools (:class:`~.middleware.StepLimit`); the run's
+    ``max_steps`` model calls (LangChain's ``ModelCallLimitMiddleware``,
+    :func:`~.middleware.step_limit`: counted per invocation here, per run in ``ReAct``); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
     cleared past half of it and ``read_result`` to read them back; the request made to fit
     the window, never failing for its size (:class:`~.middleware.FitWindow`: the tools
@@ -168,13 +169,15 @@ def _middleware(
     held: frozenset[str] = frozenset(),
     files: bool = True,
     summarization: Any = None,
+    scoped: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
     offered (``held``: on its own backend, the scratch file tools, and its general-purpose
     ``task`` helper when it has no sub-agents of its own), whether ``read_file`` is offered
     from the start (``files``: its files are not in the graph's state), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
-    sent."""
+    sent; and whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
+    resume included — :func:`~.middleware.step_limit`)."""
     _checked(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -217,7 +220,7 @@ def _middleware(
         ours.HarnessTools(),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
-        ours.StepLimit(max_steps),
+        ours.step_limit(max_steps, scoped=scoped),
         automatic.Budgeted(),
         *clearing,
         *reads,
@@ -353,6 +356,7 @@ def ReAct(
                         call_timeout=call_timeout,
                         context_window=window,
                         system_prompt=stored_prompt,
+                        scoped=True,
                     ),
                     middleware,
                 ),
@@ -386,6 +390,7 @@ def ReAct(
         held=held,
         files=outside or bool(skills) or bool(memory_files),
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
+        scoped=True,
     )
     graph = create_deep_agent(
         profiled,
@@ -505,8 +510,9 @@ def _native(
 ) -> dict[str, Any]:
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
-    the loop's guards (``StallGuard``, ``StepLimit``, ``ModelHooks``: its own middleware of
-    those names kept) and its ``interrupt_on`` turned into its tools' declared risk — a tool it
+    the loop's guards (``StallGuard``, ``ModelCallLimitMiddleware``, ``ModelHooks``: its own
+    middleware of those names kept) and its ``interrupt_on`` turned into its tools' declared
+    risk — a tool it
     names asks a person (``irreversible``), as the catalog says; a name that is none of its
     tools (a Deep Agents tool of its own) stays Deep Agents' approval, which the harness asks
     once."""
@@ -520,7 +526,7 @@ def _native(
     names = {m.name for m in given}
     guards = [
         ours.StallGuard(max_repeats),
-        ours.StepLimit(max_steps),
+        ours.step_limit(max_steps),
         ours.ModelHooks(timeout=call_timeout),
     ]
     spec["middleware"] = [*given, *(g for g in guards if g.name not in names)]
@@ -578,7 +584,7 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
 #: What a default middleware of ``ReAct`` is set by, where a parameter sets it: a given one of
 #: the same name is refused, naming it (it would have replaced the default silently).
 SET_BY: Final = {
-    "StepLimit": "max_steps=",
+    "ModelCallLimitMiddleware": "max_steps=",
     "StallGuard": "max_repeats=",
     "ModelHooks": "call_timeout= and system_prompt=stored(...) (and h.wrap(hooks=) for the hooks)",
     "ContextEditingMiddleware": "context_window=",
