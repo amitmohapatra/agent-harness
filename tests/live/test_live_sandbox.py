@@ -176,3 +176,22 @@ async def test_the_reaper_deletes_the_container_an_ended_run_left(harness: Harne
     assert await state(ref.id) == "running"
     deleted = await reap(PROVIDER, harness.runs, tenant="default")
     assert ref in deleted and await state(ref.id) is None
+
+
+async def test_a_command_killed_past_its_memory_or_missing_a_module_says_why(
+    harness: Harness,
+) -> None:
+    async def work(input: str, agent: Runtime) -> Any:
+        hog = "python -c 'a = bytearray(512 * 1024 * 1024); print(len(a))'"
+        return [
+            await agent.tools.call("sandbox_exec", command=hog),
+            await agent.tools.call("sandbox_exec", command="python -c 'import polars'"),
+        ]
+
+    spec = SandboxSpec(memory=64)
+    agent = arm(harness.wrap(work, id="why"), [sandbox(PROVIDER, spec=spec).tools()])
+    killed, missing = (await agent.run("x", user="u")).answer
+    assert killed["exit_code"] == 137 and "memory limit (64 MiB)" in killed["hint"]
+    assert missing["exit_code"] == 1 and missing["hint"].startswith(
+        "The module polars is not installed in the sandbox, and the sandbox has no network"
+    )

@@ -195,6 +195,11 @@ ref travel in checkpoints and snapshots).
 
 ## On failure
 
+* A command that fails says, beside its output, what the sandbox knows about why that the output
+  does not (`hint`: a field of `sandbox_exec`'s result, the last line of `execute`'s output):
+  killed (exit 137) or Python's `MemoryError` — the sandbox's memory limit it went past; Python's
+  `ModuleNotFoundError` — whether the module can be installed there (no network: it cannot). Any
+  other failure has no hint: its output says all there is.
 * No Docker daemon reachable (`sandbox()` without a provider): each call is an error the model
   reads, saying so.
 * A spec the provider cannot enforce — a list of hosts for Docker — is refused when the sandbox
