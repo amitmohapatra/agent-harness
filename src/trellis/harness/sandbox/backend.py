@@ -30,6 +30,7 @@ from deepagents.backends.protocol import (
 )
 from deepagents.backends.sandbox import BaseSandbox
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain_core.tools import BaseTool
 
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
@@ -126,7 +127,7 @@ class SandboxCard(AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        found = [t for t in request.tools if getattr(t, "name", None) == EXECUTE]
+        found = [t for t in request.tools if isinstance(t, BaseTool) and t.name == EXECUTE]
         card = await self.source.card() if found and current() is not None else ""
         if not card:  # not read (no daemon): Deep Agents' own description
             return await handler(request)
