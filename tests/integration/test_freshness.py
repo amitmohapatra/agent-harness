@@ -300,7 +300,7 @@ async def test_a_framework_kept_thread_marks_an_earlier_live_result_out_of_date(
 
 
 async def test_a_framework_kept_threads_live_tool_stays_offered_when_hints_narrow(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The hints name another tool: the live tool whose earlier value the thread replays is
     offered again on the next turn, so the model can fetch it."""
