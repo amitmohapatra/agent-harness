@@ -225,11 +225,7 @@ class RunMemory:
             window=window is not Window.NONE,
             window_format="messages" if window is Window.MESSAGES else "rendered",
             document_ids=document_ids,
-            **(
-                {}
-                if conversation_budget is None
-                else {"conversation_token_budget": conversation_budget}
-            ),
+            conversation_token_budget=conversation_budget,
         )
 
     # ------------------------------------------------------------------ pull
