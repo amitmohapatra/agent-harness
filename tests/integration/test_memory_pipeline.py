@@ -27,6 +27,7 @@ from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import telemetry
+from trellis.harness.agent import NARROW_FROM
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
@@ -163,7 +164,7 @@ async def test_a_memory_outage_is_a_warning_not_a_failure(
 
 # --------------------------------------------------------------------------- tool hints
 async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     memory_service.candidates = ["t3", "t1"]
     memory_service.candidates_for = {"archive it": ["t5"]}
@@ -185,6 +186,34 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     assert offered[2] == [*sorted(["t1", "t3", *memory_tools]), "t5"]
 
 
+async def test_confident_hints_narrow_a_small_tool_set_not_at_all(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """Below ``NARROW_FROM`` tools every tool is offered however confident the hints: narrowing
+    a small set hid the tool a question needed (a name looked up before its id was used)."""
+    memory_service.candidates = ["t3", "t1"]
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
+    assert {f"t{i}" for i in range(6)} <= offered
+    assert "## Tools" in model.requests[0]["messages"][1]["content"]  # the hints still said
+
+
+async def test_confident_hints_narrow_a_large_tool_set(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    memory_service.candidates = ["t3", "t1"]
+    model = ScriptedChat(["done"])
+    tools = many(NARROW_FROM)
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), tools)
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
+    assert {"t1", "t3"} <= offered and "t5" not in offered
+
+
 async def test_hints_below_the_floor_narrow_nothing(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -204,7 +233,11 @@ async def test_hints_below_the_floor_narrow_nothing(
 
 @pytest.mark.parametrize(("top", "narrows"), [(0.5, True), (0.49, False)])
 async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
-    memory_harness: Harness, memory_service: FakeMemoryService, top: float, narrows: bool
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    top: float,
+    narrows: bool,
+    narrowing: None,
 ) -> None:
     """B13 at ``NARROW_FLOOR``: a best hint of exactly 0.5 narrows the offer (and drops the
     abstain note: a tool answers); 0.49 narrows nothing and the note stays."""
@@ -223,7 +256,7 @@ async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
 
 
 async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
-    memory_service: FakeMemoryService,
+    memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """B16/B17: the hints are asked about the tools behind Code Mode too; when one is hinted,
     the narrowing keeps the meta-tools, the only way to reach it (they were dropped)."""
@@ -244,7 +277,7 @@ async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
 
 
 async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The offered set is the hints, the tools the learned plan names, the used ones and the
     memory tools — never all of the run's tools while hints exist."""
@@ -259,7 +292,7 @@ async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
 
 
 async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """A graph's tools are bound when it is built: the harness runs a copy of a
     ``create_agent`` graph whose model calls offer only the tools the run offers — its own
@@ -297,7 +330,7 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
 
 
 async def test_the_hints_narrow_what_a_deep_agent_is_offered(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The harness tools are those the run offers; Deep Agents' state tools (its files) are no
     tools of the run's set, and its ``task`` hands work on: they stay offered."""

@@ -139,8 +139,11 @@ The memory context is asked for with the run's tool set (not the memory tools): 
 with the skills the agent learned for the task ("Learned skills for this task", any number of
 tools) and, from five tools (the memory service's threshold), the tools section (the next step,
 argument values found in memory, what is missing) and the `tools` that fit the task
-(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With five or
-more tools, the model is then offered:
+(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With 30 or
+more tools in the run (`NARROW_FROM`: its own, its framework's and memory's), the model is then
+offered the following; with fewer, every tool, and the tools section still says which fit
+(narrowing a set of 20 hid a tool the question needed in about a quarter of the turns, and
+those turns went wrong two to three times as often: the holistic small-model run):
 
 * the memory tools,
 * the tools the service named (at most 8),

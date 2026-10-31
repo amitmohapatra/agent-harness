@@ -323,7 +323,7 @@ async def test_without_memory_no_context_hook_is_registered(
 
 
 async def test_the_hints_narrow_the_tools_for_the_run(
-    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
 ) -> None:
     def make(i: int) -> Any:
         def lookup(key: str) -> str:
