@@ -113,7 +113,7 @@ async def test_an_item_paused_on_a_question_is_not_scored(harness: Harness) -> N
 
 
 async def test_the_measured_selector_picks_without_hints_past_its_threshold_keeping_used(
-    harness: Harness, memory_service: FakeMemoryService
+    harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     from trellis.harness.automatic import ToolSelection
 
