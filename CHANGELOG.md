@@ -41,6 +41,7 @@ own model work follows the harness's configuration.
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
   looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
   every adapter.
+
 ### Fixed
 
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
