@@ -112,11 +112,12 @@ async def test_a_result_over_the_window_is_offloaded_once_where_code_reads_it(
     (its summarization's overflow path offloads it whole to the backend): ``FitWindow`` does
     not also cut it and keep it in the run's journal, which the sandbox would then hold a
     second time. One copy, the whole result, in the sandbox where code reads it."""
-    rows = "sku,units\n" + "\n".join(f"s{n},{n % 5}" for n in range(5_000))
+    # a log, not a table: a table is also kept for query_result (``results.tabled``)
+    rows = "\n".join(f"event {n}: stock moved by {n % 5}" for n in range(1_500))
 
     @tool(side_effects="read")
     def stock() -> str:
-        """Every stock row."""
+        """Every stock event."""
         return rows
 
     provider = Kept()
