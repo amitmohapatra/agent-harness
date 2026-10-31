@@ -43,6 +43,11 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- MCP elicitation: an `mcp(...)` server that asks the person in the middle of a call pauses
+  the run as `ask` does — one field of a few values a choice (a dropdown), any other form a
+  form with the server's schema (a `format: date` field a date picker), a link a choice — and
+  the answer goes back to the server when the run resumes, on both MCP protocol eras
+  (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
