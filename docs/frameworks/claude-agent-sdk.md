@@ -7,7 +7,7 @@ gateway's MCP tools, memory's); your options object is never changed.
 **Install:** `pip install 'trellis-harness[claude-agent-sdk]'`, and the Claude Code CLI the SDK
 drives. Through Bifrost: `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic",
 "ANTHROPIC_API_KEY": "<virtual key>"}` is set on the run's copy of the options by the harness
-when `BIFROST_URL` is set (unless your `env` names a base URL), with Bifrost's headers — the
+when Bifrost is the route (`LLM_GATEWAY=bifrost`, its `Capability.ANTHROPIC_ROUTE`; unless your `env` names a base URL), with Bifrost's headers — the
 deny-all MCP scope, whose run it is — as `ANTHROPIC_CUSTOM_HEADERS` lines.
 
 This page is Way 1: the harness runs `query()`. To keep calling `query()` yourself and plug in
@@ -180,6 +180,15 @@ The same as every target ([runs.md](../runs.md), [surfaces.md](../surfaces.md),
 [examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py)):
 the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (or its own `model=`).
 
+## Conversations
+
+A conversation's turn continues the session the conversation's last turn ran in, in this
+process (`resume=`, through the journal's session store, with the turn's own prompt:
+[runs.md](../runs.md#a-claude-or-acp-session-across-turns)); in another process, or the first turn, a new session — with memory off given
+the run store's earlier turns in its context. `mode="steer"` gives the message to Claude after
+its next tool call (a `PostToolUse` hook's `additionalContext`); a query that calls no tool
+takes none, and the message then runs as its own turn ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
+
 ## Limits
 
 * A built-in that ran is not journaled or recorded (above).
@@ -198,6 +207,6 @@ the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (
 
 * [`examples/02_way1_claude/agent.py`](../../examples/02_way1_claude/agent.py) — offline it
   drives a scripted stand-in for the CLI (`tests/support/fake_claude_cli.py`); with
-  `BIFROST_URL` the real `claude` CLI through Bifrost.
+  `LLM_GATEWAY=bifrost` the real `claude` CLI through Bifrost.
 * Tests: `tests/integration/test_claude.py`, and against the real services
   `tests/live/test_live_matrix.py` (`claude`).

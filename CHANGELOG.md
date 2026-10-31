@@ -3,6 +3,82 @@
 What changed in each release of `trellis-harness`. The framework versions each release was
 tested with are in [docs/versioning.md](docs/versioning.md).
 
+## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
+
+Model access is provider-neutral ([ADR 0004](docs/adr/0004-provider-neutral-models.md)): a
+model name goes to any OpenAI-compatible endpoint, to Bifrost, or to the provider's own SDK,
+chosen by name from one registry, and the memory service is told the agent's endpoint so its
+own model work follows the harness's configuration.
+
+### Breaking
+
+- `BIFROST_URL` and `BIFROST_VIRTUAL_KEY` are gone, with no alias: `LLM_BASE_URL` (the
+  endpoint's `/v1` root) and `LLM_API_KEY` (its bearer key; Bifrost's virtual key), with
+  `LLM_GATEWAY=bifrost` for Bifrost. `Settings(bifrost_url=, bifrost_virtual_key=)` are
+  `Settings(llm_base_url=, llm_api_key=, llm_gateway=, llm_auth=)`. An endpoint without
+  `LLM_GATEWAY` is `openai-compatible`: model names as given, models only.
+- `trellis.harness.gateways`: `ProviderKey` is `ProviderSDK`, `GatewayKind` is each route's
+  `name` (its `LLM_GATEWAY` value), `bifrost_wins` is the route's `announce`; `GATEWAYS` maps
+  names to routes and `model_gateway` picks from `registry()`.
+- The memory service is sent the agent's whole model endpoint (`trellis.contracts.Endpoint`)
+  where it took a virtual key (`MemoryScope.register_endpoint`, was `register_model_key`),
+  needing trellis-memory with endpoint registration; trellis-contracts 0.6.3 and bifrost-sdk 0.4.
+
+- A conversation is its tenant's, its user's and its thread's (`identity.conversation_key`, a
+  digest of the three): the memory service's thread (its window, the OpenAI Agents
+  `MemorySession`, `h.add_document(thread=)`), a graph's own checkpointer `thread_id`, the turn
+  a busy conversation waits for in process, `start`'s default `concurrency_key`
+  (`thread:<conversation>`) and the trace's `session.id` were keyed by the bare thread id, so
+  two users (or tenants) giving the same `thread=` shared them. A conversation kept under a
+  bare thread id before this release is not continued: its next run starts a new one. Read a
+  graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
+  interrupt only for the user whose run it is (`404` for another user's thread named alike).
+
+### Added
+
+- Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
+  from the schemas the tools publish (a function's return annotation, now its
+  `ToolSpec.output_schema`; an MCP tool's `outputSchema`), said at the end of each linked
+  tool's description (`Chains: find_sku → sku_id → get_stock.`) in every framework, and kept
+  whole when the tool hints narrow what is offered ([tools.md](docs/tools.md#tool-chains)).
+  `benchmark/cost --suite classes --classes chain` measures two- to four-call chains.
+- `docs/research/`: the improvement backlog, the evaluation protocol every change must pass to
+  be kept, the scenario coverage audit and the self-explanation research.
+- Conversations across runs ([ADR 0005](docs/adr/0005-conversations-across-runs.md)):
+  - with memory off, a run of a conversation is given its earlier turns from the run store
+    (each run's question and answer) where the framework keeps no thread of its own —
+    messages for `ReAct`, graphs and OpenAI Agents, `agent.history` for a function, the
+    context's text for Claude and ACP;
+  - `run(mode=)` / `stream(mode=)`: `"queue"` (default, as before), `"interrupt"` (cancel the
+    conversation's working run and continue), `"steer"` (give the message to the working run
+    at its next step: `HarnessTools.before_model`, OpenAI Agents `call_model_input_filter`,
+    Claude `PostToolUse`; a function, ACP or a graph without the harness's middleware waits as
+    `"queue"`, said once — `Adapter.steers`);
+  - one id per message (`conversation.message_id`): the AG-UI text message and
+    `TOOL_CALL_RESULT` ids, and each message's `custom_metadata` in the memory service
+    (`message_id`, `run_id`, `tool_call_id`), stable across a resume;
+  - a Claude Agent SDK or ACP conversation continues its last turn's session in this process
+    (`agent.sessions`).
+  - `HarnessTools` (in `ReAct` and `middleware()`) has a `before_model` hook: one more
+    LangGraph step per model call, so a `recursion_limit` set to the bare minimum needs one
+    more.
+- `h.conversation(user=, thread=)`: the key a user's conversation keeps its state under.
+- `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
+  `LLM_GATEWAY` from one registry that packages extend under the entry-point group
+  `trellis.gateways`. Bifrost's features ask `gateway.has(Capability.X)`; new capabilities
+  `SKILLS` and `ANTHROPIC_ROUTE` (the Claude Agent SDK's routed environment).
+- `LLM_AUTH`: bifrost-sdk's auth strategies by name — `bearer`, `google` (a refreshed Google
+  token), `aws` (SigV4) — on every model client, the judge and `doctor`'s probe.
+- Optional extras `trellis-harness[anthropic]`, `[gemini]`, `[vertex]`, `[bedrock]` (the last
+  two with bifrost-sdk's `[google]` and `[aws]` login strategies); `vertex:` and `bedrock:`
+  model names for LangChain's `init_chat_model`.
+- `trellis doctor` names the route, its auth and where model profiles come from, checks the
+  declared route against the endpoint (a `bifrost` route must answer MCP), and refuses
+  settings that fit no route with the reason.
+- A conformance suite over every registered route, auth strategy and profile against stubs of
+  OpenAI's chat completions, the Anthropic, Gemini, Ollama and Bifrost endpoints that speak it,
+  a Google token refresh and an AWS SigV4 signature recomputed from the specification.
+
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
 `ReAct` is LangChain's `create_agent` with the harness's part on top, and Deep Agents'

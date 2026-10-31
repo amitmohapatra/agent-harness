@@ -27,7 +27,7 @@ from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from tests.live.conftest import (
-    BIFROST_URL,
+    GATEWAY_URL,
     MODEL,
     WIKI_TOOL,
     live_harness,
@@ -102,8 +102,8 @@ async def chat_model(h: Harness, wire: Wire) -> ChatOpenAI:
     run's time limit's), and its own HTTP client, recording what it sends: langchain-openai
     otherwise shares one per process, bound to the event loop of the test that made it."""
     return ChatOpenAI(
-        base_url=BIFROST_URL,
-        api_key=h.settings.bifrost_virtual_key,  # type: ignore[arg-type]
+        base_url=GATEWAY_URL,
+        api_key=h.settings.llm_api_key,  # type: ignore[arg-type]
         model=MODEL,
         max_tokens=MAX_TOKENS,  # type: ignore[call-arg]
         max_retries=0,
@@ -136,8 +136,8 @@ async def openai_agents(h: Harness, wiki: str, tmp: Path) -> Built:
     model = OpenAIChatCompletionsModel(
         model=MODEL,
         openai_client=AsyncOpenAI(
-            base_url=BIFROST_URL,
-            api_key=h.settings.bifrost_virtual_key,
+            base_url=GATEWAY_URL,
+            api_key=h.settings.llm_api_key,
             default_headers=GatewayHeaders(),
             http_client=wire.client(DefaultAsyncHttpxClient),
             max_retries=0,

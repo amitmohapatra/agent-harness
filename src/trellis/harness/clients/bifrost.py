@@ -171,7 +171,8 @@ class PromptPin:
 
 
 class Gateway:
-    """One Bifrost gateway (``BIFROST_URL`` is its OpenAI-compatible ``/v1`` base)."""
+    """One Bifrost gateway (``LLM_BASE_URL`` with ``LLM_GATEWAY=bifrost``: its
+    OpenAI-compatible ``/v1`` base)."""
 
     def __init__(
         self,
@@ -181,7 +182,7 @@ class Gateway:
         client: Bifrost | None = None,
         admin: Admin | None = None,
     ) -> None:
-        self.client = client or Bifrost(url, api_key=virtual_key)
+        self.client = client or Bifrost(url, api_key=virtual_key, gateway="bifrost")
         #: the gateway's management API, asked with the virtual key (the stored prompts, the
         #: MCP clients' Agent Mode lists), as the MCP log is read
         self.admin = admin or Admin(url, token=virtual_key)

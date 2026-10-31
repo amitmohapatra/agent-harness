@@ -80,7 +80,8 @@ async def main() -> None:
             print("asks:", result.interrupt.question)
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="lead")
         print(result.status.value, result.answer)
-        state = await graph.aget_state({"configurable": {"thread_id": "ticket-7"}})
+        thread = await h.conversation(user="ada", thread="ticket-7")  # ada's ticket-7
+        state = await graph.aget_state({"configurable": {"thread_id": thread}})
         print("plan:", [todo["content"] for todo in state.values.get("todos", [])])
 
 

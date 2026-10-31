@@ -135,9 +135,12 @@ class FakeMemoryService:
     failures: dict[str, int | str] = field(default_factory=dict)
     #: the ``Retry-After`` (seconds) a 429 or 503 carries
     retry_after: str = "0"
-    #: whether model keys can be registered (the service's credential encryption is
+    #: whether model endpoints can be registered (the service's credential encryption is
     #: configured); without, ``PUT /v1/agents/model-key`` answers what the service does
     model_keys: bool = True
+    #: how many registrations are answered as the replay of one the service has since
+    #: dropped (its idempotent answer from before: nothing registered)
+    stale_registrations: int = 0
     #: feedback by id, each stored once however often it is sent
     stored_feedback: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: uploaded documents by id, with the scope they were uploaded in
@@ -288,6 +291,15 @@ class FakeMemoryService:
             window = self._window(call.scope.get("thread_id"))
             if window:
                 answer["conversation"] = {"thread_id": call.scope["thread_id"], "messages": window}
+        elif call.body.get("window", True):
+            # the window rendered in the text, as the service renders the recent conversation
+            said = [
+                f"{m['role']}: {m['text']}"
+                for m in self._window(call.scope.get("thread_id"))
+                if m["text"] and m["role"] in ("USER", "ASSISTANT")
+            ]
+            if said:
+                answer["rendered"] += "\n\n## Recent conversation\n" + "\n".join(said)
         return answer
 
     def _window(self, thread: str | None) -> list[dict[str, Any]]:
@@ -687,7 +699,27 @@ class FakeMemoryService:
         return {"tools": [_catalog_tool(t["name"], t) for t in call.body["tools"]]}
 
     def _model_key(self, call: Call) -> dict[str, Any]:
-        return {"registered": True, "revoked": False, "revision": 1}
+        """The status the service answers: the endpoint as it keeps it, never its key."""
+        if self.stale_registrations:
+            self.stale_registrations -= 1
+            return {
+                "registered": False,
+                "revoked": False,
+                "revision": 0,
+                "endpoint": None,
+                "source": "service",
+                "reason": "no endpoint registered for this agent",
+            }
+        endpoint = dict(call.body["endpoint"])
+        endpoint["has_api_key"] = endpoint.pop("api_key", None) is not None
+        return {
+            "registered": True,
+            "revoked": False,
+            "revision": 1,
+            "endpoint": endpoint,
+            "source": "agent",
+            "reason": "the agent's registered endpoint",
+        }
 
     def _id(self, prefix: str) -> str:
         return f"{prefix}_{next(self._ids)}"

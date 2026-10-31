@@ -31,7 +31,7 @@ from trellis.harness.admission import (
     branch,
 )
 from trellis.harness.events import RunEvents
-from trellis.harness.gateways import ProviderKey
+from trellis.harness.gateways import ProviderSDK
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Replay
 from trellis.harness.runtime import Runtime, _current
@@ -289,7 +289,7 @@ def _runtime() -> tuple[Runtime, list[RunEvent]]:
     seen: list[RunEvent] = []
     events = RunEvents(AgentExecutionContext.create(tenant_id="t", agent_id="a"))
     events.listen(seen.append)
-    agent: Any = SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderKey()))
+    agent: Any = SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderSDK()))
     identity = Identity(tenant="t", agent_id="a", run_id="run_1", user="u")
     return Runtime(identity=identity, agent=agent, events=events, replay=Replay(Journal())), seen
 

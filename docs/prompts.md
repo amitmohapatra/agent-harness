@@ -7,7 +7,7 @@ Bifrost gateway's Prompt Repository — versioned, rolled out there — and name
 ```python
 from trellis import Harness, ReAct, stored
 
-h = Harness()  # BIFROST_URL: the gateway that keeps the prompts
+h = Harness()  # LLM_GATEWAY=bifrost: the gateway that keeps the prompts
 agent = h.wrap(ReAct(system_prompt=stored("triage", team="EU"), model=MODEL), id="triage")
 prompt = await h.prompt("triage@3", team="EU")  # any framework: prompt.text, prompt.messages
 ```
@@ -56,7 +56,7 @@ code is reviewed with it.
 | What | Then |
 |---|---|
 | a name (or `name@version`) the gateway does not have | `ConfigurationError` (`no committed prompt named 'triage'`): a `ReAct` run ends `ERROR` with it |
-| no gateway (`BIFROST_URL` unset) | `ConfigurationError`: set `BIFROST_URL` (a prompt in code is a string) |
+| no gateway (the route is not `bifrost`) | `ConfigurationError`: set `LLM_GATEWAY=bifrost` (a prompt in code is a string) |
 | the gateway unreachable, read before | the last copy read (a warning in the log) |
 | a variable not given | `ConfigurationError` naming it |
 | a malformed reference (`"triage@"`), a version that is not a number | `ConfigurationError` where `stored(...)` is written; the run ends `ERROR` |

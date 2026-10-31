@@ -32,11 +32,12 @@
   ``SessionStore`` (``bridges.claude.JournalSessions``): the SDK writes it back for the CLI on
   any machine. A session the CLI cannot continue (options keeping their own store, a transcript
   it refuses) is a warning, and the query runs again from its prompt against the journal;
-* models: with Bifrost serving the harness, the CLI's model calls go through Bifrost's
-  Anthropic route with the virtual key (:func:`routed_env`; the options' own
-  ``ANTHROPIC_BASE_URL`` wins), carrying the deny-all MCP scope, the run's dimensions and its
-  ``traceparent`` as ``ANTHROPIC_CUSTOM_HEADERS`` beside the options' own — the CLI reads them
-  as it starts, once per attempt;
+* models: with a route that has an Anthropic route (``Capability.ANTHROPIC_ROUTE``: Bifrost)
+  serving the harness, the CLI's model calls go through the gateway's Anthropic route with the
+  virtual key (:func:`routed_env`; the options' own ``ANTHROPIC_BASE_URL`` wins), carrying
+  the deny-all MCP scope, the run's dimensions and its ``traceparent`` as
+  ``ANTHROPIC_CUSTOM_HEADERS`` beside the options' own — the CLI reads them as it starts, once
+  per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``hooks`` (the governance and context
   hooks go after theirs), ``can_use_tool`` (the
@@ -70,6 +71,7 @@ from trellis.contracts import (
 from trellis.harness import budget, skills
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     Output,
@@ -80,7 +82,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.bridges.helpers import Helpers, Kind
-from trellis.harness.gateways import NO_KEY, Bifrost
+from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
@@ -135,6 +137,8 @@ ANTHROPIC_ROUTE: Final = "anthropic"
 TOOL_EVENT: Final = "PreToolUse"
 RAN_EVENT: Final = "PostToolUse"
 FAILED_EVENT: Final = "PostToolUseFailure"
+#: How a message steered into the run reads to Claude, after a tool call's result.
+STEERED_SAYS: Final = "The user adds, while you work: "
 #: The key a query's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "claude_agent_sdk"
 #: When the SDK hands the session store a step: as soon as the CLI mirrors it.
@@ -197,6 +201,10 @@ class ClaudeAdapter:
     narrows: Narrowing = "run"
     #: a query takes one prompt, not a conversation: memory's window is in the context's text
     replays_history = False
+    #: with memory off, the conversation's earlier turns are in the context's text too
+    history_in: HistoryIn = "context"
+    #: its session (the journal's) is continued by the conversation's next turn
+    sessions = True
 
     def __init__(self) -> None:
         #: the tools the options declare (:meth:`native`), once read
@@ -206,6 +214,12 @@ class ClaudeAdapter:
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
+
+    def steers(self, target: Any) -> bool:
+        """Every query: a steered message is added after a tool call's result (a
+        ``PostToolUse`` hook's ``additionalContext``, :func:`_with_governance`); a query that
+        calls no tool takes none."""
+        return True
 
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
@@ -366,7 +380,10 @@ class ClaudeAdapter:
             target = dataclasses.replace(target, plugins=plugins)
         steps = Steps(runtime, self)
         options = _options(target, native_input.context, run, session, steps)
-        prompt = native_input.prompt if session is None else _resumed(native_input, run)
+        # a first attempt resumes only the conversation's session (``Runtime.continued``):
+        # the turn's own prompt; a later one, the run's own session after a pause
+        first = session is None or runtime.attempt == 1
+        prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
         try:
             # closed as it is left (``aclosing``): its CLI process ends here, in this loop
@@ -547,15 +564,17 @@ def _options(
 
 
 def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
-    """The CLI's environment with its model calls routed through Bifrost when it serves the
-    harness (``None``: as it is): Bifrost's Anthropic route (``ANTHROPIC_BASE_URL``, the
+    """The CLI's environment with its model calls routed through the gateway when the route
+    serving the harness has an Anthropic route (``Capability.ANTHROPIC_ROUTE``: Bifrost;
+    ``None``: as it is): the gateway's Anthropic route (``ANTHROPIC_BASE_URL``, the
     virtual key as ``ANTHROPIC_API_KEY``) — unless the options' own ``env`` names a base URL
     (code over the environment) — and, on Bifrost's route, its headers as
     ``ANTHROPIC_CUSTOM_HEADERS`` lines beside the options' own: the deny-all MCP scope, the
     run's dimensions and its ``traceparent`` (read as the CLI starts)."""
     gateway = runtime.agent.harness.model_gateway
-    if not isinstance(gateway, Bifrost):
+    if not gateway.has(Capability.ANTHROPIC_ROUTE):
         return None
+    gateway = cast("OpenAICompatible", gateway)
     given = dict(env)
     route = f"{gateway.origin}/{ANTHROPIC_ROUTE}"
     if "ANTHROPIC_BASE_URL" not in given:
@@ -589,7 +608,24 @@ def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) ->
     recorded = _recorded(steps)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
+    given[RAN_EVENT] = [*given[RAN_EVENT], _steering()]
     return given
+
+
+def _steering() -> Any:
+    """The ``PostToolUse`` hook that gives Claude the messages steered into the run since its
+    last tool call (``Runtime.steered``), as the context a hook adds after the call's result."""
+    from claude_agent_sdk import HookMatcher
+
+    async def steered(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
+        runtime = current()
+        taken = runtime.steered() if runtime is not None else []
+        if not taken:
+            return {}
+        said = "\n\n".join(f"{STEERED_SAYS}{s.text}" for s in taken)
+        return {"hookSpecificOutput": {"hookEventName": RAN_EVENT, "additionalContext": said}}
+
+    return HookMatcher(hooks=[steered])
 
 
 def _governance(own: Any, steps: Steps) -> Any:

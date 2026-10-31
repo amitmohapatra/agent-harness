@@ -47,7 +47,10 @@ are still there on replay. A pause arrives as `RUN_FINISHED` with an `interrupt`
 failure as `RUN_ERROR`; a cancellation as `RUN_FINISHED` with a `cancelled` outcome. A tool
 call's arguments (`TOOL_CALL_ARGS`) and output (`TOOL_CALL_RESULT`), `CUSTOM` events, the answer
 and the interrupt arrive as they are, through the agent's `on_output` hooks
-([hooks.md](hooks.md#mask-what-the-ui-sees)).
+([hooks.md](hooks.md#mask-what-the-ui-sees)). The answer's text messages carry one
+`messageId` per run (`<run>:answer` of the conversation, digested: the same on every attempt)
+and a `TOOL_CALL_RESULT` its result's (`result:<call>`): the ids the memory service keeps the
+messages under ([ADR 0005](adr/0005-conversations-across-runs.md)).
 
 How a resume entry becomes a decision: `decision` wins when present; `status: "cancelled"` is
 `CANCEL`; a question is `ANSWER` with `payload`; an approval is `APPROVE` for `true`, `REJECT`

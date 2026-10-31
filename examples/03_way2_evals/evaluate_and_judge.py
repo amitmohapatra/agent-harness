@@ -6,7 +6,7 @@
   of your own and a judge model; ``sample=`` judges a stable share of runs.
 
 What evaluation reaches is ``EvalServices.from_env()``: Langfuse (its own ``LANGFUSE_*``
-variables) and the judge (``BIFROST_URL``: the gateway's judge alias, or
+variables) and the judge (``LLM_GATEWAY=bifrost``: the gateway's judge alias, or
 ``llm_judge(model=)``). Offline the judge is a scripted model; the dataset is a local list
 (with Langfuse configured, pass a Langfuse dataset's name instead).
 

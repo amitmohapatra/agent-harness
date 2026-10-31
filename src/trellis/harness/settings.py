@@ -1,10 +1,11 @@
 """The deployment facts the harness reads from the environment, and nothing else (every one
-is in ``.env.example``): where the services are and the keys they are reached with
-(``BIFROST_URL``, ``BIFROST_VIRTUAL_KEY``, ``TRELLIS_JUDGE_VIRTUAL_KEY``, ``MEMORY_URL``,
-``TRELLIS_API_KEY``, ``RUNS_URL``) and where undelivered writes are kept
-(``TRELLIS_SPOOL_DIR``). Each setting lives in exactly one layer:
+is in ``.env.example``): where the models are and how they are reached (``LLM_BASE_URL``,
+``LLM_API_KEY``, ``LLM_GATEWAY``, ``LLM_AUTH``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), where the
+services are and the key they are reached with (``MEMORY_URL``, ``TRELLIS_API_KEY``,
+``RUNS_URL``) and where undelivered writes are kept (``TRELLIS_SPOOL_DIR``). Each setting
+lives in exactly one layer:
 
-* **the environment** — what differs per deployment: the seven above. The tools' own variables
+* **the environment** — what differs per deployment: the nine above. The tools' own variables
   are read by their own SDKs, or under their own names, never mirrored here: ``OTEL_*`` (the
   OpenTelemetry SDK; ``service.version`` in ``OTEL_RESOURCE_ATTRIBUTES`` is the agents'
   version), ``LANGFUSE_*`` (its scores, datasets and — with no OpenTelemetry exporter variable
@@ -12,9 +13,9 @@ is in ``.env.example``): where the services are and the keys they are reached wi
   ``DOCKER_HOST``;
 * **the code** — the agent's behaviour: models, prompts, tools, budgets, the worker's
   concurrency, the sandbox image;
-* **the owning services** — Bifrost (routing, fallbacks, retries, rate limits, budgets,
-  caching, stored prompts, the judge's model alias), the memory catalog (approval rules, tool
-  risk), agent-runs (schedules);
+* **the owning services** — the model gateway (Bifrost: routing, fallbacks, retries, rate
+  limits, budgets, caching, stored prompts, the judge's model alias), the memory catalog
+  (approval rules, tool risk), agent-runs (schedules);
 * **internal facts** — thresholds (constants: a fixed share of runs is grounded), the model's
   window (its metadata), the tenant (the memory service says who ``TRELLIS_API_KEY`` is).
 
@@ -57,8 +58,10 @@ OTEL_EXPORTER_ENV: Final = (
 EPHEMERAL_MARKERS: Final = ("K_SERVICE", "KUBERNETES_SERVICE_HOST", "AWS_LAMBDA_FUNCTION_NAME")
 #: Each setting, by the variable it is read from.
 VARIABLES: Final = {
-    "bifrost_url": "BIFROST_URL",
-    "bifrost_virtual_key": "BIFROST_VIRTUAL_KEY",
+    "llm_base_url": "LLM_BASE_URL",
+    "llm_api_key": "LLM_API_KEY",
+    "llm_gateway": "LLM_GATEWAY",
+    "llm_auth": "LLM_AUTH",
     "api_key": "TRELLIS_API_KEY",
     "memory_url": "MEMORY_URL",
     "runs_url": "RUNS_URL",
@@ -72,11 +75,19 @@ class Settings(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    #: Bifrost's OpenAI-compatible ``/v1`` base: MCP tools, ``ReAct`` models.
-    bifrost_url: str | None = None
-    #: The agent's Bifrost virtual key: which models and MCP tools it may use, its budget —
-    #: and the key the memory service's own LLM work for this agent is billed to.
-    bifrost_virtual_key: str | None = None
+    #: The OpenAI-compatible ``/v1`` root every model name is sent to (``trellis.harness.
+    #: gateways``); unset: each provider's own SDK.
+    llm_base_url: str | None = None
+    #: The endpoint's bearer key (Bifrost's: the agent's virtual key — which models and MCP
+    #: tools it may use, its budget); the memory service's own model work for the agent is
+    #: sent to the same endpoint with it.
+    llm_api_key: str | None = None
+    #: The route's name in the gateways' registry: ``openai-compatible`` (unset, with
+    #: ``LLM_BASE_URL``), ``bifrost``, or one a package registers.
+    llm_gateway: str | None = None
+    #: How the endpoint's requests are authenticated: ``bearer`` (unset; ``LLM_API_KEY``),
+    #: ``google`` (a refreshed Google token), ``aws`` (SigV4) — bifrost-sdk's strategies.
+    llm_auth: str | None = None
     #: The one Trellis key, for the memory service and agent-runs alike.
     api_key: str | None = None
     #: The memory service: memory is on exactly when this is set.
@@ -88,7 +99,7 @@ class Settings(BaseModel):
     #: it lasts (:func:`default_spool`); unset: they are logged and counted, then lost.
     spool_dir: str | None = None
     #: The virtual key the judge's calls go through — its own budget, rate limits and models
-    #: in Bifrost, so evaluation spend never exhausts the agents'; unset: ``BIFROST_VIRTUAL_KEY``.
+    #: in Bifrost, so evaluation spend never exhausts the agents'; unset: ``LLM_API_KEY``.
     judge_virtual_key: str | None = None
 
     @classmethod

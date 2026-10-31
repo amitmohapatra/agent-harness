@@ -4,7 +4,7 @@ cell: the outside world they touch)."""
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Final
+from typing import Any, Final, TypedDict
 
 from trellis import current, tool
 from trellis.contracts import ToolError
@@ -23,6 +23,13 @@ HUGE: Final = MAX_CHECKPOINT_BYTES + 1
 WAIT_SECONDS: Final = 1.0
 #: How long ``hold`` holds at most: far past any run time limit a cell sets, which ends it.
 HOLD_SECONDS: Final = 30.0
+
+
+class Sku(TypedDict):
+    """What ``find_sku`` answers: its ``sku_id`` is ``get_stock``'s argument."""
+
+    sku_id: str
+    name: str
 
 
 class Desk:
@@ -164,6 +171,25 @@ class Desk:
             return "x" * HUGE
 
         return export
+
+    # ------------------------------------------------------------------ a chain
+    def find_sku(self) -> Any:
+        @tool(side_effects="read")
+        async def find_sku(name: str) -> Sku:
+            """Find a product's SKU by its name."""
+            self.done.append(("find_sku", {"name": name}))
+            return {"sku_id": "SKU-7", "name": name}
+
+        return find_sku
+
+    def get_stock(self) -> Any:
+        @tool(side_effects="read")
+        async def get_stock(sku_id: str) -> str:
+            """The units of a SKU on hand."""
+            self.done.append(("get_stock", {"sku_id": sku_id}))
+            return f"{sku_id}: 4 on hand"
+
+        return get_stock
 
     def parallel(self, name: str, side_effects: str) -> Any:
         @tool(name=name, side_effects=side_effects)  # type: ignore[arg-type]

@@ -8,7 +8,7 @@ changed without a redeploy — and ``stored(...)`` reads one.
 * ``await h.prompt("triage@1", team="EU")`` — any framework: the text (``.text``) and the chat
   messages (``.messages``) to build an agent of your own with; inside a run it is pinned too.
 
-Offline the gateway is scripted (two committed versions of ``triage``); with ``BIFROST_URL``
+Offline the gateway is scripted (two committed versions of ``triage``); with ``LLM_GATEWAY=bifrost``
 commit a prompt named ``triage`` in Bifrost first.
 
     python -m examples.05_features.stored_prompts

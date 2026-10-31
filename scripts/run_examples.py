@@ -23,8 +23,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 #: the variables that name a service: unset offline
 SERVICES = (
-    "BIFROST_URL",
-    "BIFROST_VIRTUAL_KEY",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_GATEWAY",
+    "LLM_AUTH",
     "MEMORY_URL",
     "RUNS_URL",
     "TRELLIS_API_KEY",

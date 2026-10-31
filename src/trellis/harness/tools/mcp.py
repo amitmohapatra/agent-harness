@@ -147,6 +147,7 @@ class MCPSource:
             name=f"{server}-{listed.name}",
             description=listed.description or listed.title or listed.name,
             input_schema=listed.input_schema or {"type": "object"},
+            output_schema=getattr(listed, "output_schema", None),
             source="mcp",
             server=server,
             side_effects=side_effects_of(annotations),

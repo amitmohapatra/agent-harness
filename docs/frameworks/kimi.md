@@ -121,9 +121,16 @@ Kimi's own tools run again.
   asks permission for one — those are governed; the others are not recorded, and the child run
   holds the sub-agent's task and answer.
 
+## Conversations
+
+A conversation's turn continues the session the conversation's last turn ran in, in this
+process (`session/resume`, else `session/load`, as a resume after a pause does: [runs.md](../runs.md#a-claude-or-acp-session-across-turns)).
+ACP has no way to add a message to a turn under way, so `mode="steer"` waits as `"queue"`, said
+once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
+
 ## Models, swarms and limits
 
-* **Through Bifrost.** With `BIFROST_URL` set and `model=` named (and no `KIMI_MODEL_BASE_URL`
+* **Through Bifrost.** With Bifrost the route (`LLM_GATEWAY=bifrost`) and `model=` named (and no `KIMI_MODEL_BASE_URL`
   in `env`), `kimi` gets `KIMI_MODEL_PROVIDER_TYPE=openai`, Bifrost's URL, the virtual key, and
   the deny-all MCP scope, the run's dimensions and its `traceparent` as
   `KIMI_CODE_CUSTOM_HEADERS` lines beside your own. Elsewhere, said once in the log.

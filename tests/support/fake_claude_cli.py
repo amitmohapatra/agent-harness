@@ -36,7 +36,11 @@ does not hold is the real CLI's error result. With ``--session-mirror`` (the SDK
 ``SessionStore``) every step is mirrored as the real CLI mirrors its transcript (a
 ``transcript_mirror`` frame), and a resume the SDK materialised (``CLAUDE_CONFIG_DIR``) goes on
 from that transcript — whatever this machine's own sessions hold. ``--max-turns`` stops a query after that many
-steps, with the real CLI's ``error_max_turns`` result.
+steps, with the real CLI's ``error_max_turns`` result. A resumed session sent a prompt of its own
+(not the harness's "This task was paused" — the conversation's next turn) runs the script anew as
+the session's next turn; the record's ``earlier`` is the prompts its transcript holds. The
+``additionalContext`` the ``PostToolUse`` hooks answer is appended to ``<record>.added`` (one
+JSON string a line): what the "model" is told after a call.
 """
 
 from __future__ import annotations
@@ -55,6 +59,8 @@ SERVER = os.environ.get("FAKE_CLAUDE_SERVER", "trellis")
 #: What the harness's tools answer when the run paused (``tools.convert.claude.WAITING``).
 WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
+#: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
+PAUSED_PROMPT = "This task was paused"
 #: The tools ``--permission-mode acceptEdits`` lets run without asking.
 EDITS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
 #: The input and output tokens each step of a query reports.
@@ -186,7 +192,7 @@ class Cli:
             if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
                 continue
             for callback in matcher.get("hookCallbackIds") or []:
-                self.control(
+                answer = self.control(
                     {
                         "subtype": "hook_callback",
                         "callback_id": callback,
@@ -194,6 +200,11 @@ class Cli:
                         "tool_use_id": tool_id,
                     }
                 )
+                added = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
+                record = os.environ.get("FAKE_CLAUDE_RECORD")
+                if added and record:
+                    with open(f"{record}.added", "a") as handle:
+                        handle.write(json.dumps(added) + "\n")
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
@@ -288,6 +299,7 @@ class Cli:
                         "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
                         "context": context,
                         "materialised": mirrored(session) is not None,
+                        "earlier": prompts(session),
                         "disallowed_tools": argument("--disallowedTools"),
                         "plugins": plugins(),
                     },
@@ -297,15 +309,20 @@ class Cli:
         restored = mirrored(session) if resumed is not None else None
         if restored is not None:  # the SDK wrote the session back from its store
             SESSIONS.mkdir(parents=True, exist_ok=True)
-            kept.write_text(json.dumps({"done": restored}))
+            kept.write_text(json.dumps({"done": restored, "turn": mirrored_turn(session)}))
         if resumed is not None and not kept.exists():
             send(result(session, f"No conversation found with session ID: {session}"))
             return
         if resumed is None:  # a new conversation: kept from its first message
             SESSIONS.mkdir(parents=True, exist_ok=True)
-            kept.write_text(json.dumps({"done": 0}))
-            mirror(session, 0)
-        done = json.loads(kept.read_text())["done"]
+            kept.write_text(json.dumps({"done": 0, "turn": 0}))
+            mirror(session, 0, prompt=str(prompt))
+        state = json.loads(kept.read_text())
+        done, turn = state["done"], state.get("turn", 0)
+        if resumed is not None and not str(prompt).startswith(PAUSED_PROMPT):
+            done, turn = 0, turn + 1  # the conversation's next turn, in the same session
+            kept.write_text(json.dumps({"done": 0, "turn": turn}))
+            mirror(session, 0, turn, prompt=str(prompt))
         last = read = ""
         limit = argument("--max-turns")
         cap = argument("--max-budget-usd")
@@ -325,8 +342,8 @@ class Cli:
                 if interrupted:
                     break
                 continue
-            kept.write_text(json.dumps({"done": step + 1}))
-            mirror(session, step + 1)
+            kept.write_text(json.dumps({"done": step + 1, "turn": turn}))
+            mirror(session, step + 1, turn)
         send(result(session, last=last, turns=len(script), steps=steps))
 
     def step(
@@ -495,23 +512,46 @@ def projects() -> Path:
     return Path(home) / "projects"
 
 
-def mirror(session: str, done: int) -> None:
-    """With ``--session-mirror``: one transcript entry (the steps done) mirrored to the SDK."""
+def mirror(session: str, done: int, turn: int = 0, *, prompt: str | None = None) -> None:
+    """With ``--session-mirror``: one transcript entry (the steps done in the session's
+    ``turn``, the prompt it began with) mirrored to the SDK."""
     if "--session-mirror" not in sys.argv:
         return
-    entry = {"type": "progress", "uuid": f"{session}-{done}", "done": done}
+    uuid_ = f"{session}-{done}" if not turn else f"{session}-{turn}-{done}"
+    entry: dict[str, Any] = {"type": "progress", "uuid": uuid_, "done": done, "turn": turn}
+    if prompt is not None:
+        entry["prompt"] = prompt
     path = projects() / "fake-project" / f"{session}.jsonl"
     send({"type": "transcript_mirror", "filePath": str(path), "entries": [entry]})
 
 
-def mirrored(session: str) -> int | None:
-    """The steps done, as a transcript the SDK materialised says (``None``: there is none)."""
+def materialised(session: str) -> list[dict[str, Any]] | None:
+    """The entries of a transcript the SDK materialised (``None``: there is none)."""
     if not os.environ.get("CLAUDE_CONFIG_DIR"):
         return None
     for found in projects().glob(f"*/{session}.jsonl"):
-        lines = [json.loads(line) for line in found.read_text().splitlines() if line.strip()]
-        return max(int(e.get("done", 0)) for e in lines)
+        return [json.loads(line) for line in found.read_text().splitlines() if line.strip()]
     return None
+
+
+def mirrored_turn(session: str) -> int:
+    """The session's latest turn, as a transcript the SDK materialised says."""
+    return max((int(e.get("turn", 0)) for e in materialised(session) or ()), default=0)
+
+
+def mirrored(session: str) -> int | None:
+    """The steps done in the session's latest turn, as a transcript the SDK materialised says
+    (``None``: there is none)."""
+    lines = materialised(session)
+    if lines is None:
+        return None
+    turn = mirrored_turn(session)
+    return max(int(e.get("done", 0)) for e in lines if int(e.get("turn", 0)) == turn)
+
+
+def prompts(session: str) -> list[str]:
+    """The prompts a transcript the SDK materialised holds: the session's earlier turns."""
+    return [e["prompt"] for e in materialised(session) or () if "prompt" in e]
 
 
 def assistant(

@@ -171,7 +171,7 @@ async def test_a_profile_block_an_agent_edits_is_in_the_next_context() -> None:
         assert any(preference in b.text for b in blocks)
 
 
-@pytest.mark.skipif(not os.environ.get("BIFROST_VIRTUAL_KEY"), reason="needs BIFROST_VIRTUAL_KEY")
+@pytest.mark.skipif(not os.environ.get("LLM_API_KEY"), reason="needs LLM_API_KEY")
 async def test_the_virtual_key_is_registered_as_the_agents_model_key() -> None:
     suffix = uuid.uuid4().hex[:8]
 

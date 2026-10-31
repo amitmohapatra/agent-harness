@@ -448,7 +448,7 @@ async def test_a_prompt_needs_a_run_and_the_gateway(harness: Harness) -> None:
         )
     agent = harness.wrap(graph(ScriptedChatModel(turns=["x"]), hooks), id="np")
     result = await agent.run("x", user="u")
-    assert result.error is not None and "set BIFROST_URL" in result.error.message
+    assert result.error is not None and "set LLM_GATEWAY=bifrost" in result.error.message
     with pytest.raises(ConfigurationError, match="seconds"):
         ModelHooks(timeout=0)
 

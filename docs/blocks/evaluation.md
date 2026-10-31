@@ -28,7 +28,7 @@ async with EvalServices.from_env() as services:  # Langfuse and the judge: the d
 | Variable | |
 |---|---|
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` | Langfuse's public API for scores, datasets and dataset runs ([Langfuse setup](../evaluation.md#langfuse-setup)); the spans are exported there too, unless your application installed its own tracer provider |
-| `BIFROST_URL`, `TRELLIS_JUDGE_VIRTUAL_KEY` (else `BIFROST_VIRTUAL_KEY`) | the judge's gateway |
+| `LLM_BASE_URL`, `LLM_GATEWAY`, `LLM_AUTH`, `TRELLIS_JUDGE_VIRTUAL_KEY` (else `LLM_API_KEY`) | the judge's route: Bifrost's judge alias, or a judge's model on the endpoint |
 
 An unset variable leaves a service out: no Langfuse means scores are `score` spans only and a
 dataset must be given as items; no judge means only `llm_judge` fails. The judge's model is

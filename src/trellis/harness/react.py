@@ -35,8 +35,9 @@ loop is the harness's. What it is built with:
 middleware=middleware(...))`` or ``create_deep_agent(..., middleware=middleware(...))``.
 
 A model name is routed per call as the harness running it says (``trellis.harness.gateways``):
-through Bifrost (``BIFROST_URL``, the virtual key ``BIFROST_VIRTUAL_KEY``), else to its provider
-through the provider's own SDK and key. Any LangChain chat model is used as it is. The context
+to the endpoint ``LLM_BASE_URL`` names (by ``LLM_GATEWAY``'s route: as given, or Bifrost's
+``provider/model``; ``LLM_API_KEY``, ``LLM_AUTH``), else to its provider through the provider's
+own SDK and key. Any LangChain chat model is used as it is. The context
 window is ``context_window``, else the model's LangChain profile; when neither says, the
 window-scaled features are off, said once.
 """

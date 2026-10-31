@@ -60,7 +60,8 @@ def memory_contract() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``ChatOpenAI`` a test builds (``ReAct`` with a gateway model name) sends through httpx,
-    where ``respx`` mocks the gateway (the openai client's own transport is its httpx fork).
+    where ``respx`` mocks the gateway (the openai client's own transport is its httpx fork),
+    with the auth strategy the route gave its clients (``gateways.openai_auth``'s, unwrapped).
     Live tests talk to the real gateway as they are."""
     if request.node.get_closest_marker("live") is not None:
         return
@@ -72,10 +73,21 @@ def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
             if not isinstance(given, httpx.AsyncClient):
                 # the hooks the harness gave its client (what it reads of a gateway's error)
                 hooks = getattr(given, "event_hooks", None)
-                kwargs["http_async_client"] = httpx.AsyncClient(event_hooks=hooks)
+                kwargs["http_async_client"] = httpx.AsyncClient(
+                    event_hooks=hooks, auth=_unwrapped(given)
+                )
+            synchronous = kwargs.get("http_client")
+            if synchronous is not None and not isinstance(synchronous, httpx.Client):
+                kwargs["http_client"] = httpx.Client(auth=_unwrapped(synchronous))
             super().__init__(**kwargs)
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", OnHttpx)
+
+
+def _unwrapped(client: Any) -> httpx.Auth | None:
+    """The ``httpx.Auth`` a route gave an OpenAI client (``gateways.openai_auth`` wraps it in
+    the client's own library's)."""
+    return getattr(getattr(client, "auth", None), "inner", None)
 
 
 #: The application's own tracer provider, as a test process has it (exporting nothing).

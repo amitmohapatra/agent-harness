@@ -5,7 +5,7 @@ your agent that also carries the harness's tools (the gateway's MCP tools, memor
 object is never changed.
 
 **Install:** `pip install 'trellis-harness[openai-agents]'`. A model name (or the SDK's
-default) goes through Bifrost when `BIFROST_URL` is set (`RunConfig.model_provider`, unless the
+default) goes through Bifrost when it is the route (`LLM_GATEWAY=bifrost`; `RunConfig.model_provider`, unless the
 run's own `run_config` names one), else to its provider with its own key
 ([configuration.md](../configuration.md#models)). `agents.set_tracing_disabled(True)` keeps the
 SDK's own tracing (which goes to OpenAI) off; the harness traces through OpenTelemetry.
@@ -183,6 +183,13 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 [runs.md](../runs.md), [surfaces.md](../surfaces.md), [evaluation.md](../evaluation.md), and
 [examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py)
 (an agent of every framework queued, one worker for all).
+
+## Conversations
+
+With memory off and no `session` of yours, a run of a conversation is given its earlier turns
+from the run store as input items before the question ([runs.md](../runs.md#earlier-turns-with-memory-off)). `mode="steer"` adds the
+message as a user item to each later model call's input (`RunConfig.call_model_input_filter`,
+after yours) ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 
 ## Limits
 

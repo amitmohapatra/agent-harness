@@ -68,6 +68,7 @@ def merged(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
 
 ToolFormat = Literal["langchain", "openai_agents", "claude", "mcp", "none"]
 Narrowing = Literal["turn", "run", "none"]
+HistoryIn = Literal["messages", "context"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +124,20 @@ class Adapter(Protocol):
     #: the framework takes a conversation's history as its own messages (``prepare_input``'s
     #: ``history``); else memory's window comes in the context's text
     replays_history: bool
+    #: where a conversation's earlier turns from the run store go, with memory off
+    #: (``Agent.recalled``): its own messages (``prepare_input``'s ``history``; a function's
+    #: ``agent.history``), or the context's text
+    history_in: HistoryIn
+    #: the framework keeps a session of its own (the journal's ``session``), which the
+    #: conversation's next turn continues (``Agent.sessions``, ADR 0005)
+    sessions: bool
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None: ...
+
+    def steers(self, target: Any) -> bool:
+        """Whether ``target`` takes a message between two of its steps (``mode="steer"``,
+        ``Runtime.steered``): its framework has a hook there the harness uses."""
+        ...
 
     def prepare_input(
         self,
@@ -237,6 +250,13 @@ def metadata_of(target: Any) -> dict[str, Any]:
     config = getattr(target, "config", None)
     found = config.get("metadata") if isinstance(config, dict) else None
     return found if isinstance(found, dict) else {}
+
+
+def model_name(target: Any) -> str | None:
+    """The name of the target's model when the graph's metadata says it (``ReAct`` given a
+    model name); ``None`` otherwise."""
+    found = metadata_of(target).get(MODEL_METADATA)
+    return found if isinstance(found, str) else None
 
 
 def context_window(target: Any) -> int | None:

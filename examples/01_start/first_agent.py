@@ -4,7 +4,7 @@
 the harness's middleware). ``stock`` only reads, so it runs; ``reorder`` is irreversible, so the
 run pauses until a person approves it, and the approved call runs once.
 
-    python -m examples.01_start.first_agent       # a scripted model; BIFROST_URL: a real one
+    python -m examples.01_start.first_agent    # a scripted model; LLM_GATEWAY=bifrost: a real one
 """
 
 from __future__ import annotations

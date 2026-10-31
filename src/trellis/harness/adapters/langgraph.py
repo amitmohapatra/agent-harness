@@ -70,6 +70,7 @@ from typing import Any, ClassVar, Final
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     NativePause,
@@ -114,6 +115,8 @@ class LangGraphAdapter:
     name: ClassVar[str] = "langgraph"
 
     replays_history = True
+    history_in: HistoryIn = "messages"
+    sessions = False
 
     def __init__(self, target: Any = None) -> None:
         # every model call of the graph accounted to the run's budget, ModelHooks or not
@@ -138,6 +141,12 @@ class LangGraphAdapter:
         self.narrows: Narrowing = "turn" if per_turn else "none"
         #: the graph's own tools (:meth:`native`), once read
         self._native: list[ToolSpec] | None = None
+
+    def steers(self, target: Any) -> bool:
+        """A graph with the harness's middleware (``ReAct``, ``middleware()``): its
+        ``HarnessTools`` takes a steered message before each model call
+        (``AgentMiddleware.before_model``); any other graph has no hook the harness owns."""
+        return HARNESS_TOOLS in (getattr(target, "channels", None) or {})
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The graph's checkpointer, unless it checkpoints into its run."""
@@ -392,8 +401,10 @@ def _narrowed(target: Any) -> Any | None:
 
 def thread_of(target: Any, runtime: Any) -> str:
     """The LangGraph thread a run of ``target`` runs on: the run's own for a graph that
-    checkpoints into its run, else the run's conversation (or the run)."""
-    return runtime.run_id if run_scoped(target) else runtime.thread or runtime.run_id
+    checkpoints into its run, else the run's conversation — its tenant's, its user's
+    (``Identity.conversation``: two users naming their threads alike never share one), or
+    the run's own."""
+    return runtime.run_id if run_scoped(target) else runtime.conversation
 
 
 async def holds(target: Any, thread: str, native_id: str, journal: Journal) -> bool:
@@ -633,13 +644,14 @@ def langchain_message(said: Said) -> Any:
 
 
 def added(messages: Sequence[Any]) -> list[Said]:
-    """What the run said after its question (the last user message): each answer with the
-    tool calls it made, and their results; ``[]`` without a question."""
+    """What the run said after its question (the last user message not steered into it): each
+    answer with the tool calls it made, and their results, and each message steered into it
+    (``middleware.STEERED``, with its id); ``[]`` without a question."""
     asked = next(
         (
             i
             for i in range(len(messages) - 1, -1, -1)
-            if getattr(messages[i], "type", None) == "human"
+            if getattr(messages[i], "type", None) == "human" and not _steered(messages[i])
         ),
         None,
     )
@@ -648,7 +660,9 @@ def added(messages: Sequence[Any]) -> list[Said]:
     out: list[Said] = []
     for m in messages[asked + 1 :]:
         kind = getattr(m, "type", None)
-        if kind == "ai":
+        if kind == "human":  # steered into the run
+            out.append(Said(Speaker.USER, _text(m), id=m.id))
+        elif kind == "ai":
             calls = tuple(
                 Called(c["id"] or "", c["name"], c.get("args") or {})
                 for c in getattr(m, "tool_calls", None) or ()
@@ -658,6 +672,12 @@ def added(messages: Sequence[Any]) -> list[Said]:
         elif kind == "tool":
             out.append(Said(Speaker.TOOL, _text(m), tool_call_id=m.tool_call_id))
     return out
+
+
+def _steered(message: Any) -> bool:
+    from trellis.harness.middleware import STEERED
+
+    return STEERED in (getattr(message, "response_metadata", None) or {})
 
 
 def _text(message: Any) -> str:

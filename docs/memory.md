@@ -104,8 +104,14 @@ said:
   their call) with its answers, where the framework reports them (LangGraph, the OpenAI Agents
   SDK) — each message named by the harness (`source_system: trellis-harness`,
   `source_message_id`: the run for the question, which every attempt asks, the attempt and
-  position for what the agent said), so the service stores a message it has already seen once.
-  A run started with no thread — a scheduled run — is its own thread (`thread = run_id`). Where
+  position for what the agent said), so the service stores a message it has already seen once;
+  each message's `custom_metadata` carries its harness id (`message_id`: the conversation's
+  digest of `<run>:input`, `<run>:answer`, `result:<call>` or `call:<call>` — the same id the
+  AG-UI stream says, across a resume), its `run_id` and the `tool_call_id` it answers or makes
+  ([ADR 0005](adr/0005-conversations-across-runs.md)).
+  A run started with no thread — a scheduled run — is its own thread (`thread = run_id`); a run
+  with one writes to its conversation's thread — keyed by the tenant, the user and the thread
+  (`h.conversation(user=, thread=)`), so two users' threads named alike are two threads. Where
   memory keeps the conversation the transcript is written before the run returns (at most 5 s,
   then queued like the rest), so the next turn's window holds it wherever that turn runs;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
@@ -186,11 +192,22 @@ precedence **human > judge > system**:
   action ([interrupts.md](interrupts.md)); the administrator's step is "review". The stored record is returned so a surface can show that.
   The `system` outcome and the judge's verdict are applied as they arrive.
 
-## The memory model key
+## The memory model endpoint
 
-`BIFROST_VIRTUAL_KEY` is registered for each agent (tenant, agent) once per process, in the
-background, idempotently: the memory service's own LLM work for the agent (extraction,
-summaries, procedures, the grounding judge) runs on the agent's own key and budget. A memory
-service that takes no model keys (`PUT /v1/agents/model-key` answers that its credential
-encryption is not configured) is logged once per process, at `INFO`, and not asked again — no
-failed-write warning for it; the service then uses the tenant's or the operator's key.
+With `LLM_BASE_URL` set, each agent (tenant, agent) tells the memory service its model
+endpoint once per process, in the background, idempotently (`PUT /v1/agents/model-key`): the
+route's `trellis.contracts.Endpoint` — the base URL, the route (`openai-compatible`, `bifrost`)
+and auth (`bearer`, `google`, `aws`) by name, the agent's model as the route names it (a
+`ReAct` model name; none for a target whose model the harness cannot read: the service picks),
+the model's LangChain profile (whether it reasons, takes a temperature, its output tokens,
+whether it calls tools) and `LLM_API_KEY` when it is a bearer key — a Google or AWS login
+sends no secret. The memory service's own LLM work for the agent (extraction, summaries, the
+grounding judge) then goes where the agent's does, on its key and budget: configure the
+harness only, and memory follows ([ADR 0004](adr/0004-provider-neutral-models.md)). Without
+`LLM_BASE_URL` (each provider's own SDK) nothing is told, and the service uses its own `LLM_*`
+settings — as it does for every agent when its operator turns agents' endpoints off
+(`models.llm.accept_agent_endpoints: false`). The service checks the endpoint answers before it
+keeps it, so one only the harness's machine reaches (`localhost`) is refused. A memory service
+that takes no endpoints (`PUT /v1/agents/model-key` answers that its credential encryption is
+not configured) is logged once per process, at `INFO`, and not asked again — no failed-write
+warning for it; the service then uses its own settings.

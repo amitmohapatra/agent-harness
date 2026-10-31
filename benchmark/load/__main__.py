@@ -2,7 +2,8 @@
 one and on two worker processes, and the harness's memory over a long run.
 
     python -m benchmark.load                                   # Paced model: the harness alone
-    BIFROST_URL=... BIFROST_VIRTUAL_KEY=... python -m benchmark.load --model provider/model
+    LLM_GATEWAY=bifrost LLM_BASE_URL=... LLM_API_KEY=... \\
+      python -m benchmark.load --model provider/model
 
 For each worker count (``--workers 1,2``) and each level of concurrency (``--levels
 1,10,50,100``, split across the workers) it runs ``--rounds`` runs per lane and reports the

@@ -1,5 +1,5 @@
-"""A scripted Bifrost gateway, in process: the MCP tools the examples use when ``BIFROST_URL`` is
-unset.
+"""A scripted Bifrost gateway, in process: the MCP tools the examples use when Bifrost
+(``LLM_GATEWAY=bifrost``) is unset.
 
 The tools are plain Python functions, served the way the gateway serves an MCP server's:
 listed on ``/mcp`` with their annotations (``readOnlyHint``, ``destructiveHint``), executed on
@@ -73,7 +73,14 @@ class ScriptedGateway:
         transport = httpx.MockTransport(self.handle)
         http = httpx.AsyncClient(transport=transport, base_url=URL)
         api = httpx.AsyncClient(transport=transport, base_url=URL.removesuffix("/v1"))
-        bifrost = Bifrost(URL, api_key="offline", client=http, admin_client=api, max_retries=0)
+        bifrost = Bifrost(
+            URL,
+            api_key="offline",
+            gateway="bifrost",
+            client=http,
+            admin_client=api,
+            max_retries=0,
+        )
         return Gateway(URL, "offline", client=bifrost, admin=Admin(URL, client=api))
 
     # ------------------------------------------------------------------ the routes

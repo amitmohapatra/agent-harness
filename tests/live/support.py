@@ -53,11 +53,12 @@ async def seed(scope: MemoryContext, content: str, **options: Any) -> None:
 async def memory_scope(
     h: Harness, *, user: str, agent_id: str, thread: str | None = None
 ) -> MemoryContext:
-    """The memory service in a user's (and thread's) scope, read as the agent reads it."""
+    """The memory service in a user's (and thread's) scope, read as the agent reads it: the
+    thread is the user's conversation (``h.conversation``)."""
     assert h.memory is not None
     scope = {"tenant_id": await h._tenant(), "user_id": user, "agent_id": agent_id}
     if thread is not None:
-        scope["thread_id"] = thread
+        scope["thread_id"] = await h.conversation(user=user, thread=thread)
     return h.memory.client.bind(**scope)
 
 
@@ -171,13 +172,13 @@ def gateway_model(h: Harness, sent: Sent, *, wait: float = 600.0, **kwargs: Any)
     from bifrost_sdk import NO_GATEWAY_TOOLS
     from langchain_openai import ChatOpenAI
 
-    from tests.live.conftest import BIFROST_URL, MODEL
+    from tests.live.conftest import GATEWAY_URL, MODEL
 
     client = httpx.AsyncClient(timeout=wait, event_hooks={"request": [sent]})
     return ChatOpenAI(
         model=MODEL,
-        base_url=BIFROST_URL,
-        api_key=h.settings.bifrost_virtual_key or "none",  # type: ignore[arg-type]
+        base_url=GATEWAY_URL,
+        api_key=h.settings.llm_api_key or "none",  # type: ignore[arg-type]
         default_headers=dict(NO_GATEWAY_TOOLS),
         max_tokens=160,  # type: ignore[call-arg]
         http_async_client=client,

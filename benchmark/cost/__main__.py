@@ -1,7 +1,7 @@
 """The cost and accuracy benchmark of a ``ReAct`` agent: ``make bench-cost`` (or
 ``python -m benchmark.cost``), against whatever model the environment configures.
 
-    BIFROST_URL=http://127.0.0.1:8080/v1 BIFROST_VIRTUAL_KEY=... \\
+    LLM_GATEWAY=bifrost LLM_BASE_URL=http://127.0.0.1:8080/v1 LLM_API_KEY=... \\
       python -m benchmark.cost --model provider/model --repeats 3
 
 Writes ``<out>.json`` (every run, and each cell's means and 95% intervals) and ``<out>.md``

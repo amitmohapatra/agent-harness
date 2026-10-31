@@ -31,6 +31,7 @@ from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness.agent import UNREACHED_FIX
 from trellis.harness.clients.memory import CITED_MAX, PUSHED_BUNDLE, PUSHED_MEMORIES
+from trellis.harness.identity import conversation_key
 from trellis.memory.errors import DependencyUnavailableError
 
 
@@ -135,7 +136,8 @@ async def test_a_sub_agents_run_reads_its_parents_notes_and_binds_its_group(
     assert deeper_scope["parent_agent_run_id"] == helper_scope["agent_run_id"]
     assert deeper_scope["agent_group_id"] == result.run_id
     for scope in (helper_scope, deeper_scope):  # the same person and conversation
-        assert (scope["user_id"], scope["thread_id"], scope["tenant_id"]) == ("ada", "t1", "acme")
+        thread = conversation_key("acme", "ada", "t1")
+        assert (scope["user_id"], scope["thread_id"], scope["tenant_id"]) == ("ada", thread, "acme")
     # every call of the child's run is in that scope: its context and its records too
     contexts = [c.scope for c in memory_service.named("context") if c.scope["agent_id"] == "helper"]
     assert contexts and all(s["agent_group_id"] == result.run_id for s in contexts)

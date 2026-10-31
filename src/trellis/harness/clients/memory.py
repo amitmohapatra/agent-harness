@@ -10,12 +10,15 @@ what tools and nodes get as ``trellis.current().memory``.
 from __future__ import annotations
 
 import hashlib
+import json
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Final
 
 from trellis.contracts import (
     ConfigurationError,
+    Endpoint,
     FeedbackSource,
     FeedbackTargetKind,
     ToolCall,
@@ -25,8 +28,8 @@ from trellis.contracts import (
 from trellis.contracts import Feedback as Decision
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance.catalog import MemoryCatalog
-from trellis.harness.history import Said, Speaker, recorded, said_of
-from trellis.harness.identity import Identity
+from trellis.harness.history import MESSAGE_ID, Said, Speaker, recorded, said_of
+from trellis.harness.identity import Identity, conversation_key
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.errors import NotFoundError
 from trellis.memory.models import (
@@ -125,8 +128,12 @@ class Memory:
         return RunMemory(self, child)
 
     def for_user(self, tenant: str, user: str, thread: str | None = None) -> RunMemory:
-        """Calls made for a person outside a run (adding a document they can retrieve)."""
-        scope = {"tenant_id": tenant, "user_id": user} | ({"thread_id": thread} if thread else {})
+        """Calls made for a person outside a run (adding a document they can retrieve) — in
+        their conversation ``thread``, the memory service's thread its runs write to
+        (``identity.conversation_key``)."""
+        scope = {"tenant_id": tenant, "user_id": user} | (
+            {"thread_id": conversation_key(tenant, user, thread)} if thread else {}
+        )
         return RunMemory(self, self.client.bind(**scope))
 
     def scoped(self, tenant: str, agent_id: str | None = None) -> RunMemory:
@@ -156,6 +163,16 @@ class Memory:
             case "publish_catalog":
                 return lambda: MemoryCatalog(run.ctx).publish(args["entries"])
         return None
+
+
+def _identified(said: Said, run_id: str) -> dict[str, Any]:
+    """The ``custom_metadata`` of a message with its harness id: the id, the run, and the
+    tool call it answers (a result) or the first it makes (an assistant's calls)."""
+    if said.id is None:
+        return {}
+    call = said.tool_call_id or (said.tool_calls[0].id if said.tool_calls else None)
+    linked = {MESSAGE_ID: said.id, "run_id": run_id} | ({"tool_call_id": call} if call else {})
+    return {"custom_metadata": linked}
 
 
 class RunMemory:
@@ -217,7 +234,9 @@ class RunMemory:
         """One attempt's transcript - its tool calls and their results with it - in one
         request. Each message names itself (the run for the question, which every attempt
         asks; the attempt and position for what the agent said), and the service stores a
-        message it has seen before once."""
+        message it has seen before once. A message with its harness id (``Said.id``) carries
+        it in its ``custom_metadata``, with the run it was said in and the tool call it makes
+        or answers (one level: the service allows two)."""
         batch = [
             recorded(said)
             | {
@@ -226,6 +245,7 @@ class RunMemory:
                 if said.role is Speaker.USER
                 else f"{run_id}:{attempt}:msg:{index}",
             }
+            | _identified(said, run_id)
             for index, said in enumerate(messages)
         ]
         await self.ctx.history.add(batch, idempotency_key=f"{run_id}:{attempt}:transcript")
@@ -330,13 +350,25 @@ class RunMemory:
         may not (``AuthorizationError``) and one that does not exist (``NotFoundError``)."""
         return await self.ctx.advanced.documents.document(document_id)
 
-    async def register_model_key(self, key: str) -> None:
-        """The agent-level LLM key the service uses for this agent's memory, in an agent
-        scope (the same request from every process and run, so the idempotent PUT repeats
-        rather than conflicts; a rotated key is a new request)."""
+    async def register_endpoint(self, endpoint: Endpoint) -> None:
+        """The model endpoint the service calls for this agent's memory work, in an agent
+        scope: the whole ``Endpoint``, its key in plain (``SecretStr`` masks it; the service
+        keeps it encrypted). The same request from every process and run, so the idempotent PUT
+        repeats rather than conflicts; a rotated key or a moved endpoint is a new request. An
+        answer that holds no endpoint — the replay of an earlier request whose registration the
+        service has since dropped (a migration, a cleared store) — is sent again, as a new
+        request."""
         agent = self.ctx.scope.agent_id
-        digest = hashlib.blake2b(key.encode(), digest_size=8).hexdigest()
-        await self.ctx.advanced.model_keys.set(key, idempotency_key=f"model-key:{agent}:{digest}")
+        wire = endpoint.model_dump(mode="json")
+        wire["api_key"] = endpoint.api_key.get_secret_value() if endpoint.api_key else None
+        said = json.dumps(wire, sort_keys=True).encode()
+        digest = hashlib.blake2b(said, digest_size=8).hexdigest()
+        key = f"model-key:{agent}:{digest}"
+        status = await self.ctx.advanced.model_keys.set(wire, idempotency_key=key)
+        if not status.registered or status.endpoint is None:
+            await self.ctx.advanced.model_keys.set(
+                wire, idempotency_key=f"{key}:{uuid.uuid4().hex}"
+            )
 
 
 def documents(document_ids: Sequence[str]) -> list[str]:

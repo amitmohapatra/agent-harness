@@ -12,10 +12,11 @@ blocks plugged in by the team's own code.
   permission callback lets exactly the approved call through.
 * Evaluation (``trellis.harness.evals``): the answer is judged on the run's trace.
 
-Offline (no ``BIFROST_URL``) the CLI is a scripted stand-in (``tests/support/fake_claude_cli.py``)
-that asks the permission callback as the real CLI does; with ``BIFROST_URL`` it is the real
-``claude`` through Bifrost. Without ``RUNS_URL`` / ``MEMORY_URL`` the run store is the in-process
-one and the memory service a scripted one in this process.
+Offline (no ``LLM_GATEWAY=bifrost``) the CLI is a scripted stand-in
+(``tests/support/fake_claude_cli.py``) that asks the permission callback as the real CLI does;
+with ``LLM_GATEWAY=bifrost`` it is the real ``claude`` through Bifrost. Without ``RUNS_URL`` /
+``MEMORY_URL`` the run store is the in-process one and the memory service a scripted one in
+this process.
 
     python -m examples.03_way2_governance.claude_recipe
 """

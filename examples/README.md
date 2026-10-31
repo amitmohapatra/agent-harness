@@ -2,7 +2,7 @@
 
 Simple to complex. Every example runs **offline** — a scripted model, a scripted memory service
 and gateway, runs kept in process (`examples/_support`) — and against the real services when
-their variables are set (`BIFROST_URL`, `MEMORY_URL` with `TRELLIS_API_KEY`, `RUNS_URL`):
+their variables are set (`LLM_BASE_URL` with `LLM_GATEWAY=bifrost`, `MEMORY_URL` with `TRELLIS_API_KEY`, `RUNS_URL`):
 the harness, the frameworks and the tools are always real; offline only the model's choices
 are written down.
 
@@ -87,7 +87,7 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | [tracing_and_redaction.py](05_features/tracing_and_redaction.py) | the OTel spans of a run, exported to your own provider; a secret dropped and an e-mail masked in their attributes |
 | [own_scheduler.py](05_features/own_scheduler.py) | `ReAct` on blocks of your own: your run store, your scheduler loop (`agent.execute`), your governance, memory off |
 | [priority_and_concurrency.py](05_features/priority_and_concurrency.py) | `start(priority=)` claimed first; a busy conversation's second message waiting (`concurrency_key`) while others overtake it |
-| [model_routing.py](05_features/model_routing.py) | one `ReAct` on each route: through Bifrost (`BIFROST_URL`, its virtual key) and through the provider's own SDK (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) |
+| [model_routing.py](05_features/model_routing.py) | one `ReAct` on each route: through Bifrost (`LLM_GATEWAY=bifrost`, its virtual key as `LLM_API_KEY`), through any OpenAI-compatible endpoint (`LLM_BASE_URL` alone) and through the provider's own SDK (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) |
 | [without_combinations.py](05_features/without_combinations.py) | `without=` on `h.wrap` and on a run, added together: what each combination leaves on (`agent.uses`), the context, an MCP call; an unknown name refused |
 
 ## 06_scenarios: end to end

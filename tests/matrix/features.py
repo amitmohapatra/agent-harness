@@ -65,6 +65,8 @@ from trellis.harness.sandbox import sandbox
 from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
 
+#: How a tool's description says the chain it is in (``tools.links``).
+CHAIN: Final = "find_sku → sku_id → get_stock"
 #: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
 
@@ -296,12 +298,18 @@ RUN_LIMIT: Final = 2.0
 #: start. ``elsewhere`` starts it twice (it pauses first, then another process resumes it), all
 #: within the run's one limit; ``hold`` holds longer than either limit.
 KIMI_START_SECONDS: Final = 6.0
+#: ``elsewhere`` hands the run to another process, which builds the graph before its first model
+#: call, all within the run's one limit: on a loaded CI runner that has taken past 2 s (Deep
+#: Agents' graph, ReAct's), so the run timed out before its tool started. The hand-off gets its
+#: own margin; ``hold`` holds longer than the limit with it.
+HANDOFF_SECONDS: Final = 6.0
 
 
 def run_limit(w: World) -> float:
+    handoff = w.mode == "elsewhere"
     if w.adapter != "kimi":
-        return RUN_LIMIT
-    starts = 2 if w.mode == "elsewhere" else 1
+        return RUN_LIMIT + (HANDOFF_SECONDS if handoff else 0.0)
+    starts = 2 if handoff else 1
     return RUN_LIMIT + starts * KIMI_START_SECONDS
 
 
@@ -569,6 +577,32 @@ async def hints(w: World) -> None:
         assert narrowed and all("lookup" in names for names in offered), offered
     else:
         assert not narrowed, offered
+
+
+async def chains(w: World) -> None:
+    """A two-tool chain (``find_sku``'s ``sku_id`` is ``get_stock``'s argument, as their
+    schemas say): every model reads it in the tools' descriptions, and the hints, narrowed to
+    the first tool, keep the second offered."""
+    d = Desk()
+    w.memory_service.candidates = ["find_sku", CONFIRM[0]]
+    tools = [
+        d.find_sku(),
+        d.get_stock(),
+        d.note(),
+        d.parallel("t4", "read"),
+        d.parallel("t5", "read"),
+    ]
+    plan = [("find_sku", {"name": "blue mug"}), ("get_stock", {"sku_id": "SKU-7"})]
+    (await w.go(tools, plan)).succeeded()
+    assert d.ran("get_stock") == [{"sku_id": "SKU-7"}], d.done
+    described = w.models.described | w.claude_described
+    assert CHAIN in described.get("get_stock", ""), described
+    assert CHAIN in described.get("find_sku", ""), described
+    offered = w.models.offered() or w.claude_offered
+    assert offered, "the model was never offered anything"
+    assert all({"find_sku", "get_stock"} <= set(names) for names in offered), offered
+    narrowed = all("note" not in names for names in offered)
+    assert narrowed == w.on, offered
 
 
 # --------------------------------------------------------------------------- gateway
@@ -1181,10 +1215,20 @@ FEATURES: Final[list[Feature]] = [
         ),
     ),
     Feature(
+        "F28c",
+        "tool chains: said in the descriptions, kept whole when the hints narrow",
+        "F28",
+        "the tools' schemas (a return annotation, an MCP outputSchema); with memory",
+        chains,
+        needs=frozenset({"memory", "tool_search"}),
+        adapters={"function": NO_MODEL},
+        way2=NA("by design: the descriptions are the toolbox's; your code offers the tools"),
+    ),
+    Feature(
         "F17",
         "the key's MCP tools (through the gateway)",
         "F17",
-        "the gateway (BIFROST_URL / Harness(gateway=))",
+        "the gateway (LLM_GATEWAY=bifrost / Harness(gateway=))",
         key_tools,
         needs=frozenset({"gateway", "mcp"}),
         way2=way2.key_tools,
@@ -1411,7 +1455,8 @@ async def run_options_without(w: World) -> None:
 #: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
 #: what its error says), and set far above it.
 TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
-    "react": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
+    # one step more than a model call: HarnessTools.before_model (a steered message, ADR 0005)
+    "react": ({"recursion_limit": 4}, "Recursion limit of 4 reached"),
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),

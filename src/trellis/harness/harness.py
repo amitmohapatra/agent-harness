@@ -37,11 +37,11 @@ from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.features import Feature
 from trellis.harness.fresh import Fresh
-from trellis.harness.gateways import GatewayKind, bifrost_wins, model_gateway
+from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.hooks import Hooks
-from trellis.harness.identity import Identity
+from trellis.harness.identity import Identity, conversation_key
 from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
 from trellis.harness.runs import LocalRuns, RunStore
@@ -58,6 +58,7 @@ from trellis.memory.errors import (
     AuthenticationError,
     AuthorizationError,
     DependencyUnavailableError,
+    ValidationError,
 )
 from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
 from trellis.runs import RunsClient, RunSummary
@@ -101,7 +102,7 @@ class Harness:
     :class:`~trellis.harness.runs.RunStore`: ``trellis.runs.RunsClient``, ``LocalRuns``) and
     ``gateway`` (a ``trellis.harness.clients.bifrost.Gateway``) replace that service (tests, in
     process): given, each is used as it is (and closed by its owner, not here); not given, each
-    is built from the environment (``MEMORY_URL``, ``RUNS_URL``, ``BIFROST_URL``); ``False``
+    is built from the environment (``MEMORY_URL``, ``RUNS_URL``, ``LLM_GATEWAY=bifrost``); ``False``
     leaves memory, the gateway or agent-runs off (runs kept in this process) even where the
     environment names them."""
 
@@ -129,8 +130,14 @@ class Harness:
             )
         #: the clients built here from the environment, closed by :meth:`aclose`
         self._made: list[Any] = []
-        if gateway is None and s.bifrost_url:
-            gateway = self._making(Gateway(s.bifrost_url, s.bifrost_virtual_key))
+        #: where a model name goes (``trellis.harness.gateways``): the route ``LLM_GATEWAY``
+        #: names, with ``LLM_BASE_URL``, else the provider's own SDK with its own key; these
+        #: settings', not the environment's
+        self.model_gateway = model_gateway(s)
+        self.model_gateway.announce(os.environ)
+        if gateway is None:
+            made = self.model_gateway.gateway_client()
+            gateway = self._making(made) if made is not None else None
         self.gateway: Gateway | None = gateway or None
         #: what evaluation reaches: Langfuse (scores, datasets, dataset runs) and the judge —
         #: the gateway, with the judge's own virtual key when it has one (its budget apart from
@@ -152,9 +159,10 @@ class Harness:
             retry=KEY_RETRY_SECONDS,
             fatal=(ConfigurationError,),
         )
-        self._keys_registered: set[tuple[str, str]] = set()
-        #: the memory service said it takes no model keys: none is registered again
-        self._model_keys_off = False
+        #: the agents (tenant, agent) whose model endpoint the memory service was told
+        self._endpoints_told: set[tuple[str, str]] = set()
+        #: the memory service takes no model endpoints, or refused this one: none is told again
+        self._endpoints_off = False
         #: governance per tenant (:meth:`governance`), the least recently used forgotten past
         #: the bound; ``_governance_given`` replaces it for every tenant (tests)
         self._governances: LRU[str, Governance] = LRU()
@@ -162,15 +170,10 @@ class Harness:
         #: the gateway's stored prompts (``stored``, :meth:`prompt`)
         self.prompts = Prompts(self.gateway)
         telemetry.configure()
-        #: where a model name goes (``trellis.harness.gateways``): Bifrost, else the
-        #: provider's own SDK with its own key; these settings', not the environment's
-        self.model_gateway = model_gateway(s)
-        if self.model_gateway.kind is GatewayKind.BIFROST:
-            bifrost_wins(os.environ)
         log.info(
             "trellis harness: models %s, memory %s, runs %s, spool %s, traces %s "
             "(trellis doctor prints each setting and its source)",
-            f"{self.model_gateway.title} {self.model_gateway.url}",
+            f"{self.model_gateway.title} {self.model_gateway.where}",
             s.memory_url or "off",
             s.runs_url or "in process",
             s.spool_dir or "none",
@@ -315,6 +318,14 @@ class Harness:
             comment=comment,
         )
         return stored
+
+    async def conversation(self, *, user: str, thread: str, tenant: str | None = None) -> str:
+        """The key ``user``'s conversation ``thread`` keeps its state under: the ``thread_id``
+        of a graph's own checkpointer, the memory service's thread, the trace's session
+        (``identity.conversation_key``). A thread id is the caller's name for a chat, so the
+        same one given by two users (or in two tenants) is two conversations. ``tenant`` is
+        named by a platform key only."""
+        return conversation_key(await self._tenant(tenant), user, thread)
 
     async def add_document(
         self,
@@ -553,33 +564,48 @@ class Harness:
             for spec in await run_memory.agent_tools()
         ]
 
-    async def _registered(self, memory: Memory, identity: Identity) -> None:
-        """Register ``BIFROST_VIRTUAL_KEY`` as the agent's memory model key, once per process
-        and agent (idempotent in the service). A memory service that takes no model keys (its
-        credential encryption is not configured) is told so once per process, in the log, and
-        not asked again."""
-        key = self.settings.bifrost_virtual_key
+    async def _registered(self, memory: Memory, identity: Identity, model: str | None) -> None:
+        """Tell the memory service the agent's model endpoint — the route's
+        (:meth:`~trellis.harness.gateways.ModelGateway.endpoint`: ``LLM_BASE_URL``, the route,
+        the auth, the bearer key when it is one, the agent's ``model`` and its profile) — so its
+        own model work for the agent goes where the agent's does: once per process and agent
+        (idempotent in the service). A route with none to tell (the providers' own SDKs) tells
+        nothing. A memory service that takes no model endpoints (its credential encryption is
+        not configured), or refuses this one (it cannot reach it: a ``localhost`` only this
+        machine reaches), is said so once per process, in the log, and not asked again: its
+        own settings serve then."""
         scope = (identity.tenant, identity.agent_id)
-        if key is None or self._model_keys_off or scope in self._keys_registered:
+        if self._endpoints_off or scope in self._endpoints_told:
             return
-        self._keys_registered.add(scope)
+        self._endpoints_told.add(scope)
+        endpoint = self.model_gateway.endpoint(model)
+        if endpoint is None:
+            return
         agent_memory = memory.scoped(identity.tenant, identity.agent_id)
 
         async def register() -> None:
             try:
-                await agent_memory.register_model_key(key)
+                await agent_memory.register_endpoint(endpoint)
             except DependencyUnavailableError as exc:
                 if NOT_CONFIGURED not in str(exc):
                     raise
-                if not self._model_keys_off:
-                    self._model_keys_off = True
-                    log.info(
-                        "the memory service takes no model keys (%s): its LLM work for these "
-                        "agents runs on the tenant's or the operator's key",
-                        exc,
-                    )
+                self._endpoints_unused("takes no model endpoints", exc, logging.INFO)
+            except ValidationError as exc:
+                self._endpoints_unused(f"refused {endpoint.base_url}", exc, logging.WARNING)
 
         await self.writes.submit("memory.model_key", register)
+
+    def _endpoints_unused(self, why: str, exc: Exception, level: int) -> None:
+        """The memory service does not use the agents' endpoint: said once per process."""
+        if not self._endpoints_off:
+            self._endpoints_off = True
+            log.log(
+                level,
+                "the memory service %s (%s): its LLM work for these agents runs on its own "
+                "settings",
+                why,
+                exc,
+            )
 
     async def _score(
         self,

@@ -232,8 +232,10 @@ async def test_a_dataset_name_needs_langfuse(harness: Harness) -> None:
 # --------------------------------------------------------------------------- any callable
 #: The variables that would point ``EvalServices.from_env()`` at real services.
 SERVICE_VARIABLES = (
-    "BIFROST_URL",
-    "BIFROST_VIRTUAL_KEY",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_GATEWAY",
+    "LLM_AUTH",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_HEADERS",
     "TRELLIS_JUDGE_MODEL",
@@ -268,7 +270,7 @@ async def test_a_plain_callable_is_evaluated_with_the_services_the_environment_n
     france, italy, boom = report.items
     assert (france.status, france.output, france.trace_url) == ("success", "Paris", None)
     assert france.scores == [EvalScore("exact_match", True)]
-    assert "BIFROST_URL" in france.failed["llm_judge"]  # no gateway in the env: no judge alias
+    assert "LLM_GATEWAY=bifrost" in france.failed["llm_judge"]  # no gateway: no judge alias
     assert italy.scores == [] and italy.status == "success"
     assert (boom.status, boom.error, boom.output) == (
         "error",
@@ -622,8 +624,9 @@ async def test_the_judge_asks_the_judge_model_through_bifrost_with_the_judge_key
         return_value=httpx.Response(200, json=judge_reply('{"score": 0.7, "reasoning": "ok"}'))
     )
     settings = Settings(
-        bifrost_url=GW,
-        bifrost_virtual_key="agent-key",
+        llm_gateway="bifrost",
+        llm_base_url=GW,
+        llm_api_key="agent-key",
         judge_virtual_key="eval-key",
     )
     async with Harness(config=settings) as h:
@@ -642,8 +645,9 @@ async def test_the_judge_asks_the_judge_model_through_bifrost_with_the_judge_key
 async def test_without_a_judge_model_the_gateways_judge_alias_is_asked(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("BIFROST_URL", GW)
-    monkeypatch.setenv("BIFROST_VIRTUAL_KEY", "agent-key")
+    monkeypatch.setenv("LLM_BASE_URL", GW)
+    monkeypatch.setenv("LLM_GATEWAY", "bifrost")
+    monkeypatch.setenv("LLM_API_KEY", "agent-key")
     respx.post(f"{GW.rsplit('/v1', 1)[0]}/mcp").mock(
         return_value=httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
     )
@@ -656,7 +660,10 @@ async def test_without_a_judge_model_the_gateways_judge_alias_is_asked(
 
     chat = respx.post(f"{GW}/chat/completions").mock(side_effect=answer)
     settings = Settings(
-        bifrost_url=GW, bifrost_virtual_key="agent-key", judge_virtual_key="agent-key"
+        llm_gateway="bifrost",
+        llm_base_url=GW,
+        llm_api_key="agent-key",
+        judge_virtual_key="agent-key",
     )
     with caplog.at_level(logging.WARNING, logger="trellis.evals"):
         async with Harness(config=settings) as h:
@@ -681,7 +688,7 @@ async def test_an_alias_the_gateway_does_not_route_turns_the_judges_off(
         return_value=httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}})
     )
     respx.post(f"{GW}/chat/completions").mock(return_value=httpx.Response(404))
-    settings = Settings(bifrost_url=GW, bifrost_virtual_key="k")
+    settings = Settings(llm_gateway="bifrost", llm_base_url=GW, llm_api_key="k")
     with caplog.at_level(logging.WARNING, logger="trellis.evals"):
         async with Harness(config=settings) as h:
             report = await h.evaluate(
@@ -729,9 +736,10 @@ def asked(route: Any) -> list[str]:
 async def test_the_judge_model_wins_over_the_agents_own(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("BIFROST_URL", GW)
+    monkeypatch.setenv("LLM_BASE_URL", GW)
+    monkeypatch.setenv("LLM_GATEWAY", "bifrost")
     route = gateway_judging({"judges/strong": '{"score": 1, "reasoning": "right"}'})
-    settings = Settings(bifrost_url=GW, bifrost_virtual_key="vk")
+    settings = Settings(llm_gateway="bifrost", llm_base_url=GW, llm_api_key="vk")
     with caplog.at_level(logging.WARNING, logger="trellis.evals"):
         async with Harness(config=settings) as h:
             agent = h.wrap(ReAct(system_prompt="s", model="agents/small"), id="geo")
@@ -762,7 +770,9 @@ async def test_two_judges_ask_two_models_and_each_score_says_which(
         llm_judge("Polite?", name="polite", model="judges/one"),
         llm_judge("Right?", name="right", model="judges/two"),
     ]
-    async with Harness(config=Settings(bifrost_url=GW, bifrost_virtual_key="vk")) as h:
+    async with Harness(
+        config=Settings(llm_gateway="bifrost", llm_base_url=GW, llm_api_key="vk")
+    ) as h:
         report = await h.evaluate(h.wrap(capital, id="c"), [{"input": "France"}], judges)
     assert asked(route) == ["judges/one", "judges/two"]
     assert report.summary["polite"].mean == 1.0 and report.summary["right"].mean == 0.5
@@ -782,18 +792,18 @@ async def test_a_judge_with_no_model_to_ask_is_an_evaluator_failure(harness: Har
     report = await harness.evaluate(
         harness.wrap(capital, id="c"), [{"input": "France"}], [llm_judge("ok?")]
     )
-    assert "BIFROST_URL" in report.items[0].failed["llm_judge"]  # the judge alias: a gateway's
+    assert "LLM_GATEWAY=bifrost" in report.items[0].failed["llm_judge"]  # the alias: Bifrost's
     report = await harness.evaluate(
         harness.wrap(capital, id="c2"), [{"input": "France"}], [llm_judge("ok?", model=STRONG)]
     )
-    assert "BIFROST_URL" in report.items[0].failed["llm_judge"]
+    assert "set LLM_BASE_URL" in report.items[0].failed["llm_judge"]  # not an OpenAI model
 
 
 async def test_the_judge_never_falls_back_to_the_agents_model(harness: Harness) -> None:
     model = JudgeOrAnswer([])
     agent = harness.wrap(ReAct(system_prompt="s", model=model), id="geo")
     report = await harness.evaluate(agent, [{"input": "France"}], [llm_judge("ok?")])
-    assert "BIFROST_URL" in report.items[0].failed["llm_judge"] and model.judged == []
+    assert "LLM_GATEWAY=bifrost" in report.items[0].failed["llm_judge"] and model.judged == []
 
 
 # --------------------------------------------------------------------------- judge, services
@@ -831,8 +841,9 @@ async def test_the_services_come_from_the_environment_alone(
     # the Langfuse keys export the spans too: not from this test process
     monkeypatch.setattr(telemetry, "configure", lambda environ: False)
     environment = {
-        "BIFROST_URL": GW,
-        "BIFROST_VIRTUAL_KEY": "agent-key",
+        "LLM_BASE_URL": GW,
+        "LLM_API_KEY": "agent-key",
+        "LLM_GATEWAY": "bifrost",
         "TRELLIS_JUDGE_VIRTUAL_KEY": "eval-key",
         "LANGFUSE_PUBLIC_KEY": "pk",
         "LANGFUSE_SECRET_KEY": "sk",

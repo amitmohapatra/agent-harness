@@ -52,7 +52,7 @@ from trellis.harness.adapters.openai_agents import (
 )
 from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.evals import _unfenced
-from trellis.harness.gateways import ProviderKey
+from trellis.harness.gateways import ProviderSDK
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Journal, Pending
 
@@ -189,7 +189,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
         offered=None,
-        agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderKey())),
+        agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=ProviderSDK())),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     adapter = ClaudeAdapter()
@@ -253,7 +253,12 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
             yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
 
     runtime = SimpleNamespace(
-        thread=None, run_id="run_1", framework_options={}, run_memory=None, attempt=1, pending=None
+        conversation="run_1",
+        run_id="run_1",
+        framework_options={},
+        run_memory=None,
+        attempt=1,
+        pending=None,
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]

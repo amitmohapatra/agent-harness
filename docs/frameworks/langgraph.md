@@ -61,7 +61,11 @@ call: every MCP tool the Bifrost virtual key allows and — memory on — the me
 without memory, run records or traces, and a harness tool refuses to run (`ToolError`: "runs
 inside a Harness run"). Config the graph needs at run time goes in the
 input, the graph's defaults or `graph.with_config(...)` before wrapping (still a graph); the
-harness sets `configurable.thread_id` itself (the run's thread, else the run id).
+harness sets `configurable.thread_id` itself (the run's conversation, else the run id). The
+conversation is the tenant's, the user's and the thread's, so two users giving the same
+`thread=` never share a checkpointer thread; to read your graph's state yourself, ask for its
+key: `graph.aget_state({"configurable": {"thread_id": await h.conversation(user="ada",
+thread="t-7")}})`.
 
 ## middleware(): ReAct's harness part on your graph
 
@@ -225,6 +229,16 @@ gateway's stored prompts; a `ReAct` takes the run's sandbox as its `backend=sand
 and a graph of yours its tools, `sandbox().tools()`, which govern and journal every command
 ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). A LangChain `create_agent` can
 take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders ([skills.md](../skills.md#native-or-ours)).
+
+## Conversations
+
+A graph with its own checkpointer keeps the conversation on its thread (the conversation's key,
+`h.conversation`). Without one — and `ReAct`, whose checkpoint is the run's — memory's window
+keeps it, or with memory off the run store's earlier turns, as messages before the question
+([runs.md](../runs.md#earlier-turns-with-memory-off)). `mode="steer"` reaches a graph with the harness's middleware (`ReAct`,
+`middleware()`: `HarnessTools.before_model` adds the message before the next model call, kept in
+the graph's messages and in the run's transcript); any other graph waits as `"queue"`, said once
+([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 
 ## Limits
 

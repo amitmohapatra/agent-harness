@@ -12,7 +12,7 @@ plugged in by your own code:
 
 The runnable version is [`examples/03_way2_governance/claude_recipe.py`](../../examples/03_way2_governance/claude_recipe.py): offline
 it runs a scripted stand-in for the `claude` CLI that asks the permission callback as the real
-CLI does; with `BIFROST_URL` it runs the real `claude` through Bifrost's Anthropic route. The
+CLI does; with `LLM_GATEWAY=bifrost` it runs the real `claude` through Bifrost's Anthropic route. The
 snippets below are from it. Wrapping the same options instead (Way 1):
 [frameworks/claude-agent-sdk.md](../frameworks/claude-agent-sdk.md).
 
@@ -24,7 +24,7 @@ pip install -e ../agent-runs/sdk/python                # trellis.runs (the harne
 ```
 
 The SDK drives the Claude Code CLI, which must be on the machine. Set `MEMORY_URL`, `RUNS_URL`
-and `TRELLIS_API_KEY` for the services, and `BIFROST_URL` for the judge (its judge alias); through Bifrost, `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic", ...}` in the options.
+and `TRELLIS_API_KEY` for the services, and `LLM_BASE_URL` with `LLM_GATEWAY=bifrost` for the judge (its judge alias); through Bifrost, `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic", ...}` in the options.
 
 ## The tools, and the permission callback
 

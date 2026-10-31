@@ -1,6 +1,6 @@
 [project]
 name = "trellis-harness"
-version = "0.6.0"
+version = "0.7.0"
 description = "Attach memory, tools, approvals, durable runs and tracing to an agent you already built."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,10 +21,10 @@ classifiers = [
 # src/trellis/harness/compat.py (tests/unit/test_compat.py checks they agree); a newer
 # framework arrives with a newer trellis-harness.
 dependencies = [
-  "trellis-contracts>=0.6.2,<0.7",
-  "trellis-memory>=0.5",
+  "trellis-contracts>=0.6.3,<0.7",
+  "trellis-memory>=0.6.0",
   "trellis-runs>=0.4.0",
-  "bifrost-sdk>=0.3",
+  "bifrost-sdk>=0.4",
   "pydantic>=2.13,<3",
   "httpx>=0.28",
   "croniter>=6",
@@ -63,8 +63,15 @@ a2a = ["a2a-sdk[http-server]>=1.1,<1.2", "fastapi>=0.115"]
 mcp = ["mcp>=2.2,<3"]
 # OTLP export (Langfuse is reached through the same exporter; no Langfuse SDK).
 otel = ["opentelemetry-sdk>=1.44", "opentelemetry-exporter-otlp-proto-http>=1.44"]
+# The providers' own LangChain packages, for a model name without LLM_BASE_URL (the provider
+# SDK's route, LangChain's init_chat_model: 'anthropic:...', 'gemini:...', 'vertex:...',
+# 'bedrock:...'); vertex and bedrock also sign an endpoint's requests (LLM_AUTH=google, aws).
+anthropic = ["langchain-anthropic>=1.7,<2"]
+gemini = ["langchain-google-genai>=4.4,<5"]
+vertex = ["langchain-google-vertexai>=3.2,<4", "bifrost-sdk[google]>=0.4"]
+bedrock = ["langchain-aws>=1.9,<2", "bifrost-sdk[aws]>=0.4"]
 all = [
-  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,kimi,agui,a2a,otel,mcp]",
+  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,kimi,agui,a2a,otel,mcp,anthropic,gemini,vertex,bedrock]",
 ]
 
 [dependency-groups]
@@ -109,7 +116,7 @@ testpaths = ["tests"]
 timeout = 120
 filterwarnings = ["error::DeprecationWarning:trellis.*"]
 markers = [
-  "live: needs running services (BIFROST_URL / MEMORY_URL / RUNS_URL); skipped otherwise",
+  "live: needs running services (LLM_BASE_URL / MEMORY_URL / RUNS_URL); skipped otherwise",
   "performance: harness overhead benchmark (writes build/benchmark-results.json)",
   "matrix: the generated feature matrix (make matrix): run apart from make test",
 ]

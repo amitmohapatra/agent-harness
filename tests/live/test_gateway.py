@@ -1,4 +1,4 @@
-"""Opt-in: real models through a running Bifrost gateway (``BIFROST_URL``, e.g.
+"""Opt-in: real models through a running Bifrost gateway (``GATEWAY_URL``, e.g.
 ``http://localhost:8091/v1``). Skipped when it is unset. ``make test-live`` runs them."""
 
 from __future__ import annotations
@@ -21,12 +21,14 @@ from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness.prompts import GatewayHeaders
 
-URL = os.environ.get("BIFROST_URL")
-KEY = os.environ.get("BIFROST_VIRTUAL_KEY") or "unused"
+URL = os.environ.get("LLM_BASE_URL") if os.environ.get("LLM_GATEWAY") == "bifrost" else None
+KEY = os.environ.get("LLM_API_KEY") or "unused"
 
 pytestmark = [
     pytest.mark.live,
-    pytest.mark.skipif(not URL, reason="needs a Bifrost gateway (BIFROST_URL)"),
+    pytest.mark.skipif(
+        not URL, reason="needs a Bifrost gateway (LLM_BASE_URL, LLM_GATEWAY=bifrost)"
+    ),
 ]
 
 
@@ -48,7 +50,7 @@ REACT_MODEL_ERRORS = frozenset({"ValidationError", "ModelError"})
 
 def harness() -> Harness:
     """The gateway alone: no memory, runs in process."""
-    return Harness(config=Settings(bifrost_url=URL, bifrost_virtual_key=KEY))
+    return Harness(config=Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key=KEY))
 
 
 @pytest.mark.timeout(TEST_SECONDS)
